@@ -1,86 +1,249 @@
 /* Today (timeline) panel.
    Split from console-host.css (imported there, in this order). */
 
-/* ── Timeline panel (Today) ─────────────────────────────────── */
-/* Built on the panel kit: one line per event, a clock time, a tone dot on a
-   rail and a sentence that names agents by display name. */
-.today__list {
-  margin: 0;
-  padding: 10px 0 0;
-  list-style: none;
+/* The activity charts (Today's swimlanes, the Logs severity strip) live in
+   the kit package; this sheet loads them for the console. */
+@import url("../../../packages/console-components/src/styles/activity-charts.css");
+
+/* ── Today (spec B4) ──────────────────────────────────────────────
+   Header, glance strip, then a body that does not scroll itself: the
+   drawer layout's main column scrolls (the day lanes, the filters and the
+   story), and the detail drawer stays beside it. */
+.today__body {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding-bottom: 0;
 }
+.today__body > .cc-drawer-layout { flex: 1 1 auto; min-height: 0; }
+.today__main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+/* The day lanes: full bleed, the label column inset like the panel. */
+.today__lanes {
+  flex: none;
+  padding: 10px 0 12px;
+  border-bottom: 1px solid var(--_cc-border-soft);
+  background: var(--_cc-surface-raised);
+}
+.today__lanes .cc-lanes { padding-right: var(--_cc-panel-pad-x); box-sizing: border-box; }
+.today__lanes .cc-skeleton { padding: 0 var(--_cc-panel-pad-x); }
+
+.today__filters {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  background: var(--_cc-surface-card);
+}
+
+/* ── The story ─────────────────────────────────────────────────── */
+.today__story {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  padding-bottom: 24px;
+}
+.today__story > .cc-panel-empty { margin-top: 24px; }
+.today__hour {
+  position: sticky;
+  top: 47px;
+  z-index: 2;
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 10px var(--_cc-panel-pad-x) 6px;
+  background: var(--_cc-surface-card);
+  border-bottom: 1px solid var(--_cc-border-soft);
+}
+.today__hour-label {
+  font-family: var(--_cc-font-mono);
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--_cc-foreground);
+  font-variant-numeric: tabular-nums;
+}
+.today__hour-count {
+  font-size: var(--_cc-panel-fs-meta);
+  color: var(--_cc-foreground-meta);
+}
+
+/* One row: the clock time, the mark on the day's rail, the sentence and
+   what came of it, and the row's controls. */
 .today__row {
+  position: relative;
   display: grid;
-  grid-template-columns: 60px 14px minmax(0, 1fr);
-  column-gap: 12px;
-  padding: 0 var(--_cc-panel-pad-x);
+  grid-template-columns: 40px 14px minmax(0, 1fr) auto;
+  column-gap: 10px;
+  align-items: start;
+  min-height: var(--_cc-panel-row-h, 40px);
+  padding: 7px var(--_cc-panel-pad-x) 7px var(--_cc-panel-pad-x);
+  box-sizing: border-box;
+  transition: background var(--_cc-dur-fast, 120ms) ease;
 }
+.today__row:hover { background: var(--_cc-surface-hover); }
+.today__row.is-selected {
+  background: var(--_cc-surface-soft);
+  box-shadow: inset 2px 0 0 var(--_cc-member-accent);
+}
+.today__row--nested { padding-left: calc(var(--_cc-panel-pad-x) + 24px); }
+.today__row--nested .today__time { visibility: hidden; }
 .today__time {
-  padding: 6px 0;
-  font-family: var(--mono);
+  padding-top: 2px;
+  font-family: var(--_cc-font-mono);
   font-size: 11px;
   line-height: 1.6;
-  color: var(--ink-meta);
+  color: var(--_cc-foreground-meta);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
-/* The rail joins the dots; it stops at the first and last dot. */
+/* The rail joins the marks of one hour. */
 .today__rail {
   position: relative;
   display: flex;
   justify-content: center;
-  padding-top: 12px;
+  align-self: stretch;
+  padding-top: 7px;
 }
 .today__rail::before {
   content: "";
   position: absolute;
-  top: 0;
-  bottom: 0;
+  top: -7px;
+  bottom: -7px;
   left: 50%;
   width: 1px;
-  background: var(--line);
+  background: var(--_cc-viz-grid);
 }
-.today__row:first-child .today__rail::before { top: 12px; }
-.today__row:last-child .today__rail::before { bottom: auto; height: 12px; }
-.today__row:only-child .today__rail::before { display: none; }
-.today__rail .cc-dot {
+.today__rail .cc-mark {
   position: relative;
-  box-shadow: 0 0 0 3px var(--bg-elev-1);
+  box-shadow: 0 0 0 3px var(--_cc-surface-card);
 }
-.today__body {
+.today__row:hover .today__rail .cc-mark { box-shadow: 0 0 0 3px var(--_cc-surface-hover); }
+.today__content {
   display: flex;
-  align-items: baseline;
-  gap: 2px 12px;
-  min-width: 0;
-  padding: 6px 0;
+  flex-direction: column;
+  gap: 2px;
+  overflow: visible;
 }
+.today__lead {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  min-width: 0;
+}
+.today__lead > .cc-agent__avatar { margin-top: 1px; flex: none; }
 .today__text {
   flex: 1 1 auto;
   min-width: 0;
   display: -webkit-box;
   -webkit-box-orient: vertical;
-  -webkit-line-clamp: 3;
+  -webkit-line-clamp: 2;
   overflow: hidden;
-  font-size: 12.5px;
-  line-height: 1.5;
-  color: var(--ink);
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--_cc-foreground);
   overflow-wrap: anywhere;
 }
 .today__who { font-weight: 600; }
-.today__snippet { color: var(--ink-muted); }
-.today__kind {
-  flex: none;
-  font-size: 11px;
-  color: var(--ink-meta);
+.today__text .cc-agent { display: inline; }
+.today__text .cc-agent--link {
+  display: inline;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  font-weight: 600;
+  color: inherit;
+  cursor: pointer;
 }
-@container cc-panel (max-width: 479px) {
-  .today__row {
-    grid-template-columns: 44px 14px minmax(0, 1fr);
-    column-gap: 8px;
-  }
-  .today__body {
-    flex-direction: column;
-    gap: 0;
-  }
+.today__text .cc-agent--link:hover { text-decoration: underline; text-underline-offset: 2px; }
+.today__snippet { color: var(--_cc-foreground-muted); }
+.today__fold-facts { color: var(--_cc-foreground-muted); }
+.today__meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px 0;
+  min-width: 0;
+  padding-left: 26px;
+  font-size: var(--_cc-panel-fs-meta);
+  line-height: 1.4;
+  color: var(--_cc-foreground-meta);
+}
+.today__meta > * + *::before {
+  content: "·";
+  margin: 0 6px;
+  color: var(--_cc-foreground-meta);
+}
+.today__outcome[data-tone="ok"] { color: var(--_cc-positive-ink); }
+.today__outcome[data-tone="crit"] { color: var(--_cc-negative-ink); }
+.today__outcome[data-tone="warn"] { color: var(--_cc-warning-ink); }
+.today__live {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--_cc-foreground);
+}
+.today__result {
+  min-width: 0;
+  max-width: 60ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.today__row--crit .today__fact,
+.today__row--warn .today__fact { color: var(--_cc-foreground-muted); }
+.today__actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding-top: 1px;
 }
 
+/* ── The drawer ────────────────────────────────────────────────── */
+.today__drawer-text {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--_cc-foreground);
+}
+.today__drawer-quote {
+  margin: 6px 0 0;
+  padding: 8px 10px;
+  border-left: 2px solid var(--_cc-border-strong);
+  background: var(--_cc-surface-soft);
+  border-radius: 0 var(--_cc-radius-sm) var(--_cc-radius-sm) 0;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--_cc-foreground-muted);
+  overflow-wrap: anywhere;
+}
+.today__drawer-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.today__drawer-item {
+  display: grid;
+  grid-template-columns: 40px 10px minmax(0, 1fr);
+  column-gap: 8px;
+  align-items: baseline;
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+.today__drawer-item .today__time { padding-top: 0; }
+.today__drawer-item .cc-mark { align-self: center; }
+.today__drawer-words { min-width: 0; overflow-wrap: anywhere; }
+.today__drawer-words .cc-agent { display: inline; }
+
+/* Narrow panes: the time column shrinks, the rail stays. */
+@container cc-panel (max-width: 479px) {
+  .today__row { grid-template-columns: 36px 12px minmax(0, 1fr) auto; column-gap: 8px; }
+  .today__meta { padding-left: 0; }
+  .today__lead > .cc-agent__avatar { display: none; }
+}

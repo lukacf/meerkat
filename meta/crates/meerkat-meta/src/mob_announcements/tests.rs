@@ -2727,9 +2727,10 @@ impl NativeDelivery for ScriptedNative {
             .unwrap()
             .entry(identity.to_string())
             .or_default() += 1;
-        if self.panicking.lock().unwrap().contains(identity) {
-            panic!("the scripted check of {identity} panicked");
-        }
+        assert!(
+            !self.panicking.lock().unwrap().contains(identity),
+            "the scripted check of {identity} panicked"
+        );
         let wedged = self.wedged.borrow().contains(identity);
         if wedged {
             let _ = self
@@ -4218,7 +4219,7 @@ impl HeldCall {
 /// than the bound a row allows the gate holder it holds (the declarations
 /// rows' `STOPS_WITHIN`), so a call a row holds as a store call that never
 /// answers stays held for that row.
-const HELD_PUT_BOUND: std::time::Duration = std::time::Duration::from_secs(300);
+const HELD_PUT_BOUND: std::time::Duration = std::time::Duration::from_mins(5);
 
 impl FaultyStore {
     fn new(inner: SqliteAnnouncementStore, failing: Option<&str>) -> Self {

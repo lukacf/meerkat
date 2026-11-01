@@ -61,6 +61,8 @@ export const SVG_LIMITS = { nodes: 300, edges: 800 } as const;
 const MOVE_MS = 320;
 /** Lanes never fit below this: further out the marks would crowd their labels. */
 const LANE_MIN_SCALE = 0.6;
+/** Below this frame width the legend starts folded and stacks its rows under its title. */
+const LEGEND_NARROW = 560;
 /** Layered frames sit this far in from the view's edges (px). */
 const CARD_FIT_PAD = 24;
 /** Item cards never fit below this: their titles stay at 10 px or more. */
@@ -331,7 +333,10 @@ export const GraphView = React.forwardRef<GraphViewHandle, GraphViewProps>(funct
   const hiddenSet = React.useMemo(() => new Set(hiddenList), [hiddenList]);
   const [focusMode, setFocusMode] = React.useState(false);
   const focusTarget = focusMode ? selection[0] ?? null : null;
-  const [legendCollapsed, setLegendCollapsed] = React.useState(legend === "collapsed");
+  // The legend starts folded where asked, and in a narrow frame (until the user unfolds it).
+  const [legendChoice, setLegendChoice] = React.useState<boolean | null>(null);
+  const narrowFrame = size.width > 0 && size.width < LEGEND_NARROW;
+  const legendCollapsed = legendChoice ?? (legend === "collapsed" || narrowFrame);
   const panel = panelOfKey(cacheKey) || testIdPrefix || "";
   const [minimapHidden, setMinimapHidden] = React.useState(() => readMinimapHidden(panel));
 
@@ -1503,7 +1508,7 @@ export const GraphView = React.forwardRef<GraphViewHandle, GraphViewProps>(funct
       <div className="cc-viz-chrome">
         {tooltip}
         {showLegend || controls ? (
-          <div className="cc-viz-chrome__left" ref={chromeRef}>
+          <div className={cx("cc-viz-chrome__left", !showMinimap && "is-wide")} ref={chromeRef}>
             {showLegend ? (
               <Legend
                 relations={model.relations}
@@ -1515,7 +1520,8 @@ export const GraphView = React.forwardRef<GraphViewHandle, GraphViewProps>(funct
                   props.onHiddenRelationsChange?.(next);
                 }}
                 collapsed={legendCollapsed}
-                onCollapsedChange={setLegendCollapsed}
+                onCollapsedChange={setLegendChoice}
+                stacked={narrowFrame}
                 testId={testIds.legend ?? prefixed("legend")}
                 itemTestId={legendItemTestId}
                 headingClassName={classNames?.legendHeading}

@@ -295,6 +295,31 @@ describe("GraphView", () => {
     }
   });
 
+  it("folds the legend in a narrow frame until it is unfolded, then stacks its rows", () => {
+    let frameWidth = 500;
+    const rect = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      const [width, height] = this.classList.contains("cc-viz-graph") ? [frameWidth, 600] : [0, 0];
+      return { x: 0, y: 0, left: 0, top: 0, right: width, bottom: height, width, height, toJSON: () => ({}) } as DOMRect;
+    });
+    try {
+      const { nodes, edges } = team();
+      const { unmount } = render(<GraphView nodes={nodes} edges={edges} lanes={lanes} layout="lanes" ariaLabel="g" testIdPrefix="t" />);
+      const legend = () => screen.getByTestId("t-legend");
+      expect(legend()).toHaveClass("is-collapsed");
+      fireEvent.click(within(legend()).getByRole("button", { name: "Legend" }));
+      expect(legend()).not.toHaveClass("is-collapsed");
+      expect(legend()).toHaveClass("is-stacked");
+      expect(screen.getByTestId("t-legend:wired")).toBeInTheDocument();
+      unmount();
+      frameWidth = 900;
+      render(<GraphView nodes={nodes} edges={edges} lanes={lanes} layout="lanes" ariaLabel="g" testIdPrefix="t" />);
+      expect(legend()).not.toHaveClass("is-collapsed");
+      expect(legend()).not.toHaveClass("is-stacked");
+    } finally {
+      rect.mockRestore();
+    }
+  });
+
   it("leaves plain wheel scrolling to the page unless asked to zoom with it", () => {
     const { nodes, edges } = team();
     const wheel = (target: Element, init: WheelEventInit) => {

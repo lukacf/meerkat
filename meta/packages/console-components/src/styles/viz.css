@@ -943,6 +943,11 @@
   max-height: calc(100% - 24px);
 }
 
+/* Without the minimap the corner is free: the column may take the width. */
+.cc-viz-chrome__left.is-wide {
+  max-width: calc(100% - 24px);
+}
+
 .cc-viz-controls,
 .cc-viz-legend,
 .cc-viz-minimap {
@@ -1191,6 +1196,22 @@
   margin: 2px 6px 1px;
   color: var(--_cc-foreground-meta);
   font-size: 11px;
+}
+
+/* A narrow frame: the micro-label and the fold button share the first line,
+   the rows wrap under them at the column's full width. */
+.cc-viz-legend.is-stacked {
+  max-height: 176px;
+}
+
+.cc-viz-legend.is-stacked .cc-viz-legend__collapse {
+  order: 1;
+  margin-left: auto;
+}
+
+.cc-viz-legend.is-stacked .cc-viz-legend__list {
+  order: 2;
+  flex-basis: 100%;
 }
 
 /* Node kinds start a row of their own under the relations. */

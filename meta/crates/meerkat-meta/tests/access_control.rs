@@ -4593,6 +4593,118 @@ async fn memory_panel_applied_promotion_is_judged_by_its_target_scope() {
     let _ = runtime.mob_handle().stop().await;
 }
 
+/// A gated promotion the steward made from a proposal names that proposal
+/// as its source, not a record. While pending it is judged by the
+/// proposal's scope as well as its target: an operator proposal promoted
+/// into the mob is listed to a reviewer of every scope, and withheld from a
+/// reviewer without `operator.memory.read`.
+#[tokio::test]
+async fn memory_panel_pending_promotion_of_a_proposal_needs_its_scope() {
+    use meerkat_meta::memory::records::{MemoryAuthor, MemoryKind};
+    use meerkat_meta::memory::staged::StagedBatchKind;
+    use meerkat_meta::{
+        AgentMemoryProvider, MemoryScope, NewMemoryRecord, StagedMemoryStore, StagedMutationBatch,
+        StagedOp, TrustTier,
+    };
+
+    let (_temp_dir, mut runtime) = build_access_runtime_fixture().await;
+    let memory_dir = tempfile::tempdir().expect("memory dir");
+    let store = plain_dream_store(memory_dir.path()).await;
+    let record = |title: &str| NewMemoryRecord {
+        kind: MemoryKind::Fact,
+        title: title.to_string(),
+        description: format!("{title} description"),
+        body: format!("{title} body"),
+        tags: Vec::new(),
+        evidence: Vec::new(),
+        verification: None,
+    };
+    let proposal_id = store
+        .propose(
+            &MemoryScope::Operator {
+                realm: "default".to_string(),
+                operator: "op-owner".to_string(),
+            },
+            record("Operator preference"),
+            MemoryAuthor::Operator,
+        )
+        .await
+        .expect("operator proposal");
+    let stage = store
+        .stage(StagedMutationBatch {
+            kind: StagedBatchKind::FreshWrite,
+            realm: "default".to_string(),
+            author: MemoryAuthor::Steward {
+                run_id: "run-gate-proposal".to_string(),
+            },
+            ops: vec![StagedOp::Create {
+                id: None,
+                scope: MemoryScope::Mob {
+                    realm: "default".to_string(),
+                    mob: "access-control-mob".to_string(),
+                },
+                record: record("Operator preference for the mob"),
+                trust: TrustTier::AgentObserved,
+                derived_from: Vec::new(),
+                rationale: Some("promote the operator proposal".to_string()),
+                created_at_ms: None,
+                updated_at_ms: None,
+            }],
+        })
+        .await
+        .expect("stage the promotion");
+    store
+        .record_pending_promotion(
+            "default",
+            meerkat_meta::memory::PendingPromotion {
+                pending_id: "gate-proposal".to_string(),
+                stage_token: stage.token,
+                record_id: proposal_id,
+                scope_kind: "mob".to_string(),
+                scope_key: "access-control-mob".to_string(),
+                rationale: Some("steward: a mob-wide preference".to_string()),
+                status: "pending".to_string(),
+                created_at_ms: 1,
+            },
+        )
+        .await
+        .expect("pending promotion");
+    runtime.set_memory_panel_store(Arc::new(store.clone()));
+    let every_scope = [
+        "agent.view",
+        "agent.memory.read",
+        "mob.memory.read",
+        "operator.memory.read",
+        "memory.quarantine.review",
+    ];
+    let without_operator = [
+        "agent.view",
+        "agent.memory.read",
+        "mob.memory.read",
+        "memory.quarantine.review",
+    ];
+
+    for (case, reads, listed) in [
+        ("a reviewer of every scope", &every_scope[..], true),
+        (
+            "a reviewer without operator.memory.read",
+            &without_operator[..],
+            false,
+        ),
+    ] {
+        runtime.set_access_controller(unscoped_reader(reads));
+        let app = runtime.build_reference_app_router(decision_state(false));
+        let promotions = listed_promotions(&app).await;
+        assert_eq!(
+            promotions.contains(&"gate-proposal".to_string()),
+            listed,
+            "{case}: {promotions:?}"
+        );
+    }
+
+    let _ = runtime.mob_handle().stop().await;
+}
+
 /// The operator half of quarantine review over the console: the decision
 /// composes EXISTING grants. The reviewer grant alone decides nothing; it
 /// must meet the per-row read grants and the identity's own write (release)

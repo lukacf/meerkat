@@ -17982,9 +17982,19 @@ comms = true
         shared: &SharedMemoryConsole,
         controller: &AccessController,
     ) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
-        let response = shared_memory_read(
+        shared_pending_promotions_as(shared, controller, "viewer@example.test").await
+    }
+
+    /// [`shared_pending_promotions`] as the signed-in `subject`.
+    async fn shared_pending_promotions_as(
+        shared: &SharedMemoryConsole,
+        controller: &AccessController,
+        subject: &str,
+    ) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
+        let response = shared_memory_read_as(
             shared,
             controller,
+            subject,
             "meta/memory/panel/quarantine",
             json!({}),
         )
@@ -17995,6 +18005,80 @@ comms = true
             .iter()
             .filter_map(|row| row["pending_id"].as_str().map(str::to_string))
             .collect())
+    }
+
+    /// Park a pending gate `gate-proposal` that would promote an operator
+    /// proposal into the mob `panel-mob`, naming the proposal as its source,
+    /// as the steward does for a proposal it promotes through a gate.
+    async fn shared_proposal_promotion(
+        shared: &SharedMemoryConsole,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        use crate::AgentMemoryProvider as _;
+        use crate::StagedMemoryStore as _;
+        use crate::memory::StewardStore as _;
+        use crate::memory::records::MemoryAuthor;
+        use crate::memory::staged::StagedBatchKind;
+
+        let fact = |title: &str| crate::NewMemoryRecord {
+            kind: crate::MemoryKind::Fact,
+            title: title.to_string(),
+            description: format!("{title} description"),
+            body: format!("{title} body"),
+            tags: Vec::new(),
+            evidence: Vec::new(),
+            verification: None,
+        };
+        let proposal_id = shared
+            .store
+            .propose(
+                &crate::MemoryScope::Operator {
+                    realm: "default".to_string(),
+                    operator: "op-owner".to_string(),
+                },
+                fact("operator preference"),
+                MemoryAuthor::Operator,
+            )
+            .await?;
+        let stage = shared
+            .store
+            .stage(crate::StagedMutationBatch {
+                kind: StagedBatchKind::FreshWrite,
+                realm: "default".to_string(),
+                author: MemoryAuthor::Steward {
+                    run_id: "run-gate-proposal".to_string(),
+                },
+                ops: vec![crate::StagedOp::Create {
+                    id: None,
+                    scope: crate::MemoryScope::Mob {
+                        realm: "default".to_string(),
+                        mob: "panel-mob".to_string(),
+                    },
+                    record: fact("operator preference for the mob"),
+                    trust: crate::TrustTier::AgentObserved,
+                    derived_from: Vec::new(),
+                    rationale: Some("promote the operator proposal".to_string()),
+                    created_at_ms: None,
+                    updated_at_ms: None,
+                }],
+            })
+            .await?;
+        shared
+            .store
+            .record_pending_promotion(
+                "default",
+                crate::memory::PendingPromotion {
+                    pending_id: "gate-proposal".to_string(),
+                    stage_token: stage.token,
+                    record_id: proposal_id,
+                    scope_kind: "mob".to_string(),
+                    scope_key: "panel-mob".to_string(),
+                    rationale: Some("steward: a mob-wide preference".to_string()),
+                    status: "pending".to_string(),
+                    created_at_ms: 3,
+                },
+            )
+            .await?;
+        Ok(())
     }
 
     fn shared_delivery_deny() -> crate::access::AccessRule {
@@ -18033,10 +18117,21 @@ comms = true
         shared: &SharedMemoryConsole,
         controller: &AccessController,
         method: &str,
+        params: Value,
+    ) -> Value {
+        shared_memory_read_as(shared, controller, "viewer@example.test", method, params).await
+    }
+
+    /// [`shared_memory_read`] as the signed-in `subject`.
+    async fn shared_memory_read_as(
+        shared: &SharedMemoryConsole,
+        controller: &AccessController,
+        subject: &str,
+        method: &str,
         mut params: Value,
     ) -> Value {
         params["runtime_key"] = json!("repo");
-        let view = controller.view_for_subject(Some("viewer@example.test"));
+        let view = controller.view_for_subject(Some(subject));
         handle_console_aggregator_rpc(
             Some(shared.aggregator.clone()),
             rpc_request_with_params(method, params),
@@ -18310,6 +18405,52 @@ comms = true
             pending.iter().all(|id| id != "gate-cross"),
             "an applied promotion is no longer pending: {pending:?}"
         );
+        shared.runtime.mob_handle().stop().await?;
+        Ok(())
+    }
+
+    /// A gated promotion made from a proposal names the proposal as its
+    /// source. On a shared Console it is listed to an admin and to a reviewer
+    /// of every scope, and withheld from a reviewer without
+    /// `operator.memory.read`, the scope of the operator proposal it would
+    /// publish into the mob.
+    #[tokio::test]
+    async fn aggregator_pending_promotion_of_a_proposal_needs_its_scope()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let shared = shared_memory_console("panel-promotions-proposal").await?;
+        shared_proposal_promotion(&shared).await?;
+        let without_operator: Vec<&str> = SHARED_MEMORY_READS
+            .iter()
+            .copied()
+            .filter(|action| *action != ACTION_OPERATOR_MEMORY_READ)
+            .collect();
+        for (case, controller, subject, listed) in [
+            (
+                "an admin",
+                shared_memory_reader(&[ACTION_AGENT_VIEW], None)?,
+                "admin@example.test",
+                true,
+            ),
+            (
+                "a reviewer of every scope",
+                shared_memory_reader(&SHARED_MEMORY_READS, None)?,
+                "viewer@example.test",
+                true,
+            ),
+            (
+                "a reviewer without operator.memory.read",
+                shared_memory_reader(&without_operator, None)?,
+                "viewer@example.test",
+                false,
+            ),
+        ] {
+            let pending = shared_pending_promotions_as(&shared, &controller, subject).await?;
+            assert_eq!(
+                pending.iter().any(|id| id == "gate-proposal"),
+                listed,
+                "{case}: {pending:?}"
+            );
+        }
         shared.runtime.mob_handle().stop().await?;
         Ok(())
     }

@@ -332,6 +332,8 @@ export interface GraphViewProps {
 /** Imperative handle (`ref`) for panels: return focus, reveal, fit. */
 export interface GraphViewHandle {
   fit(): void;
+  /** Zooms to show these nodes; a goal shows its whole frame (double-click a goal header). */
+  fitTo(ids: readonly string[]): void;
   zoomBy(factor: number): void;
   reveal(id: string): void;
   /** Moves keyboard focus to the node (the drawer's Escape returns focus here). */

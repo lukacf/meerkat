@@ -895,6 +895,9 @@
   cursor: default;
 }
 
+/* The column's width is bounded by the graph's (it leaves the minimap's
+   corner free); the legend inside it takes a fixed cap, never a percentage
+   of this shrink-to-fit column. */
 .cc-viz-chrome__left {
   position: absolute;
   left: 12px;
@@ -903,6 +906,7 @@
   flex-direction: column;
   align-items: flex-start;
   gap: 8px;
+  max-width: calc(100% - 210px);
   max-height: calc(100% - 24px);
 }
 
@@ -995,7 +999,7 @@
   flex-wrap: wrap;
   align-items: flex-start;
   gap: 0 10px;
-  max-width: min(600px, calc(100% - 210px));
+  max-width: 600px;
   max-height: 96px;
   overflow: auto;
   padding: 5px 6px 5px 10px;
@@ -1008,6 +1012,8 @@
 }
 
 .cc-viz-legend.is-collapsed {
+  max-height: none;
+  overflow: visible;
   padding: 0;
   border: 0;
   background: none;

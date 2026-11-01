@@ -173,12 +173,20 @@ export function unionBounds(a: LayoutBounds, b: LayoutBounds): LayoutBounds {
   return { x, y, w: Math.max(a.x + a.w, b.x + b.w) - x, h: Math.max(a.y + a.h, b.y + b.h) - y };
 }
 
+/** One collator: localeCompare with options builds one per call. */
+const LABELS = new Intl.Collator(undefined, { sensitivity: "base", numeric: true });
+
+/** Compares labels the way people read them ("Agent 2" before "Agent 10", case aside). */
+export function compareLabels(a: string, b: string): number {
+  return LABELS.compare(a, b);
+}
+
 /** Manual order first, then the label, then the id: every layout sorts alike. */
 export function compareNodes(a: LayoutNode, b: LayoutNode): number {
   const ao = a.order ?? Number.POSITIVE_INFINITY;
   const bo = b.order ?? Number.POSITIVE_INFINITY;
   if (ao !== bo) return ao < bo ? -1 : 1;
-  const byLabel = a.label.localeCompare(b.label, undefined, { sensitivity: "base", numeric: true });
+  const byLabel = LABELS.compare(a.label, b.label);
   if (byLabel !== 0) return byLabel;
   return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
 }

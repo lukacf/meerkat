@@ -3524,7 +3524,6 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
   // Routing reads need routing access (runtime.admin): a refusal shows the
   // no-access state, never "no routes". The data belongs to the principal
   // and runtime it was read under and is cleared when either changes.
-  const accessEnforced = experience?.access?.enabled === true;
   const refreshRoutingData = React.useCallback(() => panelRefreshFlight("routing", async () => {
     const scope = accessScopeRef.current;
     setRoutingRead((current) => (current.scope === scope ? { ...current, loading: true } : { ...emptyRoutingRead(), scope, loading: true }));
@@ -3543,7 +3542,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       const failure = classifyConsoleSendFailure(error);
       // An enforced console leaves a refused method out of its capabilities.
       const denied = failure.kind === "access_denied" || failure.kind === "unauthenticated"
-        || (capability && accessEnforced);
+        || (capability && accessEnforcing);
       const unavailable = capability && !denied;
       if (denied || unavailable) setRoutingData({ routes: [], deliveries: [] });
       setRoutingRead((current) => ({
@@ -3553,7 +3552,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       }));
       throw error;
     }
-  }), [baseUrl, panelRefreshFlight, accessEnforced]);
+  }), [baseUrl, panelRefreshFlight, accessEnforcing]);
   React.useEffect(() => {
     setRoutingData({ routes: [], deliveries: [] });
     setRoutingRead({ ...emptyRoutingRead(), scope: accessScope });
@@ -5915,7 +5914,8 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
             ((await executeHeadlessCommand(
               CONSOLE_COMMAND_NAMES.previewAccess,
               controlWorkbenchTarget("access"),
-              identity ? { subject, action, identity } : { subject, action },
+              // No subject asks as someone who is not signed in.
+              { ...(subject ? { subject } : {}), action, ...(identity ? { identity } : {}) },
             )) as AccessPreviewResult | null) || null
           }
         />

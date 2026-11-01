@@ -4763,6 +4763,9 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
     /// How operator-instruction entries lower for `identity`, as this
     /// service's builder serves it
     /// ([`SessionAgentBuilder::instruction_lowering_for_identity`]).
+    /// The persistent service, its only caller, is built with the session
+    /// store.
+    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
     pub(crate) async fn instruction_lowering_for_identity(
         &self,
         identity: &SessionLlmIdentity,

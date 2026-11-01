@@ -102,6 +102,10 @@
   color: var(--_cc-foreground-muted);
 }
 
+/* ── Work the agent owns or claimed ────────────────────────── */
+.agent-details__work { margin: 0 calc(-1 * var(--_cc-panel-pad-x)); }
+.agent-details__work-item .cc-link { font-weight: 500; }
+
 /* ── Session repair ────────────────────────────────────────── */
 .agent-details__repair { padding: 10px var(--_cc-panel-pad-x) 0; }
 .agent-details__repair p { margin: 0 0 8px; }

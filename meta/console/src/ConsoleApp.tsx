@@ -210,9 +210,9 @@ import {
   type MemoryRecordDetail,
 } from "./panels/MemoryPanel";
 import { RosterPanel } from "./panels/RosterPanel";
-import { AgentDetailsPanel } from "./panels/AgentDetailsPanel";
+import { AgentDetailsPanel, type AgentWorkItem } from "./panels/AgentDetailsPanel";
 import { HealthPanel } from "./panels/HealthPanel";
-import type { ConsoleHealthSnapshot } from "./types";
+import type { ConsoleHealthSnapshot, WorkGraphWireItem } from "./types";
 import { SchedulesSection } from "./panels/SchedulesSection";
 import { SchedulesPanel } from "./panels/SchedulesPanel";
 import {
@@ -469,6 +469,33 @@ function normalizeConsoleInspectResult(
     ...(runtimeKey ? { runtime_key: runtimeKey } : {}),
     ...(visibility ? { visibility } : {}),
   } as IdentityInspectViewState;
+}
+
+/** The open work items an agent owns or has claimed, from the WorkGraph
+ * snapshot the console last read (empty until WorkGraph is read): owner keys
+ * name the agent by identity or end in it ("mob/<mob>/agent/<identity>"). */
+function agentWorkItems(
+  items: readonly WorkGraphWireItem[] | undefined,
+  identity: string,
+  agent: ConsoleAgent | undefined,
+): AgentWorkItem[] {
+  const keys = new Set([identity, agent?.identity, agent?.member_id].filter((key): key is string => Boolean(key)));
+  const names = (key: { id?: string } | undefined) => {
+    const id = key?.id?.trim();
+    return Boolean(id) && (keys.has(id!) || keys.has(id!.split("/").filter(Boolean).pop() || ""));
+  };
+  const open = new Set(["open", "ready", "in_progress", "blocked"]);
+  return (items || [])
+    .filter((item) => item.id && open.has(item.status || "") && (names(item.claim?.owner?.key) || names(item.owner?.key)))
+    .sort((left, right) => (left.status === "in_progress" ? 0 : 1) - (right.status === "in_progress" ? 0 : 1))
+    .slice(0, 8)
+    .map((item) => ({
+      id: item.id!,
+      title: item.title || item.id!,
+      status: item.status || "open",
+      claimedAt: item.claim?.claimed_at ?? null,
+      priority: item.priority ?? null,
+    }));
 }
 
 const DEFAULT_APPROVER_ID = "console-ops-lead";
@@ -5606,6 +5633,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
         inspect={inspect}
         agent={agent}
         agents={agents}
+        work={agentWorkItems(workGraphData.items, target.identity, agent)}
         stateLabel={inspect ? identityStateLabel(inspect) : null}
         onOpenChat={
           configuredActionVisibility.chat !== false && agent

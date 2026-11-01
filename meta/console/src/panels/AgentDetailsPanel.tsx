@@ -22,6 +22,8 @@ import {
   AgentName,
   Button,
   EmptyState,
+  EntityLink,
+  EntityRow,
   FigureTile,
   GlanceStrip,
   KeyValueList,
@@ -47,12 +49,23 @@ import {
   type SummaryFact,
   type Tone,
 } from "../../../packages/console-components/src/panel-kit";
-import { GraphView } from "../../../packages/console-components/src/viz";
+import { GraphView, StatusSquare } from "../../../packages/console-components/src/viz";
 import type { VizEdge, VizNode } from "../../../packages/console-components/src/viz";
 
 export interface AgentDetailsAction {
   label: string;
   onClick: () => void;
+}
+
+/** A work item the agent owns or has claimed (from the WorkGraph snapshot). */
+export interface AgentWorkItem {
+  id: string;
+  title: string;
+  /** open, ready, in_progress, blocked, completed, failed, cancelled */
+  status: string;
+  /** When the agent claimed it. */
+  claimedAt?: string | null;
+  priority?: string | null;
 }
 
 /** The inspect read as the console keeps it: the view state plus the facts
@@ -174,6 +187,7 @@ export function AgentDetailsPanel({
   openChatLabel = "Open chat",
   onRefresh,
   agents,
+  work,
   now,
   children,
 }: {
@@ -190,6 +204,8 @@ export function AgentDetailsPanel({
   onRefresh?: () => void;
   /** The roster: names, roles and live state of the agent's peers. */
   agents?: ConsoleAgent[];
+  /** The work items it owns or has claimed, when the console has read them. */
+  work?: AgentWorkItem[];
   /** A fixed clock (tests, the gallery). */
   now?: () => number;
   /** The schedules section, when offered. */
@@ -460,6 +476,28 @@ export function AgentDetailsPanel({
                 </p>
               ) : null}
             </PanelSection>
+            {work && work.length ? (
+              <PanelSection label="Work" count={work.length} headerAs="div" padded testId={`inspect-work:${identity}`}>
+                <div className="agent-details__work">
+                  {work.map((item) => {
+                    const live = item.status === "in_progress";
+                    return (
+                      <EntityRow
+                        key={item.id}
+                        kind="task"
+                        testId={`inspect-work-item:${item.id}`}
+                        className="agent-details__work-item"
+                        mark={<StatusSquare status={item.status} live={live} />}
+                        title={<EntityLink kind="work-item" id={item.id} title={item.id}>{item.title}</EntityLink>}
+                        subtitle={item.claimedAt ? <>claimed <RelativeTime value={item.claimedAt} /></> : undefined}
+                        status={<StatusPill tone={live ? "live" : statusTone(item.status)} variant="quiet">{humanizeEnum(item.status)}</StatusPill>}
+                        live={live}
+                      />
+                    );
+                  })}
+                </div>
+              </PanelSection>
+            ) : null}
             <div className="agent-details__tech">
               <TechnicalDetails
                 items={[

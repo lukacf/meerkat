@@ -183,6 +183,11 @@ function DemoDetails({ withSchedules }: { withSchedules?: boolean }) {
           )}
           agent={research}
           agents={team}
+          work={[
+            { id: "wi-41", title: "Collect the carrier delay reports", status: "in_progress", claimedAt: new Date(now - 2 * 3_600_000).toISOString() },
+            { id: "wi-44", title: "Summarize the delay trends for Dispatch", status: "ready" },
+            { id: "wi-38", title: "Check the holiday stock for the top 20 products", status: "blocked" },
+          ]}
           stateLabel="active"
           now={() => now}
           onOpenChat={() => {}}

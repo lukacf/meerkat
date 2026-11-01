@@ -154,6 +154,30 @@ describe("AgentDetailsPanel", () => {
     expect(ego.getAttribute("aria-label")).toBe("Coordinator and 1 connection");
   });
 
+  it("lists the work it owns or claimed, the item in progress live, ids in tooltips", () => {
+    const view = render(
+      <AgentDetailsPanel
+        identity="identity:coordinator"
+        inspect={inspect()}
+        agent={agent}
+        stateLabel="active"
+        actions={{}}
+        work={[
+          { id: "wi-41", title: "Collect vendor scorecards", status: "in_progress", claimedAt: new Date(NOW - 2 * 3_600_000).toISOString() },
+          { id: "wi-44", title: "Summarize the scorecards", status: "ready" },
+        ]}
+      />,
+    );
+    const work = view.getByTestId("inspect-work:identity:coordinator");
+    const first = view.getByTestId("inspect-work-item:wi-41");
+    expect(first.classList.contains("is-live")).toBe(true);
+    expect(first.textContent?.includes("Collect vendor scorecards")).toBe(true);
+    expect(first.textContent?.includes("claimed 2h ago")).toBe(true);
+    expect(first.querySelector('[title="wi-41"]') !== null).toBe(true);
+    expect(work.textContent?.includes("wi-44")).toBe(false);
+    expect(view.getByTestId("inspect-work-item:wi-44").textContent?.includes("Ready")).toBe(true);
+  });
+
   it("explains an inspect answer it could not read, with Retry", () => {
     const refresh = vi.fn();
     const view = render(

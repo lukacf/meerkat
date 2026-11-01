@@ -208645,12 +208645,29 @@
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "One page of work items: `list` (most recently updated first) or `ready`\n(priority, then creation time, then id).",
     "properties": {
       "items": {
         "items": {
           "$ref": "#/$defs/WorkItem"
         },
         "type": "array"
+      },
+      "total_items": {
+        "description": "Items that matched the filter at this read (for `ready`, the ready\nitems), before `limit` cut them. Absent only from a server that\npredates the field.",
+        "format": "uint",
+        "minimum": 0,
+        "type": [
+          "integer",
+          "null"
+        ]
+      },
+      "truncated": {
+        "description": "Matching items exist after the last item returned. Absent only from a\nserver that predates the field, which does not mean the page is\ncomplete.",
+        "type": [
+          "boolean",
+          "null"
+        ]
       }
     },
     "required": [
@@ -209480,6 +209497,22 @@
       },
       "realm_id": {
         "type": "string"
+      },
+      "total_items": {
+        "description": "Items that matched the filter in this snapshot, before `limit` cut\nthem. Absent only from a server that predates the field.",
+        "format": "uint",
+        "minimum": 0,
+        "type": [
+          "integer",
+          "null"
+        ]
+      },
+      "truncated": {
+        "description": "Matching items exist after the last item returned. Absent only from a\nserver that predates the field, which does not mean the page is\ncomplete.",
+        "type": [
+          "boolean",
+          "null"
+        ]
       }
     },
     "required": [
@@ -209975,6 +210008,22 @@
       "items": {
         "items": true,
         "type": "array"
+      },
+      "total_items": {
+        "description": "Items that matched the filter at this read (for `workgraph/ready`, the\nready items), before `limit` cut them. Absent only from a server that\npredates the field.",
+        "format": "uint",
+        "minimum": 0,
+        "type": [
+          "integer",
+          "null"
+        ]
+      },
+      "truncated": {
+        "description": "Matching items exist after the last item returned. Absent only from a\nserver that predates the field, which does not mean the page is\ncomplete.",
+        "type": [
+          "boolean",
+          "null"
+        ]
       }
     },
     "required": [

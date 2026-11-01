@@ -506,6 +506,8 @@ export interface WorkEventsResult {
 
 export interface WorkItemsResult {
   items: unknown[];
+  total_items?: number | null;
+  truncated?: boolean | null;
 }
 
 export type ConfigSetParams = Record<string, unknown>;
@@ -3288,6 +3290,8 @@ export interface WorkGraphIdParams {
 
 export interface WorkGraphItemsResponse {
   items: WorkItem[];
+  total_items?: number | null;
+  truncated?: boolean | null;
 }
 
 export interface WorkGraphSnapshot {
@@ -3300,6 +3304,8 @@ export interface WorkGraphSnapshot {
   namespace?: string | null;
   ready_item_ids: string[];
   realm_id: string;
+  total_items?: number | null;
+  truncated?: boolean | null;
 }
 
 export interface WorkGraphSnapshotFilter {
@@ -7864,6 +7870,8 @@ export function parseWorkGraphItemsResponse(value: unknown): WorkGraphItemsRespo
   const data = expectWireObject(value, "WorkGraphItemsResponse");
   return {
     items: expectWireArray(requireWireField(data, "items", "WorkGraphItemsResponse"), "WorkGraphItemsResponse.items").map((entry) => parseWorkItem(entry)),
+    ...(data["total_items"] === undefined || data["total_items"] === null ? {} : { total_items: expectWireInteger(data["total_items"], "WorkGraphItemsResponse.total_items") }),
+    ...(data["truncated"] === undefined || data["truncated"] === null ? {} : { truncated: expectWireBoolean(data["truncated"], "WorkGraphItemsResponse.truncated") }),
   };
 }
 
@@ -7888,6 +7896,8 @@ export function parseWorkGraphSnapshot(value: unknown): WorkGraphSnapshot {
     ...(data["namespace"] === undefined || data["namespace"] === null ? {} : { namespace: expectWireString(data["namespace"], "WorkGraphSnapshot.namespace") }),
     ready_item_ids: expectWireArray(requireWireField(data, "ready_item_ids", "WorkGraphSnapshot"), "WorkGraphSnapshot.ready_item_ids").map((entry) => expectWireString(entry, "WorkGraphSnapshot.ready_item_ids[]")),
     realm_id: expectWireString(requireWireField(data, "realm_id", "WorkGraphSnapshot"), "WorkGraphSnapshot.realm_id"),
+    ...(data["total_items"] === undefined || data["total_items"] === null ? {} : { total_items: expectWireInteger(data["total_items"], "WorkGraphSnapshot.total_items") }),
+    ...(data["truncated"] === undefined || data["truncated"] === null ? {} : { truncated: expectWireBoolean(data["truncated"], "WorkGraphSnapshot.truncated") }),
   };
 }
 
@@ -7896,6 +7906,8 @@ export function parseWorkItemsResult(value: unknown): WorkItemsResult {
   const data = expectWireObject(value, "WorkItemsResult");
   return {
     items: expectWireArray(requireWireField(data, "items", "WorkItemsResult"), "WorkItemsResult.items"),
+    ...(data["total_items"] === undefined || data["total_items"] === null ? {} : { total_items: expectWireInteger(data["total_items"], "WorkItemsResult.total_items") }),
+    ...(data["truncated"] === undefined || data["truncated"] === null ? {} : { truncated: expectWireBoolean(data["truncated"], "WorkItemsResult.truncated") }),
   };
 }
 

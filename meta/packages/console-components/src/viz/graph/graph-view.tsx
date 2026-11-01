@@ -61,6 +61,10 @@ export const SVG_LIMITS = { nodes: 300, edges: 800 } as const;
 const MOVE_MS = 320;
 /** Lanes never fit below this: further out the marks would crowd their labels. */
 const LANE_MIN_SCALE = 0.6;
+/** Layered frames sit this far in from the view's edges (px). */
+const CARD_FIT_PAD = 24;
+/** Item cards never fit below this: their titles stay at 10 px or more. */
+const CARD_MIN_SCALE = 0.85;
 const EXIT_MS = 200;
 const LABEL_SETTLE_MS = 120;
 
@@ -341,7 +345,9 @@ export const GraphView = React.forwardRef<GraphViewHandle, GraphViewProps>(funct
   const tokens = useVizTokens(rootRef, useCanvas);
 
   // Layout. Lanes and clusters spread across the frame; force settles in idle chunks.
-  const layoutWidth = size.width > 0 ? Math.max(320, size.width - 2 * ZOOM.pad) : 960;
+  // Layered pictures sit closer to the frame's edge (the A3.9 WorkGraph frames, 24 px in).
+  const fitPad = cards ? CARD_FIT_PAD : ZOOM.pad;
+  const layoutWidth = size.width > 0 ? Math.max(320, size.width - 2 * fitPad) : 960;
   const layoutHeight = size.height > 0 ? Math.max(200, size.height - 2 * ZOOM.pad) : 560;
   // The bottom-left chrome (legend and zoom controls) stays clear of the fitted picture.
   const chromeRef = React.useRef<HTMLDivElement | null>(null);
@@ -361,7 +367,7 @@ export const GraphView = React.forwardRef<GraphViewHandle, GraphViewProps>(funct
     observer.observe(element);
     return () => observer.disconnect();
   }, [chromeKey]);
-  const fitBottom = chromeHeight > 0 ? Math.max(ZOOM.pad, chromeHeight + 20) : ZOOM.pad;
+  const fitBottom = chromeHeight > 0 ? Math.max(fitPad, chromeHeight + 20) : fitPad;
   const cachedRef = React.useRef<Map<string, LayoutPoint> | null>(null);
   if (cachedRef.current === null) cachedRef.current = cacheKey ? readPositionCache(cacheKey) : new Map();
   const [settled, setSettled] = React.useState<Map<string, LayoutPoint> | null>(null);
@@ -394,8 +400,13 @@ export const GraphView = React.forwardRef<GraphViewHandle, GraphViewProps>(funct
       const fitScale = Math.max(LANE_MIN_SCALE, Math.min(1, (size.height - ZOOM.pad - fitBottom) / first.bounds.h));
       if (fitScale < 0.98) return computeGraphLayout({ ...input, width: layoutWidth / fitScale });
     }
+    // Frames, likewise, fill the width at the scale that fits their height.
+    if (kind === "layered" && first.frames.length > 0 && first.bounds.h > 0 && size.height > 0) {
+      const fitScale = Math.max(CARD_MIN_SCALE, Math.min(1, (size.height - fitPad - fitBottom) / first.bounds.h));
+      if (fitScale < 0.98) return computeGraphLayout({ ...input, width: layoutWidth / fitScale });
+    }
     return first;
-  }, [kind, model, lanes, frames, center, density, layoutWidth, layoutHeight, measures.label, settled, size.height, fitBottom]);
+  }, [kind, model, lanes, frames, center, density, layoutWidth, layoutHeight, measures.label, settled, size.height, fitPad, fitBottom]);
   const layoutRef = React.useRef(layout);
   layoutRef.current = layout;
 
@@ -507,7 +518,7 @@ export const GraphView = React.forwardRef<GraphViewHandle, GraphViewProps>(funct
     });
   }, []);
   const limits: FitLimits = cards
-    ? { minScale: 0.85, maxScale: 1 }
+    ? { minScale: CARD_MIN_SCALE, maxScale: 1, alignTop: true }
     : kind === "lanes"
       ? { minScale: LANE_MIN_SCALE, maxScale: 1 }
       : kind === "clusters"
@@ -530,9 +541,9 @@ export const GraphView = React.forwardRef<GraphViewHandle, GraphViewProps>(funct
     return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
   }, [layout, model.nodes, measures.label]);
   const fit = React.useMemo(
-    () => fitViewport(fitBounds, size.width, size.height, limits, { top: ZOOM.pad, right: ZOOM.pad, bottom: fitBottom, left: ZOOM.pad }),
+    () => fitViewport(fitBounds, size.width, size.height, limits, { top: fitPad, right: fitPad, bottom: fitBottom, left: fitPad }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [fitBounds.x, fitBounds.y, fitBounds.w, fitBounds.h, size.width, size.height, limits.minScale, limits.maxScale, fitBottom],
+    [fitBounds.x, fitBounds.y, fitBounds.w, fitBounds.h, size.width, size.height, limits.minScale, limits.maxScale, limits.alignTop, fitPad, fitBottom],
   );
   const fitRef = React.useRef(fit);
   fitRef.current = fit;

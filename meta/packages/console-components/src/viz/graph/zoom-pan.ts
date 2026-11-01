@@ -41,6 +41,8 @@ export interface FitLimits {
   minScale: number;
   /** Never enlarge beyond this. */
   maxScale: number;
+  /** Pin a short picture to the top instead of centring it (layered reads like a document). */
+  alignTop?: boolean;
 }
 
 /** Room to keep clear at each side of the frame, in px. */
@@ -73,7 +75,7 @@ export function fitViewport(
   const slackX = innerW - bounds.w * scale;
   const slackY = innerH - bounds.h * scale;
   const tx = p.left + (slackX >= 0 ? slackX / 2 : 0) - bounds.x * scale;
-  const ty = p.top + (slackY >= 0 ? slackY / 2 : 0) - bounds.y * scale;
+  const ty = p.top + (slackY >= 0 && !limits.alignTop ? slackY / 2 : 0) - bounds.y * scale;
   return { tx, ty, scale };
 }
 

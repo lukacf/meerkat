@@ -260,32 +260,42 @@ function RenderTimes(): React.JSX.Element {
   );
 }
 
+interface GalleryDemo {
+  id: string;
+  title: string;
+  note: string;
+  height: number;
+  render: () => React.JSX.Element;
+}
+
+const DEMOS: GalleryDemo[] = [
+  { id: "lanes", title: "Lanes", note: "Topology: every relation of the A3.9 grammar, a live coordinator, particles in flight, memory arcs, a degraded and a wedged agent, helpers under their hosts.", height: 600, render: () => <LanesDemo /> },
+  { id: "layered", title: "Layered with frames", note: "WorkGraph: goals as frames with progress, a nested goal, the critical path in the accent, a selected blocked item, a collapsed done goal.", height: 620, render: () => <PlanDemo /> },
+  { id: "clusters", title: "Clusters, 300 agents", note: "Eight groups as rings of member dots around their leads; helpers hollow, live in the accent; one bundled line per group pair.", height: 640, render: () => <ClustersDemo /> },
+  { id: "radial", title: "Radial ego graph", note: "Billing at the centre, its peers grouped by relation (Agent details, 240 px).", height: 240, render: () => <EgoDemo /> },
+  { id: "force", title: "Force, 48 agents", note: "d3-force in idle chunks, pulled to group anchors; positions cached for the session.", height: 480, render: () => <ForceDemo /> },
+  { id: "list", title: "List twin", note: "The same team as rows: the screen reader path and the List view.", height: 420, render: () => <ListDemo /> },
+  { id: "perf", title: "First render", note: "Budgets (A4.9): 100 nodes under 100 ms; 1000 nodes under 400 ms on canvas.", height: 420, render: () => <RenderTimes /> },
+];
+
+/** `&graph=lanes,perf` in the page's URL shows only those demos (clean measurements, single shots). */
+function shownDemos(): Set<string> | null {
+  if (typeof window === "undefined") return null;
+  const value = new URLSearchParams(window.location.search).get("graph");
+  return value ? new Set(value.split(",").map((part) => part.trim()).filter(Boolean)) : null;
+}
+
 export function GraphGallery(): React.JSX.Element {
   const ref = React.useRef<HTMLDivElement | null>(null);
   useSpecTokenShim(ref);
+  const only = React.useMemo(shownDemos, []);
   return (
     <div className="cc-viz-gallery" ref={ref}>
-      <Demo testId="graph-gallery:lanes" title="Lanes" note="Topology: every relation of the A3.9 grammar, a live coordinator, particles in flight, memory arcs, a degraded and a wedged agent, helpers under their hosts." height={600}>
-        <LanesDemo />
-      </Demo>
-      <Demo testId="graph-gallery:layered" title="Layered with frames" note="WorkGraph: goals as frames with progress, a nested goal, the critical path in the accent, a selected blocked item, a collapsed done goal." height={620}>
-        <PlanDemo />
-      </Demo>
-      <Demo testId="graph-gallery:clusters" title="Clusters, 300 agents" note="Eight groups as rings of member dots around their leads; helpers hollow, live in the accent; one bundled line per group pair." height={640}>
-        <ClustersDemo />
-      </Demo>
-      <Demo testId="graph-gallery:radial" title="Radial ego graph" note="Billing at the centre, its peers grouped by relation (Agent details, 240 px)." height={240}>
-        <EgoDemo />
-      </Demo>
-      <Demo testId="graph-gallery:force" title="Force, 48 agents" note="d3-force in idle chunks, pulled to group anchors; positions cached for the session." height={480}>
-        <ForceDemo />
-      </Demo>
-      <Demo testId="graph-gallery:list" title="List twin" note="The same team as rows: the screen reader path and the List view." height={420}>
-        <ListDemo />
-      </Demo>
-      <Demo testId="graph-gallery:perf" title="First render" note="Budgets (A4.9): 100 nodes under 100 ms; 1000 nodes under 400 ms on canvas." height={420}>
-        <RenderTimes />
-      </Demo>
+      {DEMOS.filter((demo) => !only || only.has(demo.id)).map((demo) => (
+        <Demo key={demo.id} testId={`graph-gallery:${demo.id}`} title={demo.title} note={demo.note} height={demo.height}>
+          {demo.render()}
+        </Demo>
+      ))}
     </div>
   );
 }

@@ -86,6 +86,21 @@ export interface PlacedCluster {
   lead?: string;
 }
 
+/**
+ * A bundle's line between two groups' rings: a quadratic from (x0, y0) to
+ * (x1, y1) through the control point (cx, cy); straight unless it bows
+ * around a group that sits on the way.
+ */
+export interface BundleRoute {
+  x0: number;
+  y0: number;
+  cx: number;
+  cy: number;
+  x1: number;
+  y1: number;
+  bowed: boolean;
+}
+
 /** Inter-group edges of the clusters layout, one line per group pair. */
 export interface ClusterBundle {
   id: string;
@@ -93,6 +108,7 @@ export interface ClusterBundle {
   to: string;
   count: number;
   relations: VizRelation[];
+  route: BundleRoute;
 }
 
 export interface LayoutPoint {

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildSignalGroupsForTest, signalNameResolver } from "./SignalsRail";
+// The rail's model (pure): this node test bundle cannot resolve React.
+import { buildSignalGroupsForTest, signalNameResolver } from "./activity/signals-model";
 import { createAgentDirectory } from "../../../packages/console-components/src/panel-kit/agents";
 import type { ConsoleFrame } from "../types";
 import { MEERKAT_1608_KICKOFF_NOTICES } from "../lib/fixtures/meerkat-1608-kickoff-notices";

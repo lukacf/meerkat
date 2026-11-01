@@ -386,6 +386,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   before, such a page was cut with no cursor, so the rows past it could not
   be listed. A page holds `limit` rows, or more only to keep together the
   rows two realms hold under one memory id and update time.
+- An invalid access configuration is refused with what is wrong with it:
+  the `-32602` `invalid_access_config` refusal of a `meta/access/*` write,
+  checked or not, carries `data.reason`, a stable `kind` (for example
+  `unknown_action`, `unknown_group` or `duplicate_rule_id`) and a `message`
+  that names the rule, action, group or approver at fault. A configuration
+  the owner cannot write as TOML is described without the writer's text.
+  The code and the fixed message are unchanged, and the list of kinds can
+  grow. Before, the refusal carried its kind alone, so a client such as the
+  Console's Access editor could not say what was wrong with a save.
 - On a shared Console the memory panel reads judge each identity under the
   name the Console gives it, `<namespace>/<identity>`, after recording the
   access attributes of its runtimes, as its send route does. Before, every

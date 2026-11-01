@@ -6387,10 +6387,10 @@ fn access_edit_rpc_error(response_id: Value, error: crate::access::AccessEditErr
             "Access configuration could not be saved.",
             json!({"kind":"access_persistence_failed"}),
         ),
-        AccessEditError::Config(_) => (
+        AccessEditError::Config(invalid) => (
             -32602,
             "Invalid access configuration.",
-            json!({"kind":"invalid_access_config"}),
+            json!({"kind":"invalid_access_config", "reason":invalid_access_config_reason(&invalid)}),
         ),
     };
     response_value(
@@ -6402,6 +6402,24 @@ fn access_edit_rpc_error(response_id: Value, error: crate::access::AccessEditErr
             data: Some(data),
         }),
     )
+}
+
+/// What is wrong with a configuration the owner refused, for the editor that
+/// saved it: a stable `kind` (`AccessConfigError::kind`) and a `message` that
+/// names the rule, action, group or approver at fault. Only an administrator
+/// is answered, since the owner checks administration before it validates.
+fn invalid_access_config_reason(error: &crate::access::AccessConfigError) -> Value {
+    use crate::access::AccessConfigError;
+    let message = match error {
+        // The TOML writer's and the file system's own text stay on the
+        // server.
+        AccessConfigError::Parse(_) => {
+            "access configuration could not be written as TOML".to_string()
+        }
+        AccessConfigError::Io(_) => "access configuration could not be saved".to_string(),
+        other => other.to_string(),
+    };
+    json!({"kind": error.kind(), "message": message})
 }
 
 /// Returns None only for a legacy payload with no checked-version key. Any

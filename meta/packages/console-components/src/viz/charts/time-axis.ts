@@ -44,7 +44,8 @@ export interface TimeTickOptions {
   count?: number;
   /** A fixed step in ms (rounded to the nearest nice step otherwise). */
   step?: number;
-  /** "hour" reads "06", "clock" "06:00", "day" "Mon 2" (default: by step). */
+  /** "hour" reads "06", "clock" "06:00", "day" "Mon 2" (default: by step;
+   * an automatic clock axis names the day at midnight). */
   format?: TimeTickFormat;
 }
 
@@ -113,12 +114,15 @@ function alignUp(t: number, step: number): number {
 export function timeTicks(start: number, end: number, options: TimeTickOptions = {}): TimeTick[] {
   if (!(end > start)) return [];
   const step = options.step ?? niceTimeStep(end - start, options.count ?? 5);
-  const format: Exclude<TimeTickFormat, "auto"> =
-    options.format && options.format !== "auto" ? options.format : step >= DAY ? "day" : "clock";
+  const auto = !options.format || options.format === "auto";
+  const format: Exclude<TimeTickFormat, "auto"> = auto ? (step >= DAY ? "day" : "clock") : (options.format as Exclude<TimeTickFormat, "auto">);
   const ticks: TimeTick[] = [];
   for (let t = alignUp(start, step); t <= end && ticks.length < 500; ) {
     const date = new Date(t);
-    ticks.push({ t, label: formatTimeTick(t, format), major: date.getHours() === 0 && date.getMinutes() === 0 });
+    const major = date.getHours() === 0 && date.getMinutes() === 0;
+    // An automatic clock axis names the day at midnight ("Sun 1", not
+    // "00:00"), so a span across midnight says which day it reaches.
+    ticks.push({ t, label: formatTimeTick(t, auto && major ? "day" : format), major });
     // Day steps follow the calendar (a daylight-saving day is 23 or 25 h).
     t = step >= DAY ? new Date(date.getFullYear(), date.getMonth(), date.getDate() + Math.round(step / DAY)).getTime() : t + step;
   }

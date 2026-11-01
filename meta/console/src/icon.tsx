@@ -82,7 +82,7 @@ export function SpriteSheet() {
       <symbol id="i-approvals" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="3" /><path d="m8.5 12 2.5 2.5 4.5-5" /></symbol>
       <symbol id="i-roster" viewBox="0 0 24 24"><circle cx="8" cy="8.5" r="3" /><path d="M3 19a5 5 0 0 1 10 0M15.5 8h5M15.5 12h5M15.5 16h3.5" /></symbol>
       <symbol id="i-routing" viewBox="0 0 24 24"><path d="M3 12h6l4-5h7M13 17h7M9 12l4 5M17 4l3 3-3 3M17 14l3 3-3 3" /></symbol>
-      <symbol id="i-logs" viewBox="0 0 24 24"><path d="M4 6h2M9 6h11M4 12h2M9 12h11M4 18h2M9 18h7" /></symbol>
+      <symbol id="i-logs" viewBox="0 0 24 24"><path d="M4 4v16M8 7h12M8 12h8M8 17h10" /></symbol>
       <symbol id="i-health" viewBox="0 0 24 24"><path d="M3 12h4l2-5 4 10 2-5h6" /></symbol>
       <symbol id="i-access" viewBox="0 0 24 24"><circle cx="8" cy="15" r="4" /><path d="m10.8 12.2 9.2-9.2M17 6l3 3M14.5 8.5l2 2" /></symbol>
       <symbol id="i-workgraph" viewBox="0 0 24 24"><rect x="3" y="4" width="6" height="5" rx="1" /><rect x="15" y="4" width="6" height="5" rx="1" /><rect x="9" y="15" width="6" height="5" rx="1" /><path d="M6 9v1.5a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V9M12 12.5V15" /></symbol>

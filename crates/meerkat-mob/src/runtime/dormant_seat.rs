@@ -586,7 +586,8 @@ pub(in crate::runtime) enum DormantSeatCommitEntry {
     },
     /// A prepared seat: its session exists, or is unborn (created by the
     /// member's first wake), and `endpoint` is its stored-key endpoint
-    /// (`None` under network comms).
+    /// (`None` under network comms, and for an archived session the seat
+    /// does not revive, which MobMachine refuses).
     Seat {
         candidate: Box<DormantSeatCandidate>,
         endpoint: Option<TrustedPeerDescriptor>,
@@ -630,7 +631,8 @@ pub(in crate::runtime) async fn prepare_dormant_seat(
         // (session_not_archived_or_revived) admits only the identity entry's
         // own archived session record, which the seat binds as it is and the
         // member's first wake revives, history kept; any other archived
-        // session is refused there, and answered SessionArchived.
+        // session is refused there, and answered SessionArchived (its
+        // endpoint is not read, below).
         super::session_service::SessionResumeLifecycle::Archived {
             revivable: true, ..
         } => {
@@ -705,6 +707,20 @@ pub(in crate::runtime) async fn prepare_dormant_seat(
     };
     let endpoint = match endpoint_source {
         MemberSeatEndpointSource::Network => None,
+        // An archived session the seat does not revive is never bound:
+        // MobMachine refuses the seat (session_not_archived_or_revived) and
+        // the commit answers it SessionArchived, as the preparation answered
+        // every archived session before the declared apply's revival. Its
+        // key pair is neither read nor minted. A key pair missing where this
+        // mob recorded the session's endpoint (a store an earlier release
+        // wrote, whose comms identities live outside its state directory)
+        // would otherwise refuse the seat first, and its host, never told the
+        // session is archived, would not revive the identity on it.
+        MemberSeatEndpointSource::SessionScopedInproc { .. }
+            if candidate.session_archived && !candidate.revives_archived_session =>
+        {
+            None
+        }
         MemberSeatEndpointSource::SessionScopedInproc { identity_root } => {
             // The member's first build loads this key; its wake checks that
             // the endpoint it built is the one recorded here. A key pair is

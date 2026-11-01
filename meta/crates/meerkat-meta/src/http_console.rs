@@ -18499,6 +18499,67 @@ comms = true
         Ok(())
     }
 
+    /// A shared Console judges the identity a record listing is filtered by
+    /// under the name it gives that identity, after recording its runtimes'
+    /// access attributes: a grant written for `repo/router` lists router's
+    /// records, and a deny on `repo/delivery` refuses delivery's listing
+    /// instead of answering an empty one.
+    #[tokio::test]
+    async fn aggregator_identity_listing_is_judged_by_the_namespaced_name()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let shared = shared_memory_console("panel-identity-listing").await?;
+        let router_reader = AccessController::new(crate::access::AccessControlConfig {
+            enabled: true,
+            admins: vec!["admin@example.test".into()],
+            rules: vec![crate::access::AccessRule {
+                id: "read-router-memory".into(),
+                actions: vec![ACTION_AGENT_VIEW.into(), ACTION_AGENT_MEMORY_READ.into()],
+                agents: vec!["repo/router".into()],
+                ..Default::default()
+            }],
+            ..Default::default()
+        })?;
+        let listing = shared_memory_read(
+            &shared,
+            &router_reader,
+            "meta/memory/panel/records",
+            json!({ "identity": "router" }),
+        )
+        .await;
+        assert_eq!(
+            listing["error"],
+            Value::Null,
+            "a grant on repo/router: the listing filtered by router answers: {listing}"
+        );
+        let identities: Vec<&str> = listing["result"]["records"]
+            .as_array()
+            .ok_or_else(|| format!("no records: {listing}"))?
+            .iter()
+            .filter_map(|row| row.pointer("/scope/identity").and_then(Value::as_str))
+            .collect();
+        assert!(
+            !identities.is_empty() && identities.iter().all(|identity| *identity == "router"),
+            "a grant on repo/router lists router's records: {listing}"
+        );
+
+        let delivery_denied =
+            shared_memory_reader(&SHARED_MEMORY_READS, Some(shared_delivery_deny()))?;
+        let refused = shared_memory_read(
+            &shared,
+            &delivery_denied,
+            "meta/memory/panel/records",
+            json!({ "identity": "delivery" }),
+        )
+        .await;
+        assert_eq!(
+            refused["error"]["code"],
+            json!(super::ACCESS_DENIED_RPC_CODE),
+            "a deny on repo/delivery refuses the listing filtered by delivery: {refused}"
+        );
+        shared.runtime.mob_handle().stop().await?;
+        Ok(())
+    }
+
     #[tokio::test]
     async fn read_only_aggregator_capabilities_omit_mutating_methods() {
         let response = handle_console_aggregator_rpc(

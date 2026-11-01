@@ -23,12 +23,15 @@
   /* Density (spec A4.3): comfortable here, compact on a PanelShell with
      data-density="compact" and in every pane under 480 px. */
   --_cc-panel-row-h: 40px;
+  /* Two-line rows: 48 px comfortable, 38 px compact. */
+  --_cc-row-pad-y: 6px;
   --_cc-card-pad: 12px 14px;
   --_cc-figure-size: var(--_cc-fs-figure);
   --_cc-lane-min-h: 88px;
 }
 .cc-panel[data-density="compact"] {
   --_cc-panel-row-h: var(--_cc-density-row);
+  --_cc-row-pad-y: 3px;
   --_cc-card-pad: 8px 10px;
   --_cc-figure-size: 16px;
   --_cc-lane-min-h: 64px;
@@ -1496,6 +1499,14 @@ button.cc-tile:focus-visible,
   color: var(--_cc-foreground-muted);
 }
 
+/* Skeleton ink: the foreground over whatever surface holds it, so a
+   skeleton reads as a faint shape in light and dark alike (never a hole
+   darker than the card). */
+.cc-skeleton,
+.cc-figure__skeleton {
+  --_cc-skeleton: color-mix(in srgb, var(--_cc-foreground) 7%, transparent);
+  --_cc-skeleton-hi: color-mix(in srgb, var(--_cc-foreground) 12%, transparent);
+}
 .cc-skeleton {
   display: flex;
   flex-direction: column;
@@ -1508,9 +1519,9 @@ button.cc-tile:focus-visible,
   border-radius: var(--_cc-radius-sm);
   background: linear-gradient(
     90deg,
-    var(--_cc-surface-soft) 0%,
-    var(--_cc-surface-hover) 50%,
-    var(--_cc-surface-soft) 100%
+    var(--_cc-skeleton) 0%,
+    var(--_cc-skeleton-hi) 50%,
+    var(--_cc-skeleton) 100%
   );
   background-size: 200% 100%;
   animation: cc-shimmer 1.4s ease-in-out infinite;
@@ -1581,6 +1592,14 @@ button.cc-tile:focus-visible,
 .cc-notice__icon {
   margin-top: 2px;
   color: var(--_cc-tone-ink);
+}
+.cc-notice__icon--mark {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
 }
 .cc-notice__text {
   flex: 1 1 auto;
@@ -1942,7 +1961,7 @@ button.cc-figure:focus-visible { outline: 2px solid var(--_cc-focus-ring); outli
   width: 40px;
   height: calc(var(--_cc-figure-size) * 0.95);
   border-radius: var(--_cc-radius-sm);
-  background: var(--_cc-surface-soft);
+  background: var(--_cc-skeleton);
 }
 .cc-panel[data-density="compact"] .cc-figure__trend { display: none; }
 
@@ -2503,7 +2522,7 @@ button.cc-figure:focus-visible { outline: 2px solid var(--_cc-focus-ring); outli
   gap: 10px;
   box-sizing: border-box;
   min-height: var(--_cc-panel-row-h);
-  padding: 5px var(--_cc-panel-pad-x);
+  padding: var(--_cc-row-pad-y) var(--_cc-panel-pad-x);
   border-bottom: 1px solid var(--_cc-border-soft);
 }
 .cc-entity--row.is-interactive:hover { background: var(--_cc-surface-hover); }
@@ -2516,6 +2535,9 @@ button.cc-figure:focus-visible { outline: 2px solid var(--_cc-focus-ring); outli
   font-size: var(--_cc-panel-fs-body);
   font-weight: 500;
 }
+/* Compact two-line rows tighten their lines too (A4.3). */
+.cc-panel[data-density="compact"] .cc-entity--row .cc-entity__title { line-height: 16px; }
+.cc-panel[data-density="compact"] .cc-entity--row .cc-entity__sub { line-height: 14px; }
 .cc-entity--row .cc-entity__now { font-size: var(--_cc-panel-fs-meta); color: var(--_cc-foreground-muted); }
 .cc-entity--row .cc-entity__now > .cc-mark { margin-top: 3.5px; }
 .cc-entity--row .cc-entity__time { min-width: 48px; margin-left: 0; text-align: right; }
@@ -2662,6 +2684,9 @@ button.cc-figure:focus-visible { outline: 2px solid var(--_cc-focus-ring); outli
   text-underline-offset: 2px;
   transition: text-decoration-color var(--_cc-dur-fast) ease;
 }
+/* A link inside prose shows a faint rule at rest, so it reads as a link
+   among words; an agent name carries its avatar instead. */
+.cc-link--button { text-decoration-color: color-mix(in srgb, currentColor 35%, transparent); }
 .cc-agent--link:hover .cc-agent__name,
 .cc-link--button:hover { text-decoration-color: currentColor; }
 .cc-agent--link:focus-visible,
@@ -2791,6 +2816,7 @@ button.cc-figure:focus-visible { outline: 2px solid var(--_cc-focus-ring); outli
   .cc-panel-head--v2 .cc-panel-head__facts { flex-wrap: wrap; }
   .cc-panel > * {
     --_cc-panel-row-h: var(--_cc-density-row);
+    --_cc-row-pad-y: 3px;
     --_cc-card-pad: 8px 10px;
     --_cc-figure-size: 16px;
     --_cc-lane-min-h: 64px;
@@ -2802,6 +2828,8 @@ button.cc-figure:focus-visible { outline: 2px solid var(--_cc-focus-ring); outli
   }
   .cc-row__actions { opacity: 1; }
   .cc-row__meta > :not(:first-child):not(.cc-time) { display: none; }
+  .cc-entity--row .cc-entity__title { line-height: 16px; }
+  .cc-entity--row .cc-entity__sub { line-height: 14px; }
   .cc-btn__label { display: none; }
   .cc-search__input { width: 100%; }
   .cc-search,

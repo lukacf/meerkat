@@ -24,6 +24,7 @@ import {
   EmptyIllustration,
   EmptyState,
   LoadingState,
+  Notice,
   TechnicalDetails,
   IconButton,
   OverflowMenu,
@@ -720,6 +721,19 @@ describe("states and illustrations", () => {
     const view = render(<div>{names.map((name) => <EmptyIllustration key={name} name={name} />)}</div>);
     expect(view.container.querySelectorAll("svg.cc-illus").length).toBe(names.length);
     expect(Array.from(view.container.querySelectorAll("svg.cc-illus")).every((svg) => svg.childElementCount > 0)).toBe(true);
+  });
+
+  it("gives a notice its tone's shape, and a live notice the live mark", () => {
+    const view = render(
+      <>
+        <Notice tone="warn" testId="warn">2 records wait for approval.</Notice>
+        <Notice tone="live" testId="live">Triage is replying now.</Notice>
+      </>,
+    );
+    expect(view.getByTestId("warn").querySelector(".cc-glyph")?.getAttribute("data-glyph")).toBe("warning");
+    const live = view.getByTestId("live");
+    expect(live.querySelector(".cc-glyph") === null).toBe(true);
+    expect(live.querySelector('.cc-mark[data-tone="live"]') !== null).toBe(true);
   });
 
   it("draws graph and timeline skeletons, announced politely", () => {

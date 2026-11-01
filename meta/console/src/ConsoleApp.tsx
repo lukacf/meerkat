@@ -237,6 +237,8 @@ import {
   type NavKind,
 } from "./panels/Sidebar";
 import { SignalsRail } from "./panels/SignalsRail";
+import { historyFramesOf } from "./panels/activity/history-frames";
+import { railPresetsFromActivityFeed } from "./panels/activity/signals-model";
 import { ChatPane, type StagedAttachment } from "./panels/ChatPane";
 import { MetaDock } from "./panels/MetaDock";
 import { PendingStack, type PendingCheckView, type PendingDeliveredNotice, type PendingItem } from "./panels/PendingStack";
@@ -1718,6 +1720,9 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
   ): boolean {
     const log = getOrCreateLog(identity);
     log.hasServerLog = available;
+    // History reaches the activity ledger too (Today's turns, the traffic
+    // figures); the ledger counts an event once however often it arrives.
+    timelineScopeRef.current?.ledger.ingestMany(frames.map((frame) => (frame.identity ? frame : { ...frame, identity })));
     let changed = false;
     let appended = false;
     for (const frame of frames) {
@@ -1890,6 +1895,18 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       forceRender();
     }
   }
+
+  // Today's backfill (spec B4): one agent's recent history, up to 1000
+  // frames, into its identity log and from there the activity ledger. Today
+  // asks for the most active agents, four at a time.
+  const loadDayHistoryRef = React.useRef<(identity: string) => Promise<void>>(() => Promise.resolve());
+  loadDayHistoryRef.current = async (identity: string) => {
+    const normalized = identity.trim();
+    if (!normalized) return;
+    const { page, metadataChanged } = await queryIdentityTimelinePage(normalized, { mode: "recent", limit: 1000 });
+    if (reconcileServerLog(normalized, page.frames, page.available) || metadataChanged) forceRender();
+  };
+  const loadDayHistory = React.useCallback((identity: string) => loadDayHistoryRef.current(identity), []);
 
   /// Render-time chat view: transcript time is the primary order. Aggregate
   /// cursor order is useful for replay paging, but it can arrive out of
@@ -5204,6 +5221,15 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       ),
     [agents],
   );
+  // The rail's presets: the console config's, else the experience's
+  // activity feed presets (spec B6), else the rail's own.
+  const activityFeedPresets = experience?.activity_feed?.filter_presets;
+  const railFilterPresets = React.useMemo(
+    () => (experience?.console_config?.rail?.filter_presets?.length
+      ? experience.console_config.rail.filter_presets
+      : railPresetsFromActivityFeed(activityFeedPresets)),
+    [experience?.console_config?.rail?.filter_presets, activityFeedPresets],
+  );
 
   if (loading)
     return (
@@ -5778,7 +5804,15 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
         experience?.health_overview?.live_snapshot?.identities || [],
       );
     if (target.kind === "timeline")
-      return <TimelinePanel frames={activityRef.current} />;
+      return (
+        <TimelinePanel
+          frames={activityRef.current}
+          historyFrames={historyFramesOf(identityLogRef.current)}
+          agents={agents}
+          approvals={activeApprovals?.requests}
+          loadHistory={loadDayHistory}
+        />
+      );
     if (target.kind === "roster")
       return (
         <RosterPanel
@@ -5819,7 +5853,13 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
         />
       );
     if (target.kind === "logs")
-      return <LogsPanel frames={activityRef.current} agentDirectory={agentDirectory} />;
+      return (
+        <LogsPanel
+          frames={activityRef.current}
+          historyFrames={historyFramesOf(identityLogRef.current)}
+          agentDirectory={agentDirectory}
+        />
+      );
     if (target.kind === "access")
       return (
         <AccessPanel
@@ -6068,7 +6108,8 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
             <SignalsRail
               frames={activityRef.current}
               collapsed={railCollapsed}
-              filterPresets={railConfig?.filter_presets}
+              filterPresets={railFilterPresets}
+              approvals={activeApprovals?.requests}
               activePresetId={
                 activeActivityPresetId || railConfig?.active_preset_id
               }

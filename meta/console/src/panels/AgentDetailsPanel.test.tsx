@@ -178,6 +178,17 @@ describe("AgentDetailsPanel", () => {
     expect(view.getByTestId("inspect-work-item:wi-44").textContent?.includes("Ready")).toBe(true);
   });
 
+  it("names the agent that started a helper and draws the lineage in the ego graph", () => {
+    const view = render(
+      <AgentDirectoryProvider directory={directory}>
+        <AgentDetailsPanel identity="identity:coordinator" inspect={inspect()} agent={agent} stateLabel="active" actions={{}} spawnedBy="identity:analyst" />
+      </AgentDirectoryProvider>,
+    );
+    const panel = view.getByTestId("inspect-panel:identity:coordinator");
+    expect(panel.textContent?.includes("Started by")).toBe(true);
+    expect(view.queryByTestId("inspect-ego-edge:identity:analyst:identity:coordinator:lineage") !== null).toBe(true);
+  });
+
   it("explains an inspect answer it could not read, with Retry", () => {
     const refresh = vi.fn();
     const view = render(

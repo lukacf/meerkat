@@ -303,6 +303,17 @@ describe("RosterPanel", () => {
     expect(view.getByText("No agents yet").className).toBe("cc-panel-empty__title");
   });
 
+  it("marks a helper by the topology's lineage, outlined in the ladder, and names who started it", () => {
+    const helper = agent({ member_id: "identity:surge", label: "Surge Helper", role: "specialist" });
+    const { view } = renderRoster([coordinator, analyst, helper], { lineage: { "identity:surge": "identity:coordinator" } });
+    expect(view.getByTestId("roster-glance:agents").textContent?.includes("1 helper")).toBe(true);
+    expect(view.getByTestId("roster-row:identity:surge").textContent?.includes("Surge Helper")).toBe(true);
+    fireEvent.click(hit(view.getByTestId("roster-row:identity:surge")));
+    const detail = view.getByTestId("roster-detail:identity:surge");
+    expect(detail.textContent?.includes("Started by")).toBe(true);
+    expect(detail.textContent?.includes("Coordinator")).toBe(true);
+  });
+
   it("renders only the rows in view for a very large team", () => {
     const many = Array.from({ length: 320 }, (_, index) => agent({ member_id: `identity:a${index}`, label: `Agent ${index}`, role: "specialist" }));
     const { view } = renderRoster(many);

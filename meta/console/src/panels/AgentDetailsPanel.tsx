@@ -189,6 +189,7 @@ export function AgentDetailsPanel({
   onRefresh,
   agents,
   work,
+  spawnedBy,
   now,
   children,
 }: {
@@ -207,6 +208,8 @@ export function AgentDetailsPanel({
   agents?: ConsoleAgent[];
   /** The work items it owns or has claimed, when the console has read them. */
   work?: AgentWorkItem[];
+  /** The agent that started this one (a helper), when the console knows. */
+  spawnedBy?: string;
   /** A fixed clock (tests, the gallery). */
   now?: () => number;
   /** The schedules section, when offered. */
@@ -263,6 +266,7 @@ export function AgentDetailsPanel({
     ? view.last_activity_ms
     : activity.lastActivityMs;
   const roleGroup = [humanizeEnum(role || ""), agent?.group ? humanizeEnum(agent.group) : ""].filter(Boolean).join(" · ");
+  const sideChatOf = agent?.side_chat_of || agent?.labels?.side_chat_of;
 
   const menuItems: MenuEntry[] = [];
   if (actions.respawn) {
@@ -399,6 +403,8 @@ export function AgentDetailsPanel({
                   { label: "Reachability", value: reachabilityWords(view.addressability) },
                   lastActivity ? { label: "Last activity", value: <RelativeTime value={lastActivity} /> } : null,
                   view.unobserved ? { label: "Not observed", value: humanizeEnum(String(view.unobserved.reason)) } : null,
+                  sideChatOf ? { label: "Side chat of", value: <AgentName id={sideChatOf} link /> } : null,
+                  spawnedBy ? { label: "Started by", value: <AgentName id={spawnedBy} link /> } : null,
                 ]}
               />
               <Part label="Activity · 24h" action={`${countWords(turnsToday, "turn")} today`} testId={`inspect-activity:${identity}`}>
@@ -430,6 +436,7 @@ export function AgentDetailsPanel({
                       name={name}
                       working={working}
                       peers={peers}
+                      parent={spawnedBy || sideChatOf || undefined}
                       agents={agents}
                       ledgerWorking={(key) => ledger.hasOpenRun(key)}
                       onOpenPeer={navigation?.openAgent ? (peer) => navigation.openAgent?.(peer, "details") : undefined}
@@ -530,7 +537,8 @@ function EgoGraph({
   identity,
   name,
   working,
-  peers,
+  peers: wiredPeers,
+  parent,
   agents,
   ledgerWorking,
   onOpenPeer,
@@ -539,11 +547,17 @@ function EgoGraph({
   name: string;
   working: boolean;
   peers: string[];
+  /** The agent that started this one: a lineage edge from it. */
+  parent?: string;
   agents?: ConsoleAgent[];
   ledgerWorking: (key: string) => boolean;
   onOpenPeer?: (identity: string) => void;
 }) {
   const directory = useAgentDirectory();
+  const peers = React.useMemo(
+    () => (parent && !wiredPeers.includes(parent) ? [...wiredPeers, parent] : wiredPeers),
+    [wiredPeers, parent],
+  );
   const { nodes, edges } = React.useMemo(() => {
     const centre: VizNode = {
       id: identity,
@@ -571,9 +585,10 @@ function EgoGraph({
         title: peer,
       };
     });
-    const peerEdges: VizEdge[] = peers.map((peer) => ({ id: `${identity}->${peer}`, from: identity, to: peer, relation: "wired" }));
+    const peerEdges: VizEdge[] = wiredPeers.map((peer) => ({ id: `${identity}->${peer}`, from: identity, to: peer, relation: "wired" }));
+    if (parent) peerEdges.push({ id: `${parent}=>${identity}`, from: parent, to: identity, relation: "lineage", directed: true, title: "started this agent" });
     return { nodes: [centre, ...peerNodes], edges: peerEdges };
-  }, [identity, name, working, peers, agents, directory, ledgerWorking]);
+  }, [identity, name, working, peers, wiredPeers, parent, agents, directory, ledgerWorking]);
   return (
     <div className="agent-details__ego">
       <GraphView

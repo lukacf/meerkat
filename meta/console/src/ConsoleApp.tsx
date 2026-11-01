@@ -215,6 +215,7 @@ import { HealthPanel } from "./panels/HealthPanel";
 import type { ConsoleHealthSnapshot, WorkGraphWireItem } from "./types";
 import { SchedulesSection } from "./panels/SchedulesSection";
 import { SchedulesPanel } from "./panels/SchedulesPanel";
+import { topologyLineage } from "./lib/agent-lineage";
 import {
   WorkGraphPanel,
   createWorkGraphRefreshSequencer,
@@ -5649,6 +5650,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
         agent={agent}
         agents={agents}
         work={agentWorkItems(workGraphData.items, target.identity, agent)}
+        spawnedBy={topologyLineage(topologyQueryResult)[target.identity]}
         stateLabel={inspect ? identityStateLabel(inspect) : null}
         onOpenChat={
           configuredActionVisibility.chat !== false && agent
@@ -5844,6 +5846,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       return (
         <RosterPanel
           agents={agents}
+          lineage={topologyLineage(topologyQueryResult)}
           selectedMemberId={selectedRosterMemberId}
           onSelect={(a) => setSelectedRosterMemberId(a.member_id)}
           onChat={(a) => openAgentChat(a)}

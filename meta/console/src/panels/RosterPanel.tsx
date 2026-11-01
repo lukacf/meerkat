@@ -89,6 +89,9 @@ interface RosterPanelProps {
   now?: () => number;
   /** The agent whose drawer is open when the panel first shows (the gallery). */
   defaultOpenMemberId?: string;
+  /** helper identity -> the identity that started it (from the topology read;
+   * the live snapshot drops `spawned_by`). */
+  lineage?: Readonly<Record<string, string>>;
 }
 
 type Bucket = AgentBucket;
@@ -208,9 +211,14 @@ function findAgent(agents: ConsoleAgent[], key: string): ConsoleAgent | undefine
     || agent.identity === bare || agent.member_id === bare);
 }
 
+/** Who started a helper: the topology's lineage, else the agent's own label. */
+function spawnedByOf(agent: ConsoleAgent, lineage?: Readonly<Record<string, string>>): string {
+  return (lineage?.[agentKey(agent)] || agent.labels?.spawned_by || "").trim();
+}
+
 /** A helper (spawned by another agent) or a side chat: drawn outlined. */
-function isHelper(agent: ConsoleAgent): boolean {
-  return Boolean(agent.side_chat_of || agent.labels?.side_chat_of || agent.labels?.spawned_by);
+function isHelper(agent: ConsoleAgent, lineage?: Readonly<Record<string, string>>): boolean {
+  return Boolean(agent.side_chat_of || agent.labels?.side_chat_of || spawnedByOf(agent, lineage));
 }
 
 /** Everything one card, row and drawer show about an agent. */
@@ -227,9 +235,11 @@ interface RosterEntry {
   status: { word: string; tone: Tone };
   now: AgentNowLine;
   peers: string[];
+  /** The agent that started this helper, when known. */
+  spawnedBy: string;
 }
 
-function rosterEntry(agent: ConsoleAgent, ledger: ActivityLedgerReader, nowMs: number): RosterEntry {
+function rosterEntry(agent: ConsoleAgent, ledger: ActivityLedgerReader, nowMs: number, lineage?: Readonly<Record<string, string>>): RosterEntry {
   const activity = agentActivity(ledger, agent, nowMs);
   const health = agentHealthOf(agent, activity);
   const working = agentWorking(agent, activity);
@@ -242,10 +252,11 @@ function rosterEntry(agent: ConsoleAgent, ledger: ActivityLedgerReader, nowMs: n
     health,
     working,
     retired: isRetired(agent),
-    helper: isHelper(agent),
+    helper: isHelper(agent, lineage),
     status: rosterStatus(health, agent, working),
     now: agentNowLine(agent, activity, nowMs),
     peers: (agent.wired_to || []).map(peerKey).filter(Boolean),
+    spawnedBy: spawnedByOf(agent, lineage),
   };
 }
 
@@ -275,6 +286,7 @@ export function RosterPanel({
   actionVisibility,
   now,
   defaultOpenMemberId,
+  lineage,
 }: RosterPanelProps): React.JSX.Element {
   const ledger = useActivityLedger({ tickMs: 30_000 });
   const nowMs = now ? now() : ledger.nowMs;
@@ -297,9 +309,9 @@ export function RosterPanel({
 
   // The ledger's version and the clock re-derive the entries.
   const entries = React.useMemo(
-    () => agents.map((agent) => rosterEntry(agent, ledger, nowMs)),
+    () => agents.map((agent) => rosterEntry(agent, ledger, nowMs, lineage)),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [agents, ledger.version, nowMs],
+    [agents, ledger.version, nowMs, lineage],
   );
 
   const buckets = React.useMemo(() => {
@@ -669,7 +681,7 @@ function RosterCard({
       mark={<AgentAvatar name={entry.name} size={28} live={entry.working} />}
       title={<span title={identity}>{entry.name}</span>}
       activateLabel={entry.name}
-      subtitle={joinMeta(roleAndGroup(agent, entry.bucket), sideChatOf ? "side chat" : "") || undefined}
+      subtitle={joinMeta(roleAndGroup(agent, entry.bucket), sideChatOf ? "side chat" : entry.spawnedBy ? "helper" : "") || undefined}
       status={<StatusPill tone={entry.status.tone}>{entry.status.word}</StatusPill>}
       now={{ text: entry.now.text, live: entry.now.live }}
       trend={{
@@ -809,7 +821,7 @@ function RosterDrawer({
   const showReset = actionVisibility?.reset !== false && canResetLifecycle && restartOffered(agent);
   const showRetire = actionVisibility?.retire !== false && agent.affordances?.can_retire;
   const sideChatOf = agent.side_chat_of || agent.labels?.side_chat_of;
-  const spawnedBy = agent.labels?.spawned_by;
+  const spawnedBy = entry.spawnedBy;
   const heatRows = React.useMemo(
     () => HEAT_ROWS.map((row) => ({
       key: row.key,

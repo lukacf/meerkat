@@ -185,11 +185,11 @@ impl Driver {
 fn planted_mob_only_session_call_outside_the_mob_runtime_fails() {
     let findings = findings_for(
         "crates/meerkat-rpc/src/forwarding.rs",
-        r#"
+        r"
 async fn forward(service: &Service, id: &SessionId, record: Record) {
     let _ = service.record_mob_instruction_target(id, record).await;
 }
-"#,
+",
     );
     assert!(
         findings
@@ -204,11 +204,11 @@ fn the_mob_session_service_and_test_code_may_call_the_mob_only_entry_points() {
     let findings = findings_for_files(&[
         (
             "crates/meerkat-mob/src/runtime/session_service.rs",
-            r#"
+            r"
 async fn record(service: &Service, id: &SessionId, record: Record) {
     let _ = service.record_mob_instruction_target(id, record).await;
 }
-"#,
+",
         ),
         (
             "crates/meerkat-rpc/src/lib.rs",
@@ -232,7 +232,7 @@ mod tests {
 fn a_path_form_mob_only_session_call_fails() {
     let findings = findings_for(
         "crates/meerkat-rpc/src/forwarding.rs",
-        r#"
+        r"
 async fn forward(service: &Service, id: &SessionId, record: Record) {
     let _ = PersistentSessionService::record_mob_instruction_target(service, id, record).await;
 }
@@ -241,7 +241,7 @@ fn release_entry() {
     let release = PersistentSessionService::release_mob_instruction_target;
     drop(release);
 }
-"#,
+",
     );
     for method in [
         "record_mob_instruction_target",
@@ -278,11 +278,11 @@ async fn race(service: &Service, id: &SessionId) {
 
 #[test]
 fn a_mob_only_session_call_in_an_example_fails() {
-    let call = r#"
+    let call = r"
 async fn main_flow(service: &Service, id: &SessionId, record: Record) {
     let _ = service.record_mob_instruction_target(id, record).await;
 }
-"#;
+";
     let examples = [
         "examples/099-instructions-rs/src/main.rs",
         "crates/meerkat/examples/instructions.rs",

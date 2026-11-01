@@ -210,6 +210,10 @@ pub trait WorkGraphStore: Send + Sync {
         id: &WorkItemId,
     ) -> Result<Option<WorkItem>, WorkGraphError>;
 
+    /// Every item matching `filter`; with `filter.limit`, the `limit` most
+    /// recently updated (`updated_at`, then id, descending).
+    /// `WorkGraphService::list_page` passes no limit and orders and cuts
+    /// itself.
     async fn list_items(&self, filter: WorkItemFilter) -> Result<Vec<WorkItem>, WorkGraphError>;
 
     /// Read one namespace's items, edges, and observation time from one store
@@ -1211,10 +1215,12 @@ impl WorkGraphStore for MemoryWorkGraphStore {
 
     async fn list_items(&self, filter: WorkItemFilter) -> Result<Vec<WorkItem>, WorkGraphError> {
         let guard = self.inner.read().await;
+        // Most recently updated first, so a limit keeps the newest items.
         let compare = |left: &WorkItem, right: &WorkItem| {
-            left.updated_at
-                .cmp(&right.updated_at)
-                .then_with(|| left.id.cmp(&right.id))
+            right
+                .updated_at
+                .cmp(&left.updated_at)
+                .then_with(|| right.id.cmp(&left.id))
         };
         if let Some(limit) = filter.limit {
             let mut items = Vec::with_capacity(limit.min(1024));
@@ -5194,9 +5200,12 @@ fn list_sqlite_items(
     } else {
         format!(" WHERE {}", clauses.join(" AND "))
     };
+    // Most recently updated first, so a limit keeps the newest items. The
+    // RFC 3339 text the writers store (`+00:00`, an AutoSi fraction) sorts
+    // in time order.
     let sql = format!(
         "SELECT item_json FROM workgraph_items{where_clause}
-         ORDER BY updated_at_utc ASC, item_id ASC"
+         ORDER BY updated_at_utc DESC, item_id DESC"
     );
     let mut stmt = conn
         .prepare(&sql)

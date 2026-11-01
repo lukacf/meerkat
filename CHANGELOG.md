@@ -526,6 +526,14 @@ them.
   retirement must finish, or be re-driven (`MobHandle::redrive_retirement`),
   first. In 0.9.7 the call took the retirement over.
 
+- `meerkat-mob`: `MemberRespawnReceipt` is no longer `UnwindSafe` or
+  `RefUnwindSafe`. The receipt now keeps the error of a respawn's wake that
+  failed after the successor was committed (`MemberRespawnReceipt::wake_error`,
+  see Added) as an `Arc<MobError>`, and `MobError` is not `RefUnwindSafe`, so
+  code that needs either auto trait of the receipt (a closure that captures it
+  inside `std::panic::catch_unwind`, a generic bound) no longer compiles; wrap
+  it in `std::panic::AssertUnwindSafe` where that is sound.
+
 - `meerkat-runtime`, `meerkat-machine-schema` and `meerkat-machine-kernels`:
   the runtime machine (`MeerkatMachine`) holds an identity creation scope
   beside the mob operator scopes and answers the identity creation check

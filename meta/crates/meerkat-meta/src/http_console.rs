@@ -5011,6 +5011,50 @@ async fn memory_panel_retain_readable_records<T>(
     Ok(())
 }
 
+/// Keep the pending promotions whose source the caller may read. A
+/// promotion names its source by id: a record, judged by
+/// [`memory_panel_record_visible`], or, for a promotion the steward made from
+/// a proposal, that proposal, judged by its scope
+/// ([`memory_panel_scope_visible`]). Under enforcement a promotion whose
+/// source resolves as neither is withheld.
+async fn memory_panel_retain_readable_promotion_sources(
+    store: &dyn crate::memory::capabilities::MemoryPanelStore,
+    caller: MemoryPanelCaller<'_>,
+    realm: &str,
+    promotions: &mut Vec<crate::memory::capabilities::PendingPromotion>,
+) -> Result<(), crate::identity_first::agent_memory::AgentMemoryError> {
+    if caller.enforced().is_none() || promotions.is_empty() {
+        return Ok(());
+    }
+    let mut ids: Vec<String> = promotions
+        .iter()
+        .map(|promotion| promotion.record_id.clone())
+        .collect();
+    ids.sort_unstable();
+    ids.dedup();
+    let mut resolved = BTreeSet::new();
+    let mut readable = BTreeSet::new();
+    for record in store.records_by_ids(realm, &ids).await? {
+        if memory_panel_record_visible(caller, &record) {
+            readable.insert(record.id.clone());
+        }
+        resolved.insert(record.id);
+    }
+    let unresolved: Vec<String> = ids
+        .into_iter()
+        .filter(|id| !resolved.contains(id))
+        .collect();
+    if !unresolved.is_empty() {
+        for (proposal_id, scope) in store.proposal_scopes(realm, &unresolved).await? {
+            if memory_panel_scope_visible(caller, &scope) {
+                readable.insert(proposal_id);
+            }
+        }
+    }
+    promotions.retain(|promotion| readable.contains(&promotion.record_id));
+    Ok(())
+}
+
 /// Whether the caller may read every memory scope `realm` names
 /// ([`crate::memory::capabilities::MemoryPanelStore::realm_scopes`]: the
 /// scopes of its records, proposals and gated promotions, and its harvested
@@ -5066,7 +5110,8 @@ fn memory_panel_record_is_quarantine_evidence(
 /// same cross-scope metadata as record rows. `memory.quarantine.review` is
 /// the queue's entry gate but is deliberately not sufficient per row.
 /// Unknown scope kinds are denied. The queue also requires the promotion's
-/// source record ([`memory_panel_retain_readable_records`]), whose content a
+/// source, a record or a proposal
+/// ([`memory_panel_retain_readable_promotion_sources`]), whose content a
 /// pending promotion would publish.
 fn memory_panel_promotion_visible(
     caller: MemoryPanelCaller<'_>,
@@ -5353,16 +5398,15 @@ async fn handle_memory_panel_quarantine(
             Err(err) => return memory_panel_store_error(response_id, err),
         };
         // A pending promotion would publish content that still lives only in
-        // its source record, so it needs the source record's rule as well as
-        // its target scope's. Once applied it leaves this queue, and its
-        // content is a record of the target scope, judged there.
+        // its source (a record, or the proposal the steward promoted), so it
+        // needs the source's rule as well as its target scope's. Once applied
+        // it leaves this queue, and its content is a record of the target
+        // scope, judged there.
         promotions.retain(|promotion| {
             memory_panel_promotion_visible(caller, &promotion.scope_kind, &promotion.scope_key)
         });
         let readable =
-            memory_panel_retain_readable_records(store, caller, realm, &mut promotions, |row| {
-                row.record_id.as_str()
-            });
+            memory_panel_retain_readable_promotion_sources(store, caller, realm, &mut promotions);
         if let Err(err) = readable.await {
             return memory_panel_store_error(response_id, err);
         }

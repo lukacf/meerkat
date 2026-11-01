@@ -496,4 +496,18 @@ pub trait MemoryPanelStore: StewardStore {
             .map(|row| row.scope)
             .collect())
     }
+
+    /// The scope of each proposal among `ids` that `realm` holds, in any
+    /// status, by proposal id; ids that name no proposal are left out. A
+    /// gated promotion names its source by id, and the source of one the
+    /// steward made from a proposal is that proposal. The default resolves
+    /// none, so a store that cannot tell withholds such a promotion from
+    /// every caller under access control.
+    async fn proposal_scopes(
+        &self,
+        _realm: &str,
+        _ids: &[String],
+    ) -> Result<Vec<(String, MemoryScope)>, AgentMemoryError> {
+        Ok(Vec::new())
+    }
 }

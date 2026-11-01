@@ -199,7 +199,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   record, a proposal or a gated promotion, and each harvested identity). The
   bundled SQLite store implements both, `realm_scopes` from the records scope
   index without reading a record; the defaults answer `true` and list the
-  scopes of `scope_overview`.
+  scopes of `scope_overview`. A third, `proposal_scopes(realm, ids)`, resolves
+  the proposal a gated promotion names as its source; its default resolves
+  none, which withholds such a promotion under access control.
 
 ### Changed
 
@@ -386,11 +388,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   cannot match.
 - The quarantine queue (`meta/memory/panel/quarantine`) lists a pending
   gated promotion only to a caller who may read both its target scope and
-  its source record, whose content the promotion would publish and which
-  still holds it. Before, a promotion was judged by its target scope alone,
-  so a reviewer denied the source scope still read the source record's id
-  and the steward's rationale for promoting it. An applied promotion leaves
-  the queue, and its content is a record of the target scope, judged there.
+  its source record or proposal (a promotion the steward made from a
+  proposal names that proposal, judged by its scope), whose content the
+  promotion would publish and which still holds it. Before, a promotion was
+  judged by its target scope alone, so a reviewer denied the source scope
+  still read the source's id and the steward's rationale for promoting it.
+  An applied promotion leaves the queue, and its content is a record of the
+  target scope, judged there.
 - Dream history (`meta/memory/panel/dreams` and `dream_runs`) spans a
   realm's scopes and can describe quarantined content, so it now lists a
   realm's runs only to a caller who may read every memory scope the realm

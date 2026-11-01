@@ -2777,6 +2777,49 @@ impl MemoryPanelStore for SqliteAgentMemoryStore {
         })
         .await
     }
+
+    async fn proposal_scopes(
+        &self,
+        realm: &str,
+        ids: &[String],
+    ) -> Result<Vec<(String, MemoryScope)>, AgentMemoryError> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let store = self.clone();
+        let realm = realm.to_string();
+        let ids = ids.to_vec();
+        run_blocking(move || {
+            store.with_realm_conn(&realm, |conn| {
+                let placeholders = vec!["?"; ids.len()].join(", ");
+                let mut stmt = conn
+                    .prepare(&format!(
+                        "SELECT proposal_id, scope_kind, scope_key FROM proposals \
+                         WHERE proposal_id IN ({placeholders})"
+                    ))
+                    .map_err(sql_err)?;
+                let rows = stmt
+                    .query_map(rusqlite::params_from_iter(ids.iter()), |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                        ))
+                    })
+                    .map_err(sql_err)?;
+                let mut scopes = Vec::new();
+                for row in rows {
+                    let (proposal_id, scope_kind, scope_key) = row.map_err(sql_err)?;
+                    scopes.push((
+                        proposal_id,
+                        scope_from_parts(&scope_kind, &scope_key, &realm)?,
+                    ));
+                }
+                Ok(scopes)
+            })
+        })
+        .await
+    }
 }
 
 impl SqliteAgentMemoryStore {

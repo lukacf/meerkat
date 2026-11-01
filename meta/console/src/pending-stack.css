@@ -89,7 +89,7 @@
   list-style: none;
   margin: 0;
   padding: 0;
-  max-height: min(280px, 36vh);
+  max-height: min(360px, 40vh);
   overflow-y: auto;
   border-top: 1px solid var(--_cc-border-soft);
 }

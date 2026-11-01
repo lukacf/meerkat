@@ -1,7 +1,9 @@
 import {
   createContext,
+  useCallback,
   useContext,
   useEffect,
+  useLayoutEffect,
   useRef,
   useState,
   type ComponentPropsWithRef,
@@ -397,6 +399,9 @@ export function PanelHeader({
   );
 }
 
+/** The edge fade of a scrolling tab strip, in px. */
+const TAB_FADE = 24;
+
 export interface PanelTab<Id extends string = string> {
   id: Id;
   label: ReactNode;
@@ -414,6 +419,11 @@ export interface PanelTab<Id extends string = string> {
  * hold actions (refresh lives in the header). With `idBase`, each tab
  * controls its panel (aria-controls): render the active tab's content in a
  * PanelBody with `tabPanel`, or in a PanelTabPanel, with the same base.
+ *
+ * A strip wider than its pane scrolls: the edge with more tabs beyond it
+ * fades (and only while there are), and the active tab is kept wholly in
+ * view, clear of the fade, on mount, when it changes and when the pane
+ * resizes, so no tab shows a cut word without a sign of more.
  */
 export function PanelTabs<Id extends string>({
   tabs,
@@ -436,6 +446,48 @@ export function PanelTabs<Id extends string>({
   testId?: string;
 }) {
   const listRef = useRef<HTMLDivElement | null>(null);
+  const [fade, setFade] = useState({ start: false, end: false });
+  const updateFade = useCallback(() => {
+    const list = listRef.current;
+    if (!list) return;
+    const max = list.scrollWidth - list.clientWidth;
+    const next = { start: max > 1 && list.scrollLeft > 1, end: max > 1 && list.scrollLeft < max - 1 };
+    setFade((previous) => (previous.start === next.start && previous.end === next.end ? previous : next));
+  }, []);
+  // Scrolls the strip (never the page) so the active tab is wholly in view,
+  // clear of the edge fade.
+  const revealActive = useCallback(() => {
+    const list = listRef.current;
+    if (!list) return;
+    const tab = list.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]');
+    if (tab && list.scrollWidth > list.clientWidth + 1) {
+      const box = list.getBoundingClientRect();
+      const rect = tab.getBoundingClientRect();
+      const left = rect.left - box.left + list.scrollLeft;
+      const right = left + rect.width;
+      const view = list.clientWidth;
+      if (left - TAB_FADE < list.scrollLeft) list.scrollLeft = Math.max(0, left - TAB_FADE);
+      else if (right + TAB_FADE > list.scrollLeft + view) list.scrollLeft = Math.min(list.scrollWidth - view, right + TAB_FADE - view);
+    }
+    updateFade();
+  }, [updateFade]);
+  useLayoutEffect(() => {
+    revealActive();
+  }, [active, tabs.length, revealActive]);
+  useEffect(() => {
+    const list = listRef.current;
+    if (!list) return undefined;
+    const view = list.ownerDocument.defaultView;
+    list.addEventListener("scroll", updateFade, { passive: true });
+    const observer = typeof ResizeObserver !== "undefined" ? new ResizeObserver(() => revealActive()) : null;
+    if (observer) observer.observe(list);
+    else view?.addEventListener("resize", revealActive);
+    return () => {
+      list.removeEventListener("scroll", updateFade);
+      observer?.disconnect();
+      view?.removeEventListener("resize", revealActive);
+    };
+  }, [revealActive, updateFade]);
   const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
     const keys = ["ArrowRight", "ArrowLeft", "Home", "End"];
     if (!keys.includes(event.key)) return;
@@ -458,6 +510,8 @@ export function PanelTabs<Id extends string>({
       className={cx("cc-tabs", className)}
       onKeyDown={onKeyDown}
       data-testid={testId}
+      data-fade-start={fade.start ? "" : undefined}
+      data-fade-end={fade.end ? "" : undefined}
     >
       {tabs.map((tab) => {
         const selected = tab.id === active;

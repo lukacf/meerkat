@@ -70,7 +70,12 @@ export function RelativeTime({
   const shared = useNow();
   const ms = toEpochMs(value);
   if (ms === null) return null;
-  const text = formatRelativeTime(ms, now ?? shared);
+  // The shared clock lags the real one by up to a tick: a time read since
+  // its last tick ("Updated" after a refresh) must never read as the future.
+  // So compare against the later of the two, and read a time less than one
+  // tick ahead (a clock skew between hosts) as "just now".
+  const current = now ?? Math.max(shared, Date.now());
+  const text = ms > current && ms - current < TICK_MS ? "just now" : formatRelativeTime(ms, current);
   return (
     <time
       className={cx("cc-time", className)}

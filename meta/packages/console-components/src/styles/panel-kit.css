@@ -312,6 +312,20 @@
   scrollbar-width: none;
 }
 .cc-tabs::-webkit-scrollbar { display: none; }
+/* A strip wider than its pane fades the edge that has more tabs beyond it
+   (PanelTabs sets the attributes from the scroll position). */
+.cc-tabs[data-fade-start] {
+  -webkit-mask-image: linear-gradient(to right, transparent, black 24px);
+  mask-image: linear-gradient(to right, transparent, black 24px);
+}
+.cc-tabs[data-fade-end] {
+  -webkit-mask-image: linear-gradient(to left, transparent, black 24px);
+  mask-image: linear-gradient(to left, transparent, black 24px);
+}
+.cc-tabs[data-fade-start][data-fade-end] {
+  -webkit-mask-image: linear-gradient(to right, transparent, black 24px, black calc(100% - 24px), transparent);
+  mask-image: linear-gradient(to right, transparent, black 24px, black calc(100% - 24px), transparent);
+}
 .cc-tab {
   flex: none;
   padding: 8px 12px 10px;

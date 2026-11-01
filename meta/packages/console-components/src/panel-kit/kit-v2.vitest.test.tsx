@@ -12,6 +12,7 @@ import {
   EntityRow,
   FilterBar,
   NewItemsPill,
+  RelativeTime,
   RelativeTimeChip,
   TrustLadder,
   countdownTone,
@@ -32,6 +33,7 @@ import {
   PanelHeader,
   PanelPreferencesProvider,
   PanelShell,
+  PanelTabs,
   Popover,
   SearchField,
   SelectField,
@@ -520,6 +522,82 @@ describe("panel header v2", () => {
   });
 });
 
+/** Lays a tab strip out where jsdom lays nothing out: the strip is `view` px
+ * wide and scrolls; each tab is 100 px, side by side. */
+function withTabLayout(view: number, run: () => void) {
+  const scrollLeft = new WeakMap<Element, number>();
+  const proto = HTMLElement.prototype;
+  const saved = {
+    rect: proto.getBoundingClientRect,
+    scrollWidth: Object.getOwnPropertyDescriptor(Element.prototype, "scrollWidth"),
+    clientWidth: Object.getOwnPropertyDescriptor(Element.prototype, "clientWidth"),
+    scrollLeft: Object.getOwnPropertyDescriptor(Element.prototype, "scrollLeft"),
+  };
+  const isStrip = (element: Element) => element.getAttribute("role") === "tablist";
+  const tabs = (strip: Element) => Array.from(strip.querySelectorAll('[role="tab"]'));
+  Object.defineProperty(Element.prototype, "scrollWidth", { configurable: true, get(this: Element) { return isStrip(this) ? tabs(this).length * 100 : 0; } });
+  Object.defineProperty(Element.prototype, "clientWidth", { configurable: true, get(this: Element) { return isStrip(this) ? view : 0; } });
+  Object.defineProperty(Element.prototype, "scrollLeft", {
+    configurable: true,
+    get(this: Element) { return scrollLeft.get(this) ?? 0; },
+    set(this: Element, value: number) { scrollLeft.set(this, value); },
+  });
+  proto.getBoundingClientRect = function rect(this: HTMLElement) {
+    const box = (left: number, width: number) => ({ left, right: left + width, width, top: 0, bottom: 32, height: 32, x: left, y: 0, toJSON: () => ({}) }) as DOMRect;
+    if (isStrip(this)) return box(0, view);
+    const strip = this.closest('[role="tablist"]');
+    if (strip && this.getAttribute("role") === "tab") return box(tabs(strip).indexOf(this) * 100 - (scrollLeft.get(strip) ?? 0), 100);
+    return box(0, 0);
+  };
+  try {
+    run();
+  } finally {
+    proto.getBoundingClientRect = saved.rect;
+    for (const [name, descriptor] of [["scrollWidth", saved.scrollWidth], ["clientWidth", saved.clientWidth], ["scrollLeft", saved.scrollLeft]] as const) {
+      if (descriptor) Object.defineProperty(Element.prototype, name, descriptor);
+    }
+  }
+}
+
+const FIVE_TABS = ["holdings", "records", "knowledge", "pipeline", "dreams"].map((id) => ({ id, label: id, testId: `tab:${id}` }));
+
+describe("panel tabs", () => {
+  it("keeps the active tab wholly in view, clear of the fade, after a change", () => {
+    withTabLayout(260, () => {
+      const view = render(<PanelTabs tabs={FIVE_TABS} active="holdings" onSelect={() => {}} ariaLabel="Memory sections" testId="tabs" />);
+      const strip = view.getByTestId("tabs");
+      expect(strip.scrollLeft).toBe(0);
+      view.rerender(<PanelTabs tabs={FIVE_TABS} active="dreams" onSelect={() => {}} ariaLabel="Memory sections" testId="tabs" />);
+      // Dreams spans 400-500: the strip scrolls to its end (240 = 500 - 260).
+      expect(strip.scrollLeft).toBe(240);
+      view.rerender(<PanelTabs tabs={FIVE_TABS} active="records" onSelect={() => {}} ariaLabel="Memory sections" testId="tabs" />);
+      // Records spans 100-200: back to its left edge, less the 24 px fade.
+      expect(strip.scrollLeft).toBe(76);
+    });
+  });
+
+  it("fades only the edge with more tabs beyond it, and none without overflow", () => {
+    withTabLayout(260, () => {
+      const view = render(<PanelTabs tabs={FIVE_TABS} active="holdings" onSelect={() => {}} ariaLabel="Memory sections" testId="tabs" />);
+      const strip = view.getByTestId("tabs");
+      expect([strip.hasAttribute("data-fade-start"), strip.hasAttribute("data-fade-end")]).toEqual([false, true]);
+      view.rerender(<PanelTabs tabs={FIVE_TABS} active="dreams" onSelect={() => {}} ariaLabel="Memory sections" testId="tabs" />);
+      expect([strip.hasAttribute("data-fade-start"), strip.hasAttribute("data-fade-end")]).toEqual([true, false]);
+      act(() => {
+        strip.scrollLeft = 120;
+        fireEvent.scroll(strip);
+      });
+      expect([strip.hasAttribute("data-fade-start"), strip.hasAttribute("data-fade-end")]).toEqual([true, true]);
+      view.unmount();
+    });
+    withTabLayout(600, () => {
+      const view = render(<PanelTabs tabs={FIVE_TABS} active="dreams" onSelect={() => {}} ariaLabel="Memory sections" testId="tabs" />);
+      const strip = view.getByTestId("tabs");
+      expect([strip.hasAttribute("data-fade-start"), strip.hasAttribute("data-fade-end"), strip.scrollLeft]).toEqual([false, false, 0]);
+    });
+  });
+});
+
 describe("status toast", () => {
   it("keeps the reserved row by default", () => {
     const html = render(<StatusRow error="Memory is unavailable" errorTestId="memory-error" />).container.innerHTML;
@@ -875,6 +953,33 @@ describe("entities", () => {
 });
 
 describe("time", () => {
+  it("never reads a past time as the future while the shared clock lags", () => {
+    vi.useFakeTimers();
+    try {
+      const t0 = Date.UTC(2026, 10, 1, 1, 0, 0);
+      vi.setSystemTime(t0);
+      const view = render(<RelativeTime value={t0 - 60_000} prefix="Updated" testId="fresh" />);
+      // 12 s on, before the shared clock's next tick, the panel refreshes:
+      // its new time is in the past, so it must not read "Updated in 11s".
+      vi.setSystemTime(t0 + 12_000);
+      view.rerender(<RelativeTime value={t0 + 11_000} prefix="Updated" testId="fresh" />);
+      expect(view.getByTestId("fresh").textContent).toBe("Updated just now");
+      // A time that is really ahead still reads as the future.
+      view.rerender(<RelativeTime value={t0 + 12_000 + 5 * 60_000} testId="fresh" />);
+      expect(view.getByTestId("fresh").textContent).toBe("in 5m");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("reads a time less than one tick ahead as just now, a clock skew", () => {
+    const now = Date.UTC(2026, 10, 1, 1, 0, 0);
+    const view = render(<RelativeTime value={now + 12_000} now={now} testId="skew" />);
+    expect(view.getByTestId("skew").textContent).toBe("just now");
+    view.rerender(<RelativeTime value={now + 20_000} now={now} testId="skew" />);
+    expect(view.getByTestId("skew").textContent).toBe("in 20s");
+  });
+
   it("words a countdown and tones it by distance", () => {
     const MIN = 60_000;
     expect(formatCountdown(45_000)).toBe("in 45s");

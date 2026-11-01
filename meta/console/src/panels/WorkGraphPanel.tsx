@@ -70,6 +70,7 @@ import type {
   TechnicalDetail,
 } from "../../../packages/console-components/src/panel-kit";
 import { StatusSquare } from "../../../packages/console-components/src/viz";
+import type { VizRelation } from "../../../packages/console-components/src/viz";
 import {
   WorkGraphActivityList,
   WorkGraphAttentionRow,
@@ -91,6 +92,15 @@ let workGraphViewModeMemory: WorkGraphViewMode | null = null;
 let workGraphCriticalPathMemory: boolean | null = null;
 let workGraphShowDoneMemory = false;
 let workGraphShowCancelledMemory = false;
+let workGraphHiddenRelationsMemory: readonly VizRelation[] = [];
+
+/// The graph's link kinds in the order the menu lists them, with the words
+/// the edges carry.
+const WORKGRAPH_LINK_TOGGLES: ReadonlyArray<{ relation: VizRelation; label: string }> = [
+  { relation: "blocks", label: "Show blocks links" },
+  { relation: "related", label: "Show related links" },
+  { relation: "parent", label: "Show also-under links" },
+];
 
 /// Snapshot-backed panel state assembled by ConsoleApp. `denied` is a -32030
 /// access outcome (rendered as "no access", never as an empty store);
@@ -720,6 +730,15 @@ export function WorkGraphPanel({
     workGraphShowCancelledMemory = on;
     setShowCancelledState(on);
   };
+  // The graph's legend, in the header menu: which link kinds are drawn.
+  const [hiddenRelations, setHiddenRelationsState] = React.useState<readonly VizRelation[]>(workGraphHiddenRelationsMemory);
+  const showRelation = (relation: VizRelation, shown: boolean) => {
+    const next = shown
+      ? hiddenRelations.filter((value) => value !== relation)
+      : [...hiddenRelations.filter((value) => value !== relation), relation];
+    workGraphHiddenRelationsMemory = next;
+    setHiddenRelationsState(next);
+  };
   const [selectedId, setSelectedId] = React.useState<string | null>(null);
   const [activityOpen, setActivityOpen] = React.useState(false);
   const [unfolded, setUnfolded] = React.useState<ReadonlySet<string>>(() => new Set());
@@ -898,6 +917,7 @@ export function WorkGraphPanel({
         canManage={canManage}
         handlers={handlers}
         cacheKey="panel"
+        hiddenRelations={hiddenRelations}
         // Only while the item asked for is still the one selected.
         revealRequest={revealRequest && revealRequest.id === selected ? revealRequest : null}
         footer={(
@@ -1031,6 +1051,25 @@ export function WorkGraphPanel({
       testId: "workgraph-menu:critical-path",
     },
   ];
+  // The legend's work, without a chip on the picture: the Graph's link kinds
+  // (the ones it has) can be hidden and shown again here.
+  if (viewMode === "graph") {
+    const present = new Set(model.links.map((link) => link.relation));
+    const toggles = WORKGRAPH_LINK_TOGGLES.filter((toggle) => present.has(toggle.relation));
+    if (toggles.length) {
+      viewOptions.push({ kind: "separator", id: "links-sep" });
+      for (const toggle of toggles) {
+        viewOptions.push({
+          kind: "checkbox",
+          id: `links-${toggle.relation}`,
+          label: toggle.label,
+          checked: !hiddenRelations.includes(toggle.relation),
+          onChange: (on: boolean) => showRelation(toggle.relation, on),
+          testId: `workgraph-menu:links-${toggle.relation}`,
+        });
+      }
+    }
+  }
   const doneToday = (() => {
     const start = startOfToday(now);
     let count = 0;

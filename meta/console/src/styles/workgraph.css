@@ -75,6 +75,14 @@
   padding-bottom: max(40px, 8%);
 }
 
+/* The summary's facts wrap whole onto another line instead of clipping a
+   word where the header runs out of room (a 520 px pane beside another). */
+.workgraph__head.cc-panel-head--v2 .cc-panel-head__summary {
+  max-height: none;
+  line-height: 1.45;
+}
+.workgraph__head.cc-panel-head--v2 .cc-panel-head__facts { flex-wrap: wrap; }
+
 /* === Graph view ====================================================== */
 
 .workgraph-graph {
@@ -105,15 +113,50 @@
   position: absolute;
   inset: 0;
 }
+/* The graph's own bar under the canvas: the zoom controls and the note on
+   items not drawn. Nothing floats on the picture, so nothing covers it. */
+.workgraph-graph__bar {
+  display: flex;
+  flex: none;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px 12px;
+  min-height: 36px;
+  padding: 3px calc(var(--_cc-panel-pad-x) - 6px);
+  border-top: 1px solid var(--_cc-border-soft);
+  background: var(--_cc-surface-card);
+}
+.workgraph-graph__zoom {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+.workgraph-graph__zoom-level {
+  min-width: 46px;
+  height: 28px;
+  padding: 0 6px;
+  border: 0;
+  border-radius: var(--_cc-radius-sm);
+  background: none;
+  color: var(--_cc-foreground-muted);
+  font: inherit;
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+}
+.workgraph-graph__zoom-level:hover {
+  background: var(--_cc-surface-hover);
+  color: var(--_cc-foreground);
+}
+.workgraph-graph__zoom-level:focus-visible {
+  outline: 2px solid var(--_cc-focus-ring, var(--_cc-accent));
+  outline-offset: 1px;
+}
 .workgraph-graph__overflow {
-  position: absolute;
-  top: 10px;
-  right: 16px;
-  z-index: 2;
   padding: 2px 10px;
   border: 1px solid var(--_cc-border-soft);
   border-radius: var(--_cc-radius-pill);
-  background: var(--_cc-viz-plate);
   font-size: var(--_cc-panel-fs-meta);
   color: var(--_cc-warning-ink);
   font-variant-numeric: tabular-nums;
@@ -577,6 +620,11 @@ button.workgraph-drawer__link-title:focus-visible {
 /* === Narrow panes ===================================================== */
 
 @media (hover: none) {
+  .workgraph-goal__actions { opacity: 1; }
+}
+/* Below the single-pane width a goal's actions wrap under its title: they
+   stay shown there, or the wrapped row would read as an empty gap. */
+@container cc-panel (max-width: 719px) {
   .workgraph-goal__actions { opacity: 1; }
 }
 @container cc-panel (max-width: 640px) {

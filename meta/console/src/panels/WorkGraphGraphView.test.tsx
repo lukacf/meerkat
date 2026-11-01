@@ -110,6 +110,31 @@ describe("WorkGraphGraphView refresh", () => {
   });
 });
 
+describe("WorkGraphGraphView chrome", () => {
+  it("floats nothing on the picture: the zoom controls sit in the bar below, with the level", () => {
+    sizeTheCanvas();
+    const view = render(<WorkGraphGraphView items={items} edges={edges} attention={[]} />);
+    const frame = view.getByTestId("workgraph-graph-frame");
+    expect(frame.querySelectorAll(".cc-viz-legend, .cc-viz-controls, .cc-viz-minimap").length).toBe(0);
+    const fit = view.getByTestId("workgraph-graph-fit");
+    expect(frame.contains(fit)).toBe(false);
+    const level = () => view.getByTestId("workgraph-graph-zoom:reset").textContent ?? "";
+    const before = level();
+    expect(/^\d+%$/.test(before)).toBe(true);
+    fireEvent.click(view.getByTestId("workgraph-graph-zoom:in"));
+    return waitFor(() => expect(level() === before).toBe(false));
+  });
+
+  it("draws only the link kinds the header menu leaves on", () => {
+    const relations = (root: HTMLElement) =>
+      Array.from(root.querySelectorAll('[data-testid="workgraph-graph-edge"]')).map((edge) => edge.getAttribute("data-relation"));
+    const view = render(<WorkGraphGraphView items={items} edges={edges} attention={[]} />);
+    expect(relations(view.container).includes("blocks")).toBe(true);
+    view.rerender(<WorkGraphGraphView items={items} edges={edges} attention={[]} hiddenRelations={["blocks"]} />);
+    expect(relations(view.container).includes("blocks")).toBe(false);
+  });
+});
+
 describe("WorkGraphGraphView goal zoom", () => {
   it("zooms to a goal when its header is double-clicked, and opens it", () => {
     sizeTheCanvas();
@@ -210,6 +235,21 @@ describe("WorkGraphPanel", () => {
     fireEvent.click(toggle);
     expect(toggle.getAttribute("aria-pressed")).toBe("false");
     expect(accented()).toEqual([]);
+  });
+});
+
+describe("WorkGraphPanel link toggles", () => {
+  it("offers the Graph's link kinds in the header menu, and hides one when unticked", () => {
+    const view = render(<WorkGraphPanel data={panelData()} canManage={false} onRefresh={() => {}} />);
+    fireEvent.click(view.getByTestId("workgraph-view-toggle:graph"));
+    const blocksEdges = () => Array.from(view.container.querySelectorAll('[data-testid="workgraph-graph-edge"]'))
+      .filter((edge) => edge.getAttribute("data-relation") === "blocks").length;
+    expect(blocksEdges() > 0).toBe(true);
+    fireEvent.click(view.getByTestId("workgraph-menu"));
+    const toggle = view.getByTestId("workgraph-menu:links-blocks");
+    expect(toggle.getAttribute("aria-checked")).toBe("true");
+    fireEvent.click(toggle);
+    expect(blocksEdges()).toBe(0);
   });
 });
 

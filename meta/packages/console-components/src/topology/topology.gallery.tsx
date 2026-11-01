@@ -13,6 +13,7 @@ import { TopologyPanel } from "./topology-panel";
 import type {
   ConsoleAgent,
   ConsoleFrame,
+  ConsoleTopologyActivitySource,
   ConsoleTopologyLink,
   ConsoleTopologyNode,
   ConsoleTopologyRoute,
@@ -172,6 +173,60 @@ function initialFrames(now: number): ConsoleFrame[] {
   return frames.sort((left, right) => (right.timestampMs || 0) - (left.timestampMs || 0));
 }
 
+const HOUR_MS = 60 * 60_000;
+
+/** A day of turns per agent, deterministic, busier in working hours. */
+function turnsAt(identity: string, hourIndex: number): number {
+  let seed = 0;
+  for (const char of identity) seed = (seed * 31 + char.charCodeAt(0)) % 997;
+  const hour = new Date(Date.now() - (23 - hourIndex) * HOUR_MS).getHours();
+  const workday = hour >= 7 && hour <= 19 ? 1 : 0.2;
+  return Math.round(((seed + hourIndex * 7) % 5) * workday);
+}
+
+/**
+ * The host's activity history for the fixture (the console passes its
+ * activity ledger): the messages the frames carry, a day of turns, and
+ * Triage's open run.
+ */
+function galleryActivity(frames: readonly ConsoleFrame[], version: number): ConsoleTopologyActivitySource {
+  const sent = frames.flatMap((frame) => {
+    const block = (frame.data as { blocks?: Array<{ peer?: { display_name?: string } }> } | null)?.blocks?.[0];
+    const from = block?.peer?.display_name?.split("/").pop();
+    return frame.event === "system_notice" && from && frame.identity && frame.timestampMs
+      ? [{ from, to: frame.identity, atMs: frame.timestampMs }]
+      : [];
+  });
+  return {
+    subscribe: () => () => undefined,
+    getVersion: () => version,
+    traffic(window = {}) {
+      const pairs = new Map<string, { from: string; to: string; count: number; lastMs: number }>();
+      for (const entry of sent) {
+        if (entry.atMs < (window.sinceMs ?? 0) || entry.atMs > (window.untilMs ?? Number.POSITIVE_INFINITY)) continue;
+        const key = `${entry.from}>${entry.to}`;
+        const pair = pairs.get(key) || { from: entry.from, to: entry.to, count: 0, lastMs: 0 };
+        pair.count += 1;
+        pair.lastMs = Math.max(pair.lastMs, entry.atMs);
+        pairs.set(key, pair);
+      }
+      return [...pairs.values()];
+    },
+    series(identity, metric, window) {
+      const binMs = window.binMs ?? HOUR_MS;
+      const endMs = window.endMs ?? Date.now();
+      return Array.from({ length: window.bins }, (_, index) => {
+        const start = endMs - (window.bins - index) * binMs;
+        if (metric === "messagesSent") {
+          return sent.filter((entry) => entry.atMs > start && entry.atMs <= start + binMs && (!identity || entry.from === identity)).length;
+        }
+        return identity ? turnsAt(identity, index) + (index === window.bins - 1 && identity === "triage" ? 1 : 0) : 0;
+      });
+    },
+    hasOpenRun: (identity) => identity === "triage",
+  };
+}
+
 /** The fixture team, with a message from Triage to Support every few seconds. */
 function TopologyGalleryPanel(): React.JSX.Element {
   const [frames, setFrames] = React.useState<ConsoleFrame[]>(() => initialFrames(Date.now()));
@@ -181,12 +236,14 @@ function TopologyGalleryPanel(): React.JSX.Element {
     }, 5_000);
     return () => window.clearInterval(timer);
   }, []);
+  const activitySource = React.useMemo(() => galleryActivity(frames, frames.length), [frames]);
   return (
     <div style={{ height: 860, display: "flex", border: "1px solid transparent" }}>
       <TopologyPanel
         nodes={NODES}
         agents={AGENTS}
         activity={frames}
+        activitySource={activitySource}
         links={LINKS}
         routes={ROUTES}
         routesAccess="loaded"

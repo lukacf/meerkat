@@ -170,16 +170,14 @@
 
 /* ── Glance ──────────────────────────────────────────────────────────── */
 
-.memory-glance.cc-glance { grid-template-columns: minmax(0, 1.35fr) repeat(3, minmax(0, 1fr)); }
+/* In a wide pane the hero figure takes a little more room; narrower, the
+   kit wraps the strip two by two. */
+@container cc-panel (min-width: 720px) {
+  .memory-glance.cc-glance { grid-template-columns: minmax(0, 1.35fr) repeat(3, minmax(0, 1fr)); }
+}
 .memory-glance__marks { display: inline-flex; align-items: center; gap: 5px; align-self: center; }
 /* A chart as wide as its slot (FluidSparkline): the slot sets the width. */
 .memory-fluid { display: block; width: 100%; min-width: 0; overflow: hidden; }
-/* A figure's meter sits beside the value while there is room for it and
-   moves under the value when there is not; the hero's chart then takes the
-   room the figure leaves, up to its own width. */
-.memory-glance .cc-figure__fig { flex-wrap: wrap; row-gap: 4px; }
-.memory-glance .cc-figure__meter { margin-left: 0; }
-.memory-glance .cc-figure--hero .cc-figure__meter { flex: 1 1 64px; min-width: 64px; max-width: 128px; }
 
 /* ── Holdings: checks strip ──────────────────────────────────────────── */
 
@@ -1285,13 +1283,6 @@ button.memory-flow__hit:focus-visible { outline: 2px solid var(--_cc-focus-ring)
 .memory-docs-link .cc-glyph { width: 12px; height: 12px; }
 
 /* ── Narrow panes (A4.8) ─────────────────────────────────────────────── */
-
-@container cc-panel (max-width: 719px) {
-  /* Two by two: the kit's strip flows in columns, so flow in rows here. */
-  .memory-glance.cc-glance { grid-auto-flow: row; grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .memory-glance.cc-glance > :nth-child(2n + 1) { border-left: 0; }
-  .memory-glance.cc-glance > :nth-child(n + 3) { border-top: 1px solid var(--_cc-border-soft); }
-}
 
 /* The view's own width: the drawer may be docked beside it. */
 @container memory-main (max-width: 899px) {

@@ -5,9 +5,8 @@
 import React from "react";
 
 import type { MemoryLedgerEntry, MemoryPanelRecord } from "../../types";
-import { FigureTile, GlanceStrip, StatusMark, plural, type SummaryFact, type Tone } from "./kit";
+import { FigureTile, GlanceStrip, Sparkline, StatusMark, plural, type SummaryFact, type Tone } from "./kit";
 import { verdictTone, type VerdictTile } from "./model";
-import { FluidSparkline } from "./parts";
 import {
   DAY_MS,
   HOUR_MS,
@@ -64,6 +63,10 @@ export function memorySummaryFacts(inputs: GlanceInputs): SummaryFact[] {
 }
 
 /** The six checks as six tiny marks, in tile order. */
+/// The six check marks' own width (marks and their 5 px gaps), the least
+/// room they take beside the figure.
+const CHECK_MARKS_WIDTH = 76;
+
 function ChecksMarks({ tiles }: { tiles: ReadonlyArray<VerdictTile> }): React.JSX.Element {
   // The strip's order: the checks that run first, the two that cannot last.
   const quiet = new Set<VerdictTile["id"]>(["echo-safety", "taint-wall"]);
@@ -120,16 +123,20 @@ export function MemoryGlance({
         value={inputs.recordsDenied ? "-" : totals.active}
         unit={inputs.recordsDenied ? undefined : "active"}
         meter={
-          inputs.recordsDenied ? undefined : (
-            <FluidSparkline
-              className="memory-glance__trend"
-              values={perDay}
-              kind="bars"
-              maxWidth={128}
-              height={26}
-              label={`${plural(perDay.reduce((sum, count) => sum + count, 0), "record")} written in the last 30 days`}
-            />
-          )
+          inputs.recordsDenied
+            ? undefined
+            : // The kit's responsive meter: the bars take the room beside
+              // the figure (or under it), never more than their own 128 px.
+              ({ width }: { width: number }) => (
+                <Sparkline
+                  className="memory-glance__trend"
+                  values={perDay}
+                  kind="bars"
+                  width={Math.min(128, width)}
+                  height={26}
+                  label={`${plural(perDay.reduce((sum, count) => sum + count, 0), "record")} written in the last 30 days`}
+                />
+              )
         }
         foot={
           inputs.recordsDenied
@@ -181,7 +188,10 @@ export function MemoryGlance({
         loading={!inputs.loaded}
         value={holding}
         of={inputs.tiles.length}
-        meter={<ChecksMarks tiles={inputs.tiles} />}
+        // Six marks, never squeezed: under their own width they go below
+        // the figure.
+        meter={() => <ChecksMarks tiles={inputs.tiles} />}
+        meterMinWidth={CHECK_MARKS_WIDTH}
         foot="holding"
         title="Open the checks"
         onActivate={onOpenChecks}

@@ -5,7 +5,7 @@
 // frame); edges between groups bundle into one line per pair.
 
 import { CLUSTER_DOT } from "./geometry";
-import type { ClusterBundle, GraphLayout, LayoutEdge, LayoutLaneInput, LayoutNode, LayoutOptions, PlacedCluster } from "./types";
+import type { BundleRoute, ClusterBundle, GraphLayout, LayoutEdge, LayoutLaneInput, LayoutNode, LayoutOptions, LayoutPoint, PlacedCluster } from "./types";
 import { compareNodes, emptyLayout } from "./types";
 import type { VizNodeBox, VizRelation } from "../graph/types";
 
@@ -20,7 +20,81 @@ export const CLUSTERS = {
   /** Room under each cluster for its label and count. */
   labelRoom: 30,
   pad: 40,
+  /** A bundle starts this far outside its rings, and passes other groups this far out. */
+  bundleGap: 4,
+  bundleClear: 14,
 } as const;
+
+/**
+ * The line between groups `a` and `b`: straight, unless a group of `others`
+ * sits on the way, when it bows around them (away from them, or, when they
+ * sit on the line, away from the picture's `centre`: a top row bows up, a
+ * bottom row down, past the labels under the rings).
+ */
+export function routeBundle(a: PlacedCluster, b: PlacedCluster, others: readonly PlacedCluster[], centre: LayoutPoint): BundleRoute {
+  const dx = b.cx - a.cx;
+  const dy = b.cy - a.cy;
+  const length = Math.hypot(dx, dy) || 1;
+  const ux = dx / length;
+  const uy = dy / length;
+  const nx = -uy;
+  const ny = ux;
+  const blocking: { t: number; d: number; r: number }[] = [];
+  for (const other of others) {
+    if (other.id === a.id || other.id === b.id) continue;
+    const t = ((other.cx - a.cx) * ux + (other.cy - a.cy) * uy) / length;
+    if (t <= 0 || t >= 1) continue;
+    const d = (other.cx - a.cx) * nx + (other.cy - a.cy) * ny;
+    // Only a line through the dots bows: one that threads between two groups,
+    // grazing their outer rings, stays straight (bowing would hit the other).
+    if (Math.abs(d) < other.r - 2) blocking.push({ t, d, r: other.r });
+  }
+  const along = (cluster: PlacedCluster, towardX: number, towardY: number): LayoutPoint => {
+    const length = Math.hypot(towardX - cluster.cx, towardY - cluster.cy) || 1;
+    const reach = cluster.r + CLUSTERS.bundleGap;
+    return { x: cluster.cx + ((towardX - cluster.cx) / length) * reach, y: cluster.cy + ((towardY - cluster.cy) / length) * reach };
+  };
+  if (blocking.length === 0) {
+    const start = along(a, b.cx, b.cy);
+    const end = along(b, a.cx, a.cy);
+    return { x0: start.x, y0: start.y, cx: (start.x + end.x) / 2, cy: (start.y + end.y) / 2, x1: end.x, y1: end.y, bowed: false };
+  }
+  const midX = (a.cx + b.cx) / 2;
+  const midY = (a.cy + b.cy) / 2;
+  const leaning = blocking.reduce((sum, block) => sum + block.d, 0);
+  const outward = (midX - centre.x) * nx + (midY - centre.y) * ny;
+  const side = Math.abs(leaning) > 1 ? -Math.sign(leaning) : Math.abs(outward) > 1 ? Math.sign(outward) : ny > 0 ? -1 : 1;
+  // Downward, the line also clears the label and count under each ring.
+  const below = side * ny > 0.3 ? CLUSTERS.labelRoom + 6 : 0;
+  let control = 0;
+  for (const block of blocking) {
+    const needed = side * block.d + block.r + CLUSTERS.bundleClear + below;
+    if (needed > 0) control = Math.max(control, needed / (2 * block.t * (1 - block.t)));
+  }
+  const cx = midX + side * nx * control;
+  const cy = midY + side * ny * control;
+  const start = along(a, cx, cy);
+  const end = along(b, cx, cy);
+  return { x0: start.x, y0: start.y, cx, cy, x1: end.x, y1: end.y, bowed: control > 0 };
+}
+
+/** The bounds of a bundle's line (sampled; quadratics are smooth). */
+function routeExtent(route: BundleRoute): { x0: number; y0: number; x1: number; y1: number } {
+  let x0 = Infinity;
+  let y0 = Infinity;
+  let x1 = -Infinity;
+  let y1 = -Infinity;
+  for (let step = 0; step <= 16; step += 1) {
+    const t = step / 16;
+    const x = (1 - t) * (1 - t) * route.x0 + 2 * t * (1 - t) * route.cx + t * t * route.x1;
+    const y = (1 - t) * (1 - t) * route.y0 + 2 * t * (1 - t) * route.cy + t * t * route.y1;
+    x0 = Math.min(x0, x);
+    y0 = Math.min(y0, y);
+    x1 = Math.max(x1, x);
+    y1 = Math.max(y1, y);
+  }
+  return { x0, y0, x1, y1 };
+}
 
 /** The group nodes cluster by: their lane. */
 export const UNGROUPED = "__ungrouped";
@@ -51,6 +125,8 @@ export function ringSlots(count: number, hasLead: boolean): { radii: number[]; s
   }
   return { radii, slots };
 }
+
+const STRAIGHT: BundleRoute = { x0: 0, y0: 0, cx: 0, cy: 0, x1: 0, y1: 0, bowed: false };
 
 const LONG_LIVED_ORDER: Record<string, number> = { coordinator: 0, agent: 1, external: 2, unknown: 3, person: 4, source: 5, store: 6, item: 7, goal: 8 };
 
@@ -189,13 +265,29 @@ export function layoutClusters(
       bundle.count += 1;
       if (!bundle.relations.includes(edge.relation)) bundle.relations.push(edge.relation);
     } else {
-      bundles.set(key, { id: `bundle:${from}:${to}`, from, to, count: 1, relations: [edge.relation as VizRelation] });
+      bundles.set(key, { id: `bundle:${from}:${to}`, from, to, count: 1, relations: [edge.relation as VizRelation], route: STRAIGHT });
     }
+  }
+
+  let bounds = { x: 0, y: 0, w: Math.max(maxX + CLUSTERS.pad, usable + 2 * CLUSTERS.pad), h: y - CLUSTERS.groupGap / 2 + CLUSTERS.pad };
+  const clusterById = new Map(clusters.map((cluster) => [cluster.id, cluster]));
+  const centre = { x: bounds.w / 2, y: bounds.h / 2 };
+  for (const bundle of bundles.values()) {
+    const a = clusterById.get(bundle.from)!;
+    const b = clusterById.get(bundle.to)!;
+    bundle.route = routeBundle(a, b, clusters, centre);
+    if (!bundle.route.bowed) continue;
+    const extent = routeExtent(bundle.route);
+    const x0 = Math.min(bounds.x, extent.x0 - CLUSTERS.bundleGap);
+    const y0 = Math.min(bounds.y, extent.y0 - CLUSTERS.bundleGap);
+    const x1 = Math.max(bounds.x + bounds.w, extent.x1 + CLUSTERS.bundleGap);
+    const y1 = Math.max(bounds.y + bounds.h, extent.y1 + CLUSTERS.bundleGap);
+    bounds = { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
   }
 
   layout.nodes = boxes;
   layout.clusters = clusters;
   layout.bundles = [...bundles.values()];
-  layout.bounds = { x: 0, y: 0, w: Math.max(maxX + CLUSTERS.pad, usable + 2 * CLUSTERS.pad), h: y - CLUSTERS.groupGap / 2 + CLUSTERS.pad };
+  layout.bounds = bounds;
   return layout;
 }

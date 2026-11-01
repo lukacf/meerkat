@@ -478,4 +478,22 @@ pub trait MemoryPanelStore: StewardStore {
     async fn holds_quarantine_evidence(&self, _realm: &str) -> Result<bool, AgentMemoryError> {
         Ok(true)
     }
+
+    /// Every memory scope `realm` names: each scope that holds a record (in
+    /// any status), a proposal or a gated promotion, and the identity of each
+    /// recorded harvest. A steward dream's history can name any of them (a
+    /// harvest phase names its identity, a skip names a proposal), so the
+    /// panel lists a realm's dream history only to a caller who may read
+    /// every one. The default lists the scopes
+    /// [`StewardStore::scope_overview`] reports, which aggregates every
+    /// record; a store should answer from its indexes and name the proposal,
+    /// promotion and harvest scopes too.
+    async fn realm_scopes(&self, realm: &str) -> Result<Vec<MemoryScope>, AgentMemoryError> {
+        Ok(self
+            .scope_overview(realm)
+            .await?
+            .into_iter()
+            .map(|row| row.scope)
+            .collect())
+    }
 }

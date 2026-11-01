@@ -5011,16 +5011,20 @@ async fn memory_panel_retain_readable_records<T>(
     Ok(())
 }
 
-/// Whether the caller may read every memory scope `realm` holds, each by
-/// [`memory_panel_scope_visible`]: every identity with memory there, its mobs
-/// (`mob.memory.read`), the operator scope once operator records exist
-/// (`operator.memory.read`) and the realm scope. While the realm holds
-/// quarantined content, the caller must also pass the quarantine half of the
-/// record rule ([`memory_panel_quarantine_evidence_visible`]). A steward
-/// dream spans the realm's scopes and can describe quarantined content, so
-/// its runs are listed only to such a caller. Call it after reading the
-/// runs: the store never deletes a record, so every scope a run read before
-/// touched is then among the realm's scopes, and quarantine evidence stays.
+/// Whether the caller may read every memory scope `realm` names
+/// ([`crate::memory::capabilities::MemoryPanelStore::realm_scopes`]: the
+/// scopes of its records, proposals and gated promotions, and its harvested
+/// identities), each by [`memory_panel_scope_visible`]: every identity
+/// there, its mobs (`mob.memory.read`), the operator scope once it holds
+/// anything (`operator.memory.read`) and the realm scope. While the realm
+/// holds quarantined content, the caller must also pass the quarantine half
+/// of the record rule ([`memory_panel_quarantine_evidence_visible`]). A
+/// steward dream spans the realm's scopes and its history names them (a
+/// harvest phase names its identity, a skip names a proposal, a rationale
+/// can describe quarantined content), so its runs are listed only to such a
+/// caller. Call it after reading the runs: once a realm is open the bundled
+/// store deletes none of those rows, so every scope a run read before named
+/// is then among the realm's scopes, and quarantine evidence stays.
 async fn memory_panel_realm_fully_readable(
     store: &dyn crate::memory::capabilities::MemoryPanelStore,
     caller: MemoryPanelCaller<'_>,
@@ -5030,10 +5034,10 @@ async fn memory_panel_realm_fully_readable(
         return Ok(true);
     }
     let every_scope = store
-        .scope_overview(realm)
+        .realm_scopes(realm)
         .await?
         .iter()
-        .all(|row| memory_panel_scope_visible(caller, &row.scope));
+        .all(|scope| memory_panel_scope_visible(caller, scope));
     if !every_scope {
         return Ok(false);
     }

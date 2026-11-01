@@ -1704,11 +1704,8 @@ button.cc-tile:focus-visible,
   animation: cc-pop-in var(--_cc-dur-enter) var(--_cc-ease-out);
 }
 .cc-popover[data-side="top"] { animation-name: cc-pop-in-above; }
-.cc-popover[data-state="closing"] {
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity var(--_cc-dur-exit) var(--_cc-ease-in);
-}
+/* No exit fade: a popover unmounts the moment it closes, so nothing closed
+   stays on screen, in the top layer or under the pointer. */
 @keyframes cc-pop-in {
   from { opacity: 0; transform: translateY(-4px); }
   to   { opacity: 1; transform: none; }

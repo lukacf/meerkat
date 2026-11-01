@@ -275,7 +275,69 @@ function PopoverProbe({ onClose, onFocusMove }: { onClose: (reason: string) => v
   );
 }
 
+function ClosingProbe({ onClose }: { onClose: (reason: string) => void }) {
+  const anchorRef = useRef<HTMLButtonElement | null>(null);
+  const [open, setOpen] = useState(true);
+  return (
+    <>
+      <button type="button" ref={anchorRef}>
+        Anchor
+      </button>
+      <button type="button" data-testid="outside">
+        Outside
+      </button>
+      <Popover
+        open={open}
+        anchorRef={anchorRef}
+        onClose={(reason) => {
+          onClose(reason);
+          setOpen(false);
+        }}
+        ariaLabel="Probe"
+        testId="probe-popover"
+      >
+        <button type="button">Inside</button>
+      </Popover>
+    </>
+  );
+}
+
+/** Browsers animate and jsdom does not: with this, a popover that faded out
+ * on close (it once did) stays mounted here as it did in a browser. */
+function withAnimate(run: () => void) {
+  const original = Element.prototype.animate;
+  Element.prototype.animate = (() => ({ cancel() {}, finished: Promise.resolve() })) as unknown as typeof original;
+  try {
+    run();
+  } finally {
+    Element.prototype.animate = original;
+  }
+}
+
 describe("popover", () => {
+  it("unmounts at once on a press outside, never lingering open", () => {
+    withAnimate(() => {
+      const onClose = vi.fn();
+      const view = render(<ClosingProbe onClose={onClose} />);
+      expect(view.getByTestId("probe-popover").getAttribute("data-state")).toBe("open");
+      fireEvent.pointerDown(view.getByTestId("outside"));
+      expect(onClose).toHaveBeenCalledWith("outside");
+      expect(view.queryByTestId("probe-popover") === null).toBe(true);
+    });
+  });
+
+  it("unmounts at once when focus moves outside it", () => {
+    withAnimate(() => {
+      const onClose = vi.fn();
+      const view = render(<ClosingProbe onClose={onClose} />);
+      const inside = view.getByRole("button", { name: "Inside" });
+      expect(document.activeElement === inside).toBe(true);
+      fireEvent.focusOut(inside, { relatedTarget: view.getByTestId("outside") });
+      expect(onClose).toHaveBeenCalledWith("focus");
+      expect(view.queryByTestId("probe-popover") === null).toBe(true);
+    });
+  });
+
   it("can take focus while it is placed: transparent, never visibility hidden", () => {
     // Browsers skip focus inside a visibility: hidden subtree (jsdom does
     // not), so a popover hidden that way kept focus on its trigger and

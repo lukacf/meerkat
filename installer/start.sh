@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# Forge and its children create private runtime and preparation files.
+umask 077
 cd "$(dirname "$0")"
 
 prepare_only=false

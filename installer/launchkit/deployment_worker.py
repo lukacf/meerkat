@@ -360,6 +360,8 @@ class Supervisor:
         admission = object()
         self._child_admission = admission
         try:
+            # Direct hosted starts must also create private application files.
+            options["umask"] = 0o077
             process, cancelled = await spawn_owned_worker(*args, preserve_admission_errors=True, **options)
             self.child = process
             return process, cancelled

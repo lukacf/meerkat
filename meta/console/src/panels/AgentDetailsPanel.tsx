@@ -582,6 +582,9 @@ function EgoGraph({
         minimap="off"
         controls={false}
         labels="all"
+        // Inside the scrolling details body: plain scrolling moves the page,
+        // a pinch or Ctrl/Cmd + wheel zooms the graph.
+        wheelZoom="pinch"
         testIdPrefix="inspect-ego"
         selection={[]}
         onSelect={(ids) => {

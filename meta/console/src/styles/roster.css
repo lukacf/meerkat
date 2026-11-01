@@ -8,6 +8,10 @@
 .roster__measure { height: 0; flex: none; }
 .roster__filters { flex: none; }
 .roster__groups .cc-count { color: var(--_cc-foreground-meta); }
+/* In a narrow pane the group pills scroll sideways instead of overflowing. */
+.roster__groups { max-width: 100%; overflow-x: auto; scrollbar-width: none; }
+.roster__groups::-webkit-scrollbar { display: none; }
+.roster__groups .cc-seg__btn { flex: none; }
 .roster__layout { flex: 1 1 auto; min-height: 0; }
 .roster__main { display: flex; flex-direction: column; flex: 1 1 auto; min-width: 0; min-height: 0; }
 .roster__main > .cc-panel-empty { margin: auto 0; }

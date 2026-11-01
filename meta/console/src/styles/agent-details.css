@@ -43,6 +43,7 @@
 }
 .agent-details__now > .cc-mark { margin-top: 5px; }
 .agent-details__bars { max-width: 100%; }
+.agent-details__bars-box { height: 0; }
 .agent-details__muted { margin: 0; font-size: var(--_cc-panel-fs-meta); color: var(--_cc-foreground-meta); }
 
 /* The ego graph: the agent at the centre of its peers, 240 px tall. */

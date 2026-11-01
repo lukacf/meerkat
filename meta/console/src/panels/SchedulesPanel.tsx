@@ -85,7 +85,7 @@ const DAY_MS = 24 * 3_600_000;
 /** A repeat with more runs than this in the agenda's window is drawn as a band. */
 const BAND_THRESHOLD = 48;
 
-type SchedulesView = "agenda" | "week" | "list";
+export type SchedulesView = "agenda" | "week" | "list";
 type AgendaRange = "day" | "week";
 type PhaseFilter = "all" | "active" | "paused";
 
@@ -106,6 +106,11 @@ export interface SchedulesPanelProps {
   now?: () => Date;
   timezone?: string;
   formatTime?: (iso: string) => string;
+  /** The view shown until the viewer picks one (Agenda by default). */
+  defaultView?: SchedulesView;
+  /** Opens the New schedule form once the lists are read; a string picks
+   * the agent (a link to "schedule a message for this agent"). */
+  openNew?: boolean | string;
 }
 
 /** One agent's list as the panel last read it. */
@@ -199,12 +204,14 @@ export function SchedulesPanel({
   now,
   timezone,
   formatTime = formatScheduleTime,
+  defaultView = "agenda",
+  openNew: openNewOnLoad,
 }: SchedulesPanelProps): React.JSX.Element {
   const directory = useAgentDirectory();
   const sharedNow = useNow();
   const nowMs = now ? now().getTime() : sharedNow;
   const nowMinute = Math.floor(nowMs / 60_000) * 60_000;
-  const [view, setView] = usePanelPreference<SchedulesView>("meta-console-schedules-view", "agenda", VIEWS);
+  const [view, setView] = usePanelPreference<SchedulesView>("meta-console-schedules-view", defaultView, VIEWS);
   const [range, setRange] = usePanelPreference<AgendaRange>("meta-console-schedules-range", "day", RANGES);
   const [density, setDensity] = usePanelDensity("schedules");
   const [showIds, setShowIds] = useShowTechnicalIds("schedules");
@@ -215,6 +222,9 @@ export function SchedulesPanel({
   const [actionError, setActionError] = React.useState<string | null>(null);
   const [confirmingDelete, setConfirmingDelete] = React.useState<string | null>(null);
   const [phaseFilter, setPhaseFilter] = React.useState<PhaseFilter>("all");
+  // A drawer the viewer opened takes focus (spec A3.10); one a deep link
+  // opened on load does not steal it.
+  const [drawerFocus, setDrawerFocus] = React.useState(true);
   const [weekRef, weekWidth] = useMeasuredWidth<HTMLDivElement>(640);
 
   const runRef = React.useRef(run);
@@ -365,10 +375,11 @@ export function SchedulesPanel({
     return done;
   }
 
-  function openNew() {
+  function openNew(preferred?: string, takeFocus = true) {
+    setDrawerFocus(takeFocus);
     setActionError(null);
     setConfirmingDelete(null);
-    const identity = changeable[0];
+    const identity = preferred && changeable.includes(preferred) ? preferred : changeable[0];
     if (!identity) return;
     setDrawer({
       kind: "form",
@@ -380,6 +391,7 @@ export function SchedulesPanel({
   }
 
   function openEdit(schedule: ConsoleSchedule) {
+    setDrawerFocus(true);
     setActionError(null);
     setConfirmingDelete(null);
     setDrawer({
@@ -392,6 +404,7 @@ export function SchedulesPanel({
   }
 
   function openDetail(schedule: ConsoleSchedule) {
+    setDrawerFocus(true);
     setConfirmingDelete(null);
     setDrawer({ kind: "detail", identity: schedule.identity, scheduleId: schedule.scheduleId });
   }
@@ -432,6 +445,17 @@ export function SchedulesPanel({
     });
   }
 
+  // A deep link to the form opens it once, when the lists are read.
+  const openedOnLoad = React.useRef(false);
+  const listsRead = offer.list && identities.length > 0 && shown.length === identities.length && inFlight === 0;
+  React.useEffect(() => {
+    if (!openNewOnLoad || openedOnLoad.current || !listsRead) return;
+    openedOnLoad.current = true;
+    openNew(typeof openNewOnLoad === "string" ? openNewOnLoad : undefined, false);
+    // Once, when the lists are first read.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [openNewOnLoad, listsRead]);
+
   // ── Header ──────────────────────────────────────────────────────────
   const summary: Array<SummaryFact | null> = offer.list
     ? [
@@ -470,7 +494,7 @@ export function SchedulesPanel({
       tools={
         offer.list ? (
           <>
-            {canCreate ? <IconButton label="New schedule" glyph="plus" onClick={openNew} data-testid="schedules-new-tool" /> : null}
+            {canCreate ? <IconButton label="New schedule" glyph="plus" onClick={() => openNew()} data-testid="schedules-new-tool" /> : null}
             <IconButton label="Refresh schedules" glyph="refresh" onClick={refresh} data-testid="schedules-refresh" />
           </>
         ) : undefined
@@ -479,7 +503,7 @@ export function SchedulesPanel({
         label: "More actions for Schedules",
         triggerTestId: "schedules-menu",
         items: standardPanelMenu({
-          viewOptions: canCreate ? [{ kind: "item", id: "new", label: "New schedule", glyph: "plus", onSelect: openNew, testId: "schedules-menu:new" }] : [],
+          viewOptions: canCreate ? [{ kind: "item", id: "new", label: "New schedule", glyph: "plus", onSelect: () => openNew(), testId: "schedules-menu:new" }] : [],
           density,
           onDensityChange: setDensity,
           showTechnicalIds: showIds,
@@ -632,6 +656,8 @@ export function SchedulesPanel({
           testIdPrefix="schedules-agenda-run"
           rowTestIdPrefix="schedules-agenda-row"
           testId="schedules-agenda"
+          rowHeight={density === "compact" ? 30 : 40}
+          emptyText={`Nothing in ${rangeWords}`}
           className={selectedKey ? "has-selection" : undefined}
         />
       ) : (
@@ -691,7 +717,7 @@ export function SchedulesPanel({
     <div className="schedules__list" data-testid="schedules-list">
       {canCreate ? (
         <div className="schedules__toolbar">
-          <Button size="sm" onClick={openNew} data-testid="schedules-new" icon={<KitGlyph name="plus" />}>
+          <Button size="sm" onClick={() => openNew()} data-testid="schedules-new" icon={<KitGlyph name="plus" />}>
             New schedule
           </Button>
         </div>
@@ -790,8 +816,8 @@ export function SchedulesPanel({
         time={
           plan.next !== null ? (
             <Countdown to={plan.next} now={now ? nowMs : undefined} testId={`schedules-next:${id}`} />
-          ) : (
-            <span className="schedules__no-run">{isPaused ? "Paused" : "No run planned"}</span>
+          ) : isPaused ? undefined : (
+            <span className="schedules__no-run">No run planned</span>
           )
         }
         actions={actions}
@@ -831,6 +857,7 @@ export function SchedulesPanel({
         title={form.schedule ? `Edit ${form.schedule.name || "schedule"}` : "New schedule"}
         subtitle={<>For <AgentName id={form.identity} /></>}
         onClose={() => setDrawer(null)}
+        autoFocus={drawerFocus}
         testId="schedules-drawer"
         closeTestId="schedules-drawer-close"
       >
@@ -955,7 +982,7 @@ export function SchedulesPanel({
             ? "You may not view any agent's schedules here."
             : "Schedules send a message to an agent at set times: once, on a repeat, or on a calendar. None of the agents you can see has one."
         }
-        action={canCreate ? <Button size="sm" variant="primary" onClick={openNew}>New schedule</Button> : undefined}
+        action={canCreate ? <Button size="sm" variant="primary" onClick={() => openNew()}>New schedule</Button> : undefined}
         testId="schedules-empty"
       />
     );

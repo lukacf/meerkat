@@ -93,7 +93,7 @@
 .schedules__no-run { font-size: 11px; color: var(--_cc-foreground-meta); white-space: nowrap; }
 
 /* The drawer: the form and a schedule's details. */
-.schedules__form {
+.console-schedules__form.schedules__form {
   border: 0;
   border-radius: 0;
   padding: 0;

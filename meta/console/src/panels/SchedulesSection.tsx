@@ -282,24 +282,25 @@ export function ScheduleForm({
   );
 }
 
-/** The width of an element, followed as it resizes (a fallback until measured). */
-export function useMeasuredWidth<T extends HTMLElement>(fallback: number): [React.RefObject<T | null>, number] {
-  const ref = React.useRef<T | null>(null);
+/** The width of an element, followed as it resizes (a fallback until
+ * measured). The ref is a callback, so an element that mounts later (a
+ * view switched to) is measured too. */
+export function useMeasuredWidth<T extends HTMLElement>(fallback: number): [(node: T | null) => void, number] {
+  const [node, setNode] = React.useState<T | null>(null);
   const [width, setWidth] = React.useState(fallback);
   React.useEffect(() => {
-    const element = ref.current;
-    if (!element) return undefined;
+    if (!node) return undefined;
     const measure = () => {
-      const next = Math.round(element.getBoundingClientRect().width);
+      const next = Math.round(node.getBoundingClientRect().width);
       if (next > 0) setWidth((current) => (current === next ? current : next));
     };
     measure();
     if (typeof ResizeObserver === "undefined") return undefined;
     const observer = new ResizeObserver(measure);
-    observer.observe(element);
+    observer.observe(node);
     return () => observer.disconnect();
-  }, []);
-  return [ref, width];
+  }, [node]);
+  return [setNode, width];
 }
 
 /** A schedule's planned runs as strip marks: shaped by kind, the next run
@@ -578,7 +579,6 @@ export function SchedulesSection({
               width={Math.max(160, stripWidth)}
               height={18}
               axis
-              now={nowMs}
               label={`Next 7 days: ${stripItems.filter((item) => !item.faint).length} planned runs`}
               testIdPrefix={`schedule-run:${identity}`}
               testId={`schedules-strip:${identity}`}

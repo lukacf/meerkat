@@ -111,8 +111,20 @@ impl Default for ResumeMemberBinding {
 }
 
 /// Bridging type for agent identity. Maps to `crate::ids::AgentIdentity`.
+/// `Default` is required by the `OptionValueExt::get("value")` unwrap path
+/// used in the operator-instruction arms that record a member target, as the
+/// schema's own bridging `AgentIdentity` derives it.
 #[derive(
-    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
 )]
 pub struct AgentIdentity(pub String);
 

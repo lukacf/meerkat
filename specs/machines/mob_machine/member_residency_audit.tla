@@ -561,7 +561,7 @@ RRecoverStarted ==
 \* when its terminal's input says so (ex).
 RAuthorize ==
     AuthorizeSpawnProfileRunning(Id1, AuditProfile, AuditModel, AuditDigest, AuditDigest, AuditDigest, None, None, FALSE, None)
-RBeginRotation == BeginMemberRotationRunning(Id1, Rid1, 1, 0, Sess3, None, FALSE, "FreshSession")
+RBeginRotation == BeginMemberRotationRunning(Id1, Rid1, 1, 0, Sess3, None, FALSE, "FreshSession", AuditProfile)
 RCommitRotationOwing(ko, ex) ==
     \/ CommitMemberRotationLiveRunning(Id1, Rid1, 1, 0, Some(Sess1), AuditDisposal, Rid3, 3, 1, AuditMode, FALSE, ko, AuditObjective, ex)
     \/ CommitMemberRotationRetiredRunning(Id1, Rid1, 1, 0, Some(Sess1), AuditDisposal, Rid3, 3, 1, AuditMode, FALSE, ko, AuditObjective, ex)
@@ -860,7 +860,7 @@ SRetire ==
     \/ RetireRunningReleasing(AuditMob, Rid1, Id1, 0, Some(Sess1), Some(Sess1))
     \/ RetireRunningReleasingArchiveOnly(AuditMob, Rid1, Id1, 0, Some(Sess1), Some(Sess1))
 SBeginRotation ==
-    \E ep \in {Some(E3Inproc), None} : BeginMemberRotationRunning(Id1, Rid1, 1, 0, Sess3, ep, FALSE, "FreshSession")
+    \E ep \in {Some(E3Inproc), None} : BeginMemberRotationRunning(Id1, Rid1, 1, 0, Sess3, ep, FALSE, "FreshSession", AuditProfile)
 SRuntimeRetired == ObserveRuntimeRetired(Rid1, 1)
 SDetach == SessionIngressDetachedForMobDestroyRunning(AuditMob, Rid1)
 SCommitRotation ==
@@ -955,10 +955,10 @@ AuditWake2Spec == Init /\ [][AuditWake2Next]_vars
 (* The rotate-same run: one identity rotated onto its own session.         *)
 (***************************************************************************)
 
-\* Member 1's same-session rotation (a respawn): its retirement starts in the
-\* rotation's own step, on the member's kept binding, with no endpoint of the
-\* rotation's own.
-QBegin == BeginMemberRotationSameSessionRunning(Id1, Rid1, 1, 0, Sess1, None, FALSE, "SameSession")
+\* Member 1's same-session rotation (a respawn) under its own role: its
+\* retirement starts in the rotation's own step, on the member's kept binding,
+\* with no endpoint of the rotation's own.
+QBegin == BeginMemberRotationSameSessionRunning(Id1, Rid1, 1, 0, Sess1, None, FALSE, "SameSession", AuditProfile)
 
 \* The same-session terminals: the next incarnation Rid3, fence 3,
 \* generation 1, seated Dormant on session 1, which the retirement kept,
@@ -1052,19 +1052,20 @@ AuditRotateSameSpec == Init /\ [][AuditRotateSameNext]_vars
 (***************************************************************************)
 
 \* The rotations a start row records: a FreshSession rotation onto session 3
-\* (endpoint 3 or none) and a same-session rotation on session 1.
+\* (endpoint 3 or none) and a same-session rotation on session 1, each under
+\* the member's own role.
 VIntents ==
-    { <<"FreshSession", Sess3, Some(E3Inproc)>>,
-      <<"FreshSession", Sess3, None>>,
-      <<"SameSession", Sess1, None>> }
+    { <<"FreshSession", Sess3, Some(E3Inproc), AuditProfile>>,
+      <<"FreshSession", Sess3, None, AuditProfile>>,
+      <<"SameSession", Sess1, None, AuditProfile>> }
 
 \* The replay of a recorded rotation on member 1's Retiring incarnation, for
 \* every arm of the signal.
 VRecoverIntent ==
     \E v \in VIntents :
-        \/ RecoverMemberRotationIntentFreshSessionRunning(Id1, Rid1, v[1], v[2], v[3])
-        \/ RecoverMemberRotationIntentSameSessionRunning(Id1, Rid1, v[1], v[2], v[3])
-        \/ RecoverMemberRotationIntentDestroyingRunning(Id1, Rid1, v[1], v[2], v[3])
+        \/ RecoverMemberRotationIntentFreshSessionRunning(Id1, Rid1, v[1], v[2], v[3], v[4])
+        \/ RecoverMemberRotationIntentSameSessionRunning(Id1, Rid1, v[1], v[2], v[3], v[4])
+        \/ RecoverMemberRotationIntentDestroyingRunning(Id1, Rid1, v[1], v[2], v[3], v[4])
 
 \* The re-drive of the replayed retirement (archive-only: nothing is
 \* registered after a restart), preserving the binding (a same-session

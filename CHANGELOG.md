@@ -99,8 +99,10 @@ them.
   code that builds either struct literally must set it. The `MobMachineInput`
   variant `BeginMemberRotation` (meerkat-machine-schema and meerkat-mob) and
   the kernel `generated::mob::inputs` struct `BeginMemberRotation` gain the
-  public field `target` (the new enum `RotationTarget`: `FreshSession` keeps
-  the previous behaviour), the variant and struct `ClassifyMemberRelease`
+  public fields `target` (the new enum `RotationTarget`: `FreshSession` keeps
+  the previous behaviour) and `profile_name: String` (the next incarnation's
+  role, which only a same-session rotation reads), the variant and struct
+  `ClassifyMemberRelease`
   gain `scope_agent_runtime_id`, `scope_fence_token` and `scope_session_id`
   (`None` keeps the previous unscoped verdict), and the variant and struct
   `Respawn` gain `agent_identity` (the identity whose incarnation
@@ -108,7 +110,8 @@ them.
   them, and a serialized kernel input without them no longer deserializes.
   `MobMachineSignal` and its variant enum and the kernel `Signal` and
   `SignalKind` gain `RecoverMemberRotationIntent { agent_identity,
-  agent_runtime_id, target, session_id, peer_endpoint }`; `MobMachineEffect`
+  agent_runtime_id, target, session_id, peer_endpoint, profile_name }`;
+  `MobMachineEffect`
   and its variant enum and the kernel `Effect` and `EffectKind` gain
   `RespawnRefused { agent_identity, reason }`; `MemberSessionDisposal`
   (meerkat-machine-schema and meerkat-mob) gains `KeptForSuccessor` and
@@ -704,9 +707,14 @@ them.
   member's current incarnation and seats its next one Dormant at the next
   generation on the same session, each in one MobMachine step, so the
   identity is never unseated: the next incarnation keeps the member's
-  conversation, comms identity, wiring edges and external peer edges, after a
-  restart too (the terminal's journal batch records the kept edges again
-  after its successor's row). The member's running turn is cancelled. When
+  conversation and comms key and, under the member's own profile, its
+  endpoint, wiring edges and external peer edges, after a restart too (the
+  terminal's journal batch records the kept edges again after its successor's
+  row). Under another profile the next incarnation runs under that role's
+  comms name: its endpoint is the member's key under the new name, its
+  retirement unwires the member's peers' trust as a plain retirement does,
+  the member's edges end, and it is wired to the edges the definition
+  declares for its role. The member's running turn is cancelled. When
   its session commits each round, its queued inputs that may cross a stop
   (durable prompts not bound to an objective) stay queued for the next
   incarnation, which the handover wakes to run each of them once, and their

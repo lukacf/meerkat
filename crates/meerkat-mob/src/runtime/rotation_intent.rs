@@ -108,9 +108,12 @@ pub struct MemberRotationRecord {
     /// The next incarnation's session: a new one, or (SameSession) the
     /// member's own.
     pub(crate) session_id: SessionId,
-    /// The next incarnation's endpoint a FreshSession rotation recorded
-    /// (none for network comms before the first wake, and none for a
-    /// SameSession rotation: the member keeps its own).
+    /// The next incarnation's endpoint the rotation recorded: a FreshSession
+    /// rotation's on its next session, or a SameSession successor's under
+    /// another role (the member's own key under the new role's comms name).
+    /// None for network comms before the first wake, and none for a
+    /// SameSession successor under the member's own role: it keeps the
+    /// member's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) peer_endpoint: Option<TrustedPeerDescriptor>,
     pub(crate) successor: RotationSuccessor,
@@ -178,6 +181,11 @@ impl MemberRotationRecord {
         self.successor.generation
     }
 
+    /// The next incarnation's role.
+    pub(crate) fn successor_profile(&self) -> &ProfileName {
+        &self.successor.profile
+    }
+
     /// The machine form of the record's endpoint.
     pub(crate) fn machine_peer_endpoint(&self) -> Option<mob_dsl::MemberPeerEndpoint> {
         self.peer_endpoint
@@ -198,10 +206,14 @@ impl MemberRotationRecord {
 ///
 /// The member's current incarnation is retired and its next one is seated
 /// Dormant at the next generation on the SAME session, in one machine step:
-/// its conversation, comms identity and wiring edges are kept. The next
-/// incarnation keeps the member's labels, spawner, wiring exemption and
-/// continuity, and its profile and runtime mode unless this request names
-/// others (a declared role migration, a runtime-mode restamp).
+/// its conversation and comms key are kept, and under the member's own role
+/// its endpoint and wiring edges too. The next incarnation keeps the
+/// member's labels, spawner, wiring exemption and continuity, and its
+/// profile and runtime mode unless this request names others (a declared
+/// role migration, a runtime-mode restamp). Under another profile the next
+/// incarnation runs under that role's comms name: its endpoint is the
+/// member's key under that name, the member's edges end, and it is wired to
+/// the edges the definition declares for its role.
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
 pub struct MemberRespawn {

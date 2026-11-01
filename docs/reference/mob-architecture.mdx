@@ -365,9 +365,16 @@ retirement cancels the member's running turn, releases its runtime
 registration and keeps the session. A second step retires the incarnation and
 seats the next one Dormant at the next generation on the same session, so the
 identity is never unseated, and the next incarnation keeps the member's
-conversation, comms identity, wiring edges and external peer edges. The
-second step's journal batch records the kept edges again after the next
+conversation and comms key. Under the member's own profile it keeps the
+member's endpoint, wiring edges and external peer edges too: the second
+step's journal batch records the kept edges again after the next
 incarnation's row, so a restart (under an older release too) restores them.
+Under another profile the next incarnation runs under that role's comms
+name, so it keeps neither its descriptor nor its topology: its endpoint is
+the member's key under the new name, the retirement unwires the member's
+peers' trust as a plain retirement does, the member's edges end, and the
+next incarnation is wired to the edges the definition declares for its role,
+as a rotation's next incarnation is.
 When the member's session
 commits each round, its queued inputs that may cross a stop (durable prompts
 not bound to an objective) stay queued: their waiters are answered

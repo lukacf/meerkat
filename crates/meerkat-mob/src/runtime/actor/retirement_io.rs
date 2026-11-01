@@ -78,10 +78,22 @@ impl RotationReply {
 
 impl RetirementState {
     /// Whether this retirement is a same-session rotation's: it keeps the
-    /// member's session, and with it the member's endpoint, its wiring edges
-    /// and its peers' trust, for the next incarnation.
+    /// member's session for the next incarnation, and hands its queued
+    /// inputs to it.
     fn keeps_session(&self) -> bool {
         matches!(&self.reply, RetirementReply::Rotate { rotation, .. } if rotation.keeps_session())
+    }
+
+    /// Whether this retirement keeps the member's topology for the next
+    /// incarnation: a same-session successor under the member's own role
+    /// keeps the member's endpoint, its wiring edges and its peers' trust,
+    /// so no peer is observed, notified or unwired. A same-session successor
+    /// under another role runs under the new role's comms name: its
+    /// retirement unwires its peers' trust as a plain retirement's does,
+    /// and keeps only the session.
+    fn keeps_topology(&self) -> bool {
+        matches!(&self.reply, RetirementReply::Rotate { rotation, .. }
+            if rotation.keeps_topology(&self.entry.role))
     }
 }
 
@@ -2934,9 +2946,9 @@ impl MobActor {
             }
             let identity = mob_dsl::AgentIdentity::from_domain(&continuation.entry.agent_identity);
             let state = self.dsl_authority.state();
-            // A same-session rotation unwires no edge: the next incarnation
-            // keeps them.
-            if continuation.keeps_session() {
+            // A same-session successor under the member's own role unwires
+            // no edge: the next incarnation keeps them.
+            if continuation.keeps_topology() {
                 return Ok(());
             }
             continuation.placed_peers = state
@@ -3019,10 +3031,11 @@ impl MobActor {
                 return;
             }
         }
-        if continuation.keeps_session() {
-            // A same-session rotation observes no peer: it keeps the
-            // member's endpoint, edges and peers' trust for the next
-            // incarnation, so its disposal carries no trust cleanup.
+        if continuation.keeps_topology() {
+            // A same-session successor under the member's own role observes
+            // no peer: it keeps the member's endpoint, edges and peers' trust
+            // for the next incarnation, so its disposal carries no trust
+            // cleanup.
             let mut ctx = Self::disposal_context_from_entry(
                 &continuation.entry.agent_identity,
                 &continuation.entry,
@@ -4519,19 +4532,25 @@ impl MobActor {
         reply: RetirementReply,
         redriven: bool,
     ) -> Option<RetirementReply> {
-        let standing = {
+        let (standing, standing_endpoint) = {
             let state = self.dsl_authority.state();
             let dsl_identity = mob_dsl::AgentIdentity::from_domain(identity);
-            state
-                .member_rotation_targets
-                .get(&dsl_identity)
-                .copied()
-                .zip(
-                    state
-                        .member_rotation_session_ids
-                        .get(&dsl_identity)
-                        .cloned(),
-                )
+            (
+                state
+                    .member_rotation_targets
+                    .get(&dsl_identity)
+                    .copied()
+                    .zip(
+                        state
+                            .member_rotation_session_ids
+                            .get(&dsl_identity)
+                            .cloned(),
+                    ),
+                state
+                    .member_rotation_peer_endpoints
+                    .get(&dsl_identity)
+                    .cloned(),
+            )
         };
         let Some((standing_target, standing_session)) = standing else {
             // No rotation stands: a record left from one is spent.
@@ -4555,9 +4574,22 @@ impl MobActor {
         };
         let reply = match reply {
             RetirementReply::Rotate { rotation, reply } => {
+                // The endpoint a standing same-session rotation recorded (a
+                // successor under another role) carries that role's comms
+                // name, which the terminal installs: a re-issue naming
+                // another endpoint (another role) is another rotation.
+                let same_endpoint = standing_target != mob_dsl::RotationTarget::SameSession
+                    || standing_endpoint.is_none()
+                    || standing_endpoint.as_ref()
+                        == rotation
+                            .endpoint
+                            .as_ref()
+                            .map(mob_dsl::MemberPeerEndpoint::from)
+                            .as_ref();
                 if rotation.target.to_machine() == standing_target
                     && mob_dsl::SessionId::from_domain(&rotation.candidate.session_id)
                         == standing_session
+                    && same_endpoint
                 {
                     return Some(RetirementReply::Rotate { rotation, reply });
                 }
@@ -5031,10 +5063,13 @@ impl MobActor {
                                 } => Some(Self::kickoff_notice_intent(intent)),
                                 _ => None,
                             }));
-                        // A same-session rotation keeps the member's endpoint,
-                        // edges and peers' trust: no peer is notified or
-                        // unwired, and the session is released, not archived.
-                        if continuation.keeps_session() {
+                        // A same-session successor under the member's own
+                        // role keeps the member's endpoint, edges and peers'
+                        // trust: no peer is notified or unwired, and the
+                        // session is released, not archived. One under
+                        // another role notifies and unwires its peers as a
+                        // plain retirement does; its session is released too.
+                        if continuation.keeps_topology() {
                             self.retirement_prepare_archive(continuation).await;
                         } else {
                             self.retirement_observe_endpoints(continuation, true).await;

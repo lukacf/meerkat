@@ -710,6 +710,20 @@ RolesShapes ==
 RAuthorizeAs(p) ==
     AuthorizeSpawnProfileRunning(Id1, p, AuditModel, AuditDigest, AuditDigest, AuditDigest, None, None, FALSE, None)
 RSeedFirstBoot == \E hp \in {{}, {Id1}} : SeedMemberResidencyRunning("OnDemand", "Authoritative", hp)
+
+\* Member 1's same-session rotation under the new role: it runs under that
+\* role's comms name, so it names member 1's key (peer id 1) under a new
+\* name; an endpoint under another key is refused at the start.
+E1InprocMoved == [name |-> "peername_1b", peer_id |-> "peerid_1", address |-> "inproc://peername_1b",
+                  signing_key |-> "peersigningkey_1", transport |-> "Inproc"]
+QBeginMoved ==
+    \E ep \in {Some(E1InprocMoved), Some(E3Inproc)} :
+        BeginMemberRotationSameSessionRunning(Id1, Rid1, 1, 0, Sess1, ep, FALSE, "SameSession", AuditProfile2)
+
+Endpoint(id) == IF id \in DOMAIN member_peer_endpoints THEN Some(member_peer_endpoints[id]) ELSE None
+EndpointNext(id) == IF id \in DOMAIN member_peer_endpoints' THEN Some(member_peer_endpoints'[id]) ELSE None
+RotationEndpoint(id) ==
+    IF id \in DOMAIN member_rotation_peer_endpoints THEN Some(member_rotation_peer_endpoints[id]) ELSE None
 RWake == \E cause \in AuditWakeCauses : WakeArm(Id1, cause, FALSE, "Content", FALSE)
 
 RolesNext ==
@@ -727,6 +741,7 @@ RolesNext ==
     \/ QRelease
     \/ \E p \in {AuditProfile, AuditProfile2} : RAuthorizeAs(p)
     \/ QBegin
+    \/ QBeginMoved
     \/ QCommit
     \/ QRetire
     \/ WDetach
@@ -748,6 +763,16 @@ AuditHostPreparationNeverWoken ==
 AuditHostStepKeepsRoleHold ==
     [][QHostPrepared /\ Cause(Id1) = Some("RoleMigrationUndeclared")
          => member_host_preparation_causes' = member_host_preparation_causes]_vars
+
+\* A same-session successor under another role takes the endpoint its
+\* rotation recorded (member 1's key under the new role's comms name), or
+\* owes one when none was recorded; one under the member's own role keeps
+\* the member's endpoint.
+AuditRoleMoveTakesItsEndpoint ==
+    [][QCommit =>
+         IF ProfileNext(Id1) # Profile(Id1)
+         THEN EndpointNext(Id1) = RotationEndpoint(Id1)
+         ELSE EndpointNext(Id1) = Endpoint(Id1)]_vars
 
 \* A declaration with no first-boot request never replaces a first-boot
 \* preparation.
@@ -783,6 +808,13 @@ AuditWitnessRoleHoldEnded ==
 AuditWitnessFirstBootKeptOverRoleHold ==
     /\ Cause(Id1) = Some("FirstBootRow")
     /\ DeclareIdentityEntryRoleMigrationHeld(Id1, AuditProfile2, AuditMode, "Local", FALSE, None, FALSE, FALSE, None, "None")
+\* A same-session successor under the new role takes member 1's key under
+\* that role's comms name.
+AuditWitnessRoleMoveTakesNewName ==
+    /\ Profile(Id1) = Some(AuditProfile)
+    /\ QCommit
+    /\ ProfileNext(Id1) = Some(AuditProfile2)
+    /\ EndpointNext(Id1) = Some(E1InprocMoved)
 \* The end of a role-held member's retirement drops the hold.
 AuditWitnessRoleHoldDroppedAtArchive ==
     /\ Cause(Id1) = Some("RoleMigrationUndeclared")
@@ -797,6 +829,7 @@ NotAuditWitnessRotateVerdict == [][~AuditWitnessRotateVerdict]_vars
 NotAuditWitnessRoleHoldEnded == [][~AuditWitnessRoleHoldEnded]_vars
 NotAuditWitnessFirstBootKeptOverRoleHold == [][~AuditWitnessFirstBootKeptOverRoleHold]_vars
 NotAuditWitnessRoleHoldDroppedAtArchive == [][~AuditWitnessRoleHoldDroppedAtArchive]_vars
+NotAuditWitnessRoleMoveTakesNewName == [][~AuditWitnessRoleMoveTakesNewName]_vars
 
 (***************************************************************************)
 (* The held run.                                                           *)
@@ -1029,6 +1062,7 @@ HoldNext ==
     \/ \E s \in HoldShapes : DeclareArm(Id1, s)
     \/ \E p \in {AuditProfile, AuditProfile2} : RAuthorizeAs(p)
     \/ QBegin
+    \/ QBeginMoved
     \/ QRetire
     \/ RBeginRotation
     \/ HoldCommit

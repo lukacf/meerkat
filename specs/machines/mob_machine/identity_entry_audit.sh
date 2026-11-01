@@ -674,7 +674,8 @@ write_cfg() {
           run_properties="
   AuditHostPreparationNeverWoken
   AuditHostStepKeepsRoleHold
-  AuditRoleHoldKeepsFirstBootRow"
+  AuditRoleHoldKeepsFirstBootRow
+  AuditRoleMoveTakesItsEndpoint"
           run_invariants="
   AuditRolesDeclareExactlyOne"
           ;;
@@ -890,6 +891,7 @@ for witness in \
   "roles:Action property:MigrationRestamped" "roles:Action property:RestampVerdict" \
   "roles:Action property:RotateVerdict" "roles:Action property:RoleHoldEnded" \
   "roles:Action property:FirstBootKeptOverRoleHold" "roles:Action property:RoleHoldDroppedAtArchive" \
+  "roles:Action property:RoleMoveTakesNewName" \
   "held:Invariant:HeldWaiting" "held:Action property:HeldSpawnSeats" \
   "held:Invariant:Hosted" "held:Action property:EverCreatedOwedSeat" \
   "held:Action property:ApplyBusy" \
@@ -1350,6 +1352,22 @@ PY
   # A refusal answers beside the verdict's own arm in the roles run.
   mutate roles roles_declare_overlaps "Invariant AuditRolesDeclareExactlyOne" <<'PY'
 drop_guard("DeclareIdentityEntryRefusedNonAuthoritative", '"RefusedNonAuthoritative")')
+PY
+
+  # A same-session start under another role that records an endpoint under
+  # another key: the successor would take a key the member's peers never
+  # trusted.
+  mutate roles role_move_takes_another_key "Invariant same_session_rotation_keeps_its_binding" <<'PY'
+drop_guard("BeginMemberRotationSameSessionRunning", "member_peer_ids")
+PY
+
+  # A same-session terminal that keeps the member's endpoint whatever the
+  # role: a successor under another role keeps the old role's comms name,
+  # which its wake under the new role refuses.
+  mutate roles role_move_keeps_old_name "Action property AuditRoleMoveTakesItsEndpoint" <<'PY'
+for arm in ("CommitMemberRotationSameSessionRunning", "CommitMemberRotationSameSessionStopped",
+            "CommitMemberRotationSameSessionKickoffRunning", "CommitMemberRotationSameSessionKickoffStopped"):
+    keep_var(arm, "member_peer_endpoints")
 PY
 
   # A declared migration ends the role hold before its terminal commits the

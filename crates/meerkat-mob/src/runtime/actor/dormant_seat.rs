@@ -42,6 +42,12 @@ enum SeatPlanMode {
 /// step that seats it.
 pub(super) struct MemberRotation {
     pub(super) candidate: Box<DormantSeatCandidate>,
+    /// The next incarnation's endpoint the rotation records: a fresh
+    /// rotation's on its next session (none for network comms, whose first
+    /// wake registers one), or a same-session successor's under another
+    /// role (the member's own key under the new role's comms name). A
+    /// same-session successor under the member's own role keeps the
+    /// member's endpoint and records none.
     pub(super) endpoint: Option<TrustedPeerDescriptor>,
     /// Where the next incarnation is seated: a new session (a reset, a
     /// deletion), or the member's own session, which the retirement keeps
@@ -95,6 +101,16 @@ impl MemberRotation {
     /// Whether the rotation keeps the member's session.
     pub(super) fn keeps_session(&self) -> bool {
         self.target == crate::runtime::RotationTarget::SameSession
+    }
+
+    /// Whether the rotation keeps the member's topology for its next
+    /// incarnation: a same-session successor under the member's own role
+    /// (`member_role`) keeps the member's endpoint, its edges and its peers'
+    /// trust. One under another role keeps the session and key but runs
+    /// under the new role's comms name, so it keeps neither; nor does a
+    /// fresh rotation.
+    pub(super) fn keeps_topology(&self, member_role: &ProfileName) -> bool {
+        self.keeps_session() && &self.candidate.profile_name == member_role
     }
 }
 
@@ -1100,20 +1116,21 @@ impl MobActor {
                     fence_token: mob_dsl::FenceToken::from_domain(entry.fence_token),
                     generation: mob_dsl::Generation::from_domain(entry.generation),
                     session_id: next_session,
-                    // A same-session successor keeps the member's own endpoint.
-                    peer_endpoint: if rotation.keeps_session() {
-                        None
-                    } else {
-                        rotation
-                            .endpoint
-                            .as_ref()
-                            .map(mob_dsl::MemberPeerEndpoint::from)
-                    },
+                    // A fresh rotation's next session's endpoint; a
+                    // same-session successor's under another role (the
+                    // member's own key under the new role's comms name),
+                    // none under the member's own role, whose endpoint it
+                    // keeps.
+                    peer_endpoint: rotation
+                        .endpoint
+                        .as_ref()
+                        .map(mob_dsl::MemberPeerEndpoint::from),
                     // The plan's observation of the session the rotation
                     // seats on: MobMachine refuses a start onto a lost or
                     // archived one (the plan probed that verdict already).
                     session_archived: rotation.session_archived,
                     target,
+                    profile_name: rotation.candidate.profile_name.as_str().to_string(),
                 });
             }
         }
@@ -1274,7 +1291,9 @@ impl MobActor {
         if session_archived {
             // MobMachine's start verdict for that observation, probed on a
             // copy of the authority that is never committed, so its refusal
-            // is answered typed before anything starts.
+            // is answered typed before anything starts. The probe names the
+            // member's own role and no endpoint: only the session's verdict
+            // can refuse it.
             let mut probe = self.dsl_authority.prepare_authority();
             let start = mob_dsl::MobMachineInput::BeginMemberRotation {
                 agent_identity: dsl_identity.clone(),
@@ -1285,6 +1304,7 @@ impl MobActor {
                 peer_endpoint: None,
                 session_archived,
                 target: mob_dsl::RotationTarget::SameSession,
+                profile_name: entry.role.as_str().to_string(),
             };
             if probe.apply_batch([start]).is_err() {
                 return Err(unsupported(
@@ -1332,6 +1352,33 @@ impl MobActor {
                 None => None,
             }
         };
+        // A successor under another role runs under that role's comms name:
+        // it keeps the member's session and key but not its descriptor or
+        // its topology. Its endpoint, which the rotation records (MobMachine
+        // checks the key is the member's), is the member's own key under the
+        // new name for a member with an inproc endpoint; a member on network
+        // comms has its successor's endpoint registered by its first wake.
+        let endpoint = if role == entry.role {
+            None
+        } else {
+            match self.machine_member_peer_spec_for(
+                agent_identity,
+                "same-session successor under another role",
+            )? {
+                Some(current)
+                    if current.address.transport()
+                        == meerkat_core::comms::PeerTransport::Inproc =>
+                {
+                    Some(super::super::dormant_seat::inproc_member_endpoint(
+                        &self.definition.id,
+                        &role,
+                        agent_identity,
+                        current.pubkey,
+                    )?)
+                }
+                _ => None,
+            }
+        };
         let mut spec =
             super::super::handle::SpawnMemberSpec::new(role.clone(), agent_identity.clone());
         spec.runtime_mode = Some(request.runtime_mode.unwrap_or(entry.runtime_mode));
@@ -1373,7 +1420,7 @@ impl MobActor {
         candidate.session_unborn = unborn;
         Ok(MemberRotation {
             candidate,
-            endpoint: None,
+            endpoint,
             target: crate::runtime::RotationTarget::SameSession,
             spawned_by: entry.spawned_by,
             resume_from_role,
@@ -1719,19 +1766,34 @@ impl MobActor {
                 _ => None,
             })
             .collect::<Vec<_>>();
+        // The next incarnation's endpoint as the terminal recorded it: a
+        // fresh rotation's next session's, a same-session successor's under
+        // another role (none with network comms: its first wake registers
+        // one), or the member's own, which a successor under its own role
+        // keeps.
+        let endpoint = authority
+            .state()
+            .member_peer_endpoints
+            .get(&dsl_identity)
+            .map(|endpoint| {
+                Self::peer_only_spec_from_member_endpoint(endpoint, "rotation successor endpoint")
+            })
+            .transpose()?;
         // CommitMemberRotation ends every edge of the retired incarnation of
-        // a fresh rotation; its next one is wired to the edges its definition
+        // a fresh rotation and of a same-session successor under another
+        // role; that next incarnation is wired to the edges its definition
         // declares, as a spawn of it would be, in this same step and append.
-        // A same-session successor keeps the member's edges, and its
-        // endpoint, as they are.
+        // A same-session successor under the member's own role keeps the
+        // member's edges, and its endpoint, as they are.
+        let keeps_topology = rotation.keeps_topology(&entry.role);
         let mut wired_rows = Vec::new();
-        let declared_edges = if rotation.keeps_session() {
+        let declared_edges = if keeps_topology {
             None
         } else {
             Some(
                 self.stage_seated_declared_edges(
                     &mut authority,
-                    &[(identity.clone(), rotation.endpoint.clone())],
+                    &[(identity.clone(), endpoint.clone())],
                     &mut effects,
                     &mut wired_rows,
                 )
@@ -1789,14 +1851,9 @@ impl MobActor {
                 .successor_creation_witness(entry)
                 .successor_record(&candidate.session_id)
         };
-        // A same-session successor keeps the member's endpoint, which its row
-        // records again for replay; a fresh rotation's row records the next
-        // session's.
-        let endpoint = if rotation.keeps_session() {
-            self.machine_member_peer_spec_for(identity, "same-session successor endpoint")?
-        } else {
-            rotation.endpoint.clone()
-        };
+        // The next incarnation's row records its endpoint for replay: the
+        // member's own, which a same-session successor under its role keeps,
+        // or the one the terminal installed.
         let mut spawned = crate::event::MemberSpawnedEvent::new(
             identity.clone(),
             next_generation,
@@ -1865,13 +1922,15 @@ impl MobActor {
                 },
             });
         }
-        // A same-session successor keeps the member's wiring and external
-        // edges (MobMachine's terminal keeps them), while replay ends the
-        // retired incarnation's edges with its `MemberRetired` row. The batch
-        // records the kept edges again after the successor's row, read from
-        // the state the terminal committed, so a replay (this release's or
-        // an older one's) restores exactly the topology the terminal kept.
-        if rotation.keeps_session() {
+        // A same-session successor under the member's own role keeps the
+        // member's wiring and external edges (MobMachine's terminal keeps
+        // them), while replay ends the retired incarnation's edges with its
+        // `MemberRetired` row. The batch records the kept edges again after
+        // the successor's row, read from the state the terminal committed,
+        // so a replay (this release's or an older one's) restores exactly
+        // the topology the terminal kept. One under another role keeps none:
+        // its rows are its declared edges', as a fresh rotation's are.
+        if keeps_topology {
             batch.extend(self.kept_topology_rows(prepared.authority.state(), entry)?);
         }
         batch.extend(wired_rows);

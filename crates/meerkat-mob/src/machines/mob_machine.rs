@@ -10449,6 +10449,7 @@ mod tests {
                 peer_endpoint: None,
                 session_archived: false,
                 target: RotationTarget::FreshSession,
+                profile_name: "test".to_string(),
             },
         )
         .expect("the rotation records its intent");
@@ -11228,6 +11229,7 @@ mod tests {
                 peer_endpoint: None,
                 session_archived: false,
                 target: RotationTarget::FreshSession,
+                profile_name: "test".to_string(),
             },
         )
         .expect("the rotation records its intent");
@@ -11292,6 +11294,7 @@ mod tests {
                 peer_endpoint: None,
                 session_archived: false,
                 target: RotationTarget::FreshSession,
+                profile_name: "test".to_string(),
             },
         )
         .expect("the rotation records its intent");
@@ -11427,6 +11430,7 @@ mod tests {
                 peer_endpoint: None,
                 session_archived: false,
                 target: RotationTarget::SameSession,
+                profile_name: "test".to_string(),
             },
         )
         .expect("the same-session rotation starts the retirement and records itself");
@@ -11539,6 +11543,125 @@ mod tests {
         );
     }
 
+    /// A same-session successor under another role keeps the member's
+    /// session and key but runs under the new role's comms name. Its start
+    /// records the member's own peer id under that name, and refuses an
+    /// endpoint for a successor under the member's own role or under another
+    /// key. Its terminal ends the member's edges, installs that endpoint and
+    /// records the new role; a successor under the member's own role keeps
+    /// the member's endpoint and edges
+    /// (`a_same_session_rotation_seats_the_next_incarnation_on_the_kept_session`).
+    ///
+    /// RED: keep the member's endpoint and edges in the same-session
+    /// terminal whatever the role (drop its role-change branch): the
+    /// successor's durable endpoint keeps the old role's name, which its
+    /// wake under the new role refuses, and the edge stays.
+    #[test]
+    fn a_same_session_successor_under_another_role_takes_its_key_under_the_new_name() {
+        let mut authority = MobMachineAuthority::new();
+        let member = seat_live_entry_member(&mut authority, "role-move-entry", 38);
+        let peer = seat_live_entry_member(&mut authority, "role-move-peer", 39);
+        let edge = WiringEdge::new(member.identity.clone(), peer.identity.clone());
+        MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::WireMembers { edge: edge.clone() },
+        )
+        .expect("the members are wired");
+        let moved = test_member_peer_endpoint("role-move-entry-lead", [38; 32]);
+        let begin = |peer_endpoint: Option<MemberPeerEndpoint>, profile: &str| {
+            MobMachineInput::BeginMemberRotation {
+                agent_identity: member.identity.clone(),
+                agent_runtime_id: member.runtime_id.clone(),
+                fence_token: member.fence_token,
+                generation: Generation(0),
+                session_id: member.session_id.clone(),
+                peer_endpoint,
+                session_archived: false,
+                target: RotationTarget::SameSession,
+                profile_name: profile.to_string(),
+            }
+        };
+        assert!(
+            MobMachineMutator::apply(&mut authority.fork(), begin(Some(moved.clone()), "test"))
+                .is_err(),
+            "a successor under the member's own role names no endpoint"
+        );
+        assert!(
+            MobMachineMutator::apply(
+                &mut authority.fork(),
+                begin(
+                    Some(test_member_peer_endpoint("role-move-entry-lead", [7; 32])),
+                    "lead"
+                ),
+            )
+            .is_err(),
+            "a successor under another role keeps the member's key"
+        );
+        MobMachineMutator::apply(&mut authority, begin(Some(moved.clone()), "lead"))
+            .expect("the start records the member's key under the new role's name");
+        assert_eq!(
+            authority
+                .state()
+                .member_rotation_peer_endpoints
+                .get(&member.identity),
+            Some(&moved)
+        );
+        MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::AuthorizeSpawnProfile {
+                agent_identity: member.identity.clone(),
+                profile_name: "lead".to_string(),
+                model: "test-model".to_string(),
+                profile_material_digest: "role-move-profile-digest".to_string(),
+                tool_config_digest: "test-tool-config-digest".to_string(),
+                skills_digest: "test-skills-digest".to_string(),
+                provider_params_digest: None,
+                output_schema_digest: None,
+                external_addressable: false,
+                resolved_spec_digest: None,
+            },
+        )
+        .expect("the rotation authorizes its next incarnation's role");
+        let next = AgentRuntimeId::from("role-move-entry:1");
+        MobMachineMutator::apply(
+            &mut authority,
+            same_session_commit(&member, &next, MemberSessionDisposal::KeptForSuccessor),
+        )
+        .expect("the terminal seats the successor under its role on the kept session");
+        let state = authority.state();
+        assert_eq!(state.identity_to_runtime.get(&member.identity), Some(&next));
+        assert_eq!(
+            state.member_session_bindings.get(&member.identity),
+            Some(&member.session_id),
+            "the successor keeps the member's session"
+        );
+        assert_eq!(
+            state.member_peer_endpoints.get(&member.identity),
+            Some(&moved),
+            "the successor's endpoint is the member's key under the new name"
+        );
+        assert_eq!(
+            state.member_peer_ids.get(&member.identity),
+            Some(&moved.peer_id)
+        );
+        assert!(
+            !state.wiring_edges.contains(&edge),
+            "the member's edges end with the role it ran under"
+        );
+        assert_eq!(
+            state
+                .member_profile_names
+                .get(&member.identity)
+                .map(String::as_str),
+            Some("lead")
+        );
+        assert_ne!(
+            state.member_boot_obligation_owed.get(&member.identity),
+            Some(&MemberBootObligationCause::EndpointPending),
+            "the successor has its endpoint"
+        );
+    }
+
     /// The replay of a rotation's start row records the rotation again, on
     /// the Retiring incarnation the row's replay restored and only there, so
     /// the rotation's own terminal finishes it with no host record while the
@@ -11554,6 +11677,7 @@ mod tests {
                 target,
                 session_id: session_id.clone(),
                 peer_endpoint: None,
+                profile_name: "test".to_string(),
             }
         };
         assert!(
@@ -12073,6 +12197,7 @@ mod tests {
                 peer_endpoint: None,
                 session_archived: false,
                 target: RotationTarget::FreshSession,
+                profile_name: "test".to_string(),
             },
         )
         .expect("the rotation records its intent");
@@ -12439,6 +12564,7 @@ mod tests {
                 peer_endpoint: None,
                 session_archived: false,
                 target: RotationTarget::FreshSession,
+                profile_name: "test".to_string(),
             },
         )
         .expect("the rotation records its intent");
@@ -12692,6 +12818,7 @@ mod tests {
                     peer_endpoint: None,
                     session_archived: false,
                     target: RotationTarget::FreshSession,
+                    profile_name: "test".to_string(),
                 },
             )
             .expect("the rotation records its intent");
@@ -14294,6 +14421,7 @@ mod tests {
                     peer_endpoint: None,
                     session_archived: false,
                     target: RotationTarget::SameSession,
+                    profile_name: profile.to_string(),
                 },
             )
             .expect("the restamp starts its same-session rotation");

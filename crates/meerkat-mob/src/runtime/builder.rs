@@ -5338,6 +5338,7 @@ fn recover_pending_member_retirements(
                             target: rotation.target().to_machine(),
                             session_id: mob_dsl::SessionId::from_domain(rotation.session_id()),
                             peer_endpoint: rotation.machine_peer_endpoint(),
+                            profile_name: rotation.successor_profile().as_str().to_string(),
                         },
                         "recover_member_rotation_intent",
                     )?;

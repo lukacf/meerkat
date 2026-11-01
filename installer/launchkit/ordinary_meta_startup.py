@@ -155,7 +155,8 @@ class OrdinaryMetaStartup:
         if (any(options.get(name) is not None for name in (
                 "mob_config_path", "mob_config_inline", "application_tool_policies",
                 "prepared_application_bundle", "prepared_application_digest",
-                "declare_spec_update_expected_revision", "gateway_transport"))
+                "declare_spec_update_expected_revision"))
+                or "gateway_transport" in options
                 or options.get("gateway_bin") not in (None, str(self.gateway.path))
                 or options.get("persistent_state") != str(self.root / ".mobkit/state")
                 or options.get("roster_provider") is not self.application
@@ -169,20 +170,9 @@ class OrdinaryMetaStartup:
                 if self._policy_bytes else None),
             init_deadline=self.startup_timeout)
         _model_builder_options(self, options)
-        # The ordinary Meta gateway uses 16 MiB workers; give its Core
-        # process-owned member/cleanup runtimes the same budget. Keep this
-        # host choice on the native child, without changing the app environment.
-        from meerkat_meta._transport import PersistentTransport
-        gateway_bin = str(self.gateway.path)
-
-        def gateway_transport():
-            return PersistentTransport(gateway_bin,
-                env={"RKAT_WORKER_STACK_BYTES": "16777216"})
-
-        options["gateway_transport"] = gateway_transport
         self.config = MetaBuilderConfig(**options)
         self._config_providers = tuple(getattr(self.config, name) for name in (
-            "session_builder", "runtime_store", "agent_customizer", "auth_config", "gateway_transport"))
+            "session_builder", "runtime_store", "agent_customizer", "auth_config"))
         self._http_options = tuple(getattr(self.config, name) for name in (
             "http_listen", "http_public_base_url", "allow_remote", "console_require_app_auth",
             "console_config_path"))
@@ -195,6 +185,7 @@ class OrdinaryMetaStartup:
         if (type(config) is not MetaBuilderConfig or config is not self.config
                 or application is not self.application
                 or config.gateway_bin != str(self.gateway.path)
+                or getattr(config, "gateway_transport", None) is not None
                 or config.mob_config_path is not None
                 or config.mob_config_inline != self._definition_bytes.decode("utf-8")
                 or config.application_tool_policies != ([value.decode("utf-8") for value in self._policy_bytes]
@@ -207,11 +198,29 @@ class OrdinaryMetaStartup:
                 or config.declare_spec_update_expected_revision is not None
                 or self._model_configuration is None and config.meerkat_config_path is not None
                 or any(getattr(config, name) is not original for name, original in zip(
-                    ("session_builder", "runtime_store", "agent_customizer", "auth_config", "gateway_transport"), self._config_providers))
+                    ("session_builder", "runtime_store", "agent_customizer", "auth_config"), self._config_providers))
                 or tuple(getattr(config, name) for name in (
                     "http_listen", "http_public_base_url", "allow_remote", "console_require_app_auth",
                     "console_config_path")) != self._http_options):
             raise CustodyError("The genuine Meta configuration changed its selected ordinary application.")
+
+    def _new_runtime(self, config):
+        from meerkat_meta.runtime import MetaRuntime
+        from meerkat_meta._transport import PersistentTransport
+        owner = self
+        gateway_bin = str(self.gateway.path)
+
+        class OrdinaryMetaRuntime(MetaRuntime):
+            # This documented SDK hook is shared by the selected ordinary SDKs.
+            # Keep the worker stack budget on this native child only.
+            def _make_gateway_transport(runtime):
+                owner._require_current()
+                if runtime._config is not config or config.gateway_bin != gateway_bin:
+                    raise CustodyError("The ordinary gateway changed before native construction.")
+                return PersistentTransport(gateway_bin,
+                    env={"RKAT_WORKER_STACK_BYTES": "16777216"})
+
+        return OrdinaryMetaRuntime(config)
 
     async def connect(self, config, application):
         if self._entered or self.application is None:
@@ -225,8 +234,7 @@ class OrdinaryMetaStartup:
         self._check_config(config, application)
         if content != (self._definition_bytes, self._policy_bytes):
             raise CustodyError("Ordinary Meta definition or compiled policy changed before connection.")
-        from meerkat_meta.runtime import MetaRuntime
-        runtime = MetaRuntime(config)
+        runtime = self._new_runtime(config)
         self.runtime = runtime
         application.context.runtime = runtime
         try:

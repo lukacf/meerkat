@@ -200,7 +200,7 @@ async def test_one_connected_owner_and_idempotent_joined_shutdown(case, monkeypa
     config = await configure(f)
     Runtime = runtime_fixture(f, monkeypatch)
     runtime = await f.owner.connect(config, f.app)
-    assert type(runtime) is Runtime and runtime is f.owner.runtime is f.app.context.runtime
+    assert isinstance(runtime, Runtime) and runtime is f.owner.runtime is f.app.context.runtime
     with pytest.raises(CustodyError, match='already entered'):
         await f.owner.connect(config, f.app)
     await f.owner.shutdown(runtime)
@@ -260,7 +260,6 @@ async def test_ordinary_gateway_stack_budget_is_only_in_its_child_environment(ca
     """Exercise the real SDK spawn boundary, intercepting before any child starts."""
     import os
     from meerkat_meta._transport import PersistentTransport
-    from meerkat_meta.runtime import MetaRuntime
     import meerkat_meta._transport as sdk_transport
 
     monkeypatch.delenv('META_GATEWAY_STDERR_FILE', raising=False)
@@ -273,7 +272,7 @@ async def test_ordinary_gateway_stack_budget_is_only_in_its_child_environment(ca
     monkeypatch.setenv('FORGE_STACK_TEST_MARKER', 'preserved')
     parent = dict(os.environ)
     config = await configure(case)
-    selected = MetaRuntime(config)._make_gateway_transport()
+    selected = case.owner._new_runtime(config)._make_gateway_transport()
     unrelated = PersistentTransport(str(case.gateway.path))
     calls = []
 
@@ -298,4 +297,21 @@ async def test_ordinary_gateway_stack_budget_is_only_in_its_child_environment(ca
     assert selected_environment_matches
     assert unrelated_environment_matches
     assert parent_environment_unchanged
+    assert case.owner.runtime is None and case.app.context.runtime is None
+
+
+@pytest.mark.asyncio
+async def test_optional_transport_factory_cannot_enter_ordinary_configuration(case):
+    with pytest.raises(CustodyError):
+        await configure(case, gateway_transport=None)
+    assert case.owner.config is None and case.owner.runtime is None
+
+
+@pytest.mark.asyncio
+async def test_changed_gateway_refuses_at_actual_native_factory(case):
+    config = await configure(case)
+    runtime = case.owner._new_runtime(config)
+    config.gateway_bin = '/another/gateway'
+    with pytest.raises(CustodyError, match='changed before native construction'):
+        runtime._make_gateway_transport()
     assert case.owner.runtime is None and case.app.context.runtime is None

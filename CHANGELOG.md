@@ -592,13 +592,22 @@ them.
   `live_session_own_operator_instruction_entry_placement`, so an
   implementation must answer it.
 
-- `meerkat-machine-schema`, `meerkat-runtime`: a model routing request onto a
-  target that cannot carry the session's transcript is denied by
-  `MeerkatMachine` (see Added). The inputs `RequestFiniteSwitchTurn` and
-  `RequestUntilChangedSwitchTurn` gain the field `target_carries_transcript`,
-  so code that builds them literally must set it, and the machine gains the
-  transitions `RequestFiniteSwitchTurnTranscriptUnsupported` and
-  `RequestUntilChangedSwitchTurnTranscriptUnsupported`.
+- `meerkat-machine-schema`, `meerkat-machine-kernels`, `meerkat-runtime`: a
+  model routing request onto a target that cannot carry the session's
+  transcript is denied by `MeerkatMachine` (see Added). The inputs
+  `RequestFiniteSwitchTurn` and `RequestUntilChangedSwitchTurn` gain the field
+  `target_carries_transcript`, so code that builds them literally must set it,
+  and the machine gains the transitions
+  `RequestFiniteSwitchTurnTranscriptUnsupported` and
+  `RequestUntilChangedSwitchTurnTranscriptUnsupported`. The kernel
+  `generated::meerkat::TransitionId` gains, appended last,
+  `RequestFiniteSwitchTurnTranscriptUnsupportedIdle`,
+  `RequestFiniteSwitchTurnTranscriptUnsupportedAttached`,
+  `RequestFiniteSwitchTurnTranscriptUnsupportedRunning`,
+  `RequestUntilChangedSwitchTurnTranscriptUnsupportedIdle`,
+  `RequestUntilChangedSwitchTurnTranscriptUnsupportedAttached` and
+  `RequestUntilChangedSwitchTurnTranscriptUnsupportedRunning`, so no existing
+  variant's discriminant moves; exhaustive matches must add them.
   `SessionLlmReconfigureHost` gains `switch_target_carries_session_transcript`,
   with a default that carries every target.
 
@@ -612,31 +621,70 @@ them.
   `RecoverSessionInstructionEffective`, `RecordInstructionTarget`,
   `SetSessionInstruction`, `RebindInstructionOwner`,
   `ReleaseInstructionTarget`, `ResolveRunStartInstructions` and
-  `AuthorizeInstructionFold`, the effects `SessionInstructionStateRecovered`,
+  `AuthorizeInstructionFold` (variants of `SessionDocumentInput` in the
+  authority and the catalog, and of `SessionDocumentInputVariant` in the
+  catalog), the effects `SessionInstructionStateRecovered`,
   `InstructionTargetRecorded`, `InstructionTargetRefused`,
   `InstructionOwnerRebound`, `InstructionTargetReleased` (whose `was_owned`
   says whether the releasing mob owned the target),
   `InstructionEntryAuthorized`, `InstructionEntryNotNeeded`,
-  `InstructionApplicationDeferred` and `InstructionFoldAuthorized`, and the
-  transitions that decide them; the machine state gains the
-  `session_instruction_*` maps; and the enums `InstructionTargetOwner`,
+  `InstructionApplicationDeferred` and `InstructionFoldAuthorized` (variants
+  of `SessionDocumentEffect` in the authority and the catalog, and of
+  `SessionDocumentEffectVariant` in the catalog), and the transitions that
+  decide them. The kernel `generated::session_document::TransitionId` gains,
+  after `ClassifyDurableTailContinuable`, which keeps the last index 0.9.8
+  published (116), `RecoverSessionInstructionState`,
+  `RecoverSessionInstructionTarget`, `RecoverSessionInstructionEffective`,
+  `RecordInstructionTargetAdvance`,
+  `RecordInstructionTargetActiveBudgetExceeded`,
+  `RecordInstructionTargetSlotLimitExceeded`,
+  `RecordInstructionTargetAlreadyRecorded`,
+  `RecordInstructionTargetOwnedBySession`,
+  `RecordInstructionTargetOwnedByOtherMob`, `SetSessionInstructionNew`,
+  `SetSessionInstructionAdvance`, `SetSessionInstructionActiveBudgetExceeded`,
+  `SetSessionInstructionDuplicate`, `SetSessionInstructionConflict`,
+  `SetSessionInstructionStale`, `SetSessionInstructionOwnedByMob`,
+  `SetSessionInstructionSlotLimitExceeded`, `SetSessionInstructionUnknownSlot`,
+  `RebindInstructionOwner`, `RebindInstructionOwnerUnowned`,
+  `ReleaseInstructionTarget`, `ReleaseInstructionTargetAlreadyUnowned`,
+  `ReleaseInstructionTargetOwnedByOtherMob`,
+  `ReleaseInstructionTargetOwnedBySession`, `ResolveRunStartInstructionsApply`,
+  `ResolveRunStartInstructionsNoChange`,
+  `ResolveRunStartInstructionsDeferredLeadingPrefix`,
+  `ResolveRunStartInstructionsDeferredUnavailable`,
+  `AuthorizeInstructionFoldAtRunStart` and
+  `AuthorizeInstructionFoldEffective`, so no existing variant's discriminant
+  moves. The machine state (`SessionDocumentMachineState` in the catalog and
+  the kernel `State`) gains the maps `session_instruction_owner`,
+  `session_instruction_owner_mob`, `session_instruction_target_generation`,
+  `session_instruction_target_revision`, `session_instruction_target_effect`,
+  `session_instruction_target_digest`, `session_instruction_target_bytes`,
+  `session_instruction_effective_revision`,
+  `session_instruction_effective_effect`,
+  `session_instruction_effective_digest`,
+  `session_instruction_effective_bytes`,
+  `session_instruction_effective_generation` and
+  `session_instruction_entry_sequence`; and the enums `InstructionTargetOwner`,
   `InstructionEffect`, `InstructionRunStart`, `InstructionLowering`,
   `InstructionWriteOutcome`, `InstructionWriteRefusal`,
   `InstructionDeferReason` and `InstructionFoldSource` are new. Exhaustive
   matches must add the new variants, and code that builds the state struct
   literally must set the new fields.
 
-- `meerkat-core`, `meerkat-store`: a session document that carries an
-  operator-instruction fact (an entry row or the recorded instruction state)
-  is written at session envelope 5, and a release before operator
-  instructions refuses such a document typed until it is rolled forward;
-  every other document stays at envelope 4, byte for byte, so documents of
-  sessions that never use operator instructions still read on older
-  binaries. The generated session persistence version authority accepts 5
-  (`SESSION_VERSION` is 5): its state gains `session_envelope_baseline_version`
-  (4), the input `RestoreSessionEnvelopeVersion` gains the transition
-  `RestoreBaselineSessionEnvelopeVersion`, which restores a document written
-  at the baseline, and `meerkat_core::generated::session_persistence_version_authority`
+- `meerkat-core`, `meerkat-machine-schema`, `meerkat-store`: a session
+  document that carries an operator-instruction fact (an entry row or the
+  recorded instruction state) is written at session envelope 5, and a release
+  before operator instructions refuses such a document typed until it is
+  rolled forward; every other document stays at envelope 4, byte for byte, so
+  documents of sessions that never use operator instructions still read on
+  older binaries. The generated session persistence version authority accepts
+  5 (`SESSION_VERSION` is 5): its state
+  (`SessionPersistenceVersionAuthorityMachineState` in the catalog) gains
+  `session_envelope_baseline_version` (4), so code that builds the state
+  struct literally must set it; the input `RestoreSessionEnvelopeVersion`
+  gains the transition `RestoreBaselineSessionEnvelopeVersion`, which
+  restores a document written at the baseline, and
+  `meerkat_core::generated::session_persistence_version_authority`
   gains `SESSION_ENVELOPE_BASELINE_VERSION` and
   `session_envelope_version_for_document`. `rkat storage doctor` lists the
   sessions at envelope 5 (Info finding `operator-instruction-envelope`) in

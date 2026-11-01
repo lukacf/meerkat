@@ -2597,6 +2597,8 @@ button.cc-figure:focus-visible { outline: 2px solid var(--_cc-focus-ring); outli
   color: var(--_cc-foreground);
 }
 .cc-filter-chip .cc-count { margin-left: -1px; }
+.cc-filter-chip__glyph { width: 13px; height: 13px; stroke-width: 1.75; color: var(--_cc-foreground-meta); }
+.cc-filter-chip.is-pressed .cc-filter-chip__glyph { color: var(--_cc-foreground); }
 
 /* ── Links between panels (spec A4.7) ─────────────────────────────── */
 .cc-agent--link,

@@ -51,6 +51,25 @@ function supportsTopLayer(): boolean {
   return typeof HTMLElement !== "undefined" && typeof HTMLElement.prototype.showPopover === "function";
 }
 
+/** Whether the trigger has scrolled wholly out of the viewport or out of a
+ * clipping ancestor (a pane body, a scrolling list). A trigger without a
+ * box (not laid out, or no layout engine) counts as in sight. */
+function anchorOutOfSight(anchor: HTMLElement): boolean {
+  const rect = anchor.getBoundingClientRect();
+  if (rect.width === 0 && rect.height === 0) return false;
+  const view = anchor.ownerDocument.defaultView;
+  const outside = (box: { top: number; left: number; bottom: number; right: number }) =>
+    rect.bottom <= box.top || rect.top >= box.bottom || rect.right <= box.left || rect.left >= box.right;
+  if (view && outside({ top: 0, left: 0, bottom: view.innerHeight, right: view.innerWidth })) return true;
+  for (let node = anchor.parentElement; node && node !== anchor.ownerDocument.body; node = node.parentElement) {
+    const style = view?.getComputedStyle(node);
+    if (style && /(auto|scroll|hidden|clip)/.test(`${style.overflowX} ${style.overflowY}`) && outside(node.getBoundingClientRect())) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function prefersReducedMotion(element: Element): boolean {
   if (element.closest(".reduced-motion")) return true;
   const view = element.ownerDocument.defaultView;
@@ -65,8 +84,9 @@ function prefersReducedMotion(element: Element): boolean {
  * and keeps the document's tab order, and lifts itself into the browser's
  * top layer (the Popover API) so no pane overflow, container or z-index can
  * clip it; without the API it is a fixed-position layer in place. Escape
- * closes it and returns focus to the trigger; a pointer press outside it or
- * focus moving outside it closes it too.
+ * closes it and returns focus to the trigger; a pointer press outside it,
+ * focus moving outside it, or a scroll that takes the trigger out of sight
+ * closes it too.
  */
 export function Popover({
   open,
@@ -165,13 +185,27 @@ export function Popover({
       if (chosen !== null) (chosen ?? popover).focus({ preventScroll: true });
     }
     const view = anchorRef.current?.ownerDocument.defaultView;
+    // A scroll that takes the trigger out of sight closes the popover rather
+    // than leaving it pinned to the edge of the view, away from its trigger.
+    const onScroll = (event: Event) => {
+      const target = event.target as Node | null;
+      if (target && "nodeType" in target && popoverRef.current?.contains(target)) return;
+      const anchor = anchorRef.current;
+      if (anchor && anchorOutOfSight(anchor)) {
+        const hadFocus = Boolean(popoverRef.current?.contains(anchor.ownerDocument.activeElement));
+        onCloseRef.current("outside");
+        if (hadFocus) anchor.focus({ preventScroll: true });
+        return;
+      }
+      place();
+    };
     view?.addEventListener("resize", place);
-    view?.addEventListener("scroll", place, true);
+    view?.addEventListener("scroll", onScroll, true);
     const observer = typeof ResizeObserver !== "undefined" && popover ? new ResizeObserver(() => place()) : null;
     if (observer && popover) observer.observe(popover);
     return () => {
       view?.removeEventListener("resize", place);
-      view?.removeEventListener("scroll", place, true);
+      view?.removeEventListener("scroll", onScroll, true);
       observer?.disconnect();
     };
     // Focus moves in once per opening.
@@ -199,7 +233,9 @@ export function Popover({
     width,
     minWidth: width ?? minWidth,
     maxWidth: width ?? maxWidth,
-    visibility: position ? undefined : "hidden",
+    // Unplaced for one layout pass only: transparent, never `visibility:
+    // hidden`, which would make its controls unfocusable while focus moves in.
+    opacity: position ? undefined : 0,
   };
   return (
     <div

@@ -1,5 +1,5 @@
 import { act, fireEvent, render } from "@testing-library/react";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { describe, expect, it, vi } from "vitest";
 
 import {
@@ -27,9 +27,11 @@ import {
   TechnicalDetails,
   IconButton,
   OverflowMenu,
+  PanelDensityDefaultProvider,
   PanelHeader,
   PanelPreferencesProvider,
   PanelShell,
+  Popover,
   SearchField,
   SelectField,
   StatusDot,
@@ -249,6 +251,54 @@ describe("view options", () => {
   });
 });
 
+function PopoverProbe({ onClose, onFocusMove }: { onClose: (reason: string) => void; onFocusMove?: (popover: HTMLElement) => void }) {
+  const anchorRef = useRef<HTMLButtonElement | null>(null);
+  return (
+    <>
+      <button type="button" ref={anchorRef}>
+        Anchor
+      </button>
+      <Popover
+        open
+        anchorRef={anchorRef}
+        onClose={onClose}
+        ariaLabel="Probe"
+        initialFocus={(popover) => {
+          onFocusMove?.(popover);
+          return popover.querySelector<HTMLElement>("button");
+        }}
+      >
+        <button type="button">Inside</button>
+      </Popover>
+    </>
+  );
+}
+
+describe("popover", () => {
+  it("can take focus while it is placed: transparent, never visibility hidden", () => {
+    // Browsers skip focus inside a visibility: hidden subtree (jsdom does
+    // not), so a popover hidden that way kept focus on its trigger and
+    // Escape never reached it. The style itself is pinned here.
+    const seen: string[] = [];
+    const view = render(<PopoverProbe onClose={() => {}} onFocusMove={(popover) => seen.push(popover.style.visibility)} />);
+    expect(seen).toEqual([""]);
+    expect(document.activeElement === view.getByRole("button", { name: "Inside" })).toBe(true);
+  });
+
+  it("closes when a scroll takes its trigger out of sight", () => {
+    const onClose = vi.fn();
+    const view = render(<PopoverProbe onClose={onClose} />);
+    const anchor = view.getByRole("button", { name: "Anchor" });
+    fireEvent.scroll(window);
+    expect(onClose).not.toHaveBeenCalled();
+    anchor.getBoundingClientRect = () =>
+      ({ top: -120, bottom: -92, left: 10, right: 38, width: 28, height: 28, x: 10, y: -120, toJSON: () => ({}) }) as DOMRect;
+    fireEvent.scroll(window);
+    expect(onClose).toHaveBeenCalledWith("outside");
+    expect(document.activeElement === anchor).toBe(true);
+  });
+});
+
 describe("fields", () => {
   it("renders the scope chip as the native select with its accessible name", () => {
     const view = render(
@@ -422,6 +472,61 @@ describe("panel preferences", () => {
     expect(window.localStorage.getItem("meta-console-density:topology:principal-1") === null).toBe(true);
   });
 
+  it("follows the display density while a kind has no choice of its own", () => {
+    window.localStorage.clear();
+    const tree = (density: "comfortable" | "compact") => (
+      <PanelPreferencesProvider scope="principal-1">
+        <PanelDensityDefaultProvider density={density}>
+          <DensityProbe kind="topology" testId="a" />
+          <DensityProbe kind="memory" testId="b" />
+        </PanelDensityDefaultProvider>
+      </PanelPreferencesProvider>
+    );
+    const view = render(tree("compact"));
+    expect(view.getByTestId("a").textContent).toBe("compact");
+    expect(view.getByTestId("b").textContent).toBe("compact");
+    view.rerender(tree("comfortable"));
+    expect(view.getByTestId("a").textContent).toBe("comfortable");
+    expect(view.getByTestId("b").textContent).toBe("comfortable");
+    // Nothing is written for a kind that only follows the default.
+    expect(window.localStorage.getItem("meta-console-density:topology:principal-1") === null).toBe(true);
+    // Without a provider the default is comfortable.
+    const bare = render(<DensityProbe kind="workgraph" testId="c" />);
+    expect(bare.getByTestId("c").textContent).toBe("comfortable");
+  });
+
+  it("keeps a kind's stored choice over the display density, and clears it on the default", () => {
+    window.localStorage.clear();
+    window.localStorage.setItem("meta-console-density:topology:principal-1", "comfortable");
+    const tree = (density: "comfortable" | "compact") => (
+      <PanelPreferencesProvider scope="principal-1">
+        <PanelDensityDefaultProvider density={density}>
+          <DensityProbe kind="topology" testId="a" />
+          <DensityProbe kind="memory" testId="b" />
+        </PanelDensityDefaultProvider>
+      </PanelPreferencesProvider>
+    );
+    const view = render(tree("compact"));
+    expect(view.getByTestId("a").textContent).toBe("comfortable");
+    expect(view.getByTestId("b").textContent).toBe("compact");
+    // Choosing the default (compact) again clears the stored choice.
+    act(() => {
+      fireEvent.click(view.getByTestId("a"));
+    });
+    expect(view.getByTestId("a").textContent).toBe("compact");
+    expect(window.localStorage.getItem("meta-console-density:topology:principal-1") === null).toBe(true);
+    view.rerender(tree("comfortable"));
+    expect(view.getByTestId("a").textContent).toBe("comfortable");
+    // A choice away from the default is stored and outlives a change of the default.
+    act(() => {
+      fireEvent.click(view.getByTestId("b"));
+    });
+    expect(window.localStorage.getItem("meta-console-density:memory:principal-1")).toBe("compact");
+    view.rerender(tree("compact"));
+    view.rerender(tree("comfortable"));
+    expect(view.getByTestId("b").textContent).toBe("compact");
+  });
+
   it("gives the shell's density and id option to every part inside", () => {
     const view = render(
       <PanelShell density="compact" showTechnicalIds testId="shell">
@@ -515,6 +620,20 @@ describe("detail drawer", () => {
     fireEvent.keyDown(heading, { key: "Escape" });
     expect(view.queryByTestId("drawer") === null).toBe(true);
     expect(document.activeElement === node).toBe(true);
+  });
+
+  it("names its close button and Back row for tests", () => {
+    const view = render(
+      <DrawerLayout
+        open
+        onClose={() => {}}
+        backTestId="memory-detail-back-row"
+        main={<span />}
+        drawer={<DetailDrawer title="Record" onClose={() => {}} closeTestId="memory-detail-back" autoFocus={false} />}
+      />,
+    );
+    expect(view.getByTestId("memory-detail-back").getAttribute("aria-label")).toBe("Close details");
+    expect(view.getByTestId("memory-detail-back-row").textContent).toBe("Back");
   });
 
   it("closes from its close button and resizes from the keyboard, persisting the width", () => {

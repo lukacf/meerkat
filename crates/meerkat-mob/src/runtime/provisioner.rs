@@ -13843,7 +13843,9 @@ impl SessionBackend {
         // agent factory binds the session's live mob operator authority to
         // the session's external tools, and an agent creator's commit check
         // reads only what the receiver recorded (`MemberSessionAuthorities`).
-        // The receiver forwards everything else to the tools it wraps.
+        // The receiver forwards everything else to the tools it wraps; one
+        // that wraps none only observes, and the factory composes the build
+        // as one with no external tools.
         if let Some(build) = req.create_session.build.as_mut()
             && let Some(session_id) = build
                 .resume_session

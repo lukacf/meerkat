@@ -3077,6 +3077,21 @@ pub trait AgentToolDispatcher: Send + Sync {
         _authority: Option<Arc<std::sync::RwLock<crate::service::MobToolAuthorityContext>>>,
     ) {
     }
+
+    /// Whether this dispatcher only observes the bindings the agent factory
+    /// gives a build's external tools, and surfaces nothing of its own.
+    ///
+    /// Such a dispatcher lists no tool, catalog entry or pending catalog
+    /// source, now or later (for example a wrapper of a build's external
+    /// tools that wraps none). The agent factory binds the session's mob
+    /// operator authority to it ([`Self::bind_session_mob_tool_authority`])
+    /// as to any external tools, and then composes the build as one with no
+    /// external tools, so it changes nothing in the composed surface, its
+    /// catalog exactness included. A wrapper forwards the answer of the
+    /// dispatcher it wraps. The default is `false`.
+    fn observes_bindings_only(&self) -> bool {
+        false
+    }
 }
 
 /// Resolve a plan against the exact live root dispatcher allocation.

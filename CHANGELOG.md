@@ -722,6 +722,16 @@ them.
   builder's. `meerkat::session_comms_identity_root_in` gives the root under
   an explicit user-global root, infallibly.
 
+- `meerkat-core`, `meerkat`: `AgentToolDispatcher::observes_bindings_only`,
+  a provided method, `false` by default. A dispatcher that surfaces nothing
+  and only observes the bindings the agent factory gives a build's external
+  tools answers `true`: the factory binds the session's mob operator
+  authority to it like any external tools, then composes the build as one
+  with no external tools, so it changes nothing in the composed surface, its
+  catalog exactness included. A mob runtime's receiver of a member session's
+  authority (see the identity creation entries below) answers `true` for a
+  member build with no external tools of its own.
+
 - `meerkat-core`, `meerkat-runtime`: an identity creation scope for agent
   creators. A mob operator authority can hold, per mob, the templates an
   agent may create identities from, bound to the mob's incarnation like the

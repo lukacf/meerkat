@@ -12,6 +12,7 @@ import {
   EntityRow,
   FilterBar,
   NewItemsPill,
+  RelativeTime,
   RelativeTimeChip,
   TrustLadder,
   countdownTone,
@@ -875,6 +876,33 @@ describe("entities", () => {
 });
 
 describe("time", () => {
+  it("never reads a past time as the future while the shared clock lags", () => {
+    vi.useFakeTimers();
+    try {
+      const t0 = Date.UTC(2026, 10, 1, 1, 0, 0);
+      vi.setSystemTime(t0);
+      const view = render(<RelativeTime value={t0 - 60_000} prefix="Updated" testId="fresh" />);
+      // 12 s on, before the shared clock's next tick, the panel refreshes:
+      // its new time is in the past, so it must not read "Updated in 11s".
+      vi.setSystemTime(t0 + 12_000);
+      view.rerender(<RelativeTime value={t0 + 11_000} prefix="Updated" testId="fresh" />);
+      expect(view.getByTestId("fresh").textContent).toBe("Updated just now");
+      // A time that is really ahead still reads as the future.
+      view.rerender(<RelativeTime value={t0 + 12_000 + 5 * 60_000} testId="fresh" />);
+      expect(view.getByTestId("fresh").textContent).toBe("in 5m");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("reads a time less than one tick ahead as just now, a clock skew", () => {
+    const now = Date.UTC(2026, 10, 1, 1, 0, 0);
+    const view = render(<RelativeTime value={now + 12_000} now={now} testId="skew" />);
+    expect(view.getByTestId("skew").textContent).toBe("just now");
+    view.rerender(<RelativeTime value={now + 20_000} now={now} testId="skew" />);
+    expect(view.getByTestId("skew").textContent).toBe("in 20s");
+  });
+
   it("words a countdown and tones it by distance", () => {
     const MIN = 60_000;
     expect(formatCountdown(45_000)).toBe("in 45s");

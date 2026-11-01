@@ -10091,37 +10091,37 @@ impl MobHandle {
         meerkat_core::service::LiveMobIncarnation::witnessed(self.incarnation)
     }
 
-    /// The identity creation check of an agent creator's commit in this mob:
-    /// whether the member session `origin_session` may create identities
-    /// from `template` here, as this mob runs now. The commit of an agent's
-    /// created identities asks it once per identity's template, before it
-    /// writes anything.
+    /// Raw, atomic observation for an identity creation the member session
+    /// `origin_session` requests in this mob: whether that session's live
+    /// spawn grant holds `profile` here, as this mob runs now. The right to
+    /// create an identity is the ordinary spawn grant, so this is the
+    /// `profile_scope_contains` fact the spawn tools pass to MobMachine's
+    /// spawn admission, read for the requesting session; the admission that
+    /// asks it composes the verdict. It is not an admission conclusion.
     ///
     /// It reads only the live mob operator authority of `origin_session`
     /// itself: every member build this mob's runtime provisions in a local
     /// session carries a receiver to which the agent factory binds the
-    /// session's final, sealed authority, whatever the member's mob tools
-    /// are, so a creator whose build binds its creation scope authority only
-    /// is read like any other. It takes no authority from its caller, so a
-    /// caller holding another session's sealed authority, a wider one
-    /// included, cannot lend it. A session this runtime did not build (a
-    /// placed or external member, a session outside the mob), one whose
-    /// build bound no authority, and one whose tools are gone hold none and
-    /// are refused. The verdict is the generated MeerkatMachine one
-    /// (`meerkat_runtime::mob_operator_authority::admit_identity_creation_from_template`),
-    /// at this runtime's own incarnation witness: scope minted for an
-    /// earlier incarnation of the mob admits nothing.
+    /// session's final, sealed authority. It takes no authority from its
+    /// caller, so a caller holding another session's sealed authority, a
+    /// wider one included, cannot lend it. A session this runtime did not
+    /// build (a placed or external member, a session outside the mob), one
+    /// whose build bound no authority (its mob tools disabled, among others),
+    /// and one whose tools are gone hold none, and read `false`. The scope is
+    /// read at this runtime's own incarnation: a grant minted for an earlier
+    /// incarnation of the mob holds nothing here.
     pub fn admit_member_identity_creation(
         &self,
         origin_session: &SessionId,
-        template: &str,
-    ) -> Result<(), meerkat_runtime::mob_operator_authority::IdentityCreationScopeRefusal> {
-        self.member_session_authorities.admit_identity_creation(
-            origin_session,
-            self.definition.id.as_str(),
-            self.live_incarnation(),
-            template,
-        )
+        profile: &str,
+    ) -> bool {
+        self.member_session_authorities
+            .spawn_profile_scope_contains(
+                origin_session,
+                self.definition.id.as_str(),
+                self.incarnation(),
+                profile,
+            )
     }
 
     /// Who created this mob ([`crate::MobProvenance`]): the fact its create

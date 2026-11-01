@@ -7,23 +7,23 @@
 //! tools it wraps, and lists none of its own. The agent factory binds the
 //! session's final, sealed mob operator authority to the session's external
 //! tools (`AgentToolDispatcher::bind_session_mob_tool_authority`), so the
-//! receiver gets it, the authority-only binding of a creator whose mob tools
-//! are disabled included, and this runtime holds the live authority of each
-//! of its member sessions. [`MemberSessionAuthorities`] keeps them by
-//! session. A receiver that wraps no tools (its build has none of its own)
-//! only observes that binding (`AgentToolDispatcher::observes_bindings_only`):
-//! the agent factory binds it, then composes the build as one with no
-//! external tools, so the receiver changes nothing in the session's surface.
+//! receiver gets it, and this runtime holds the live authority of each of its
+//! member sessions. [`MemberSessionAuthorities`] keeps them by session. A
+//! receiver that wraps no tools (its build has none of its own) only observes
+//! that binding (`AgentToolDispatcher::observes_bindings_only`): the agent
+//! factory binds it, then composes the build as one with no external tools,
+//! so the receiver changes nothing in the session's surface.
 //!
-//! An agent creator's commit check reads only this record
-//! ([`MemberSessionAuthorities::admit_identity_creation`], reached through
-//! `MobHandle::admit_member_identity_creation`): it takes no authority from
-//! its caller, so a caller holding another session's sealed authority, a
-//! wider one included, cannot lend it. A session this runtime did not build,
-//! one whose build bound no authority, and one whose tools and agent are gone
-//! hold none, and are refused. A host that edits a member build's external
-//! tools wraps them, as for the runtime's own member tools; tools it replaces
-//! outright leave the session with no recorded authority.
+//! The runtime's read of a member session's live spawn grant
+//! ([`MemberSessionAuthorities::spawn_profile_scope_contains`], reached
+//! through `MobHandle::admit_member_identity_creation`) reads only this
+//! record: it takes no authority from its caller, so a caller holding another
+//! session's sealed authority, a wider one included, cannot lend it. A
+//! session this runtime did not build, one whose build bound no authority,
+//! and one whose tools and agent are gone hold none. A host that edits a
+//! member build's external tools wraps them, as for the runtime's own member
+//! tools; tools it replaces outright leave the session with no recorded
+//! authority.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError, RwLock, Weak};
@@ -35,9 +35,8 @@ use meerkat_core::agent::{
 use meerkat_core::error::ToolError;
 use meerkat_core::ops::ToolDispatchOutcome;
 use meerkat_core::ops_lifecycle::OpsLifecycleRegistry;
-use meerkat_core::service::{LiveMobIncarnation, MobToolAuthorityContext};
+use meerkat_core::service::{MobIncarnationId, MobToolAuthorityContext};
 use meerkat_core::types::{SessionId, ToolCallView, ToolDef};
-use meerkat_runtime::mob_operator_authority::IdentityCreationScopeRefusal;
 
 /// A session's effective mob operator authority handle, as the agent factory
 /// binds it.
@@ -109,28 +108,21 @@ impl MemberSessionAuthorities {
         Some(context)
     }
 
-    /// The identity creation check of an agent creator's commit: whether the
-    /// member session `origin_session` may create identities from `template`
-    /// in the mob `mob_id` as it runs at `mob_incarnation`. It reads only
-    /// `origin_session`'s own live authority, recorded here from that
-    /// session's build, and asks the generated MeerkatMachine verdict
-    /// (`meerkat_runtime::mob_operator_authority::admit_identity_creation_from_template`)
-    /// over it. A session with no record is refused like a session with no
-    /// generated authority.
-    pub(crate) fn admit_identity_creation(
+    /// Whether the live authority the latest build of `origin_session` bound
+    /// holds spawn-profile scope for `profile` in the mob `mob_id` at
+    /// `mob_incarnation`: the raw `profile_scope_contains` fact the spawn
+    /// tools pass to MobMachine's spawn admission, read from that session's
+    /// own record only. A session with no record holds none.
+    pub(crate) fn spawn_profile_scope_contains(
         &self,
         origin_session: &SessionId,
         mob_id: &str,
-        mob_incarnation: LiveMobIncarnation,
-        template: &str,
-    ) -> Result<(), IdentityCreationScopeRefusal> {
-        let authority = self.snapshot(origin_session);
-        meerkat_runtime::mob_operator_authority::admit_identity_creation_from_template(
-            authority.as_ref(),
-            mob_id,
-            mob_incarnation,
-            template,
-        )
+        mob_incarnation: MobIncarnationId,
+        profile: &str,
+    ) -> bool {
+        self.snapshot(origin_session).is_some_and(|authority| {
+            authority.spawn_profile_scope_contains(mob_id, mob_incarnation, profile)
+        })
     }
 }
 

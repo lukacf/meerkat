@@ -2214,9 +2214,9 @@ pub trait MobProvisioner: Send + Sync {
     }
 
     /// The live mob operator authority of every member session this
-    /// provisioner built in a local session, which an agent creator's commit
-    /// check reads (see `MemberSessionAuthorities`). A provisioner that builds
-    /// no local member session has none.
+    /// provisioner built in a local session, which the runtime's read of a
+    /// member session's spawn grant reads (see `MemberSessionAuthorities`). A
+    /// provisioner that builds no local member session has none.
     fn member_session_authorities(
         &self,
     ) -> Option<Arc<super::member_session_authority::MemberSessionAuthorities>> {
@@ -13847,8 +13847,9 @@ impl SessionBackend {
         // Every member build carries its external tools inside this runtime's
         // receiver for its session, whatever the member's mob tools: the
         // agent factory binds the session's live mob operator authority to
-        // the session's external tools, and an agent creator's commit check
-        // reads only what the receiver recorded (`MemberSessionAuthorities`).
+        // the session's external tools, and the runtime's read of a member
+        // session's spawn grant reads only what the receiver recorded
+        // (`MemberSessionAuthorities`).
         // The receiver forwards everything else to the tools it wraps; one
         // that wraps none only observes, and the factory composes the build
         // as one with no external tools.

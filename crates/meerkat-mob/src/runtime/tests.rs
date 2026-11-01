@@ -88911,6 +88911,11 @@ struct MobRuntimeParitySnapshotSummary {
     identity_runtime_fence_tokens: BTreeMap<String, u64>,
     identity_generation_highwater: BTreeMap<String, u64>,
     identity_generation_highwater_sealed: bool,
+    // Created identity entries: the reserved names and the created custody,
+    // read from the runtime's formal state.
+    identity_entry_tombstones: BTreeSet<String>,
+    identity_entry_unreadable: BTreeSet<String>,
+    spawn_exec_created_custody: BTreeSet<String>,
     member_peer_ids: BTreeMap<String, String>,
     member_peer_endpoints: BTreeMap<String, String>,
     member_prior_peer_endpoints: BTreeMap<String, BTreeSet<String>>,
@@ -90063,6 +90068,28 @@ async fn mob_runtime_parity_snapshot_summary(
     let identity_generation_highwater_sealed = dsl_t2
         .as_ref()
         .is_some_and(|snap| snap.identity_generation_highwater_sealed);
+    // Created identity entries, read from the runtime's formal state (the
+    // machine state the actor publishes), as the explicit resume fields are.
+    let (identity_entry_tombstones, identity_entry_unreadable, spawn_exec_created_custody) = {
+        let state = handle.machine_state_watch_rx.borrow();
+        (
+            state
+                .identity_entry_tombstones
+                .iter()
+                .map(|identity| format!("{identity:?}"))
+                .collect::<BTreeSet<_>>(),
+            state
+                .identity_entry_unreadable
+                .iter()
+                .map(|identity| format!("{identity:?}"))
+                .collect::<BTreeSet<_>>(),
+            state
+                .spawn_exec_created_custody
+                .iter()
+                .map(|identity| format!("{identity:?}"))
+                .collect::<BTreeSet<_>>(),
+        )
+    };
     let host_binding_generation_highwater = dsl_t2
         .as_ref()
         .map(|snap| {
@@ -90659,6 +90686,9 @@ async fn mob_runtime_parity_snapshot_summary(
         host_binding_generation_highwater,
         identity_generation_highwater,
         identity_generation_highwater_sealed,
+        identity_entry_tombstones,
+        identity_entry_unreadable,
+        spawn_exec_created_custody,
         confirmed_host_binding_revocations,
         replacement_host_bind_endpoints,
         replacement_host_binding_generations,
@@ -90911,6 +90941,16 @@ fn mob_runtime_parity_field_value(
         // Identity entries: the parity probes declare none.
         | "spawn_exec_entry_custody"
         | "identity_entry_retiring" => Some(MobRuntimeParityExprValue::Set(BTreeSet::new())),
+        // Created identity entries, from the runtime's formal state.
+        "identity_entry_tombstones" => Some(MobRuntimeParityExprValue::Set(
+            snapshot.identity_entry_tombstones.clone(),
+        )),
+        "identity_entry_unreadable" => Some(MobRuntimeParityExprValue::Set(
+            snapshot.identity_entry_unreadable.clone(),
+        )),
+        "spawn_exec_created_custody" => Some(MobRuntimeParityExprValue::Set(
+            snapshot.spawn_exec_created_custody.clone(),
+        )),
         "member_materialization_epoch"
         | "member_boot_obligation_owed"
         | "member_host_preparation_causes"

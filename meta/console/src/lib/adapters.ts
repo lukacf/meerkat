@@ -77,6 +77,7 @@ export type MetaDockTarget =
   | AccessPanelTarget
   | MemoryPanelTarget
   | WorkGraphPanelTarget
+  | SchedulesPanelTarget
   | OperatorPanelTarget
   | import("@console-core").ConsoleCustomPanelTarget;
 
@@ -168,6 +169,11 @@ export interface WorkGraphPanelTarget extends ConsoleDockTarget {
   kind: "workgraph";
 }
 
+/** The Schedules workbench panel: what runs automatically, and when. */
+export interface SchedulesPanelTarget extends ConsoleDockTarget {
+  kind: "schedules";
+}
+
 export function buildPanelConversationKey(
   panelId: string,
   target: Pick<ConsoleDockTarget, "kind" | "id"> & Partial<Pick<AgentChatTarget, "identity" | "memberId" | "addressingMode">> | null,
@@ -236,7 +242,7 @@ export function buildInspectTarget(agent: ConsoleAgent): IdentityInspectTarget {
 
 export type ControlTargetKind =
   | "routing" | "gating" | "topology" | "health"
-  | "timeline" | "roster" | "gates" | "logs" | "access" | "memory" | "workgraph";
+  | "timeline" | "roster" | "gates" | "logs" | "access" | "memory" | "workgraph" | "schedules";
 
 export function buildControlTarget(kind: ControlTargetKind): MetaDockTarget {
   switch (kind) {
@@ -262,6 +268,8 @@ export function buildControlTarget(kind: ControlTargetKind): MetaDockTarget {
       return { id: "memory", kind, title: "Memory", subtitle: "Records, quarantine, dreams", iconName: "i-archive" };
     case "workgraph":
       return { id: "workgraph", kind, title: "WorkGraph", subtitle: "Goals, work items, and attention", iconName: "i-cube" };
+    case "schedules":
+      return { id: "schedules", kind, title: "Schedules", subtitle: "What runs automatically, and when", iconName: "i-clock" };
     default:
       return { id: "health", kind: "health", title: "Health" };
   }
@@ -3848,15 +3856,36 @@ const PEER_TRANSPORT_SCAFFOLD_SPAN_RE =
 
 /// Remove canonical peer transport scaffold spans, keeping any human-authored
 /// remainder (e.g. an appended request body). Returns "" when the text is
-/// pure transport scaffold.
-export function stripPeerTransportScaffold(text: string): string {
-  if (!text || !PEER_TRANSPORT_SCAFFOLD_START_RE.test(text)) return text;
+/// pure transport scaffold. Given the names of the peer a comms notice came
+/// from (its display name, its id), it also drops the envelope line that
+/// opens the notice's text ("Peer message from <name>:"); without them,
+/// ordinary text that merely starts that way is kept.
+export function stripPeerTransportScaffold(text: string, peerAliases: readonly string[] = []): string {
+  if (!text || !PEER_TRANSPORT_SCAFFOLD_START_RE.test(text)) return stripLeadingPeerEnvelope(text, peerAliases);
   let scrubbed = text.replace(PEER_TRANSPORT_SCAFFOLD_SPAN_RE, " ");
   // Defensive: a projection without its coaching terminator (e.g. truncated
   // upstream) must still never render; cut from the marker onward.
   const residualIndex = scrubbed.search(PEER_TRANSPORT_SCAFFOLD_START_RE);
   if (residualIndex >= 0) scrubbed = scrubbed.slice(0, residualIndex);
-  return scrubbed.replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+  return stripLeadingPeerEnvelope(scrubbed.replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim(), peerAliases);
+}
+
+/// The text after an opening envelope line that names one of the peer's
+/// names: "Peer message from <name>:" (request, response) or
+/// "[COMMS MESSAGE from <name>]". Text without one is returned as it is.
+function stripLeadingPeerEnvelope(text: string, peerAliases: readonly string[]): string {
+  if (!text || peerAliases.length === 0) return text;
+  const opening = text.replace(/^\s+/, "");
+  const aliases = peerAliases.map((alias) => alias.trim()).filter(Boolean).sort((a, b) => b.length - a.length);
+  for (const alias of aliases) {
+    const escaped = escapeRegExp(alias);
+    const envelope = new RegExp(
+      `^(?:Peer\\s+(?:message|request|response)\\s+from\\s+${escaped}:|\\[COMMS\\s+(?:MESSAGE|REQUEST|RESPONSE)\\s+from\\s+${escaped}\\])[ \\t]*(?:\\r?\\n)?`,
+      "i",
+    );
+    if (envelope.test(opening)) return opening.replace(envelope, "").trim();
+  }
+  return text;
 }
 
 function escapeRegExp(value: string): string {
@@ -4426,6 +4455,13 @@ export function systemNoticeClearsBusyState(frame: ConsoleFrame): boolean {
   return legacyPeerNoticeTextCandidates(record).some(isLegacyPeerNoticeText);
 }
 
+/** A typed comms notice without a request id: named by the frame it came
+ * in (its id, else its cursor) and the block's place in it, so every plain
+ * message from one peer gets its own id. */
+function typedCommsFallbackId(peerLabel: string, kind: string, frameKey: string | undefined, index: number): string {
+  return `typed-comms:${peerLabel}:${kind}:${frameKey || "frame"}:${index}`;
+}
+
 function typedSystemNoticeBlocksToRich(
   blocks: unknown,
   body: unknown,
@@ -4433,6 +4469,7 @@ function typedSystemNoticeBlocksToRich(
   sourceKind?: string,
   consumeDuplicateCommsBlock?: (key: string) => boolean,
   textMode: ConversationTextMode = "legacy",
+  frameKey?: string,
 ): ConversationRichBlock[] {
   const rich: ConversationRichBlock[] = [];
   const bodyText = textFromUnknown(body);
@@ -4479,7 +4516,7 @@ function typedSystemNoticeBlocksToRich(
       const kind = textFromUnknown(record.kind) || "message";
       const direction = textFromUnknown(record.direction);
       const intent = textFromUnknown(record.intent);
-      const requestId = textFromUnknown(record.request_id) || `typed-comms:${peerLabel}:${kind}`;
+      const requestId = textFromUnknown(record.request_id) || typedCommsFallbackId(peerLabel, kind, frameKey, index);
       const contentBlocks = typedNoticeContentBlocks(record.content, blobBaseUrl);
       const contentText = contentBlocks
         .map((item) => item.type === "paragraph" ? item.text : "")
@@ -4599,6 +4636,8 @@ function historyMessageText(
   sourceKind?: string,
   consumeDuplicateCommsBlock?: (key: string) => boolean,
   textMode: ConversationTextMode = "markdown",
+  /** The frame's id (else its cursor): names typed comms notices without a request id. */
+  frameKey?: string,
 ): { role: "user" | "assistant" | "system" | "meta" | null; text: string; blocks?: ConversationRichBlock[] } {
   if (!message || typeof message !== "object") {
     return { role: null, text: "" };
@@ -4618,6 +4657,7 @@ function historyMessageText(
         sourceKind,
         consumeDuplicateCommsBlock,
         textMode,
+        frameKey,
       );
       const duplicateCommsConsumed = Boolean(
         consumeDuplicateCommsBlock
@@ -4710,6 +4750,7 @@ function renderSessionHistoryTextCompleteEntry(
     frame.sourceKind,
     options.consumeDuplicateCommsBlock,
     options.textMode,
+    frame.id || frame.cursor,
   );
   const textMode = options.textMode ?? "markdown";
   const realtimeOrigin = realtimeMessageOrigin(frame);
@@ -4802,6 +4843,7 @@ function renderSystemNoticeEntry(
     frame.sourceKind,
     options.consumeDuplicateCommsBlock,
     options.textMode ?? "legacy",
+    frame.id || frame.cursor,
   );
   if (parsed.role !== "meta") return null;
   const parsedBlocks = Array.isArray(parsed.blocks) ? parsed.blocks : [];

@@ -27,6 +27,7 @@ import {
   TechnicalDetails,
   IconButton,
   OverflowMenu,
+  PanelDensityDefaultProvider,
   PanelHeader,
   PanelPreferencesProvider,
   PanelShell,
@@ -469,6 +470,61 @@ describe("panel preferences", () => {
     });
     // The default is not stored.
     expect(window.localStorage.getItem("meta-console-density:topology:principal-1") === null).toBe(true);
+  });
+
+  it("follows the display density while a kind has no choice of its own", () => {
+    window.localStorage.clear();
+    const tree = (density: "comfortable" | "compact") => (
+      <PanelPreferencesProvider scope="principal-1">
+        <PanelDensityDefaultProvider density={density}>
+          <DensityProbe kind="topology" testId="a" />
+          <DensityProbe kind="memory" testId="b" />
+        </PanelDensityDefaultProvider>
+      </PanelPreferencesProvider>
+    );
+    const view = render(tree("compact"));
+    expect(view.getByTestId("a").textContent).toBe("compact");
+    expect(view.getByTestId("b").textContent).toBe("compact");
+    view.rerender(tree("comfortable"));
+    expect(view.getByTestId("a").textContent).toBe("comfortable");
+    expect(view.getByTestId("b").textContent).toBe("comfortable");
+    // Nothing is written for a kind that only follows the default.
+    expect(window.localStorage.getItem("meta-console-density:topology:principal-1") === null).toBe(true);
+    // Without a provider the default is comfortable.
+    const bare = render(<DensityProbe kind="workgraph" testId="c" />);
+    expect(bare.getByTestId("c").textContent).toBe("comfortable");
+  });
+
+  it("keeps a kind's stored choice over the display density, and clears it on the default", () => {
+    window.localStorage.clear();
+    window.localStorage.setItem("meta-console-density:topology:principal-1", "comfortable");
+    const tree = (density: "comfortable" | "compact") => (
+      <PanelPreferencesProvider scope="principal-1">
+        <PanelDensityDefaultProvider density={density}>
+          <DensityProbe kind="topology" testId="a" />
+          <DensityProbe kind="memory" testId="b" />
+        </PanelDensityDefaultProvider>
+      </PanelPreferencesProvider>
+    );
+    const view = render(tree("compact"));
+    expect(view.getByTestId("a").textContent).toBe("comfortable");
+    expect(view.getByTestId("b").textContent).toBe("compact");
+    // Choosing the default (compact) again clears the stored choice.
+    act(() => {
+      fireEvent.click(view.getByTestId("a"));
+    });
+    expect(view.getByTestId("a").textContent).toBe("compact");
+    expect(window.localStorage.getItem("meta-console-density:topology:principal-1") === null).toBe(true);
+    view.rerender(tree("comfortable"));
+    expect(view.getByTestId("a").textContent).toBe("comfortable");
+    // A choice away from the default is stored and outlives a change of the default.
+    act(() => {
+      fireEvent.click(view.getByTestId("b"));
+    });
+    expect(window.localStorage.getItem("meta-console-density:memory:principal-1")).toBe("compact");
+    view.rerender(tree("compact"));
+    view.rerender(tree("comfortable"));
+    expect(view.getByTestId("b").textContent).toBe("compact");
   });
 
   it("gives the shell's density and id option to every part inside", () => {

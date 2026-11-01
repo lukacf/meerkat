@@ -326,6 +326,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   over several runtimes or none). `ConsoleLiveSnapshot` gains `mob_id`
   (`None` from `ConsoleLiveSnapshot::new`), which a host that builds its own
   snapshot sets to name its team.
+- The results of `meta/memory/panel/dreams` and `meta/memory/panel/dream_runs`
+  carry `withheld_by_access`: true when access withholds the dream history of
+  at least one realm, whether or not that realm has runs, so a client can
+  tell withheld history from none. `MemoryPanelStore` gains two provided
+  methods the dream history check uses: `holds_quarantine_evidence(realm)`
+  (whether the realm holds a quarantined record, or a tombstoned one that was
+  ever quarantined) and `realm_scopes(realm)` (every scope that holds a
+  record, a proposal or a gated promotion, and each harvested identity). The
+  bundled SQLite store implements both, `realm_scopes` from the records scope
+  index without reading a record; the defaults answer `true` and list the
+  scopes of `scope_overview`. A third, `proposal_scopes(realm, ids)`, resolves
+  the proposal a gated promotion names as its source; its default resolves
+  none, which withholds such a promotion under access control.
 
 - `SessionBridge::member_lifecycle_journal_head` and
   `member_lifecycle_journal_page` read Core's member lifecycle journal of the
@@ -838,6 +851,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   was listed under Personal, and one with a router or triage role under
   Coordinators. An agent whose group label names no category is still placed
   by its role.
+- The Console Memory panel's realm-level reads (`meta/memory/panel/overview`,
+  `proposals`, `injections`, `harvests` and `audit_verdicts`) return only the
+  rows the caller may read. They admit a caller on the unscoped
+  `agent.memory.read` grant, a check with no resource that a deny written for
+  one identity, role or label does not match, and they returned the rows of
+  every scope: such a caller received the overview counts, injection-ledger
+  rows, pending harvests and audit verdicts of identities whose memory it may
+  not read (a deny on the identity, or no `agent.view` on it), and a caller
+  without `mob.memory.read` or `operator.memory.read` received those scopes'
+  overview rows and proposal titles. Each row now passes the rule the record
+  listing applies: an overview scope row and a proposal by their scope, a
+  harvest by its identity, an audit verdict by its record (quarantined
+  content still needs `memory.quarantine.review`), and an injection-ledger
+  row by both its record and the identity it went into. A record's detail
+  (`meta/memory/panel/record`) likewise lists only the injections into
+  identities the caller may read. Before, the Console hid some of these rows
+  in the browser after they had arrived.
+- On a shared Console the memory panel reads judge each identity under the
+  name the Console gives it, `<namespace>/<identity>`, after recording the
+  access attributes of its runtimes, as its send route does. Before, every
+  memory read there, the record listing, record detail and quarantine queue
+  included, judged the store's bare identity with no attributes recorded,
+  so a deny on the name the Console shows, or on a role or label, removed no
+  row. On either console an identity whose attributes are not known (memory
+  written for a name no member holds) is now withheld while a deny scoped by
+  a role, a label or another agent applies to the memory read or view
+  action, instead of being decided by its bare name, which such a deny
+  cannot match. The identity a shared record listing is filtered by
+  (`identity`) is judged the same way: before, it was checked under the
+  bare name before the attributes were recorded, so a grant written for the
+  namespaced name was refused and a deny on it answered an empty listing.
+- The quarantine queue (`meta/memory/panel/quarantine`) lists a pending
+  gated promotion only to a caller who may read both its target scope and
+  its source record or proposal (a promotion the steward made from a
+  proposal names that proposal, judged by its scope), whose content the
+  promotion would publish and which still holds it. Before, a promotion was
+  judged by its target scope alone, so a reviewer denied the source scope
+  still read the source's id and the steward's rationale for promoting it.
+  An applied promotion leaves the queue, and its content is a record of the
+  target scope, judged there.
+- Dream history (`meta/memory/panel/dreams` and `dream_runs`) spans a
+  realm's scopes and can describe quarantined content, so it now lists a
+  realm's runs only to a caller who may read every memory scope the realm
+  names (the scopes of its records, proposals and gated promotions, and its
+  harvested identities) and, while the realm holds quarantined content (a
+  quarantined record, or a tombstoned one that was ever quarantined), also
+  holds `memory.quarantine.review`. For any other caller those runs are left
+  out, and `withheld_by_access` (see Added) is true when access withholds the
+  dream history of at least one realm, whether or not that realm has runs.
 
 - A candidate launch
   (`runtime_options.mob_composition.authority = "candidate"`) refuses

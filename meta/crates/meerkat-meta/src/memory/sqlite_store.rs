@@ -2744,6 +2744,96 @@ impl MemoryPanelStore for SqliteAgentMemoryStore {
         })
         .await
     }
+
+    async fn holds_quarantine_evidence(&self, realm: &str) -> Result<bool, AgentMemoryError> {
+        let store = self.clone();
+        let realm = realm.to_string();
+        run_blocking(move || {
+            store.with_realm_conn(&realm, |conn| {
+                conn.query_row(
+                    "SELECT EXISTS (SELECT 1 FROM records WHERE status_kind = 'quarantined' \
+                     OR (status_kind = 'tombstoned' AND ever_quarantined = 1))",
+                    [],
+                    |row| row.get::<_, bool>(0),
+                )
+                .map_err(sql_err)
+            })
+        })
+        .await
+    }
+
+    async fn realm_scopes(&self, realm: &str) -> Result<Vec<MemoryScope>, AgentMemoryError> {
+        let store = self.clone();
+        let realm = realm.to_string();
+        run_blocking(move || {
+            store.with_realm_conn(&realm, |conn| {
+                // The records part reads the scope index alone, never a body.
+                let mut stmt = conn
+                    .prepare(
+                        "SELECT scope_kind, scope_key FROM records \
+                         UNION SELECT scope_kind, scope_key FROM proposals \
+                         UNION SELECT scope_kind, scope_key FROM pending_promotions \
+                         UNION SELECT 'identity', identity FROM pending_harvests",
+                    )
+                    .map_err(sql_err)?;
+                let rows = stmt
+                    .query_map([], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                    })
+                    .map_err(sql_err)?;
+                let mut scopes = Vec::new();
+                for row in rows {
+                    let (scope_kind, scope_key) = row.map_err(sql_err)?;
+                    scopes.push(scope_from_parts(&scope_kind, &scope_key, &realm)?);
+                }
+                Ok(scopes)
+            })
+        })
+        .await
+    }
+
+    async fn proposal_scopes(
+        &self,
+        realm: &str,
+        ids: &[String],
+    ) -> Result<Vec<(String, MemoryScope)>, AgentMemoryError> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let store = self.clone();
+        let realm = realm.to_string();
+        let ids = ids.to_vec();
+        run_blocking(move || {
+            store.with_realm_conn(&realm, |conn| {
+                let placeholders = vec!["?"; ids.len()].join(", ");
+                let mut stmt = conn
+                    .prepare(&format!(
+                        "SELECT proposal_id, scope_kind, scope_key FROM proposals \
+                         WHERE proposal_id IN ({placeholders})"
+                    ))
+                    .map_err(sql_err)?;
+                let rows = stmt
+                    .query_map(rusqlite::params_from_iter(ids.iter()), |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                        ))
+                    })
+                    .map_err(sql_err)?;
+                let mut scopes = Vec::new();
+                for row in rows {
+                    let (proposal_id, scope_kind, scope_key) = row.map_err(sql_err)?;
+                    scopes.push((
+                        proposal_id,
+                        scope_from_parts(&scope_kind, &scope_key, &realm)?,
+                    ));
+                }
+                Ok(scopes)
+            })
+        })
+        .await
+    }
 }
 
 impl SqliteAgentMemoryStore {
@@ -5969,6 +6059,85 @@ mod tests {
             },
             "proposals carry real authorship (§8.2)"
         );
+        Ok(())
+    }
+
+    /// The scopes a realm names come from the records (any status), the
+    /// proposals, the gated promotions and the harvests, each scope once.
+    #[tokio::test]
+    async fn realm_scopes_name_records_proposals_promotions_and_harvests()
+    -> Result<(), Box<dyn Error>> {
+        let dir = tempfile::tempdir()?;
+        let store = SqliteAgentMemoryStore::open(dir.path())?;
+        let identity_scope = |identity: &str| MemoryScope::Identity {
+            realm: "team".to_string(),
+            identity: identity.to_string(),
+        };
+        let mob = MemoryScope::Mob {
+            realm: "team".to_string(),
+            mob: "mob:main".to_string(),
+        };
+        let operator = MemoryScope::Operator {
+            realm: "team".to_string(),
+            operator: "op:owner".to_string(),
+        };
+        let forgotten = store
+            .remember_authored(
+                &identity_scope("writer"),
+                payload("Writer fact", "A fact"),
+                MemoryAuthor::Operator,
+            )
+            .await?;
+        store
+            .forget_authored(
+                &identity_scope("writer"),
+                &forgotten.memory_id,
+                MemoryAuthor::Operator,
+            )
+            .await?;
+        store
+            .remember_authored(
+                &identity_scope("writer"),
+                payload("Writer note", "A note"),
+                MemoryAuthor::Operator,
+            )
+            .await?;
+        store
+            .propose(
+                &mob,
+                payload("Mob proposal", "For the mob"),
+                MemoryAuthor::Operator,
+            )
+            .await?;
+        store
+            .record_pending_promotion(
+                "team",
+                PendingPromotion {
+                    pending_id: "gate-1".to_string(),
+                    stage_token: "stage-1".to_string(),
+                    record_id: forgotten.memory_id.clone(),
+                    scope_kind: "operator".to_string(),
+                    scope_key: "op:owner".to_string(),
+                    rationale: None,
+                    status: "pending".to_string(),
+                    created_at_ms: 1,
+                },
+            )
+            .await?;
+        store
+            .record_pending_harvest("team", "retiree", None, "retired")
+            .await?;
+
+        let mut scopes = store.realm_scopes("team").await?;
+        scopes.sort();
+        let mut expected = vec![
+            identity_scope("writer"),
+            identity_scope("retiree"),
+            mob,
+            operator,
+        ];
+        expected.sort();
+        assert_eq!(scopes, expected);
         Ok(())
     }
 

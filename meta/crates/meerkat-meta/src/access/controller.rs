@@ -1257,6 +1257,24 @@ impl AccessView {
         self.can_view_agent(identity)
     }
 
+    /// Whether a deny that applies to `action` for this principal could
+    /// match `identity` only through attributes the bare identity does not
+    /// carry: a role, a label, or another agent that may be its spawn
+    /// ancestor. A decision on an identity the attribute cache does not know
+    /// cannot honour such a deny, so a read that must fail closed withholds
+    /// the identity instead ([`Self::can_view_uncaptured_member`] does so for
+    /// `agent.view`). An admin, and a disabled config, have none.
+    pub(crate) fn has_deny_undecidable_by_identity(&self, action: &str, identity: &str) -> bool {
+        self.config.enabled
+            && super::engine::deny_undecidable_by_identity(
+                &self.config,
+                &self.principal,
+                action,
+                identity,
+            )
+            .is_some()
+    }
+
     /// True when the agent's resource attributes (role/labels) are present in
     /// the shared attribute cache, keyed by identity or projected `agent_id`.
     ///

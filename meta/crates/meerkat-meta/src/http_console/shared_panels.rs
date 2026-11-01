@@ -35,6 +35,23 @@ pub(super) const MEMORY_READ_METHODS: &[&str] = &[
     "meta/memory/panel/harvests",
 ];
 
+/// The identity a record listing is filtered by, when the generic entry
+/// check would judge the listing by that name: `identity` given, with no mob
+/// or operator `scope`. The name is the store's bare identity, so this
+/// Console judges it in [`dispatch`] instead, under the name it gives the
+/// identity and after recording its runtimes' access attributes.
+pub(super) fn identity_listing(method: &str, params: &Value) -> Option<String> {
+    if method != "meta/memory/panel/records"
+        || matches!(
+            memory_panel_scope_param(params).as_deref(),
+            Some("mob" | "operator")
+        )
+    {
+        return None;
+    }
+    normalized_console_rpc_string_param(params, "identity")
+}
+
 pub(super) fn is_read(method: &str) -> bool {
     MEMORY_READ_METHODS.contains(&method)
         || crate::rpc::workgraph_methods::is_workgraph_read_method(method)
@@ -79,26 +96,43 @@ pub(super) async fn dispatch(
         );
     };
     let store = selected.memory.as_deref();
+    // The rows name the runtime's identities bare; this Console names them
+    // in the runtime's namespace, which is how their access is judged.
+    let caller = MemoryPanelCaller {
+        view: access_view,
+        namespace: &selected.namespace,
+    };
     let stale_id = id.clone();
     let response = match request.method.as_str() {
-        "meta/memory/panel/records" => {
-            handle_memory_panel_records(store, access_view, &params, id).await
-        }
-        "meta/memory/panel/record" => {
-            handle_memory_panel_record(store, access_view, &params, id).await
-        }
+        "meta/memory/panel/records" => match identity_listing(&request.method, &params) {
+            Some(identity) if !memory_panel_identity_visible(caller, &identity) => {
+                memory_panel_identity_denied(id, caller, &identity)
+            }
+            _ => handle_memory_panel_records(store, caller, &params, id).await,
+        },
+        "meta/memory/panel/record" => handle_memory_panel_record(store, caller, &params, id).await,
         "meta/memory/panel/quarantine" => {
-            handle_memory_panel_quarantine(store, access_view, &params, id).await
+            handle_memory_panel_quarantine(store, caller, &params, id).await
         }
-        "meta/memory/panel/dreams" => handle_memory_panel_dreams(store, &params, id).await,
-        "meta/memory/panel/dream_runs" => handle_memory_panel_dream_runs(store, &params, id).await,
+        "meta/memory/panel/dreams" => handle_memory_panel_dreams(store, caller, &params, id).await,
+        "meta/memory/panel/dream_runs" => {
+            handle_memory_panel_dream_runs(store, caller, &params, id).await
+        }
         "meta/memory/panel/audit_verdicts" => {
-            handle_memory_panel_audit_verdicts(store, &params, id).await
+            handle_memory_panel_audit_verdicts(store, caller, &params, id).await
         }
-        "meta/memory/panel/overview" => handle_memory_panel_overview(store, &params, id).await,
-        "meta/memory/panel/proposals" => handle_memory_panel_proposals(store, &params, id).await,
-        "meta/memory/panel/injections" => handle_memory_panel_injections(store, &params, id).await,
-        "meta/memory/panel/harvests" => handle_memory_panel_harvests(store, &params, id).await,
+        "meta/memory/panel/overview" => {
+            handle_memory_panel_overview(store, caller, &params, id).await
+        }
+        "meta/memory/panel/proposals" => {
+            handle_memory_panel_proposals(store, caller, &params, id).await
+        }
+        "meta/memory/panel/injections" => {
+            handle_memory_panel_injections(store, caller, &params, id).await
+        }
+        "meta/memory/panel/harvests" => {
+            handle_memory_panel_harvests(store, caller, &params, id).await
+        }
         method => {
             let admission = selected.runtime.workgraph_admission();
             let service = selected.runtime.workgraph_service();

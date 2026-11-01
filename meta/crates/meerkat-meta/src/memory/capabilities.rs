@@ -486,4 +486,46 @@ pub trait MemoryPanelStore: StewardStore {
         realm: &str,
         max_runs: usize,
     ) -> Result<Vec<DreamRunAudit>, AgentMemoryError>;
+
+    /// Whether `realm` holds quarantined content: a quarantined record, or a
+    /// tombstoned one that was ever quarantined. The panel shows such
+    /// content only to `memory.quarantine.review`, and while any exists it
+    /// lists the realm's dream history, which can describe it, only to that
+    /// grant. The default answers `true`, so a store that cannot tell keeps
+    /// the history to reviewers.
+    async fn holds_quarantine_evidence(&self, _realm: &str) -> Result<bool, AgentMemoryError> {
+        Ok(true)
+    }
+
+    /// Every memory scope `realm` names: each scope that holds a record (in
+    /// any status), a proposal or a gated promotion, and the identity of each
+    /// recorded harvest. A steward dream's history can name any of them (a
+    /// harvest phase names its identity, a skip names a proposal), so the
+    /// panel lists a realm's dream history only to a caller who may read
+    /// every one. The default lists the scopes
+    /// [`StewardStore::scope_overview`] reports, which aggregates every
+    /// record; a store should answer from its indexes and name the proposal,
+    /// promotion and harvest scopes too.
+    async fn realm_scopes(&self, realm: &str) -> Result<Vec<MemoryScope>, AgentMemoryError> {
+        Ok(self
+            .scope_overview(realm)
+            .await?
+            .into_iter()
+            .map(|row| row.scope)
+            .collect())
+    }
+
+    /// The scope of each proposal among `ids` that `realm` holds, in any
+    /// status, by proposal id; ids that name no proposal are left out. A
+    /// gated promotion names its source by id, and the source of one the
+    /// steward made from a proposal is that proposal. The default resolves
+    /// none, so a store that cannot tell withholds such a promotion from
+    /// every caller under access control.
+    async fn proposal_scopes(
+        &self,
+        _realm: &str,
+        _ids: &[String],
+    ) -> Result<Vec<(String, MemoryScope)>, AgentMemoryError> {
+        Ok(Vec::new())
+    }
 }

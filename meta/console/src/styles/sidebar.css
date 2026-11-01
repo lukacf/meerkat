@@ -1,36 +1,104 @@
 /* Sidebar: nav buttons, roster sections and agent rows.
    Split from console-host.css (imported there, in this order). */
 
-/* Sidebar nav buttons */
-.sidebar__section--nav {
-  display: flex; flex-direction: column; gap: 1px;
-  padding: 10px 0 6px;
+/* ── Workbench (spec B14): a vertical list of views, 28 px rows with a
+   16 px icon, the label and an attention badge (a mark and a count). The
+   focused pane's view wears the accent rule. The list folds away. ── */
+.sidebar__section.sidebar__section--nav {
+  display: flex;
+  flex-direction: column;
   flex: none;
+  padding: 4px 0 8px;
+  border-bottom: 1px solid var(--_cc-border-soft);
+}
+.sidebar__sec-head.sidebar__nav-head {
+  height: 28px;
+  padding: 0 10px 0 14px;
+  align-items: center;
+}
+.sidebar__navlist {
+  display: flex;
+  flex-direction: column;
 }
 .sidebar__navitem {
-  display: flex; align-items: center;
-  justify-content: center;
-  min-height: 28px;
-  padding: 5px 8px;
-  font-family: var(--disp);
-  font-size: 11px;
-  color: var(--ink-muted);
-  text-align: center;
-  border: 1px solid var(--line);
-  background: var(--bg-elev-1);
-  border-radius: var(--r-sm);
-  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  box-sizing: border-box;
+  width: 100%;
+  height: 28px;
+  padding: 0 12px 0 14px;
+  border: 0;
+  background: transparent;
+  color: var(--_cc-foreground-muted);
+  font-family: var(--_cc-font-display);
+  font-size: 12.5px;
+  font-weight: 400;
+  line-height: 1;
+  text-align: left;
   text-decoration: none;
+  cursor: pointer;
+  transition: background var(--_cc-dur-fast) ease, color var(--_cc-dur-fast) ease;
 }
 .sidebar__navitem:hover {
-  background: var(--bg-elev-2);
-  color: var(--ink);
-  border-color: var(--line-strong);
+  background: var(--_cc-surface-hover);
+  color: var(--_cc-foreground);
 }
 .sidebar__navitem:focus-visible {
-  outline: 1.5px solid var(--focus);
+  outline: 2px solid var(--_cc-focus-ring);
   outline-offset: -2px;
 }
+.sidebar__navitem.is-active {
+  background: var(--_cc-surface-card);
+  color: var(--_cc-foreground);
+  font-weight: 500;
+  box-shadow: inset 2px 0 0 var(--_cc-member-accent);
+}
+.sidebar__navicon {
+  flex: none;
+  width: 15px;
+  height: 15px;
+  color: var(--_cc-foreground-meta);
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.sidebar__navitem.is-active .sidebar__navicon,
+.sidebar__navitem:hover .sidebar__navicon { color: var(--_cc-foreground-muted); }
+.sidebar__navlabel {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* An attention badge: the tone's mark and a count in a soft pill. */
+.sidebar__navbadge {
+  --_cc-tone: var(--_cc-warning);
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+  height: 18px;
+  padding: 0 6px;
+  border-radius: var(--_cc-radius-pill);
+  background: color-mix(in srgb, var(--_cc-warning) 16%, var(--_cc-surface-card));
+  color: var(--_cc-warning-ink);
+  font-family: var(--_cc-font-mono);
+  font-size: 10.5px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+.sidebar__navbadge[data-tone="crit"] {
+  --_cc-tone: var(--_cc-negative);
+  background: color-mix(in srgb, var(--_cc-negative) 12%, var(--_cc-surface-card));
+  color: var(--_cc-negative-ink);
+}
+.sidebar__navbadge .cc-mark { --_cc-mark-size: 7px; }
+.sidebar__nav-head .sidebar__navbadge { margin-left: 4px; }
 
 /* ══════════════════════════════════════════════════════════════
    Component tweaks for existing ConsoleSidebar / ConsoleActivityRail
@@ -76,10 +144,10 @@
    ══════════════════════════════════════════════════════════════ */
 
 .sidebar {
-  background: var(--bg-sunken);
-  border-right: 1px solid var(--line);
+  background: var(--_cc-surface-soft);
+  border-right: 1px solid var(--_cc-border-soft);
   overflow: hidden;
-  font-family: var(--sans);
+  font-family: var(--_cc-font-display);
   padding-bottom: 0;
   min-width: 0;
   position: relative;
@@ -89,26 +157,70 @@
   user-select: none;
   -webkit-user-select: none;
 }
-.sidebar__mast {
-  padding: 14px 14px 10px;
-  border-bottom: 1px solid var(--line);
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
+/* ── The roster mast (spec A5): "Roster", the count and, when the view
+   is not the default, its summary and a reset; the view options trigger
+   at the right shows on hover or focus of the mast or the search, and
+   always while the view is customised (it then wears the accent dot). ── */
+.sidebar__head {
   flex: none;
+  border-bottom: 1px solid var(--_cc-border-soft);
 }
+.sidebar__mast {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 12px 10px 4px 14px;
+}
+.sidebar__mast-text { flex: 1 1 auto; min-width: 0; }
 .sidebar__mast-title {
-  color: var(--ink);
-  font-size: 15px;
-  font-weight: 650;
-  letter-spacing: -0.01em;
+  color: var(--_cc-foreground);
+  font-family: var(--_cc-font-display);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.35;
+  letter-spacing: -0.005em;
 }
 .sidebar__mast-sub {
-  color: var(--ink-dim);
-  font-family: var(--mono);
-  font-size: 10.5px;
-  margin-top: 2px;
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  margin-top: 1px;
+  color: var(--_cc-foreground-meta);
+  font-family: var(--_cc-font-display);
+  font-size: var(--_cc-panel-fs-meta);
+  line-height: 18px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
+.sidebar__mast-count { flex: none; }
+.sidebar__view-summary {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  padding: 0;
+  border: 0;
+  border-radius: var(--_cc-radius-xs);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: pre;
+  cursor: pointer;
+}
+.sidebar__view-summary:hover { color: var(--_cc-foreground-muted); text-decoration: underline; text-underline-offset: 2px; }
+.sidebar__view-summary:focus-visible { outline: 2px solid var(--_cc-focus-ring); outline-offset: 1px; }
+/* The reset: a small x after the summary, a 24 px target that does not
+   grow the line. */
+.sidebar__view-reset.cc-btn--icon.cc-btn--sm {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  margin: -1px -4px -1px 0;
+}
+.sidebar__view-reset .cc-btn__icon .cc-glyph { width: 11px; height: 11px; }
+.sidebar__view-trigger { flex: none; margin-top: -2px; }
+.sidebar__view-trigger .cc-btn__badge { box-shadow: 0 0 0 1.5px var(--_cc-surface-soft); }
 
 /* Collapsed sidebar - content is fully replaced by a thin vertical
    "grip" bar centered in the rail. The actual collapse toggle lives
@@ -124,63 +236,34 @@
 .sidebar__grip {
   width: 2px;
   height: 28px;
-  background: var(--line-strong);
+  background: var(--_cc-border-strong);
   border-radius: 1px;
   opacity: 0.7;
   display: block;
 }
 
 .sidebar__search {
-  padding: 12px;
-  border-bottom: 1px solid var(--line);
-  flex: none;
+  padding: 6px 10px 10px 12px;
 }
-.sidebar__search input {
+.sidebar__search .cc-search,
+.sidebar__search .cc-search__box { display: flex; width: 100%; }
+.sidebar__search .cc-search__input {
   width: 100%;
-  background: var(--bg-elev-1);
-  border: 1px solid var(--line);
-  color: var(--ink);
-  padding: 6px 10px;
-  font: inherit; font-size: 12px;
-  border-radius: var(--r-sm);
-  font-family: var(--mono);
+  height: 28px;
+  background: var(--_cc-surface-card);
+  font-size: var(--_cc-fs-control);
   user-select: text;
   -webkit-user-select: text;
 }
-.sidebar__activity-filters { display: flex; gap: 2px; margin-top: 8px; }
-.sidebar__activity-filters button {
-  flex: 1; min-width: 0; padding: 5px 2px; border: 0; border-radius: var(--r-sm);
-  background: transparent; color: var(--ink-dim); font: inherit; font-size: 11px; cursor: pointer;
-}
-.sidebar__activity-filters button:hover { color: var(--ink); background: var(--bg-hover); }
-.sidebar__activity-filters button[aria-pressed="true"] { color: var(--ink); background: var(--bg-elev-2); box-shadow: inset 0 0 0 1px var(--line); }
-.sidebar__activity-filters button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
-.sidebar__view { display: flex; gap: 6px; margin-top: 8px; }
-.sidebar__view-control {
-  flex: 1; min-width: 0;
-  display: flex; align-items: center; gap: 5px;
-  font-size: 11px; color: var(--ink-dim);
-}
-.sidebar__view-control select {
-  flex: 1; min-width: 0;
-  padding: 3px 4px;
-  border: 1px solid var(--line); border-radius: var(--r-sm);
-  background: var(--bg-elev-1); color: var(--ink);
-  font: inherit; font-size: 11px;
-}
-.sidebar__view-control select:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
-
-.sidebar__search input::placeholder { color: var(--ink-faint); }
-.sidebar__search input:focus { outline: none; border-color: var(--line-strong); background: var(--bg-elev-2); }
 
 .sidebar__section {
   padding: 12px 0 6px;
-  border-bottom: 1px solid var(--line);
+  border-bottom: 1px solid var(--_cc-border-soft);
 }
 .sidebar__section:last-child { border-bottom: none; }
 .sidebar__sec-head {
-  display: flex; align-items: baseline; gap: 8px;
-  padding: 0 14px 6px;
+  display: flex; align-items: center; gap: 6px;
+  padding: 0 10px 6px 14px;
 }
 .sidebar__sec-head--button {
   width: 100%;
@@ -209,7 +292,7 @@
   left: 12px;
   right: 12px;
   height: 2px;
-  background: var(--accent);
+  background: var(--_cc-member-accent);
   border-radius: 1px;
 }
 .sidebar__order-target[data-drag-over="before"]::before,
@@ -229,9 +312,9 @@
   pointer-events: none;
   max-height: min(420px, calc(100vh - 32px));
   overflow: hidden;
-  border: 1px solid var(--line-strong);
-  background: color-mix(in oklch, var(--bg-sunken) 92%, transparent);
-  box-shadow: 0 14px 36px color-mix(in oklch, black 22%, transparent);
+  border: 1px solid var(--_cc-border-strong);
+  background: color-mix(in srgb, var(--_cc-surface-soft) 92%, transparent);
+  box-shadow: var(--_cc-shadow-lg);
   opacity: 0.62;
   transform-origin: top left;
 }
@@ -249,12 +332,12 @@
   gap: 8px;
   min-height: 36px;
   padding: 12px 14px 7px;
-  border-bottom: 1px solid var(--line);
-  background: var(--bg-elev-1);
+  border-bottom: 1px solid var(--_cc-border-soft);
+  background: var(--_cc-surface-card);
 }
 
 .sidebar__drag-preview-section[data-pinned="true"] {
-  background: color-mix(in oklch, var(--accent) 9%, var(--bg-elev-1));
+  background: color-mix(in srgb, var(--_cc-member-accent) 9%, var(--_cc-surface-card));
 }
 
 .sidebar__drag-preview-subgroup {
@@ -262,8 +345,8 @@
   align-items: center;
   min-height: 28px;
   padding: 8px 14px 3px;
-  color: var(--ink-faint);
-  font-family: var(--disp);
+  color: var(--_cc-foreground-meta);
+  font-family: var(--_cc-font-display);
   font-size: 10px;
   font-weight: 600;
   letter-spacing: 0.08em;
@@ -273,8 +356,8 @@
 .sidebar__drag-preview-empty {
   min-height: 44px;
   padding: 10px 14px;
-  color: var(--ink-dim);
-  font-family: var(--mono);
+  color: var(--_cc-foreground-meta);
+  font-family: var(--_cc-font-display);
   font-size: 11px;
 }
 
@@ -285,7 +368,7 @@
   gap: 10px;
   min-height: 58px;
   padding: 8px 12px;
-  color: var(--ink);
+  color: var(--_cc-foreground);
 }
 
 .sidebar__drag-preview-agent--child {
@@ -297,8 +380,8 @@
   content: "";
   width: 12px;
   height: 18px;
-  border-left: 1px solid var(--line-strong);
-  border-bottom: 1px solid var(--line-strong);
+  border-left: 1px solid var(--_cc-border-strong);
+  border-bottom: 1px solid var(--_cc-border-strong);
   justify-self: end;
   align-self: start;
   opacity: 0.75;
@@ -314,7 +397,7 @@
   padding-left: 40px;
 }
 
-.sidebar__drag-preview-agent--child .agent__dot {
+.sidebar__drag-preview-agent--child .agent__mark {
   grid-column: 2;
 }
 
@@ -329,27 +412,50 @@
   grid-column: 3;
 }
 
-.sidebar__sec-head--button:hover .sidebar__sec-label { color: var(--ink-muted); }
+.sidebar__sec-head--button:hover .sidebar__sec-label { color: var(--_cc-foreground-muted); }
+.sidebar__sec-head--button:focus-visible {
+  outline: 2px solid var(--_cc-focus-ring);
+  outline-offset: -2px;
+}
 .sidebar__sec-label {
-  font-size: 10px;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
-  color: var(--ink-dim);
+  font-family: var(--_cc-font-display);
+  font-size: var(--_cc-panel-fs-label);
   font-weight: 600;
-  font-family: var(--disp);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--_cc-foreground-meta);
 }
 .sidebar__sec-count {
-  font-size: 10px;
-  color: var(--ink-faint);
-  font-family: var(--mono);
+  font-family: var(--_cc-font-mono);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  color: var(--_cc-foreground-meta);
 }
 .sidebar__sec-spacer { flex: 1; }
-
-.sidebar__navgrid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 4px;
-  padding: 0 10px 4px;
+/* The collapse chevron: shown on hover or focus, and always while folded. */
+.sidebar__sec-chevron {
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  width: 16px;
+  height: 16px;
+  color: var(--_cc-foreground-meta);
+}
+.sidebar__sec-chevron svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.75;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  transition: transform var(--_cc-dur-base) var(--_cc-ease-out);
+}
+[aria-expanded="false"] > .sidebar__sec-chevron { opacity: 1; }
+[aria-expanded="false"] > .sidebar__sec-chevron svg { transform: rotate(-90deg); }
+.reduced-motion .sidebar__sec-chevron svg { transition: none; }
+@media (prefers-reduced-motion: reduce) {
+  .sidebar__sec-chevron svg { transition: none; }
 }
 
 .sidebar__virtual-list {
@@ -376,7 +482,7 @@
 }
 
 .sidebar__virtual-row--section {
-  border-top: 1px solid var(--line);
+  border-top: 1px solid var(--_cc-border-soft);
 }
 
 .sidebar__virtual-row--section .sidebar__section {
@@ -384,11 +490,16 @@
   border-bottom: none;
 }
 .sidebar__virtual-row--section .sidebar__section[data-pinned="true"] {
-  background: color-mix(in oklch, var(--accent) 5%, transparent);
+  background: color-mix(in srgb, var(--_cc-member-accent) 5%, transparent);
 }
 
+/* Row heights: SIDEBAR_ROW_HEIGHT in Sidebar.tsx lays the virtual list
+   out with the same numbers (44 px, 32 px in compact density). */
 .sidebar__virtual-row--agent .agent {
-  height: 72px;
+  height: 44px;
+}
+.sidebar[data-density="compact"] .sidebar__virtual-row--agent .agent {
+  height: 32px;
 }
 
 .sidebar__virtual-row--agent .agent__badges {
@@ -417,8 +528,8 @@
   padding: 8px 14px 3px;
   border: 0;
   background: transparent;
-  color: var(--ink-faint);
-  font-family: var(--disp);
+  color: var(--_cc-foreground-meta);
+  font-family: var(--_cc-font-display);
   font-size: 10px;
   font-weight: 600;
   text-transform: uppercase;
@@ -429,7 +540,7 @@
   cursor: pointer;
 }
 .sidebar__subgroup--button:hover {
-  color: var(--ink-muted);
+  color: var(--_cc-foreground-muted);
 }
 
 .sidebar__empty {
@@ -437,16 +548,33 @@
   flex-direction: column;
   gap: 3px;
   padding: 8px 14px 10px;
-  font-size: 11px;
-  color: var(--ink-dim);
-  font-family: var(--mono);
+  font-family: var(--_cc-font-display);
+  font-size: var(--_cc-panel-fs-meta);
+  color: var(--_cc-foreground-meta);
 }
 .sidebar__empty-title {
-  color: var(--ink-muted);
-  font-family: var(--disp);
-  font-size: 11px;
+  color: var(--_cc-foreground-muted);
+  font-size: var(--_cc-fs-control);
   font-weight: 600;
 }
+.sidebar__empty--filtered {
+  flex-direction: row;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding-top: 12px;
+}
+.sidebar__empty-clear {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--_cc-link-ink);
+  font: inherit;
+  font-weight: 500;
+  cursor: pointer;
+}
+.sidebar__empty-clear:hover { text-decoration: underline; text-underline-offset: 2px; }
+.sidebar__empty-clear:focus-visible { outline: 2px solid var(--_cc-focus-ring); outline-offset: 2px; border-radius: var(--_cc-radius-xs); }
 
 /* A roster row: the agent's button and, beside it, its pin and copy actions.
    The button shares the row's columns (a subgrid), so the actions keep their
@@ -454,14 +582,14 @@
    the button's left padding. */
 .agent-row {
   display: grid;
-  grid-template-columns: 22px 1fr auto auto;
-  column-gap: 10px;
+  grid-template-columns: 14px 1fr auto auto;
+  column-gap: 9px;
   align-items: center;
   position: relative;
 }
-.agent-row--child { grid-template-columns: 40px 7px 1fr auto auto; }
-.agent-row--child[data-depth="2"] { grid-template-columns: 72px 7px 1fr auto auto; }
-.agent-row--child[data-depth="3"] { grid-template-columns: 104px 7px 1fr auto auto; }
+.agent-row--child { grid-template-columns: 30px 8px 1fr auto auto; }
+.agent-row--child[data-depth="2"] { grid-template-columns: 54px 8px 1fr auto auto; }
+.agent-row--child[data-depth="3"] { grid-template-columns: 78px 8px 1fr auto auto; }
 .agent-row > .agent__actions { grid-row: 1; grid-column: -3; }
 .agent {
   display: grid;
@@ -469,8 +597,9 @@
   grid-column: 1 / -1;
   grid-template-columns: subgrid;
   align-items: center;
-  gap: 10px;
-  padding: 8px 12px;
+  column-gap: 9px;
+  box-sizing: border-box;
+  padding: 0 12px 0 12px;
   cursor: pointer;
   border: none;
   width: 100%;
@@ -478,87 +607,105 @@
   position: relative;
   min-height: 32px;
   background: transparent;
-  color: var(--ink);
+  color: var(--_cc-foreground);
+  transition: background var(--_cc-dur-fast) ease;
 }
-.agent-row:hover > .agent { background: var(--bg-elev-1); }
-.agent.is-active {
-  background: var(--bg-elev-1);
-  box-shadow: inset 2px 0 0 var(--accent);
+.agent:focus-visible {
+  outline: 2px solid var(--_cc-focus-ring);
+  outline-offset: -2px;
 }
-.agent--child { padding-left: 20px; }
-.agent--child[data-depth="2"] { padding-left: 30px; }
-.agent--child[data-depth="3"] { padding-left: 40px; }
+.agent-row:hover > .agent { background: var(--_cc-surface-hover); }
+.agent.is-active,
+.agent-row:hover > .agent.is-active {
+  background: var(--_cc-surface-card);
+  box-shadow: inset 2px 0 0 var(--_cc-member-accent);
+}
+.agent--child { padding-left: 14px; }
+.agent--child[data-depth="2"] { padding-left: 22px; }
+.agent--child[data-depth="3"] { padding-left: 30px; }
+/* A spawned helper or side chat hangs from its parent by a hairline. */
 .agent--child::before {
   content: "";
-  width: 12px;
-  height: 18px;
-  border-left: 1px solid var(--line-strong);
-  border-bottom: 1px solid var(--line-strong);
+  width: 10px;
+  height: 50%;
+  border-left: 1px solid var(--_cc-border-strong);
+  border-bottom: 1px solid var(--_cc-border-strong);
+  border-bottom-left-radius: var(--_cc-radius-xs);
   justify-self: end;
   align-self: start;
-  opacity: 0.75;
 }
 .agent--child[data-depth="2"]::before,
 .agent--child[data-depth="3"]::before {
   width: 24px;
 }
+.agent--child .agent__mark,
 .agent--child .agent__dot { grid-column: 2; }
 .agent--child .agent__body { grid-column: 3; }
+/* The status mark (A2.4 shape and tone; live pulses), from the shared
+   agent-status rule. The words are the detail line's. */
+.agent__mark { justify-self: center; }
 .agent__dot {
   width: 7px; height: 7px; border-radius: 50%;
-  background: var(--ink-faint);
+  background: var(--_cc-viz-mid);
   justify-self: center;
 }
 [data-cc-variant="terminal"] .agent__dot { border-radius: 0; width: 6px; height: 6px; }
-.agent[data-state="active"] .agent__dot { background: var(--ok); }
-.agent[data-state="degraded"] .agent__dot {
-  background: var(--warn);
-  animation: pulse-dot 1.4s infinite ease-in-out;
-}
-.agent[data-state="retired"] .agent__dot { background: var(--ink-faint); opacity: 0.5; }
-
-@keyframes pulse-dot {
-  0%, 100% { box-shadow: 0 0 0 0 color-mix(in oklch, var(--warn) 40%, transparent); }
-  50%      { box-shadow: 0 0 0 4px color-mix(in oklch, var(--warn) 0%, transparent); }
-}
 
 .agent__body {
   display: flex; flex-direction: column; min-width: 0;
   gap: 1px;
 }
+.agent__title-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
 .agent__name {
-  font-size: 12.5px;
+  flex: 0 1 auto;
+  min-width: 0;
+  font-family: var(--_cc-font-display);
+  font-size: 13px;
   font-weight: 500;
-  color: var(--ink);
+  line-height: 1.3;
+  color: var(--_cc-foreground);
   letter-spacing: -0.003em;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
-.agent[data-state="retired"] .agent__name { color: var(--ink-dim); }
+.agent[data-state="retired"] .agent__name { color: var(--_cc-foreground-muted); }
 .agent__detail {
   display: flex;
   min-width: 0;
+  font-family: var(--_cc-font-display);
   font-size: 11px;
-  color: var(--ink-dim);
+  line-height: 1.35;
+  color: var(--_cc-foreground-meta);
   white-space: nowrap;
 }
 .agent__detail-kind { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .agent__detail-separator { flex: none; white-space: pre; }
 .agent__detail-status { flex: none; }
 /* Manual order: a grip on hover or focus, and a line where the row lands. */
+/* The 6-dot grip (A5): two columns of three dots in the row's left gutter,
+   on a 12 x 24 hit area. */
 .agent__grip {
   position: absolute;
-  left: 1px;
+  left: 0;
   top: 50%;
-  width: 8px;
-  height: 18px;
+  box-sizing: border-box;
+  width: 12px;
+  height: 24px;
+  padding: 6px 2px;
   transform: translateY(-50%);
   cursor: grab;
   touch-action: none;
   opacity: 0;
-  color: var(--ink-faint);
+  color: var(--_cc-foreground-meta);
   background-image: radial-gradient(currentColor 1px, transparent 1.4px);
   background-size: 4px 4px;
-  transition: opacity 120ms ease;
+  background-origin: content-box;
+  background-clip: content-box;
+  transition: opacity var(--_cc-dur-fast) ease;
 }
 .agent-row:hover .agent__grip,
 .agent:focus-visible .agent__grip { opacity: 1; }
@@ -566,7 +713,7 @@
 @media (hover: none) {
   .agent__grip { opacity: 1; }
 }
-.agent__grip:hover { color: var(--ink-muted); }
+.agent__grip:hover { color: var(--_cc-foreground-muted); }
 .agent__grip:active { cursor: grabbing; }
 /* A dragged row fades with its pin and copy actions, which sit beside it. */
 .agent[data-dragging="true"],
@@ -576,49 +723,86 @@
   left: 12px;
   right: 12px;
   height: 2px;
-  background: var(--accent);
+  background: var(--_cc-member-accent);
   border-radius: 1px;
   pointer-events: none;
 }
 .agent__drop-line[data-where="before"] { top: 1px; }
 .agent__drop-line[data-where="after"] { bottom: 1px; }
+/* Badges ride the name's line; the name truncates first, then the badges
+   give way past half the line. */
 .agent__badges {
   display: flex;
-  flex-wrap: wrap;
+  flex: 0 0 auto;
   gap: 3px;
-  padding-top: 3px;
+  min-width: 0;
+  max-width: 55%;
+  overflow: hidden;
 }
 .agent__badge {
   display: inline-flex;
   align-items: center;
   gap: 3px;
   max-width: 100%;
-  border: 1px solid var(--line);
-  background: var(--bg-elev-1);
-  color: var(--ink-dim);
-  border-radius: 5px;
-  padding: 1px 4px;
-  font-family: var(--mono);
-  font-size: 9.5px;
-  line-height: 1.3;
+  height: 16px;
+  box-sizing: border-box;
+  border: 1px solid var(--_cc-border-soft);
+  background: var(--_cc-surface-card);
+  color: var(--_cc-foreground-meta);
+  border-radius: var(--_cc-radius-pill);
+  padding: 0 6px;
+  font-family: var(--_cc-font-display);
+  font-size: 10px;
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+}
+.agent__badge--icon { padding: 0 4px; }
+.agent__badge-icon {
+  width: 11px;
+  height: 11px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 .agent__badge strong {
-  color: var(--ink-muted);
+  color: var(--_cc-foreground-muted);
   font-weight: 600;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.agent__badge[data-tone="warning"] { border-color: color-mix(in oklch, var(--warn) 45%, var(--line)); }
-.agent__badge[data-tone="critical"] { border-color: color-mix(in oklch, var(--danger) 45%, var(--line)); }
-.agent__badge[data-tone="success"] { border-color: color-mix(in oklch, var(--ok) 45%, var(--line)); }
+.agent__badge[data-tone="warning"] { border-color: color-mix(in srgb, var(--_cc-warning) 45%, var(--_cc-border-soft)); }
+.agent__badge[data-tone="critical"] { border-color: color-mix(in srgb, var(--_cc-negative) 45%, var(--_cc-border-soft)); }
+.agent__badge[data-tone="success"] { border-color: color-mix(in srgb, var(--_cc-positive) 45%, var(--_cc-border-soft)); }
 [data-cc-variant="terminal"] .agent__badge { border-radius: 0; }
 
+/* The right of a row: a 15-minute activity sparkline over the last
+   activity time. */
 .agent__meta {
   grid-column: -2;
-  display: flex; flex-direction: column; align-items: flex-end;
+  display: flex; flex-direction: column; align-items: flex-end; justify-content: center;
   gap: 3px;
-  color: var(--ink-dim);
+  min-width: 42px;
+  color: var(--_cc-foreground-meta);
+}
+.agent__spark { display: block; line-height: 0; }
+.agent__spark svg { display: block; }
+.agent__meta-line {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 13px;
+}
+.agent__time {
+  font-family: var(--_cc-font-display);
+  font-size: 10.5px;
+  line-height: 1.2;
+  font-variant-numeric: tabular-nums;
+  color: var(--_cc-foreground-meta);
+  white-space: nowrap;
 }
 .agent__actions {
   position: relative;
@@ -634,8 +818,8 @@
   justify-content: center;
   border: 1px solid transparent;
   background: transparent;
-  color: var(--ink-faint);
-  border-radius: var(--r-sm);
+  color: var(--_cc-foreground-meta);
+  border-radius: var(--_cc-radius-sm);
   cursor: pointer;
   opacity: 0;
   transition: opacity 120ms ease, color 120ms ease, border-color 120ms ease, background 120ms ease;
@@ -646,12 +830,16 @@
 }
 .agent__pin:hover,
 .agent__pin[data-active="true"] {
-  color: var(--ink-muted);
-  border-color: var(--line);
-  background: var(--bg-elev-1);
+  color: var(--_cc-foreground-muted);
+  border-color: var(--_cc-border-soft);
+  background: var(--_cc-surface-card);
 }
 .agent__pin[data-active="true"] {
-  color: var(--accent);
+  color: var(--_cc-member-accent);
+}
+.agent__pin:focus-visible {
+  outline: 2px solid var(--_cc-focus-ring);
+  outline-offset: 0;
 }
 .agent__pin-icon {
   width: 14px;
@@ -671,8 +859,8 @@
   top: 50%;
   transform: translateY(-50%);
   display: none;
-  border-radius: var(--r-sm);
-  background: var(--bg-elev-1);
+  border-radius: var(--_cc-radius-sm);
+  background: var(--_cc-surface-card);
 }
 .agent__actions:hover .agent__copy,
 .agent:focus-visible + .agent__actions .agent__copy,
@@ -681,44 +869,97 @@
   width: 24px;
   height: 24px;
   border: 1px solid transparent;
-  border-radius: var(--r-sm);
+  border-radius: var(--_cc-radius-sm);
   background: transparent;
   box-shadow: none;
-  color: var(--ink-faint);
+  color: var(--_cc-foreground-meta);
   cursor: pointer;
 }
 .agent__copy .cc-copy-btn:hover,
 .agent__copy .cc-copy-btn:focus-visible {
-  color: var(--ink-muted);
-  border-color: var(--line);
-  background: var(--bg-elev-1);
+  color: var(--_cc-foreground-muted);
+  border-color: var(--_cc-border-soft);
+  background: var(--_cc-surface-card);
 }
 .agent__copy .cc-copy-btn[data-copied="true"] {
-  color: var(--ok);
+  color: var(--_cc-positive-ink);
   background: transparent;
   box-shadow: none;
 }
-.agent__pulse {
-  display: flex; align-items: flex-end; gap: 1.5px;
-  height: 12px;
-}
-.agent__pulse span {
-  width: 2px; background: var(--ink-faint); border-radius: 1px;
-  min-height: 1px;
-}
-[data-cc-variant="terminal"] .agent__pulse span { border-radius: 0; }
-.agent[data-state="active"] .agent__pulse span { background: var(--ink-dim); }
-.agent.is-active .agent__pulse span { background: var(--accent); }
-
 .agent__inbox {
-  font-family: var(--mono);
+  font-family: var(--_cc-font-mono);
   font-size: 10px;
-  padding: 1px 5px;
-  border-radius: 8px;
-  background: var(--accent);
-  color: var(--bg);
+  padding: 0 5px;
+  border-radius: var(--_cc-radius-pill);
+  background: var(--_cc-member-accent);
+  color: var(--_cc-surface-canvas);
   font-weight: 600;
-  line-height: 1.3;
+  line-height: 14px;
 }
+
+/* Compact density (B4): one 32 px line, the name then what the agent
+   does; the role and the sparkline step aside. */
+.sidebar[data-density="compact"] .agent__body {
+  flex-direction: row;
+  align-items: baseline;
+  gap: 8px;
+}
+.sidebar[data-density="compact"] .agent__title-line { flex: 0 1 auto; }
+.sidebar[data-density="compact"] .agent__detail { flex: 1 1 0; }
+.sidebar[data-density="compact"] .agent__detail-kind,
+.sidebar[data-density="compact"] .agent__detail-separator { display: none; }
+.sidebar[data-density="compact"] .agent__detail-status { overflow: hidden; text-overflow: ellipsis; flex: 0 1 auto; }
+.sidebar[data-density="compact"] .agent__spark,
+.sidebar[data-density="compact"] .agent__badges { display: none; }
 [data-cc-variant="terminal"] .agent__inbox { border-radius: 0; }
 
+
+/* ── Needs you (B14), restyled here: the kit's attention row, quiet until
+   something waits; then its count is a warn pill with the triangle mark
+   and the number. Names and roles are the component's own. ── */
+.sidebar .cc-approval-attention {
+  padding: 4px 6px;
+  border-bottom: 1px solid var(--_cc-border-soft);
+}
+.sidebar .cc-approval-attention__open {
+  min-height: 32px;
+  padding: 6px 8px;
+  font-family: var(--_cc-font-display);
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--_cc-foreground-muted);
+}
+.sidebar .cc-approval-attention__open:focus-visible {
+  outline: 2px solid var(--_cc-focus-ring);
+  outline-offset: -2px;
+}
+.sidebar .cc-approval-attention__icon { width: 16px; height: 16px; color: var(--_cc-foreground-meta); }
+.sidebar .cc-approval-attention__count {
+  gap: 4px;
+  min-width: 0;
+  height: 18px;
+  padding: 0 6px;
+  border-radius: var(--_cc-radius-pill);
+  background: color-mix(in srgb, var(--_cc-foreground) 7%, var(--_cc-surface-card));
+  color: var(--_cc-foreground-muted);
+  font-family: var(--_cc-font-mono);
+  font-size: 10.5px;
+  font-weight: 500;
+}
+.sidebar .cc-approval-attention[data-pending="true"] .cc-approval-attention__open { color: var(--_cc-foreground); }
+.sidebar .cc-approval-attention[data-pending="true"] .cc-approval-attention__icon { color: var(--_cc-foreground-muted); }
+.sidebar .cc-approval-attention[data-pending="true"] .cc-approval-attention__count {
+  background: color-mix(in srgb, var(--_cc-warning) 16%, var(--_cc-surface-card));
+  color: var(--_cc-warning-ink);
+}
+.sidebar .cc-approval-attention[data-pending="true"] .cc-approval-attention__count::before {
+  content: "";
+  flex: none;
+  width: 7px;
+  height: 6px;
+  background: var(--_cc-warning);
+  clip-path: polygon(50% 0, 100% 100%, 0 100%);
+}
+.sidebar .cc-approval-attention:is([data-state="stale"], [data-state="unavailable"]) .cc-approval-attention__count {
+  color: var(--_cc-warning-ink);
+}

@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { Sidebar } from "./Sidebar";
 import type { ConsoleAgent } from "../types";
@@ -20,6 +20,13 @@ const rows = (container: HTMLElement) => [...container.querySelectorAll('[data-t
   .map(node => node.getAttribute("data-testid")?.slice("sidebar-agent:".length));
 const announced = (container: HTMLElement) =>
   container.querySelector('[data-testid="sidebar-reorder-live"]')?.textContent || "";
+// The roster view lives in the mast's view options popover (A5): open it
+// unless it is open, then press an option. A change keeps it open.
+const chooseView = (view: ReturnType<typeof render>, option: string) => {
+  if (!view.queryByTestId("sidebar-view-options")) fireEvent.click(view.getByTestId("sidebar-view-menu"));
+  fireEvent.click(view.getByTestId(option));
+};
+const pressed = (view: ReturnType<typeof render>, option: string) => view.getByTestId(option).getAttribute("aria-pressed");
 // A control inside another control: a button or link in a button, or in
 // an element that claims the button role.
 const NESTED_CONTROLS = [
@@ -47,14 +54,14 @@ describe("Roster manual order", () => {
     fireEvent.keyDown(alpha, { key: "ArrowUp", altKey: true });
     expect(announced(view.container)).toBe("Alpha is already first.");
 
-    fireEvent.change(view.getByTestId("sidebar-view-sort"), { target: { value: "name" } });
+    chooseView(view, "sidebar-view-sort:name");
     fireEvent.keyDown(view.getByTestId("sidebar-agent:a"), { key: "ArrowDown", altKey: true });
-    expect(announced(view.container)).toBe("Choose Sort: Manual to reorder agents.");
+    expect(announced(view.container)).toBe("Choose Manual under Sort by in the roster view options to reorder agents.");
     expect(view.queryByTestId("sidebar-agent-grip:a") === null).toBe(true);
 
-    fireEvent.change(view.getByTestId("sidebar-view-sort"), { target: { value: "manual" } });
+    chooseView(view, "sidebar-view-sort:manual");
     expect(view.queryByTestId("sidebar-agent-grip:a") !== null).toBe(true);
-    fireEvent.change(view.getByPlaceholderText("Search roster..."), { target: { value: "a" } });
+    fireEvent.change(view.getByPlaceholderText("Search agents"), { target: { value: "a" } });
     fireEvent.keyDown(view.getByTestId("sidebar-agent:a"), { key: "ArrowDown", altKey: true });
     expect(announced(view.container)).toBe("Clear the search and the activity filter to reorder agents.");
     expect(view.queryByTestId("sidebar-agent-grip:a") === null).toBe(true);
@@ -70,13 +77,15 @@ describe("Roster manual order", () => {
   it("keeps the view and the order per user across remounts and configuration changes", () => {
     localStorage.setItem(ORDER_KEY, JSON.stringify(["agent:b", "agent:a", "agent:c"]));
     const first = render(<Sidebar {...props} />);
-    fireEvent.change(first.getByTestId("sidebar-view-group"), { target: { value: "none" } });
+    chooseView(first, "sidebar-view-group:none");
     expect(first.queryByTestId("sidebar-section-toggle:Team") === null).toBe(true);
     expect(JSON.parse(localStorage.getItem(VIEW_KEY) || "{}")).toEqual({ v: 1, group_by: "none", sort_by: "manual" });
     first.unmount();
 
     const second = render(<Sidebar {...props} storageNamespace="configuration-b" />);
-    expect((second.getByTestId("sidebar-view-group") as HTMLSelectElement).value).toBe("none");
+    fireEvent.click(second.getByTestId("sidebar-view-menu"));
+    expect(pressed(second, "sidebar-view-group:none")).toBe("true");
+    expect(pressed(second, "sidebar-view-group:category")).toBe("false");
     expect(rows(second.container)).toEqual(["b", "a", "c"]);
   });
 
@@ -87,9 +96,9 @@ describe("Roster manual order", () => {
       agent("c", "Agent 1"),
     ];
     const view = render(<Sidebar {...props} agents={agents} />);
-    fireEvent.change(view.getByTestId("sidebar-view-sort"), { target: { value: "name" } });
+    chooseView(view, "sidebar-view-sort:name");
     expect(rows(view.container)).toEqual(["c", "b", "a"]);
-    fireEvent.change(view.getByTestId("sidebar-view-sort"), { target: { value: "activity" } });
+    chooseView(view, "sidebar-view-sort:activity");
     expect(rows(view.container)).toEqual(["a", "b", "c"]);
 
     view.rerender(<Sidebar {...props} agents={agents} recentActivity={[
@@ -103,12 +112,12 @@ describe("Roster manual order", () => {
     const view = render(<Sidebar {...props} onSelect={onSelect}
       agents={[agent("a", "Alpha", { role: "router", response_phase: "generating" })]} />);
     const detail = view.getByTestId("sidebar-agent-detail:a");
-    expect(detail.textContent).toBe("Router · working");
+    expect(detail.textContent).toBe("Router · writing a reply");
     // The kind truncates on its own; the separator and the activity are its
     // siblings, so a narrow roster never swallows them.
     expect(detail.querySelector(".agent__detail-kind")?.textContent).toBe("Router");
     expect(detail.querySelector(".agent__detail-separator")?.parentElement?.classList.contains("agent__detail")).toBe(true);
-    expect(detail.querySelector(".agent__detail-status")?.textContent).toBe("working");
+    expect(detail.querySelector(".agent__detail-status")?.textContent).toBe("writing a reply");
     const row = view.getByTestId("sidebar-agent:a");
     expect(row.getAttribute("title")).toBe("Identity: agent:a");
     expect((row.textContent || "").includes("agent:a")).toBe(false);
@@ -130,23 +139,22 @@ describe("Roster manual order", () => {
     expect(row.getAttribute("title")).toBe("Identity: router:main");
     expect(view.queryByRole("button", { name: "Copy the identity of Router main" }) !== null).toBe(true);
     expect(view.queryByRole("button", { name: "Pin Router main" }) !== null).toBe(true);
-    fireEvent.change(view.getByPlaceholderText("Search roster..."), { target: { value: "router main" } });
+    fireEvent.change(view.getByPlaceholderText("Search agents"), { target: { value: "router main" } });
     expect(rows(view.container)).toEqual(["router"]);
   });
 
   it("keeps the relative order when Group switches to None and back", () => {
     const agents = [agent("a", "Alpha"), agent("b", "Bravo"), agent("m", "Mike", { group: "Ops" }), agent("z", "Zulu", { group: "Ops" })];
     const view = render(<Sidebar {...props} agents={agents} />);
-    const group = () => view.getByTestId("sidebar-view-group");
     expect(rows(view.container)).toEqual(["m", "z", "a", "b"]);
-    fireEvent.change(group(), { target: { value: "none" } });
+    chooseView(view, "sidebar-view-group:none");
     expect(rows(view.container)).toEqual(["m", "z", "a", "b"]);
 
     fireEvent.keyDown(view.getByTestId("sidebar-agent:a"), { key: "ArrowUp", altKey: true });
     expect(rows(view.container)).toEqual(["m", "a", "z", "b"]);
-    fireEvent.change(group(), { target: { value: "category" } });
+    chooseView(view, "sidebar-view-group:category");
     expect(rows(view.container)).toEqual(["m", "z", "a", "b"]);
-    fireEvent.change(group(), { target: { value: "none" } });
+    chooseView(view, "sidebar-view-group:none");
     expect(rows(view.container)).toEqual(["m", "a", "z", "b"]);
   });
 
@@ -157,14 +165,15 @@ describe("Roster manual order", () => {
       agent("c", "Charlie", { response_phase: null, last_activity_ms: 50 }),
     ];
     const view = render(<Sidebar {...props} agents={agents} />);
-    fireEvent.click(view.getByRole("button", { name: "Working", exact: true }));
+    chooseView(view, "sidebar-view-activity:working");
+    expect(view.getByRole("button", { name: "Working", exact: true }).getAttribute("aria-pressed")).toBe("true");
     expect(rows(view.container)).toEqual(["a", "b"]);
     expect(view.queryByTestId("sidebar-agent-grip:a") === null).toBe(true);
     fireEvent.keyDown(view.getByTestId("sidebar-agent:a"), { key: "ArrowDown", altKey: true });
     expect(announced(view.container)).toBe("Clear the search and the activity filter to reorder agents.");
     expect(localStorage.getItem(ORDER_KEY)).toBeNull();
 
-    fireEvent.change(view.getByTestId("sidebar-view-sort"), { target: { value: "activity" } });
+    chooseView(view, "sidebar-view-sort:activity");
     expect(rows(view.container)).toEqual(["b", "a"]);
     fireEvent.click(view.getByRole("button", { name: "All", exact: true }));
     expect(rows(view.container)).toEqual(["c", "b", "a"]);

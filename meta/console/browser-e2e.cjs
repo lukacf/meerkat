@@ -1879,10 +1879,15 @@ async function runSidebarManualAgentOrderProof() {
     await page.waitForSelector('[data-testid="sidebar-agent:team-ada"]', { timeout: 30_000 });
     await expectOrder(teamOrder, ["team-ada", "team-bea", "team-cyd", "team-dov"], "default order is by name");
     assert.deepEqual((await sectionOrder()).slice(0, 2), ["Team", "Agents"], "configured category order");
-    assert.match(
+    assert.equal(
       await page.getByTestId("sidebar-agent-detail:team-ada").textContent(),
-      /^Reviewer · active (just now|\d+ (min|h|d) ago)$/,
+      "Reviewer · idle",
       "the row shows a human detail line",
+    );
+    assert.match(
+      await page.getByTestId("sidebar-agent:team-ada").locator(".agent__meta time").textContent(),
+      /^(just now|\d+[smhd] ago|[A-Z][a-z]{2} \d+)$/,
+      "the row's last activity sits at its right",
     );
     assert.equal((await page.getByTestId("sidebar-agent:team-ada").textContent()).includes("team-ada"), false,
       "the identity is not the row's text");
@@ -1944,15 +1949,23 @@ async function runSidebarManualAgentOrderProof() {
       "focus stays on the moved agent", 5_000);
     await copyClearOfActions("on keyboard focus");
 
-    // Sort by name and by last activity, then back to the manual order.
-    const sort = page.getByTestId("sidebar-view-sort");
-    await sort.selectOption("name");
+    // Sort by name and by last activity, then back to the manual order. The
+    // roster view lives in the mast's view options popover (A5); a change
+    // keeps it open, Escape closes it.
+    const chooseView = async (option) => {
+      if (!(await page.getByTestId("sidebar-view-options").count())) await page.getByTestId("sidebar-view-menu").click();
+      await page.getByTestId(option).click();
+      assert.equal(await page.getByTestId(option).getAttribute("aria-pressed"), "true", `${option} is pressed`);
+    };
+    await chooseView("sidebar-view-sort:name");
     await expectOrder(teamOrder, ["team-ada", "team-bea", "team-cyd", "team-dov"], "name sort");
     assert.equal(await page.locator('[data-testid^="sidebar-agent-grip:"]').count(), 0, "no grips outside Manual");
-    await sort.selectOption("activity");
+    await chooseView("sidebar-view-sort:activity");
     await expectOrder(teamOrder, ["team-dov", "team-cyd", "team-bea", "team-ada"], "last activity sort is newest first");
-    await sort.selectOption("manual");
+    await chooseView("sidebar-view-sort:manual");
     await expectOrder(teamOrder, ["team-ada", "team-dov", "team-bea", "team-cyd"], "manual sort restores the stored order");
+    await page.keyboard.press("Escape");
+    await page.getByTestId("sidebar-view-options").waitFor({ state: "detached", timeout: 5_000 });
 
     // Drag the Agents category above Team: the existing category drag.
     await drag(page.getByTestId("sidebar-section-toggle:Agents"), page.getByTestId("sidebar-section-toggle:Team"), "before");
@@ -1960,7 +1973,8 @@ async function runSidebarManualAgentOrderProof() {
     await expectOrder(async () => (await sectionOrder()).slice(0, 2), ["Agents", "Team"], "a category drag reorders categories");
 
     // Group: None lists one flat list in the same order, without category headers.
-    await page.getByTestId("sidebar-view-group").selectOption("none");
+    await chooseView("sidebar-view-group:none");
+    await page.keyboard.press("Escape");
     await expectOrder(sectionOrder, [], "no category headers in a flat list");
     await expectOrder(teamOrder, ["team-ada", "team-dov", "team-bea", "team-cyd"], "the flat list keeps the manual order");
     await sidebar.screenshot({ path: path.join(evidenceDir, "sidebar-manual-order-flat.png") });

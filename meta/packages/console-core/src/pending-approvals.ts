@@ -141,12 +141,18 @@ const REFUSAL_WORDS: Readonly<Record<string, string>> = {
   gating_ids_unavailable: "The decision couldn't be recorded right now. Nothing changed; try again.",
 };
 export function approvalRefusal(error: unknown): ApprovalRefusal | null {
-  const typed = error as { rpcError?: { data?: unknown }; responseRpcError?: { data?: unknown } } | null;
-  const data = (typed?.rpcError ?? typed?.responseRpcError)?.data;
+  const typed = error as { rpcError?: { code?: unknown; data?: unknown }; responseRpcError?: { code?: unknown; data?: unknown } } | null;
+  const rpc = typed?.rpcError ?? typed?.responseRpcError;
+  const data = rpc?.data;
   const record = data && typeof data === "object" ? data as { kind?: unknown; error?: unknown } : null;
   const kind = typeof record?.kind === "string" ? record.kind : typeof record?.error === "string" ? record.error : "";
   const words = kind ? REFUSAL_WORDS[kind] : undefined;
-  return words ? { kind, words } : null;
+  if (words) return { kind, words };
+  // The owner answers every decision it will not apply with invalid params
+  // (-32602) and applies nothing: a refusal, not an uncertain outcome, even
+  // before it names its reason.
+  if (rpc?.code === -32602) return { kind: "refused", words: "The runtime refused this decision, so nothing was decided." };
+  return null;
 }
 function unavailableCapability(error: unknown): { method: string; availableMethods: readonly string[] } | null {
   const record = error as { kind?: unknown; method?: unknown; availableMethods?: unknown } | null;

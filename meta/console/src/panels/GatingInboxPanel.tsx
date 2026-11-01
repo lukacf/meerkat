@@ -121,7 +121,11 @@ function payloadSummary(entry: RawRecord): string {
 /// row's tooltip.
 function actionTitle(raw: RawRecord, record: GatingAuditEntryView, titles?: ReadonlyMap<string, string>): string {
   const label = textOf(recordOf(raw.detail).action) || textOf(raw.action) || (record.actionId ? titles?.get(record.actionId) : "") || "";
-  return label || humanizeEnum(record.actionId) || humanizeEnum(record.eventType) || "Unknown action";
+  if (label) return label;
+  // An owner-minted id ("gate-action-v2-6dd2...-000066") reads as nothing
+  // in words; a named action ("send-message") reads as its words.
+  if (record.actionId && /[0-9a-f]{12,}|\d{5,}/i.test(record.actionId)) return "Untitled request";
+  return humanizeEnum(record.actionId) || humanizeEnum(record.eventType) || "Unknown action";
 }
 
 const OUTCOME_WORDS: Record<string, string> = {
@@ -451,7 +455,14 @@ export function GatingInboxPanel({
   const automaticallyAllowed = auditEntries.filter((entry) => entry.record.automaticAllowance);
   const automaticCount = automaticallyAllowed.length;
   const auditCapped = auditLimit !== undefined && audit.length >= auditLimit;
-  const titles = React.useMemo(() => actionTitles(auditEntries, resource?.requests ?? []), [auditEntries, resource?.requests]);
+  // Titles seen in this session stay known: a request decided here leaves
+  // the queue, and its own record may be older than the audit window.
+  const titleMemory = React.useRef(new Map<string, string>());
+  const titles = React.useMemo(() => {
+    const read = actionTitles(auditEntries, resource?.requests ?? []);
+    for (const [action, title] of read) titleMemory.current.set(action, title);
+    return new Map(titleMemory.current);
+  }, [auditEntries, resource?.requests]);
   const decisions = React.useMemo(() => decisionEvents(auditEntries, titles), [auditEntries, titles]);
   const queue = React.useMemo(() => (pendingRequests ? byDeadline(pendingRequests) : []), [pendingRequests]);
   const deadlines = queue.map((request) => request.deadlineAtMs).filter((deadline): deadline is number => deadline !== undefined);
@@ -663,10 +674,10 @@ export function GatingInboxPanel({
       />
       <FigureTile
         label="Next deadline"
-        value={nextWords ? nextWords.text : "None"}
+        value={nextWords ? (nextWords.past ? "Overdue" : nextWords.text) : "None"}
         tone={nextWords?.tone === "neutral" ? undefined : nextWords?.tone}
         loading={!pendingKnown}
-        foot={next ? next.action : pendingKnown ? "no request has a deadline" : undefined}
+        foot={next ? (nextWords?.past ? `waiting for refresh · ${next.action}` : next.action) : pendingKnown ? "no request has a deadline" : undefined}
         title={next?.deadlineAtMs !== undefined ? `Deadline ${formatAbsoluteTime(next.deadlineAtMs)}` : undefined}
         className="gating-glance__deadline"
         testId="gating-glance:deadline"
@@ -690,8 +701,8 @@ export function GatingInboxPanel({
         value={mix.total}
         unit={mix.total === 1 ? "action" : "actions"}
         meter={<RiskMix mix={mix} />}
-        foot={RISK_TIERS.map((tier) => `${tier.toUpperCase()} ${mix[tier]}`).join(" · ")}
-        title={RISK_TIERS.map((tier) => `${riskTierWord(tier)} risk: ${mix[tier]}`).join(", ")}
+        foot={RISK_TIERS.map((tier) => `${riskTierWord(tier)} ${mix[tier]}`).join(" · ")}
+        title={RISK_TIERS.map((tier) => `${riskTierWord(tier)} risk (${tier.toUpperCase()}): ${mix[tier]}`).join(", ")}
         className="gating-glance__risk"
         testId="gating-glance:risk"
       />

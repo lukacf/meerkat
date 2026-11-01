@@ -266,7 +266,12 @@ export function ApprovalCard({ request, resourceStatus, decision, readOnly = fal
         ]}
       />
       {decision?.error ? (
-        <Notice tone={decision.phase === "refused" ? "warn" : "crit"} role="alert">{decision.error}</Notice>
+        <Notice tone={decision.phase === "refused" ? "warn" : "crit"} role="alert">
+          {decision.error}
+          {decision.phase === "refused" && decision.refusal?.kind === "refused" && request.requestedApprover
+            ? ` This request asks ${request.requestedApprover} to decide it.`
+            : ""}
+        </Notice>
       ) : null}
       {decision?.result?.next_pending_id ? (
         <Notice tone="info">

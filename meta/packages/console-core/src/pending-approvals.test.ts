@@ -233,6 +233,17 @@ test("a typed owner refusal is a refused decision in words, not an uncertain one
   await tick(); await busy.decide("p1", "approve");
   assert.equal(busy.getSnapshot().decisions.p1.phase, "refused");
   busy.dispose();
+  // Today's owner refuses every decision it will not apply with a plain
+  // invalid params error: still a refusal, never an uncertain decision.
+  const plain = createPendingApprovalResource({ scopeKey: "c", environment: c.environment,
+    load: async () => ({ pending: [row()] }),
+    decide: async () => { throw Object.assign(new Error("meta/gating/decide RPC error -32602: gating decision failed"), { rpcError: { code: -32602, message: "gating decision failed" } }); },
+  });
+  await tick(); await plain.decide("p1", "approve");
+  assert.deepEqual(plain.getSnapshot().decisions.p1, { phase: "refused", action: "approve",
+    refusal: { kind: "refused", words: "The runtime refused this decision, so nothing was decided." },
+    error: "The runtime refused this decision, so nothing was decided." });
+  plain.dispose();
 });
 
 test("a request knows whether it can be escalated only when the owner says so", () => {

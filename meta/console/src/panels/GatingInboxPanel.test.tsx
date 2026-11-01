@@ -506,6 +506,19 @@ describe("Approvals at a glance (v2)", () => {
     expect(view.getByTestId("gating-audit-window").textContent).toBe("The newest 50 records. 50 of them were allowed automatically.");
   });
 
+  it("keeps a decided request's title after it leaves the queue and its record leaves the window", () => {
+    const id = "gate-action-v2-6dd23470ae4b08c50af7c03e5b35ca65-000066";
+    const request = normalizePendingApproval({ pending_id: "p66", action_id: id, action: "Refund 1,240 EUR on order 77310", created_at_ms: now - 60_000 })!;
+    const decided = [{ audit_id: "d66", event_type: "rejection_decided", action_id: id, risk_tier: "r3", outcome: "safe_draft", timestamp_ms: now - 1000, detail: { decision: "reject" } }];
+    const view = render(<GatingInboxPanel pending={[]} audit={[]} onDecide={vi.fn()} resource={ready([request])} />);
+    view.rerender(<GatingInboxPanel pending={[]} audit={decided} onDecide={vi.fn()} resource={ready([])} />);
+    fireEvent.click(view.getByTestId("gating-tab:audit"));
+    expect(view.getByTestId("gating-audit:d66").querySelector(".cc-row__title")?.textContent).toBe("Refund 1,240 EUR on order 77310");
+    // An owner-minted id never reads as words.
+    view.rerender(<GatingInboxPanel pending={[]} audit={[{ ...decided[0], audit_id: "d67", action_id: "gate-action-v2-0123456789abcdef0123-000067" }]} onDecide={vi.fn()} resource={ready([])} />);
+    expect(view.getByTestId("gating-audit:d67").querySelector(".cc-row__title")?.textContent).toBe("Untitled request");
+  });
+
   it("hides the glance strip where approvals do not apply", () => {
     const view = render(<GatingInboxPanel pending={[]} audit={[]} onDecide={vi.fn()} resource={{ scopeKey: "scope", status: "unsupported", requests: [], decisions: {}, readOnly: true }} />);
     expect(view.queryByTestId("gating-glance") === null).toBe(true);

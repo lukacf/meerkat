@@ -152,3 +152,9 @@
   color: var(--_cc-foreground-meta);
 }
 .gating-inbox__content > .gating-day > .cc-rows { margin-top: 0; }
+/* The risk bar shrinks with its tile, then drops under the figure. */
+.gating-glance__risk .cc-figure__fig { flex-wrap: wrap; row-gap: 4px; }
+.gating-glance__risk .cc-figure__meter { flex: 1 1 64px; min-width: 0; max-width: 96px; }
+.gating-glance__risk .gating-risk,
+.gating-glance__risk .gating-risk__bar { width: 100%; }
+.gating-glance .cc-figure { min-width: 0; overflow: hidden; }

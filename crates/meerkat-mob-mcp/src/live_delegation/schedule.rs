@@ -10,8 +10,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use meerkat::{
     AddEvidenceRequest, ClaimWorkItemRequest, CloseWorkItemRequest, CreateWorkItemRequest,
-    WorkEdgeKind, WorkEvidenceRef, WorkGraphService, WorkGraphSnapshotFilter, WorkItem, WorkItemId,
-    WorkOwner, WorkOwnerKey, WorkStatus,
+    WorkEdgeKind, WorkEvidenceRef, WorkGraphService, WorkGraphSnapshot, WorkGraphSnapshotFilter,
+    WorkItem, WorkItemId, WorkOwner, WorkOwnerKey, WorkStatus,
 };
 use meerkat_core::LiveChannelId;
 use meerkat_runtime::live_execution::LiveDelegationNarrationKind;
@@ -25,6 +25,10 @@ pub(super) const LIVE_DELEGATION_CHANNEL_WORKER_CAP: usize =
 
 /// Label every voice delegation item carries.
 pub(super) const VOICE_WORK_LABEL: &str = "voice";
+
+/// Voice items one scheduling snapshot reads: the most recently updated ones
+/// (the WorkGraph maximum). A snapshot that cut older voice items warns.
+const VOICE_SNAPSHOT_LIMIT: usize = 1000;
 
 const WORK_TITLE_CHARS: usize = 200;
 const NARRATION_TITLE_CHARS: usize = 120;
@@ -361,6 +365,31 @@ impl std::fmt::Display for WorkItemCloseFailure {
     }
 }
 
+/// The voice items a scheduling decision reads, terminal ones included
+/// (blockers may have finished, and may belong to another channel), most
+/// recently updated first.
+fn voice_snapshot_filter() -> WorkGraphSnapshotFilter {
+    WorkGraphSnapshotFilter {
+        labels: vec![VOICE_WORK_LABEL.to_string()],
+        include_terminal: true,
+        limit: Some(VOICE_SNAPSHOT_LIMIT),
+        ..WorkGraphSnapshotFilter::default()
+    }
+}
+
+/// A voice snapshot that cut voice items read only the most recently updated
+/// ones: an older open item is not offered, and an older blocker is not named.
+fn warn_when_voice_snapshot_cut(snapshot: &WorkGraphSnapshot, read: &'static str) {
+    if snapshot.truncated == Some(true) {
+        tracing::warn!(
+            read,
+            total_items = ?snapshot.total_items,
+            limit = VOICE_SNAPSHOT_LIMIT,
+            "voice work snapshot holds more voice items than one read covers; only the most recently updated were read"
+        );
+    }
+}
+
 /// WorkGraph access scoped the way the mob's members see it.
 #[derive(Clone)]
 pub(super) struct VoiceWorkGraph {
@@ -502,20 +531,18 @@ impl VoiceWorkGraph {
     }
 
     /// Scheduling facts for one channel's queue, read from one snapshot of
-    /// every voice item (blockers may belong to another channel).
+    /// the voice items of every channel (blockers may belong to another
+    /// channel).
     pub(super) async fn channel_readiness(
         &self,
         channel_id: &LiveChannelId,
     ) -> Result<ChannelReadiness, String> {
         let snapshot = self
             .service
-            .snapshot(WorkGraphSnapshotFilter {
-                labels: vec![VOICE_WORK_LABEL.to_string()],
-                include_terminal: true,
-                ..WorkGraphSnapshotFilter::default()
-            })
+            .snapshot(voice_snapshot_filter())
             .await
             .map_err(|error| format!("voice work readiness snapshot failed: {error}"))?;
+        warn_when_voice_snapshot_cut(&snapshot, "readiness");
         let channel_label = channel_work_label(channel_id);
         let items_by_id = snapshot
             .items
@@ -612,13 +639,10 @@ impl VoiceWorkGraph {
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let snapshot = self
             .service
-            .snapshot(WorkGraphSnapshotFilter {
-                labels: vec![VOICE_WORK_LABEL.to_string()],
-                include_terminal: true,
-                ..WorkGraphSnapshotFilter::default()
-            })
+            .snapshot(voice_snapshot_filter())
             .await
             .map_err(|error| format!("voice work snapshot failed: {error}"))?;
+        warn_when_voice_snapshot_cut(&snapshot, "classification");
         let items_by_id = snapshot
             .items
             .iter()

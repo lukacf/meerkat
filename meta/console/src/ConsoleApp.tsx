@@ -5129,19 +5129,9 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     [agents],
   );
   // The sidebar's inputs (B14). Lineage: the live snapshot drops
-  // `labels.spawned_by` and the topology read keeps it, so the topology is
-  // read once whenever the team's membership changes (a read; the Topology
-  // panel reads it again when it opens).
-  const sidebarMembershipKey = React.useMemo(
-    () => agents.map((agent) => agent.identity || agent.member_id).sort().join("\n"),
-    [agents],
-  );
-  React.useEffect(() => {
-    if (loading || !hasMobControlSurface || !sidebarMembershipKey) return;
-    void refreshTopologyData().catch(() => {});
-    // Once per membership; the read itself is single-flight.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [loading, hasMobControlSurface, sidebarMembershipKey]);
+  // `labels.spawned_by` and the topology read keeps it, so the roster takes
+  // it from the latest topology read when there is one. The sidebar never
+  // reads the topology itself: a hidden Topology panel costs no query.
   const sidebarAgents = React.useMemo(
     () => sidebarAgentsWithLineage(agents, topologyQueryResult),
     [agents, topologyQueryResult],

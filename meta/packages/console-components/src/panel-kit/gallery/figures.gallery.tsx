@@ -278,8 +278,8 @@ export const gallerySections: GallerySection[] = [
           </Specimen>
           <Specimen title="DotStrip" note="records over 30 days; decisions over 24 h">
             <div className="kg-stack" style={{ gap: 18 }}>
-              <DotStrip items={RECORDS} start={NOW - 30 * DAY} end={NOW} width={320} height={18} now axis label="64 records over 30 days, 1 quarantined" onSelect={() => {}} />
-              <DotStrip items={DECISIONS} start={NOW - 24 * HOUR} end={NOW} width={320} height={18} axis now markSize={8} label="7 decisions in the last 24 hours" />
+              <DotStrip items={RECORDS} start={NOW - 30 * DAY} end={NOW} width={320} height={18} now={NOW} axis label="64 records over 30 days, 1 quarantined" onSelect={() => {}} />
+              <DotStrip items={DECISIONS} start={NOW - 24 * HOUR} end={NOW} width={320} height={18} axis now={NOW} markSize={8} label="7 decisions in the last 24 hours" />
             </div>
           </Specimen>
         </SpecimenRow>

@@ -135,9 +135,10 @@ export {
   formatTimeTick,
   niceTimeStep,
   nowMarker,
+  placeTickLabels,
   timeTicks,
 } from "../viz/charts/time-axis";
-export type { TimeScale, TimeTick, TimeTickFormat, TimeTickOptions } from "../viz/charts/time-axis";
+export type { PlacedTickLabel, TimeScale, TimeTick, TimeTickFormat, TimeTickOptions } from "../viz/charts/time-axis";
 
 // The dev-only kit gallery's section shape (type only: no gallery code ships).
 export type { GallerySection } from "./gallery/types";

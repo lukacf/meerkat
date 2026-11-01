@@ -129,6 +129,41 @@ export function timeTicks(start: number, end: number, options: TimeTickOptions =
   return ticks;
 }
 
+/** A tick label placed on the axis: its centre, kept inside the chart. */
+export interface PlacedTickLabel extends TimeTick {
+  /** The tick's own x. */
+  x: number;
+  /** Where the label centres: the tick's x, slid inward at an edge. */
+  labelX: number;
+}
+
+/**
+ * Tick labels centred on their ticks but kept inside a chart `width` wide: a
+ * label that would cross the left edge, or the right edge less `endReserve`
+ * (room for the "now" label), slides inward, and one that would then meet the
+ * label before it is left out. Label widths are estimated from the tick font
+ * (mono: 0.6 em a character in IBM Plex Mono, 0.66 em allowed for a fallback
+ * face, and a pixel each side), so nothing needs measuring.
+ */
+export function placeTickLabels(
+  ticks: ReadonlyArray<TimeTick & { x: number }>,
+  width: number,
+  { fontSize = 9.5, endReserve = 0, gap = 6 }: { fontSize?: number; endReserve?: number; gap?: number } = {},
+): PlacedTickLabel[] {
+  const placed: PlacedTickLabel[] = [];
+  let lastEnd = -Infinity;
+  for (const tick of ticks) {
+    const half = (tick.label.length * fontSize * 0.66) / 2 + 1;
+    const right = width - endReserve;
+    if (right - half < half) continue;
+    const labelX = Math.min(Math.max(tick.x, half), right - half);
+    if (labelX - half < lastEnd + gap) continue;
+    placed.push({ ...tick, labelX });
+    lastEnd = labelX + half;
+  }
+  return placed;
+}
+
 /** The "now" marker: its x and label when now is inside the domain. */
 export function nowMarker(scale: TimeScale, now: number = Date.now()): { x: number; t: number; label: string } | null {
   if (now < scale.start || now > scale.end) return null;

@@ -11,6 +11,7 @@ import {
   Meter,
   MiniBar,
   ProgressRing,
+  placeTickLabels,
   Sparkline,
   barcodeUnitsPerSegment,
   binCounts,
@@ -44,6 +45,39 @@ describe("time axis", () => {
     expect(ticks.map((tick) => tick.label)).toEqual(["06", "12", "18", "00"]);
     expect(ticks.every((tick) => new Date(tick.t).getMinutes() === 0 && new Date(tick.t).getHours() % 6 === 0)).toBe(true);
     expect(ticks[3].major).toBe(true);
+  });
+
+  it("keeps tick labels inside the chart, sliding the edge ones inward", () => {
+    const tick = (x: number, label: string) => ({ t: x, label, major: false, x });
+    // "Sat 3" is about 30 px wide at 9.5 px: centred at x 4 it would start at -11.
+    const placed = placeTickLabels([tick(4, "Sat 3"), tick(80, "Sat 10"), tick(156, "Sat 17"), tick(318, "Sat 31")], 320, { endReserve: 24 });
+    expect(placed.map((label) => label.label)).toEqual(["Sat 3", "Sat 10", "Sat 17", "Sat 31"]);
+    for (const label of placed) {
+      const half = (label.label.length * 9.5 * 0.66) / 2;
+      expect([label.label, label.labelX - half >= 0, label.labelX + half <= 320 - 24]).toEqual([label.label, true, true]);
+    }
+    expect(placed[1].labelX).toBe(80);
+    // A label that would meet the one before it is left out.
+    expect(placeTickLabels([tick(10, "06:00"), tick(20, "12:00")], 200).map((label) => label.label)).toEqual(["06:00"]);
+  });
+
+  it("draws a DotStrip's first and last tick labels inside the strip", () => {
+    // The first midnight tick lands about 10 px in, where a centred
+    // "Fri 30" (about 34 px wide) would lose its start to the edge.
+    const start = DAY_START - 14 * HOUR;
+    const end = start + 30 * 24 * HOUR;
+    const view = render(<DotStrip items={[{ id: "a", t: start + HOUR, label: "First" }]} start={start} end={end} width={320} height={18} axis now={end} label="1 record" testId="strip" />);
+    const labels = Array.from(view.getByTestId("strip").querySelectorAll("text.cc-viz-tick"));
+    expect(labels.length > 2).toBe(true);
+    for (const label of labels) {
+      const text = label.textContent ?? "";
+      const x = Number(label.getAttribute("x"));
+      const anchor = label.getAttribute("text-anchor");
+      const half = (text.length * 9.5 * 0.66) / 2;
+      const left = anchor === "end" ? x - 2 * half : anchor === "middle" ? x - half : x;
+      const right = anchor === "end" ? x : anchor === "middle" ? x + half : x + 2 * half;
+      expect([text, left >= 0, right <= 320]).toEqual([text, true, true]);
+    }
   });
 
   it("names the day at midnight on an automatic clock axis", () => {

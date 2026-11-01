@@ -7,7 +7,7 @@ import type {
   ConsoleAccessRule,
   ConsoleAccessStatus,
 } from "../types";
-import { accessSaveNotice } from "../lib/errors";
+import { accessSaveNotice, type AccessSaveEdit } from "../lib/errors";
 import { accessActionLabel, isAccessActionPattern, isKnownAccessAction } from "../lib/access-actions";
 import {
   AgentAvatar,
@@ -88,7 +88,6 @@ interface AccessPanelProps {
 }
 
 type Tab = "overview" | "groups" | "rules" | "preview";
-type EditKind = "admins" | "rule" | "group" | "immediate";
 
 
 export function parseListInput(raw: string): string[] {
@@ -753,7 +752,7 @@ export function AccessPanel({
 
   const actions = status?.actions ?? [];
   const [saving, setSaving] = React.useState(false);
-  const [saveFailure, setSaveFailure] = React.useState<(ConsoleAccessSaveFailure & { edit: EditKind }) | null>(null);
+  const [saveFailure, setSaveFailure] = React.useState<(ConsoleAccessSaveFailure & { edit: AccessSaveEdit }) | null>(null);
   const [adminsBase, setAdminsBase] = React.useState<ConsoleAccessEditBase | null>(null);
   const [ruleBase, setRuleBase] = React.useState<ConsoleAccessEditBase | null>(null);
   const [groupBase, setGroupBase] = React.useState<ConsoleAccessEditBase | null>(null);
@@ -822,7 +821,7 @@ export function AccessPanel({
     if (!canReview || !config) return null;
     return { owner_instance: status!.owner_instance!, revision: status!.revision!, config: structuredClone(config) };
   }
-  async function mutate(edit: EditKind, base: ConsoleAccessEditBase | null,
+  async function mutate(edit: AccessSaveEdit, base: ConsoleAccessEditBase | null,
     action: (base: ConsoleAccessEditBase) => ConsoleAccessSaveResult | Promise<ConsoleAccessSaveResult>, done = () => {}) {
     if (!canEdit || !base) return;
     const requestedScope = scope;
@@ -953,7 +952,7 @@ export function AccessPanel({
     testId: "access-summary-standing",
   });
   const reviewNeeded = requiresReview && canReview;
-  const alertText = error || (saveFailure ? accessSaveNotice(saveFailure) : null);
+  const alertText = error || (saveFailure ? accessSaveNotice(saveFailure, saveFailure.edit) : null);
   const groupFormShown = canEdit || groupBase !== null;
   const groupEditedInPlace = editingGroup !== null && groups.some(([name]) => name === editingGroup);
   const ruleEditedInPlace = ruleDraft !== null && editingRuleId !== null && rules.some((rule) => rule.id === editingRuleId);
@@ -1159,7 +1158,7 @@ export function AccessPanel({
               action={canEdit ? (
                 <Button
                   data-testid="access-toggle-enabled"
-                  onClick={() => void mutate("immediate", captureBase(), base => onSetEnabled(!enabled, base))}
+                  onClick={() => void mutate("toggle", captureBase(), base => onSetEnabled(!enabled, base))}
                 >
                   {enabled ? "Disable enforcement" : "Enable enforcement"}
                 </Button>
@@ -1280,7 +1279,7 @@ export function AccessPanel({
                           data-testid={`access-group-delete:${name}`}
                           onClick={() => {
                             if (window.confirm(`Delete group "${name}"?`)) {
-                              void mutate("immediate", captureBase(), base => onDeleteGroup(name, base));
+                              void mutate("group-delete", captureBase(), base => onDeleteGroup(name, base));
                             }
                           }}
                         >
@@ -1374,7 +1373,7 @@ export function AccessPanel({
                             data-testid={`access-rule-delete:${rule.id}`}
                             onClick={() => {
                               if (window.confirm(ruleDeleteConfirmText(rule))) {
-                                void mutate("immediate", captureBase(), base => onDeleteRule(rule.id, base));
+                                void mutate("rule-delete", captureBase(), base => onDeleteRule(rule.id, base));
                               }
                             }}
                           >

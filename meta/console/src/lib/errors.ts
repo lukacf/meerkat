@@ -70,23 +70,51 @@ function isKnownInvalidAccessReason(reason: string | undefined): reason is keyof
   return reason !== undefined && Object.hasOwn(INVALID_ACCESS_REASONS, reason);
 }
 
+/** The edit a refused access save carried: a draft the editor keeps (the
+ * admins, a rule or a group), or a one-click change that keeps none (the
+ * enforcement toggle, a rule delete or a group delete). */
+export type AccessSaveEdit = "admins" | "rule" | "group" | "toggle" | "rule-delete" | "group-delete";
+
+function keepsDraft(edit: AccessSaveEdit): boolean {
+  return edit === "admins" || edit === "rule" || edit === "group";
+}
+
+// A group delete that a rule or an approver still needs is refused with the
+// reason a save naming a missing group gets. From the delete's side the group
+// exists and is still in use; the owner's detail names the rule or approver.
+const GROUP_DELETE_WORDS: Partial<Record<keyof typeof INVALID_ACCESS_REASONS, string>> = {
+  unknown_group: "The group is still used by a rule",
+  unknown_approver_group: "The group is still used by an approver",
+};
+
 /// An invalid save says what is wrong: a known reason in the Console's words,
 /// with the owner's detail where it names the entry at fault. For a reason
 /// this Console does not know, the detail after the generic words says it;
-/// without a detail, the generic words stand alone.
-function invalidAccessNotice({ reason, detail }: ConsoleAccessSaveFailure): string {
-  const known = isKnownInvalidAccessReason(reason) ? INVALID_ACCESS_REASONS[reason] : null;
-  const words = known?.words ?? "The resulting access configuration is not valid";
+/// without a detail, the generic words stand alone. Only the save of a draft
+/// says the draft is retained.
+function invalidAccessNotice({ reason, detail }: ConsoleAccessSaveFailure, edit: AccessSaveEdit): string {
+  const token = isKnownInvalidAccessReason(reason) ? reason : null;
+  const known = token ? INVALID_ACCESS_REASONS[token] : null;
+  const words = (token && edit === "group-delete" ? GROUP_DELETE_WORDS[token] : undefined)
+    ?? known?.words
+    ?? "The resulting access configuration is not valid";
   const shown = detail && (known === null || known.showDetail) ? ` (${detail})` : "";
-  return `Changes were not saved. ${words}${shown}; your draft is retained for correction.`;
+  return keepsDraft(edit)
+    ? `Changes were not saved. ${words}${shown}; your draft is retained for correction.`
+    : `Changes were not saved. ${words}${shown}.`;
 }
 
-export function accessSaveNotice(failure: ConsoleAccessSaveFailure): string {
+export function accessSaveNotice(failure: ConsoleAccessSaveFailure, edit: AccessSaveEdit): string {
+  const draft = keepsDraft(edit);
   switch (failure.kind) {
     case "revision_conflict": return "Access configuration changed. Review the latest settings before saving again.";
     case "owner_changed": return "The access configuration owner changed. Review the latest settings before saving again.";
-    case "unavailable": return "Changes were not saved. Checked access saves are unavailable; your draft is retained.";
-    case "invalid": return invalidAccessNotice(failure);
-    case "failed": return "Changes were not saved. Your draft is retained; refresh Console access before trying again.";
+    case "unavailable": return draft
+      ? "Changes were not saved. Checked access saves are unavailable; your draft is retained."
+      : "Changes were not saved. Checked access saves are unavailable.";
+    case "invalid": return invalidAccessNotice(failure, edit);
+    case "failed": return draft
+      ? "Changes were not saved. Your draft is retained; refresh Console access before trying again."
+      : "Changes were not saved. Refresh Console access before trying again.";
   }
 }

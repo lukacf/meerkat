@@ -1298,12 +1298,20 @@ impl super::MobHandle {
                 }
             }
             mob_dsl::IdentityEntryVerdict::RoleMigrationHeld => {
+                // The role of the member that holds the identity, when one
+                // does (MobMachine's seat fact). An identity no member holds
+                // keeps its last incarnation's role in the machine's
+                // incarnation history, but has no member to release.
                 let seated_role = {
                     let state = self.machine_state_watch_rx.borrow();
-                    state
-                        .member_profile_names
-                        .get(&mob_dsl::AgentIdentity::from_domain(identity))
-                        .map(|profile| ProfileName::from(profile.as_str()))
+                    if super::identity_entry::machine_seats(&state, identity) {
+                        state
+                            .member_profile_names
+                            .get(&mob_dsl::AgentIdentity::from_domain(identity))
+                            .map(|profile| ProfileName::from(profile.as_str()))
+                    } else {
+                        None
+                    }
                 };
                 let from = match seated_role {
                     Some(role) => {

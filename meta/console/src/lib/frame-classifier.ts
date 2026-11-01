@@ -7,7 +7,7 @@
 // (no React).
 
 import { normalizeStatusWord, type Tone } from "../../../packages/console-components/src/panel-kit/tone";
-import type { AgentDirectory } from "../../../packages/console-components/src/panel-kit/agents";
+import { agentDisplayName, type AgentDirectory } from "../../../packages/console-components/src/panel-kit/agents";
 import { humanizeEnum } from "../../../packages/console-components/src/panel-kit/format";
 import { memberKickoffNotice, memberKickoffPhaseLabel } from "../../../packages/console-core/src/member-kickoff";
 import { stripPeerTransportScaffold } from "./adapters";
@@ -178,8 +178,29 @@ function textOf(value: unknown): string {
   return "";
 }
 
+/**
+ * Model markdown as plain words for a one-line snippet: no ** or __
+ * emphasis marks, code ticks or fences, heading or quote marks, list
+ * bullets, rules or table pipes. Single * and _ stay (snake_case names).
+ */
+export function plainSnippetText(value: string): string {
+  return value
+    .split(/\r?\n/)
+    .map((line) => {
+      // Code fences, rules and a table's separator row carry no words.
+      if (/^\s*(?:`{3,}|~{3,})/.test(line)) return "";
+      if (/^\s*(?:[-*_]\s*){3,}$/.test(line)) return "";
+      if (/^\s*\|?\s*:?-+:?\s*(?:\|\s*:?-+:?\s*)+\|?\s*$/.test(line)) return "";
+      let text = line.replace(/^\s*(?:>\s?)+/, "").replace(/^\s*#{1,6}\s+/, "").replace(/^\s*(?:[-*+\u2022]|\d{1,3}[.)])\s+/, "");
+      if (/^\s*\|/.test(text)) text = text.replace(/\|/g, " ");
+      return text;
+    })
+    .join("\n")
+    .replace(/\*\*|__|`/g, "");
+}
+
 function snippetOf(value: string): string | undefined {
-  const text = stripPeerTransportScaffold(value).replace(/\s+/g, " ").trim();
+  const text = plainSnippetText(stripPeerTransportScaffold(value)).replace(/\s+/g, " ").trim();
   if (!text || /^You have been spawned as\b/i.test(text)) return undefined;
   return text.length > SNIPPET_MAX ? `${text.slice(0, SNIPPET_MAX - 3).trimEnd()}...` : text;
 }
@@ -1036,6 +1057,21 @@ function classifySystem(frame: ConsoleFrame, data: Data, who: FrameSegment): Par
   };
 }
 
+/** "Accounts' kickoff", "Billing's kickoff": an agent whose name ends in s
+ * takes the bare apostrophe, by the name the directory gives it. */
+function possessives(segments: FrameSegment[], directory: AgentDirectory | undefined): FrameSegment[] {
+  let changed = false;
+  const out = segments.map((segment, index) => {
+    const previous = segments[index - 1];
+    if (typeof segment !== "string" || !/^'s(?![\p{L}\p{N}])/u.test(segment)) return segment;
+    if (!previous || typeof previous === "string" || previous.agent === null) return segment;
+    if (!/s$/i.test(agentDisplayName(previous.agent, directory))) return segment;
+    changed = true;
+    return `'${segment.slice(2)}`;
+  });
+  return changed ? out : segments;
+}
+
 function classifyUncached(frame: ConsoleFrame, directory: AgentDirectory | undefined): ClassifiedFrame {
   const data = recordOf(frame.data);
   const agent = frameAgent(frame);
@@ -1058,7 +1094,7 @@ function classifyUncached(frame: ConsoleFrame, directory: AgentDirectory | undef
     tone: parts.tone,
     title: parts.title,
     verb: parts.verb,
-    segments: parts.segments,
+    segments: possessives(parts.segments, directory),
     actor: parts.actor !== undefined ? parts.actor : agent,
     ...(parts.target ? { target: parts.target } : {}),
     ...(parts.snippet ? { snippet: parts.snippet } : {}),

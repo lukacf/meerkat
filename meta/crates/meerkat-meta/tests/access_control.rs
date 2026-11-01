@@ -6323,6 +6323,164 @@ mod checked_v1_acceptance {
         }
     }
 
+    /// An invalid save says what is wrong with it: `invalid_access_config`
+    /// carries `reason`, a stable `kind` and a `message` that names the
+    /// rule, action, group or approver at fault, on the checked and the
+    /// unchecked write of each method that can leave the configuration
+    /// invalid. The code and the fixed message stay, nothing is written, and
+    /// the refusal names nothing private.
+    #[tokio::test]
+    async fn invalid_saves_name_their_reason_on_checked_and_unchecked_writes() {
+        fn strings(values: &[&str]) -> Vec<String> {
+            values.iter().map(ToString::to_string).collect()
+        }
+        /// A `meta/access/set` payload: `base` with `edit` applied.
+        fn edited(
+            base: &AccessControlConfig,
+            edit: impl FnOnce(&mut AccessControlConfig),
+        ) -> Value {
+            let mut config = base.clone();
+            edit(&mut config);
+            json!({ "config": config })
+        }
+        fn approver(subjects: &[&str], groups: &[&str]) -> meerkat_meta::AccessApprover {
+            meerkat_meta::AccessApprover {
+                subjects: strings(subjects),
+                groups: strings(groups),
+            }
+        }
+        /// A `meta/access/rules/upsert` payload.
+        fn rule(id: &str, groups: &[&str], actions: &[&str]) -> Value {
+            let rule = AccessRule {
+                id: id.to_string(),
+                groups: strings(groups),
+                actions: strings(actions),
+                ..AccessRule::default()
+            };
+            json!({ "rule": rule })
+        }
+
+        let fixture = fixture();
+        let base = read_edit_base(&fixture.app, ADMIN_A).await;
+        let initial = checkpoint(&fixture);
+        let cases = [
+            (
+                "meta/access/set",
+                edited(&base.config, |config| config.admins.clear()),
+                "enabled_without_admins",
+                "access control cannot be enabled without at least one admin subject",
+            ),
+            (
+                "meta/access/set",
+                edited(&base.config, |config| {
+                    config.rules.push(AccessRule {
+                        actions: strings(&["agent.send"]),
+                        ..AccessRule::default()
+                    });
+                }),
+                "empty_rule_id",
+                "access rule id must not be empty",
+            ),
+            (
+                "meta/access/set",
+                edited(&base.config, |config| {
+                    config.rules.push(config.rules[0].clone());
+                }),
+                "duplicate_rule_id",
+                "duplicate access rule id: existing-rule",
+            ),
+            (
+                "meta/access/set",
+                edited(&base.config, |config| {
+                    config
+                        .approvers
+                        .insert(String::new(), approver(&["ops-lead"], &[]));
+                }),
+                "empty_approver_id",
+                "approver id must not be empty",
+            ),
+            (
+                "meta/access/set",
+                edited(&base.config, |config| {
+                    config
+                        .approvers
+                        .insert("role:release".to_string(), approver(&[], &[]));
+                }),
+                "approver_without_holders",
+                "approver role:release: at least one subject or group must hold it",
+            ),
+            (
+                "meta/access/set",
+                edited(&base.config, |config| {
+                    config
+                        .approvers
+                        .insert("role:release".to_string(), approver(&[], &["release-team"]));
+                }),
+                "unknown_approver_group",
+                "approver role:release: unknown group \"release-team\"",
+            ),
+            (
+                "meta/access/rules/upsert",
+                rule("idle", &[], &[]),
+                "empty_actions",
+                "access rule idle: actions must not be empty",
+            ),
+            (
+                "meta/access/rules/upsert",
+                rule("fly", &[], &["agent.fly"]),
+                "unknown_action",
+                "access rule fly: unknown action \"agent.fly\"",
+            ),
+            (
+                "meta/access/rules/upsert",
+                rule("ghost-readers", &["ghosts"], &["agent.send"]),
+                "unknown_group",
+                "access rule ghost-readers: unknown group \"ghosts\"",
+            ),
+            (
+                "meta/access/rules/delete",
+                json!({ "id": "missing-rule" }),
+                "unknown_rule",
+                "unknown access rule id: missing-rule",
+            ),
+        ];
+        for (method, payload, kind, message) in cases {
+            for (form, params) in [
+                (
+                    "checked",
+                    checked(&base.owner, base.revision, payload.clone()),
+                ),
+                ("unchecked", payload),
+            ] {
+                let response = authenticated_rpc(&fixture.app, ADMIN_A, method, params).await;
+                assert_eq!(
+                    response["error"]["code"],
+                    json!(-32602),
+                    "{method}, {form}: {response:#?}"
+                );
+                assert_eq!(
+                    response["error"]["message"],
+                    json!("Invalid access configuration."),
+                    "{method}, {form}: {response:#?}"
+                );
+                assert_eq!(
+                    response["error"]["data"],
+                    json!({
+                        "kind": "invalid_access_config",
+                        "reason": { "kind": kind, "message": message },
+                    }),
+                    "{method}, {form}: {response:#?}"
+                );
+                safe_error(&response, &fixture);
+                assert_eq!(
+                    checkpoint(&fixture),
+                    initial,
+                    "{method}, {form}: nothing is written"
+                );
+            }
+        }
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn concurrent_same_revision_commits_one_distinct_write_and_one_conflict() {
         let fixture = fixture();

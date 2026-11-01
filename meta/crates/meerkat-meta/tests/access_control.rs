@@ -4462,6 +4462,137 @@ async fn memory_panel_dream_history_judges_every_scope_the_realm_names() {
     let _ = runtime.mob_handle().stop().await;
 }
 
+/// A reviewer who may read every scope, with or without a deny on router's
+/// memory.
+fn promotion_reviewer(deny_router: bool) -> AccessController {
+    let mut rules = vec![AccessRule {
+        id: "review-every-scope".to_string(),
+        actions: vec![
+            "agent.view".to_string(),
+            "agent.memory.read".to_string(),
+            "mob.memory.read".to_string(),
+            "operator.memory.read".to_string(),
+            "memory.quarantine.review".to_string(),
+        ],
+        ..AccessRule::default()
+    }];
+    if deny_router {
+        rules.push(AccessRule {
+            id: "deny-router-memory".to_string(),
+            effect: meerkat_meta::AccessEffect::Deny,
+            actions: vec!["agent.memory.read".to_string()],
+            agents: vec!["router".to_string()],
+            ..AccessRule::default()
+        });
+    }
+    AccessController::new(AccessControlConfig {
+        enabled: true,
+        admins: vec!["root@example.test".to_string()],
+        rules,
+        ..AccessControlConfig::default()
+    })
+    .expect("controller")
+}
+
+/// The ids of the pending promotions the quarantine queue lists.
+async fn listed_promotions(app: &axum::Router) -> Vec<String> {
+    let quarantine = rpc(app, "meta/memory/panel/quarantine", json!({})).await;
+    assert_eq!(quarantine["error"], Value::Null, "{quarantine:#?}");
+    quarantine["result"]["pending_promotions"]
+        .as_array()
+        .expect("promotions")
+        .iter()
+        .filter_map(|row| row["pending_id"].as_str().map(str::to_string))
+        .collect()
+}
+
+/// A pending (gated, not yet applied) promotion would publish content that
+/// still lives only in its source record, so it is listed only to a caller
+/// who may read both its target scope and that source. Both seeded
+/// promotions come from router's quarantined record (one targets the mob,
+/// one delivery): a reviewer denied router's memory sees neither, and the
+/// same reviewer without the deny sees both.
+#[tokio::test]
+async fn memory_panel_pending_promotions_need_their_source_scope() {
+    let (_temp_dir, mut runtime) = build_access_runtime_fixture().await;
+    let memory_dir = tempfile::tempdir().expect("memory dir");
+    let (store, ..) = seeded_memory_store(memory_dir.path()).await;
+    runtime.set_memory_panel_store(Arc::new(store.clone()));
+
+    runtime.set_access_controller(promotion_reviewer(false));
+    let app = runtime.build_reference_app_router(decision_state(false));
+    let mut listed = listed_promotions(&app).await;
+    listed.sort();
+    assert_eq!(
+        listed,
+        ["gate-delivery-promotion", "gate-mob-promotion"],
+        "a reader of the sources and the targets sees both promotions"
+    );
+
+    runtime.set_access_controller(promotion_reviewer(true));
+    let app = runtime.build_reference_app_router(decision_state(false));
+    let listed = listed_promotions(&app).await;
+    assert!(
+        listed.is_empty(),
+        "a reader denied the source must see no pending promotion of it: {listed:?}"
+    );
+
+    let _ = runtime.mob_handle().stop().await;
+}
+
+/// Once a promotion is applied, its content is a record of the target scope
+/// and is judged there like any other: a reviewer denied router's memory,
+/// the source's scope, reads the promoted mob record, and the queue no
+/// longer lists the applied promotion.
+#[tokio::test]
+async fn memory_panel_applied_promotion_is_judged_by_its_target_scope() {
+    use meerkat_meta::StagedMemoryStore;
+
+    let (_temp_dir, mut runtime) = build_access_runtime_fixture().await;
+    let memory_dir = tempfile::tempdir().expect("memory dir");
+    let (store, ..) = seeded_memory_store(memory_dir.path()).await;
+    let promotion = store
+        .pending_promotion_by_id("default", "gate-mob-promotion")
+        .await
+        .expect("promotion read")
+        .expect("the seeded mob promotion");
+    store
+        .commit(meerkat_meta::memory::StageToken {
+            realm: "default".to_string(),
+            token: promotion.stage_token.clone(),
+        })
+        .await
+        .expect("apply the promotion's staged batch");
+    assert!(
+        store
+            .resolve_pending_promotion("default", "gate-mob-promotion", "committed")
+            .await
+            .expect("resolve the promotion"),
+        "the promotion resolves as applied"
+    );
+    runtime.set_memory_panel_store(Arc::new(store.clone()));
+    runtime.set_access_controller(promotion_reviewer(true));
+    let app = runtime.build_reference_app_router(decision_state(false));
+
+    let records = rpc(&app, "meta/memory/panel/records", json!({ "scope": "mob" })).await;
+    assert_eq!(records["error"], Value::Null, "{records:#?}");
+    assert!(
+        records["result"]["records"]
+            .as_array()
+            .expect("records")
+            .iter()
+            .any(|row| row["title"] == json!("Promoted mob claim")),
+        "the applied promotion's record is read under its target scope: {records:#?}"
+    );
+    let listed = listed_promotions(&app).await;
+    assert!(
+        !listed.contains(&"gate-mob-promotion".to_string()),
+        "an applied promotion is no longer pending: {listed:?}"
+    );
+
+    let _ = runtime.mob_handle().stop().await;
+}
+
 /// The operator half of quarantine review over the console: the decision
 /// composes EXISTING grants. The reviewer grant alone decides nothing; it
 /// must meet the per-row read grants and the identity's own write (release)

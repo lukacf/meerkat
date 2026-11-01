@@ -17669,8 +17669,11 @@ comms = true
     struct SharedMemoryConsole {
         aggregator: MetaConsoleAggregator,
         runtime: Arc<crate::UnifiedRuntime>,
+        store: SqliteAgentMemoryStore,
         /// Each identity's first record.
         records: BTreeMap<&'static str, String>,
+        /// Each identity's quarantined write.
+        quarantined: BTreeMap<&'static str, String>,
         _memory_dir: tempfile::TempDir,
     }
 
@@ -17810,6 +17813,7 @@ comms = true
             .await?;
         // After the dream, so that the dream's own records land active.
         store.set_llm_write_gate(Arc::new(AlwaysQuarantine));
+        let mut quarantined_writes = BTreeMap::new();
         for identity in SHARED_MEMORY_IDENTITIES {
             let quarantined = store
                 .remember_authored(
@@ -17820,6 +17824,7 @@ comms = true
                     },
                 )
                 .await?;
+            quarantined_writes.insert(identity, quarantined.memory_id.clone());
             let stage = store
                 .stage(steward_batch("run-gate-shared", &[identity]))
                 .await?;
@@ -17877,7 +17882,7 @@ comms = true
             )
             .await
             .expect("spawn delivery");
-        runtime.set_memory_panel_store(Arc::new(store));
+        runtime.set_memory_panel_store(Arc::new(store.clone()));
         let aggregator = MetaConsoleAggregator::in_memory();
         aggregator.register_runtime(crate::console_aggregator::ConsoleRuntimeRegistration {
             runtime_key: "repo".into(),
@@ -17888,9 +17893,111 @@ comms = true
         Ok(SharedMemoryConsole {
             aggregator,
             runtime,
+            store,
             records,
+            quarantined: quarantined_writes,
             _memory_dir: memory_dir,
         })
+    }
+
+    /// Stage a promotion of delivery's quarantined write into router's
+    /// memory and park it as the pending gate `gate-cross`; with `apply`,
+    /// commit the staged batch and resolve the gate as applied, as an
+    /// approval does.
+    async fn shared_cross_promotion(
+        shared: &SharedMemoryConsole,
+        apply: bool,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        use crate::StagedMemoryStore as _;
+        use crate::memory::StewardStore as _;
+        use crate::memory::records::MemoryAuthor;
+        use crate::memory::staged::StagedBatchKind;
+
+        let stage = shared
+            .store
+            .stage(crate::StagedMutationBatch {
+                kind: StagedBatchKind::FreshWrite,
+                realm: "default".to_string(),
+                author: MemoryAuthor::Steward {
+                    run_id: "run-gate-cross".to_string(),
+                },
+                ops: vec![crate::StagedOp::Create {
+                    id: None,
+                    scope: crate::MemoryScope::Identity {
+                        realm: "default".to_string(),
+                        identity: "router".to_string(),
+                    },
+                    record: crate::NewMemoryRecord {
+                        kind: crate::MemoryKind::Fact,
+                        title: "router promoted claim".to_string(),
+                        description: "router promoted claim description".to_string(),
+                        body: "router promoted claim body".to_string(),
+                        tags: Vec::new(),
+                        evidence: Vec::new(),
+                        verification: None,
+                    },
+                    trust: crate::TrustTier::AgentObserved,
+                    derived_from: Vec::new(),
+                    rationale: Some("promote delivery's claim".to_string()),
+                    created_at_ms: None,
+                    updated_at_ms: None,
+                }],
+            })
+            .await?;
+        shared
+            .store
+            .record_pending_promotion(
+                "default",
+                crate::memory::PendingPromotion {
+                    pending_id: "gate-cross".to_string(),
+                    stage_token: stage.token.clone(),
+                    record_id: shared.quarantined["delivery"].clone(),
+                    scope_kind: "identity".to_string(),
+                    scope_key: "router".to_string(),
+                    rationale: Some("steward: delivery's claim, for router".to_string()),
+                    status: "pending".to_string(),
+                    created_at_ms: 2,
+                },
+            )
+            .await?;
+        if apply {
+            shared.store.commit(stage).await?;
+            shared
+                .store
+                .resolve_pending_promotion("default", "gate-cross", "committed")
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// The pending promotion ids a shared Console's quarantine queue lists.
+    async fn shared_pending_promotions(
+        shared: &SharedMemoryConsole,
+        controller: &AccessController,
+    ) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
+        let response = shared_memory_read(
+            shared,
+            controller,
+            "meta/memory/panel/quarantine",
+            json!({}),
+        )
+        .await;
+        Ok(response["result"]["pending_promotions"]
+            .as_array()
+            .ok_or_else(|| format!("no pending promotions: {response}"))?
+            .iter()
+            .filter_map(|row| row["pending_id"].as_str().map(str::to_string))
+            .collect())
+    }
+
+    fn shared_delivery_deny() -> crate::access::AccessRule {
+        crate::access::AccessRule {
+            id: "deny-delivery".into(),
+            effect: crate::access::AccessEffect::Deny,
+            actions: vec![ACTION_AGENT_MEMORY_READ.into()],
+            agents: vec!["repo/delivery".into()],
+            ..Default::default()
+        }
     }
 
     /// A controller with one unscoped allow of `reads` and, when given, one
@@ -18129,6 +18236,73 @@ comms = true
                 );
             }
         }
+        shared.runtime.mob_handle().stop().await?;
+        Ok(())
+    }
+
+    /// A shared Console lists a pending promotion only to a caller who may
+    /// read both its target scope and its source record: `gate-cross` would
+    /// publish delivery's quarantined write into router's memory, so a
+    /// reviewer denied `repo/delivery` sees `gate-router` but not
+    /// `gate-cross`, which the same reviewer without the deny sees.
+    #[tokio::test]
+    async fn aggregator_pending_promotions_need_their_source_scope()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let shared = shared_memory_console("panel-promotions-pending").await?;
+        shared_cross_promotion(&shared, false).await?;
+        for (case, controller, cross_listed) in [
+            (
+                "every scope",
+                shared_memory_reader(&SHARED_MEMORY_READS, None)?,
+                true,
+            ),
+            (
+                "a deny on repo/delivery",
+                shared_memory_reader(&SHARED_MEMORY_READS, Some(shared_delivery_deny()))?,
+                false,
+            ),
+        ] {
+            let pending = shared_pending_promotions(&shared, &controller).await?;
+            assert!(
+                pending.iter().any(|id| id == "gate-router"),
+                "{case}: router's own promotion is listed: {pending:?}"
+            );
+            assert_eq!(
+                pending.iter().any(|id| id == "gate-cross"),
+                cross_listed,
+                "{case}: the promotion of delivery's write: {pending:?}"
+            );
+        }
+        shared.runtime.mob_handle().stop().await?;
+        Ok(())
+    }
+
+    /// Once applied, the promotion of delivery's write into router's memory
+    /// is a record of router's scope: a reviewer denied `repo/delivery` reads
+    /// it, and the queue no longer lists the applied gate.
+    #[tokio::test]
+    async fn aggregator_applied_promotion_is_judged_by_its_target_scope()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let shared = shared_memory_console("panel-promotions-applied").await?;
+        shared_cross_promotion(&shared, true).await?;
+        let controller = shared_memory_reader(&SHARED_MEMORY_READS, Some(shared_delivery_deny()))?;
+        let records =
+            shared_memory_read(&shared, &controller, "meta/memory/panel/records", json!({})).await;
+        let titles: Vec<&str> = records["result"]["records"]
+            .as_array()
+            .ok_or_else(|| format!("no records: {records}"))?
+            .iter()
+            .filter_map(|row| row["title"].as_str())
+            .collect();
+        assert!(
+            titles.contains(&"router promoted claim"),
+            "the applied promotion's record is read under router's scope: {records}"
+        );
+        let pending = shared_pending_promotions(&shared, &controller).await?;
+        assert!(
+            pending.iter().all(|id| id != "gate-cross"),
+            "an applied promotion is no longer pending: {pending:?}"
+        );
         shared.runtime.mob_handle().stop().await?;
         Ok(())
     }

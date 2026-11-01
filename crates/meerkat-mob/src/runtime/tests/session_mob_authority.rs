@@ -374,7 +374,9 @@ async fn a_member_built_without_a_mob_tools_factory_follows_the_final_authority(
 }
 
 /// The hook removes the member's mob authority: the runtime's mob operator
-/// tools are no longer listed, and a call that reaches them is denied.
+/// tools are no longer listed, a call that reaches them is denied, and the
+/// runtime's reads of the session's grant find neither spawn nor manage
+/// scope in the mob.
 async fn assert_removed_authority_hides_and_denies(edit: fn(&mut meerkat::AgentBuildConfig)) {
     let (handle, service, session_id) = mob_with_spawned_worker().await;
     let tools = recorded_member_tools(&service, &session_id).await;
@@ -382,6 +384,14 @@ async fn assert_removed_authority_hides_and_denies(edit: fn(&mut meerkat::AgentB
     edit(&mut config);
     let (_dir, _agent) = build_through_factory(config, None).await;
 
+    assert!(
+        !handle.member_spawn_profile_scope_contains(&session_id, "worker"),
+        "the build bound no spawn grant in the mob"
+    );
+    assert!(
+        !handle.member_manage_scope_contains(&session_id),
+        "the build bound no manage scope over the mob"
+    );
     let listed = tool_names(&tools);
     for name in ["spawn_member", "spawn_many_members", "list_members"] {
         assert!(

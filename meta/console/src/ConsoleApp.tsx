@@ -5592,9 +5592,9 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
         });
     const canCloseSideChat =
       sideChatOf !== null && !consoleReadOnly && agent?.affordances?.can_retire === true;
+    // The queue's slot: an older queue to import, the queue, then where it is
+    // kept (a caption under the queue) and any storage failure.
     const stackSlot = <>
-      {stackItems.length > 0 ? <small className="queue-storage-note" role="status">{persistentSendScopeRef.current ? "Saved in this browser until sent" : "Not saved: these messages are lost if you reload"}</small> : null}
-      {pendingStorageErrorRef.current[identity] && <p role="alert">{pendingStorageErrorRef.current[identity]}</p>}
       {hasLegacyQueue && (
         <div className="queue-import" role="group" aria-label="Older queued messages" data-testid="legacy-queue-import">
           <span className="queue-import__icon" aria-hidden="true"><Icon name="i-clock" /></span>
@@ -5642,6 +5642,8 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           onToggleExpand={(itemId) => onStackToggleExpand(identity, itemId)}
         />
       ) : null}
+      {stackItems.length > 0 ? <small className="queue-storage-note" role="status">{persistentSendScopeRef.current ? "Saved in this browser until sent" : "Not saved: these messages are lost if you reload"}</small> : null}
+      {pendingStorageErrorRef.current[identity] && <p className="queue-storage-error" role="alert">{pendingStorageErrorRef.current[identity]}</p>}
     </>;
     const submittedRowId = submittedFrames[draftKey];
     const addQuote = (quote: ConsoleQuoteSelection) => {

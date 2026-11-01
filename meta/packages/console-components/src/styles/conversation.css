@@ -2071,11 +2071,17 @@ span.cc-conversation-turn-preview__file-icon::after {
 :is([data-cc-theme="light"], .cc-theme-scope[data-cc-theme="light"]) .cc-flow-run__dot.is-failed { background: #b1232f; }
 :is([data-cc-theme="light"], .cc-theme-scope[data-cc-theme="light"]) .cc-flow-run__dot.is-stopped { background: #946014; }
 
-/* --- Work-graph card (in-conversation goal → work-items tree) --- */
+/* --- Work-graph card (in-conversation goal → work-items tree) ---
+   Console v2 spec B17: the card follows the kit's tokens and the A2.4 tone
+   map in every theme and variant. An item's mark speaks shape as well as
+   tone (open hollow, working accent with its ring, done filled, blocked a
+   triangle, failed a diamond); modes are categories, named in words with
+   no hue of their own. */
 .cc-work-graph {
-  border: 1px solid var(--_cc-border-soft, rgba(255, 255, 255, 0.08));
-  border-radius: 12px;
-  background: var(--_cc-surface-soft, rgba(255, 255, 255, 0.03));
+  border: 1px solid var(--_cc-border-soft);
+  border-radius: var(--_cc-radius-md);
+  background: var(--_cc-surface-card);
+  color: var(--_cc-foreground);
   overflow: hidden;
   margin: 2px 0;
 }
@@ -2084,7 +2090,7 @@ span.cc-conversation-turn-preview__file-icon::after {
   align-items: center;
   gap: 10px;
   padding: 10px 14px;
-  border-bottom: 1px solid var(--_cc-border-soft, rgba(255, 255, 255, 0.06));
+  border-bottom: 1px solid var(--_cc-border-soft);
 }
 .cc-work-graph.is-collapsed .cc-work-graph__header {
   border-bottom: none;
@@ -2095,9 +2101,9 @@ span.cc-conversation-turn-preview__file-icon::after {
   justify-content: center;
   width: 22px;
   height: 22px;
-  border-radius: 7px;
-  background: var(--_cc-surface-raised, rgba(255, 255, 255, 0.06));
-  color: var(--_cc-foreground-muted, rgba(177, 184, 193, 0.7));
+  border-radius: var(--_cc-radius-sm);
+  background: var(--_cc-surface-soft);
+  color: var(--_cc-foreground-meta);
   flex: none;
 }
 .cc-work-graph__heading {
@@ -2110,14 +2116,14 @@ span.cc-conversation-turn-preview__file-icon::after {
 .cc-work-graph__title {
   font-weight: 600;
   font-size: 13px;
-  color: var(--_cc-foreground, rgba(232, 234, 237, 0.96));
+  color: var(--_cc-foreground);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 .cc-work-graph__objective {
   font-size: var(--_cc-text-xs, 11px);
-  color: var(--_cc-foreground-muted, rgba(177, 184, 193, 0.58));
+  color: var(--_cc-foreground-meta);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -2131,89 +2137,117 @@ span.cc-conversation-turn-preview__file-icon::after {
 .cc-work-graph__progress-count {
   font-size: 11px;
   font-variant-numeric: tabular-nums;
-  color: var(--_cc-foreground-muted, rgba(177, 184, 193, 0.7));
+  color: var(--_cc-foreground-meta);
 }
+/* Progress is a MiniBar (spec A3.8): a 4 px track in viz-faint, done in
+   ink; a failed or blocked goal fills in its tone. */
 .cc-work-graph__progress-track {
   display: inline-block;
   width: 64px;
   height: 4px;
-  border-radius: 999px;
-  background: var(--_cc-surface-raised, rgba(255, 255, 255, 0.08));
+  border-radius: var(--_cc-radius-pill);
+  background: var(--_cc-viz-faint);
   overflow: hidden;
 }
 .cc-work-graph__progress-fill {
   display: block;
   height: 100%;
-  border-radius: 999px;
-  background: var(--_cc-positive, rgb(140, 225, 175));
-  transition: width 180ms ease;
+  border-radius: var(--_cc-radius-pill);
+  background: var(--_cc-viz-ink);
+  transition: width var(--_cc-dur-base) var(--_cc-ease-out);
 }
-.cc-work-graph.is-failed .cc-work-graph__progress-fill { background: var(--_cc-negative, rgb(255, 155, 155)); }
-.cc-work-graph.is-blocked .cc-work-graph__progress-fill { background: var(--_cc-warning, rgb(240, 200, 120)); }
+.cc-work-graph.is-failed .cc-work-graph__progress-fill { background: var(--_cc-negative); }
+.cc-work-graph.is-blocked .cc-work-graph__progress-fill { background: var(--_cc-warning); }
 .cc-work-graph__badge {
   display: inline-flex;
   align-items: center;
   gap: 6px;
   flex: none;
+  height: 20px;
+  padding: 0 8px;
+  border: 1px solid var(--_cc-border-soft);
+  border-radius: var(--_cc-radius-pill);
+  background: var(--_cc-surface-soft);
+  color: var(--_cc-foreground-muted);
   font-size: 11px;
-  font-weight: 600;
-  padding: 2px 9px;
-  border-radius: 999px;
-  background: var(--_cc-surface-raised, rgba(255, 255, 255, 0.06));
-  color: var(--_cc-foreground-muted, rgba(177, 184, 193, 0.7));
-  letter-spacing: 0.01em;
+  font-weight: 500;
+  line-height: 18px;
 }
+/* An active goal is being worked now: the live tone (the accent's soft
+   fill, the foreground as its ink, the pulse as its mark). */
 .cc-work-graph__badge.is-active {
-  background: color-mix(in oklch, var(--_cc-link, rgb(150, 190, 255)) 14%, transparent);
-  color: var(--_cc-link-ink, rgb(150, 190, 255));
+  border-color: color-mix(in srgb, var(--_cc-member-accent) 32%, var(--_cc-surface-card));
+  background: var(--_cc-viz-live-soft);
+  color: var(--_cc-foreground);
 }
 .cc-work-graph__badge.is-completed {
-  background: color-mix(in oklch, var(--_cc-positive, rgb(140, 225, 175)) 14%, transparent);
-  color: var(--_cc-positive-ink, rgb(140, 225, 175));
+  border-color: color-mix(in srgb, var(--_cc-positive) 32%, var(--_cc-surface-card));
+  background: color-mix(in srgb, var(--_cc-positive) 12%, var(--_cc-surface-card));
+  color: var(--_cc-positive-ink);
 }
 .cc-work-graph__badge.is-failed {
-  background: color-mix(in oklch, var(--_cc-negative, rgb(255, 155, 155)) 14%, transparent);
-  color: var(--_cc-negative-ink, rgb(255, 155, 155));
+  border-color: color-mix(in srgb, var(--_cc-negative) 32%, var(--_cc-surface-card));
+  background: color-mix(in srgb, var(--_cc-negative) 12%, var(--_cc-surface-card));
+  color: var(--_cc-negative-ink);
 }
 .cc-work-graph__badge.is-blocked {
-  background: color-mix(in oklch, var(--_cc-warning, rgb(240, 200, 120)) 16%, transparent);
-  color: var(--_cc-warning-ink, rgb(240, 200, 120));
+  border-color: color-mix(in srgb, var(--_cc-warning) 36%, var(--_cc-surface-card));
+  background: color-mix(in srgb, var(--_cc-warning) 14%, var(--_cc-surface-card));
+  color: var(--_cc-warning-ink);
 }
+/* The last action failed: the status in words with its tone and mark
+   (A1.3), crit like a failed goal's badge. */
 .cc-work-graph__last-failed {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   flex: none;
+  height: 20px;
+  padding: 0 8px 0 7px;
+  border: 1px solid color-mix(in srgb, var(--_cc-negative) 32%, var(--_cc-surface-card));
+  border-radius: var(--_cc-radius-pill);
+  background: color-mix(in srgb, var(--_cc-negative) 12%, var(--_cc-surface-card));
+  color: var(--_cc-negative-ink);
   font-size: 11px;
-  font-weight: 600;
-  padding: 2px 7px;
-  border-radius: 999px;
-  background: color-mix(in oklch, var(--_cc-negative, rgb(255, 155, 155)) 14%, transparent);
-  color: var(--_cc-negative-ink, rgb(255, 155, 155));
+  font-weight: 500;
+  line-height: 18px;
+  white-space: nowrap;
 }
+.cc-work-graph__last-failed-mark {
+  font-size: 10px;
+  line-height: 1;
+}
+/* A card is a snapshot in the transcript: its live marks wear the static
+   double ring instead of a pulse that would run for as long as the message
+   stays mounted. */
 .cc-work-graph__pulse {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: currentColor;
-  animation: cc-work-graph-pulse 1.4s ease-in-out infinite;
-}
-@keyframes cc-work-graph-pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.35; }
+  width: 7px;
+  height: 7px;
+  border-radius: var(--_cc-radius-round);
+  background: var(--_cc-viz-live);
+  box-shadow: 0 0 0 1.5px var(--_cc-viz-live-soft), 0 0 0 2.5px var(--_cc-viz-live);
 }
 .cc-work-graph__collapse {
   flex: none;
-  width: 22px;
-  height: 22px;
+  width: 24px;
+  height: 24px;
   border: none;
-  border-radius: 6px;
+  border-radius: var(--_cc-radius-sm);
   background: none;
-  color: var(--_cc-foreground-muted, rgba(177, 184, 193, 0.6));
+  color: var(--_cc-foreground-meta);
   font: inherit;
   font-size: 11px;
   cursor: pointer;
 }
 .cc-work-graph__collapse:hover {
-  background: var(--_cc-surface-raised, rgba(255, 255, 255, 0.06));
-  color: var(--_cc-foreground, rgba(232, 234, 237, 0.95));
+  background: var(--_cc-surface-hover);
+  color: var(--_cc-foreground);
+}
+.cc-work-graph__collapse:focus-visible,
+.cc-work-graph__item-row:focus-visible,
+.cc-work-graph__action:focus-visible {
+  outline: 2px solid var(--_cc-focus-ring);
+  outline-offset: -2px;
 }
 .cc-work-graph__items {
   list-style: none;
@@ -2223,8 +2257,9 @@ span.cc-conversation-turn-preview__file-icon::after {
 .cc-work-graph__item {
   border-left: 2px solid transparent;
 }
+/* The item being worked now carries the live rule. */
 .cc-work-graph__item.is-in_progress {
-  border-left-color: var(--_cc-link, rgb(150, 190, 255));
+  border-left-color: var(--_cc-viz-live);
 }
 .cc-work-graph__item-line {
   display: flex;
@@ -2249,40 +2284,56 @@ span.cc-conversation-turn-preview__file-icon::after {
   cursor: pointer;
 }
 .cc-work-graph__item-row[aria-expanded]:hover {
-  background: var(--_cc-surface-raised, rgba(255, 255, 255, 0.04));
+  background: var(--_cc-surface-hover);
 }
 .cc-work-graph__overflow {
   padding: 5px 14px 5px 29px;
   font-size: 11px;
-  color: var(--_cc-foreground-muted, rgba(177, 184, 193, 0.6));
+  color: var(--_cc-foreground-meta);
 }
+/* The status marks of spec A2.4, in an 8 px box. */
 .cc-work-graph__dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
+  width: 8px;
+  height: 8px;
+  border-radius: var(--_cc-radius-round);
   flex: none;
-  background: var(--_cc-foreground-muted, rgba(177, 184, 193, 0.4));
+  box-sizing: border-box;
+  background: transparent;
+  box-shadow: inset 0 0 0 1.5px var(--_cc-viz-mid);
 }
 .cc-work-graph__dot.is-in_progress {
-  background: var(--_cc-link, rgb(150, 190, 255));
-  box-shadow: 0 0 0 3px color-mix(in oklch, var(--_cc-link, rgb(150, 190, 255)) 18%, transparent);
-  animation: cc-work-graph-pulse 1.4s ease-in-out infinite;
+  background: var(--_cc-viz-live);
+  box-shadow: 0 0 0 1.5px var(--_cc-surface-card), 0 0 0 2.5px var(--_cc-viz-live);
 }
-.cc-work-graph__dot.is-completed { background: var(--_cc-positive, rgb(140, 225, 175)); }
-.cc-work-graph__dot.is-failed { background: var(--_cc-negative, rgb(255, 155, 155)); }
-.cc-work-graph__dot.is-blocked { background: var(--_cc-warning, rgb(240, 200, 120)); }
-.cc-work-graph__dot.is-cancelled { background: var(--_cc-foreground-muted, rgba(177, 184, 193, 0.3)); }
+.cc-work-graph__dot.is-completed { background: var(--_cc-positive); box-shadow: none; }
+.cc-work-graph__dot.is-failed {
+  width: 6.4px;
+  height: 6.4px;
+  margin: 0.8px;
+  border-radius: 0;
+  background: var(--_cc-negative);
+  box-shadow: none;
+  transform: rotate(45deg);
+}
+.cc-work-graph__dot.is-blocked {
+  width: 9px;
+  border-radius: 0;
+  background: var(--_cc-warning);
+  box-shadow: none;
+  clip-path: polygon(50% 0, 100% 100%, 0 100%);
+}
+.cc-work-graph__dot.is-cancelled { box-shadow: inset 0 0 0 1.5px var(--_cc-viz-faint); }
 .cc-work-graph__item.is-completed .cc-work-graph__item-title,
 .cc-work-graph__item.is-cancelled .cc-work-graph__item-title {
-  color: var(--_cc-foreground-muted, rgba(177, 184, 193, 0.55));
+  color: var(--_cc-foreground-muted);
 }
 .cc-work-graph__item.is-cancelled .cc-work-graph__item-title {
   text-decoration: line-through;
 }
 .cc-work-graph__item-title {
-  font-weight: 550;
-  font-size: 12px;
-  color: var(--_cc-foreground, rgba(232, 234, 237, 0.92));
+  font-weight: 500;
+  font-size: 12.5px;
+  color: var(--_cc-foreground);
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -2290,64 +2341,77 @@ span.cc-conversation-turn-preview__file-icon::after {
 }
 .cc-work-graph__chip {
   flex: none;
-  font-size: 10px;
-  font-weight: 600;
-  padding: 1px 7px;
-  border-radius: 999px;
-  background: var(--_cc-surface-raised, rgba(255, 255, 255, 0.06));
-  color: var(--_cc-foreground-muted, rgba(177, 184, 193, 0.7));
-  letter-spacing: 0.02em;
+  height: 18px;
+  padding: 0 7px;
+  border: 1px solid var(--_cc-border-soft);
+  border-radius: var(--_cc-radius-pill);
+  background: var(--_cc-surface-soft);
+  color: var(--_cc-foreground-muted);
+  font-size: 10.5px;
+  font-weight: 500;
+  line-height: 16px;
   max-width: 140px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* Priority speaks only when it matters (the kit's priorityTone): high is a
+   critical outline, low a quiet one. */
 .cc-work-graph__chip.is-priority-high {
-  background: color-mix(in oklch, var(--_cc-negative, rgb(255, 155, 155)) 12%, transparent);
-  color: var(--_cc-negative-ink, rgb(255, 155, 155));
+  border-color: color-mix(in srgb, var(--_cc-negative) 45%, var(--_cc-surface-card));
+  background: transparent;
+  color: var(--_cc-negative-ink);
 }
 .cc-work-graph__chip.is-priority-low {
-  color: var(--_cc-foreground-muted, rgba(177, 184, 193, 0.5));
+  background: transparent;
+  color: var(--_cc-foreground-meta);
 }
 .cc-work-graph__chip.is-blocked {
-  background: color-mix(in oklch, var(--_cc-warning, rgb(240, 200, 120)) 14%, transparent);
-  color: var(--_cc-warning-ink, rgb(240, 200, 120));
+  border-color: color-mix(in srgb, var(--_cc-warning) 36%, var(--_cc-surface-card));
+  background: color-mix(in srgb, var(--_cc-warning) 14%, var(--_cc-surface-card));
+  color: var(--_cc-warning-ink);
 }
 .cc-work-graph__item-status {
   font-size: var(--_cc-text-xs, 11px);
-  color: var(--_cc-foreground-muted, rgba(177, 184, 193, 0.5));
+  color: var(--_cc-foreground-meta);
   flex: none;
   margin-left: auto;
 }
 .cc-work-graph__item-chevron {
   font-size: 10px;
-  color: var(--_cc-foreground-muted, rgba(177, 184, 193, 0.5));
+  color: var(--_cc-foreground-meta);
   flex: none;
   margin-left: auto;
 }
 .cc-work-graph__action {
   flex: none;
   margin-right: 12px;
-  padding: 2px 9px;
-  border: 1px solid var(--_cc-border-soft, rgba(255, 255, 255, 0.1));
-  border-radius: 999px;
-  background: var(--_cc-surface-raised, rgba(255, 255, 255, 0.05));
-  color: var(--_cc-foreground-muted, rgba(177, 184, 193, 0.75));
+  height: 24px;
+  padding: 0 9px;
+  border: 1px solid var(--_cc-border-soft);
+  border-radius: var(--_cc-radius-sm);
+  background: var(--_cc-surface-card);
+  color: var(--_cc-foreground-muted);
   font: inherit;
   font-size: var(--_cc-text-xs, 11px);
-  font-weight: 550;
+  font-weight: 500;
   cursor: pointer;
   opacity: 0;
-  transition: opacity 120ms ease;
+  transition: opacity var(--_cc-dur-fast) ease, color var(--_cc-dur-fast) ease, border-color var(--_cc-dur-fast) ease;
 }
 .cc-work-graph__item-line:hover .cc-work-graph__action,
+.cc-work-graph__item-line:focus-within .cc-work-graph__action,
 .cc-work-graph__attention-row:hover .cc-work-graph__action,
+.cc-work-graph__attention-row:focus-within .cc-work-graph__action,
 .cc-work-graph__action:focus-visible {
   opacity: 1;
 }
+@media (hover: none) {
+  .cc-work-graph__action { opacity: 1; }
+}
 .cc-work-graph__action:hover {
-  color: var(--_cc-foreground, rgba(232, 234, 237, 0.95));
-  background: var(--_cc-surface-soft, rgba(255, 255, 255, 0.09));
+  color: var(--_cc-foreground);
+  border-color: var(--_cc-border-strong);
 }
 .cc-work-graph__attention-row .cc-work-graph__action {
   margin-right: 0;
@@ -2355,13 +2419,13 @@ span.cc-conversation-turn-preview__file-icon::after {
 }
 .cc-work-graph__item-detail {
   padding: 2px 14px 8px 0;
-  border-left: 2px solid var(--cc-member-accent-soft, rgba(255, 255, 255, 0.08));
+  border-left: 2px solid var(--_cc-border-soft);
 }
 .cc-work-graph__item-description {
   margin: 2px 0 4px;
   padding-left: 10px;
   font-size: 12px;
-  color: var(--_cc-foreground, rgba(232, 234, 237, 0.85));
+  color: var(--_cc-foreground);
   white-space: pre-wrap;
 }
 .cc-work-graph__item-labels {
@@ -2376,7 +2440,7 @@ span.cc-conversation-turn-preview__file-icon::after {
   margin: 2px 0 4px;
   padding-left: 10px;
   font-size: var(--_cc-text-xs, 11px);
-  color: var(--_cc-foreground-muted, rgba(177, 184, 193, 0.7));
+  color: var(--_cc-foreground-muted);
 }
 .cc-work-graph__evidence li {
   padding: 1px 0;
@@ -2385,15 +2449,15 @@ span.cc-conversation-turn-preview__file-icon::after {
   display: flex;
   gap: 10px;
   padding-left: 10px;
-  font-size: 10px;
-  color: var(--_cc-foreground-muted, rgba(177, 184, 193, 0.45));
+  font-size: 10.5px;
+  color: var(--_cc-foreground-meta);
   font-variant-numeric: tabular-nums;
 }
 .cc-work-graph__attention {
   list-style: none;
   margin: 0;
   padding: 5px 14px 7px;
-  border-top: 1px solid var(--_cc-border-soft, rgba(255, 255, 255, 0.06));
+  border-top: 1px solid var(--_cc-border-soft);
 }
 .cc-work-graph__attention-row {
   display: flex;
@@ -2407,47 +2471,32 @@ span.cc-conversation-turn-preview__file-icon::after {
 }
 .cc-work-graph__mode {
   flex: none;
+  height: 18px;
+  padding: 0 7px;
+  border: 1px solid var(--_cc-border-soft);
+  border-radius: var(--_cc-radius-pill);
+  background: var(--_cc-surface-soft);
+  color: var(--_cc-foreground-muted);
   font-size: 10px;
-  font-weight: 650;
+  font-weight: 600;
+  line-height: 16px;
   text-transform: uppercase;
-  letter-spacing: 0.05em;
-  padding: 1px 8px;
-  border-radius: 999px;
-  background: var(--_cc-surface-raised, rgba(255, 255, 255, 0.06));
-  color: var(--_cc-foreground-muted, rgba(177, 184, 193, 0.75));
+  letter-spacing: 0.06em;
 }
-/* Modes are categories, named in words; tones come from the theme so they
-   read on light and dark surfaces alike. Coordinate stays neutral. */
-.cc-work-graph__mode.is-pursue {
-  background: color-mix(in oklch, var(--_cc-link, rgb(150, 190, 255)) 14%, transparent);
-  color: var(--_cc-link-ink, rgb(150, 190, 255));
-}
-.cc-work-graph__mode.is-coordinate {
-  color: var(--_cc-foreground, rgba(232, 234, 237, 0.92));
-}
-.cc-work-graph__mode.is-review {
-  background: color-mix(in oklch, var(--_cc-positive, rgb(140, 225, 175)) 14%, transparent);
-  color: var(--_cc-positive-ink, rgb(140, 225, 175));
-}
-.cc-work-graph__mode.is-falsify {
-  background: color-mix(in oklch, var(--_cc-negative, rgb(255, 155, 155)) 12%, transparent);
-  color: var(--_cc-negative-ink, rgb(255, 165, 165));
-}
-.cc-work-graph__mode.is-judge {
-  background: color-mix(in oklch, var(--_cc-warning, rgb(240, 200, 120)) 16%, transparent);
-  color: var(--_cc-warning-ink, rgb(240, 200, 120));
-}
+/* Modes are categories: one neutral look, the word says which. Observing
+   is the quietest. */
 .cc-work-graph__mode.is-observe {
-  color: var(--_cc-foreground-muted, rgba(177, 184, 193, 0.55));
+  background: transparent;
+  color: var(--_cc-foreground-meta);
 }
 .cc-work-graph__attention-status {
   flex: none;
   font-size: var(--_cc-text-xs, 11px);
-  color: var(--_cc-foreground-muted, rgba(177, 184, 193, 0.65));
+  color: var(--_cc-foreground-meta);
 }
 .cc-work-graph__attention-target {
   font-size: var(--_cc-text-xs, 11px);
-  color: var(--_cc-foreground, rgba(232, 234, 237, 0.8));
+  color: var(--_cc-foreground);
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -2458,27 +2507,50 @@ span.cc-conversation-turn-preview__file-icon::after {
 }
 .cc-work-graph__events {
   padding: 6px 14px 8px;
-  border-top: 1px solid var(--_cc-border-soft, rgba(255, 255, 255, 0.06));
+  border-top: 1px solid var(--_cc-border-soft);
 }
 .cc-work-graph__event {
   font-size: var(--_cc-text-xs, 11px);
-  color: var(--_cc-foreground-muted, rgba(177, 184, 193, 0.55));
+  color: var(--_cc-foreground-meta);
   padding: 1px 0;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
-
-:is([data-cc-theme="light"], .cc-theme-scope[data-cc-theme="light"]) .cc-work-graph {
-  border-color: var(--_cc-border-soft);
-  background: var(--_cc-surface-raised);
-  box-shadow: var(--_cc-shadow-sm);
+/* A failed call reads as a sentence with the crit mark; what it failed
+   with sits behind the technical details, in muted mono. */
+.cc-work-graph__event.is-failed {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--_cc-negative-ink);
 }
-:is([data-cc-theme="light"], .cc-theme-scope[data-cc-theme="light"]) .cc-work-graph__title,
-:is([data-cc-theme="light"], .cc-theme-scope[data-cc-theme="light"]) .cc-work-graph__item-title,
-:is([data-cc-theme="light"], .cc-theme-scope[data-cc-theme="light"]) .cc-work-graph__item-description,
-:is([data-cc-theme="light"], .cc-theme-scope[data-cc-theme="light"]) .cc-work-graph__attention-target {
-  color: var(--_cc-foreground);
+.cc-work-graph__event-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.cc-work-graph__event-tech {
+  margin: 0 0 4px 14px;
+}
+.cc-work-graph__event-tech .cc-tech__summary {
+  font-size: var(--_cc-text-xs, 11px);
+}
+.cc-work-graph__event-tech .cc-tech__body {
+  margin-top: 4px;
+  padding: 8px 10px;
+}
+.cc-work-graph__event-tech .cc-kv dd {
+  min-width: 0;
+  font-family: var(--_cc-font-mono);
+  font-size: var(--_cc-panel-fs-mono, 11px);
+  color: var(--_cc-foreground-meta);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+@media (prefers-reduced-motion: reduce) {
+  .cc-work-graph__action,
+  .cc-work-graph__progress-fill { transition: none; }
 }
 
 .cc-markdown-document {

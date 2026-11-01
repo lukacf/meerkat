@@ -3251,12 +3251,14 @@ async function runHeadlessControlSurfaceBrowserProof() {
     await waitForRpcMethod(server, "meta/gating/decide", 3);
 
     await openSidebarAgentChat(page, "Identity Example");
-    await page.getByTestId("conv-action:respawn").waitFor({ timeout: 10_000 });
-    await page.getByTestId("conv-action:respawn").click();
-    await waitForRpcMethod(server, "meta/respawn");
-    await page.getByTestId("conv-action:retire").waitFor({ timeout: 10_000 });
-    await page.getByTestId("conv-action:retire").click();
-    await waitForRpcMethod(server, "meta/retire");
+    // Respawn and Retire sit in the chat header's menu and ask first.
+    for (const action of ["respawn", "retire"]) {
+      await page.getByTestId("conv-menu").waitFor({ timeout: 10_000 });
+      await page.getByTestId("conv-menu").click();
+      await page.getByTestId(`conv-action:${action}`).click();
+      await page.getByTestId(`conv-confirm-accept:${action}`).click();
+      await waitForRpcMethod(server, `meta/${action}`);
+    }
     await page.getByTestId("conv-action:details").click();
     // Agent details keep the lifecycle actions in the overflow menu, and a
     // reset asks for confirmation first.

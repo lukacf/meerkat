@@ -513,6 +513,7 @@ export function TimelinePanel({
 
   const main = (
     <div className="today__main">
+      {lanes.lanes.length || firstLoad ? (
       <section className="today__lanes" aria-label="Day lanes">
         {lanes.lanes.length ? (
           <Swimlanes
@@ -537,10 +538,11 @@ export function TimelinePanel({
             selectedId={selectedLaneId}
             testIdPrefix="timeline"
           />
-        ) : firstLoad ? (
+        ) : (
           <LoadingState variant="timeline" label="Loading today's activity" />
-        ) : null}
+        )}
       </section>
+      ) : null}
       {partial ? (
         <Notice tone="info" flush testId="timeline-partial">
           {`Showing activity since ${formatClockTime(oldestLoaded!)}, when this console connected. Earlier events load per agent.`}

@@ -76,7 +76,7 @@ export interface SwimlaneMark {
 
 export type SwimlaneItem =
   | { kind: "span"; id: string; span: SwimlaneSpan }
-  | { kind: "link"; id: string; link: SwimlaneLink }
+  | { kind: "link"; id: string; link: SwimlaneLink; count: number }
   | { kind: "mark"; id: string; mark: SwimlaneMark }
   | { kind: "problem"; id: string; mark: SwimlaneMark };
 
@@ -217,9 +217,18 @@ export function Swimlanes({
       if (!laneIds.has(span.lane)) continue;
       out.push({ item: { kind: "span", id: span.id, span }, lane: span.lane, t: span.start, x: scale.x(span.start), y: rowCenter(span.lane) });
     }
+    // Messages between one pair in one pixel column (a burst) draw once,
+    // with their count.
+    const bursts = new Map<string, { link: SwimlaneLink; count: number }>();
     for (const link of links) {
       if (!laneIds.has(link.from) || !laneIds.has(link.to)) continue;
-      out.push({ item: { kind: "link", id: link.id, link }, lane: link.from, t: link.at, x: scale.x(link.at), y: rowCenter(link.from) });
+      const key = `${link.from}\u0000${link.to}\u0000${Math.round(scale.x(link.at) / 4)}`;
+      const burst = bursts.get(key);
+      if (burst) burst.count += 1;
+      else bursts.set(key, { link, count: 1 });
+    }
+    for (const { link, count } of bursts.values()) {
+      out.push({ item: { kind: "link", id: link.id, link, count }, lane: link.from, t: link.at, x: scale.x(link.at), y: rowCenter(link.from) });
     }
     for (const mark of marks) {
       if (!laneIds.has(mark.lane)) continue;
@@ -239,7 +248,11 @@ export function Swimlanes({
   const tabStop = focusId && byId.has(focusId) ? focusId : placed[0]?.item.id ?? null;
 
   const spanEnd = (span: SwimlaneSpan) => scale.x(span.end ?? Math.min(nowMs, end));
-  const itemLabel = (item: SwimlaneItem) => (item.kind === "span" ? item.span.label : item.kind === "link" ? item.link.label : item.mark.label);
+  const itemLabel = (item: SwimlaneItem) => (item.kind === "span"
+    ? item.span.label
+    : item.kind === "link"
+      ? (item.count > 1 ? `${item.count} messages. ${item.link.label}` : item.link.label)
+      : item.mark.label);
 
   const hitTest = (clientX: number, clientY: number): string | null => {
     const box = svgRef.current?.getBoundingClientRect();
@@ -442,6 +455,11 @@ export function Swimlanes({
               <line className="cc-lanes__link" x1={x} x2={x} y1={y0} y2={tipY} />
               <circle className="cc-lanes__link-end" cx={x} cy={y0} r={1.75} />
               <path className="cc-lanes__chevron" d={down ? `M${x - 3} ${tipY - 3.5}L${x} ${tipY}L${x + 3} ${tipY - 3.5}` : `M${x - 3} ${tipY + 3.5}L${x} ${tipY}L${x + 3} ${tipY + 3.5}`} />
+              {item.count > 1 ? (
+                <text className="cc-lanes__count" x={x + 4} y={(y0 + y1) / 2 + 3}>
+                  {item.count}
+                </text>
+              ) : null}
             </g>
           );
         })}

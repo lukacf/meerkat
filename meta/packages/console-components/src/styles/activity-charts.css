@@ -123,6 +123,15 @@
 .cc-lanes__link { stroke: var(--_cc-viz-edge-strong); stroke-width: 1; }
 .cc-lanes__link-hit { stroke: transparent; stroke-width: 7; }
 .cc-lanes__link-end { fill: var(--_cc-viz-edge-strong); stroke: none; }
+.cc-lanes__count {
+  font-family: var(--_cc-font-mono);
+  font-size: var(--_cc-fs-tick, 9.5px);
+  fill: var(--_cc-foreground-muted);
+  stroke: var(--_cc-viz-plate);
+  stroke-width: 3px;
+  paint-order: stroke;
+  font-variant-numeric: tabular-nums;
+}
 .cc-lanes__chevron {
   fill: none;
   stroke: var(--_cc-viz-edge-strong);

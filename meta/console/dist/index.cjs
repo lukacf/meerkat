@@ -29183,7 +29183,8 @@ function RelativeTime({
   const shared = useNow();
   const ms = toEpochMs(value);
   if (ms === null) return null;
-  const text14 = formatRelativeTime2(ms, now3 ?? shared);
+  const current = now3 ?? Math.max(shared, Date.now());
+  const text14 = ms > current && ms - current < TICK_MS ? "just now" : formatRelativeTime2(ms, current);
   return /* @__PURE__ */ (0, import_jsx_runtime21.jsx)(
     "time",
     {
@@ -29521,6 +29522,7 @@ function PanelHeader({
     }
   );
 }
+var TAB_FADE = 24;
 function PanelTabs({
   tabs,
   active,
@@ -29532,6 +29534,46 @@ function PanelTabs({
   testId
 }) {
   const listRef = (0, import_react12.useRef)(null);
+  const [fade, setFade] = (0, import_react12.useState)({ start: false, end: false });
+  const updateFade = (0, import_react12.useCallback)(() => {
+    const list5 = listRef.current;
+    if (!list5) return;
+    const max = list5.scrollWidth - list5.clientWidth;
+    const next = { start: max > 1 && list5.scrollLeft > 1, end: max > 1 && list5.scrollLeft < max - 1 };
+    setFade((previous3) => previous3.start === next.start && previous3.end === next.end ? previous3 : next);
+  }, []);
+  const revealActive = (0, import_react12.useCallback)(() => {
+    const list5 = listRef.current;
+    if (!list5) return;
+    const tab2 = list5.querySelector('[role="tab"][aria-selected="true"]');
+    if (tab2 && list5.scrollWidth > list5.clientWidth + 1) {
+      const box = list5.getBoundingClientRect();
+      const rect = tab2.getBoundingClientRect();
+      const left = rect.left - box.left + list5.scrollLeft;
+      const right = left + rect.width;
+      const view = list5.clientWidth;
+      if (left - TAB_FADE < list5.scrollLeft) list5.scrollLeft = Math.max(0, left - TAB_FADE);
+      else if (right + TAB_FADE > list5.scrollLeft + view) list5.scrollLeft = Math.min(list5.scrollWidth - view, right + TAB_FADE - view);
+    }
+    updateFade();
+  }, [updateFade]);
+  (0, import_react12.useLayoutEffect)(() => {
+    revealActive();
+  }, [active, tabs.length, revealActive]);
+  (0, import_react12.useEffect)(() => {
+    const list5 = listRef.current;
+    if (!list5) return void 0;
+    const view = list5.ownerDocument.defaultView;
+    list5.addEventListener("scroll", updateFade, { passive: true });
+    const observer = typeof ResizeObserver !== "undefined" ? new ResizeObserver(() => revealActive()) : null;
+    if (observer) observer.observe(list5);
+    else view?.addEventListener("resize", revealActive);
+    return () => {
+      list5.removeEventListener("scroll", updateFade);
+      observer?.disconnect();
+      view?.removeEventListener("resize", revealActive);
+    };
+  }, [revealActive, updateFade]);
   const onKeyDown = (event) => {
     const keys2 = ["ArrowRight", "ArrowLeft", "Home", "End"];
     if (!keys2.includes(event.key)) return;
@@ -29551,6 +29593,8 @@ function PanelTabs({
       className: cx("cc-tabs", className),
       onKeyDown,
       "data-testid": testId,
+      "data-fade-start": fade.start ? "" : void 0,
+      "data-fade-end": fade.end ? "" : void 0,
       children: tabs.map((tab2) => {
         const selected = tab2.id === active;
         const ids = idBase ? panelTabIds(idBase, tab2.id) : null;
@@ -71243,7 +71287,9 @@ function Biography({
 var import_react67 = __toESM(require("react"));
 var import_jsx_runtime95 = require("react/jsx-runtime");
 var WEEK2 = 7;
-function dayTicks(start2, end) {
+var DAY_LABEL_PX = 44;
+var NOW_LABEL_PX = 28;
+function dayTicks(start2, end, width) {
   const ticks = [];
   const first = new Date(start2);
   first.setHours(0, 0, 0, 0);
@@ -71252,16 +71298,24 @@ function dayTicks(start2, end) {
   const span2 = Math.max(1, end - start2);
   while (cursor.getTime() <= end) {
     const at = cursor.getTime();
-    if ((end - at) / span2 < 0.05) {
-      cursor.setDate(cursor.getDate() + 1);
-      continue;
-    }
     ticks.push({
       key: String(at),
       x: (at - start2) / span2,
       label: cursor.toLocaleDateString("en-GB", { weekday: "short", day: "numeric" })
     });
     cursor.setDate(cursor.getDate() + 1);
+  }
+  const daySpacing = DAY_MS3 / span2 * width;
+  const every = daySpacing >= DAY_LABEL_PX + 6 ? 1 : daySpacing * 2 >= DAY_LABEL_PX + 6 ? 2 : 3;
+  let kept = 0;
+  for (let index3 = ticks.length - 1; index3 >= 0; index3 -= 1) {
+    const tick = ticks[index3];
+    if ((1 - tick.x) * width < DAY_LABEL_PX + NOW_LABEL_PX) {
+      tick.label = "";
+      continue;
+    }
+    if (kept % every !== 0) tick.label = "";
+    kept += 1;
   }
   return ticks;
 }
@@ -71275,7 +71329,8 @@ function DreamsTimeline({
 }) {
   const nameOf = useNameOf();
   const timeline = import_react67.default.useMemo(() => dreamTimeline(sheets, runs, now3, WEEK2), [sheets, runs, now3]);
-  const ticks = import_react67.default.useMemo(() => dayTicks(timeline.start, timeline.end), [timeline.start, timeline.end]);
+  const [axisRef, axisWidth] = useMeasuredWidth(640);
+  const ticks = import_react67.default.useMemo(() => dayTicks(timeline.start, timeline.end, axisWidth), [timeline.start, timeline.end, axisWidth]);
   const count2 = timeline.rows.reduce((sum, row) => sum + row.bars.length, 0);
   return /* @__PURE__ */ (0, import_jsx_runtime95.jsxs)("section", { className: "memory-block memory-dreams-timeline", "data-testid": "memory-dreams-timeline", "aria-labelledby": "memory-dreams-week-head", children: [
     /* @__PURE__ */ (0, import_jsx_runtime95.jsx)(
@@ -71290,8 +71345,10 @@ function DreamsTimeline({
     count2 === 0 && withheld ? /* @__PURE__ */ (0, import_jsx_runtime95.jsx)(WithheldState, { testId: "memory-dreams-week-withheld" }) : count2 === 0 ? /* @__PURE__ */ (0, import_jsx_runtime95.jsx)(EmptyState, { inline: true, title: "No dream ran this week.", body: "The memory steward dreams on its schedule; runs show here as bars." }) : /* @__PURE__ */ (0, import_jsx_runtime95.jsxs)("div", { className: "memory-week", children: [
       /* @__PURE__ */ (0, import_jsx_runtime95.jsxs)("div", { className: "memory-week__axis", "aria-hidden": "true", children: [
         /* @__PURE__ */ (0, import_jsx_runtime95.jsx)("span", { className: "memory-week__axis-label" }),
-        /* @__PURE__ */ (0, import_jsx_runtime95.jsxs)("span", { className: "memory-week__axis-days", children: [
-          ticks.map((tick) => /* @__PURE__ */ (0, import_jsx_runtime95.jsx)("span", { className: "memory-week__day", style: { left: "".concat(tick.x * 100, "%") }, children: tick.label }, tick.key)),
+        /* @__PURE__ */ (0, import_jsx_runtime95.jsxs)("span", { className: "memory-week__axis-days", ref: axisRef, children: [
+          ticks.map(
+            (tick) => tick.label ? /* @__PURE__ */ (0, import_jsx_runtime95.jsx)("span", { className: "memory-week__day", style: { left: "".concat(tick.x * 100, "%") }, children: tick.label }, tick.key) : null
+          ),
           /* @__PURE__ */ (0, import_jsx_runtime95.jsx)("span", { className: "memory-week__now", children: "now" })
         ] })
       ] }),
@@ -92956,6 +93013,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       });
       if (match) target = buildDockTarget2(match);
     }
+    if (!target && visibleControls.includes("timeline")) target = buildControlTarget2("timeline");
     initialTargetOpened.current = true;
     if (!target) return;
     const preset = normalizeDockPreset(layoutConfig?.initial_preset);
@@ -95625,7 +95683,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
                     visibleControls,
                     onSelectTab: (id) => dock.selectTab(id),
                     onCloseTab: (id) => dock.closeTab(id),
-                    onCreateTab: () => dock.createTab(),
+                    onCreateTab: () => dock.createTab({ blank: true }),
                     onFocusPanel: (id) => dock.focusPanel(id),
                     onSplitPanel: (id, dir) => dock.splitPanel(id, dir),
                     onClosePanel: (id) => dock.closePanel(id),

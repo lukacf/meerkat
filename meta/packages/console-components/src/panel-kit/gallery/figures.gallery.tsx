@@ -53,6 +53,14 @@ const DECISIONS: DotStripItem[] = [
   { id: "d7", t: NOW - 1 * HOUR, shape: "dot", tone: "ok", label: "Approved: publish notes" },
 ];
 
+// A window that starts at now: the "now" label sits at the left end.
+const UPCOMING: DotStripItem[] = [2, 5, 9, 14, 21].map((hours, index) => ({
+  id: `run-${index}`,
+  t: NOW + hours * HOUR,
+  shape: "hollow",
+  label: `Heartbeat check in ${hours} h`,
+}));
+
 const WEEK_ROWS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].map((day, index) => ({
   key: day,
   label: day,
@@ -78,6 +86,55 @@ function FilteringStrip() {
         <FigureTile label="Ready" value={2} tone="ok" onActivate={() => toggle("ready")} pressed={filter === "ready"} />
         <FigureTile label="To finish" value="3 steps" foot="Critical path on" />
       </GlanceStrip>
+    </PanelShell>
+  );
+}
+
+// WorkGraph's five figures (or four), as a pane between 480 and 720 px wraps them.
+function WorkStrip({ width, four }: { width: number; four?: boolean }) {
+  return (
+    <div className="kg-pane" style={{ width, flex: "none" }} data-testid={`kit-glance-pane:${width}${four ? ":four" : ""}`}>
+      <PanelShell>
+        <GlanceStrip ariaLabel="Work at a glance">
+          <FigureTile hero label="Done" value={1} of={9} meter={<ProgressRing done={1} inProgress={1} blocked={1} total={9} size={24} />} foot="none today" />
+          <FigureTile label="In progress" tone="live" live value={1} foot="1 agent on them" />
+          <FigureTile label="Blocked" tone="warn" value={1} foot="Publish to all regions" />
+          <FigureTile label="Ready" tone="ok" value={2} foot="can start now" />
+          {four ? null : <FigureTile label="To finish" value={3} unit="steps" foot="Critical path" />}
+        </GlanceStrip>
+      </PanelShell>
+    </div>
+  );
+}
+
+// Every kind of tile, loaded and loading, each alone in a strip, so its own
+// height shows (in a strip of several the row takes the tallest).
+const LOADING_KINDS: Array<[string, Omit<Parameters<typeof FigureTile>[0], "loading">]> = [
+  ["plain", { label: "Ready", value: 2 }],
+  ["foot", { label: "Ready", value: 2, tone: "ok", foot: "can start now" }],
+  ["of", { label: "Done", value: 1, of: 9, foot: "none today" }],
+  ["unit", { label: "To finish", value: 3, unit: "steps", foot: "Critical path" }],
+  ["delta", { label: "Messages", value: 48, delta: { value: 12, period: "the hour before" }, foot: "rising" }],
+  ["trend", { label: "Given · 24h", value: 1284, trend: series(9, 24, 8), trendLive: true, foot: "to 3 agents" }],
+  ["meter", { label: "Checks", value: 3, of: 4, meter: <ProgressRing done={3} total={4} size={24} />, foot: "holding" }],
+  ["hero", { label: "Records", value: 74, unit: "active", hero: true, meter: <Sparkline values={series(4, 30, 4)} kind="bars" width={128} height={26} label="Records per day" />, foot: "+9 written this week" }],
+  ["button", { label: "Blocked", value: 1, tone: "warn", foot: "Publish to all regions", onActivate: () => {} }],
+];
+
+function LoadingPairs({ density }: { density: "comfortable" | "compact" }) {
+  return (
+    <PanelShell density={density}>
+      <div className="kg-grid" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(460px, 1fr))", padding: 12 }}>
+        {LOADING_KINDS.map(([kind, props]) => (
+          <div key={kind} className="kg-inline" style={{ alignItems: "flex-start", gap: 8, flexWrap: "nowrap" }} data-testid={`kit-figure-pair:${density}:${kind}`}>
+            {[false, true].map((loading) => (
+              <div key={String(loading)} className="cc-glance" style={{ flex: "1 1 0", border: "1px solid var(--_cc-border-soft)" }}>
+                <FigureTile {...props} loading={loading} testId={`kit-figure:${density}:${kind}:${loading ? "loading" : "loaded"}`} />
+              </div>
+            ))}
+          </div>
+        ))}
+      </div>
     </PanelShell>
   );
 }
@@ -113,6 +170,18 @@ export const gallerySections: GallerySection[] = [
             </PanelShell>
           </Specimen>
         </SpecimenRow>
+        <Specimen title="Figures at mid widths" note="from 480 to 719 px five wrap three and two (520, 680 px), four two and two (600 px); 760 px keeps one row">
+          <div className="kg-stack">
+            {[520, 680, 760].map((width) => (
+              <WorkStrip key={width} width={width} />
+            ))}
+            <WorkStrip width={600} four />
+          </div>
+        </Specimen>
+        <Specimen bare title="Loading keeps the height" note="each kind of tile loaded (left) and loading (right): the same boxes, the foot line kept; comfortable and compact">
+          <LoadingPairs density="comfortable" />
+          <LoadingPairs density="compact" />
+        </Specimen>
       </>
     ),
   },
@@ -215,10 +284,11 @@ export const gallerySections: GallerySection[] = [
               formatCell={(row, column, value) => `${row.label} ${String(column).padStart(2, "0")}:00 · ${value} turns`}
             />
           </Specimen>
-          <Specimen title="DotStrip" note="records over 30 days; decisions over 24 h">
+          <Specimen title="DotStrip" note="records over 30 days; decisions over the last 24 h; runs over the next 24 h">
             <div className="kg-stack" style={{ gap: 18 }}>
-              <DotStrip items={RECORDS} start={NOW - 30 * DAY} end={NOW} width={320} height={18} now axis label="64 records over 30 days, 1 quarantined" onSelect={() => {}} />
-              <DotStrip items={DECISIONS} start={NOW - 24 * HOUR} end={NOW} width={320} height={18} axis now markSize={8} label="7 decisions in the last 24 hours" />
+              <DotStrip items={RECORDS} start={NOW - 30 * DAY} end={NOW} width={320} height={18} now={NOW} axis label="64 records over 30 days, 1 quarantined" onSelect={() => {}} />
+              <DotStrip items={DECISIONS} start={NOW - 24 * HOUR} end={NOW} width={320} height={18} axis now={NOW} markSize={8} label="7 decisions in the last 24 hours" />
+              <DotStrip items={UPCOMING} start={NOW} end={NOW + 24 * HOUR} width={320} height={18} axis now={NOW} markSize={8} label="5 runs in the next 24 hours" />
             </div>
           </Specimen>
         </SpecimenRow>

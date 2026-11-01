@@ -1704,11 +1704,8 @@ button.cc-tile:focus-visible,
   animation: cc-pop-in var(--_cc-dur-enter) var(--_cc-ease-out);
 }
 .cc-popover[data-side="top"] { animation-name: cc-pop-in-above; }
-.cc-popover[data-state="closing"] {
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity var(--_cc-dur-exit) var(--_cc-ease-in);
-}
+/* No exit fade: a popover unmounts the moment it closes, so nothing closed
+   stays on screen, in the top layer or under the pointer. */
 @keyframes cc-pop-in {
   from { opacity: 0; transform: translateY(-4px); }
   to   { opacity: 1; transform: none; }
@@ -1937,6 +1934,8 @@ button.cc-figure:focus-visible { outline: 2px solid var(--_cc-focus-ring); outli
   align-items: center;
   gap: 10px;
   min-width: 0;
+  /* One foot line even when empty: a tile is as tall with or without a foot. */
+  min-height: 1.4em;
   margin-top: 5px;
   overflow: hidden;
   font-size: 11px;
@@ -1956,13 +1955,26 @@ button.cc-figure:focus-visible { outline: 2px solid var(--_cc-focus-ring); outli
 .cc-figure__arrow { width: 11px; height: 11px; stroke-width: 2.25; }
 .cc-figure__arrow.is-up { transform: rotate(-45deg); }
 .cc-figure__arrow.is-down { transform: rotate(45deg); }
+/* Loading (A3.7): the tile keeps every box of the loaded tile. The value
+   holds a non-breaking space, so its line box is the figure's own, and the
+   skeleton bar lies over it; the meter, the trend slot and the foot keep
+   their boxes, hidden. */
+.cc-figure.is-loading .cc-figure__value {
+  position: relative;
+  min-width: 2em;
+}
 .cc-figure__skeleton {
-  display: inline-block;
-  width: 40px;
-  height: calc(var(--_cc-figure-size) * 0.95);
+  position: absolute;
+  top: 50%;
+  left: 0;
+  width: 100%;
+  height: 0.8em;
   border-radius: var(--_cc-radius-sm);
   background: var(--_cc-skeleton);
+  transform: translateY(-50%);
 }
+.cc-figure.is-loading .cc-figure__meter,
+.cc-figure.is-loading .cc-figure__foot > * { visibility: hidden; }
 .cc-panel[data-density="compact"] .cc-figure__trend { display: none; }
 
 /* ── Micro charts (spec A3.8) ──────────────────────────────────────
@@ -2767,6 +2779,21 @@ button.cc-figure:focus-visible { outline: 2px solid var(--_cc-focus-ring); outli
 
 @container cc-panel (max-width: 559px) {
   .cc-panel > * { --_cc-panel-pad-x: 16px; }
+}
+
+/* 480-719 px: four or more figures do not fit one row. Four wrap two and
+   two, five or more three to a row; the rules run between the figures of a
+   row and between the rows. */
+@container cc-panel (min-width: 480px) and (max-width: 719px) {
+  .cc-glance:has(> :nth-child(4)) {
+    grid-auto-flow: row;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .cc-glance:has(> :nth-child(5)) { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .cc-glance:has(> :nth-child(4)):not(:has(> :nth-child(5))) > :nth-child(2n + 1) { border-left: 0; }
+  .cc-glance:has(> :nth-child(4)):not(:has(> :nth-child(5))) > :nth-child(n + 3) { border-top: 1px solid var(--_cc-border-soft); }
+  .cc-glance:has(> :nth-child(5)) > :nth-child(3n + 1) { border-left: 0; }
+  .cc-glance:has(> :nth-child(5)) > :nth-child(n + 4) { border-top: 1px solid var(--_cc-border-soft); }
 }
 
 @container cc-panel (max-width: 479px) {

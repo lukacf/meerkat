@@ -320,6 +320,32 @@ describe("GraphView", () => {
     }
   });
 
+  it("highlights a hovered node's neighbours and lets the highlight linger a moment over empty space", async () => {
+    const { nodes, edges } = team();
+    const onHover = vi.fn();
+    render(<GraphView nodes={nodes} edges={edges} lanes={lanes} layout="lanes" ariaLabel="g" testIdPrefix="t" onHover={onHover} />);
+    const root = screen.getByTestId("t-graph");
+    fireEvent.pointerOver(screen.getByTestId("t-node:billing"));
+    expect(root).toHaveAttribute("data-hovering", "true");
+    expect(screen.getByTestId("t-node:router")).toHaveClass("is-lit");
+    expect(screen.getByTestId("t-node:support")).toHaveClass("is-lit");
+    expect(screen.getByTestId("t-node:triage")).not.toHaveClass("is-lit");
+    expect(onHover).toHaveBeenLastCalledWith({ node: "billing" });
+    // Empty space: still lit at once, cleared shortly after.
+    fireEvent.pointerOver(root.querySelector("svg")!);
+    expect(root).toHaveAttribute("data-hovering", "true");
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 150));
+    });
+    expect(root).not.toHaveAttribute("data-hovering");
+    expect(onHover).toHaveBeenLastCalledWith(null);
+    // Leaving the graph clears at once.
+    fireEvent.pointerOver(screen.getByTestId("t-node:router"));
+    expect(root).toHaveAttribute("data-hovering", "true");
+    fireEvent.pointerLeave(root);
+    expect(root).not.toHaveAttribute("data-hovering");
+  });
+
   it("leaves plain wheel scrolling to the page unless asked to zoom with it", () => {
     const { nodes, edges } = team();
     const wheel = (target: Element, init: WheelEventInit) => {

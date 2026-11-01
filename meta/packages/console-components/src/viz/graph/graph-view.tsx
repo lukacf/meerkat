@@ -68,6 +68,8 @@ const CARD_FIT_PAD = 24;
 /** Item cards never fit below this: their titles stay at 10 px or more. */
 const CARD_MIN_SCALE = 0.85;
 const EXIT_MS = 200;
+/** How long a hover highlight outlives the pointer leaving its mark for empty space. */
+const HOVER_CLEAR_MS = 90;
 const LABEL_SETTLE_MS = 120;
 
 function cx(...parts: Array<string | false | null | undefined>): string {
@@ -1029,22 +1031,39 @@ export const GraphView = React.forwardRef<GraphViewHandle, GraphViewProps>(funct
     if (target.node) props.onOpen?.(target.node);
     else if (!target.edge) doFit();
   };
+  const hoverClearRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+  const cancelHoverClear = () => {
+    if (hoverClearRef.current === null) return;
+    clearTimeout(hoverClearRef.current);
+    hoverClearRef.current = null;
+  };
+  React.useEffect(() => () => {
+    if (hoverClearRef.current !== null) clearTimeout(hoverClearRef.current);
+  }, []);
   const onPointerOver = (event: React.PointerEvent<HTMLDivElement>) => {
     if (useCanvas || pressRef.current?.pan) return;
     const target = targetOf(event);
     if (target.chrome) return;
     if (target.node) {
+      cancelHoverClear();
       setHover((current) => (current?.node === target.node ? current : { node: target.node }));
     } else if (target.edge) {
+      cancelHoverClear();
       const rect = rootRect();
       const x = event.clientX - rect.left;
       const y = event.clientY - rect.top;
       setHover((current) => (current?.edge === target.edge ? current : { edge: target.edge, x, y }));
-    } else {
-      setHover((current) => (current ? null : current));
+    } else if (hoverClearRef.current === null) {
+      // Between marks the highlight lingers a moment: moving from one node
+      // to the next does not flash (and restyle) the whole picture.
+      hoverClearRef.current = setTimeout(() => {
+        hoverClearRef.current = null;
+        setHover((current) => (current ? null : current));
+      }, HOVER_CLEAR_MS);
     }
   };
   const onPointerLeave = () => {
+    cancelHoverClear();
     setHover(null);
   };
 

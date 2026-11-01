@@ -282,14 +282,22 @@ class DispatchTests(unittest.TestCase):
         # macos-arm64 with that target's actual package digest. Every file digest and the
         # projection's join digests are recomputed from the changed records, so only the
         # agreed target can refuse it.
-        for slot in ("application_join", "guide_join"):
-            def mac(name, record, slot=slot):
-                if name == slot:
+        # Mac in either slot alone, and in both; the Linux A5 owner join is kept every time.
+        for slots in (("application_join",), ("guide_join",), ("application_join", "guide_join")):
+            def mac(name, record, slots=slots):
+                if name in slots:
                     record["target"] = "macos-arm64"
                     record["subjects"]["package_sha256"] = forge.manifest_packages(manifest_value())["macos-arm64"]
 
-            with self.subTest(slot):
-                self.refused(f"{slot} record must cover linux-x86_64", join=mac)
+            with self.subTest(slots=slots):
+                self.refused(f"{slots[0]} record must cover linux-x86_64", join=mac)
+
+    def test_the_a5_owner_join_must_cover_the_same_linux_target(self):
+        def mac(name, record):
+            if name == "a5_join":
+                record["target"] = "macos-arm64"
+
+        self.refused("a5_join record must cover linux-x86_64", join=mac)
 
     def test_every_join_must_cover_the_same_target(self):
         # Were a kind ever allowed for another target, the joins must still cover one target.

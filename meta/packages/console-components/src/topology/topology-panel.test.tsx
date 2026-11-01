@@ -1,11 +1,11 @@
 import React from "react";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import { beforeEach, describe, expect, test, vi } from "vitest";
 
 import { topologyEdgeKey, type TopologyManagementState } from "@console-core";
 
 import { TopologyPanel } from "./topology-panel";
-import type { ConsoleTopologyNode } from "./types";
+import type { ConsoleAgent, ConsoleFrame, ConsoleTopologyLink, ConsoleTopologyNode } from "./types";
 
 const NODES: ConsoleTopologyNode[] = [
   {
@@ -68,6 +68,35 @@ const localStorageStub = {
   setItem: (key: string, value: string) => { localStorageValues.set(key, value); },
 };
 
+/** Opens the panel's overflow menu ("More actions for Topology"). */
+function openMenu() {
+  fireEvent.click(screen.getByTestId("topology-menu"));
+  return screen.getByRole("menu");
+}
+
+/** Selects a map node the way a pointer does (press and release in place). */
+function pressNode(id: string) {
+  const node = screen.getByTestId(`topology-node:${id}`);
+  fireEvent.pointerDown(node, { button: 0, pointerId: 1, clientX: 10, clientY: 10 });
+  fireEvent.pointerUp(node, { button: 0, pointerId: 1, clientX: 10, clientY: 10 });
+}
+
+/** Nodes the way the topology query adapter shapes them (stock endpoint keys). */
+const key = (identity: string) => `mk1|ops|${identity}`;
+function queryNode(identity: string, extra: Partial<ConsoleTopologyNode> = {}): ConsoleTopologyNode {
+  return { identity: key(identity), ref: { id: key(identity), authority: "ops", identity }, role: "specialist", labels: {}, wired_to: [], ...extra };
+}
+const link = (a: string, b: string, flags: Partial<ConsoleTopologyLink>): ConsoleTopologyLink => ({ from: key(a), to: key(b), actual: false, ...flags });
+const agent = (identity: string, extra: Partial<ConsoleAgent> = {}): ConsoleAgent => ({
+  identity,
+  agent_id: identity,
+  member_id: identity,
+  label: identity[0]!.toUpperCase() + identity.slice(1),
+  kind: "mob_agent",
+  state: "active",
+  ...extra,
+});
+
 describe("TopologyPanel", () => {
   beforeEach(() => {
     Object.defineProperty(window, "localStorage", {
@@ -100,7 +129,7 @@ describe("TopologyPanel", () => {
     expect(onSelectAgent.mock.calls[0]?.[0]).toBe("commander");
     expect(screen.getByTestId("topology-view:roles").getAttribute("aria-pressed")).toBe("true");
     expect(screen.getByTestId("topology-view:graph").getAttribute("aria-pressed")).toBe("false");
-    expect(screen.getByRole("group", { name: "View" }).classList.contains("topo__viewbar")).toBe(true);
+    expect(within(screen.getByRole("group", { name: "View" })).getByTestId("topology-view:list")).toBeInTheDocument();
   });
 
   test("names the roles view's root after the team and reads roles as words", () => {
@@ -115,6 +144,8 @@ describe("TopologyPanel", () => {
     expect(screen.getByTestId("topology-node:router:main").textContent).toBe("Router main");
     expect(screen.getByTestId("topology-node:identity:queue-agent").textContent).toBe("Queue agent");
     expect(container.querySelector(".topo-roletree__mob .topo-roletree__label")?.hasAttribute("title")).toBe(false);
+    // One role, two agents: the counts read as words.
+    expect(container.querySelector(".topo-roletree__mob .topo-roletree__count")?.textContent).toBe("2 agents · 1 role");
     rerender(<TopologyPanel activity={[]} agents={[]} nodes={nodes} view="roles" teamName="Operations team" teamKey="ops" />);
     expect(labels()[0]).toBe("Operations team");
     expect(container.querySelector(".topo-roletree__mob .topo-roletree__label")?.getAttribute("title")).toBe("ops");
@@ -131,6 +162,7 @@ describe("TopologyPanel", () => {
       />,
     );
 
+    within(openMenu()).getByText("Show helpers");
     expect(screen.queryByTestId("topology-view:connections")).toBeNull();
     expect(screen.getByTestId("topology-panel")).toHaveAttribute("data-management-mode", "unavailable");
   });
@@ -150,11 +182,12 @@ describe("TopologyPanel", () => {
       />,
     );
 
+    openMenu();
     expect(screen.queryByTestId("topology-view:connections")).toBeNull();
     expect(screen.getByTestId("topology-panel")).toHaveAttribute("data-management-mode", "disabled");
   });
 
-  test("exposes a controlled search-first connection view from explicit management state", () => {
+  test("exposes a controlled search-first connection view from the overflow menu", () => {
     const onViewChange = vi.fn();
     const { rerender } = render(
       <TopologyPanel
@@ -167,6 +200,7 @@ describe("TopologyPanel", () => {
       />,
     );
 
+    openMenu();
     fireEvent.click(screen.getByTestId("topology-view:connections"));
     expect(onViewChange).toHaveBeenCalledWith("connections");
 
@@ -248,6 +282,7 @@ describe("TopologyPanel", () => {
       "data-topology-editable",
       "false",
     );
+    expect(screen.getByTestId("topology-dense-map")).toHaveAttribute("data-drag-kind", "none");
     expect(screen.queryByText(/drag an agent onto an authorized peer/i)).toBeNull();
   });
 
@@ -294,5 +329,104 @@ describe("TopologyPanel", () => {
       "data-topology-editable",
       "false",
     );
+  });
+
+  test("draws every relation on the query path, keyed by identity, and keeps the live signal", () => {
+    const now = Date.now();
+    const frames: ConsoleFrame[] = [
+      { id: "run", event: "run_started", identity: "dispatch", timestampMs: now - 2_000, data: {} },
+      {
+        id: "notice",
+        event: "system_notice",
+        identity: "billing",
+        timestampMs: now - 1_000,
+        data: { blocks: [{ type: "comms", kind: "message", direction: "incoming", peer: { display_name: "ops/coordinator/dispatch" }, delivery_id: "d1" }] },
+      },
+    ];
+    render(
+      <TopologyPanel
+        view="graph"
+        activity={frames}
+        agents={[agent("billing", { group: "Domain" }), agent("dispatch", { group: "Coordinators" })]}
+        nodes={[
+          queryNode("billing"),
+          queryNode("dispatch", { role: "coordinator" }),
+          queryNode("returns"),
+          queryNode("refund-review", { labels: { side_chat_of: "billing" } }),
+        ]}
+        links={[
+          link("billing", "dispatch", { actual: true, declared: true, desired: true }),
+          link("billing", "returns", { declared: true, desired: true }),
+        ]}
+        routes={[{ key: "billing-events", channel: "email", recipient: "billing" }]}
+        routesAccess="loaded"
+      />,
+    );
+    // Stable node ids: the identity, never the endpoint key.
+    expect(screen.getByTestId("topology-node:billing")).toBeInTheDocument();
+    expect(screen.queryByTestId(`topology-node:${key("billing")}`)).toBeNull();
+    expect(screen.getByTestId("topology-edge:billing:dispatch:wired")).toHaveAttribute("data-state", "normal");
+    expect(screen.getByTestId("topology-edge:billing:returns:wired")).toHaveAttribute("data-state", "declared");
+    expect(screen.getByTestId("topology-edge:billing:refund-review:lineage")).toHaveAttribute("data-relation", "lineage");
+    expect(screen.getByTestId("topology-edge:channel:email:billing:route")).toHaveAttribute("data-relation", "route");
+    expect(screen.getByTestId("topology-edge:dispatch:billing:traffic")).toHaveAttribute("data-relation", "traffic");
+    // The open run marks the node live although the node came from the query.
+    expect(screen.getByTestId("topology-node:dispatch")).toHaveAttribute("data-live", "true");
+    expect(screen.getByTestId("topology-panel")).toHaveAttribute("data-busy-count", "1");
+    expect(screen.getByTestId("topology-glance:agents")).toHaveTextContent("4");
+    expect(screen.getByTestId("topology-glance:connections")).toHaveTextContent("1 wired");
+    expect(screen.queryByTestId("topology-empty-relations")).toBeNull();
+  });
+
+  test("explains an empty map instead of drawing nothing", () => {
+    render(<TopologyPanel view="graph" activity={[]} agents={[]} nodes={[queryNode("a"), queryNode("b")]} links={[]} />);
+    const notice = screen.getByTestId("topology-empty-relations");
+    expect(notice).toHaveTextContent("No connections yet");
+    expect(notice).toHaveTextContent("not wired to each other, no route feeds them");
+    expect(screen.getByTestId("topology-glance:connections")).toHaveTextContent("none");
+    expect(screen.queryByTestId("topology-legend")).toBeNull();
+  });
+
+  test("opens the drawer on an agent and disconnects a peer from it", () => {
+    const onRequestMutation = vi.fn();
+    render(
+      <TopologyPanel
+        view="graph"
+        activity={[]}
+        agents={[]}
+        nodes={NODES}
+        management={management}
+        onRequestMutation={onRequestMutation}
+      />,
+    );
+    pressNode("commander");
+    const drawer = screen.getByTestId("topology-drawer");
+    expect(drawer).toHaveTextContent("Commander");
+    const row = within(drawer).getByTestId("topology-drawer-connection:triage");
+    expect(row).toHaveTextContent("wired");
+    fireEvent.click(within(row).getByRole("button", { name: "Disconnect Triage from Commander" }));
+    expect(onRequestMutation).toHaveBeenCalledWith(expect.objectContaining({
+      action: "disconnect",
+      edge: { from: "commander", to: "triage" },
+    }));
+  });
+
+  test("the overflow menu holds the window, the edge mode and the filters", () => {
+    render(<TopologyPanel view="graph" activity={[]} agents={[]} nodes={NODES} management={management} onRequestMutation={vi.fn()} />);
+    openMenu();
+    expect(screen.getByTestId("topology-edges:all")).toBeInTheDocument();
+    expect(screen.getByTestId("topology-edges:focus")).toBeInTheDocument();
+    expect(screen.getByTestId("topology-window:15m")).toBeInTheDocument();
+    expect(screen.getByTestId("topology-show-helpers")).toBeInTheDocument();
+    expect(screen.getByTestId("topology-view:connections")).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId("topology-edges:focus"));
+    // Focus mode: with nothing hovered or selected no edge draws.
+    expect(screen.queryByTestId("topology-edge:commander:triage:wired")).toBeNull();
+  });
+
+  test("switches the map to clusters above 150 nodes", () => {
+    const many = Array.from({ length: 160 }, (_, index) => ({ identity: `agent-${index}`, label: `Agent ${index}`, wired_to: [] }));
+    render(<TopologyPanel view="graph" activity={[]} agents={[]} nodes={many} />);
+    expect(screen.getByTestId("topology-dense-map")).toHaveAttribute("data-layout", "clusters");
   });
 });

@@ -117,12 +117,39 @@ export interface ConsoleTopologyTraffic {
   lastAtMs?: number | null;
 }
 
-/** One message to play along its edge (the live particle). */
+/**
+ * Peer messages one agent sent another: one message at `atMs`, or `count`
+ * of them in a bucket that starts at `atMs` (the activity ledger keeps one
+ * per minute). The panel sums them for its window, draws the trend and plays
+ * the newest single messages as particles.
+ */
 export interface ConsoleTopologyMessage {
   id?: string;
   from: string;
   to: string;
   atMs: number;
+  /** Messages this entry stands for; 1 when omitted. */
+  count?: number;
+}
+
+/**
+ * The host's activity history (the console's activity ledger): messages per
+ * ordered pair in a time range, per-minute series and open runs. The panel
+ * listens to it and reads it again when its version changes.
+ */
+export interface ConsoleTopologyActivitySource {
+  subscribe(listener: () => void): () => void;
+  getVersion(): number;
+  /** Messages per ordered pair sent in the range. */
+  traffic(window?: { sinceMs?: number; untilMs?: number }): ReadonlyArray<{ from: string; to: string; count: number; lastMs: number }>;
+  /** Counts per bin, oldest first; a null identity sums every agent. */
+  series(
+    identity: string | null,
+    metric: "messagesSent" | "turnsStarted",
+    window: { bins: number; binMs?: number; endMs?: number },
+  ): number[];
+  /** A run of the agent started and has not ended. */
+  hasOpenRun(identity: string): boolean;
 }
 
 /** A memory store drawn in the SHARED lane. */
@@ -163,8 +190,13 @@ export interface ConsoleTopologyGrouping {
 export interface ConsoleTopologyAgentStatus {
   /** A turn or a tool is running now. */
   working: boolean;
-  /** Health that needs attention: degraded (warn) or wedged, stalled, broken (crit). */
+  /**
+   * Health that needs attention, drawn as the node's badge and counted as a
+   * problem: warn (degraded, needs repair) or crit (stalled, broken).
+   */
   health?: "warn" | "crit" | null;
-  /** The state in words ("Working", "Idle", "Degraded"). */
-  word?: string | null;
+  /** The health in words when it needs attention ("Degraded", "Stalled"). */
+  healthWord?: string | null;
+  /** The agent left the team (retired, retiring, stopped). */
+  retired?: boolean;
 }

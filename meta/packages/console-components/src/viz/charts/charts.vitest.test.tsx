@@ -2,6 +2,7 @@ import { fireEvent, render } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  BarcodeLegend,
   BarcodeMeter,
   DotStrip,
   FigureTile,
@@ -135,6 +136,15 @@ describe("micro charts", () => {
     expect(barcodeUnitsPerSegment(300, 40)).toBe(10);
     const big = render(<BarcodeMeter filled={300} label="300 agents" segments={40} testId="big" />);
     expect(big.getByTestId("big").querySelector("svg")?.getAttribute("aria-label")).toBe("300 agents (1 segment = 10 agents)");
+  });
+
+  it("agrees the legend's helper word with its number unless the caller names it", () => {
+    const one = render(<BarcodeMeter filled={7} live={1} outlined={1} label="8 agents" segments={24} legend testId="one" />);
+    expect(one.getByTestId("one").querySelector(".cc-barcode-legend")?.textContent).toBe("7 long-lived1 helper1 active now");
+    const two = render(<BarcodeLegend filled={5} outlined={2} />);
+    expect(two.container.textContent).toBe("5 long-lived2 helpers");
+    const named = render(<BarcodeLegend filled={5} outlined={1} labels={{ outlined: "workers" }} />);
+    expect(named.container.textContent).toBe("5 long-lived1 workers");
   });
 
   it("ranks heat cells by quantile, zero apart, with a table twin", () => {

@@ -216,6 +216,31 @@ function TopologyFrame({ narrow }: { narrow?: boolean }) {
   );
 }
 
+// Memory's five tabs in a 339 px pane: the strip scrolls, the edge with more
+// tabs beyond it fades, and the active tab stays wholly in view.
+const MEMORY_TABS = [
+  { id: "holdings", label: "Holdings", testId: "kit-narrow-tab:holdings" },
+  { id: "records", label: "Records", testId: "kit-narrow-tab:records" },
+  { id: "knowledge", label: "Knowledge", testId: "kit-narrow-tab:knowledge" },
+  { id: "pipeline", label: "Pipeline", count: 2, testId: "kit-narrow-tab:pipeline" },
+  { id: "dreams", label: "Dreams", count: 1, testId: "kit-narrow-tab:dreams" },
+];
+
+function NarrowTabs({ initial }: { initial: string }) {
+  const [tab, setTab] = useState(initial);
+  return (
+    <div className="kg-pane" style={{ width: 339, flex: "none" }}>
+      <PanelShell>
+        <PanelHeader title="Memory" summary={[{ text: "84 records" }, { text: "1 quarantined", tone: "warn" }]} />
+        <PanelTabs ariaLabel="Memory sections" active={tab} onSelect={setTab} tabs={MEMORY_TABS} testId={`kit-narrow-tabs:${initial}`} />
+        <PanelBody>
+          <div style={{ padding: "14px 16px", fontSize: 12.5, color: "var(--_cc-foreground-muted)" }}>{MEMORY_TABS.find((entry) => entry.id === tab)?.label}</div>
+        </PanelBody>
+      </PanelShell>
+    </div>
+  );
+}
+
 function NarrowHeader({ width }: { width: number }) {
   const [view, setView] = useState("graph");
   return (
@@ -274,6 +299,13 @@ export const gallerySections: GallerySection[] = [
             </div>
           </Specimen>
         </SpecimenRow>
+        <Specimen title="Tabs in a narrow pane" note="339 px: the strip scrolls, the edge with more tabs beyond it fades, the active tab stays wholly in view">
+          <div className="kg-inline" style={{ alignItems: "flex-start", gap: 14 }}>
+            <NarrowTabs initial="holdings" />
+            <NarrowTabs initial="dreams" />
+            <NarrowTabs initial="knowledge" />
+          </div>
+        </Specimen>
         <Specimen title="Narrow headers" note="180, 330 and 500 px panes: the actions wrap to a row of their own; the view switch stays, glyphs only under 480 px">
           <div className="kg-inline" style={{ alignItems: "flex-start", gap: 14 }}>
             {[180, 330, 500].map((width) => (

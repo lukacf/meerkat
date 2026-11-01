@@ -57588,6 +57588,12 @@ mod tests {
                 .expect("the session document");
             assert_eq!(stored.messages(), &before[2..]);
 
+            // The next run wakes the session from its committed document, as
+            // a host's resume does: a runtime turn applies to a live session.
+            service
+                .create_session(resume_request(stored))
+                .await
+                .expect("the session wakes from its pruned document");
             committed_content_turn(&service, runtime_store.as_ref(), &id, "And tomorrow?").await;
             let after = history(&service, &id).await;
             assert_eq!(

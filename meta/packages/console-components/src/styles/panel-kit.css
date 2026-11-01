@@ -1868,6 +1868,9 @@ button.cc-tile:focus-visible,
   box-sizing: border-box;
   min-width: 0;
   margin: 0;
+  /* Nothing a tile holds crosses its bounds (a meter wider than the room
+     shrinks, moves below the figure or is clipped here). */
+  overflow: hidden;
   padding: 11px 12px 12px;
   border: 0;
   background: transparent;
@@ -1922,6 +1925,16 @@ button.cc-figure:focus-visible { outline: 2px solid var(--_cc-focus-ring); outli
   color: var(--_cc-foreground-meta);
   white-space: nowrap;
 }
+/* The figure, its "of" and its unit: a short figure keeps two figures'
+   width, so a loading tile and a loaded one leave the same room beside it. */
+.cc-figure__group {
+  display: inline-flex;
+  flex: none;
+  align-items: baseline;
+  gap: 6px;
+  min-width: calc(var(--_cc-figure-size) * 2);
+}
+.cc-figure--hero .cc-figure__group { min-width: calc(var(--_cc-fs-hero) * 2); }
 .cc-figure__trend,
 .cc-figure__meter {
   align-self: center;
@@ -1929,6 +1942,18 @@ button.cc-figure:focus-visible { outline: 2px solid var(--_cc-focus-ring); outli
   margin-left: 6px;
 }
 .cc-figure__meter { display: inline-flex; align-items: center; }
+/* A fixed meter shrinks to the room left and is clipped there. */
+.cc-figure__meter.is-fixed {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+}
+/* A responsive meter without room beside the figure goes below it. */
+.cc-figure__meter.is-below {
+  align-self: flex-start;
+  max-width: 100%;
+  margin: 6px 0 0;
+}
 .cc-figure__foot {
   display: flex;
   align-items: center;

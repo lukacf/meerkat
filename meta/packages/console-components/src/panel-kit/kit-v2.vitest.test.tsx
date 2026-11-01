@@ -1051,6 +1051,18 @@ describe("kit stylesheet", () => {
     expect(loadingRules.filter((rule) => /display:\s*none|height:/.test(rule.body)).map((rule) => rule.selector)).toEqual([]);
   });
 
+  it("keeps a figure tile's meter inside the tile", async () => {
+    const fs = await import("node:fs");
+    const path = await import("node:path");
+    const css = fs.readFileSync(path.join(__dirname, "../styles/panel-kit.css"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+    const rules = [...css.matchAll(/([^{}]+)\{([^{}]*)\}/g)].map((match) => ({ selector: match[1].trim().replace(/\s+/g, " "), body: match[2] }));
+    const body = (selector: string) => rules.filter((rule) => rule.selector === selector).map((rule) => rule.body).join(" ");
+    expect(body(".cc-figure")).toMatch(/overflow:\s*hidden/);
+    expect(body(".cc-figure__meter.is-fixed")).toMatch(/min-width:\s*0/);
+    expect(body(".cc-figure__meter.is-fixed")).toMatch(/overflow:\s*hidden/);
+    expect(body(".cc-figure__meter.is-below")).toMatch(/max-width:\s*100%/);
+  });
+
   it("wraps four or more figures to two rows between 480 and 719 px, rules kept", async () => {
     const fs = await import("node:fs");
     const path = await import("node:path");

@@ -1,10 +1,6 @@
 /* Today (timeline) panel.
    Split from console-host.css (imported there, in this order). */
 
-/* The activity charts (Today's swimlanes, the Logs severity strip) live in
-   the kit package; this sheet loads them for the console. */
-@import url("../../../packages/console-components/src/styles/activity-charts.css");
-
 /* ── Today (spec B4) ──────────────────────────────────────────────
    Header, glance strip, then a body that does not scroll itself: the
    drawer layout's main column scrolls (the day lanes, the filters and the

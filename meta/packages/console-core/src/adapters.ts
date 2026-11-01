@@ -3249,6 +3249,13 @@ export function systemNoticeClearsBusyState(frame: ConsoleFrame): boolean {
   return legacyPeerNoticeTextCandidates(record).some(isLegacyPeerNoticeText);
 }
 
+/** A typed comms notice without a request id: named by the frame it came
+ * in (its id, else its cursor) and the block's place in it, so every plain
+ * message from one peer gets its own id. */
+function typedCommsFallbackId(peerLabel: string, kind: string, frameKey: string | undefined, index: number): string {
+  return `typed-comms:${peerLabel}:${kind}:${frameKey || "frame"}:${index}`;
+}
+
 function typedSystemNoticeBlocksToRich(
   blocks: unknown,
   body: unknown,
@@ -3256,6 +3263,7 @@ function typedSystemNoticeBlocksToRich(
   sourceKind?: string,
   consumeDuplicateCommsBlock?: (key: string) => boolean,
   textMode: ConversationTextMode = "legacy",
+  frameKey?: string,
 ): ConversationRichBlock[] {
   const rich: ConversationRichBlock[] = [];
   const bodyText = textFromUnknown(body);
@@ -3302,7 +3310,7 @@ function typedSystemNoticeBlocksToRich(
       const kind = textFromUnknown(record.kind) || "message";
       const direction = textFromUnknown(record.direction);
       const intent = textFromUnknown(record.intent);
-      const requestId = textFromUnknown(record.request_id) || `typed-comms:${peerLabel}:${kind}`;
+      const requestId = textFromUnknown(record.request_id) || typedCommsFallbackId(peerLabel, kind, frameKey, index);
       const contentBlocks = typedNoticeContentBlocks(record.content, blobBaseUrl);
       const contentText = contentBlocks
         .map((item) => item.type === "paragraph" ? item.text : "")
@@ -3416,6 +3424,8 @@ function historyMessageText(
   sourceKind?: string,
   consumeDuplicateCommsBlock?: (key: string) => boolean,
   textMode: ConversationTextMode = "legacy",
+  /** The frame's id (else its cursor): names typed comms notices without a request id. */
+  frameKey?: string,
 ): { role: "user" | "assistant" | "system" | "meta" | null; text: string; blocks?: ConversationRichBlock[] } {
   if (!message || typeof message !== "object") {
     return { role: null, text: "" };
@@ -3435,6 +3445,7 @@ function historyMessageText(
         sourceKind,
         consumeDuplicateCommsBlock,
         textMode,
+        frameKey,
       );
       const duplicateCommsConsumed = Boolean(
         consumeDuplicateCommsBlock
@@ -3527,6 +3538,7 @@ function renderSessionHistoryTextCompleteEntry(
     frame.sourceKind,
     options.consumeDuplicateCommsBlock,
     options.textMode,
+    frame.id || frame.cursor,
   );
   const textMode = options.textMode ?? "legacy";
   const realtimeOrigin = realtimeMessageOrigin(frame);
@@ -3619,6 +3631,7 @@ function renderSystemNoticeEntry(
     frame.sourceKind,
     options.consumeDuplicateCommsBlock,
     options.textMode ?? "legacy",
+    frame.id || frame.cursor,
   );
   if (parsed.role !== "meta") return null;
   const parsedBlocks = Array.isArray(parsed.blocks) ? parsed.blocks : [];

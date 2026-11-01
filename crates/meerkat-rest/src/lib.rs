@@ -14836,6 +14836,18 @@ requirement = { baseline = "command_runtime_v1", read = { kind = "paths", paths 
                 .await
                 .unwrap();
             assert_eq!(response.status(), StatusCode::OK, "GET {uri}");
+            if matches!(
+                descriptor.route,
+                meerkat::WorkGraphRestRoute::Items
+                    | meerkat::WorkGraphRestRoute::Ready
+                    | meerkat::WorkGraphRestRoute::Snapshot
+            ) {
+                // The one open item, uncut: each page says so.
+                let body = response.into_body().collect().await.unwrap().to_bytes();
+                let page: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                assert_eq!(page["total_items"], json!(1), "GET {uri}: {page}");
+                assert_eq!(page["truncated"], json!(false), "GET {uri}: {page}");
+            }
         }
 
         let events_path = meerkat::workgraph_rest_path_catalog()

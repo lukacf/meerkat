@@ -329,6 +329,9 @@ fn assert_workgraph_snapshot(
             .is_some_and(|seq| seq >= 5),
         "expected seeded event high-water mark in {snapshot}"
     );
+    // Both seeded items match `include_terminal`, and none is cut.
+    assert_eq!(snapshot["total_items"], json!(2), "{snapshot}");
+    assert_eq!(snapshot["truncated"], json!(false), "{snapshot}");
     Ok(())
 }
 
@@ -689,6 +692,28 @@ async fn workgraph_sqlite_shared_realm_observability_roundtrip()
     )
     .await?;
     assert_workgraph_snapshot(&rpc_snapshot, realm_id, &seeded)?;
+    // workgraph/list and workgraph/ready carry the page fields too.
+    let rpc_list = rpc_call(
+        &mut rpc,
+        3,
+        "workgraph/list",
+        json!({
+            "include_terminal": true,
+            "limit": 1,
+        }),
+        20,
+    )
+    .await?;
+    assert_eq!(
+        rpc_list["items"][0]["id"].as_str(),
+        Some(seeded.completed_id.as_str()),
+        "{rpc_list}"
+    );
+    assert_eq!(rpc_list["total_items"], json!(2), "{rpc_list}");
+    assert_eq!(rpc_list["truncated"], json!(true), "{rpc_list}");
+    let rpc_ready = rpc_call(&mut rpc, 4, "workgraph/ready", json!({}), 20).await?;
+    assert_eq!(rpc_ready["total_items"], json!(1), "{rpc_ready}");
+    assert_eq!(rpc_ready["truncated"], json!(false), "{rpc_ready}");
 
     let port = allocate_port();
     write_rest_config(&state_root, realm_id, port).await?;
@@ -718,6 +743,21 @@ async fn workgraph_sqlite_shared_realm_observability_roundtrip()
     assert!(rest_response.status().is_success());
     let rest_snapshot: Value = rest_response.json().await?;
     assert_workgraph_snapshot(&rest_snapshot, realm_id, &seeded)?;
+    let rest_items_response = client
+        .get(format!(
+            "http://127.0.0.1:{port}/workgraph/items?include_terminal=true&limit=1"
+        ))
+        .send()
+        .await?;
+    assert!(rest_items_response.status().is_success());
+    let rest_items: Value = rest_items_response.json().await?;
+    assert_eq!(
+        rest_items["items"][0]["id"].as_str(),
+        Some(seeded.completed_id.as_str()),
+        "{rest_items}"
+    );
+    assert_eq!(rest_items["total_items"], json!(2), "{rest_items}");
+    assert_eq!(rest_items["truncated"], json!(true), "{rest_items}");
 
     shutdown_child(rest).await?;
     shutdown_rpc(rpc).await?;

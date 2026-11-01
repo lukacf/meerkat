@@ -3023,6 +3023,19 @@ mod tests {
         let page = serde_json::to_value(&snapshot).expect("snapshot json");
         assert_eq!(page["total_items"], json!(50));
         assert_eq!(page["truncated"], json!(false));
+        // Closed, the items and their edges are history: the default
+        // snapshot holds the live item alone, and no edge.
+        for item in items {
+            let current = service.get(None, None, item.id).await.expect("get");
+            close_completed(&service, current).await;
+        }
+        service.create(create_req("live")).await.expect("live");
+        let snapshot = service
+            .snapshot(Default::default())
+            .await
+            .expect("snapshot");
+        assert_eq!(snapshot.items.len(), 1);
+        assert!(snapshot.edges.is_empty());
     }
 
     #[tokio::test]
@@ -3124,6 +3137,8 @@ mod tests {
             ids(&snapshot.items),
             vec![blocked.id.clone(), newest_filler.id.clone()]
         );
+        // Edges follow the page, so the blocker's edge was cut with it.
+        assert!(snapshot.edges.is_empty());
         // The cut left the blocker out of the page, and readiness is still
         // classified against the whole namespace: the open blocker blocks.
         assert_eq!(snapshot.ready_item_ids, vec![newest_filler.id]);

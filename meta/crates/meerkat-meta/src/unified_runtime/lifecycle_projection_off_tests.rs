@@ -305,6 +305,75 @@ async fn a_session_bridge_without_binding_reads_is_reported_off() {
     the_off_report(&events).await;
 }
 
+/// A bridge that reads Core's member lifecycle journal and member history
+/// but not Core's standing of an identity's member turns the projection off
+/// once it reaches a seat whose incarnation it must place, reported once and
+/// typed.
+///
+/// RED before the projection read Core's standing: a seat's currency was
+/// read from Core's member history, so nothing was reported, and the seat
+/// was told from a read that can disagree with Core's standing.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_session_bridge_without_the_standing_read_is_reported_off() {
+    let bridge = Arc::new(CoreReadsBridge::default());
+    bridge.core.keep_journal();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let identities = identity_runtime_over(
+        Arc::clone(&bridge) as Arc<dyn SessionBridge>,
+        "lifecycle-projection-no-standing-read",
+        &events,
+    );
+    identities
+        .set_agent_customizer(Some(Arc::new(QuietCustomizer)))
+        .await;
+    // The projection starts at the journal's head, before the seat.
+    identities.settle_lifecycle_projection().await;
+    let alice = AgentIdentity::parse("lifecycle-projection-standing-alice").expect("identity");
+    register_live(
+        &identities,
+        &bridge.core,
+        member(&alice),
+        0,
+        SessionId::new(),
+    )
+    .await
+    .expect("a live registered member");
+    bridge.refuse_standing_reads();
+    identities.settle_lifecycle_projection().await;
+    identities.settle_lifecycle_projection().await;
+    the_off_report(&events).await;
+    assert_eq!(
+        identities.lifecycle_projection_status().state,
+        crate::identity_first::LifecycleProjectionState::Off
+    );
+}
+
+/// A bridge that reads Core's member lifecycle journal and member history
+/// but not Core's standing of an identity's member is found out when the
+/// projection is prepared, before any step: reported once and typed, and
+/// the projection's status reads off.
+///
+/// RED before the preparation read Core's standing: nothing was reported
+/// until a page held a seat to place.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_session_bridge_without_the_standing_read_is_reported_off_when_prepared() {
+    let bridge = Arc::new(CoreReadsBridge::default());
+    bridge.core.keep_journal();
+    bridge.refuse_standing_reads();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let identities = identity_runtime_over(
+        Arc::clone(&bridge) as Arc<dyn SessionBridge>,
+        "lifecycle-projection-no-standing-at-preparation",
+        &events,
+    );
+    identities.settle_lifecycle_projection().await;
+    the_off_report(&events).await;
+    assert_eq!(
+        identities.lifecycle_projection_status().state,
+        crate::identity_first::LifecycleProjectionState::Off
+    );
+}
+
 /// A session bridge over a mob handle whose principal may not subscribe to
 /// the mob's events cannot read Core's member lifecycle journal: the
 /// projection is off, reported once and typed.

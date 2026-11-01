@@ -16,10 +16,13 @@ use tokio::sync::oneshot;
 use super::*;
 use crate::identity_first::bridge::{
     BridgeDelivery, BridgeError, DormantSeatRequest, DormantSeatResult, MemberLifecycleJournalHead,
-    MemberLifecycleJournalPage, MemberRuntimeBinding, ResumeRejectionKind, ResumeSessionOutcome,
-    SessionBridge,
+    MemberLifecycleJournalPage, MemberRuntimeBinding, MemberStanding, ResumeRejectionKind,
+    ResumeSessionOutcome, SessionBridge,
 };
-use crate::identity_first::core_test_bridge::{CoreReadsBridge, bind_live, register_live};
+use crate::identity_first::core_test_bridge::{
+    CoreReadsBridge, bind_live, register_live, respawn_live, respawn_live_unretired,
+    respawn_seat_live, rotate_live,
+};
 use crate::identity_first::core_test_members::CoreTestMembers;
 use crate::identity_first::first_boot_manifest::FirstBootManifest;
 use crate::identity_first::local_lease::LocalLeaseProvider;
@@ -33,6 +36,9 @@ use crate::identity_first::{
 use crate::memory::distiller::{
     DistillerClientHandle, DistillerConfig, DistillerEngine, DistillerError, DistillerProfile,
     TranscriptSlice, TranscriptSource,
+};
+use crate::memory::steward::{
+    StewardClientHandle, StewardConfig, StewardEngine, StewardError, StewardProfile,
 };
 
 fn lock<T>(mutex: &StdMutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -137,9 +143,25 @@ struct SeatCore {
     /// Core's session service keeps sessions in memory only: no session
     /// outlives its member. Otherwise the double cannot say.
     sessions_in_memory: bool,
-    /// Core's rotation fails with this error after it may have started (a
-    /// failure that is not one of Core's typed refusals before the start).
+    /// Core's rotation fails with this error after it started: Core
+    /// journaled the start of the live incarnation's retirement, and ended
+    /// neither the retirement nor the rotation.
     rotation_failure: StdMutex<Option<BridgeError>>,
+    /// The bridge answers the next rotation with this error before it asks
+    /// Core for anything (a spec it could not lower, say): nothing reaches
+    /// Core.
+    refuse_before_core: StdMutex<Option<BridgeError>>,
+    /// Core carries the next rotation out, and the bridge then answers it
+    /// with this error: a wrapper that ran Core's rotation and answered an
+    /// error after it.
+    answers_after_rotating: StdMutex<Option<BridgeError>>,
+    /// Core compensates the next rotations' seats: the seat is journaled,
+    /// then the spawn's membership step fails and Core closes the
+    /// incarnation with a retirement that records no facts.
+    compensate_next_rotations: AtomicUsize,
+    /// Core starts the next retires and fails each before its end: its
+    /// start is journaled, and the member stays seated, retiring.
+    retire_starts_then_fails: AtomicUsize,
     /// The launch's member auth binding refuses these identities' member
     /// builds wherever Core builds one outside a wake, as the bridge reads
     /// the gateway's build check off Core's typed refusal: the live spawn
@@ -297,24 +319,45 @@ impl SessionBridge for SeatCore {
         // its next generation. A spawn ends no host preparation, and Core
         // refuses the plain retirement of an occupant while its host
         // preparation is pending: the retirement never reaches its terminal.
-        if let Some(live) = self.core.live_member(identity)? {
+        let live = self.core.live_member(identity)?;
+        if let Some(live) = live.as_ref() {
             if lock(&self.host_pending).contains(identity) {
                 return Err(BridgeError::Mob(format!(
                     "{identity}: Core refuses retiring the occupant while its host preparation \
                      is pending"
                 )));
             }
-            self.core.retire(&live.agent_runtime_id);
             self.dematerialize(&live.agent_runtime_id);
         }
         let generation = self.next_generation(identity)?;
-        let agent_runtime_id = bind_live(
-            &self.core,
-            identity,
-            &spec.profile,
-            generation,
-            Some(session_id.clone()),
-        )?;
+        // The restamp of a live member on its own session is Core's rotation
+        // onto the same session, whose retirement and seat name each other.
+        // A resume of a live member onto another session retires the
+        // occupant and then spawns, two rows that name no rotation; so is the
+        // revival of one no member holds a spawn.
+        let restamp = live
+            .as_ref()
+            .is_some_and(|live| live.session_id.as_ref() == Some(session_id));
+        if !restamp && let Some(live) = live.as_ref() {
+            self.core.retire(&live.agent_runtime_id);
+        }
+        let agent_runtime_id = if restamp {
+            rotate_live(
+                &self.core,
+                identity,
+                &spec.profile,
+                generation,
+                Some(session_id.clone()),
+            )?
+        } else {
+            bind_live(
+                &self.core,
+                identity,
+                &spec.profile,
+                generation,
+                Some(session_id.clone()),
+            )?
+        };
         // A resume is a spawn: Core builds the member, live.
         self.materialize(&agent_runtime_id);
         Ok(ResumeSessionOutcome::Resumed {
@@ -532,6 +575,9 @@ impl SessionBridge for SeatCore {
         _draft: &AgentBuildDraft,
     ) -> Result<SessionId, BridgeError> {
         self.rotation_calls.fetch_add(1, Ordering::SeqCst);
+        if let Some(refusal) = lock(&self.refuse_before_core).take() {
+            return Err(refusal);
+        }
         let gate = lock(&self.rotate_gate).take();
         if let Some((reached, release)) = gate {
             let _ = reached.send(());
@@ -559,6 +605,12 @@ impl SessionBridge for SeatCore {
             });
         }
         if let Some(failure) = lock(&self.rotation_failure).take() {
+            if let Some(live) = self.core.live_member(identity)? {
+                self.core.start_retirement(
+                    &live.agent_runtime_id,
+                    Some(meerkat_mob::RotationTarget::FreshSession),
+                );
+            }
             return Err(failure);
         }
         let listed = self.manifest_dir.as_deref().is_some_and(|dir| {
@@ -572,12 +624,13 @@ impl SessionBridge for SeatCore {
         lock(&self.rotations).push(identity.clone());
         lock(&self.rotations_listed).push((identity.clone(), listed));
         if let Some(live) = self.core.live_member(identity)? {
-            self.core.retire(&live.agent_runtime_id);
             self.dematerialize(&live.agent_runtime_id);
         }
         let generation = self.next_generation(identity)?;
         let session_id = SessionId::new();
-        bind_live(
+        // One step retires the live incarnation and seats the next one, and
+        // its journal rows name each other, as Core's rotation's do.
+        rotate_live(
             &self.core,
             identity,
             &spec.profile,
@@ -585,6 +638,16 @@ impl SessionBridge for SeatCore {
             Some(session_id.clone()),
         )?;
         lock(&self.host_pending).remove(identity);
+        if take_one(&self.compensate_next_rotations) {
+            self.core.compensate(identity);
+            return Err(BridgeError::Mob(format!(
+                "{identity}: the fresh life's membership step failed, and Core compensated its \
+                 spawn"
+            )));
+        }
+        if let Some(error) = lock(&self.answers_after_rotating).take() {
+            return Err(error);
+        }
         Ok(session_id)
     }
 
@@ -656,6 +719,12 @@ impl SessionBridge for SeatCore {
                 "{runtime_id}: Core refused the retire before any of it started"
             )));
         }
+        if take_one(&self.retire_starts_then_fails) {
+            self.core.start_retirement(runtime_id, None);
+            return Err(BridgeError::Mob(format!(
+                "{runtime_id}: Core started the retirement and failed before its end"
+            )));
+        }
         self.core.retire(runtime_id);
         self.dematerialize(runtime_id);
         let gate = lock(&self.retire_gate).take();
@@ -679,6 +748,13 @@ impl SessionBridge for SeatCore {
 
     fn mob_incarnation(&self) -> Option<String> {
         Some(crate::identity_first::core_test_members::JOURNAL_INCARNATION.to_string())
+    }
+
+    async fn member_standing(
+        &self,
+        identity: &AgentIdentity,
+    ) -> Result<MemberStanding, BridgeError> {
+        self.core.member_standing(identity)
     }
 
     async fn member_lifecycle_journal_page(
@@ -2792,9 +2868,10 @@ async fn a_declared_migration_over_a_done_first_boot_row_ends_its_host_preparati
 }
 
 /// A reset Core refuses before any of it starts (here: the mob is not
-/// running) answers the typed retryable refusal and takes its rotation
-/// record back, so no later roster compile or restart resets the identity.
-/// A record an earlier reset left is put back as it was.
+/// running) answers the typed retryable refusal; Core's journal holds no
+/// fact of it, so it takes its rotation record back, and no later roster
+/// compile or restart resets the identity. A record an earlier reset left
+/// is put back as it was.
 #[tokio::test]
 async fn a_reset_core_refuses_before_it_starts_leaves_no_rotation_to_carry_out() {
     let alice = identity("personal:alice");
@@ -2803,6 +2880,7 @@ async fn a_reset_core_refuses_before_it_starts_leaves_no_rotation_to_carry_out()
         refuses_rotation: true,
         ..SeatCore::default()
     });
+    core.core.keep_journal();
     let runtime = runtime_over(None, &core);
     for who in [&alice, &bob] {
         register_live(&runtime, &core.core, spec(who), 0, SessionId::new())
@@ -3513,15 +3591,16 @@ async fn a_reset_that_may_have_started_keeps_its_record_and_rotates_once_later()
 }
 
 /// A reset whose fresh life spec cannot be lowered is refused before Core
-/// is asked: its record is taken back, and no later compile resets the
-/// identity.
+/// is asked: Core's journal holds no fact of it, so its record is taken
+/// back, and no later compile resets the identity.
 #[tokio::test]
 async fn a_reset_whose_spec_cannot_be_lowered_leaves_no_rotation_to_carry_out() {
     let alice = identity("personal:alice");
     let core = Arc::new(SeatCore::default());
-    *lock(&core.rotation_failure) = Some(BridgeError::InvalidInput(
+    *lock(&core.refuse_before_core) = Some(BridgeError::InvalidInput(
         "lowering the fresh life spec failed".to_string(),
     ));
+    core.core.keep_journal();
     let runtime = runtime_over(None, &core);
     register_live(&runtime, &core.core, spec(&alice), 0, SessionId::new())
         .await
@@ -3617,10 +3696,10 @@ async fn a_member_route_refusal_of_a_kickoff_seat_is_final_and_typed() {
 
 /// A reset of an identity Core does not hold that owes a kickoff is Core's
 /// live spawn of its fresh life. Refused for its member route, it is final
-/// and leaves nothing to carry out: none of the rotation started, so its
-/// record is taken back, a restart hands the mob no host-pending identity
-/// for it, and the next compile rotates nothing (its seat, the same live
-/// spawn, is refused final again).
+/// and leaves nothing to carry out: none of the rotation started (Core's
+/// journal holds no fact of it), so its record is taken back, a restart
+/// hands the mob no host-pending identity for it, and the next compile
+/// rotates nothing (its seat, the same live spawn, is refused final again).
 #[tokio::test]
 async fn a_reset_refused_for_the_member_route_leaves_no_rotation_to_carry_out() {
     let alice = identity("personal:alice");
@@ -3628,6 +3707,7 @@ async fn a_reset_refused_for_the_member_route_leaves_no_rotation_to_carry_out() 
         route_refused: vec![alice.clone()],
         ..SeatCore::default()
     });
+    core.core.keep_journal();
     let runtime = runtime_over(None, &core);
     let records = Arc::new(crate::runtime::InMemoryMetadataStore::new());
     runtime.set_identity_records(records.clone(), "route-refused".to_string());
@@ -3997,6 +4077,128 @@ fn memory_reading(
         .with_taint_tracker(tracker.clone())
         .with_distiller(distiller);
     (injector, tracker)
+}
+
+#[async_trait::async_trait]
+impl StewardClientHandle for UnaskedClient {
+    async fn client(&self) -> Result<Arc<dyn meerkat_client::LlmClient>, StewardError> {
+        Ok(Arc::new(meerkat_client::TestClient::default()))
+    }
+
+    fn invalidate(&self) {}
+}
+
+/// Agent memory over a store in `dir`, whose distiller reads sessions
+/// through `reads` and whose steward keeps the exit-interview queue in the
+/// same store, and that store.
+fn memory_with_exit_interviews(
+    dir: &std::path::Path,
+    reads: &Arc<ReadSessions>,
+) -> (
+    AgentMemoryRuntimeInjector,
+    Arc<crate::SqliteAgentMemoryStore>,
+) {
+    let store = Arc::new(crate::SqliteAgentMemoryStore::open(dir).expect("open the memory store"));
+    let distiller = Arc::new(DistillerEngine::new(
+        DistillerProfile::embedded_default(),
+        DistillerConfig {
+            enabled: true,
+            ..DistillerConfig::default()
+        },
+        Arc::new(UnaskedClient),
+        store.clone(),
+        store.clone(),
+        Arc::clone(reads) as Arc<dyn TranscriptSource>,
+        None,
+        None,
+        "default",
+    ));
+    let steward = Arc::new(StewardEngine::new(
+        StewardProfile::embedded_default(),
+        StewardConfig {
+            enabled: true,
+            ..StewardConfig::default()
+        },
+        Arc::new(UnaskedClient),
+        store.clone(),
+        Arc::clone(reads) as Arc<dyn TranscriptSource>,
+        "default",
+    ));
+    let injector = AgentMemoryRuntimeInjector::new(store.clone(), AgentMemoryConfig::default())
+        .with_distiller(distiller)
+        .with_steward(steward);
+    (injector, store)
+}
+
+/// The exit interviews `store` holds pending for `identity`, each with its
+/// cause.
+async fn exit_interviews_of(
+    store: &crate::SqliteAgentMemoryStore,
+    identity: &AgentIdentity,
+) -> Vec<String> {
+    use crate::memory::StewardStore as _;
+    store
+        .pending_harvests("default", 64)
+        .await
+        .expect("read the exit-interview queue")
+        .into_iter()
+        .filter(|harvest| harvest.identity == identity.as_str())
+        .map(|harvest| harvest.cause)
+        .collect()
+}
+
+/// A retirement hook on `runtime` that records each incarnation it hears
+/// of, and answers for an incarnation of `held` only once `gate` has a
+/// permit: the projection that calls it waits inside it until then.
+fn hook_held_on(
+    runtime: &IdentityRuntime,
+    held: &AgentIdentity,
+    gate: &Arc<tokio::sync::Semaphore>,
+) -> Arc<StdMutex<Vec<RetiredIdentityMember>>> {
+    let seen = Arc::new(StdMutex::new(Vec::new()));
+    let recorded = Arc::clone(&seen);
+    let held = held.clone();
+    let gate = Arc::clone(gate);
+    let observer: RetiredMemberObserver = Arc::new(move |retired| {
+        let holds = retired.identity == held;
+        lock(&recorded).push(retired);
+        let gate = Arc::clone(&gate);
+        Box::pin(async move {
+            if holds {
+                let _ = gate.acquire().await;
+            }
+            Ok(())
+        })
+    });
+    runtime.set_retired_member_observer(Some(observer));
+    seen
+}
+
+/// Wait until the hook `seen` records heard of `identity`.
+async fn hook_heard_of(seen: &StdMutex<Vec<RetiredIdentityMember>>, identity: &AgentIdentity) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !lock(seen)
+            .iter()
+            .any(|retired| retired.identity == *identity)
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the hook hears of the identity");
+}
+
+/// The causes the hook `seen` records heard for `identity`, each with its
+/// generation, in the order heard.
+fn heard_of(
+    seen: &StdMutex<Vec<RetiredIdentityMember>>,
+    identity: &AgentIdentity,
+) -> Vec<(String, u64)> {
+    lock(seen)
+        .iter()
+        .filter(|retired| retired.identity == *identity)
+        .map(|retired| (retired.cause.as_str().to_string(), retired.generation))
+        .collect()
 }
 
 /// A role move on a session that lives in memory only rotates the identity
@@ -5244,4 +5446,1297 @@ async fn a_long_step_s_seat_is_told_its_own_build_while_the_step_rotates() {
         outcomes.iter().all(|(_, refused)| refused.is_none()),
         "the step seats alice and moves bob: {outcomes:?}"
     );
+}
+
+/// A reset whose rotation Core carried out, answered with an error the
+/// bridge raised after it (a wrapper's `InvalidInput`, here): Core's journal
+/// holds the rotation's facts after the head the reset read before it asked
+/// Core, so the reset keeps what it recorded, and the retirement hook hears
+/// of the incarnation the rotation ended as a reset's.
+///
+/// RED before a step's outcome was read from Core's journal: an
+/// `InvalidInput` answer read as "nothing of the rotation started", so the
+/// reset took its record back, and the rotation reached the hook as one no
+/// Meta verb asked for (`rotated`).
+#[tokio::test]
+async fn a_rotation_that_started_before_its_error_keeps_its_intent() {
+    let alice = identity("personal:alice");
+    let core = Arc::new(SeatCore {
+        answers_after_rotating: StdMutex::new(Some(BridgeError::InvalidInput(
+            "the wrapper refused Core's answer".to_string(),
+        ))),
+        ..SeatCore::default()
+    });
+    core.core.keep_journal();
+    let runtime = runtime_over(None, &core);
+    runtime.bind_lifecycle_projection(None);
+    register_live(&runtime, &core.core, spec(&alice), 0, SessionId::new())
+        .await
+        .expect("registered live");
+    let seen = recording_hook(&runtime);
+
+    runtime
+        .reset_tracked(&alice)
+        .await
+        .expect_err("the bridge answered the rotation with an error");
+    assert_eq!(
+        core.generation_of(&alice),
+        Some(1),
+        "Core carried the rotation out"
+    );
+    runtime.settle_lifecycle_projection().await;
+    let calls = lock(&seen).clone();
+    assert_eq!(calls.len(), 1, "{calls:?}");
+    assert_eq!(calls[0].generation, 0);
+    assert_eq!(calls[0].cause.as_str(), "reset", "{calls:?}");
+}
+
+/// A reset the bridge answered with an error before it asked Core (a `Mob`
+/// error, which may come before or after Core started): no fact of the
+/// identity's member follows the head the reset read before it asked, so
+/// nothing of it reached Core, and the reset takes its record back. A host's
+/// own rotation of the same incarnation then reaches the retirement hook as
+/// what it is (`rotated`), never as a reset.
+///
+/// RED before a step's outcome was read from Core's journal: a `Mob` error
+/// read as "the rotation may have started", so the reset's record stayed,
+/// and the host's rotation reached the hook as a reset.
+#[tokio::test]
+async fn a_rotation_that_never_reached_core_takes_its_intent_back() {
+    let alice = identity("personal:alice");
+    let core = Arc::new(SeatCore {
+        refuse_before_core: StdMutex::new(Some(BridgeError::Mob(
+            "the bridge gave up before it asked Core".to_string(),
+        ))),
+        ..SeatCore::default()
+    });
+    core.core.keep_journal();
+    let runtime = runtime_over(None, &core);
+    runtime.bind_lifecycle_projection(None);
+    register_live(&runtime, &core.core, spec(&alice), 0, SessionId::new())
+        .await
+        .expect("registered live");
+    let seen = recording_hook(&runtime);
+
+    runtime
+        .reset_tracked(&alice)
+        .await
+        .expect_err("the bridge answered before it asked Core");
+    // A host's own rotation of the incarnation the reset named.
+    rotate_live(
+        &core.core,
+        &alice,
+        &spec(&alice).profile,
+        1,
+        Some(SessionId::new()),
+    )
+    .expect("the host's rotation");
+    runtime.settle_lifecycle_projection().await;
+    let calls = lock(&seen).clone();
+    assert_eq!(calls.len(), 1, "{calls:?}");
+    assert_eq!(calls[0].generation, 0);
+    assert_eq!(calls[0].cause.as_str(), "rotated", "{calls:?}");
+}
+
+/// A reset whose rotation started in Core and failed before its end keeps
+/// what it recorded, and so does its rotation record; a delete of the same
+/// incarnation that Core then refuses before any of it started takes its
+/// own record back and puts the reset's back. When the identity's next seat
+/// step drives the reset's rotation to its end, the hook hears of the
+/// incarnation it ended as a reset's.
+#[tokio::test]
+async fn a_delete_refused_behind_a_reset_in_flight_keeps_the_resets_effects() {
+    let alice = identity("personal:alice");
+    let core = Arc::new(SeatCore {
+        rotation_failure: StdMutex::new(Some(BridgeError::Mob(
+            "the rotation's answer was lost".to_string(),
+        ))),
+        ..SeatCore::default()
+    });
+    core.core.keep_journal();
+    let runtime = runtime_over(None, &core);
+    runtime.bind_lifecycle_projection(None);
+    register_live(&runtime, &core.core, spec(&alice), 0, SessionId::new())
+        .await
+        .expect("registered live");
+    let seen = recording_hook(&runtime);
+
+    runtime
+        .reset_tracked(&alice)
+        .await
+        .expect_err("the reset's rotation failed after it started");
+    core.refuse_next_rotations.store(1, Ordering::SeqCst);
+    runtime
+        .delete_identity_tracked(&alice)
+        .await
+        .expect_err("Core refused the delete before any of it started");
+    let outcomes = runtime.seat_identities(&[spec(&alice)], None).await;
+    outcomes[&alice]
+        .as_ref()
+        .expect("the next step drives the reset's rotation to its end");
+    runtime.settle_lifecycle_projection().await;
+    let calls = lock(&seen).clone();
+    assert_eq!(calls.len(), 1, "{calls:?}");
+    assert_eq!(calls[0].generation, 0);
+    assert_eq!(calls[0].cause.as_str(), "reset", "{calls:?}");
+}
+
+/// The seat of an incarnation Core still holds is told `after_create`: the
+/// projection reads whether the incarnation is Core's from Core's standing
+/// of the identity's member, whatever Core's member history reads of it
+/// (here a history that reads the member retired).
+///
+/// RED before a seat's currency was read from Core's standing: it was read
+/// from the history's latest binding of the identity, so a history that
+/// disagreed with Core's standing kept the seat untold.
+#[tokio::test]
+async fn a_seat_core_holds_is_told_whatever_core_s_member_history_reads() {
+    let alice = identity("personal:alice");
+    let core = Arc::new(SeatCore::default());
+    core.core.keep_journal();
+    core.core.read_retired_in_history(&alice);
+    let runtime = runtime_over(None, &core);
+    runtime.bind_lifecycle_projection(None);
+    let customizer = ToldSeats::answering();
+    runtime
+        .set_agent_customizer(Some(Arc::clone(&customizer) as Arc<dyn AgentCustomizer>))
+        .await;
+    register_all(&runtime, &[spec(&alice)]).await;
+
+    let outcomes = runtime.seat_identities(&[spec(&alice)], None).await;
+    outcomes[&alice].as_ref().expect("the step seats alice");
+    runtime.settle_lifecycle_projection().await;
+    assert_eq!(
+        customizer.told(),
+        vec![(
+            alice.clone(),
+            core.session_of(&alice).expect("Core binds the seat")
+        )],
+        "the seat Core holds is told once"
+    );
+}
+
+/// The roster stops listing an identity, and Core starts its member's
+/// retirement, which fails before its end; then the roster lists the
+/// identity again. Core's standing reads the incarnation retiring: Core
+/// carried the unlisting out, so the pass that lists the identity again
+/// keeps what the unlisting recorded, and once Core ends that retirement
+/// the hook hears of the incarnation as unlisted.
+///
+/// RED before the take-back read Core's standing: Core still binding the
+/// incarnation read as "Core never carried the unlisting out", so the pass
+/// took it back, and the retirement Core then ended reached no hook.
+#[tokio::test]
+async fn a_relisted_identity_whose_unlisting_core_started_keeps_its_effects() {
+    let alice = identity("personal:alice");
+    let core = Arc::new(SeatCore {
+        retire_starts_then_fails: AtomicUsize::new(1),
+        ..SeatCore::default()
+    });
+    core.core.keep_journal();
+    let runtime = runtime_over(None, &core);
+    let roster = Arc::new(MutableRosterProvider::new(vec![spec(&alice)]));
+    let context = IdentityFirstRuntimeContext::new(
+        Arc::clone(&runtime),
+        Arc::clone(&roster) as Arc<dyn RosterProvider>,
+        None,
+        None,
+        None,
+    );
+    let live = register_live(&runtime, &core.core, spec(&alice), 0, SessionId::new())
+        .await
+        .expect("registered live");
+    let seen = recording_hook(&runtime);
+
+    assert!(roster.remove(&alice));
+    let _ = context.refresh_desired_topology().await;
+    assert!(
+        core.core
+            .live_member(&alice)
+            .expect("Core's members read")
+            .is_some(),
+        "Core started the member's retirement and has not ended it"
+    );
+    roster.upsert(spec(&alice));
+    let _ = context.refresh_desired_topology().await;
+
+    // Core ends the retirement it started.
+    core.core.retire(&live);
+    runtime.settle_lifecycle_projection().await;
+    let calls = lock(&seen).clone();
+    assert_eq!(calls.len(), 1, "{calls:?}");
+    assert_eq!(calls[0].generation, 0);
+    assert_eq!(calls[0].cause.as_str(), "unlisted", "{calls:?}");
+}
+
+/// The roster's unlisting of an identity records what it owes and Core
+/// retires its member, and before the projection reaches that retirement a
+/// reset gives the identity, which no member holds now, its fresh life (the
+/// roster listed it again). The reset's record for the fresh life after the
+/// incarnation Core had retired has a key of its own, apart from the
+/// unlisting's, which the projection reads at that retirement: the hook
+/// hears of the incarnation as unlisted, its session is distilled as the
+/// unlisting's and again as the reset's, and both records are consumed.
+/// Had the reset's record replaced the unlisting's, the hook would hear
+/// nothing of the incarnation.
+#[tokio::test]
+async fn a_reset_before_the_projection_reads_an_unlisting_keeps_the_unlisting_s_effects() {
+    let alice = identity("personal:alice");
+    let session = SessionId::new();
+    let core = Arc::new(SeatCore::default());
+    core.core.keep_journal();
+    let runtime = runtime_over(None, &core);
+    let records: Arc<dyn crate::runtime::PersistentMetadataStore> =
+        Arc::new(crate::runtime::InMemoryMetadataStore::new());
+    runtime.set_identity_records(Arc::clone(&records), "unlisted-then-reset".to_string());
+    runtime.bind_lifecycle_projection(None);
+    let live = register_live(&runtime, &core.core, spec(&alice), 0, session.clone())
+        .await
+        .expect("registered live");
+    let seen = recording_hook(&runtime);
+    let memory_dir = tempfile::tempdir().expect("memory dir");
+    let reads = Arc::new(ReadSessions::default());
+    let (memory, _tracker) = memory_reading(memory_dir.path(), Arc::clone(&reads));
+    runtime.set_agent_memory(Some(memory)).await;
+
+    // The unlisting records what it owes, and Core retires the member; the
+    // projection has not read the retirement yet.
+    runtime
+        .prepare_lifecycle_retirement(&alice, crate::runtime::LifecycleEffectVerb::Unlisted, None)
+        .await
+        .expect("the unlisting records what it owes")
+        .expect("Core holds an incarnation of alice's");
+    core.core.retire(&live);
+    runtime
+        .reset_tracked(&alice)
+        .await
+        .expect("the reset gives the identity its fresh life");
+
+    runtime.settle_lifecycle_projection().await;
+    let calls = lock(&seen).clone();
+    assert_eq!(calls.len(), 1, "{calls:?}");
+    assert_eq!(calls[0].generation, 0);
+    assert_eq!(calls[0].cause.as_str(), "unlisted", "{calls:?}");
+    assert_eq!(
+        reads.reads_of(&session),
+        2,
+        "the session is distilled as the unlisting's and as the reset's"
+    );
+    assert!(
+        records
+            .lifecycle_effect_intents("unlisted-then-reset")
+            .await
+            .expect("the intents read")
+            .is_empty(),
+        "both records are consumed"
+    );
+}
+
+/// A host's legacy respawn of an identity's member, which Core journals as a
+/// plain retirement and then a seat that names the incarnation it retired,
+/// owes what a rotation no Meta verb asked for owes, even when Core's member
+/// history keeps no binding of that incarnation any more (its session was
+/// named again since, say): the retirement Core journaled before the seat
+/// names its session and role, and the hook hears of it as `rotated`, with
+/// that session.
+///
+/// RED before the projection read a respawn's retired incarnation from
+/// Core's journal when the history keeps none: the miss read as a plain
+/// seat, and the hook heard nothing.
+#[tokio::test]
+async fn a_respawn_whose_retired_incarnation_the_history_no_longer_keeps_still_owes_its_effects() {
+    let alice = identity("personal:alice");
+    let first = SessionId::new();
+    let core = Arc::new(SeatCore::default());
+    core.core.keep_journal();
+    let runtime = runtime_over(None, &core);
+    runtime.bind_lifecycle_projection(None);
+    register_live(&runtime, &core.core, spec(&alice), 0, first.clone())
+        .await
+        .expect("registered live");
+    let seen = recording_hook(&runtime);
+    // The projection starts at the journal's head, after alice's seat.
+    runtime.settle_lifecycle_projection().await;
+
+    respawn_live(
+        &core.core,
+        &alice,
+        &spec(&alice).profile,
+        1,
+        Some(SessionId::new()),
+    )
+    .expect("the host's legacy respawn");
+    core.core.forget_in_history(&alice, 0);
+    runtime.settle_lifecycle_projection().await;
+    let calls = lock(&seen).clone();
+    assert_eq!(calls.len(), 1, "{calls:?}");
+    assert_eq!(calls[0].generation, 0);
+    assert_eq!(calls[0].cause.as_str(), "rotated", "{calls:?}");
+    assert_eq!(calls[0].session_id.as_ref(), Some(&first), "{calls:?}");
+}
+
+/// The roster's unlisting of alice and a step of the same incarnation's
+/// end, held: the unlisting records what it owes, Core retires her member,
+/// and the projection runs the unlisting's side effects, its hook held.
+/// Meanwhile `step` (a reset or a delete) gives alice, whom no member holds
+/// now, her fresh life, recording what it owes for the incarnation Core
+/// retired. Once the hook answers, both run.
+async fn unlisting_held_while(
+    step: &str,
+) -> (
+    Arc<IdentityRuntime>,
+    AgentIdentity,
+    SessionId,
+    Arc<StdMutex<Vec<RetiredIdentityMember>>>,
+    Arc<ReadSessions>,
+    Arc<crate::SqliteAgentMemoryStore>,
+    tempfile::TempDir,
+) {
+    let alice = identity("personal:alice");
+    let session = SessionId::new();
+    let core = Arc::new(SeatCore::default());
+    core.core.keep_journal();
+    let runtime = runtime_over(None, &core);
+    runtime.bind_lifecycle_projection(None);
+    let live = register_live(&runtime, &core.core, spec(&alice), 0, session.clone())
+        .await
+        .expect("registered live");
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    let seen = hook_held_on(&runtime, &alice, &gate);
+    let memory_dir = tempfile::tempdir().expect("memory dir");
+    let reads = Arc::new(ReadSessions::default());
+    let (memory, store) = memory_with_exit_interviews(memory_dir.path(), &reads);
+    runtime.set_agent_memory(Some(memory)).await;
+    runtime.settle_lifecycle_projection().await;
+
+    runtime
+        .prepare_lifecycle_retirement(&alice, crate::runtime::LifecycleEffectVerb::Unlisted, None)
+        .await
+        .expect("the unlisting records what it owes")
+        .expect("Core holds an incarnation of alice's");
+    core.core.retire(&live);
+    let projecting = tokio::spawn({
+        let runtime = Arc::clone(&runtime);
+        async move { runtime.settle_lifecycle_projection().await }
+    });
+    hook_heard_of(&seen, &alice).await;
+    // The exit interviews are keyed by the time their step was asked, to
+    // the millisecond: the step is asked in a later one than the unlisting.
+    tokio::time::sleep(Duration::from_millis(2)).await;
+    match step {
+        "reset" => {
+            runtime
+                .reset_tracked(&alice)
+                .await
+                .expect("the reset gives alice her fresh life");
+        }
+        _ => {
+            runtime
+                .delete_identity_tracked(&alice)
+                .await
+                .expect("the delete gives alice her fresh life")
+                .expect("Core held an incarnation of alice's");
+        }
+    }
+    gate.add_permits(64);
+    projecting.await.expect("the projection's run");
+    runtime.settle_lifecycle_projection().await;
+    (runtime, alice, session, seen, reads, store, memory_dir)
+}
+
+/// The roster's unlisting of alice and a reset of her, unseated, while the
+/// unlisting's side effects run ([`unlisting_held_while`]): both run. The
+/// hook hears of the incarnation once, as unlisted, and the session it left
+/// is distilled twice, as the unlisting's and, at the fresh life's seat,
+/// as the reset's.
+///
+/// RED before the fresh life's record had a key of its own: the reset's
+/// record took the unlisting's key, and the projection's removal of the
+/// unlisting's record, once its side effects ran, removed the reset's too,
+/// so the fresh life's seat found nothing owed.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reset_while_an_unlisting_s_effects_run_keeps_both_effects() {
+    let (_runtime, alice, session, seen, reads, _store, _memory_dir) =
+        unlisting_held_while("reset").await;
+    assert_eq!(
+        heard_of(&seen, &alice),
+        vec![("unlisted".to_string(), 0)],
+        "the hook hears of the incarnation once, as unlisted"
+    );
+    assert_eq!(
+        reads.reads_of(&session),
+        2,
+        "the session is distilled as the unlisting's and as the reset's"
+    );
+}
+
+/// The delete twin of [`a_reset_while_an_unlisting_s_effects_run_keeps_both_effects`]:
+/// the unlisting's exit interview (`retire`) and the delete's (`delete`)
+/// are both queued.
+///
+/// RED before the fresh life's record had a key of its own: the delete's
+/// record was removed with the unlisting's, so its exit interview was never
+/// queued.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_delete_while_an_unlisting_s_effects_run_keeps_both_effects() {
+    let (_runtime, alice, _session, seen, _reads, store, _memory_dir) =
+        unlisting_held_while("delete").await;
+    assert_eq!(
+        heard_of(&seen, &alice),
+        vec![("unlisted".to_string(), 0)],
+        "the hook hears of the incarnation once, as unlisted"
+    );
+    let mut interviews = exit_interviews_of(&store, &alice).await;
+    interviews.sort();
+    assert_eq!(
+        interviews,
+        vec!["delete".to_string(), "retire".to_string()],
+        "the unlisting's exit interview and the delete's are both queued"
+    );
+}
+
+/// A host's rotation of alice's member is in flight when a delete of alice
+/// asks Core for its own rotation: Core refuses it, typed, and the host's
+/// rotation ends while the delete waits for that answer. Nothing of the
+/// delete reached Core, so it keeps nothing: its records are taken back,
+/// and the host's rotation reaches the hook as what it is (`rotated`), never
+/// as a delete.
+///
+/// RED before a step's reach counted only the fact the step itself writes
+/// first: any fact of the member after the head the delete read (here, the
+/// end of the host's rotation) kept the delete's records.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_delete_core_refuses_while_a_host_rotation_ends_keeps_nothing() {
+    let alice = identity("personal:alice");
+    let (reached_tx, reached_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
+    let core = Arc::new(SeatCore {
+        rotate_gate: StdMutex::new(Some((reached_tx, release_rx))),
+        refuse_next_rotations: AtomicUsize::new(1),
+        ..SeatCore::default()
+    });
+    core.core.keep_journal();
+    let runtime = runtime_over(None, &core);
+    runtime.bind_lifecycle_projection(None);
+    let live = register_live(&runtime, &core.core, spec(&alice), 0, SessionId::new())
+        .await
+        .expect("registered live");
+    let seen = recording_hook(&runtime);
+    runtime.settle_lifecycle_projection().await;
+    // A host's rotation of alice's member starts.
+    core.core
+        .start_retirement(&live, Some(meerkat_mob::RotationTarget::FreshSession));
+
+    let deleting = tokio::spawn({
+        let runtime = Arc::clone(&runtime);
+        let alice = alice.clone();
+        async move { runtime.delete_identity(&alice).await }
+    });
+    reached_rx.await.expect("the delete reaches Core");
+    // The host's rotation ends while Core answers the delete.
+    rotate_live(
+        &core.core,
+        &alice,
+        &spec(&alice).profile,
+        1,
+        Some(SessionId::new()),
+    )
+    .expect("the host's rotation ends");
+    release_tx.send(()).expect("release the delete's rotation");
+    let refused = deleting.await.expect("the delete's task");
+    assert!(
+        matches!(
+            refused,
+            Err(IdentityRuntimeError::IdentityWakeRetryable { .. })
+        ),
+        "{refused:?}"
+    );
+    assert!(
+        !runtime
+            .pending_rotation_intents()
+            .await
+            .expect("the records read")
+            .contains_key(&alice),
+        "the refused delete keeps no rotation record"
+    );
+    runtime.settle_lifecycle_projection().await;
+    let calls = lock(&seen).clone();
+    assert_eq!(calls.len(), 1, "{calls:?}");
+    assert_eq!(calls[0].generation, 0);
+    assert_eq!(calls[0].cause.as_str(), "rotated", "{calls:?}");
+}
+
+/// A reset whose read of the head of Core's journal fails, while the
+/// projection reads Core's journal, is refused before Core is asked for
+/// anything, retryable: with no head, a failure of its rotation could not
+/// tell whether any of it reached Core.
+///
+/// RED before such a step was refused: it asked Core with no head.
+#[tokio::test]
+async fn a_reset_whose_journal_head_does_not_read_asks_core_nothing() {
+    let alice = identity("personal:alice");
+    let core = Arc::new(SeatCore::default());
+    core.core.keep_journal();
+    let runtime = runtime_over(None, &core);
+    runtime.bind_lifecycle_projection(None);
+    register_live(&runtime, &core.core, spec(&alice), 0, SessionId::new())
+        .await
+        .expect("registered live");
+    runtime.settle_lifecycle_projection().await;
+    core.journal_head_failures.store(1, Ordering::SeqCst);
+
+    let refused = runtime.reset(&alice).await;
+    assert!(
+        matches!(
+            refused,
+            Err(IdentityRuntimeError::IdentityHistoryUnavailable { .. })
+        ),
+        "{refused:?}"
+    );
+    assert_eq!(
+        core.rotation_calls.load(Ordering::SeqCst),
+        0,
+        "Core was asked nothing"
+    );
+    assert!(
+        runtime
+            .pending_rotation_intents()
+            .await
+            .expect("the records read")
+            .is_empty(),
+        "the refused reset left no record"
+    );
+}
+
+/// A reset refused for its member route over a bridge whose journal does
+/// not read keeps what it recorded (nothing tells it that none of the
+/// rotation reached Core), so its answer says so: the rotation may have
+/// started, and the identity's next roster compile drives it to its end. It
+/// never answers the refusal as final.
+///
+/// RED before a kept step's answer said what Meta does with the records:
+/// the refusal still answered "was not started", final.
+#[tokio::test]
+async fn a_refusal_whose_records_are_kept_says_the_rotation_may_have_started() {
+    let alice = identity("personal:alice");
+    let core = Arc::new(SeatCore {
+        route_refused: vec![alice.clone()],
+        ..SeatCore::default()
+    });
+    let runtime = runtime_over(None, &core);
+    register_all(&runtime, &[kickoff_spec(&alice)]).await;
+
+    let answered = runtime.reset(&alice).await;
+    let Err(IdentityRuntimeError::Internal(detail)) = &answered else {
+        panic!("the kept reset answers that it may have started: {answered:?}");
+    };
+    assert!(detail.contains("may have started"), "{detail}");
+    assert!(
+        runtime
+            .pending_rotation_intents()
+            .await
+            .expect("the records read")
+            .contains_key(&alice),
+        "the reset's rotation record stays for the next compile"
+    );
+}
+
+/// The roster's unlisting of alice records what it owes, and a host's
+/// legacy respawn of the same incarnation wins the race: Core retires the
+/// incarnation and seats the next one, naming it. That retirement is the
+/// unlisting's: the hook hears of the incarnation once, as unlisted, and
+/// its session is distilled once; the respawn's seat owes nothing more.
+///
+/// RED before the respawn's seat deferred to a Meta record naming the
+/// incarnation it follows: it owed a rotation's side effects as well, so
+/// the hook heard of the incarnation twice and its session was distilled
+/// twice.
+#[tokio::test]
+async fn a_roster_unlisting_racing_a_host_respawn_owes_one_hook_and_one_distillation() {
+    let alice = identity("personal:alice");
+    let session = SessionId::new();
+    let core = Arc::new(SeatCore::default());
+    core.core.keep_journal();
+    let runtime = runtime_over(None, &core);
+    runtime.bind_lifecycle_projection(None);
+    register_live(&runtime, &core.core, spec(&alice), 0, session.clone())
+        .await
+        .expect("registered live");
+    let seen = recording_hook(&runtime);
+    let memory_dir = tempfile::tempdir().expect("memory dir");
+    let reads = Arc::new(ReadSessions::default());
+    let (memory, _tracker) = memory_reading(memory_dir.path(), Arc::clone(&reads));
+    runtime.set_agent_memory(Some(memory)).await;
+    runtime.settle_lifecycle_projection().await;
+
+    runtime
+        .prepare_lifecycle_retirement(&alice, crate::runtime::LifecycleEffectVerb::Unlisted, None)
+        .await
+        .expect("the unlisting records what it owes")
+        .expect("Core holds an incarnation of alice's");
+    respawn_live(
+        &core.core,
+        &alice,
+        &spec(&alice).profile,
+        1,
+        Some(SessionId::new()),
+    )
+    .expect("the host's legacy respawn");
+    runtime.settle_lifecycle_projection().await;
+    assert_eq!(
+        heard_of(&seen, &alice),
+        vec![("unlisted".to_string(), 0)],
+        "the hook hears of the incarnation once, as unlisted"
+    );
+    assert_eq!(
+        reads.reads_of(&session),
+        1,
+        "the session the incarnation left is distilled once"
+    );
+}
+
+/// The roster's unlisting of alice records what it owes, and a host's
+/// legacy respawn of the same incarnation wins the race, its two steps on
+/// two pages: Core retires the incarnation, the projection runs the
+/// unlisting's side effects and removes its record, and only then does Core
+/// seat the next incarnation, naming the retired one. The hook still hears
+/// of the incarnation once, as unlisted, and its session is distilled once:
+/// the respawn's seat defers to the record its retirement read.
+///
+/// RED before the respawn's seat deferred to the Meta record its
+/// retirement read: the record was gone by the seat's page, so the seat
+/// owed a rotation's side effects as well, and the hook heard `rotated`
+/// after `unlisted`.
+#[tokio::test]
+async fn a_roster_unlisting_racing_a_host_respawn_across_pages_owes_one_hook() {
+    let alice = identity("personal:alice");
+    let session = SessionId::new();
+    let core = Arc::new(SeatCore::default());
+    core.core.keep_journal();
+    let runtime = runtime_over(None, &core);
+    runtime.bind_lifecycle_projection(None);
+    let live = register_live(&runtime, &core.core, spec(&alice), 0, session.clone())
+        .await
+        .expect("registered live");
+    let seen = recording_hook(&runtime);
+    let memory_dir = tempfile::tempdir().expect("memory dir");
+    let reads = Arc::new(ReadSessions::default());
+    let (memory, _tracker) = memory_reading(memory_dir.path(), Arc::clone(&reads));
+    runtime.set_agent_memory(Some(memory)).await;
+    runtime.settle_lifecycle_projection().await;
+
+    runtime
+        .prepare_lifecycle_retirement(&alice, crate::runtime::LifecycleEffectVerb::Unlisted, None)
+        .await
+        .expect("the unlisting records what it owes")
+        .expect("Core holds an incarnation of alice's");
+    // The respawn's first step, and the page that holds it.
+    core.core.retire(&live);
+    runtime.settle_lifecycle_projection().await;
+    assert_eq!(
+        heard_of(&seen, &alice),
+        vec![("unlisted".to_string(), 0)],
+        "the retirement is the unlisting's"
+    );
+    // The respawn's second step, on a page of its own.
+    respawn_seat_live(
+        &core.core,
+        &alice,
+        &spec(&alice).profile,
+        1,
+        Some(SessionId::new()),
+    )
+    .expect("the respawn's seat");
+    runtime.settle_lifecycle_projection().await;
+    assert_eq!(
+        heard_of(&seen, &alice),
+        vec![("unlisted".to_string(), 0)],
+        "the hook hears of the incarnation once, as unlisted"
+    );
+    assert_eq!(
+        reads.reads_of(&session),
+        1,
+        "the session the incarnation left is distilled once"
+    );
+}
+
+/// Core seats alice and then retires her member, both on one page of its
+/// journal, while Core's standing still shows the seat (the state Core's
+/// actor last published trails its journal). The seat is not told
+/// `after_create`: the page that holds it holds its end.
+///
+/// RED before the page's own facts were read for a seat's end: standing
+/// showed the incarnation, so the seat was told after its end.
+#[tokio::test]
+async fn a_seat_whose_end_is_on_its_page_is_not_told_while_standing_trails() {
+    let alice = identity("personal:alice");
+    let core = Arc::new(SeatCore::default());
+    core.core.keep_journal();
+    let runtime = runtime_over(None, &core);
+    runtime.bind_lifecycle_projection(None);
+    let customizer = ToldSeats::answering();
+    runtime
+        .set_agent_customizer(Some(Arc::clone(&customizer) as Arc<dyn AgentCustomizer>))
+        .await;
+    runtime.settle_lifecycle_projection().await;
+
+    let live = register_live(&runtime, &core.core, spec(&alice), 0, SessionId::new())
+        .await
+        .expect("registered live");
+    core.core.pin_standing(&alice, MemberStanding::seated(0));
+    core.core.retire(&live);
+    runtime.settle_lifecycle_projection().await;
+    assert!(
+        customizer.told().is_empty(),
+        "the seat is not told after its end: {:?}",
+        customizer.told()
+    );
+}
+
+/// Core seats alice and bob while its standing still shows neither (its
+/// actor has not published the state that shows the seats yet), and
+/// retires bob later, past the page that holds the seats. Alice's seat is
+/// told `after_create`: Core's journal holds no end of it. Bob's is not:
+/// the journal after the page ends it.
+#[tokio::test]
+async fn a_seat_standing_does_not_show_yet_is_told_unless_the_journal_ends_it() {
+    let alice = identity("personal:alice");
+    let bob = identity("personal:bob");
+    let core = Arc::new(SeatCore::default());
+    core.core.keep_journal();
+    let runtime = runtime_over(None, &core);
+    runtime.bind_lifecycle_projection(None);
+    let customizer = ToldSeats::answering();
+    runtime
+        .set_agent_customizer(Some(Arc::clone(&customizer) as Arc<dyn AgentCustomizer>))
+        .await;
+    runtime.settle_lifecycle_projection().await;
+
+    let alice_session = SessionId::new();
+    register_live(&runtime, &core.core, spec(&alice), 0, alice_session.clone())
+        .await
+        .expect("alice registered live");
+    let bob_live = register_live(&runtime, &core.core, spec(&bob), 0, SessionId::new())
+        .await
+        .expect("bob registered live");
+    // A busy journal: bob's end lies past the page that holds the seats.
+    core.core
+        .journal_others(meerkat_mob::IDENTITY_ENTRY_PAGE_MAX);
+    core.core.retire(&bob_live);
+    core.core.pin_standing(&alice, MemberStanding::unseated());
+    core.core.pin_standing(&bob, MemberStanding::unseated());
+    runtime.settle_lifecycle_projection().await;
+    assert_eq!(
+        customizer.told(),
+        vec![(alice.clone(), alice_session)],
+        "the seat whose end Core journaled is not told"
+    );
+}
+
+/// A reset gives alice, whose incarnation Core had retired, her fresh
+/// life, and Core compensates the fresh life's spawn: its seat is
+/// journaled, then closed by a retirement that records no facts. The
+/// fresh life's seat still owes the reset's memory side effects of the
+/// session the retired incarnation left, once; it is told no
+/// `after_create`, the compensation owes nothing, and no hook hears of
+/// either.
+#[tokio::test]
+async fn a_compensated_fresh_life_owes_its_predecessor_once_and_tells_nothing() {
+    let alice = identity("personal:alice");
+    let session = SessionId::new();
+    let core = Arc::new(SeatCore {
+        compensate_next_rotations: AtomicUsize::new(1),
+        ..SeatCore::default()
+    });
+    core.core.keep_journal();
+    let runtime = runtime_over(None, &core);
+    runtime.bind_lifecycle_projection(None);
+    let live = register_live(&runtime, &core.core, spec(&alice), 0, session.clone())
+        .await
+        .expect("registered live");
+    let seen = recording_hook(&runtime);
+    let customizer = ToldSeats::answering();
+    runtime
+        .set_agent_customizer(Some(Arc::clone(&customizer) as Arc<dyn AgentCustomizer>))
+        .await;
+    let memory_dir = tempfile::tempdir().expect("memory dir");
+    let reads = Arc::new(ReadSessions::default());
+    let (memory, _tracker) = memory_reading(memory_dir.path(), Arc::clone(&reads));
+    runtime.set_agent_memory(Some(memory)).await;
+    runtime.settle_lifecycle_projection().await;
+
+    core.core.retire(&live);
+    runtime
+        .reset(&alice)
+        .await
+        .expect_err("Core compensated the fresh life's spawn");
+    runtime.settle_lifecycle_projection().await;
+    assert_eq!(
+        reads.reads_of(&session),
+        1,
+        "the reset's distillation of the session the retired incarnation left, once"
+    );
+    assert!(
+        customizer.told().is_empty(),
+        "the compensated seat is not told: {:?}",
+        customizer.told()
+    );
+    assert!(lock(&seen).is_empty(), "{:?}", lock(&seen));
+}
+
+/// A legacy respawn's seat whose retired incarnation Core's member history
+/// no longer keeps, in a journal that holds that incarnation's seat but no
+/// retirement of it before the respawn's seat (which Core's journal rules
+/// out). The projection does not read back past that seat: the page fails
+/// with that, so the projection reads stalled with it, and the seat never
+/// reads as a plain one.
+///
+/// RED before the backward read stopped at the incarnation's own seat: it
+/// read on to the journal's start, and its failure named no seat.
+#[tokio::test]
+async fn a_respawn_with_no_retirement_since_its_predecessor_s_seat_stalls_there() {
+    let alice = identity("personal:alice");
+    let core = Arc::new(SeatCore::default());
+    core.core.keep_journal();
+    let runtime = runtime_over(None, &core);
+    runtime.bind_lifecycle_projection(None);
+    let seen = recording_hook(&runtime);
+    runtime.settle_lifecycle_projection().await;
+
+    register_live(&runtime, &core.core, spec(&alice), 0, SessionId::new())
+        .await
+        .expect("registered live");
+    respawn_live_unretired(
+        &core.core,
+        &alice,
+        &spec(&alice).profile,
+        1,
+        Some(SessionId::new()),
+    )
+    .expect("the respawn's seat");
+    core.core.forget_in_history(&alice, 0);
+    for _ in 0..3 {
+        runtime.settle_lifecycle_projection().await;
+    }
+    let status = runtime.lifecycle_projection_status();
+    assert_eq!(
+        status.state,
+        crate::identity_first::LifecycleProjectionState::Stalled,
+        "{status:?}"
+    );
+    assert!(
+        status
+            .detail
+            .as_deref()
+            .is_some_and(|detail| detail.contains("between its seat")),
+        "the failure names the incarnation's own seat: {status:?}"
+    );
+    assert!(lock(&seen).is_empty(), "{:?}", lock(&seen));
+}
+
+/// A roster pass lists alice again while a step of hers holds her
+/// lifecycle lock past a side effect's deadline (a reset whose customizer
+/// build is stuck, say). The pass's take-back of her unlisting does not
+/// wait for the lock: it skips her, and her unlisting stays recorded. Once
+/// the step answered, the next pass takes the unlisting back.
+///
+/// RED before the take-back's wait was bounded: the pass waited for the
+/// lock for as long as the step held it.
+#[tokio::test]
+async fn a_roster_pass_does_not_wait_for_a_relisted_identity_s_held_lock() {
+    let alice = identity("personal:alice");
+    let core = Arc::new(SeatCore::default());
+    core.core.keep_journal();
+    let runtime = runtime_over(None, &core);
+    let records: Arc<dyn crate::runtime::PersistentMetadataStore> =
+        Arc::new(crate::runtime::InMemoryMetadataStore::new());
+    runtime.set_identity_records(Arc::clone(&records), "relisted-held".to_string());
+    runtime.bind_lifecycle_projection(None);
+    register_live(&runtime, &core.core, spec(&alice), 0, SessionId::new())
+        .await
+        .expect("registered live");
+    runtime.settle_lifecycle_projection().await;
+    runtime.set_lifecycle_effect_limits(Duration::from_millis(200), 1);
+    runtime
+        .prepare_lifecycle_retirement(&alice, crate::runtime::LifecycleEffectVerb::Unlisted, None)
+        .await
+        .expect("the unlisting records what it owes")
+        .expect("Core holds an incarnation of alice's");
+    let unlisting = crate::runtime::LifecycleIntentKey::new(alice.as_str(), 0);
+
+    let held = runtime.lifecycle_lock_for(&alice).await.lock_owned().await;
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        runtime.take_back_relisted_unlistings(&[spec(&alice)]),
+    )
+    .await
+    .expect("the pass does not wait for a held lock past a side effect's deadline");
+    assert!(
+        records
+            .lifecycle_effect_intent("relisted-held", &unlisting)
+            .await
+            .expect("the record reads")
+            .is_some(),
+        "the unlisting stays recorded for a later pass"
+    );
+    drop(held);
+    runtime.take_back_relisted_unlistings(&[spec(&alice)]).await;
+    assert!(
+        records
+            .lifecycle_effect_intent("relisted-held", &unlisting)
+            .await
+            .expect("the record reads")
+            .is_none(),
+        "the next pass takes the unlisting back"
+    );
+}
+
+/// A reset reads alice's incarnation live, and a host's retirement of it
+/// ends before the reset's rotation reaches Core: Core seats her fresh life
+/// after that incarnation instead of starting its retirement, and the
+/// rotation then fails (Core compensates the spawn). The fresh life's seat
+/// says the rotation reached Core, so the reset keeps what it recorded and
+/// answers that the rotation may have started.
+///
+/// RED before a step that read the incarnation live took the fresh life's
+/// seat after it for its reach: the reset took its records back and
+/// answered that nothing was started, although Core had seated.
+#[tokio::test]
+async fn a_reset_whose_incarnation_a_host_retired_first_keeps_what_it_recorded() {
+    let alice = identity("personal:alice");
+    let (reached_tx, reached_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
+    let core = Arc::new(SeatCore {
+        rotate_gate: StdMutex::new(Some((reached_tx, release_rx))),
+        compensate_next_rotations: AtomicUsize::new(1),
+        ..SeatCore::default()
+    });
+    core.core.keep_journal();
+    let runtime = runtime_over(None, &core);
+    runtime.bind_lifecycle_projection(None);
+    let live = register_live(&runtime, &core.core, spec(&alice), 0, SessionId::new())
+        .await
+        .expect("registered live");
+    runtime.settle_lifecycle_projection().await;
+
+    let resetting = tokio::spawn({
+        let runtime = Arc::clone(&runtime);
+        let alice = alice.clone();
+        async move { runtime.reset(&alice).await }
+    });
+    reached_rx.await.expect("the reset reaches Core");
+    // A host's retirement of the incarnation the reset read live ends first.
+    core.core.retire(&live);
+    release_tx.send(()).expect("release the reset's rotation");
+    let answered = resetting.await.expect("the reset's task");
+    let Err(IdentityRuntimeError::Internal(detail)) = &answered else {
+        panic!("the reset answers that its rotation may have started: {answered:?}");
+    };
+    assert!(detail.contains("may have started"), "{detail}");
+    assert!(
+        runtime
+            .pending_rotation_intents()
+            .await
+            .expect("the records read")
+            .contains_key(&alice),
+        "the reset's rotation record stays for the next compile"
+    );
+}
+
+/// Source guard: the lifecycle projection and the verbs decide no
+/// lifecycle fact Core's journal carries. No retirement and seat are paired
+/// by their positions in the journal (`rotation_successor`, a retirement
+/// held back at the end of a full page with `split_last`), no rotation's
+/// cause is read from Core's member history (`RotationFacts`), no step's
+/// outcome from the bridge's error (`nothing_of_the_rotation_started`), and
+/// no reset or delete runs the side effects of an incarnation Core had
+/// already retired in its own process (`spawn_lifecycle_side_task`, an
+/// inline scope drop or exit interview): each comes from the journal's facts.
+#[test]
+fn the_identity_runtime_decides_no_fact_core_s_journal_carries() {
+    let sources = [
+        (
+            "identity_first/runtime/lifecycle_projection.rs",
+            include_str!("lifecycle_projection.rs"),
+        ),
+        ("identity_first/runtime.rs", include_str!("../runtime.rs")),
+        ("identity_first/runtime/seat.rs", include_str!("seat.rs")),
+    ];
+    for (file, source) in sources {
+        let production = production_code(source);
+        assert!(
+            !production.trim().is_empty(),
+            "{file}: no production code was read"
+        );
+        for needle in [
+            "rotation_successor",
+            "split_last",
+            "RotationFacts",
+            "nothing_of_the_rotation_started",
+            "spawn_lifecycle_side_task",
+        ] {
+            assert!(
+                !production.contains(needle),
+                "{file} names `{needle}`: the fact it decides is Core's journal's"
+            );
+        }
+    }
+    let verbs = production_code(include_str!("../runtime.rs"));
+    for needle in ["drop_orphaned_session_scope", "note_identity_retired"] {
+        assert!(
+            !verbs.contains(needle),
+            "identity_first/runtime.rs names `{needle}`: a retirement's memory side effects \
+             are the lifecycle projection's"
+        );
+    }
+}
+
+/// Source guard: the label or marker a member's binding carries is read for
+/// the identity's membership in an allowlisted set of places only, which
+/// empties once membership is read from Core's identity entry fact. The
+/// lifecycle projection reads Core's member history once per page, inside
+/// its membership helper (`page_members`), and asks
+/// `binding_spawned_for_identity` there and in a verb's preparation only.
+#[test]
+fn membership_is_read_from_a_binding_s_label_only_where_allowed() {
+    let lifecycle = production_code(include_str!("lifecycle_projection.rs"));
+    assert_eq!(
+        lifecycle.matches(".member_binding_history()").count(),
+        1,
+        "the lifecycle projection reads Core's member history in one place"
+    );
+    assert!(
+        item_body(&lifecycle, "fn page_members(").contains(".member_binding_history()"),
+        "the lifecycle projection reads Core's member history in its membership helper"
+    );
+    // The label and marker reads that membership is made of are asked
+    // through `binding_spawned_for_identity` only, never inlined.
+    for inlined in [
+        "durable_identity_label(",
+        "binding_carries_identity_marker(",
+    ] {
+        assert!(
+            !lifecycle.contains(inlined),
+            "the lifecycle projection reads membership inline (`{inlined}`)"
+        );
+    }
+    let callers = [
+        (
+            "identity_first/runtime/lifecycle_projection.rs",
+            lifecycle,
+            2,
+        ),
+        (
+            "identity_first/runtime.rs",
+            production_code(include_str!("../runtime.rs")),
+            2,
+        ),
+        (
+            "identity_first/runtime/seat.rs",
+            production_code(include_str!("seat.rs")),
+            1,
+        ),
+        (
+            "identity_first/first_boot_manifest.rs",
+            production_code(include_str!("../first_boot_manifest.rs")),
+            1,
+        ),
+        (
+            "identity_first/runtime/records.rs",
+            production_code(include_str!("records.rs")),
+            0,
+        ),
+        (
+            "identity_first/runtime/build_preparation.rs",
+            production_code(include_str!("build_preparation.rs")),
+            0,
+        ),
+        (
+            "identity_first/bridge.rs",
+            production_code(include_str!("../bridge.rs")),
+            0,
+        ),
+        (
+            "identity_first/orchestrator.rs",
+            production_code(include_str!("../orchestrator.rs")),
+            0,
+        ),
+        (
+            "identity_first/held_bootstrap.rs",
+            production_code(include_str!("../held_bootstrap.rs")),
+            0,
+        ),
+        (
+            "identity_first/adapters.rs",
+            production_code(include_str!("../adapters.rs")),
+            0,
+        ),
+        (
+            "unified_runtime/mod.rs",
+            production_code(include_str!("../../unified_runtime/mod.rs")),
+            0,
+        ),
+        (
+            "rpc_gateway.rs",
+            production_code(include_str!("../../rpc_gateway.rs")),
+            0,
+        ),
+    ];
+    for (file, production, allowed) in callers {
+        let calls = production.matches("binding_spawned_for_identity(").count()
+            - production
+                .matches("fn binding_spawned_for_identity(")
+                .count();
+        assert_eq!(
+            calls, allowed,
+            "{file} reads an identity's membership from a binding's label or marker in {calls} \
+             places; {allowed} are allowed until membership is read from Core's identity entry \
+             fact"
+        );
+    }
+}
+
+/// Source guard: Meta's session bridge forwards every kind of fact
+/// Core's member lifecycle journal holds. Its conversion of a journal record
+/// (`member_lifecycle_fact`) names each of Core's six
+/// `MemberLifecycleEvent` kinds, so none is dropped at the bridge: a legacy
+/// member reset reaches the projection, whose classification owes nothing
+/// for it.
+#[test]
+fn the_bridge_forwards_every_core_lifecycle_kind() {
+    let bridge = production_code(include_str!("../bridge.rs"));
+    let conversion = item_body(&bridge, "fn member_lifecycle_fact(");
+    // Each kind with the fields of Core's that the conversion forwards: an
+    // arm that leaves one to `..` drops it.
+    for (kind, fields) in [
+        (
+            "Spawned",
+            &[
+                "agent_identity",
+                "generation",
+                "role",
+                "identity_entry",
+                "history_unavailable",
+                "session_id",
+                "rotation",
+            ][..],
+        ),
+        (
+            "Retired",
+            &[
+                "agent_identity",
+                "generation",
+                "role",
+                "session_id",
+                "identity_entry",
+                "cause",
+                "rotation",
+            ][..],
+        ),
+        (
+            "RetirementStarted",
+            &["agent_identity", "generation", "rotation", "cause"][..],
+        ),
+        (
+            "EntryAdopted",
+            &["agent_identity", "generation", "origin"][..],
+        ),
+        (
+            "Reset",
+            &["agent_identity", "previous_generation", "new_generation"][..],
+        ),
+        ("MobReset", &[][..]),
+    ] {
+        let header = format!("MemberLifecycleEvent::{kind} {{");
+        let Some(at) = conversion.find(&header) else {
+            panic!("the bridge's conversion of Core's journal names no `{kind}`");
+        };
+        let pattern = &conversion[at..];
+        let pattern = &pattern[..pattern.find('}').unwrap_or(pattern.len())];
+        for field in fields {
+            assert!(
+                binds_field(pattern, field),
+                "the bridge's conversion of `{kind}` drops its `{field}`"
+            );
+        }
+    }
+}
+
+/// Whether the struct pattern `pattern` binds its field `field`, by that
+/// exact name, to anything but `_`: `field` alone, or `field: binding`.
+/// A longer name that holds `field` (`successor_role` for `role`) is not
+/// that field.
+fn binds_field(pattern: &str, field: &str) -> bool {
+    let is_name = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'_';
+    let bytes = pattern.as_bytes();
+    let mut from = 0;
+    while let Some(at) = pattern[from..].find(field).map(|at| from + at) {
+        let end = at + field.len();
+        from = end;
+        if (at > 0 && is_name(bytes[at - 1])) || bytes.get(end).copied().is_some_and(is_name) {
+            continue;
+        }
+        let Some(binding) = pattern[end..].trim_start().strip_prefix(':') else {
+            return true;
+        };
+        let binding = binding.trim_start();
+        let name = &binding[..binding.bytes().take_while(|byte| is_name(*byte)).count()];
+        if name != "_" {
+            return true;
+        }
+    }
+    false
+}
+
+/// The kind guard above reads a field by its exact name: a longer name that
+/// holds it, or a binding to `_`, does not forward it.
+#[test]
+fn a_forwarded_field_is_bound_by_its_exact_name() {
+    let pattern = "MemberLifecycleEvent::Retired {\n    agent_identity: member,\n    \
+                   generation,\n    successor_role,\n    cause: _,\n    rotation,\n    ..";
+    for field in ["agent_identity", "generation", "rotation"] {
+        assert!(binds_field(pattern, field), "`{field}` is bound");
+    }
+    for field in ["role", "cause", "session_id"] {
+        assert!(!binds_field(pattern, field), "`{field}` is not bound");
+    }
+}
+
+/// The source guards above read what they should: the body of the item a
+/// header opens, braces inside it included, and nothing past it.
+#[test]
+fn an_item_body_ends_where_its_braces_close() {
+    let code = "fn other() { a(); }\nfn page_members(x: u8) -> u8 {\n    if x { b() } else { c() }\n}\nfn after() { d(); }\n";
+    let body = item_body(code, "fn page_members(");
+    assert!(body.starts_with('{') && body.ends_with('}'), "{body}");
+    assert!(body.contains("b()") && body.contains("c()"), "{body}");
+    assert!(!body.contains("d()") && !body.contains("a()"), "{body}");
+    assert_eq!(item_body(code, "fn missing("), "");
+}
+
+/// The body of the first item `header` opens in `code` (code as
+/// [`production_code`] answers it, so no literal or comment holds a brace):
+/// from its first `{` to the brace that closes it. Empty when `code` holds
+/// no such item.
+fn item_body<'a>(code: &'a str, header: &str) -> &'a str {
+    let Some(start) = code.find(header) else {
+        return "";
+    };
+    let Some(open) = code[start..].find('{').map(|at| start + at) else {
+        return "";
+    };
+    let mut depth = 0_usize;
+    for (at, byte) in code.bytes().enumerate().skip(open) {
+        match byte {
+            b'{' => depth += 1,
+            b'}' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return &code[open..=at];
+                }
+            }
+            _ => {}
+        }
+    }
+    ""
 }

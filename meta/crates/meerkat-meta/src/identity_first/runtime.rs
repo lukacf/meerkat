@@ -779,18 +779,16 @@ impl FreshLife {
     }
 }
 
-/// Whether Core's rotation answered `error` before any of it started: Core's
-/// typed refusal, a spec the bridge could not lower before Core was asked,
-/// or a fresh life the launch's member auth binding refused at its build.
-/// Any other failure may come after the rotation started.
-fn nothing_of_the_rotation_started(error: &BridgeError) -> bool {
-    matches!(
-        error,
-        BridgeError::RotationRefused { .. }
-            | BridgeError::MemberRouteRefused { .. }
-            | BridgeError::InvalidInput(_)
-            | BridgeError::Unsupported { .. }
-    )
+/// What a fresh life's rotation that Core did not carry out leaves to settle
+/// ([`IdentityRuntime::refused_rotation`]): the rotation record an earlier
+/// call left, the retirement the call prepared, the head of Core's journal
+/// the call read before it asked Core, and the fact the rotation journals
+/// first.
+struct RefusedRotation {
+    earlier: Option<crate::runtime::IdentityRotationIntent>,
+    retiring: Option<lifecycle_projection::PreparedRetirement>,
+    asked_after: Option<u64>,
+    first: lifecycle_projection::StepFirstFact,
 }
 
 /// Map the terminal edge of an admitted turn. Pre-admission outcomes are
@@ -3594,6 +3592,10 @@ pub struct IdentityRuntime {
     /// Test seam: runs in a held bootstrap right after its freshness read.
     #[cfg(test)]
     held_after_freshness_hook: StdMutex<Option<HeldFreshnessHook>>,
+    /// Test seam: runs in a fresh life (a reset, a delete) right after Core
+    /// answered its rotation, before anything after it.
+    #[cfg(test)]
+    fresh_life_answered_hook: StdMutex<Option<HeldFreshnessHook>>,
     bootstrap_task: Mutex<Option<JoinHandle<()>>>,
     bootstrap_cancel: StdRwLock<Option<watch::Sender<bool>>>,
     bootstrap_shutdown: AtomicBool,
@@ -4118,6 +4120,32 @@ impl IdentityRuntime {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(hook);
     }
 
+    /// Test seam: run `hook` in the next fresh life (a reset, a delete)
+    /// right after Core answered its rotation, before anything after it.
+    #[cfg(test)]
+    pub(crate) fn set_fresh_life_answered_hook(&self, hook: HeldFreshnessHook) {
+        *self
+            .fresh_life_answered_hook
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(hook);
+    }
+
+    /// Test seam: run the hook a test set to run right after Core answered
+    /// a fresh life's rotation.
+    async fn run_fresh_life_answered_hook(&self) {
+        #[cfg(test)]
+        {
+            let hook = self
+                .fresh_life_answered_hook
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+            if let Some(hook) = hook {
+                hook().await;
+            }
+        }
+    }
+
     /// The held bootstrap pass in progress, if any.
     pub(crate) fn held_create_pass(&self) -> Option<Arc<super::held_bootstrap::HeldCreatePass>> {
         self.held_create_pass
@@ -4396,6 +4424,8 @@ impl IdentityRuntime {
             process_identity_records: Arc::new(crate::runtime::InMemoryMetadataStore::new()),
             #[cfg(test)]
             held_after_freshness_hook: StdMutex::new(None),
+            #[cfg(test)]
+            fresh_life_answered_hook: StdMutex::new(None),
             bootstrap_task: Mutex::new(None),
             bootstrap_cancel: StdRwLock::new(None),
             bootstrap_shutdown: AtomicBool::new(false),
@@ -13701,11 +13731,16 @@ impl IdentityRuntime {
             self.prepare_lifecycle_retirement(
                 identity,
                 crate::runtime::LifecycleEffectVerb::Unlisted,
+                None,
             )
             .await?
         } else {
-            self.prepare_lifecycle_retirement(identity, crate::runtime::LifecycleEffectVerb::Reload)
-                .await?
+            self.prepare_lifecycle_retirement(
+                identity,
+                crate::runtime::LifecycleEffectVerb::Reload,
+                None,
+            )
+            .await?
         };
         // A failed retire keeps what it recorded: the retirement may have
         // started, and Core finishes it; one that did not is asked again by
@@ -14326,7 +14361,11 @@ impl IdentityRuntime {
             // A replacement on the same session owes no lifecycle side
             // effect: recorded before Core is asked, as a reload's.
             let prepared = self
-                .prepare_lifecycle_retirement(identity, crate::runtime::LifecycleEffectVerb::Reload)
+                .prepare_lifecycle_retirement(
+                    identity,
+                    crate::runtime::LifecycleEffectVerb::Reload,
+                    None,
+                )
                 .await?;
             self.core_bridge(identity)?
                 .retire_member(&live.agent_runtime_id)
@@ -14516,17 +14555,12 @@ impl IdentityRuntime {
         // made directly on the mob under the identity's member id, since
         // retired, is not the identity's, so its session is never captured
         // into the identity's memory.
-        let previous = self
-            .core_last_binding(identity)
-            .await?
+        let last = self.core_last_binding(identity).await?;
+        let previous = last
+            .clone()
             .filter(|binding| binding_spawned_for_identity(binding, identity));
-        self.start_fresh_life_locked(
-            identity,
-            &mut foreground_shutdown,
-            FreshLife::Reset,
-            previous.clone(),
-        )
-        .await?;
+        self.start_fresh_life_locked(identity, &mut foreground_shutdown, FreshLife::Reset, last)
+            .await?;
 
         // The fresh life is committed in Core from here. The bookkeeping that
         // needs only the old binding runs first, so a failed read of the
@@ -14538,9 +14572,11 @@ impl IdentityRuntime {
         // pending pre-attribution taint) and mark the outgoing boundary
         // synchronously. The fresh life always runs on a fresh session, so
         // the old one is outgoing. Its distillation is the lifecycle
-        // projection's, once Core journaled the rotation's retirement of it
-        // (which repeats the marks first), so a restart in between still
-        // distills it, and the reset stays latency-neutral.
+        // projection's (which repeats the marks first), so a restart in
+        // between still distills it, and the reset stays latency-neutral:
+        // at the rotation's retirement of the live incarnation, or, for an
+        // incarnation Core had already retired, at the fresh life's seat,
+        // which Core journals as the life after that incarnation.
         let injector = self.agent_memory.read().await.clone();
         if let Some(injector) = injector.as_ref() {
             injector.clear_taint_for_identity(identity);
@@ -14554,23 +14590,6 @@ impl IdentityRuntime {
                     &session_key,
                     previous.generation().get(),
                 );
-                // An incarnation Core had already retired is not retired by
-                // the rotation, so no journal fact carries its distillation:
-                // it runs beside the projection, bounded by the distiller,
-                // and a graceful shutdown joins it with the projection.
-                if !previous.is_live() {
-                    let injector = injector.clone();
-                    let identity = identity.clone();
-                    self.spawn_lifecycle_side_task(async move {
-                        injector
-                            .distill_before_rotation(
-                                &identity,
-                                &session_key,
-                                crate::memory::distiller::DistillCause::Reset,
-                            )
-                            .await;
-                    });
-                }
             }
         }
         self.settle_fresh_life(identity).await;
@@ -14647,7 +14666,7 @@ impl IdentityRuntime {
         identity: &AgentIdentity,
         foreground_shutdown: &mut watch::Receiver<bool>,
         life: FreshLife,
-        previous: Option<meerkat_mob::MemberBinding>,
+        last: Option<meerkat_mob::MemberBinding>,
     ) -> Result<SessionId, IdentityRuntimeError> {
         let operation = life.operation();
         // An identity a held pass did not publish owes its host a fresh held
@@ -14694,15 +14713,20 @@ impl IdentityRuntime {
                 ),
             })?
             .remove(identity);
-        // The live incarnation the rotation retires, as the verb read it;
-        // `None` when Core holds none the identity spawned, and its rotation
-        // seats the identity fresh.
+        // The head of Core's journal before Core is asked: after a failure,
+        // the fact the rotation journals first, past it, says the rotation
+        // reached Core. A head that does not read refuses the step here.
+        let asked_after = self.lifecycle_journal_head(identity).await?;
+        let first = lifecycle_projection::StepFirstFact::of(last.as_ref());
+        // The live incarnation the rotation retires, as the verb read it, or
+        // the incarnation Core had already retired that the rotation's fresh
+        // life follows; `None` when Core held none the identity spawned.
         let retiring = self
-            .prepare_lifecycle_retirement_of(identity, previous, life.effect_verb())
+            .prepare_lifecycle_retirement_of(identity, last, life.effect_verb(), asked_after)
             .await?;
         let from_generation = retiring
             .as_ref()
-            .map(lifecycle_projection::PreparedRetirement::generation);
+            .and_then(lifecycle_projection::PreparedRetirement::live_generation);
         if let Err(error) = self
             .record_rotation_intent(identity, operation, from_generation)
             .await
@@ -14719,10 +14743,21 @@ impl IdentityRuntime {
             Ok(session_id) => session_id,
             Err(error) => {
                 return Err(self
-                    .refused_rotation(identity, operation, earlier_rotation, retiring, error)
+                    .refused_rotation(
+                        identity,
+                        operation,
+                        RefusedRotation {
+                            earlier: earlier_rotation,
+                            retiring,
+                            asked_after,
+                            first,
+                        },
+                        error,
+                    )
                     .await);
             }
         };
+        self.run_fresh_life_answered_hook().await;
         self.bind_lifecycle_build(identity, &session_id);
         self.clear_rotation_intent(identity).await;
         self.settle_lifecycle_retirement(retiring).await;
@@ -14742,30 +14777,46 @@ impl IdentityRuntime {
         Ok(session_id)
     }
 
-    /// The answer to a rotation Core did not carry out. When nothing of it
-    /// started (Core's typed refusal, a spec this bridge could not lower
-    /// before Core was asked, or a fresh life the launch's member auth
-    /// binding refuses), the record this call wrote is taken back, an
-    /// earlier call's record put back as it was, and the refusal answered:
-    /// no later compile or restart carries the rotation out. So is what the
-    /// retirement it prepared would owe (`retiring`). Otherwise the rotation
-    /// may have started, so its records stay, and the identity's next
-    /// roster compile drives it to its end.
+    /// The answer to a rotation Core did not carry out, and what becomes of
+    /// what the call recorded. Core's journal says whether any of the
+    /// rotation reached Core ([`Self::lifecycle_step_reach`]): when the fact
+    /// the rotation journals first does not follow the head the call read
+    /// before it asked Core, nothing of it reached Core, so the rotation
+    /// record this call wrote is taken back, an earlier call's put back as
+    /// it was, and so is what the retirement it prepared would owe
+    /// (`retiring`): no later compile or restart carries the rotation out,
+    /// and the bridge's error picks the answer. Otherwise (the fact follows,
+    /// or the journal does not read) the rotation may have started, so its
+    /// records stay, the identity's next roster compile drives it to its
+    /// end, and the answer says so, whatever the error.
     async fn refused_rotation(
         &self,
         identity: &AgentIdentity,
         operation: &'static str,
-        earlier: Option<crate::runtime::IdentityRotationIntent>,
-        retiring: Option<lifecycle_projection::PreparedRetirement>,
+        refused: RefusedRotation,
         error: BridgeError,
     ) -> IdentityRuntimeError {
-        if nothing_of_the_rotation_started(&error) {
-            self.forget_lifecycle_build(identity);
-            self.abandon_lifecycle_retirement(retiring).await;
+        let RefusedRotation {
+            earlier,
+            retiring,
+            asked_after,
+            first,
+        } = refused;
+        if self
+            .lifecycle_step_reach(identity, asked_after, first)
+            .await
+            != lifecycle_projection::StepReach::NotReached
+        {
+            return IdentityRuntimeError::Internal(format!(
+                "{operation} of identity {identity}: Core's rotation failed ({error}); it may \
+                 have started, and the identity's next roster compile drives it to its end"
+            ));
         }
+        self.forget_lifecycle_build(identity);
+        self.abandon_lifecycle_retirement(retiring).await;
+        self.restore_rotation_intent(identity, earlier).await;
         match error {
             BridgeError::RotationRefused { detail, .. } => {
-                self.restore_rotation_intent(identity, earlier).await;
                 IdentityRuntimeError::IdentityWakeRetryable {
                     identity: identity.clone(),
                     session_id: None,
@@ -14782,7 +14833,6 @@ impl IdentityRuntime {
             // and nothing to retire. Asking again is refused the same way, so
             // the answer is final.
             BridgeError::MemberRouteRefused { detail, .. } => {
-                self.restore_rotation_intent(identity, earlier).await;
                 IdentityRuntimeError::HostRejectedBuild {
                     identity: identity.clone(),
                     reason: format!(
@@ -14791,16 +14841,9 @@ impl IdentityRuntime {
                     ),
                 }
             }
-            error @ (BridgeError::InvalidInput(_) | BridgeError::Unsupported { .. }) => {
-                self.restore_rotation_intent(identity, earlier).await;
-                IdentityRuntimeError::Internal(format!(
-                    "{operation} of identity {identity} was not started, and nothing was \
-                     retired: {error}"
-                ))
-            }
             error => IdentityRuntimeError::Internal(format!(
-                "{operation} of identity {identity}: Core's rotation failed: {error}; the \
-                 identity's next roster compile drives a rotation Core started to its end"
+                "{operation} of identity {identity} was not started, and nothing was retired: \
+                 {error}"
             )),
         }
     }
@@ -14918,9 +14961,9 @@ impl IdentityRuntime {
         // under the identity's member id, since retired, answers as an
         // identity Core never spawned: nothing of its session is distilled,
         // dropped or interviewed.
-        let Some(previous) = self
-            .core_last_binding(identity)
-            .await?
+        let last = self.core_last_binding(identity).await?;
+        let Some(previous) = last
+            .clone()
             .filter(|binding| binding_spawned_for_identity(binding, identity))
         else {
             return Ok(None);
@@ -14944,42 +14987,20 @@ impl IdentityRuntime {
         }
 
         let mut foreground_shutdown = self.foreground_cancel.subscribe();
-        // The rotation's record reads the liveness the delete read: what the
-        // projection owes and what runs here below agree.
-        self.start_fresh_life_locked(
-            identity,
-            &mut foreground_shutdown,
-            FreshLife::Delete,
-            Some(previous.clone()),
-        )
-        .await?;
+        // The rotation's record reads the binding the delete read, live or
+        // retired.
+        self.start_fresh_life_locked(identity, &mut foreground_shutdown, FreshLife::Delete, last)
+            .await?;
 
         // The fresh life is committed in Core from here. The drop of the old
         // session's semantic-memory scope (Ask 2 GC: the identity never
         // resumes it, and its knowledge was just distilled into the
         // identity-keyed Meta store the exit interview reads) and the exit
         // interview (section 8.5: delete is the identity's LAST boundary) are
-        // the lifecycle projection's, once Core journaled the rotation's
-        // retirement of the live incarnation, so a restart in between still
-        // runs them. An incarnation Core had already retired is not retired
-        // by the rotation, so no journal fact carries them: they run here,
-        // best-effort, before the fresh binding is read, so a failed read
-        // never leaves them undone or invites a second rotation.
-        if !previous.is_live()
-            && let Some(injector) = injector
-        {
-            if let Some(session_key) = previous_session_key.as_ref() {
-                injector
-                    .drop_orphaned_session_scope(
-                        session_key,
-                        crate::memory::distiller::DistillCause::Delete,
-                    )
-                    .await;
-            }
-            injector
-                .note_identity_retired(identity, previous_session_key.as_deref(), "delete")
-                .await;
-        }
+        // the lifecycle projection's, so a restart in between still runs
+        // them: at the rotation's retirement of the live incarnation, or,
+        // for an incarnation Core had already retired, at the fresh life's
+        // seat, which Core journals as the life after that incarnation.
 
         // Subscriptions belong to the old life and end with it.
         self.event_channels.write().await.remove(identity);

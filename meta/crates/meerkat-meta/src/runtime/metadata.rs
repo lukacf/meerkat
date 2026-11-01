@@ -421,22 +421,66 @@ impl LifecycleProjectionBacklog {
     }
 }
 
-/// The key of a lifecycle effect intent: the identity and the generation of
-/// the incarnation its step ends.
+/// The key of a lifecycle effect intent: the identity, the generation of
+/// the incarnation its step ends or follows, and which of that
+/// incarnation's two intents it is.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub struct LifecycleIntentKey {
     pub identity: String,
     pub generation: u64,
+    #[serde(default)]
+    pub slot: LifecycleIntentSlot,
 }
 
 impl LifecycleIntentKey {
+    /// The key of the intent of the step that ends `identity`'s incarnation
+    /// `generation`.
     pub fn new(identity: impl Into<String>, generation: u64) -> Self {
         Self {
             identity: identity.into(),
             generation,
+            slot: LifecycleIntentSlot::End,
         }
     }
+
+    /// The key of the intent of a reset or a delete that seats `identity`'s
+    /// fresh life after its incarnation `generation`, which Core had
+    /// already retired.
+    pub fn fresh_life_after(identity: impl Into<String>, generation: u64) -> Self {
+        Self {
+            identity: identity.into(),
+            generation,
+            slot: LifecycleIntentSlot::FreshLifeAfter,
+        }
+    }
+}
+
+/// Which of an incarnation's two lifecycle effect intents a key names. The
+/// two are kept apart, so consuming one never removes the other.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum LifecycleIntentSlot {
+    /// The intent of the step that ends the incarnation, read at its
+    /// retirement.
+    #[default]
+    End,
+    /// The intent of a reset or a delete that seats the identity's fresh
+    /// life after the incarnation, which Core had already retired, read at
+    /// that fresh life's seat.
+    FreshLifeAfter,
 }
 
 /// What one lifecycle step a Meta verb asks Core for owes beyond what Core's
@@ -468,10 +512,12 @@ pub enum LifecycleEffectVerb {
 /// The side effects a Meta verb owes for one lifecycle step it asks Core
 /// for, recorded before Core is asked. The identity runtime's lifecycle
 /// projection reads it when it reaches the end of `generation` in Core's
-/// journal, and removes it once that step's side effects ran. Kept in the
-/// same placements as [`IdentityToolRecord`] (key
-/// `lifecycle_intent/<generation>/<identity>`; host store document
-/// `effect/...`).
+/// journal (or, for a fresh life after an incarnation Core had already
+/// retired, that fresh life's seat), and removes it once that step's side
+/// effects ran. Kept in the same placements as [`IdentityToolRecord`] (key
+/// `lifecycle_intent/<generation>/<identity>`, or
+/// `lifecycle_intent/<generation>.after/<identity>` for a fresh life's;
+/// host store document `effect/...`).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub struct LifecycleEffectIntent {
@@ -488,6 +534,25 @@ pub struct LifecycleEffectIntent {
     /// When the step was asked, in Unix milliseconds. The exit interview the
     /// step queues is keyed by it, so a replay of the step queues it once.
     pub recorded_at_ms: u64,
+    /// The cursor of the head of Core's member lifecycle journal, read
+    /// before Core was asked for the step: a fact of the identity's member
+    /// that Core journaled after it is the step's (or another step's of the
+    /// same member), so a step that failed tells from the journal whether
+    /// any of it reached Core. `None` for an intent recorded without it (by
+    /// an earlier build, or when the head did not read): a step that failed
+    /// then keeps its intent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asked_after: Option<u64>,
+    /// Core had retired the incarnation `generation` before the step was
+    /// asked: the step (a reset, a delete) seats the identity's fresh life
+    /// after it, and Core journals that seat as a fresh life after
+    /// `generation`. The projection reads the intent at that seat, not at
+    /// the incarnation's retirement, and runs the verb's memory side effects
+    /// on `session_id`, with no retirement hook. Such an intent has a key
+    /// of its own ([`LifecycleIntentSlot::FreshLifeAfter`]), apart from
+    /// the intent of the step that ended the incarnation.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub predecessor_retired: bool,
 }
 
 impl LifecycleEffectIntent {
@@ -510,12 +575,35 @@ impl LifecycleEffectIntent {
             verb,
             session_id,
             recorded_at_ms,
+            asked_after: None,
+            predecessor_retired: false,
         }
     }
 
-    /// The intent's key.
+    /// The intent, with the head of Core's journal its step read before
+    /// Core was asked (`asked_after`).
+    #[must_use]
+    pub fn with_asked_after(mut self, asked_after: Option<u64>) -> Self {
+        self.asked_after = asked_after;
+        self
+    }
+
+    /// The intent, for a step whose incarnation Core had already retired
+    /// before it was asked (`predecessor_retired`).
+    #[must_use]
+    pub fn with_predecessor_retired(mut self, predecessor_retired: bool) -> Self {
+        self.predecessor_retired = predecessor_retired;
+        self
+    }
+
+    /// The intent's key: the fresh life's slot for a step whose
+    /// incarnation Core had already retired.
     pub fn key(&self) -> LifecycleIntentKey {
-        LifecycleIntentKey::new(self.identity.clone(), self.generation)
+        if self.predecessor_retired {
+            LifecycleIntentKey::fresh_life_after(self.identity.clone(), self.generation)
+        } else {
+            LifecycleIntentKey::new(self.identity.clone(), self.generation)
+        }
     }
 }
 
@@ -672,10 +760,19 @@ const LIFECYCLE_INTENT_KEY_PREFIX: &str = "lifecycle_intent/";
 /// Key prefix of the lifecycle effect failures in the `meta_metadata` table.
 const LIFECYCLE_FAILURE_KEY_PREFIX: &str = "lifecycle_failure/";
 
-/// The key of the lifecycle effect intent of `identity`'s `generation`: the
-/// generation first, so the key is unambiguous whatever the identity holds.
-fn lifecycle_intent_key(identity: &str, generation: u64) -> String {
-    format!("{LIFECYCLE_INTENT_KEY_PREFIX}{generation}/{identity}")
+/// The key of the lifecycle effect intent `key` names: the generation and
+/// the slot first, so the key is unambiguous whatever the identity holds
+/// (a generation's digits end at `/` for the intent of the step that ends
+/// the incarnation, and at `.after/` for a fresh life's).
+fn lifecycle_intent_key(key: &LifecycleIntentKey) -> String {
+    let generation = key.generation;
+    let identity = &key.identity;
+    match key.slot {
+        LifecycleIntentSlot::End => format!("{LIFECYCLE_INTENT_KEY_PREFIX}{generation}/{identity}"),
+        LifecycleIntentSlot::FreshLifeAfter => {
+            format!("{LIFECYCLE_INTENT_KEY_PREFIX}{generation}.after/{identity}")
+        }
+    }
 }
 
 /// The key of `failure`: its generation and effect first, both free of `/`,
@@ -827,8 +924,8 @@ pub trait PersistentMetadataStore: Send + Sync {
         cursor: &LifecycleProjectionCursor,
     ) -> Result<(), MetadataStoreError>;
 
-    /// The lifecycle effect intent of `identity`'s `generation` in `mob_id`,
-    /// if one was recorded.
+    /// The lifecycle effect intent `key` names in `mob_id`, if one was
+    /// recorded.
     ///
     /// Required: the intent carries what a reset, a delete or the roster's
     /// unlisting owes across a restart that came between the step and its
@@ -836,25 +933,23 @@ pub trait PersistentMetadataStore: Send + Sync {
     async fn lifecycle_effect_intent(
         &self,
         mob_id: &str,
-        identity: &str,
-        generation: u64,
+        key: &LifecycleIntentKey,
     ) -> Result<Option<LifecycleEffectIntent>, MetadataStoreError>;
 
-    /// Record (or replace) a lifecycle effect intent, durably, before the
-    /// step it names is asked of Core. An error refuses the step: nothing
-    /// starts.
+    /// Record (or replace) a lifecycle effect intent under its key
+    /// ([`LifecycleEffectIntent::key`]), durably, before the step it names
+    /// is asked of Core. An error refuses the step: nothing starts.
     async fn set_lifecycle_effect_intent(
         &self,
         intent: &LifecycleEffectIntent,
     ) -> Result<(), MetadataStoreError>;
 
-    /// Remove the lifecycle effect intent of `identity`'s `generation`;
-    /// removing an absent one is not an error.
+    /// Remove the lifecycle effect intent `key` names; removing an absent
+    /// one is not an error.
     async fn clear_lifecycle_effect_intent(
         &self,
         mob_id: &str,
-        identity: &str,
-        generation: u64,
+        key: &LifecycleIntentKey,
     ) -> Result<(), MetadataStoreError>;
 
     /// Every lifecycle effect intent recorded for `mob_id`, in no promised
@@ -920,7 +1015,7 @@ pub struct InMemoryMetadataStore {
     identity_tool_records: RwLock<BTreeMap<(String, String), IdentityToolRecord>>,
     identity_rotation_intents: RwLock<BTreeMap<(String, String), IdentityRotationIntent>>,
     lifecycle_cursors: RwLock<BTreeMap<String, LifecycleProjectionCursor>>,
-    lifecycle_intents: RwLock<BTreeMap<(String, String, u64), LifecycleEffectIntent>>,
+    lifecycle_intents: RwLock<BTreeMap<(String, LifecycleIntentKey), LifecycleEffectIntent>>,
     lifecycle_failures: RwLock<BTreeMap<(String, String), LifecycleEffectFailure>>,
 }
 
@@ -1071,14 +1166,13 @@ impl PersistentMetadataStore for InMemoryMetadataStore {
     async fn lifecycle_effect_intent(
         &self,
         mob_id: &str,
-        identity: &str,
-        generation: u64,
+        key: &LifecycleIntentKey,
     ) -> Result<Option<LifecycleEffectIntent>, MetadataStoreError> {
         Ok(self
             .lifecycle_intents
             .read()
             .await
-            .get(&(mob_id.to_string(), identity.to_string(), generation))
+            .get(&(mob_id.to_string(), key.clone()))
             .cloned())
     }
 
@@ -1086,28 +1180,22 @@ impl PersistentMetadataStore for InMemoryMetadataStore {
         &self,
         intent: &LifecycleEffectIntent,
     ) -> Result<(), MetadataStoreError> {
-        self.lifecycle_intents.write().await.insert(
-            (
-                intent.mob_id.clone(),
-                intent.identity.clone(),
-                intent.generation,
-            ),
-            intent.clone(),
-        );
+        self.lifecycle_intents
+            .write()
+            .await
+            .insert((intent.mob_id.clone(), intent.key()), intent.clone());
         Ok(())
     }
 
     async fn clear_lifecycle_effect_intent(
         &self,
         mob_id: &str,
-        identity: &str,
-        generation: u64,
+        key: &LifecycleIntentKey,
     ) -> Result<(), MetadataStoreError> {
-        self.lifecycle_intents.write().await.remove(&(
-            mob_id.to_string(),
-            identity.to_string(),
-            generation,
-        ));
+        self.lifecycle_intents
+            .write()
+            .await
+            .remove(&(mob_id.to_string(), key.clone()));
         Ok(())
     }
 
@@ -1606,10 +1694,9 @@ impl PersistentMetadataStore for SqliteMetadataStore {
     async fn lifecycle_effect_intent(
         &self,
         mob_id: &str,
-        identity: &str,
-        generation: u64,
+        key: &LifecycleIntentKey,
     ) -> Result<Option<LifecycleEffectIntent>, MetadataStoreError> {
-        self.identity_record_row(mob_id, &lifecycle_intent_key(identity, generation))?
+        self.identity_record_row(mob_id, &lifecycle_intent_key(key))?
             .map(|value| decode_identity_record(value.as_bytes()))
             .transpose()
     }
@@ -1621,7 +1708,7 @@ impl PersistentMetadataStore for SqliteMetadataStore {
         let value = encode_identity_record(intent)?;
         self.upsert_identity_record_row(
             &intent.mob_id,
-            &lifecycle_intent_key(&intent.identity, intent.generation),
+            &lifecycle_intent_key(&intent.key()),
             &value,
         )
     }
@@ -1629,14 +1716,13 @@ impl PersistentMetadataStore for SqliteMetadataStore {
     async fn clear_lifecycle_effect_intent(
         &self,
         mob_id: &str,
-        identity: &str,
-        generation: u64,
+        key: &LifecycleIntentKey,
     ) -> Result<(), MetadataStoreError> {
         let _fence = self.operation_fence()?;
         let conn = self.lock_conn()?;
         conn.execute(
             "DELETE FROM meta_metadata WHERE mob_id = ?1 AND key = ?2",
-            rusqlite::params![mob_id, lifecycle_intent_key(identity, generation)],
+            rusqlite::params![mob_id, lifecycle_intent_key(key)],
         )
         .map_err(|err| MetadataStoreError::Io(format!("delete: {err}")))?;
         Ok(())
@@ -2085,9 +2171,11 @@ mod tests {
     }
 
     /// The lifecycle projection's records are per mob, survive a reopen of
-    /// a SQLite store, and an intent is keyed by its identity and the
-    /// generation it ends: an identity's next generation is another intent,
-    /// and an identity whose name looks like a key's tail is another one.
+    /// a SQLite store, and an intent is keyed by its identity, the
+    /// generation it ends or follows, and its slot: an identity's next
+    /// generation is another intent, a fresh life's intent after a
+    /// generation is apart from the intent of the step that ended it, and an
+    /// identity whose name looks like a key's tail is another one.
     #[tokio::test]
     async fn lifecycle_projection_records_round_trip_per_mob_and_generation() {
         let dir = tempfile::tempdir().unwrap();
@@ -2102,6 +2190,14 @@ mod tests {
         let unlisted = effect_intent("mob-a", "personal:alice", 3, LifecycleEffectVerb::Unlisted);
         let deleted = effect_intent("mob-a", "personal:alice", 4, LifecycleEffectVerb::Delete);
         let lookalike = effect_intent("mob-a", "3/personal:alice", 0, LifecycleEffectVerb::Reset);
+        let fresh_life = effect_intent("mob-a", "personal:alice", 3, LifecycleEffectVerb::Reset)
+            .with_predecessor_retired(true);
+        let after_lookalike = effect_intent(
+            "mob-a",
+            "after/personal:alice",
+            3,
+            LifecycleEffectVerb::Reset,
+        );
         for store in stores {
             assert_eq!(
                 store.lifecycle_projection_cursor("mob-a").await.unwrap(),
@@ -2120,59 +2216,106 @@ mod tests {
                 None,
                 "cursors are per mob"
             );
-            for intent in [&unlisted, &deleted, &lookalike] {
+            for intent in [
+                &unlisted,
+                &deleted,
+                &lookalike,
+                &fresh_life,
+                &after_lookalike,
+            ] {
                 store.set_lifecycle_effect_intent(intent).await.unwrap();
             }
             assert_eq!(
                 store
-                    .lifecycle_effect_intent("mob-a", "personal:alice", 3)
+                    .lifecycle_effect_intent(
+                        "mob-a",
+                        &LifecycleIntentKey::fresh_life_after("personal:alice", 3)
+                    )
+                    .await
+                    .unwrap(),
+                Some(fresh_life.clone()),
+                "a fresh life's intent is kept apart from the unlisting's"
+            );
+            assert_eq!(
+                store
+                    .lifecycle_effect_intent(
+                        "mob-a",
+                        &LifecycleIntentKey::new("after/personal:alice", 3)
+                    )
+                    .await
+                    .unwrap(),
+                Some(after_lookalike.clone())
+            );
+            assert_eq!(
+                store
+                    .lifecycle_effect_intent("mob-a", &LifecycleIntentKey::new("personal:alice", 3))
                     .await
                     .unwrap(),
                 Some(unlisted.clone())
             );
             assert_eq!(
                 store
-                    .lifecycle_effect_intent("mob-a", "personal:alice", 4)
+                    .lifecycle_effect_intent("mob-a", &LifecycleIntentKey::new("personal:alice", 4))
                     .await
                     .unwrap(),
                 Some(deleted.clone())
             );
             assert_eq!(
                 store
-                    .lifecycle_effect_intent("mob-a", "3/personal:alice", 0)
+                    .lifecycle_effect_intent(
+                        "mob-a",
+                        &LifecycleIntentKey::new("3/personal:alice", 0)
+                    )
                     .await
                     .unwrap(),
                 Some(lookalike.clone())
             );
             assert_eq!(
                 store
-                    .lifecycle_effect_intent("mob-b", "personal:alice", 3)
+                    .lifecycle_effect_intent("mob-b", &LifecycleIntentKey::new("personal:alice", 3))
                     .await
                     .unwrap(),
                 None,
                 "intents are per mob"
             );
             store
-                .clear_lifecycle_effect_intent("mob-a", "personal:alice", 3)
+                .clear_lifecycle_effect_intent(
+                    "mob-a",
+                    &LifecycleIntentKey::new("personal:alice", 3),
+                )
                 .await
                 .unwrap();
             assert_eq!(
                 store
-                    .lifecycle_effect_intent("mob-a", "personal:alice", 3)
+                    .lifecycle_effect_intent("mob-a", &LifecycleIntentKey::new("personal:alice", 3))
                     .await
                     .unwrap(),
                 None
             );
             assert_eq!(
                 store
-                    .lifecycle_effect_intent("mob-a", "personal:alice", 4)
+                    .lifecycle_effect_intent("mob-a", &LifecycleIntentKey::new("personal:alice", 4))
                     .await
                     .unwrap(),
                 Some(deleted.clone()),
                 "clearing one generation keeps the next"
             );
+            assert_eq!(
+                store
+                    .lifecycle_effect_intent(
+                        "mob-a",
+                        &LifecycleIntentKey::fresh_life_after("personal:alice", 3)
+                    )
+                    .await
+                    .unwrap(),
+                Some(fresh_life.clone()),
+                "clearing the unlisting's intent keeps the fresh life's"
+            );
             store
-                .clear_lifecycle_effect_intent("mob-a", "personal:alice", 3)
+                .clear_lifecycle_effect_intent(
+                    "mob-a",
+                    &LifecycleIntentKey::new("personal:alice", 3),
+                )
                 .await
                 .expect("clearing an absent intent is no error");
         }
@@ -2185,7 +2328,7 @@ mod tests {
         );
         assert_eq!(
             reopened
-                .lifecycle_effect_intent("mob-a", "personal:alice", 4)
+                .lifecycle_effect_intent("mob-a", &LifecycleIntentKey::new("personal:alice", 4))
                 .await
                 .unwrap(),
             Some(deleted)
@@ -2225,9 +2368,19 @@ mod tests {
             "the queue refused the write",
             1_700_000_000_000,
         );
+        let listed_keys = |intents: Vec<LifecycleEffectIntent>| {
+            let mut keys = intents
+                .iter()
+                .map(LifecycleEffectIntent::key)
+                .collect::<Vec<_>>();
+            keys.sort();
+            keys
+        };
         for store in stores {
             for intent in [
                 effect_intent("mob-a", "personal:alice", 3, LifecycleEffectVerb::Unlisted),
+                effect_intent("mob-a", "personal:alice", 3, LifecycleEffectVerb::Delete)
+                    .with_predecessor_retired(true),
                 effect_intent("mob-a", "personal:bob", 1, LifecycleEffectVerb::RoleMove),
                 effect_intent("mob-b", "personal:alice", 3, LifecycleEffectVerb::Reset),
             ] {
@@ -2238,20 +2391,63 @@ mod tests {
                 .await
                 .unwrap()
                 .into_iter()
-                .map(|intent| (intent.identity, intent.generation, intent.verb))
+                .map(|intent| {
+                    (
+                        intent.identity.clone(),
+                        intent.generation,
+                        intent.key().slot,
+                        intent.verb,
+                    )
+                })
                 .collect::<Vec<_>>();
-            listed.sort_by(|a, b| (&a.0, a.1).cmp(&(&b.0, b.1)));
+            listed.sort_by(|a, b| (&a.0, a.1, a.2).cmp(&(&b.0, b.1, b.2)));
             assert_eq!(
                 listed,
                 vec![
                     (
                         "personal:alice".to_string(),
                         3,
+                        LifecycleIntentSlot::End,
                         LifecycleEffectVerb::Unlisted
                     ),
-                    ("personal:bob".to_string(), 1, LifecycleEffectVerb::RoleMove),
+                    (
+                        "personal:alice".to_string(),
+                        3,
+                        LifecycleIntentSlot::FreshLifeAfter,
+                        LifecycleEffectVerb::Delete
+                    ),
+                    (
+                        "personal:bob".to_string(),
+                        1,
+                        LifecycleIntentSlot::End,
+                        LifecycleEffectVerb::RoleMove
+                    ),
+                ],
+                "the listing holds both of an incarnation's intents"
+            );
+            // Clearing the fresh life's intent leaves the end's, and the
+            // listing says so.
+            store
+                .clear_lifecycle_effect_intent(
+                    "mob-a",
+                    &LifecycleIntentKey::fresh_life_after("personal:alice", 3),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                listed_keys(store.lifecycle_effect_intents("mob-a").await.unwrap()),
+                vec![
+                    LifecycleIntentKey::new("personal:alice", 3),
+                    LifecycleIntentKey::new("personal:bob", 1),
                 ]
             );
+            store
+                .set_lifecycle_effect_intent(
+                    &effect_intent("mob-a", "personal:alice", 3, LifecycleEffectVerb::Delete)
+                        .with_predecessor_retired(true),
+                )
+                .await
+                .unwrap();
             store.record_lifecycle_effect_failure(&hook).await.unwrap();
             store
                 .record_lifecycle_effect_failure(&interview)
@@ -2282,6 +2478,15 @@ mod tests {
                 .unwrap(),
             vec![interview, hook],
             "the failures survive a reopen"
+        );
+        assert_eq!(
+            listed_keys(reopened.lifecycle_effect_intents("mob-a").await.unwrap()),
+            vec![
+                LifecycleIntentKey::new("personal:alice", 3),
+                LifecycleIntentKey::fresh_life_after("personal:alice", 3),
+                LifecycleIntentKey::new("personal:bob", 1),
+            ],
+            "both of an incarnation's intents survive a reopen"
         );
     }
 

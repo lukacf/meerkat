@@ -988,12 +988,13 @@ pub enum ErrorEvent {
         error: String,
     },
     /// The identity runtime's lifecycle projection is off: the session
-    /// bridge cannot read Core's member lifecycle journal, or an identity's
-    /// binding, so no lifecycle side effect of a step Core journals runs (no
-    /// `after_create`, no retirement hook, no distillation or exit interview
-    /// of a retired incarnation). Reported once, when the projection finds
-    /// it out; the runtime's status and health say so for as long as it
-    /// lasts. `detail` says which read failed and what to implement.
+    /// bridge cannot read Core's member lifecycle journal, an identity's
+    /// binding, or Core's standing of an identity's member, so no lifecycle
+    /// side effect of a step Core journals runs (no `after_create`, no
+    /// retirement hook, no distillation or exit interview of a retired
+    /// incarnation). Reported once, when the projection finds it out; the
+    /// runtime's status and health say so for as long as it lasts. `detail`
+    /// says which read failed and what to implement.
     LifecycleProjectionOff {
         detail: String,
     },

@@ -4,7 +4,7 @@ description: "Optional ABAC for the console: control which users can see which a
 icon: "lock"
 ---
 
-*Mirrored from MobKit main at [6e73abee5f2d](https://github.com/lukacf/meerkat/commit/6e73abee5f2d5e5c24d114979e9c6465c4bbc2f0) on 2026-11-01; MobKit version 0.9.7 at that commit.*
+*Mirrored from MobKit main at [81bb0dddf498](https://github.com/lukacf/meerkat/commit/81bb0dddf4985b55e7d8ffad292a86e4984e1bbf) on 2026-11-01; MobKit version 0.9.7 at that commit.*
 
 Meta ships an optional attribute-based access control (ABAC) layer for everything that flows through the console and observation surfaces. When it is off — the default — nothing changes. When it is on, every console caller only sees and operates exactly what their attributes grant: the agent sidebar, roster, topology, timeline, event streams, sends, and lifecycle actions are all filtered or gated per principal, invisibly. A restricted user doesn't see denied agents or disabled buttons explained; they just get a console shaped to what they're allowed.
 
@@ -296,13 +296,27 @@ server messages:
 | `-32009`, `access_revision_conflict` | Retain the draft, refresh, review and explicitly reapply. `expected_revision` and `actual_revision` describe the mismatch. |
 | `-32009`, `access_owner_changed` | Read the replacement owner and explicitly review before another save. |
 | `-32004`, `access_mutation_unavailable` | Keep the draft; do not fall back to an unchecked write. Refresh after availability is restored. |
-| `-32602`, invalid configuration or checked request | Correct the request; do not treat it as a successful save. |
+| `-32602`, invalid configuration or checked request | Correct the request; do not treat it as a successful save. An invalid configuration answers `invalid_access_config` with `reason` and `detail`, which say what is wrong (below). |
 | `-32000`, `access_persistence_failed` | Report that persistence failed and refresh before an explicit retry. The new live revision was not published. |
 | `-32030`, `access_denied`, or the separate `read_only` error | Respect the current authorization or connection policy; changing the revision cannot authorize the write. |
 
+An `invalid_access_config` refusal carries `reason`, a stable token, and
+`detail`, the text that names the rule, action, group or approver at fault,
+for example `"reason": "unknown_group"` with
+`"detail": "access rule ops: unknown group \"ghosts\""`. The reasons are
+`enabled_without_admins`, `empty_rule_id`, `duplicate_rule_id`,
+`empty_actions`, `unknown_action`, `unknown_group`, `empty_approver_id`,
+`padded_approver_id`, `approver_without_holders`, `unknown_approver_group`,
+`unknown_rule` and `invalid_toml` (a configuration the owner could not write
+as TOML), and the list can grow. Map the reasons you know to your own words.
+Only an administrator receives this refusal, and `detail` names only entries
+of the configuration that was saved, so an access editor may show it, also
+for a reason it does not know.
+
 A transport timeout is not proof of rejection. Read the current owner state
-before deciding whether to retry. UI error notices should remain finite and
-safe, without displaying arbitrary backend diagnostic text.
+before deciding whether to retry. Apart from that `detail`, UI error notices
+should remain finite and safe, without displaying arbitrary backend
+diagnostic text.
 
 ### Refusal feedback and audit limits
 

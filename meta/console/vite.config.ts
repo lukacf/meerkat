@@ -29,12 +29,14 @@ export default defineConfig({
       exactly("@modelcontextprotocol/client", path.resolve(__dirname, "node_modules/@modelcontextprotocol/client/dist/index.mjs")),
       // Package directories: their sub-paths resolve inside them.
       { find: "clsx", replacement: path.resolve(__dirname, "node_modules/clsx") },
+      // The kit's force layout (packages/console-components/src/viz/layout).
+      { find: "d3-force", replacement: path.resolve(__dirname, "node_modules/d3-force") },
       { find: "react-markdown", replacement: path.resolve(__dirname, "node_modules/react-markdown") },
       { find: "remark-gfm", replacement: path.resolve(__dirname, "node_modules/remark-gfm") },
     ],
   },
   optimizeDeps: {
-    include: ["clsx", "react", "react-dom"],
+    include: ["clsx", "d3-force", "react", "react-dom"],
   },
   server: {
     port: 5199,

@@ -416,15 +416,20 @@ impl ApplyMob {
 /// A complete roster is the host's whole roster: its seal unlists every
 /// Declared entry the roster does not list. An unlisted entry whose member
 /// is seated is retired, its start row records the cause `Unlisted`, and
-/// the end of the retirement ends the entry. A worker the roster does not
-/// list is no entry and is never unlisted, and a listed entry keeps its
-/// seat.
+/// the end of the retirement ends the entry and records the session it
+/// archived: here the member never woke, so its session is the one its seat
+/// named and no build created, which has nothing to archive. A worker the
+/// roster does not list is no entry and is never unlisted, and a listed
+/// entry keeps its seat.
 ///
 /// RED: let `SealDeclaredRosterSealed` mark every seated member the roster
 /// does not list (iterate it over the seated members instead of the identity
 /// entries, as the TLC mutant `seal_marks_worker` does): the worker is
 /// retired as well. Drop the seal from the apply: the unlisted entry stays
-/// seated and is answered nowhere.
+/// seated and is answered nowhere. Report the unborn session's release as
+/// the runtime walk classifies it (drop the unborn branch for
+/// `RuntimeReleasedOnlyHostOwned` in `retirement_prepare_archive`): the
+/// entry ends with no archived session recorded.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unlisted_declared_member_is_retired_and_an_unlisted_worker_is_not() {
     let mob = ApplyMob::new("apply-unlisted").await;
@@ -440,6 +445,7 @@ async fn unlisted_declared_member_is_retired_and_an_unlisted_worker_is_not() {
             "{name} is seated: {seated:?}"
         );
     }
+    let (unlisted_session, _) = seated_on(&seated, "unlisted").expect("the identity is seated");
     assert!(seated.unlisted.is_empty(), "{seated:?}");
     mob.handle
         .spawn_spec(worker_spec("worker"))
@@ -475,6 +481,12 @@ async fn unlisted_declared_member_is_retired_and_an_unlisted_worker_is_not() {
         mob.standing("unlisted"),
         None,
         "the end of the unlisted retirement ends the entry"
+    );
+    assert_eq!(
+        mob.archived_record("unlisted"),
+        Some(dsl::SessionId::from_domain(&unlisted_session)),
+        "and records the identity's session, which no build created: its archive had nothing \
+         to archive"
     );
     assert!(matches!(
         mob.standing("listed"),
@@ -1448,12 +1460,16 @@ async fn an_unlisted_identity_listed_again_revives_on_its_archived_session() {
 /// finished by the restart as it would have finished live: the replay marks
 /// the entry again from the start row's cause (`Unlisted`), the start
 /// re-drives the retirement, and its end ends the entry and records the
-/// session it archived.
+/// session it archived (the member never woke: the session its seat named,
+/// which no build created).
 ///
 /// RED: let the replay of a pending retirement's start row leave its mark
 /// out (drop its `recover_unlisted_retirement_mark`): the re-driven
 /// retirement ends as a plain one, which keeps the entry, unseated and owed
-/// its seat.
+/// its seat. Report the unborn session's release as the runtime walk
+/// classifies it (drop the unborn branch for `RuntimeReleasedOnlyHostOwned`
+/// in `retirement_prepare_archive`): the entry ends with no archived session
+/// recorded.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_interrupted_unlisted_retirement_ends_its_entry_after_a_restart() {
     let mut mob = ApplyMob::new("apply-unlisted-restart").await;

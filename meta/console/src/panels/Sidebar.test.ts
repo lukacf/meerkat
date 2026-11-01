@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import type { ConsoleAgent, ConsoleAgentListConfig, ConsoleFrame } from "../types";
-import { __sidebarTest, readSidebarPins } from "./Sidebar";
+import { __sidebarTest, bucketOf, readSidebarPins } from "./Sidebar";
 
 test("sidebar treats broad-profile worker wired to commander as a child, not the host", () => {
   const commander: ConsoleAgent = {
@@ -492,6 +492,40 @@ test("sidebar can group agents by configured metadata selectors and subgroups", 
       ],
     }),
     [{ id: "org", label: "Org", value: "Payments", tone: undefined }],
+  );
+});
+
+test("sidebar Category view files an agent by its group label before its role", () => {
+  const agent = (memberId: string, role: string, group?: string): ConsoleAgent => ({
+    agent_id: memberId,
+    member_id: memberId,
+    identity: memberId,
+    label: memberId,
+    kind: "mob_agent",
+    role,
+    ...(group === undefined ? {} : { group }),
+  });
+  const domainLead = agent("billing-lead", "lead", "Domain");
+  const internalLead = agent("audit-lead", "lead", "Internal");
+  const plainLead = agent("team-lead", "lead");
+  const coordinatingLead = agent("ops-lead", "lead", "Coordinators");
+
+  // An explicit group label decides, whatever the role says.
+  assert.equal(bucketOf(domainLead), "Domains");
+  assert.equal(bucketOf(internalLead), "Internal");
+  assert.equal(bucketOf(coordinatingLead), "Coordinators");
+  // With no group label the role decides, as before.
+  assert.equal(bucketOf(plainLead), "Personal");
+
+  const sections = __sidebarTest.groupSidebarAgents([domainLead, internalLead, plainLead, coordinatingLead]);
+  assert.deepEqual(
+    Object.fromEntries(Array.from(sections, ([section, rows]) => [section, rows.map((row) => row.agent.member_id)])),
+    {
+      Coordinators: ["ops-lead"],
+      Domains: ["billing-lead"],
+      Internal: ["audit-lead"],
+      Personal: ["team-lead"],
+    },
   );
 });
 

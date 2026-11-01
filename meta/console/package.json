@@ -10,7 +10,7 @@
     "test:mcp-apps:sandbox": "node --test mcp-apps-sandbox.test.cjs mcp-apps-sandbox.browser.test.cjs",
     "e2e:mcp-apps": "node mcp-apps-native-e2e.cjs",
     "build": "node build.cjs",
-    "test:build": "node --test build.test.cjs",
+    "test:build": "node --test build.test.cjs dev-server.test.cjs",
     "embedded:freshness": "npm run build --silent && node check-embedded-freshness.cjs",
     "smoke": "npm run build --silent && node smoke.cjs",
     "e2e:browser": "npm run build --silent && node browser-e2e.cjs",

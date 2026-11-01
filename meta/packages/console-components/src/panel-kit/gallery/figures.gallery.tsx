@@ -99,6 +99,38 @@ function WorkStrip({ width, four }: { width: number; four?: boolean }) {
   );
 }
 
+// Every kind of tile, loaded and loading, each alone in a strip, so its own
+// height shows (in a strip of several the row takes the tallest).
+const LOADING_KINDS: Array<[string, Omit<Parameters<typeof FigureTile>[0], "loading">]> = [
+  ["plain", { label: "Ready", value: 2 }],
+  ["foot", { label: "Ready", value: 2, tone: "ok", foot: "can start now" }],
+  ["of", { label: "Done", value: 1, of: 9, foot: "none today" }],
+  ["unit", { label: "To finish", value: 3, unit: "steps", foot: "Critical path" }],
+  ["delta", { label: "Messages", value: 48, delta: { value: 12, period: "the hour before" }, foot: "rising" }],
+  ["trend", { label: "Given · 24h", value: 1284, trend: series(9, 24, 8), trendLive: true, foot: "to 3 agents" }],
+  ["meter", { label: "Checks", value: 3, of: 4, meter: <ProgressRing done={3} total={4} size={24} />, foot: "holding" }],
+  ["hero", { label: "Records", value: 74, unit: "active", hero: true, meter: <Sparkline values={series(4, 30, 4)} kind="bars" width={128} height={26} label="Records per day" />, foot: "+9 written this week" }],
+  ["button", { label: "Blocked", value: 1, tone: "warn", foot: "Publish to all regions", onActivate: () => {} }],
+];
+
+function LoadingPairs({ density }: { density: "comfortable" | "compact" }) {
+  return (
+    <PanelShell density={density}>
+      <div className="kg-grid" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(460px, 1fr))", padding: 12 }}>
+        {LOADING_KINDS.map(([kind, props]) => (
+          <div key={kind} className="kg-inline" style={{ alignItems: "flex-start", gap: 8, flexWrap: "nowrap" }} data-testid={`kit-figure-pair:${density}:${kind}`}>
+            {[false, true].map((loading) => (
+              <div key={String(loading)} className="cc-glance" style={{ flex: "1 1 0", border: "1px solid var(--_cc-border-soft)" }}>
+                <FigureTile {...props} loading={loading} testId={`kit-figure:${density}:${kind}:${loading ? "loading" : "loaded"}`} />
+              </div>
+            ))}
+          </div>
+        ))}
+      </div>
+    </PanelShell>
+  );
+}
+
 export const gallerySections: GallerySection[] = [
   {
     id: "figures",
@@ -137,6 +169,10 @@ export const gallerySections: GallerySection[] = [
             ))}
             <WorkStrip width={600} four />
           </div>
+        </Specimen>
+        <Specimen bare title="Loading keeps the height" note="each kind of tile loaded (left) and loading (right): the same boxes, the foot line kept; comfortable and compact">
+          <LoadingPairs density="comfortable" />
+          <LoadingPairs density="compact" />
         </Specimen>
       </>
     ),

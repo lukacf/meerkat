@@ -1937,6 +1937,8 @@ button.cc-figure:focus-visible { outline: 2px solid var(--_cc-focus-ring); outli
   align-items: center;
   gap: 10px;
   min-width: 0;
+  /* One foot line even when empty: a tile is as tall with or without a foot. */
+  min-height: 1.4em;
   margin-top: 5px;
   overflow: hidden;
   font-size: 11px;
@@ -1956,13 +1958,26 @@ button.cc-figure:focus-visible { outline: 2px solid var(--_cc-focus-ring); outli
 .cc-figure__arrow { width: 11px; height: 11px; stroke-width: 2.25; }
 .cc-figure__arrow.is-up { transform: rotate(-45deg); }
 .cc-figure__arrow.is-down { transform: rotate(45deg); }
+/* Loading (A3.7): the tile keeps every box of the loaded tile. The value
+   holds a non-breaking space, so its line box is the figure's own, and the
+   skeleton bar lies over it; the meter, the trend slot and the foot keep
+   their boxes, hidden. */
+.cc-figure.is-loading .cc-figure__value {
+  position: relative;
+  min-width: 2em;
+}
 .cc-figure__skeleton {
-  display: inline-block;
-  width: 40px;
-  height: calc(var(--_cc-figure-size) * 0.95);
+  position: absolute;
+  top: 50%;
+  left: 0;
+  width: 100%;
+  height: 0.8em;
   border-radius: var(--_cc-radius-sm);
   background: var(--_cc-skeleton);
+  transform: translateY(-50%);
 }
+.cc-figure.is-loading .cc-figure__meter,
+.cc-figure.is-loading .cc-figure__foot > * { visibility: hidden; }
 .cc-panel[data-density="compact"] .cc-figure__trend { display: none; }
 
 /* ── Micro charts (spec A3.8) ──────────────────────────────────────

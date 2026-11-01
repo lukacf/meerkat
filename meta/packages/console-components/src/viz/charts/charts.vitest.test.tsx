@@ -110,8 +110,54 @@ describe("figures", () => {
     fireEvent.click(button);
     expect(onActivate).toHaveBeenCalledTimes(1);
     view.rerender(<FigureTile label="Blocked" value={1} loading testId="tile" />);
-    expect(view.getByTestId("tile").querySelector(".cc-figure__skeleton") !== null).toBe(true);
-    expect(view.getByTestId("tile").querySelector(".cc-figure__value") === null).toBe(true);
+    const loading = view.getByTestId("tile");
+    expect(loading.getAttribute("aria-busy")).toBe("true");
+    // The value keeps its box around a non-breaking space; no figure shows.
+    expect(loading.querySelector(".cc-figure__value .cc-figure__skeleton") !== null).toBe(true);
+    expect(loading.querySelector(".cc-figure__value")?.textContent).toBe("\u00a0");
+  });
+
+  it("keeps every box of the loaded tile while loading, for each kind of tile", () => {
+    // jsdom has no layout, so this compares the boxes the two tiles lay out:
+    // the same elements in the same order, the loading one hiding its
+    // contents (the stylesheet test pins how), never dropping a box. The
+    // gallery's browser check measures the heights.
+    const ring = <ProgressRing done={1} inProgress={1} total={5} size={24} />;
+    const kinds: Array<[string, Omit<Parameters<typeof FigureTile>[0], "loading">]> = [
+      ["plain", { label: "Ready", value: 2 }],
+      ["foot", { label: "Ready", value: 2, foot: "can start now" }],
+      ["of", { label: "Done", value: 1, of: 9, foot: "none today" }],
+      ["unit", { label: "To finish", value: 3, unit: "steps", foot: "Critical path" }],
+      ["delta", { label: "Messages", value: 48, delta: { value: 12, period: "the hour before" }, foot: "rising" }],
+      ["trend", { label: "Given", value: 1284, trend: [1, 3, 2, 5], trendLive: true, foot: "to 3 agents" }],
+      ["meter", { label: "Checks", value: 3, of: 4, meter: ring, foot: "holding" }],
+      ["hero", { label: "Records", value: 74, unit: "active", hero: true, meter: ring, foot: "+9 written this week" }],
+      ["button", { label: "Blocked", value: 1, tone: "warn", foot: "Publish to all regions", onActivate: () => {} }],
+    ];
+    const LAYOUT = [
+      "cc-figure__label",
+      "cc-mark",
+      "cc-figure__label-text",
+      "cc-figure__fig",
+      "cc-figure__value",
+      "cc-figure__of",
+      "cc-figure__trend",
+      "cc-figure__meter",
+      "cc-figure__foot",
+      "cc-figure__delta",
+      "cc-figure__foot-text",
+    ];
+    const boxes = (tile: Element): string[] =>
+      Array.from(tile.querySelectorAll("*"))
+        .map((element) => LAYOUT.find((name) => element.classList.contains(name)))
+        .filter((name): name is string => Boolean(name));
+    for (const [kind, props] of kinds) {
+      const loaded = render(<FigureTile {...props} testId={`loaded-${kind}`} />).getByTestId(`loaded-${kind}`);
+      const loading = render(<FigureTile {...props} loading testId={`loading-${kind}`} />).getByTestId(`loading-${kind}`);
+      expect([kind, boxes(loading)]).toEqual([kind, boxes(loaded)]);
+      expect(loading.tagName).toBe(loaded.tagName);
+      expect(loaded.querySelector(".cc-figure__foot") !== null).toBe(true);
+    }
   });
 });
 

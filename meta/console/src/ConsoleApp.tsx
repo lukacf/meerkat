@@ -220,7 +220,7 @@ import {
   workGraphEventsParams,
   type WorkGraphPanelData,
 } from "./panels/WorkGraphPanel";
-import { RoutingPanel } from "./panels/RoutingPanel";
+import { RoutingPanel, deliverySummaries } from "./panels/RoutingPanel";
 import { LogsPanel } from "./panels/LogsPanel";
 import { Topbar } from "./panels/Topbar";
 import { useConsoleVariant, type ConsoleTheme } from "./panels/Tweaks";
@@ -279,6 +279,18 @@ export interface ConsoleAppProps {
 
 type RoutingPanelData = ReturnType<typeof buildRoutingSectionView>;
 type GatingPanelData = { pending: unknown[]; audit: unknown[]; updatedAtMs?: number };
+type RoutingReadState = {
+  scope: string;
+  loading: boolean;
+  denied: boolean;
+  unavailable: boolean;
+  error: string | null;
+  updatedAtMs: number | null;
+  summaries: Record<string, string>;
+};
+const emptyRoutingRead = (): RoutingReadState => ({
+  scope: "", loading: false, denied: false, unavailable: false, error: null, updatedAtMs: null, summaries: {},
+});
 type AccessPanelData = {
   scope: string;
   loading: boolean;
@@ -979,6 +991,9 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     routes: [],
     deliveries: [],
   });
+  // How the routing reads went, for the scope (principal and runtime) they
+  // were made under: the panel shows no access, a failure or freshness.
+  const [routingRead, setRoutingRead] = React.useState<RoutingReadState>(emptyRoutingRead);
   const [gatingData, setGatingData] = React.useState<GatingPanelData>({
     pending: [],
     audit: [],
@@ -3504,6 +3519,44 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     }
   }), [baseUrl, panelRefreshFlight]);
 
+  // Routing reads need routing access (runtime.admin): a refusal shows the
+  // no-access state, never "no routes". The data belongs to the principal
+  // and runtime it was read under and is cleared when either changes.
+  const accessEnforced = experience?.access?.enabled === true;
+  const refreshRoutingData = React.useCallback(() => panelRefreshFlight("routing", async () => {
+    const scope = accessScopeRef.current;
+    setRoutingRead((current) => (current.scope === scope ? { ...current, loading: true } : { ...emptyRoutingRead(), scope, loading: true }));
+    const routingTarget = controlWorkbenchTarget("routing");
+    try {
+      const [routes, history] = await Promise.all([
+        executeHeadlessCommand(CONSOLE_COMMAND_NAMES.listRoutingRoutes, routingTarget),
+        executeHeadlessCommand(CONSOLE_COMMAND_NAMES.listDeliveryHistory, routingTarget),
+      ]);
+      if (scope !== accessScopeRef.current) return;
+      setRoutingData(buildRoutingSectionView({ routesResponse: routes, historyResponse: history }));
+      setRoutingRead({ ...emptyRoutingRead(), scope, updatedAtMs: Date.now(), summaries: deliverySummaries(history) });
+    } catch (error) {
+      if (scope !== accessScopeRef.current) return;
+      const capability = (error as { kind?: unknown } | null)?.kind === "console-capability-unavailable";
+      const failure = classifyConsoleSendFailure(error);
+      // An enforced console leaves a refused method out of its capabilities.
+      const denied = failure.kind === "access_denied" || failure.kind === "unauthenticated"
+        || (capability && accessEnforced);
+      const unavailable = capability && !denied;
+      if (denied || unavailable) setRoutingData({ routes: [], deliveries: [] });
+      setRoutingRead((current) => ({
+        ...current, scope, loading: false, denied, unavailable,
+        error: denied || unavailable ? null : errorMessage(error),
+        ...(denied || unavailable ? { updatedAtMs: null, summaries: {} } : {}),
+      }));
+      throw error;
+    }
+  }), [baseUrl, panelRefreshFlight, accessEnforced]);
+  React.useEffect(() => {
+    setRoutingData({ routes: [], deliveries: [] });
+    setRoutingRead({ ...emptyRoutingRead(), scope: accessScope });
+  }, [accessScope]);
+
   const refreshPanelData = React.useCallback(async ({ access = true }: { access?: boolean } = {}) => {
     const openPanels = visiblePanelTargets;
     const inspects = openPanels.filter(
@@ -3518,19 +3571,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       setInspectByIdentity((c) => ({ ...c, [t.identity]: result }));
     }));
     if (hasMobControlSurface && openPanels.some((t) => t.kind === "routing")) {
-      refreshes.push(panelRefreshFlight("routing", async () => {
-        const routingTarget = controlWorkbenchTarget("routing");
-        const [routes, history] = await Promise.all([
-          executeHeadlessCommand(CONSOLE_COMMAND_NAMES.listRoutingRoutes, routingTarget),
-          executeHeadlessCommand(CONSOLE_COMMAND_NAMES.listDeliveryHistory, routingTarget),
-        ]);
-        setRoutingData(
-          buildRoutingSectionView({
-            routesResponse: routes,
-            historyResponse: history,
-          }),
-        );
-      }));
+      refreshes.push(refreshRoutingData());
     }
     if (access && openPanels.some((t) => t.kind === "access")) refreshes.push(refreshAccessData("background"));
     if (openPanels.some((t) => t.kind === "memory")) refreshes.push(refreshMemoryData());
@@ -3543,7 +3584,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       refreshes.push(refreshGatingAudit());
     }
     await Promise.all(refreshes);
-  }, [baseUrl, visiblePanelTargets, hasMobControlSurface, panelRefreshFlight, refreshAccessData, refreshGatingAudit, refreshMemoryData, refreshTopologyData, refreshWorkGraphData]);
+  }, [baseUrl, visiblePanelTargets, hasMobControlSurface, panelRefreshFlight, refreshAccessData, refreshGatingAudit, refreshMemoryData, refreshRoutingData, refreshTopologyData, refreshWorkGraphData]);
 
   const refreshPanelDataRef = React.useRef(refreshPanelData);
   refreshPanelDataRef.current = refreshPanelData;
@@ -5729,7 +5770,21 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
         </PanelShell>
       );
     }
-    if (target.kind === "routing") return <RoutingPanel data={routingData} />;
+    if (target.kind === "routing") {
+      const read = routingRead.scope === accessScope ? routingRead : null;
+      return (
+        <RoutingPanel
+          data={read ? routingData : { routes: [], deliveries: [] }}
+          loading={!read || read.loading || (read.updatedAtMs === null && !read.denied && !read.unavailable && !read.error)}
+          denied={read?.denied}
+          unavailable={read?.unavailable}
+          error={read?.error ?? null}
+          updatedAtMs={read?.updatedAtMs ?? null}
+          deliverySummaries={read?.summaries}
+          onRefresh={() => void refreshRoutingData().catch(() => {})}
+        />
+      );
+    }
     if (target.kind === "gating")
       return (
         <GatingInboxPanel

@@ -375,7 +375,7 @@ impl MobActor {
                          its held creation, which the host's held protocol carries out"
                     )));
                 }
-                mob_dsl::UnseatedEntryCause::TemplatePreparation => {
+                mob_dsl::UnseatedEntryCause::PreparationPending => {
                     return Err(MobError::WiringError(format!(
                         "'{agent_identity}' cannot be seated dormant: the created identity entry \
                          awaits its host's preparation"

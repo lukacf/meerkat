@@ -1000,12 +1000,12 @@ async fn the_census_reports_incomplete_over_an_unreadable_created_entry() {
         ),
         (0, 2, 1, 1, 1)
     );
-    assert_eq!(census.unseated_by_cause.template_preparation, 1);
+    assert_eq!(census.unseated_by_cause.preparation_pending, 1);
     assert!(!census.is_complete());
     assert_eq!(
         mob.standing("preparing"),
         Some(EntryStanding::Unseated(
-            UnseatedEntryCause::TemplatePreparation
+            UnseatedEntryCause::PreparationPending
         ))
     );
     assert!(matches!(
@@ -1131,7 +1131,7 @@ async fn a_sqlite_resume_recovers_every_created_row_among_host_adopted_intents()
             IdentityEntryRead::Entry(view)
                 if view.origin == IdentityEntryOrigin::Created
                     && view.standing
-                        == EntryStanding::Unseated(UnseatedEntryCause::TemplatePreparation)
+                        == EntryStanding::Unseated(UnseatedEntryCause::PreparationPending)
         ),
         "{:?}",
         read("f-preparing")

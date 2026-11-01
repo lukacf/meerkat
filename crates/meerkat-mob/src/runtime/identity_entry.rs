@@ -38,7 +38,7 @@
 //! predates created entries retired it) records the entry owed its seat, and
 //! the start seats it again, Dormant, on its archived session; a row pending
 //! its host's preparation records it unseated
-//! ([`UnseatedEntryCause::TemplatePreparation`]); and a removed entry's row
+//! ([`UnseatedEntryCause::PreparationPending`]); and a removed entry's row
 //! reserves its name for good ([`IdentityEntryRead::Removed`]). A row this
 //! build cannot read, a row the journal contradicts, and a member row whose
 //! origin this build does not know reserve the name as unreadable
@@ -155,7 +155,7 @@ pub enum UnseatedEntryCause {
     /// A created entry whose host preparation is pending: it has no member
     /// until its host settles the preparation, and no seat takes its name
     /// meanwhile.
-    TemplatePreparation,
+    PreparationPending,
 }
 
 impl UnseatedEntryCause {
@@ -164,7 +164,7 @@ impl UnseatedEntryCause {
             mob_dsl::UnseatedEntryCause::SeatOwed => Self::SeatOwed,
             mob_dsl::UnseatedEntryCause::HostedOnFirstUse => Self::HostedOnFirstUse,
             mob_dsl::UnseatedEntryCause::HeldCreation => Self::HeldCreation,
-            mob_dsl::UnseatedEntryCause::TemplatePreparation => Self::TemplatePreparation,
+            mob_dsl::UnseatedEntryCause::PreparationPending => Self::PreparationPending,
         }
     }
 }
@@ -396,8 +396,8 @@ pub struct UnseatedEntryCounts {
     /// ([`UnseatedEntryCause::HeldCreation`]).
     pub held_creation: usize,
     /// Created entries awaiting their host's preparation
-    /// ([`UnseatedEntryCause::TemplatePreparation`]).
-    pub template_preparation: usize,
+    /// ([`UnseatedEntryCause::PreparationPending`]).
+    pub preparation_pending: usize,
 }
 
 /// The counts of [`super::MobHandle::identity_census`].
@@ -1032,8 +1032,8 @@ pub(crate) fn identity_census(
             EntryStanding::Unseated(UnseatedEntryCause::HeldCreation) => {
                 census.unseated_by_cause.held_creation += 1;
             }
-            EntryStanding::Unseated(UnseatedEntryCause::TemplatePreparation) => {
-                census.unseated_by_cause.template_preparation += 1;
+            EntryStanding::Unseated(UnseatedEntryCause::PreparationPending) => {
+                census.unseated_by_cause.preparation_pending += 1;
             }
         }
         if view.broken.is_some() {
@@ -1591,13 +1591,13 @@ mod tests {
             ),
             (
                 "preparing",
-                mob_dsl::UnseatedEntryCause::TemplatePreparation,
-                UnseatedEntryCause::TemplatePreparation,
+                mob_dsl::UnseatedEntryCause::PreparationPending,
+                UnseatedEntryCause::PreparationPending,
             ),
         ];
         for (name, machine_cause, _) in unseated {
             let identity = mob_dsl::AgentIdentity::from(name);
-            let origin = if machine_cause == mob_dsl::UnseatedEntryCause::TemplatePreparation {
+            let origin = if machine_cause == mob_dsl::UnseatedEntryCause::PreparationPending {
                 mob_dsl::IdentityEntryOrigin::Created
             } else {
                 mob_dsl::IdentityEntryOrigin::Declared
@@ -1638,7 +1638,7 @@ mod tests {
                 seat_owed: 1,
                 hosted_on_first_use: 1,
                 held_creation: 1,
-                template_preparation: 1,
+                preparation_pending: 1,
             }
         );
         assert_eq!(census.host_preparation_pending, 1);

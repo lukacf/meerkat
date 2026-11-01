@@ -4920,7 +4920,7 @@ macro_rules! mob_catalog_machine_dsl {
             for_all(id in self.identity_entry_unseated.keys(),
                 self.identity_entry_origins.get_cloned(id) != Some(IdentityEntryOrigin::Created)
                 || self.identity_entry_unseated.get_cloned(id) == Some(UnseatedEntryCause::SeatOwed)
-                || self.identity_entry_unseated.get_cloned(id) == Some(UnseatedEntryCause::TemplatePreparation))
+                || self.identity_entry_unseated.get_cloned(id) == Some(UnseatedEntryCause::PreparationPending))
         }
 
         // A removed created entry's name is never an entry or a member again.
@@ -30965,7 +30965,7 @@ macro_rules! mob_catalog_machine_dsl {
         //   last bound to as its revival record when it has none, so the boot
         //   seats it again on that session (created custody);
         // - a row pending its host's preparation records the entry unseated,
-        //   TemplatePreparation;
+        //   PreparationPending;
         // - a removed entry's row records its tombstone;
         // - a row this build cannot read, and a row whose facts contradict the
         //   replay (a Declared entry of the same name, a member where the row
@@ -31032,7 +31032,7 @@ macro_rules! mob_catalog_machine_dsl {
             guard "no_spawn_ladder" { self.spawn_exec_phase.contains_key(agent_identity) == false }
             update {
                 self.identity_entry_origins.insert(agent_identity, IdentityEntryOrigin::Created);
-                self.identity_entry_unseated.insert(agent_identity, UnseatedEntryCause::TemplatePreparation);
+                self.identity_entry_unseated.insert(agent_identity, UnseatedEntryCause::PreparationPending);
                 self.members_to_spawn.remove(agent_identity);
                 self.members_to_retire.remove(agent_identity);
             }
@@ -35034,7 +35034,7 @@ pub enum UnseatedEntryCause {
     HeldCreation,
     /// A created entry whose host preparation is pending: no member exists
     /// until its host settles the preparation.
-    TemplatePreparation,
+    PreparationPending,
 }
 
 /// The presence a created entry's row in the identity store records, as the

@@ -4378,7 +4378,7 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
                     "SeatOwed",
                     "HostedOnFirstUse",
                     "HeldCreation",
-                    "TemplatePreparation",
+                    "PreparationPending",
                 ],
             ),
             NamedTypeBinding::string_enum(

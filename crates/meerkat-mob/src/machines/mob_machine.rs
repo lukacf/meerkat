@@ -15647,7 +15647,7 @@ mod tests {
         );
         assert_eq!(
             state.identity_entry_unseated.get(&pending),
-            Some(&UnseatedEntryCause::TemplatePreparation)
+            Some(&UnseatedEntryCause::PreparationPending)
         );
         assert!(state.identity_entry_tombstones.contains(&removed));
         assert!(!state.identity_entry_origins.contains_key(&removed));

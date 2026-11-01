@@ -154,6 +154,26 @@ describe("calendar runs", () => {
     ]);
   });
 
+  it("ends at the last whole minute of the window", () => {
+    const everyMinute = calendar("UTC", null, null);
+    expect(isos(upcomingRuns(everyMinute, { from: at("2026-01-01T10:00:00Z"), until: at("2026-01-01T10:02:30Z") }).runs)).toEqual([
+      "2026-01-01T10:01:00.000Z",
+      "2026-01-01T10:02:00.000Z",
+    ]);
+  });
+
+  it("plans a large team's week of calendars quickly", () => {
+    const zones = ["Europe/Paris", "America/New_York", "Asia/Kathmandu", "UTC", "Australia/Lord_Howe"];
+    const started = performance.now();
+    let total = 0;
+    for (let index = 0; index < 600; index += 1) {
+      const trigger = calendar(zones[index % zones.length], index % 24, (index * 7) % 60);
+      total += upcomingRuns(trigger, { from: at("2026-03-25T00:00:00Z") }).runs.length;
+    }
+    expect(total).toBe(600 * 7);
+    expect(performance.now() - started).toBeLessThan(1500);
+  });
+
   it("matches day of month, month and year fields", () => {
     const monthEnd = calendar("UTC", 12, 0, { day_of_month: { kind: "values", values: [31] } });
     const runs = upcomingRuns(monthEnd, { from: at("2026-04-01T00:00:00Z"), until: at("2026-08-01T00:00:00Z") }).runs;

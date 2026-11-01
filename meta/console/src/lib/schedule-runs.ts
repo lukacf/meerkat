@@ -192,35 +192,27 @@ function zoneOffsetMs(formatter: Intl.DateTimeFormat, at: number): number {
   return Date.UTC(year, month - 1, day, hour, minute, second) - seconds;
 }
 
-/**
- * The zone's offset at each minute of a scan, read once per 15-minute UTC
- * block: a block whose two ends agree has one offset throughout; a block
- * that holds a transition is read minute by minute.
- */
-function offsetReader(formatter: Intl.DateTimeFormat): (minute: number) => number {
-  const known = new Map<number, number>();
-  const at = (t: number) => {
-    let value = known.get(t);
+/** Zone offsets already read, per zone and instant: the planner reads the
+ * same quarter hours for every schedule of a zone. */
+const ZONE_OFFSETS = new Map<string, Map<number, number>>();
+const ZONE_OFFSET_CACHE_LIMIT = 50_000;
+
+/** The zone's offset at an instant, read once per instant across scans. */
+function offsetReader(timeZone: string, formatter: Intl.DateTimeFormat): (at: number) => number {
+  let known = ZONE_OFFSETS.get(timeZone);
+  if (!known) {
+    known = new Map<number, number>();
+    ZONE_OFFSETS.set(timeZone, known);
+  }
+  const cache = known;
+  return (at: number) => {
+    let value = cache.get(at);
     if (value === undefined) {
-      value = zoneOffsetMs(formatter, t);
-      known.set(t, value);
+      if (cache.size >= ZONE_OFFSET_CACHE_LIMIT) cache.clear();
+      value = zoneOffsetMs(formatter, at);
+      cache.set(at, value);
     }
     return value;
-  };
-  let block = Number.NaN;
-  let uniform: number | null = null;
-  return (minute: number) => {
-    const start = Math.floor(minute / OFFSET_BLOCK_MS) * OFFSET_BLOCK_MS;
-    if (start !== block) {
-      block = start;
-      const head = at(start);
-      uniform = head === at(start + OFFSET_BLOCK_MS) ? head : null;
-      // Keep the cache to this block and the next.
-      if (known.size > 8) {
-        for (const key of known.keys()) if (key < start) known.delete(key);
-      }
-    }
-    return uniform ?? at(minute);
   };
 }
 
@@ -278,31 +270,46 @@ function calendarRuns(
   const monthOk = fieldMatcher(trigger.month);
   const weekdayOk = fieldMatcher(trigger.day_of_week);
   const yearOk = fieldMatcher(trigger.year);
-  const offsetAt = offsetReader(formatter);
-  // The next minute boundary strictly after the cursor.
-  let cursor = Math.floor(from / MINUTE) * MINUTE + MINUTE;
+  const offsetAt = offsetReader(trigger.timezone, formatter);
+  const dateOk = (local: Date) =>
+    hourOk(local.getUTCHours())
+    && dayOk(local.getUTCDate())
+    && monthOk(local.getUTCMonth() + 1)
+    && weekdayOk(local.getUTCDay())
+    && yearOk(local.getUTCFullYear());
   const runs: number[] = [];
-  let truncated = false;
-  while (cursor <= until) {
-    const local = cursor + offsetAt(cursor);
-    const date = new Date(local);
-    if (
-      minuteOk(date.getUTCMinutes())
-      && hourOk(date.getUTCHours())
-      && dayOk(date.getUTCDate())
-      && monthOk(date.getUTCMonth() + 1)
-      && weekdayOk(date.getUTCDay())
-      && yearOk(date.getUTCFullYear())
-    ) {
-      if (runs.length >= max) {
-        truncated = true;
-        break;
+  // The next minute boundary strictly after the cursor, then every minute
+  // up to the window's end, one 15-minute UTC block at a time.
+  let cursor = Math.floor(from / MINUTE) * MINUTE + MINUTE;
+  const stop = Math.floor(until / MINUTE) * MINUTE + MINUTE;
+  while (cursor < stop) {
+    const block = Math.floor(cursor / OFFSET_BLOCK_MS) * OFFSET_BLOCK_MS;
+    const blockEnd = Math.min(block + OFFSET_BLOCK_MS, stop);
+    const head = offsetAt(block);
+    if (head === offsetAt(block + OFFSET_BLOCK_MS) && head % OFFSET_BLOCK_MS === 0) {
+      // One offset on the quarter-hour grid: the block's minutes share one
+      // local hour and day, so those fields are checked once.
+      const local = new Date(cursor + head);
+      if (dateOk(local)) {
+        const firstMinute = local.getUTCMinutes();
+        for (let at = cursor; at < blockEnd; at += MINUTE) {
+          if (!minuteOk(firstMinute + (at - cursor) / MINUTE)) continue;
+          if (runs.length >= max) return { runs, truncated: true, invalidZone: false };
+          runs.push(at);
+        }
       }
-      runs.push(cursor);
+    } else {
+      // A transition (or an off-grid offset) in the block: minute by minute.
+      for (let at = cursor; at < blockEnd; at += MINUTE) {
+        const local = new Date(at + offsetAt(at));
+        if (!dateOk(local) || !minuteOk(local.getUTCMinutes())) continue;
+        if (runs.length >= max) return { runs, truncated: true, invalidZone: false };
+        runs.push(at);
+      }
     }
-    cursor += MINUTE;
+    cursor = blockEnd;
   }
-  return { runs, truncated, invalidZone: false };
+  return { runs, truncated: false, invalidZone: false };
 }
 
 // ── Schedules ────────────────────────────────────────────────────────────

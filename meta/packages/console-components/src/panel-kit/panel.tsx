@@ -257,16 +257,21 @@ function PanelSummary({
   return (
     <>
       <div className="cc-panel-head__sub cc-panel-head__summary" data-testid={testId}>
-        {parts.map((part, index) => (
-          <span className="cc-panel-head__part" key={index}>
-            {index > 0 ? (
-              <span className="cc-panel-head__sep" aria-hidden="true">
-                {" · "}
-              </span>
-            ) : null}
-            {part}
-          </span>
-        ))}
+        {/* Each fact carries the separator before it, so a wrapped line
+            never ends on a dangling dot; the summary clips the separator
+            that starts a line. */}
+        <span className="cc-panel-head__facts">
+          {parts.map((part, index) => (
+            <span className="cc-panel-head__part" key={index}>
+              {index > 0 ? (
+                <span className="cc-panel-head__sep" aria-hidden="true">
+                  {" · "}
+                </span>
+              ) : null}
+              {part}
+            </span>
+          ))}
+        </span>
       </div>
       <span className="cc-visually-hidden" aria-live="polite">
         {announced}
@@ -287,6 +292,11 @@ function PanelSummary({
  * one view switch), `tools` (icon buttons, hover-revealed) and `menu` (the
  * overflow trigger, always present). `actions` keeps the older always-shown
  * slot. Every older prop renders exactly as before.
+ *
+ * The actions wrap to a row of their own when they do not fit beside the
+ * title, and in a pane under 480 px always: the view switch stays in the
+ * header at every width (pinned browser scenarios press it in a 180 px
+ * pane), its options down to their glyphs there.
  */
 export function PanelHeader({
   title,
@@ -331,27 +341,7 @@ export function PanelHeader({
   const hasSummary = facts.length > 0 || Boolean(freshness && (freshness.updating || freshness.at !== undefined));
   const v2 = Boolean(scope || summary || freshness || view || tools || menu || refreshing !== undefined);
   const heading = <Heading className="cc-panel-head__title">{title}</Heading>;
-  const menuItems: Array<MenuEntry | null | false | undefined> = [];
-  if (view) {
-    menuItems.push({
-      kind: "radio",
-      id: "panel-view",
-      label: view.ariaLabel,
-      value: view.value,
-      foldOnly: true,
-      options: view.options.map((option) => ({
-        id: option.id,
-        label: option.label,
-        disabled: option.disabled,
-        testId: option.testId ? `${option.testId}:menu` : undefined,
-      })),
-      onChange: (id) => view.onChange(id),
-    });
-    if (menu?.items.some(Boolean)) menuItems.push({ kind: "separator", id: "panel-view-sep", foldOnly: true });
-  }
-  if (menu) menuItems.push(...menu.items);
-  const showMenu = Boolean(menu || view);
-  const hasRight = Boolean(actions || view || tools || showMenu);
+  const hasRight = Boolean(actions || view || tools || menu);
   return (
     <header
       className={cx(
@@ -390,14 +380,14 @@ export function PanelHeader({
           ) : null}
           {actions}
           {tools ? <span className="cc-panel-head__tools cc-reveal">{tools}</span> : null}
-          {showMenu ? (
+          {menu ? (
             <OverflowMenu
-              label={menu?.label ?? `${view?.ariaLabel ?? "View"} options`}
-              items={menuItems}
+              label={menu.label}
+              items={menu.items}
               quiet
-              testId={menu?.testId}
-              triggerTestId={menu?.triggerTestId}
-              triggerClassName={cx("cc-panel-head__menu", !menu && "cc-panel-head__menu--fold")}
+              testId={menu.testId}
+              triggerTestId={menu.triggerTestId}
+              triggerClassName="cc-panel-head__menu"
             />
           ) : null}
         </div>

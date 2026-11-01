@@ -8,7 +8,7 @@ import { WorkGraphPanel, __workGraphPanelTest } from "./WorkGraphPanel";
 import { WorkGraphGraphView } from "./WorkGraphGraphView";
 import type { WorkGraphPanelData } from "./WorkGraphPanel";
 import type { WorkGraphWireBinding, WorkGraphWireEdge, WorkGraphWireItem } from "../types";
-import { WORKGRAPH_LARGE_ITEM_COUNT, workGraphItemOwner, workGraphStatusWord } from "../lib/workgraph-layout";
+import { WORKGRAPH_LARGE_ITEM_COUNT, WORKGRAPH_SNAPSHOT_LIMIT, workGraphItemOwner, workGraphStatusWord } from "../lib/workgraph-layout";
 import { createAgentDirectory } from "../../../packages/console-components/src/panel-kit/agents";
 import { formatClockTime } from "../../../packages/console-components/src/panel-kit/format";
 import { statusTone } from "../../../packages/console-components/src/panel-kit/tone";
@@ -26,6 +26,7 @@ const {
   workGraphGoalRevisionOf,
   workGraphEventsParams,
   workGraphEventsNewestFirst,
+  workGraphSnapshotCut,
   createWorkGraphRefreshSequencer,
   workGraphModeWord,
   workGraphBindingStateText,
@@ -777,6 +778,26 @@ test("a full snapshot says it is truncated: the first N, or N of M when the runt
   const counted = renderPanel({ ...chainFixture(), truncated: true, total: 1250 });
   assert.ok(counted.includes("Showing 6 of 1250 items"));
   assert.ok(!renderPanel(chainFixture()).includes('data-testid="workgraph-truncated"'));
+});
+
+test("a full page the runtime reports complete shows no truncation notice", () => {
+  const items = Array.from({ length: WORKGRAPH_SNAPSHOT_LIMIT }, (_, index) =>
+    item(`item-${index}`, "2026-07-08T08:00:00Z"),
+  );
+  // Exactly the limit matched: the runtime sends total_items 1000 and
+  // truncated false, and the console takes its word.
+  const cut = workGraphSnapshotCut({ total_items: WORKGRAPH_SNAPSHOT_LIMIT, truncated: false }, items.length);
+  assert.deepEqual(cut, { truncated: false, total: WORKGRAPH_SNAPSHOT_LIMIT });
+  const html = renderPanel(panelData({ items, edges: [], ...cut }));
+  assert.ok(!html.includes('data-testid="workgraph-truncated"'));
+  // A runtime that cut the page says so; one that predates the fields sends
+  // neither, and a full page may then have more behind it.
+  assert.deepEqual(
+    workGraphSnapshotCut({ total_items: 1342, truncated: true }, WORKGRAPH_SNAPSHOT_LIMIT),
+    { truncated: true, total: 1342 },
+  );
+  assert.deepEqual(workGraphSnapshotCut({}, WORKGRAPH_SNAPSHOT_LIMIT), { truncated: true, total: null });
+  assert.deepEqual(workGraphSnapshotCut({}, 12), { truncated: false, total: null });
 });
 
 test("an empty work graph teaches what will appear", () => {

@@ -13844,6 +13844,10 @@ mod tests {
             "a refusal writes nothing"
         );
 
+        begin_completion_lifecycle_quiesce(
+            &mut authority,
+            PlacedCompletionLifecycleIntentKind::Stop,
+        );
         MobMachineMutator::apply(&mut authority, MobMachineInput::Stop).expect("stop");
         assert_eq!(
             declare(&mut authority, &fresh, Declaration::default()),

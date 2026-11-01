@@ -38,6 +38,100 @@ function withDetail(line: string, detail: string): string {
   return detail ? `${line} · ${detail}` : line;
 }
 
+/** Who wrote or proposed a memory, as the console reads it. */
+export type MemoryAuthorRef =
+  | { author: "agent"; identity: string }
+  | { author: "steward"; run_id?: string }
+  | { author: "distiller"; run_id?: string }
+  | { author: "operator" }
+  | { author: "application" };
+
+const DEBUG_RECORD_AUTHOR =
+  /^\s*(Agent|Steward|Distiller)\s*\{\s*(identity|run_id)\s*:\s*"((?:[^"\\]|\\.)*)"\s*,?\s*\}\s*$/;
+const DEBUG_UNIT_AUTHOR = /^\s*(Operator|Application)\s*$/;
+
+/** The text of a Rust Debug string literal's body: `\"` reads `"`. */
+function unescapeDebugText(text: string): string {
+  return text.replace(/\\(u\{([0-9a-fA-F]{1,6})\}|.)/g, (_match, escape: string, hex?: string) => {
+    if (hex) {
+      const code = Number.parseInt(hex, 16);
+      return Number.isFinite(code) && code <= 0x10ffff ? String.fromCodePoint(code) : "";
+    }
+    switch (escape) {
+      case "n":
+        return "\n";
+      case "r":
+        return "\r";
+      case "t":
+        return "\t";
+      case "0":
+        return "\0";
+      default:
+        return escape;
+    }
+  });
+}
+
+/**
+ * A memory author from what the server sends. Proposal authors and the
+ * `memory.write.quarantined` event's author arrive as Rust Debug text
+ * (`Agent { identity: "billing" }`, `Steward { run_id: "dream-7" }`,
+ * `Operator`) until the server sends the structured author (S5); both read
+ * the same here. A bare key reads as the agent it names. Null when there is
+ * nothing to read.
+ */
+export function parseMemoryAuthor(value: unknown): MemoryAuthorRef | null {
+  if (value && typeof value === "object") {
+    const author = (value as { author?: unknown }).author;
+    const identity = (value as { identity?: unknown }).identity;
+    const runId = (value as { run_id?: unknown }).run_id;
+    switch (author) {
+      case "agent":
+        return typeof identity === "string" && identity.trim() ? { author: "agent", identity: identity.trim() } : null;
+      case "steward":
+      case "distiller":
+        return typeof runId === "string" && runId ? { author, run_id: runId } : { author };
+      case "operator":
+      case "application":
+        return { author };
+      default:
+        return null;
+    }
+  }
+  if (typeof value !== "string") return null;
+  const record = DEBUG_RECORD_AUTHOR.exec(value);
+  if (record) {
+    const [, variant, field, raw] = record;
+    const text = unescapeDebugText(raw).trim();
+    if (variant === "Agent") return field === "identity" && text ? { author: "agent", identity: text } : null;
+    if (field !== "run_id") return null;
+    const kind = variant === "Steward" ? "steward" : "distiller";
+    return text ? { author: kind, run_id: text } : { author: kind };
+  }
+  const unit = DEBUG_UNIT_AUTHOR.exec(value);
+  if (unit) return { author: unit[1] === "Operator" ? "operator" : "application" };
+  const key = value.trim();
+  if (!key || /[{}"]/.test(key)) return null;
+  return { author: "agent", identity: key };
+}
+
+/** An author in a sentence: the agent's name, "the memory steward", "an
+ * operator". Run ids and keys never show. */
+export function memoryAuthorWords(author: MemoryAuthorRef, names: MemoryEventNames = {}): string {
+  switch (author.author) {
+    case "agent":
+      return names.agentName ? names.agentName(author.identity) : author.identity;
+    case "steward":
+      return "the memory steward";
+    case "distiller":
+      return "the memory distiller";
+    case "operator":
+      return "an operator";
+    case "application":
+      return "the application";
+  }
+}
+
 /** "Research Analyst's memory", "team memory", "operator memory",
  * "shared memory"; empty when the event names no scope. */
 export function memoryScopeWords(data: Record<string, unknown>, names: MemoryEventNames = {}): string {
@@ -128,9 +222,9 @@ export function describeMemoryEventForPeople(
       return withDetail(subject ? `Conflicting memories about ${subject}` : "Conflicting memories", text(data, "reason"));
     }
     case "memory.write.quarantined": {
-      const author = text(data, "author");
+      const author = parseMemoryAuthor(data.author);
       return withDetail(
-        author ? `A memory write from ${name(author)} was quarantined` : "A memory write was quarantined",
+        author ? `A memory write from ${memoryAuthorWords(author, names)} was quarantined` : "A memory write was quarantined",
         text(data, "reason"),
       );
     }

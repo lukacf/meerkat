@@ -205,6 +205,8 @@ import { AccessPanel, type AccessPreviewResult } from "./panels/AccessPanel";
 import {
   MemoryPanel,
   memoryFramePivot,
+  memoryListingOutcome,
+  memoryNotSetUp,
   memorySectionOutcome,
   teamName,
   type MemoryRecordDetail,
@@ -307,6 +309,9 @@ type MemoryPanelData = {
   /// (never green) instead of an indistinguishable empty section.
   recordsDenied: boolean;
   dreamsDenied: boolean;
+  /// Access withheld some realm's dream runs (the reads' withheld_by_access).
+  dreamsWithheld: boolean;
+  dreamRunsWithheld: boolean;
   /// One-row scope-probe outcomes: the scope exists behind a grant this
   /// principal lacks (the unfiltered listing row-filters them silently).
   operatorScopeDenied: boolean;
@@ -785,6 +790,8 @@ function emptyMemoryPanelData(): MemoryPanelData {
     nextCursor: null,
     recordsDenied: false,
     dreamsDenied: false,
+    dreamsWithheld: false,
+    dreamRunsWithheld: false,
     operatorScopeDenied: false,
     mobScopeDenied: false,
     overview: null,
@@ -3045,6 +3052,14 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
 
   const refreshMemoryData = React.useCallback(() => panelRefreshFlight(`memory:${panelRuntimeKey}`, async () => {
     if (emptyPanelRegistry) return;
+    // A runtime without a memory store says so in its experience: the panel
+    // shows "not set up" and reads nothing.
+    if (memoryNotSetUp(experience?.memory)) {
+      if (panelRuntimeKeyRef.current !== panelRuntimeKey) return;
+      setMemoryDataRuntimeKey(panelRuntimeKey);
+      setMemoryData((current) => ({ ...current, unavailable: true, error: null, loaded: true }));
+      return;
+    }
     const memoryTarget = controlWorkbenchTarget("memory");
     try {
       let records: MemoryPanelRecord[] = [];
@@ -3061,8 +3076,17 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
         nextCursor = recordsResult?.next_cursor ?? null;
       } catch (err) {
         // Access denied to records leaves the section empty but flagged, so
-        // the panel renders "no access" instead of an empty store.
-        if (memorySectionOutcome(err) !== "denied") throw err;
+        // the panel renders "no access" instead of an empty store. A runtime
+        // that advertises no records method and reports no store has no
+        // memory set up: that is not a denial.
+        const outcome = memoryListingOutcome(err, experience?.memory?.available);
+        if (outcome === "unavailable") {
+          if (panelRuntimeKeyRef.current !== panelRuntimeKey) return;
+          setMemoryDataRuntimeKey(panelRuntimeKey);
+          setMemoryData((current) => ({ ...current, unavailable: true, error: null, loaded: true }));
+          return;
+        }
+        if (outcome !== "denied") throw err;
         recordsDenied = true;
       }
 
@@ -3113,20 +3137,23 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           quarantineRecords = quarantineResult?.records || [];
           pendingPromotions = quarantineResult?.pending_promotions || [];
         } catch (err) {
-          // Access denied to the quarantine queue leaves it empty rather than
-          // failing the whole panel.
-          if (jsonRpcErrorCode(err) !== -32030) throw err;
+          // Access denied to the quarantine queue (a -32030, or the method
+          // intersected away for this principal) leaves it empty rather than
+          // failing the whole panel, as the other sections do.
+          if (memorySectionOutcome(err) !== "denied") throw err;
         }
       }
 
       let dreams: MemoryDreamRun[] = [];
       let dreamsDenied = false;
+      let dreamsWithheld = false;
       try {
         const dreamsResult = (await executeHeadlessCommand(
           CONSOLE_COMMAND_NAMES.listMemoryDreams,
           memoryTarget,
         )) as MemoryPanelDreamsResult | null;
         dreams = dreamsResult?.runs || [];
+        dreamsWithheld = dreamsResult?.withheld_by_access === true;
       } catch (err) {
         // Tolerate access-denied for dreams: leave the list empty but flagged.
         if (memorySectionOutcome(err) !== "denied") throw err;
@@ -3171,10 +3198,13 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
             [],
             (result) => (result as MemoryPanelHarvestsResult | null)?.harvests || [],
           ),
-          section<MemoryDreamRunSheet[]>(
+          section<{ runs: MemoryDreamRunSheet[]; withheld: boolean }>(
             CONSOLE_COMMAND_NAMES.listMemoryDreamRuns,
-            [],
-            (result) => (result as MemoryPanelDreamRunsResult | null)?.runs || [],
+            { runs: [], withheld: false },
+            (result) => ({
+              runs: (result as MemoryPanelDreamRunsResult | null)?.runs || [],
+              withheld: (result as MemoryPanelDreamRunsResult | null)?.withheld_by_access === true,
+            }),
           ),
           section<MemoryAuditVerdictEntry[]>(
             CONSOLE_COMMAND_NAMES.listMemoryAuditVerdicts,
@@ -3195,6 +3225,8 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
         nextCursor,
         recordsDenied,
         dreamsDenied,
+        dreamsWithheld,
+        dreamRunsWithheld: dreamRuns.value.withheld,
         operatorScopeDenied,
         mobScopeDenied,
         overview: overview.value,
@@ -3205,7 +3237,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
         injectionsDenied: injections.denied,
         harvests: harvests.value,
         harvestsDenied: harvests.denied,
-        dreamRuns: dreamRuns.value,
+        dreamRuns: dreamRuns.value.runs,
         dreamRunsDenied: dreamRuns.denied,
         auditVerdicts: auditVerdicts.value,
         auditVerdictsDenied: auditVerdicts.denied,
@@ -3219,13 +3251,13 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       if (panelRuntimeKeyRef.current !== panelRuntimeKey) return;
       setMemoryDataRuntimeKey(panelRuntimeKey);
       if (jsonRpcErrorCode(err) === -32601) {
-        setMemoryData((current) => ({ ...current, unavailable: true, error: null }));
+        setMemoryData((current) => ({ ...current, unavailable: true, error: null, loaded: true }));
         return;
       }
       setMemoryData((current) => ({ ...current, error: errorMessage(err) }));
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }), [panelRefreshFlight, baseUrl, panelRuntimeKey, emptyPanelRegistry, experience?.memory?.can_review_quarantine]);
+  }), [panelRefreshFlight, baseUrl, panelRuntimeKey, emptyPanelRegistry, experience?.memory?.can_review_quarantine, experience?.memory?.available]);
 
   // Overlapping refreshes (debounced live signals, manual refresh, post-
   // mutation re-reads) can resolve out of order — sequence them so a stale
@@ -5891,6 +5923,8 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           nextCursor={memoryData.nextCursor}
           recordsDenied={memoryData.recordsDenied}
           dreamsDenied={memoryData.dreamsDenied}
+          dreamsWithheld={memoryData.dreamsWithheld}
+          dreamRunsWithheld={memoryData.dreamRunsWithheld}
           operatorScopeDenied={memoryData.operatorScopeDenied}
           mobScopeDenied={memoryData.mobScopeDenied}
           overview={memoryData.overview}

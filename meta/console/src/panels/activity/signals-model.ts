@@ -563,6 +563,8 @@ function strongerSeverity(a: SignalSeverity, b: SignalSeverity): SignalSeverity 
 
 function titleForGroup(items: Signal[]): string {
   if (items.length === 1) return items[0].label;
+  // A burst of one kind of signal keeps its words; the rail shows the count.
+  if (items.every((item) => item.label === items[0].label)) return items[0].label;
   const hasUser = items.some((item) => item.raw.event === "user_input" || item.raw.event === "interaction_started");
   const peerCount = items.filter((item) => item.raw.event === "tool_call_requested").length;
   const replyCount = items.filter((item) => item.raw.event === "interaction_complete").length;
@@ -588,11 +590,27 @@ function rank(severity: SignalSeverity): number {
   return severity === "critical" ? 2 : severity === "warning" ? 1 : 0;
 }
 
+/** How far apart the signals of one burst (13 tickets received) may be. */
+const BURST_MS = 120_000;
+
 function groupSignals(signals: Signal[]): SignalGroup[] {
   const groups: SignalGroup[] = [];
   const byId = new Map<string, SignalGroup>();
+  const bursts = new Map<string, SignalGroup>();
+  const burstGroups = new Set<SignalGroup>();
   for (const signal of signals) {
-    const key = groupKeyFor(signal);
+    let key = groupKeyFor(signal);
+    // Signals of no turn that repeat (one agent, one kind, close together)
+    // fold into one burst: newest first, so the burst's oldest item is last.
+    if (key.startsWith("single:") && !signal.approval) {
+      const burstKey = `${signal.agent}\u0000${signal.label}`;
+      const burst = bursts.get(burstKey);
+      const oldest = burst?.items[burst.items.length - 1];
+      if (burst && oldest && oldest.atMs - signal.atMs <= BURST_MS) {
+        key = burst.id;
+        burstGroups.add(burst);
+      }
+    }
     const existing = byId.get(key);
     if (existing) {
       const seenItemKeys = new Set(existing.items.map(semanticSignalKey));
@@ -619,7 +637,10 @@ function groupSignals(signals: Signal[]): SignalGroup[] {
     };
     byId.set(key, group);
     groups.push(group);
+    if (key.startsWith("single:") && !signal.approval) bursts.set(`${signal.agent}\u0000${signal.label}`, group);
   }
+  // A burst keeps the id of its oldest signal, so new arrivals keep its row.
+  for (const group of burstGroups) group.id = `burst:${group.items[group.items.length - 1].id}`;
   return groups;
 }
 
@@ -654,6 +675,14 @@ export function buildSignalGroups(
   const seenSemantic = new Set<string>();
   const next: Signal[] = [];
   const window = frames.slice(0, 260);
+  // One logical event lists once: a live frame and its saved copy share the
+  // classifier's event key, and the live copy speaks (it names the sender).
+  const shown = new Map<string, ConsoleFrame>();
+  for (const frame of window) {
+    const key = classifyFrame(frame, directory).eventKey;
+    const held = shown.get(key);
+    if (!held || (held.sourceKind === "session_history" && frame.sourceKind !== "session_history")) shown.set(key, frame);
+  }
   // Each turn's sender line, from its user_input frame.
   const turnLabels = new Map<string, string>();
   for (const frame of window) {
@@ -661,6 +690,7 @@ export function buildSignalGroups(
     turnLabels.set(frame.interactionId, turnSenderLine(recordOf(frame.data), displayName(agentFor(frame))));
   }
   for (const frame of window) {
+    if (shown.get(classifyFrame(frame, directory).eventKey) !== frame) continue;
     const signal = signalFromFrame(frame, displayName, directory, turnLabels);
     if (!signal) continue;
     if (seen.has(signal.id)) continue;

@@ -292,7 +292,7 @@ function countWords(count: number, one: string, many = `${one}s`): string {
  */
 export function turnFacts(turn: StoryTurn, nameOf: (agent: string) => string): string[] {
   const facts: string[] = [];
-  const messages = turn.entries.filter((entry) => entry.family === "message" && entry.actor === turn.actor);
+  const messages = turn.entries.filter((entry) => entry.family === "message" && entry.actor === turn.actor && !entry.refused);
   if (messages.length) {
     const targets = [...new Set(messages.map((entry) => entry.target).filter((target): target is string => Boolean(target)))];
     if (targets.length === 1) {
@@ -328,7 +328,7 @@ export function foldFacts(fold: StoryFold, nameOf: (agent: string) => string): s
   const turns = fold.rows.filter((row) => row.kind === "turn"
     || (row.entry.span?.kind === "run" && row.entry.span.edge === "end")).length;
   if (turns) facts.push(countWords(turns, "turn"));
-  const messages = entries.filter((entry) => entry.family === "message" && entry.actor === fold.actor);
+  const messages = entries.filter((entry) => entry.family === "message" && entry.actor === fold.actor && !entry.refused);
   if (messages.length) {
     const targets = [...new Set(messages.map((entry) => entry.target).filter((target): target is string => Boolean(target)))];
     facts.push(targets.length === 1
@@ -524,7 +524,7 @@ export function buildLaneModel(input: LaneModelInput): LaneModel {
   const marks: MarkSpec[] = [];
   const problems: MarkSpec[] = [];
   for (const entry of entries) {
-    if (entry.family === "message" && entry.actor && entry.target) {
+    if (entry.family === "message" && entry.actor && entry.target && !entry.refused) {
       const from = laneOf(entry.actor);
       const to = laneOf(entry.target);
       if (from && to && from !== to) {

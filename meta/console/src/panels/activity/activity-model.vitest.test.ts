@@ -92,3 +92,18 @@ describe("the activity entries", () => {
     expect(merged.find((candidate) => candidate.id === first.id)?.frameVersion).toBe(2);
   });
 });
+
+describe("refused sends", () => {
+  it("mark a send whose result refused it, so it draws no connector", () => {
+    const call = frame("intake", "tool_call_requested", 20, { name: "send_message", id: "call-r", args: { to: "billing", body: "Ticket 9" } }, { interactionId: "t-r" });
+    const result = frame("intake", "tool_result_received", 19, {
+      name: "send_message", id: "call-r", is_error: true,
+      result: JSON.stringify({ error: "access_denied", message: "Tool 'send_message' is not allowed by policy" }),
+    }, { interactionId: "t-r" });
+    const entries = buildActivityEntries([call, result], { directory });
+    const message = entries.find((entry) => entry.family === "message");
+    expect(message?.refused).toBe(true);
+    const failure = entries.find((entry) => entry.severity === "warn");
+    expect(failure?.title).toMatch(/failed/i);
+  });
+});

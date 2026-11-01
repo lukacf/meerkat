@@ -57,6 +57,8 @@ export interface ActivityEntry {
   durationMs?: number;
   interactionId?: string;
   runId?: string;
+  /** A message the send's result refused: it never reached the recipient. */
+  refused?: boolean;
 }
 
 const PEER_TOOLS: ReadonlySet<string> = new Set(["send_message", "send_request", "send_response", "reply_to_peer"]);
@@ -126,10 +128,12 @@ function parseJson(text: string): Data | null {
   }
 }
 
-/** The envelope id a send's receipt names, per sender and call: the id the
- * recipient's notice carries as its delivery id. */
-function learnEnvelopes(frames: readonly ConsoleFrame[]): Map<string, string> {
+/** What a send's result says, per sender and call: the envelope id its
+ * receipt names (the id the recipient's notice carries as its delivery id),
+ * and the sends whose result refused them (nothing was sent). */
+function learnSendResults(frames: readonly ConsoleFrame[]): { envelopes: Map<string, string>; refused: Set<string> } {
   const envelopes = new Map<string, string>();
+  const refused = new Set<string>();
   for (const frame of frames) {
     if (frame.event !== "tool_result_received" && frame.event !== "tool_execution_completed") continue;
     const data = recordOf(frame.data);
@@ -137,17 +141,20 @@ function learnEnvelopes(frames: readonly ConsoleFrame[]): Map<string, string> {
     const callId = textValue(data.id) || textValue(data.tool_call_id);
     const agent = frameAgent(frame);
     if (!callId || !agent) continue;
+    const key = `${agent}\u0000${callId}`;
+    if (data.is_error === true) refused.add(key);
     for (const text of resultTexts(data)) {
-      if (!text.includes("envelope_id")) continue;
       const parsed = parseJson(text);
+      if (parsed && "error" in parsed && !("receipt" in parsed)) refused.add(key);
+      if (!text.includes("envelope_id")) continue;
       const envelope = textValue(recordOf(parsed?.receipt).envelope_id) || textValue(parsed?.envelope_id);
       if (envelope) {
-        envelopes.set(`${agent}\u0000${callId}`, envelope);
+        envelopes.set(key, envelope);
         break;
       }
     }
   }
-  return envelopes;
+  return { envelopes, refused };
 }
 
 /** A message's words, compared across its two ends: no envelope line, no
@@ -169,12 +176,15 @@ interface MessageEnd {
   /** The envelope both ends name, when known. */
   envelope: string;
   words: string;
+  /** The send's result refused it: nothing reached the recipient. */
+  refused?: boolean;
 }
 
 function messageEndOf(
   frame: ConsoleFrame,
   classified: ClassifiedFrame,
   envelopes: ReadonlyMap<string, string>,
+  refused: ReadonlySet<string>,
 ): MessageEnd | null {
   if (classified.family !== "message") return null;
   const data = recordOf(frame.data);
@@ -203,6 +213,7 @@ function messageEndOf(
     recipient: classified.target ?? "",
     envelope: agent && callId ? envelopes.get(`${agent}\u0000${callId}`) ?? "" : "",
     words: messageWords(classified.snippet),
+    ...(agent && callId && refused.has(`${agent}\u0000${callId}`) ? { refused: true } : {}),
   };
 }
 
@@ -260,6 +271,7 @@ function entryOf(
     ...(classified.durationMs !== undefined ? { durationMs: classified.durationMs } : {}),
     ...(frameInteractionId(frame) ? { interactionId: frameInteractionId(frame) } : {}),
     ...(frameRunId(frame) ? { runId: frameRunId(frame) } : {}),
+    ...(message?.refused ? { refused: true } : {}),
     message,
     rank: copyRank(frame, message),
   };
@@ -296,6 +308,7 @@ function merge(into: Building, other: Building): void {
     into.actor = into.actor ?? other.actor;
   }
   if (target) into.target = target;
+  if (other.refused) into.refused = true;
   into.segments = withRecipient(into.segments, into.target);
   if (other.durationMs !== undefined && into.durationMs === undefined) into.durationMs = other.durationMs;
   if (SEVERITY_ORDER[other.severity] > SEVERITY_ORDER[into.severity]) {
@@ -319,7 +332,7 @@ export interface BuildActivityOptions {
  * (a send's recipient by its comms peer id) resolve through `directory`.
  */
 export function buildActivityEntries(frames: readonly ConsoleFrame[], options: BuildActivityOptions = {}): ActivityEntry[] {
-  const envelopes = learnEnvelopes(frames);
+  const { envelopes, refused } = learnSendResults(frames);
   const byKey = new Map<string, Building>();
   const unlinkedMessages = new Map<string, Building[]>();
   for (const frame of frames) {
@@ -327,7 +340,7 @@ export function buildActivityEntries(frames: readonly ConsoleFrame[], options: B
     if (typeof atMs !== "number" || !Number.isFinite(atMs)) continue;
     const classified = classifyFrame(frame, options.directory);
     if (classified.internal && !options.includeInternal) continue;
-    const message = messageEndOf(frame, classified, envelopes);
+    const message = messageEndOf(frame, classified, envelopes, refused);
     const candidate = entryOf(frame, classified, atMs, message);
     const known = byKey.get(candidate.key);
     if (known) {

@@ -81,6 +81,7 @@ pub mod launch;
 pub mod machines;
 pub mod member_creation;
 mod mob_machine;
+pub mod operator_instruction;
 mod portable_profile;
 pub mod profile;
 pub mod provenance;
@@ -177,6 +178,18 @@ pub use mob_machine::{
     canonical_mob_machine_runtime_internal_classifications,
     canonical_mob_machine_runtime_internal_input_variant_manifest,
     canonical_mob_machine_runtime_internal_manifest,
+};
+pub use operator_instruction::{
+    MemberInstructionBlockReason, MemberInstructionDelivery, MemberInstructionDeliveryState,
+    MemberInstructionDeliveryStatus, MemberInstructionEffectiveRead,
+    MemberInstructionEffectiveSlot, MemberInstructionPendingReason, MemberInstructionRelease,
+    MemberInstructionResidency, MemberInstructionSlotState, MemberInstructionSlotStatus,
+    MemberInstructionSlotView, MemberInstructionStatus, MemberInstructionTargetsRecordedEvent,
+    OPERATOR_INSTRUCTION_STATUS_DEFAULT_LIMIT, OPERATOR_INSTRUCTION_STATUS_MAX_LIMIT,
+    OperatorInstructionCommittedEvent, OperatorInstructionDisposition, OperatorInstructionError,
+    OperatorInstructionReceipt, OperatorInstructionRecordStatus, OperatorInstructionStatusPage,
+    OperatorInstructionStatusQuery, OperatorInstructionTarget, OperatorInstructionWrite,
+    RecordedMemberInstructionTarget,
 };
 pub use provenance::MobProvenance;
 pub use storage::{

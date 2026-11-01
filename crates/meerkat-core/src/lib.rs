@@ -588,12 +588,12 @@ pub use session::{
     InstructionTargetOwner, InstructionTargetRecord, InstructionTargetRecordSlot,
     InstructionTargetSlot, InstructionWriteDisposition, InstructionWriteError,
     InvalidInstructionRevision, MAX_OPERATOR_INSTRUCTION_ACTIVE_BYTES,
-    MAX_OPERATOR_INSTRUCTION_SLOTS, RunStartInstructionApplication, RunStartInstructionOutcome,
-    SESSION_ENVELOPE_BASELINE_VERSION, SESSION_INSTRUCTION_STATE_KEY, SYSTEM_ROW_PRUNE_REASON_KIND,
-    SessionInstructionChange, SessionInstructionReceipt, SessionInstructionState,
-    SessionInstructionWrite, SystemRowPruneCommit, SystemRowPruneRefusal, SystemRowRef,
-    effective_operator_instructions, materialize_operator_instruction_messages,
-    validate_operator_instruction_messages,
+    MAX_OPERATOR_INSTRUCTION_SLOTS, OPERATOR_INSTRUCTION_MOB_EVENT_SCHEMA_VERSION,
+    RunStartInstructionApplication, RunStartInstructionOutcome, SESSION_ENVELOPE_BASELINE_VERSION,
+    SESSION_INSTRUCTION_STATE_KEY, SYSTEM_ROW_PRUNE_REASON_KIND, SessionInstructionChange,
+    SessionInstructionReceipt, SessionInstructionState, SessionInstructionWrite,
+    SystemRowPruneCommit, SystemRowPruneRefusal, SystemRowRef, effective_operator_instructions,
+    materialize_operator_instruction_messages, validate_operator_instruction_messages,
 };
 pub use session_component_sidecar::{
     ComponentEventDigest, ComponentEventPrefixAuthority, ComponentEventPrefixDigest,

@@ -1345,6 +1345,9 @@ machine! {
                 last_entry_sequence: u64,
             },
             // A mob delivers a member's whole snapshot at its generation.
+            // `member_bound` is the session's binding fact: its metadata
+            // names a mob member binding, which a mob stamps when it seats
+            // the session as a member's.
             RecordInstructionTarget {
                 session_id: SessionId,
                 mob_id: String,
@@ -1353,9 +1356,11 @@ machine! {
                 effect: Map<String, Enum<InstructionEffect>>,
                 digest: Map<String, String>,
                 bytes: Map<String, u64>,
+                member_bound: bool,
             },
             // The session's own host writes one slot; a revoke is an Absent
-            // effect with an empty digest and no body bytes.
+            // effect with an empty digest and no body bytes. `member_bound`
+            // is the binding fact a record reads.
             SetSessionInstruction {
                 session_id: SessionId,
                 slot: String,
@@ -1363,13 +1368,16 @@ machine! {
                 effect: Enum<InstructionEffect>,
                 digest: String,
                 body_bytes: u64,
+                member_bound: bool,
             },
             // An explicit attach or a host's standalone adoption. `mob_id`
-            // names the mob of a mob owner and is empty otherwise.
+            // names the mob of a mob owner and is empty otherwise;
+            // `member_bound` is the binding fact a record reads.
             RebindInstructionOwner {
                 session_id: SessionId,
                 owner: Enum<InstructionTargetOwner>,
                 mob_id: String,
+                member_bound: bool,
             },
             // The owning mob releases a member's target (a retire, a
             // destroy), so another owner may bind it.
@@ -5624,7 +5632,8 @@ machine! {
                 revision,
                 effect,
                 digest,
-                bytes
+                bytes,
+                member_bound
             }
             guard {
                 self.lifecycle_phase == Phase::Ready
@@ -5670,7 +5679,8 @@ machine! {
                 revision,
                 effect,
                 digest,
-                bytes
+                bytes,
+                member_bound
             }
             guard {
                 self.lifecycle_phase == Phase::Ready
@@ -5704,7 +5714,8 @@ machine! {
                 revision,
                 effect,
                 digest,
-                bytes
+                bytes,
+                member_bound
             }
             guard {
                 self.lifecycle_phase == Phase::Ready
@@ -5738,7 +5749,8 @@ machine! {
                 revision,
                 effect,
                 digest,
-                bytes
+                bytes,
+                member_bound
             }
             guard {
                 self.lifecycle_phase == Phase::Ready
@@ -5757,6 +5769,8 @@ machine! {
             }
         }
 
+        // A session-owned target of a session no mob seated as a member's
+        // takes no mob snapshot: its host's writes stay its own.
         transition RecordInstructionTargetOwnedBySession {
             on input RecordInstructionTarget {
                 session_id,
@@ -5765,17 +5779,127 @@ machine! {
                 revision,
                 effect,
                 digest,
-                bytes
+                bytes,
+                member_bound
             }
             guard {
                 self.lifecycle_phase == Phase::Ready
                 && self.session_instruction_owner.get_cloned(session_id).get("value")
                     == InstructionTargetOwner::Session
             }
+            guard "not_a_member_session" { member_bound == false }
             update {}
             to Ready
             emit InstructionTargetRefused {
                 refusal: InstructionWriteRefusal::OwnedBySession
+            }
+        }
+
+        // An attach: a member's session whose own host wrote its target
+        // before a mob seated it (a member's session takes no host write
+        // after that) hands the target to the member's mob at the mob's
+        // first snapshot. In one step the mob owns the target and the
+        // snapshot replaces it, within the slot limit and the active budget;
+        // what the host had in effect is revoked at the next fresh run start
+        // unless the snapshot keeps it. The target generation counted the
+        // host's writes, so only the snapshot's own generation is checked.
+        transition RecordInstructionTargetAdopt {
+            on input RecordInstructionTarget {
+                session_id,
+                mob_id,
+                generation,
+                revision,
+                effect,
+                digest,
+                bytes,
+                member_bound
+            }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && mob_id != ""
+                && generation >= 1
+                && instruction_slot_maps_consistent(revision, effect, digest, bytes)
+                && instruction_slot_count_within_limit(revision)
+                && self.session_instruction_owner.get_cloned(session_id).get("value")
+                    == InstructionTargetOwner::Session
+            }
+            guard "within_budget" {
+                1048576 >= session_document_instruction_active_bytes(effect, bytes)
+            }
+            guard "member_session" { member_bound == true }
+            update {
+                self.session_instruction_owner.insert(session_id, InstructionTargetOwner::Mob);
+                self.session_instruction_owner_mob.insert(session_id, mob_id);
+                self.session_instruction_target_generation.insert(session_id, generation);
+                self.session_instruction_target_revision.insert(session_id, revision);
+                self.session_instruction_target_effect.insert(session_id, effect);
+                self.session_instruction_target_digest.insert(session_id, digest);
+                self.session_instruction_target_bytes.insert(session_id, bytes);
+            }
+            to Ready
+            emit InstructionTargetRecorded {
+                generation: generation,
+                outcome: InstructionWriteOutcome::Recorded
+            }
+        }
+
+        // The same takeover over the active budget changes nothing.
+        transition RecordInstructionTargetAdoptActiveBudgetExceeded {
+            on input RecordInstructionTarget {
+                session_id,
+                mob_id,
+                generation,
+                revision,
+                effect,
+                digest,
+                bytes,
+                member_bound
+            }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && mob_id != ""
+                && generation >= 1
+                && instruction_slot_maps_consistent(revision, effect, digest, bytes)
+                && instruction_slot_count_within_limit(revision)
+                && session_document_instruction_active_bytes(effect, bytes) > 1048576
+                && self.session_instruction_owner.get_cloned(session_id).get("value")
+                    == InstructionTargetOwner::Session
+            }
+            guard "member_session" { member_bound == true }
+            update {}
+            to Ready
+            emit InstructionTargetRefused {
+                refusal: InstructionWriteRefusal::ActiveSetBudgetExceeded
+            }
+        }
+
+        // The same takeover over the slot limit changes nothing, whatever
+        // its bodies weigh.
+        transition RecordInstructionTargetAdoptSlotLimitExceeded {
+            on input RecordInstructionTarget {
+                session_id,
+                mob_id,
+                generation,
+                revision,
+                effect,
+                digest,
+                bytes,
+                member_bound
+            }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && mob_id != ""
+                && generation >= 1
+                && instruction_slot_maps_consistent(revision, effect, digest, bytes)
+                && instruction_slot_count_within_limit(revision) == false
+                && self.session_instruction_owner.get_cloned(session_id).get("value")
+                    == InstructionTargetOwner::Session
+            }
+            guard "member_session" { member_bound == true }
+            update {}
+            to Ready
+            emit InstructionTargetRefused {
+                refusal: InstructionWriteRefusal::SlotLimitExceeded
             }
         }
 
@@ -5789,7 +5913,8 @@ machine! {
                 revision,
                 effect,
                 digest,
-                bytes
+                bytes,
+                member_bound
             }
             guard {
                 self.lifecycle_phase == Phase::Ready
@@ -5808,7 +5933,7 @@ machine! {
         // A session-owned write of a slot the target does not hold yet,
         // within the slot limit and the active budget.
         transition SetSessionInstructionNew {
-            on input SetSessionInstruction { session_id, slot, revision, effect, digest, body_bytes }
+            on input SetSessionInstruction { session_id, slot, revision, effect, digest, body_bytes, member_bound }
             guard {
                 self.lifecycle_phase == Phase::Ready
                 && self.session_instruction_owner.get_cloned(session_id).get("value")
@@ -5834,6 +5959,7 @@ machine! {
                             slot,
                             body_bytes))
             }
+            guard "not_a_member_session" { member_bound == false }
             update {
                 self.session_instruction_owner.insert(session_id, InstructionTargetOwner::Session);
                 self.session_instruction_target_generation.insert(
@@ -5875,7 +6001,7 @@ machine! {
         // budget; a revoke is a revision whose effect is Absent, whose digest
         // is empty and whose body has no bytes.
         transition SetSessionInstructionAdvance {
-            on input SetSessionInstruction { session_id, slot, revision, effect, digest, body_bytes }
+            on input SetSessionInstruction { session_id, slot, revision, effect, digest, body_bytes, member_bound }
             guard {
                 self.lifecycle_phase == Phase::Ready
                 && self.session_instruction_owner.get_cloned(session_id).get("value")
@@ -5902,6 +6028,7 @@ machine! {
                     > self.session_instruction_target_revision.get_cloned(session_id).get("value")
                         .get_cloned(slot).get("value")
             }
+            guard "not_a_member_session" { member_bound == false }
             update {
                 self.session_instruction_owner.insert(session_id, InstructionTargetOwner::Session);
                 self.session_instruction_target_generation.insert(
@@ -5942,7 +6069,7 @@ machine! {
         // An activation that a new slot or a higher revision would record,
         // but whose Active bodies would exceed the active budget.
         transition SetSessionInstructionActiveBudgetExceeded {
-            on input SetSessionInstruction { session_id, slot, revision, effect, digest, body_bytes }
+            on input SetSessionInstruction { session_id, slot, revision, effect, digest, body_bytes, member_bound }
             guard {
                 self.lifecycle_phase == Phase::Ready
                 && self.session_instruction_owner.get_cloned(session_id).get("value")
@@ -5971,6 +6098,7 @@ machine! {
                             body_bytes))
                     > 1048576
             }
+            guard "not_a_member_session" { member_bound == false }
             update {}
             to Ready
             emit InstructionTargetRefused {
@@ -5980,7 +6108,7 @@ machine! {
 
         // An exact retry: the same revision with the same effect and digest.
         transition SetSessionInstructionDuplicate {
-            on input SetSessionInstruction { session_id, slot, revision, effect, digest, body_bytes }
+            on input SetSessionInstruction { session_id, slot, revision, effect, digest, body_bytes, member_bound }
             guard {
                 self.lifecycle_phase == Phase::Ready
                 && self.session_instruction_owner.get_cloned(session_id).get("value")
@@ -5995,6 +6123,7 @@ machine! {
                 && self.session_instruction_target_digest.get_cloned(session_id).get("value")
                     .get_cloned(slot).get("value") == digest
             }
+            guard "not_a_member_session" { member_bound == false }
             update {}
             to Ready
             emit InstructionTargetRecorded {
@@ -6005,7 +6134,7 @@ machine! {
 
         // A revision binds one content forever.
         transition SetSessionInstructionConflict {
-            on input SetSessionInstruction { session_id, slot, revision, effect, digest, body_bytes }
+            on input SetSessionInstruction { session_id, slot, revision, effect, digest, body_bytes, member_bound }
             guard {
                 self.lifecycle_phase == Phase::Ready
                 && self.session_instruction_owner.get_cloned(session_id).get("value")
@@ -6020,6 +6149,7 @@ machine! {
                     || self.session_instruction_target_digest.get_cloned(session_id).get("value")
                         .get_cloned(slot).get("value") != digest)
             }
+            guard "not_a_member_session" { member_bound == false }
             update {}
             to Ready
             emit InstructionTargetRefused {
@@ -6028,7 +6158,7 @@ machine! {
         }
 
         transition SetSessionInstructionStale {
-            on input SetSessionInstruction { session_id, slot, revision, effect, digest, body_bytes }
+            on input SetSessionInstruction { session_id, slot, revision, effect, digest, body_bytes, member_bound }
             guard {
                 self.lifecycle_phase == Phase::Ready
                 && self.session_instruction_owner.get_cloned(session_id).get("value")
@@ -6039,6 +6169,7 @@ machine! {
                     < self.session_instruction_target_revision.get_cloned(session_id).get("value")
                         .get_cloned(slot).get("value")
             }
+            guard "not_a_member_session" { member_bound == false }
             update {}
             to Ready
             emit InstructionTargetRefused {
@@ -6048,7 +6179,7 @@ machine! {
 
         // A mob-owned target takes no session write, whatever the slot.
         transition SetSessionInstructionOwnedByMob {
-            on input SetSessionInstruction { session_id, slot, revision, effect, digest, body_bytes }
+            on input SetSessionInstruction { session_id, slot, revision, effect, digest, body_bytes, member_bound }
             guard {
                 self.lifecycle_phase == Phase::Ready
                 && self.session_instruction_owner.get_cloned(session_id).get("value")
@@ -6061,8 +6192,28 @@ machine! {
             }
         }
 
+        // A mob member's session takes no write of its own host, whatever
+        // its target holds: its instructions come from its mob, so a mob's
+        // first record never replaces a write its host was told was
+        // recorded. A target its host wrote before a mob seated the session
+        // (an attach) is the only session-owned target a mob takes over.
+        transition SetSessionInstructionMemberSession {
+            on input SetSessionInstruction { session_id, slot, revision, effect, digest, body_bytes, member_bound }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && self.session_instruction_owner.get_cloned(session_id).get("value")
+                    != InstructionTargetOwner::Mob
+            }
+            guard "member_session" { member_bound == true }
+            update {}
+            to Ready
+            emit InstructionTargetRefused {
+                refusal: InstructionWriteRefusal::OwnedByMob
+            }
+        }
+
         transition SetSessionInstructionSlotLimitExceeded {
-            on input SetSessionInstruction { session_id, slot, revision, effect, digest, body_bytes }
+            on input SetSessionInstruction { session_id, slot, revision, effect, digest, body_bytes, member_bound }
             guard {
                 self.lifecycle_phase == Phase::Ready
                 && self.session_instruction_owner.get_cloned(session_id).get("value")
@@ -6073,6 +6224,7 @@ machine! {
                 && self.session_instruction_target_revision.get_cloned(session_id).get("value")
                     .len() >= 64
             }
+            guard "not_a_member_session" { member_bound == false }
             update {}
             to Ready
             emit InstructionTargetRefused {
@@ -6082,7 +6234,7 @@ machine! {
 
         // A revoke of a slot the target does not hold.
         transition SetSessionInstructionUnknownSlot {
-            on input SetSessionInstruction { session_id, slot, revision, effect, digest, body_bytes }
+            on input SetSessionInstruction { session_id, slot, revision, effect, digest, body_bytes, member_bound }
             guard {
                 self.lifecycle_phase == Phase::Ready
                 && self.session_instruction_owner.get_cloned(session_id).get("value")
@@ -6091,6 +6243,7 @@ machine! {
                     .contains_key(slot) == false
                 && effect == InstructionEffect::Absent
             }
+            guard "not_a_member_session" { member_bound == false }
             update {}
             to Ready
             emit InstructionTargetRefused {
@@ -6105,7 +6258,7 @@ machine! {
         // rebind until its mob releases it. The ownership check is a guard
         // of its own.
         transition RebindInstructionOwner {
-            on input RebindInstructionOwner { session_id, owner, mob_id }
+            on input RebindInstructionOwner { session_id, owner, mob_id, member_bound }
             guard {
                 self.lifecycle_phase == Phase::Ready
                 && owner == InstructionTargetOwner::Mob
@@ -6140,13 +6293,14 @@ machine! {
 
         // A new owner of an unowned target (a host's standalone adoption, an
         // attach of a released member) starts from that empty target: what
-        // is still in effect is revoked at the next fresh run start. The
-        // ownership check is a guard of its own.
+        // is still in effect is revoked at the next fresh run start. A mob
+        // member's session takes no adoption by its own host. The ownership
+        // check is a guard of its own.
         transition RebindInstructionOwnerUnowned {
-            on input RebindInstructionOwner { session_id, owner, mob_id }
+            on input RebindInstructionOwner { session_id, owner, mob_id, member_bound }
             guard {
                 self.lifecycle_phase == Phase::Ready
-                && ((owner == InstructionTargetOwner::Session && mob_id == "")
+                && ((owner == InstructionTargetOwner::Session && mob_id == "" && member_bound == false)
                     || (owner == InstructionTargetOwner::Mob && mob_id != ""))
             }
             guard "unowned" {
@@ -6160,6 +6314,28 @@ machine! {
             }
             to Ready
             emit InstructionOwnerRebound { owner: owner }
+        }
+
+        // A mob member's session refuses its own host's adoption of its
+        // unowned target, as it refuses its host's writes: the member's
+        // instructions come from its mob.
+        transition RebindInstructionOwnerMemberSession {
+            on input RebindInstructionOwner { session_id, owner, mob_id, member_bound }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && owner == InstructionTargetOwner::Session
+                && mob_id == ""
+            }
+            guard "member_session" { member_bound == true }
+            guard "unowned" {
+                self.session_instruction_owner.get_cloned(session_id).get("value")
+                    == InstructionTargetOwner::Unowned
+            }
+            update {}
+            to Ready
+            emit InstructionTargetRefused {
+                refusal: InstructionWriteRefusal::OwnedByMob
+            }
         }
 
         // The owning mob releases a member's target (a retire, a destroy):

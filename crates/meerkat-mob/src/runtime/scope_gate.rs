@@ -184,12 +184,15 @@ impl MobCommand {
             | Self::DriveRouteInstalls { .. }
             | Self::DeclareMemberOutboundTaint { .. } => Some(ControlScope::WireTopology),
 
-            // ── AdminHost: host-plane administration (A9: exactly
-            //    bind/revoke hosts; supervisor authority is host-plane). ──
+            // ── AdminHost: host-plane administration (A9: bind/revoke
+            //    hosts; supervisor authority is host-plane) and the host's
+            //    operator instructions for the mob's members. ──
             Self::BindHost { .. }
             | Self::IssueHostBindingDescriptor { .. }
             | Self::RevokeHost { .. }
-            | Self::RotateSupervisor { .. } => Some(ControlScope::AdminHost),
+            | Self::RotateSupervisor { .. }
+            | Self::SetOperatorInstruction { .. }
+            | Self::RevokeOperatorInstruction { .. } => Some(ControlScope::AdminHost),
 
             // ── SubscribeEvents: the mob event journal surface ──
             Self::PollEvents { .. } | Self::ReplayAllEvents { .. } => {
@@ -311,6 +314,10 @@ impl MobCommand {
             | Self::EnsureMemberEventTap { .. }
             // Provenance recording is informational, never enforcement.
             | Self::RecordOperatorActionProvenance { .. }
+            // The operator-instruction delivery owner's preparation and
+            // feedback: the write it realizes was admitted at its verb.
+            | Self::PrepareMemberInstructionDelivery { .. }
+            | Self::SettleMemberInstructionDeliveries { .. }
             // Builder/test config seam; no principal caller today —
             // reclassify the moment a surface exposes it.
             | Self::SetSpawnPolicy { .. }
@@ -474,7 +481,10 @@ impl MobCommand {
             Self::AdoptLegacyIdentityEntry { .. }
             | Self::DeclareIdentityEntries { .. }
             | Self::SealDeclaredRoster { .. }
-            | Self::OpenDeclaredApply { .. } => AgentLaneAdmission::HostOnly,
+            | Self::OpenDeclaredApply { .. }
+            // Operator instructions are the host's; no agent writes them.
+            | Self::SetOperatorInstruction { .. }
+            | Self::RevokeOperatorInstruction { .. } => AgentLaneAdmission::HostOnly,
 
             // Spawns, seats, work, flows, objectives and forked participants.
             Self::Spawn { .. }
@@ -531,6 +541,8 @@ impl MobCommand {
             | Self::Grants { .. }
             // Internal and machine-authority plumbing.
             | Self::CloseDeclaredApply { .. }
+            | Self::PrepareMemberInstructionDelivery { .. }
+            | Self::SettleMemberInstructionDeliveries { .. }
             | Self::SpawnProvisioned { .. }
             | Self::SpawnPreparationSettled { .. }
             | Self::MemberTurnAdmissionSettled { .. }
@@ -903,6 +915,16 @@ impl MobCommand {
             Self::Grants { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(error));
             }
+            Self::SetOperatorInstruction { reply_tx, .. }
+            | Self::RevokeOperatorInstruction { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(error.into()));
+            }
+            Self::PrepareMemberInstructionDelivery { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(error));
+            }
+            Self::SettleMemberInstructionDeliveries { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(error));
+            }
             // Fenced remote-upcall handles also route their machine admission
             // and other actor-serialized queries through this gate. Preserve
             // the typed stale-authority error on every Result-bearing internal
@@ -1149,6 +1171,25 @@ mod tests {
             .required_control_scope(),
             Some(ControlScope::AdminGrants),
         );
+        // Operator instructions are the host's: AdminHost, and the agent
+        // lane never runs them.
+        let (tx, _rx) = oneshot::channel();
+        let revoke = MobCommand::RevokeOperatorInstruction {
+            slot: meerkat_core::InstructionSlot {
+                namespace: meerkat_core::InstructionNamespace::new("app.example").unwrap(),
+                key: meerkat_core::InstructionKey::new("tone").unwrap(),
+            },
+            revision: meerkat_core::InstructionRevision::new(1).unwrap(),
+            reply_tx: tx,
+        };
+        assert_eq!(
+            revoke.required_control_scope(),
+            Some(ControlScope::AdminHost)
+        );
+        assert!(matches!(
+            revoke.agent_lane_admission(),
+            super::AgentLaneAdmission::HostOnly
+        ));
         // ADJ-P5-18 prerequisite landed: the projection trio is List-scoped
         // with typed Result reply channels.
         let (tx, _rx) = oneshot::channel();

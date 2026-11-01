@@ -99,7 +99,7 @@ ClassifySpawn* spawn-many failure classification; spawn ladder variants: the spa
 ResolveSpawn* spawn member admission; spawn ladder variants: the spawn arms bind up to 29 parameters, 16 of them BOOLEAN; the residency seat run drives BeginSpawnExecFresh and CommitSpawnMembershipFresh with one fixed local shape, and identity_entry_audit's placed run the placed opener (BeginSpawnExecRemote), its abort and its remote commit (CommitSpawnMembershipRemote) with one fixed shape
 ClassifyRetire* retire disposition of a pending spawn; spawn ladder variants: the spawn arms bind up to 29 parameters, 16 of them BOOLEAN; the residency seat run drives BeginSpawnExecFresh and CommitSpawnMembershipFresh with one fixed local shape, and identity_entry_audit's placed run the placed opener (BeginSpawnExecRemote), its abort and its remote commit (CommitSpawnMembershipRemote) with one fixed shape
 ProbeMember* spawn admission probe in the Completed and Destroyed phases; identity_entry_audit and created_identity_audit drive its Running and Stopped arms
-RecordMember* spawn materialization failure record; spawn ladder variants: the spawn arms bind up to 29 parameters, 16 of them BOOLEAN; the residency seat run drives BeginSpawnExecFresh and CommitSpawnMembershipFresh with one fixed local shape, and identity_entry_audit's placed run the placed opener (BeginSpawnExecRemote), its abort and its remote commit (CommitSpawnMembershipRemote) with one fixed shape
+RecordMemberMaterializationFailure* spawn materialization failure record; spawn ladder variants: the spawn arms bind up to 29 parameters, 16 of them BOOLEAN; the residency seat run drives BeginSpawnExecFresh and CommitSpawnMembershipFresh with one fixed local shape, and identity_entry_audit's placed run the placed opener (BeginSpawnExecRemote), its abort and its remote commit (CommitSpawnMembershipRemote) with one fixed shape
 Kickoff* member kickoff lifecycle; the seat owes no kickoff and no audit drives the kickoff arms
 RecoverMemberKickoff* member kickoff replay; no audit drives it
 AdmitSupervisor* supervisor rotation; trust wiring and peer overlay obligations (member, supervisor and external peers); no hand-written audit drives them
@@ -159,7 +159,7 @@ ClassifyMemberOperation* member operation eligibility; admission and policy clas
 SetSpawn* spawn policy; admission and policy classifiers over operator, profile and spawn requests; no audit drives them
 RecordOperator* operator action provenance; admission and policy classifiers over operator, profile and spawn requests; no audit drives them
 GrantOperator* operator grant scopes; no MobMachine audit drives them
-RevokeOperator* operator grant scopes; no MobMachine audit drives them
+RevokeOperatorScopes* operator grant scopes; no MobMachine audit drives them
 ResolveCancel* work cancellation refusals; no audit drives them
 ResolveSubmit* work submission refusals; no audit drives them
 SubmitWork* work submission; no audit drives it
@@ -200,3 +200,35 @@ BeginExplicitResumeCleanup* explicit resume rollback cleanup; the resume run doe
 SettleExplicitResumeCleanup* explicit resume rollback cleanup; the resume run does not cancel
 CancelExplicit* explicit resume cancellation; the resume run does not cancel
 FinishExplicitResumeCancelledStopped explicit resume cancellation; the resume run does not cancel
+# Operator instructions (0.9.9): operator_instruction_delivery_audit drives the
+# Running arms of the writes, revokes, deliveries, records and refusals its
+# domains reach; the meerkat-machine-schema region rows
+# (mob_machine_operator_instruction_region.rs) pin the rest.
+SetOperatorInstructionBodyTooLarge* the per-slot body limit refusal; the audit's bodies are one byte, and the region rows pin the refusal
+SetOperatorInstructionSlotLimitExceeded* the slot limit refusal (64 slots); the audit writes one slot, and the region rows pin the refusal
+SetOperatorInstructionNewOverBudget* the active budget refusal of a new slot (1 MiB of Active bodies); the audit's bodies are one byte, and the region rows pin the refusal
+SetOperatorInstructionAdvanceOverBudget* the active budget refusal of a higher revision; the audit's bodies are one byte, and the region rows pin the refusal
+SetOperatorInstructionTerminal* writes to a completed or destroyed mob, refused MobTerminal; the audit keeps the mob Running, and the region rows pin the refusal
+RevokeOperatorInstructionTerminal* revokes on a completed or destroyed mob, refused MobTerminal; the audit keeps the mob Running, and the region rows pin the refusal
+SetOperatorInstructionNewStopped the same arm in a stopped mob (the guards read no phase but the one per_phase prepends); operator_instruction_delivery_audit drives their Running copies
+SetOperatorInstructionStaleStopped the same arm in a stopped mob (the guards read no phase but the one per_phase prepends); operator_instruction_delivery_audit drives their Running copies
+SetOperatorInstructionDuplicateStopped the same arm in a stopped mob (the guards read no phase but the one per_phase prepends); operator_instruction_delivery_audit drives their Running copies
+SetOperatorInstructionConflictStopped the same arm in a stopped mob (the guards read no phase but the one per_phase prepends); operator_instruction_delivery_audit drives their Running copies
+SetOperatorInstructionAdvanceStopped the same arm in a stopped mob (the guards read no phase but the one per_phase prepends); operator_instruction_delivery_audit drives their Running copies
+RevokeOperatorInstructionUnknownSlotStopped the same arm in a stopped mob (the guards read no phase but the one per_phase prepends); operator_instruction_delivery_audit drives their Running copies
+RevokeOperatorInstructionStaleStopped the same arm in a stopped mob (the guards read no phase but the one per_phase prepends); operator_instruction_delivery_audit drives their Running copies
+RevokeOperatorInstructionDuplicateStopped the same arm in a stopped mob (the guards read no phase but the one per_phase prepends); operator_instruction_delivery_audit drives their Running copies
+RevokeOperatorInstructionConflictStopped the same arm in a stopped mob (the guards read no phase but the one per_phase prepends); operator_instruction_delivery_audit drives their Running copies
+RevokeOperatorInstructionAdvanceStopped the same arm in a stopped mob (the guards read no phase but the one per_phase prepends); operator_instruction_delivery_audit drives their Running copies
+PrepareMemberInstructionDeliveryNotOwedStopped the same arm in a stopped mob (the guards read no phase but the one per_phase prepends); operator_instruction_delivery_audit drives their Running copies
+PrepareMemberInstructionDeliveryUnbornStopped the same arm in a stopped mob (the guards read no phase but the one per_phase prepends); operator_instruction_delivery_audit drives their Running copies
+PrepareMemberInstructionDeliveryUnboundStopped the same arm in a stopped mob (the guards read no phase but the one per_phase prepends); operator_instruction_delivery_audit drives their Running copies
+PrepareMemberInstructionDeliveryDeliverStopped the same arm in a stopped mob (the guards read no phase but the one per_phase prepends); operator_instruction_delivery_audit drives their Running copies
+PrepareMemberInstructionDeliveryRetiringStopped the same arm in a stopped mob (the guards read no phase but the one per_phase prepends); operator_instruction_delivery_audit drives their Running copies
+RecoverOperatorInstruction* the epoch replay of committed records and the generation reached at the last reset, before the seal; the audit drives the live writes, and the region rows pin the replay
+PrepareMemberInstructionDeliveryPlaced* a placed member's delivery blocks member_host_unsupported; placed members are outside this audit (identity_entry_audit's placed run binds hosts), and the region rows pin the block
+PrepareMemberInstructionDeliveryMobNotRunning* deliveries of a completed or destroyed mob defer; the audit keeps the mob Running
+PrepareMemberInstructionDeliverySpawning* a member whose spawn committed its membership but not its activation defers spawn_in_flight; the audit seats members by replay, which opens no spawn ladder, and the region rows pin the deferral
+RecordMemberInstructionTarget* record feedback in a stopped, completed or destroyed mob; operator_instruction_delivery_audit drives every Running arm of the family
+RefuseMemberInstructionTarget* refusal feedback in a stopped, completed or destroyed mob; operator_instruction_delivery_audit drives every Running arm of the family
+ResolveMemberInstructionRelease* the release verdict in a stopped, completed or destroyed mob; operator_instruction_delivery_audit drives both Running arms, and the region rows pin the verdict

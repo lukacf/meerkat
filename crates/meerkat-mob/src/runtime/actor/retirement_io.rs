@@ -322,6 +322,12 @@ enum RetirementObservation {
         result: Result<(), MobError>,
     },
     AttachmentsReleased(Result<(), MobError>),
+    /// The retiring member's operator-instruction target is released (or
+    /// had nothing to release).
+    InstructionTargetReleased {
+        disposal: mob_dsl::MemberSessionDisposal,
+        result: Result<(), MobError>,
+    },
     CarrierDeleted {
         obligation: mob_dsl::PlacedCarrierCleanupObligation,
         result: Result<(), MobError>,
@@ -2349,7 +2355,58 @@ impl MobActor {
         self.retirement_start_external_cleanup(continuation).await;
     }
 
+    /// The retiring member's session is disposed of: before anything clears
+    /// the member's seat, MobMachine decides whether its mob releases the
+    /// member session's operator-instruction target (a host-owned session
+    /// the mob recorded or owes a snapshot), and the release lands first,
+    /// after any delivery in flight to the member.
     async fn retirement_post_archive(
+        &mut self,
+        continuation: RetirementContinuation,
+        disposal: mob_dsl::MemberSessionDisposal,
+    ) {
+        let release = match self.resolve_member_instruction_release(
+            &continuation.entry.agent_identity,
+            continuation.entry.bridge_session_id(),
+            disposal,
+        ) {
+            Ok(release) => release,
+            Err(error) => {
+                self.finish_retirement(continuation, Err(error)).await;
+                return;
+            }
+        };
+        let Some(release) = release else {
+            self.retirement_post_archive_released(continuation, disposal)
+                .await;
+            return;
+        };
+        let released_session = release.session_id().clone();
+        let realize =
+            self.member_instruction_release_future(&continuation.entry.agent_identity, release);
+        // The release waits for any delivery in flight to the member and for
+        // its session's turn boundary, within the retirement's deadline: past
+        // it the retirement fails typed and retryable, its member still
+        // seated, and a re-drive releases the target again.
+        let deadline = continuation.deadline;
+        // Fence scope: self-only; releases the retiring member's own session target.
+        self.dispatch_retirement(
+            continuation,
+            "retire-instruction-target-release",
+            RetirementFenceScope::SelfOnly,
+            async move {
+                let result = super::operator_instructions::bounded_member_instruction_release(
+                    deadline,
+                    released_session,
+                    realize,
+                )
+                .await;
+                RetirementObservation::InstructionTargetReleased { disposal, result }
+            },
+        );
+    }
+
+    async fn retirement_post_archive_released(
         &mut self,
         mut continuation: RetirementContinuation,
         disposal: mob_dsl::MemberSessionDisposal,
@@ -5136,6 +5193,17 @@ impl MobActor {
                     self.controlling_acceptor = Some(state);
                     match result {
                         Ok(()) => self.retirement_prepare_supervisor(continuation).await,
+                        Err(error) => self.finish_retirement(continuation, Err(error)).await,
+                    }
+                })
+            }
+            RetirementObservation::InstructionTargetReleased { disposal, result } => {
+                boxed_arm_future(move || async move {
+                    match result {
+                        Ok(()) => {
+                            self.retirement_post_archive_released(continuation, disposal)
+                                .await;
+                        }
                         Err(error) => self.finish_retirement(continuation, Err(error)).await,
                     }
                 })

@@ -249,3 +249,47 @@ fn both_wrappers_forward_the_cold_predecessor_settlement() {
         "the after-create wrapper forwards the settlement to its inner service"
     );
 }
+
+/// Both production `MobSessionService` wrappers forward a mob member's
+/// operator-instruction delivery, its release, its read and a dormant resume
+/// seat's member binding to the service they wrap. Their trait defaults
+/// refuse typed (`durability_unavailable`, `Unsupported`), so a wrapper
+/// without a forward compiles and blocks every member's operator
+/// instructions behind it, or refuses its dormant resume seats over a host's
+/// session.
+#[test]
+fn both_wrappers_forward_the_member_instruction_methods() {
+    const FORWARDS: [&str; 4] = [
+        ".record_member_instruction_target(",
+        ".release_member_instruction_target(",
+        ".read_member_instructions(",
+        ".bind_seated_member_session(",
+    ];
+    let production = production_source(RUNTIME_SOURCE);
+    let delegation = production
+        .split("macro_rules! delegate_mob_session_service")
+        .nth(1)
+        .expect("delegation macro")
+        .split("delegate_mob_session_service!(PreBuildMobSessionService)")
+        .next()
+        .expect("delegation implementation");
+    let after_create = production
+        .split("impl MobSessionService for AfterCreateMobSessionService {")
+        .nth(1)
+        .expect("after-create wrapper")
+        .split("\n}\n")
+        .next()
+        .expect("after-create implementation");
+    for forward in FORWARDS {
+        assert_eq!(
+            occurrences(delegation, forward),
+            1,
+            "the delegation macro forwards {forward} to its inner service"
+        );
+        assert_eq!(
+            occurrences(after_create, forward),
+            1,
+            "the after-create wrapper forwards {forward} to its inner service"
+        );
+    }
+}

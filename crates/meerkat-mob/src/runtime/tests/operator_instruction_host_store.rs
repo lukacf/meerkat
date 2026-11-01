@@ -125,8 +125,8 @@ async fn a_dormant_member_on_a_host_store_realm_records_the_target_without_wakin
 
     // A second process over the same realm: the member is dormant there.
     let second = Arc::new(open_process(&host, &builds).await);
-    let receipt = Arc::clone(&second)
-        .record_instruction_target(&session_id, member_snapshot(1))
+    let receipt = second
+        .record_mob_instruction_target(&session_id, member_snapshot(1))
         .await
         .expect("a dormant member records its target store-only");
     assert_eq!(receipt.disposition, InstructionRecordDisposition::Recorded);
@@ -143,8 +143,8 @@ async fn a_dormant_member_on_a_host_store_realm_records_the_target_without_wakin
             .expect("live status"),
         "the member stays dormant"
     );
-    let repeated = Arc::clone(&second)
-        .record_instruction_target(&session_id, member_snapshot(1))
+    let repeated = second
+        .record_mob_instruction_target(&session_id, member_snapshot(1))
         .await
         .expect("a repeated delivery answers already recorded");
     assert_eq!(

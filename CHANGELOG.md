@@ -775,6 +775,159 @@ them.
 - `meerkat-machine-schema`: `InputFieldDomainKind` gains the variant
   `CiValues(BTreeSet<u64>)` (see Added), so exhaustive matches need an arm.
 
+- `meerkat-machine-schema`, `meerkat-machine-kernels`, `meerkat-mob`:
+  MobMachine holds a mob's operator instructions (see Added). `MobMachineState`
+  (meerkat-machine-schema and meerkat-mob) and the kernel `generated::mob`
+  `State` gain the public fields `operator_instruction_revision`,
+  `operator_instruction_effect`, `operator_instruction_digest`,
+  `operator_instruction_body_bytes`, `operator_instruction_target_kind`,
+  `operator_instruction_target_profile`, `operator_instruction_target_member`,
+  `operator_instruction_generation`, `member_instruction_owed`,
+  `member_instruction_recorded` and `member_instruction_blocked`, so code that
+  builds either struct literally must set them. `MobMachineSignal` gains
+  `SetOperatorInstruction`, `RevokeOperatorInstruction`,
+  `RecoverOperatorInstruction`, `RecoverOperatorInstructionGenerationHighwater`,
+  `PrepareMemberInstructionDelivery`, `RecordMemberInstructionTarget`,
+  `RefuseMemberInstructionTarget` and `ResolveMemberInstructionRelease`
+  (`agent_identity`, `session_id`, `disposal`), and
+  `MobMachineEffect` gains `OperatorInstructionCommitted`,
+  `OperatorInstructionDuplicate`, `OperatorInstructionRefused`,
+  `MemberInstructionDeliveryPrepared`, `MemberInstructionDeliveryDeferred`,
+  `MemberInstructionTargetRecorded`, `MemberInstructionTargetBlocked`,
+  `MemberInstructionReleaseAuthorized` and `MemberInstructionReleaseNotNeeded`;
+  exhaustive matches must add them. The enums `InstructionTargetKind`,
+  `MemberInstructionBlock`, `OperatorInstructionRefusal` and
+  `MemberInstructionDeferReason` are new.
+  The kernel `generated::mob::TransitionId` gains, after every published
+  variant, `SetOperatorInstructionBodyTooLargeRunning`,
+  `SetOperatorInstructionBodyTooLargeStopped`,
+  `SetOperatorInstructionSlotLimitExceededRunning`,
+  `SetOperatorInstructionSlotLimitExceededStopped`,
+  `SetOperatorInstructionNewOverBudgetRunning`,
+  `SetOperatorInstructionNewOverBudgetStopped`,
+  `SetOperatorInstructionNewRunning`, `SetOperatorInstructionNewStopped`,
+  `SetOperatorInstructionStaleRunning`, `SetOperatorInstructionStaleStopped`,
+  `SetOperatorInstructionDuplicateRunning`,
+  `SetOperatorInstructionDuplicateStopped`,
+  `SetOperatorInstructionConflictRunning`,
+  `SetOperatorInstructionConflictStopped`,
+  `SetOperatorInstructionAdvanceOverBudgetRunning`,
+  `SetOperatorInstructionAdvanceOverBudgetStopped`,
+  `SetOperatorInstructionAdvanceRunning`,
+  `SetOperatorInstructionAdvanceStopped`,
+  `SetOperatorInstructionTerminalCompleted`,
+  `SetOperatorInstructionTerminalDestroyed`,
+  `RevokeOperatorInstructionUnknownSlotRunning`,
+  `RevokeOperatorInstructionUnknownSlotStopped`,
+  `RevokeOperatorInstructionStaleRunning`,
+  `RevokeOperatorInstructionStaleStopped`,
+  `RevokeOperatorInstructionDuplicateRunning`,
+  `RevokeOperatorInstructionDuplicateStopped`,
+  `RevokeOperatorInstructionConflictRunning`,
+  `RevokeOperatorInstructionConflictStopped`,
+  `RevokeOperatorInstructionAdvanceRunning`,
+  `RevokeOperatorInstructionAdvanceStopped`,
+  `RevokeOperatorInstructionTerminalCompleted`,
+  `RevokeOperatorInstructionTerminalDestroyed`,
+  `RecoverOperatorInstructionAppliedRunning`,
+  `RecoverOperatorInstructionAppliedStopped`,
+  `RecoverOperatorInstructionAppliedCompleted`,
+  `RecoverOperatorInstructionStaleRunning`,
+  `RecoverOperatorInstructionStaleStopped`,
+  `RecoverOperatorInstructionStaleCompleted`,
+  `RecoverOperatorInstructionGenerationHighwaterRaised`,
+  `RecoverOperatorInstructionGenerationHighwaterKept`,
+  `PrepareMemberInstructionDeliveryNotOwedRunning`,
+  `PrepareMemberInstructionDeliveryNotOwedStopped`,
+  `PrepareMemberInstructionDeliveryPlacedRunning`,
+  `PrepareMemberInstructionDeliveryPlacedStopped`,
+  `PrepareMemberInstructionDeliveryUnbornRunning`,
+  `PrepareMemberInstructionDeliveryUnbornStopped`,
+  `PrepareMemberInstructionDeliveryUnboundRunning`,
+  `PrepareMemberInstructionDeliveryUnboundStopped`,
+  `PrepareMemberInstructionDeliveryRetiringRunning`,
+  `PrepareMemberInstructionDeliveryRetiringStopped`,
+  `PrepareMemberInstructionDeliveryDeliverRunning`,
+  `PrepareMemberInstructionDeliveryDeliverStopped`,
+  `PrepareMemberInstructionDeliveryMobNotRunningCompleted`,
+  `PrepareMemberInstructionDeliveryMobNotRunningDestroyed`,
+  `RecordMemberInstructionTargetNotOwedRunning`,
+  `RecordMemberInstructionTargetNotOwedStopped`,
+  `RecordMemberInstructionTargetNotOwedCompleted`,
+  `RecordMemberInstructionTargetNotOwedDestroyed`,
+  `RecordMemberInstructionTargetStaleSessionRunning`,
+  `RecordMemberInstructionTargetStaleSessionStopped`,
+  `RecordMemberInstructionTargetStaleSessionCompleted`,
+  `RecordMemberInstructionTargetStaleSessionDestroyed`,
+  `RecordMemberInstructionTargetSupersededRunning`,
+  `RecordMemberInstructionTargetSupersededStopped`,
+  `RecordMemberInstructionTargetSupersededCompleted`,
+  `RecordMemberInstructionTargetSupersededDestroyed`,
+  `RecordMemberInstructionTargetCurrentRunning`,
+  `RecordMemberInstructionTargetCurrentStopped`,
+  `RecordMemberInstructionTargetCurrentCompleted`,
+  `RecordMemberInstructionTargetCurrentDestroyed`,
+  `RecordMemberInstructionTargetUnmintedRunning`,
+  `RecordMemberInstructionTargetUnmintedStopped`,
+  `RecordMemberInstructionTargetUnmintedCompleted`,
+  `RecordMemberInstructionTargetUnmintedDestroyed`,
+  `RefuseMemberInstructionTargetNotOwedRunning`,
+  `RefuseMemberInstructionTargetNotOwedStopped`,
+  `RefuseMemberInstructionTargetNotOwedCompleted`,
+  `RefuseMemberInstructionTargetNotOwedDestroyed`,
+  `RefuseMemberInstructionTargetStaleSessionRunning`,
+  `RefuseMemberInstructionTargetStaleSessionStopped`,
+  `RefuseMemberInstructionTargetStaleSessionCompleted`,
+  `RefuseMemberInstructionTargetStaleSessionDestroyed`,
+  `RefuseMemberInstructionTargetSupersededRunning`,
+  `RefuseMemberInstructionTargetSupersededStopped`,
+  `RefuseMemberInstructionTargetSupersededCompleted`,
+  `RefuseMemberInstructionTargetSupersededDestroyed`,
+  `RefuseMemberInstructionTargetBlockedRunning`,
+  `RefuseMemberInstructionTargetBlockedStopped`,
+  `RefuseMemberInstructionTargetBlockedCompleted`,
+  `RefuseMemberInstructionTargetBlockedDestroyed`,
+  `ResolveMemberInstructionReleaseAuthorizedRunning`,
+  `ResolveMemberInstructionReleaseAuthorizedStopped`,
+  `ResolveMemberInstructionReleaseAuthorizedCompleted`,
+  `ResolveMemberInstructionReleaseAuthorizedDestroyed`,
+  `ResolveMemberInstructionReleaseNotNeededRunning`,
+  `ResolveMemberInstructionReleaseNotNeededStopped`,
+  `ResolveMemberInstructionReleaseNotNeededCompleted`,
+  `ResolveMemberInstructionReleaseNotNeededDestroyed`,
+  `PrepareMemberInstructionDeliverySpawningRunning`,
+  `PrepareMemberInstructionDeliverySpawningStopped`, and the kernel
+  `generated::session_document::TransitionId` gains the member session arms
+  `RecordInstructionTargetAdopt`,
+  `RecordInstructionTargetAdoptActiveBudgetExceeded`,
+  `RecordInstructionTargetAdoptSlotLimitExceeded`,
+  `SetSessionInstructionMemberSession` and
+  `RebindInstructionOwnerMemberSession`, so no published variant's discriminant
+  moves. Exhaustive matches must add the new variants.
+
+- `meerkat-mob`: `MobEventKind` gains `OperatorInstructionCommitted` and
+  `MemberInstructionTargetsRecorded`, so an exhaustive match needs the arms.
+  A mob journals these two kinds at mob event schema 10
+  (`meerkat_core::OPERATOR_INSTRUCTION_MOB_EVENT_SCHEMA_VERSION`) and every
+  other kind at 9, so a mob that never uses operator instructions keeps a
+  journal older releases read. A release before operator instructions
+  refuses the journal of a mob that recorded one, typed ("unsupported stored
+  mob event schema_version=10; expected 9"), and Core 0.9.7 and 0.9.8 stop
+  restoring every mob of that realm at the first such journal, so no mob of
+  that realm restores until the mob's database is gone or the host is rolled
+  forward; see Upgrade notes for the steps before a downgrade.
+  `rkat storage doctor` lists such mob databases (Info finding
+  `operator-instruction-mob-events`).
+  `MobSessionService` gains `record_member_instruction_target`,
+  `release_member_instruction_target` and `read_member_instructions` (the
+  member sessions of one status page, one answer per session in order), each
+  defaulting to a typed `durability_unavailable` refusal, so a wrapper over a
+  durable session owner must forward them for its mob's members to receive
+  instructions, and `bind_seated_member_session` (a dormant resume seat's
+  member binding on a session that names none, store-only), defaulting to a
+  typed `Unsupported` refusal that refuses such a seat (Core's CLI and RPC
+  wrappers and Meta's wrappers forward all four).
+
 - `meerkat-workgraph`: `WorkEvidenceRef` gains the public field `withdraws`
   (`BTreeSet<String>`, the ids of earlier evidence on the same item that the
   ref withdraws; see Added), so code that builds the struct literally must
@@ -1533,7 +1686,13 @@ them.
   later owner starts from the empty target.
   `Session::rebind_instruction_owner` attaches a mob to a session-owned
   target from the instructions in effect, or gives an unowned target a new
-  owner. A stale or conflicting revision, a slot
+  owner. A mob member's session (its metadata names a mob member binding,
+  which a mob stamps when it seats the session) refuses its own host's
+  writes and adoption (`owned_by_mob`) whether or not its mob has recorded
+  a target yet, and its target its host wrote before the mob seated it (an
+  attach) becomes the mob's at the mob's first snapshot, in the same record
+  step; a session-owned target of a session no mob seated refuses a mob's
+  snapshot (`owned_by_session`). A stale or conflicting revision, a slot
   that instruction activations manage, more than 64 slots, a body over
   256 KiB and more than 1 MiB of Active bodies are refused typed
   (`InstructionSetErrorCode`). A write or record changes only the recorded
@@ -1573,11 +1732,24 @@ them.
   prompt versions in sessions that hold entries, and a fork child's request
   leaves out copied entry rows its model cannot carry.
   `SessionServiceInstructionExt` (`set_session_instruction`,
-  `record_instruction_target`, `read_session_instructions`; the persistent
-  service implements it, the ephemeral one refuses `durability_unavailable`)
-  records a live session's write through a task the service owns, so a
-  caller that stops waiting never leaves it uncommitted, and a dormant
-  session's store-only without waking it. History reads carry each entry's
+  `read_session_instructions`; the persistent service implements it, the
+  ephemeral one refuses `durability_unavailable`) records a live session's
+  write through a task the service owns, so a caller that stops waiting never
+  leaves it uncommitted, and a dormant session's store-only without waking
+  it. Its read (`SessionInstructionRead`) also says how the session's model
+  lowers entries (`lowering`, resolved by the service's builder through the
+  new defaulted `SessionAgentBuilder::instruction_lowering_for_identity`;
+  `None` when the builder cannot tell);
+  `PersistentSessionService::read_sessions_instructions` reads several
+  sessions in one pass and resolves each model's lowering once for the
+  pass. A mob member's snapshot is recorded,
+  and released, only by the mob runtime's sealed delivery (see the mob entry
+  below); no session service trait method takes one, and an xtask gate
+  (`runtime-authority-bypass`) refuses a call of the persistent service's
+  mob-only entry points outside the mob runtime's session service. A live
+  session's release goes through the new defaulted
+  `SessionAgent::release_instruction_target_control`, which a session agent
+  wrapper must forward. History reads carry each entry's
   identity as `WireInstructionEntryIdentity`, raw for a form the reader does
   not know. `SessionDocumentMachine` decides ownership, revision order, the
   slot limit, the active budget, application, deferral, the entry sequence
@@ -1593,6 +1765,78 @@ them.
   five operator-instruction input fields this way and bounds its CI sweep at
   five steps, so the canonical TLC lane's `session_document` run stays within
   its per-run cap.
+
+- `meerkat-mob`, `meerkat-machine-schema`, `meerkat-session`, `meerkat-store`:
+  operator instructions for a mob's members (Rust API).
+  `MobHandle::set_operator_instruction` writes a slot's body at a revision for
+  a target: every member, the members of one profile, or one member, as a
+  predicate over the roster (a member added or moved later receives it; the
+  receipt's `matched_members` counts the current matches);
+  `MobHandle::revoke_operator_instruction` revokes it at a higher revision.
+  The receipt returns once the record is in the mob's journal. MobMachine
+  owns every fact: the records, a generation every committed write and every
+  reset of a mob that has one advances, and each member's owed, recorded and
+  blocked facts. Every member whose snapshot a write changes is owed it, and
+  the mob's delivery owner records the member's whole snapshot in its
+  session: through the session while it is live and store-only while it is
+  dormant, never waking or materializing a member, with dormant deliveries
+  bounded (`MobBuilder::with_member_instruction_delivery_concurrency`,
+  default 16) and live ones in a lane of their own. A member born on a new
+  session (a spawn, a rotation, an unborn seat's first wake, a recreated
+  session) carries the snapshot from its first build, so its first run
+  applies it. A stale or conflicting revision, an unknown slot, a body over
+  256 KiB, more than 64 slots, more than 1 MiB of Active bodies and a
+  completed or destroyed mob are refused typed
+  (`OperatorInstructionError::code`); writes need `AdminHost` and are never
+  an agent tool. A session that another mob's target owns blocks the member
+  (`owned_by_other_mob`) until that mob releases it; a mob releases a
+  retiring member's target when the member's host keeps the session (the
+  release names the session the retirement disposes of, which MobMachine
+  checks against the member's binding or its pending retirement, within the
+  retirement's deadline), and on destroy, which goes on past every member
+  whose release does not land and answers incomplete naming each of them,
+  still seated, so one retry releases them all; a member session whose
+  operator-instruction state does not read holds nothing to release, so it
+  never wedges a retirement or a destroy. A member's session takes no
+  session-level write of its own host (`owned_by_mob`) from the moment a mob
+  seats it, so a mob's first write never replaces a write the host was told
+  was recorded; a dormant resume seat stamps the member binding at the seat,
+  without a wake, on a session that names none. The member binding is never
+  cleared, so a session a mob seated keeps refusing its host's own writes
+  after the member retires with the session kept, after a failed attach rolls
+  back, or after a dormant seat that stamped it is refused. A failed attach,
+  or a member that retires before the mob's first write, therefore leaves the
+  instructions its host wrote before the attach in effect, and its host can no
+  longer change or revoke them. A host's
+  standalone adoption (`Session::rebind_instruction_owner` to the session) of
+  a session a mob built or seated is refused `owned_by_mob`. A member seated
+  over an existing session whose own host wrote its target before (an attach)
+  hands that target to the mob at the mob's first delivery, in one
+  session-document step (`Session::record_instruction_target`). A member is
+  delivered to only once its spawn has activated
+  (`MemberInstructionDeferReason::SpawnInFlight` until then), so a failed
+  activation rolls it back with its session untouched; an attached member's
+  first activation turn (its kickoff or initial message) therefore runs before
+  the mob's instructions arrive, which apply from its next fresh run start. A
+  blocked member is owed again by a new revision of a slot that selects it, a
+  seat or a restart. A restart replays the records and the obligations, a
+  delivery wave's records are journaled, and a crash in the middle of a
+  fan-out delivers the remaining members once; a write whose journal row
+  landed although its append answered an error is committed, never dropped by
+  the next write.
+  `MobHandle::operator_instruction_status`
+  (`ReadHistory`) reads, without waking anyone and in one session read per
+  page, the records and per member
+  its residency, its delivery state (`Current`, `Owed` with the last
+  retryable failure, `Blocked` with its reason), per slot the member's
+  desired view, its session's recorded target and the entry in effect with a
+  typed pending reason (a model that cannot carry operator instructions is
+  `lowering_unavailable`), an unreadable member's reason, and whether a live
+  channel is open on its session (operator instructions do not reach a live
+  channel). A placed member is reported blocked (`member_host_unsupported`).
+  A TLC audit (`specs/machines/mob_machine/operator_instruction_delivery_audit.sh`)
+  checks the owed computation, the seat and unseat facts, the release of a
+  retiring member's session and that no delivery wakes a member.
 
 - `meerkat-workgraph`: typed evidence withdrawal. An evidence ref withdraws
   earlier evidence on the same item by listing the earlier ids in its new
@@ -2128,6 +2372,23 @@ them.
   retired header as the key's instruction text.
 
 ### Upgrade notes
+
+- Operator instructions for a mob's members: a mob that recorded an
+  operator instruction journals rows at mob event schema 10, which Core 0.9.7
+  and 0.9.8 refuse ("unsupported stored mob event schema_version=10; expected
+  9"). Their realm restore (the mob roots of the rkat CLI, RPC and MCP hosts)
+  stops at the first such mob database, so every mob of that realm fails to
+  restore and every mob verb answers that error; a Meta gateway whose own mob
+  recorded an operator instruction does not resume its mob. Before any
+  downgrade to 0.9.8 or 0.9.7, run `rkat storage doctor` on 0.9.9, then
+  destroy each mob listed under `operator-instruction-mob-events`, or move
+  its database (`mobs/<name>.db` in the realm's state directory, the path
+  the finding names) out of that directory, before the older binary starts.
+  The doctor reads the mob databases on disk only: for a realm on a host
+  store, look in the host's store for mob events at schema 10. A member
+  session that recorded its snapshot is written at session envelope 5, which
+  the older binary refuses session by session (the
+  `operator-instruction-envelope` finding lists them).
 
 - A session's grant gate is recorded in its tooling metadata, which a binary
   older than scoped tool grants does not read: such a binary resumes a gated

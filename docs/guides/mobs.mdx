@@ -1344,6 +1344,104 @@ the persistent store, read-only. See
 [Member binding history](/reference/mob-architecture#member-binding-history)
 for what each read answers.
 
+### Operator instructions (Rust hosts)
+
+A host gives a mob's members standing System-plane instructions by slot
+(a namespace the host owns and a key), revision and body, for a target:
+every member (`OperatorInstructionTarget::Mob`), the members of one profile
+(`Profile { profile }`) or one member (`Member { agent_identity }`). A target
+is a predicate, not a reference: a member added later, or moved to the
+profile later, receives the record then, and a target that names a missing
+profile or member matches nobody (the receipt's `matched_members` shows
+zero).
+
+```rust
+use meerkat_mob::{OperatorInstructionTarget, OperatorInstructionWrite};
+
+let receipt = handle
+    .set_operator_instruction(OperatorInstructionWrite {
+        slot: slot.clone(),        // InstructionSlot { namespace, key }
+        revision,                  // strictly increasing per slot
+        body: "Answer formally.".to_string(),
+        content_sha256: None,      // checked against the body when given
+        target: OperatorInstructionTarget::Profile { profile: "worker".into() },
+    })
+    .await?;
+// Revoke at a higher revision; the record keeps its target.
+handle.revoke_operator_instruction(slot, next_revision).await?;
+```
+
+The receipt returns once the record is in the mob's journal. Delivery is
+asynchronous: every member whose snapshot the write changes (the record's
+old or new target selects it) is owed it, and the mob records the member's
+whole snapshot in the member's session, through the session while it is
+live and store-only while it is dormant. Nothing wakes or materializes a
+member to deliver. A member born on a new session (a spawn, a rotation, an
+unborn seat's first wake) carries the snapshot from its first build. Each
+session applies its target at its next fresh run start, never inside a run.
+Dormant members are recorded at most 16 at a time by default
+(`MobBuilder::with_member_instruction_delivery_concurrency`); deliveries
+through live sessions run in their own lane. An exact repeat answers as a
+duplicate; a lower revision, the same revision with other content, a body
+over 256 KiB, more than 64 slots, more than 1 MiB of Active bodies and a
+completed or destroyed mob are refused typed
+(`OperatorInstructionError::code`). A revoked slot keeps its record (its
+effect Absent), so it counts toward the 64 slots until a reset clears the
+records. Writes need the `AdminHost` scope and are never an agent tool.
+
+`MobHandle::operator_instruction_status` (scope `ReadHistory`) reads the
+records and, per member, its residency, its delivery state (`Current`,
+`Owed` with the last retryable failure, or `Blocked` with a reason), and per
+slot what the member should have, what its session recorded and the entry
+that put it in effect, with the reason a change is still pending (the
+session's next run start, a model that lowers System rows only in the
+leading prefix, or one that cannot carry them at all). It reads committed
+session state and never wakes a member; a member whose session cannot be
+read is reported with the reason, and the page still answers.
+
+A member's session target belongs to its mob: another mob's delivery to it
+is refused (`owned_by_other_mob`) until the owning mob releases it, which a
+mob does when a member whose session its host keeps retires and when the mob
+is destroyed. A destroy goes on past every member whose release does not land
+and answers incomplete naming each of them, still seated, so one retry
+releases them all; a member session whose operator-instruction state does not
+read has nothing to release and never holds up a retirement or a destroy. A
+member's session refuses its own host's session-level writes
+(`SessionServiceInstructionExt::set_session_instruction` answers
+`owned_by_mob`) from the moment a mob seats it, even before the mob writes
+anything, so the mob's first write never replaces a write the host was told
+was recorded; write to a member through `MobHandle::set_operator_instruction`
+with a member target instead. A dormant resume seat stamps the member binding
+at the seat, without a wake, on a session that names none. The member binding
+a mob stamps on a session is never cleared, so a session a mob seated keeps
+refusing its host's own writes after the member retires with the session kept,
+after a failed attach rolls back, or after a dormant seat that stamped it is
+refused. A failed attach, or a member that retires before the mob's first
+write, therefore leaves the instructions its host wrote before the attach in
+effect, and its host can no longer change or revoke them: revoke them before
+attaching a session that may leave the mob. A host's
+standalone adoption (`Session::rebind_instruction_owner` to the session) of a
+session a mob built or seated is refused `owned_by_mob` too. A member seated
+over an existing session whose own host wrote its target before (an attach)
+hands that target to the mob at the mob's first delivery: the mob's snapshot
+replaces what the host wrote. That first delivery waits until the member's
+spawn has activated, so an attach whose activation fails rolls back with the
+host's session untouched. An attached member's first activation turn (its
+kickoff or initial message) therefore runs before the mob's instructions
+arrive; they apply from its next fresh run start. A blocked member stays
+blocked until a write with a new revision of a slot that selects it, a new
+seat of the member, or a restart; an exact repeat of a write does not unblock
+it. A reset clears the records and keeps the generation moving forward, so a
+session never sees an older snapshot replace a newer one. A
+placed member is reported blocked (`member_host_unsupported`) until member
+hosts take deliveries. A mob that recorded operator instructions journals
+them at mob event schema 10, which a release before operator instructions
+refuses for every mob of that realm, not only that one: see
+[Downgrading to 0.9.8](/guides/upgrading#downgrading-to-0-9-8) before any
+downgrade. `rkat storage doctor` lists such mobs
+(`operator-instruction-mob-events`); it reads the mob databases on disk
+(`mobs/<name>.db` in each realm's state directory), not a host store.
+
 ### Shutdown, destroy and admission (Rust hosts)
 
 Every exported `MobHandle` clone shares one owner token. A mob whose admission

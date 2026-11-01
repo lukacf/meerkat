@@ -27,6 +27,7 @@ pub(super) mod member_status_lane;
 pub(super) mod member_wake;
 #[cfg(feature = "runtime-adapter")]
 pub(super) mod member_wake_turn;
+mod operator_instructions;
 mod placed_external_routes;
 pub(super) mod reload_revival;
 mod resume_post_commit;
@@ -6474,6 +6475,16 @@ pub(super) struct BatchWireTrustRollback {
     comms: Arc<dyn CoreCommsRuntime>,
 }
 
+/// How one local member's destroy disposal ended.
+enum DestroyMemberDisposal {
+    /// Its steps ran; the report says whether one failed.
+    Steps(DisposalReport),
+    /// The member's operator-instruction target was not released before its
+    /// archive record: the member stays seated with its delivery facts, and a
+    /// retried destroy releases the target again.
+    InstructionReleasePending(MobError),
+}
+
 /// What a destroy admission hands its cleanup: the report so far, whether
 /// the destroy input is still needed, the roster it admitted against and the
 /// retire trust plans it proved.
@@ -9155,6 +9166,12 @@ pub(super) struct MobActor {
     /// The host's member-residency inputs, the ones the start that built
     /// this actor planned with: the clean-stop lift plans with the same.
     pub(super) member_residency: super::boot_plan::MemberResidencyConfig,
+    /// The operator-instruction shell: the Active records' bodies (from the
+    /// journal), and the delivery bookkeeping the delivery owner and the
+    /// launched handle share. MobMachine holds every operator-instruction
+    /// fact.
+    pub(super) operator_instructions:
+        super::operator_instruction_delivery::OperatorInstructionShell,
     /// Whether the latest member plan could not observe recovery work,
     /// shared with the handles ([`super::MobHandle::boot_set_basis`]).
     pub(super) boot_set_basis: super::boot_plan::MobBootSetBasisCell,
@@ -16458,6 +16475,7 @@ impl MobActor {
             custody_deferrals: self.deferred_member_custody.view(),
             supervisor_bridge: self.supervisor_bridge.clone(),
             machine_state_watch_rx: self.machine_state_watch_tx.subscribe(),
+            operator_instruction_delivery: Arc::clone(&self.operator_instructions.delivery),
             reachability_observations: Arc::clone(&self.reachability_observations),
             phase_watch_rx: self.phase_watch_tx.subscribe(),
             // W2-E: the actor's internal handle-for-tools does not carry the
@@ -31226,6 +31244,33 @@ impl MobActor {
                 MobCommand::QueryMachineState { reply_tx } => {
                     let _ = reply_tx.send(self.dsl_authority.state().clone());
                 }
+                MobCommand::SetOperatorInstruction {
+                    write,
+                    digest,
+                    reply_tx,
+                } => {
+                    let result = self.set_operator_instruction(*write, digest).await;
+                    let _ = reply_tx.send(result);
+                }
+                MobCommand::RevokeOperatorInstruction {
+                    slot,
+                    revision,
+                    reply_tx,
+                } => {
+                    let result = self.revoke_operator_instruction(slot, revision).await;
+                    let _ = reply_tx.send(result);
+                }
+                MobCommand::PrepareMemberInstructionDelivery {
+                    agent_identity,
+                    reply_tx,
+                } => {
+                    let result = self.prepare_member_instruction_delivery(&agent_identity);
+                    let _ = reply_tx.send(result);
+                }
+                MobCommand::SettleMemberInstructionDeliveries { outcomes, reply_tx } => {
+                    let result = self.settle_member_instruction_deliveries(outcomes).await;
+                    let _ = reply_tx.send(result);
+                }
                 MobCommand::GrantScopes {
                     caller,
                     principal,
@@ -37270,6 +37315,19 @@ impl MobActor {
             );
         };
         let admitted_bridge_session_id = provision_input.admitted_bridge_session_id();
+        // A member minted on a new session is born with its operator
+        // instruction snapshot; one that continues a session receives it by
+        // delivery.
+        if matches!(provision_input.binding(), crate::RuntimeBinding::Session)
+            && let SpawnProvisionInput::Ready(request) = &mut provision_input
+            && let Err(error) = self.carry_member_instruction_birth(
+                &mut request.create_session,
+                &agent_identity,
+                profile_name.as_str(),
+            )
+        {
+            reject_spawn_before_custody!("operator_instruction_birth", error);
+        }
         let spawn_bridge_session_id = match provision_input.binding() {
             crate::RuntimeBinding::Session => Some(&admitted_bridge_session_id),
             crate::RuntimeBinding::External { .. }
@@ -40253,6 +40311,13 @@ impl MobActor {
         };
         let admitted_bridge_session_id =
             admit_bridge_session_for_spawn(&mut provision_request.create_session);
+        if matches!(provision_request.binding, crate::RuntimeBinding::Session) {
+            self.carry_member_instruction_birth(
+                &mut provision_request.create_session,
+                agent_identity,
+                profile_name.as_str(),
+            )?;
+        }
 
         if matches!(
             provision_request.binding,
@@ -52088,12 +52153,26 @@ impl MobActor {
     /// critical per-member cleanup steps succeed. General member disposal
     /// removes roster state in a finally block, but destroy retries rebuild
     /// cleanup work from the roster after a partial attempt.
-    async fn dispose_member_for_destroy(&mut self, ctx: &DisposalContext) -> DisposalReport {
+    async fn dispose_member_for_destroy(&mut self, ctx: &DisposalContext) -> DestroyMemberDisposal {
         // Both phases are built in their own frames: at opt-level 0 each
         // awaited future reserved twice its size in this poll frame.
         let (mut report, archive_disposal) =
             boxed_arm_future(|| self.dispose_member_for_destroy_steps(ctx)).await;
         if let Some(disposal) = archive_disposal {
+            // A release that does not land fails this member's destroy step:
+            // the member stays seated with its delivery facts, and a retried
+            // destroy releases the target again.
+            if let Err(error) = boxed_arm_future(|| {
+                self.release_member_instruction_target_for_destroy(
+                    &ctx.entry.agent_identity,
+                    ctx.entry.bridge_session_id(),
+                    disposal,
+                )
+            })
+            .await
+            {
+                return DestroyMemberDisposal::InstructionReleasePending(error);
+            }
             if let Err(error) =
                 boxed_arm_future(|| self.record_destroy_member_retirement_archived(ctx, disposal))
                     .await
@@ -52115,7 +52194,7 @@ impl MobActor {
                 }
             }
         }
-        report
+        DestroyMemberDisposal::Steps(report)
     }
 
     async fn execute_destroy_step(
@@ -54754,7 +54833,23 @@ impl MobActor {
         });
         // Terminal publication is deliberately last: replay may remove the
         // roster only after runtime cleanup and, for peer-only members,
-        // supervisor revocation have reached typed terminal truth.
+        // supervisor revocation have reached typed terminal truth. A member
+        // whose operator-instruction target was not released stays seated
+        // for the destroy's retry.
+        if let Err(error) = self
+            .release_member_instruction_target_for_destroy(
+                &entry.agent_identity,
+                entry.bridge_session_id(),
+                terminal_disposal,
+            )
+            .await
+        {
+            outcome.errors.push(format!(
+                "operator instruction target release failed: {error}"
+            ));
+            outcome.orphaned = true;
+            return outcome;
+        }
         if let Err(error) = self
             .record_destroy_member_retirement_archived(&ctx, terminal_disposal)
             .await
@@ -54903,7 +54998,23 @@ impl MobActor {
             }
         };
         if !disposal_already_complete {
-            let disposal_report = boxed_arm_future(|| self.dispose_member_for_destroy(&ctx)).await;
+            let disposal = boxed_arm_future(|| self.dispose_member_for_destroy(&ctx)).await;
+            let disposal_report = match disposal {
+                DestroyMemberDisposal::Steps(steps) => steps,
+                DestroyMemberDisposal::InstructionReleasePending(error) => {
+                    // The member stays seated with its delivery facts and no
+                    // archive record. The destroy goes on with the other
+                    // members and answers incomplete naming each such member,
+                    // so one retry releases them all.
+                    report.push_error(format!(
+                        "{}: disposal aborted at {}: the member's operator instruction \
+                         target was not released: {error}",
+                        entry.agent_identity,
+                        DisposalStep::ArchiveSession
+                    ));
+                    return Ok(());
+                }
+            };
             if let Some(error) = Self::destroy_disposal_failure(&disposal_report) {
                 report.push_error(format!("{}: {error}", entry.agent_identity));
                 if let Some(refusal) = Self::destroy_disposal_reload_refusal(&disposal_report) {
@@ -55528,7 +55639,10 @@ impl MobActor {
                 .remove(&entry.agent_identity)
                 .unwrap_or_else(RetireTrustCleanupPlan::empty);
             // Keep nested disposal futures out of this destroy coordinator's
-            // debug stack frame while retaining inline polling and drop.
+            // debug stack frame while retaining inline polling and drop. A
+            // member whose operator-instruction release did not land is named
+            // in the report and stays seated; the destroy goes on with the
+            // next member and answers incomplete below.
             boxed_arm_future(|| {
                 self.dispose_local_member_after_destroy_admission(entry, plan, &mut report)
             })

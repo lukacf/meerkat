@@ -10,8 +10,10 @@
 # model applies only on a leading System prefix, a mob-owned target changes
 # owner only when its own mob releases it, a release empties the target and
 # the next fresh run start revokes what the released mob had in effect, a
-# rebind starts from the right target, and the target stays within the
-# active budget.
+# rebind starts from the right target, the target stays within the
+# active budget, a mob member's session takes no write or adoption of its
+# own host, and a mob record takes over a session-owned target only on a
+# member's session (an attach).
 #
 # usage: instruction_boundary_audit.sh [--mutants] [extra tlc args...]
 #
@@ -22,7 +24,7 @@
 # arm or field fails the run instead of a vacuous pass. It then checks the
 # invariants (safety), and reruns once per reachability witness, with that
 # witness's negation as an extra invariant, requiring TLC to report exactly
-# that violation. With --mutants it seeds ten defects into a copy of the
+# that violation. With --mutants it seeds twelve defects into a copy of the
 # generated model and requires TLC to refuse each with the invariant it
 # targets, checked as the run's only invariant:
 #   - apply on ResumeRun (the FreshRun guard widened to any run);
@@ -38,7 +40,11 @@
 #     dropped);
 #   - keep a released mob's instructions at a run start (the no-change arm
 #     taken whatever is pending);
-#   - keep the target on a release (its four slot maps left as they were).
+#   - keep the target on a release (its four slot maps left as they were);
+#   - accept a host write on a member's session (the session write's
+#     binding guard dropped);
+#   - take over a session-owned target no mob seated (the takeover's
+#     binding guard dropped).
 # No run uses -continue. TLC checks the invariants of every new state and of
 # every successor past the step constraint, each time it generates one, and
 # under -continue prints a whole trace for each violation but names only the
@@ -75,9 +81,9 @@ text = open(os.environ["MODEL"]).read()
 recover = "session_id, owner, owner_mob, target_generation, entry_sequence"
 recover_target = "session_id, revision, effect, digest, bytes"
 recover_effective = "session_id, revision, effect, digest, bytes, generation, last_entry_sequence"
-record = "session_id, mob_id, generation, revision, effect, digest, bytes"
-write = "session_id, slot, revision, effect, digest, body_bytes"
-rebind = "session_id, owner, mob_id"
+record = "session_id, mob_id, generation, revision, effect, digest, bytes, member_bound"
+write = "session_id, slot, revision, effect, digest, body_bytes, member_bound"
+rebind = "session_id, owner, mob_id, member_bound"
 release = "session_id, mob_id"
 resolve = "session_id, run_start, lowering, transcript_is_system_prefix"
 fold = "session_id, at_run_start, lowering"
@@ -91,6 +97,9 @@ arms = {
     "RecordInstructionTargetAlreadyRecorded": record,
     "RecordInstructionTargetOwnedBySession": record,
     "RecordInstructionTargetOwnedByOtherMob": record,
+    "RecordInstructionTargetAdopt": record,
+    "RecordInstructionTargetAdoptActiveBudgetExceeded": record,
+    "RecordInstructionTargetAdoptSlotLimitExceeded": record,
     "SetSessionInstructionNew": write,
     "SetSessionInstructionAdvance": write,
     "SetSessionInstructionActiveBudgetExceeded": write,
@@ -100,8 +109,10 @@ arms = {
     "SetSessionInstructionOwnedByMob": write,
     "SetSessionInstructionSlotLimitExceeded": write,
     "SetSessionInstructionUnknownSlot": write,
+    "SetSessionInstructionMemberSession": write,
     "RebindInstructionOwner": rebind,
     "RebindInstructionOwnerUnowned": rebind,
+    "RebindInstructionOwnerMemberSession": rebind,
     "ReleaseInstructionTarget": release,
     "ReleaseInstructionTargetAlreadyUnowned": release,
     "ReleaseInstructionTargetOwnedByOtherMob": release,
@@ -152,9 +163,11 @@ audit_invariants="  AuditEffectiveChangesOnlyAtRunStart
   AuditReleaseEmptiesTheTarget
   AuditUnownedRunStartRevokesWhatIsInEffect
   AuditRebindStartsFromTheRightTarget
-  AuditTargetWithinBudget"
+  AuditTargetWithinBudget
+  AuditMemberSessionTakesNoHostWrite
+  AuditOnlyAMemberSessionTargetIsTakenOver"
 
-witnesses="Applied RevokeApplied MobOwnedEffective ReboundAfterRelease ReleasedInstructionsRevoked"
+witnesses="Applied RevokeApplied MobOwnedEffective ReboundAfterRelease ReleasedInstructionsRevoked Adopted"
 
 # usage: write_cfg <file> <extra invariant lines>
 write_cfg() {
@@ -323,5 +336,15 @@ PY
     "    /\\ session_instruction_target_digest' = session_instruction_target_digest" \
     "session_instruction_target_bytes' =" \
     "    /\\ session_instruction_target_bytes' = session_instruction_target_bytes"
+  # A mob member's session takes its own host's write: the session write's
+  # binding guard dropped.
+  mutate member_session_write_accepted AuditMemberSessionTakesNoHostWrite \
+    SetSessionInstructionNew '(member_bound = FALSE)' \
+    '    /\ TRUE'
+  # A mob record takes over a session-owned target of a session no mob
+  # seated: the takeover's binding guard dropped.
+  mutate unbound_session_target_adopted AuditOnlyAMemberSessionTargetIsTakenOver \
+    RecordInstructionTargetAdopt '(member_bound = TRUE)' \
+    '    /\ TRUE'
 fi
 echo "instruction boundary audit passed"

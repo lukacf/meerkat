@@ -2090,8 +2090,33 @@ impl PersistedSessionReadRefusal {
     }
 }
 
+/// How the mock answers one mob release of a member session's target.
+#[derive(Clone, Copy, Debug)]
+enum InstructionReleaseFault {
+    /// A store that did not take the write.
+    Failed,
+    /// A session whose operator-instruction state does not read.
+    Unreadable,
+}
+
 struct MockSessionService {
     sessions: RwLock<HashMap<SessionId, Arc<MockCommsRuntime>>>,
+    /// Every mob operator-instruction delivery this mock answered, in order:
+    /// the session, the snapshot's generation, and whether it wrote the
+    /// session's document (an already recorded generation writes nothing).
+    instruction_records: std::sync::Mutex<Vec<(SessionId, u64, bool)>>,
+    /// Deliveries in flight now, and the most at once.
+    instruction_records_in_flight: AtomicU64,
+    instruction_records_max_in_flight: AtomicU64,
+    /// When set, every delivery takes a permit here before it writes: a row
+    /// holds deliveries in flight and lets them through.
+    instruction_record_gate: std::sync::Mutex<Option<Arc<tokio::sync::Semaphore>>>,
+    /// Faults the next mob releases of member session targets answer, one
+    /// each in order; a faulted release writes nothing.
+    instruction_release_faults: std::sync::Mutex<VecDeque<InstructionReleaseFault>>,
+    /// How many member sessions each operator-instruction read asked for,
+    /// one entry per read call.
+    member_instruction_reads: std::sync::Mutex<Vec<usize>>,
     /// The spawner restrictions handed to the build of each session this
     /// mock created, as a session owner records them.
     tool_restrictions: std::sync::Mutex<
@@ -2439,6 +2464,107 @@ struct MockSessionService {
 }
 
 impl MockSessionService {
+    /// The mob deliveries this mock answered, in order: (session,
+    /// generation, wrote).
+    fn instruction_records(&self) -> Vec<(SessionId, u64, bool)> {
+        self.instruction_records
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// The most deliveries this mock held in flight at once.
+    fn instruction_records_max_in_flight(&self) -> u64 {
+        self.instruction_records_max_in_flight
+            .load(Ordering::SeqCst)
+    }
+
+    /// Fail the next mob release of a member session's target.
+    fn fail_next_instruction_release(&self) {
+        self.fail_next_instruction_releases(1);
+    }
+
+    /// Fail the next `count` mob releases of member session targets (a store
+    /// that did not take the write).
+    fn fail_next_instruction_releases(&self, count: usize) {
+        let mut faults = self
+            .instruction_release_faults
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for _ in 0..count {
+            faults.push_back(InstructionReleaseFault::Failed);
+        }
+    }
+
+    /// Answer the next mob release of a member session's target as a session
+    /// whose operator-instruction state does not read.
+    fn next_instruction_release_unreadable(&self) {
+        self.instruction_release_faults
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push_back(InstructionReleaseFault::Unreadable);
+    }
+
+    /// How many member sessions each operator-instruction read asked for.
+    fn member_instruction_reads(&self) -> Vec<usize> {
+        self.member_instruction_reads
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// One member session's committed operator-instruction state, as the
+    /// persistent owner reads it, never materializing the session.
+    async fn read_one_member_instructions(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<
+        meerkat_core::service::SessionInstructionRead,
+        meerkat_core::service::SessionInstructionError,
+    > {
+        let session = self
+            .persisted_sessions
+            .read()
+            .await
+            .get(session_id)
+            .cloned()
+            .ok_or_else(|| SessionError::NotFound {
+                id: session_id.clone(),
+            })?;
+        let target = session.instruction_target_state()?;
+        let effective =
+            meerkat_core::effective_operator_instructions(session.id(), session.messages())
+                .map_err(meerkat_core::InstructionStateError::MalformedHistory)?;
+        Ok(meerkat_core::service::SessionInstructionRead {
+            target,
+            effective,
+            lowering: None,
+        })
+    }
+
+    /// Hold every later delivery until the returned gate lets it through.
+    fn hold_instruction_records(&self) -> Arc<tokio::sync::Semaphore> {
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        *self
+            .instruction_record_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&gate));
+        gate
+    }
+
+    /// A session's committed operator-instruction target, as this mock's
+    /// store holds it.
+    async fn committed_instruction_target(
+        &self,
+        session_id: &SessionId,
+    ) -> Option<meerkat_core::SessionInstructionState> {
+        self.persisted_sessions
+            .read()
+            .await
+            .get(session_id)
+            .and_then(|session| session.instruction_target_state().ok().flatten())
+    }
+
     /// Drop this owner's record of a session's spawner restrictions, as a
     /// session whose evidence is missing or unknown.
     fn forget_tool_restrictions(&self, session_id: &SessionId) {
@@ -2451,6 +2577,12 @@ impl MockSessionService {
     fn new() -> Self {
         Self {
             sessions: RwLock::new(HashMap::new()),
+            instruction_records: std::sync::Mutex::new(Vec::new()),
+            instruction_records_in_flight: AtomicU64::new(0),
+            instruction_records_max_in_flight: AtomicU64::new(0),
+            instruction_record_gate: std::sync::Mutex::new(None),
+            instruction_release_faults: std::sync::Mutex::new(VecDeque::new()),
+            member_instruction_reads: std::sync::Mutex::new(Vec::new()),
             actor_registry: meerkat_session::LiveSessionActorRegistry::default(),
             live_session_data: RwLock::new(HashMap::new()),
             tool_restrictions: std::sync::Mutex::new(HashMap::new()),
@@ -4361,6 +4493,22 @@ impl MockSessionService {
             session
                 .set_session_metadata(metadata)
                 .expect("mock session metadata should serialize");
+        } else if let Some(binding) = req
+            .build
+            .as_ref()
+            .and_then(|build| build.mob_member_binding.clone())
+        {
+            // Mirror the factory, which stamps a mob build's member binding on
+            // every build, a resumed session's included: a session a mob
+            // seats over an existing one (an attach) is a member's from then
+            // on.
+            let mut metadata = session
+                .session_metadata()
+                .expect("a resumed mock session carries metadata");
+            metadata.mob_member_binding = Some(binding);
+            session
+                .set_session_metadata(metadata)
+                .expect("mock session metadata should serialize");
         }
         // Mirror the factory, which persists every build's application context
         // in the session's durable build state, unconditionally: a build that
@@ -5609,6 +5757,190 @@ impl MockSessionService {
 
 #[async_trait]
 impl MobSessionService for MockSessionService {
+    /// Records the snapshot in the session's committed document (and in its
+    /// live copy, when it has one), as the persistent owner does. It never
+    /// creates or materializes a session.
+    async fn record_member_instruction_target(
+        self: Arc<Self>,
+        delivery: crate::MemberInstructionDelivery,
+    ) -> Result<
+        meerkat_core::InstructionRecordReceipt,
+        meerkat_core::service::SessionInstructionError,
+    > {
+        let in_flight = self
+            .instruction_records_in_flight
+            .fetch_add(1, Ordering::SeqCst)
+            .saturating_add(1);
+        self.instruction_records_max_in_flight
+            .fetch_max(in_flight, Ordering::SeqCst);
+        let gate = self
+            .instruction_record_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(gate) = gate {
+            // One permit admits exactly one delivery.
+            gate.acquire_owned()
+                .await
+                .expect("instruction record gate open")
+                .forget();
+        }
+        let result = async {
+            let (session_id, record) = delivery.into_parts();
+            let generation = record.generation;
+            let _authority_guard = self.resume_authority_gate.lock().await;
+            let mut committed = self
+                .persisted_sessions
+                .read()
+                .await
+                .get(&session_id)
+                .cloned()
+                .ok_or_else(|| SessionError::NotFound {
+                    id: session_id.clone(),
+                })?;
+            let receipt = committed.record_instruction_target(record.clone())?;
+            let wrote = receipt.disposition == meerkat_core::InstructionRecordDisposition::Recorded;
+            if wrote {
+                if let Some(live) = self.live_session_data.write().await.get_mut(&session_id) {
+                    let _ = live.record_instruction_target(record);
+                }
+                self.persisted_sessions
+                    .write()
+                    .await
+                    .insert(session_id.clone(), committed);
+            }
+            self.instruction_records
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push((session_id, generation, wrote));
+            Ok::<_, meerkat_core::service::SessionInstructionError>(receipt)
+        }
+        .await;
+        self.instruction_records_in_flight
+            .fetch_sub(1, Ordering::SeqCst);
+        result
+    }
+
+    async fn release_member_instruction_target(
+        self: Arc<Self>,
+        release: crate::MemberInstructionRelease,
+    ) -> Result<
+        meerkat_core::InstructionReleaseDisposition,
+        meerkat_core::service::SessionInstructionError,
+    > {
+        let fault = self
+            .instruction_release_faults
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .pop_front();
+        match fault {
+            Some(InstructionReleaseFault::Failed) => {
+                return Err(
+                    SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                        "fault-injected operator instruction release failure".to_string(),
+                    ))
+                    .into(),
+                );
+            }
+            Some(InstructionReleaseFault::Unreadable) => {
+                return Err(meerkat_core::service::SessionInstructionError::Refused(
+                    meerkat_core::InstructionWriteError::Malformed(
+                        meerkat_core::InstructionStateError::MalformedState(
+                            "fault-injected unreadable operator instruction state".to_string(),
+                        ),
+                    ),
+                ));
+            }
+            None => {}
+        }
+        let _authority_guard = self.resume_authority_gate.lock().await;
+        let session_id = release.session_id().clone();
+        let mut committed = self
+            .persisted_sessions
+            .read()
+            .await
+            .get(&session_id)
+            .cloned()
+            .ok_or_else(|| SessionError::NotFound {
+                id: session_id.clone(),
+            })?;
+        let disposition = committed.release_instruction_target(release.mob_id().as_str())?;
+        if disposition == meerkat_core::InstructionReleaseDisposition::Released {
+            if let Some(live) = self.live_session_data.write().await.get_mut(&session_id) {
+                let _ = live.release_instruction_target(release.mob_id().as_str());
+            }
+            self.persisted_sessions
+                .write()
+                .await
+                .insert(session_id, committed);
+        }
+        Ok(disposition)
+    }
+
+    async fn read_member_instructions(
+        &self,
+        session_ids: &[SessionId],
+    ) -> Vec<
+        Result<
+            meerkat_core::service::SessionInstructionRead,
+            meerkat_core::service::SessionInstructionError,
+        >,
+    > {
+        self.member_instruction_reads
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(session_ids.len());
+        let mut reads = Vec::with_capacity(session_ids.len());
+        for session_id in session_ids {
+            reads.push(self.read_one_member_instructions(session_id).await);
+        }
+        reads
+    }
+
+    /// Stamps the binding the stored session's comms name implies, store-only,
+    /// as the persistent owner does: only on a session that names no binding
+    /// and whose comms name is this member's, and never on a live one.
+    async fn bind_seated_member_session(
+        &self,
+        session_id: &SessionId,
+        mob_id: &str,
+        member: &str,
+    ) -> Result<(), SessionError> {
+        if self.has_live_session(session_id).await? {
+            return Err(SessionError::Busy {
+                id: session_id.clone(),
+            });
+        }
+        let _authority_guard = self.resume_authority_gate.lock().await;
+        let mut persisted = self.persisted_sessions.write().await;
+        let session = persisted
+            .get_mut(session_id)
+            .ok_or_else(|| SessionError::NotFound {
+                id: session_id.clone(),
+            })?;
+        let Some(mut metadata) = session.session_metadata() else {
+            return Ok(());
+        };
+        if metadata.mob_member_binding.is_some() {
+            return Ok(());
+        }
+        let Some(name) = metadata
+            .comms_name
+            .as_deref()
+            .and_then(|name| name.parse::<meerkat_core::MemberCommsName>().ok())
+        else {
+            return Ok(());
+        };
+        if name.mob_id() != mob_id || name.member() != member {
+            return Ok(());
+        }
+        metadata.mob_member_binding = Some(name.to_member_binding());
+        session
+            .set_session_metadata(metadata)
+            .expect("mock session metadata should serialize");
+        Ok(())
+    }
+
     fn bind_member_comms_identity_root_for_test(&self, identity_root: &std::path::Path) {
         *self
             .member_comms_identity_root
@@ -6971,6 +7303,12 @@ impl FaultInjectedMobEventStore {
         self.fail_after_append_on_kind.write().await.insert(kind);
     }
 
+    /// Acknowledge the appends of `kind` again (undo
+    /// [`Self::fail_after_append_for`]).
+    async fn acknowledge_appends_for(&self, kind: &'static str) {
+        self.fail_after_append_on_kind.write().await.remove(kind);
+    }
+
     fn fail_clear(&self) {
         self.fail_clear.store(true, Ordering::Relaxed);
     }
@@ -7100,6 +7438,8 @@ impl FaultInjectedMobEventStore {
                 "OrchestratorResumeNotificationFailed"
             }
             MobEventKind::OperatorActionRecorded { .. } => "OperatorActionRecorded",
+            MobEventKind::OperatorInstructionCommitted(_) => "OperatorInstructionCommitted",
+            MobEventKind::MemberInstructionTargetsRecorded(_) => "MemberInstructionTargetsRecorded",
         }
     }
 }
@@ -88631,6 +88971,19 @@ struct MobRuntimeParitySnapshotSummary {
     spawn_profile_authority_provider_params_digests: BTreeMap<String, String>,
     spawn_profile_authority_output_schema_digests: BTreeMap<String, String>,
     spawn_profile_authority_external_addressable: BTreeMap<String, bool>,
+    // Operator instructions: the mob's records and its members' delivery,
+    // read from the runtime's formal state.
+    operator_instruction_revision: BTreeMap<String, u64>,
+    operator_instruction_effect: BTreeMap<String, String>,
+    operator_instruction_digest: BTreeMap<String, String>,
+    operator_instruction_body_bytes: BTreeMap<String, u64>,
+    operator_instruction_target_kind: BTreeMap<String, String>,
+    operator_instruction_target_profile: BTreeMap<String, String>,
+    operator_instruction_target_member: BTreeMap<String, String>,
+    operator_instruction_generation: u64,
+    member_instruction_owed: BTreeMap<String, u64>,
+    member_instruction_recorded: BTreeMap<String, u64>,
+    member_instruction_blocked: BTreeMap<String, String>,
     // Row #320 / #293 / #314 / #351: machine-owned state folded into MobMachine.
     orphan_budget: u64,
     topology_default_policy: String,
@@ -90196,6 +90549,45 @@ async fn mob_runtime_parity_snapshot_summary(
                 BTreeSet::new(),
             )
         });
+    // Operator instructions, read from the runtime's formal state (the
+    // machine state the actor publishes), as the explicit resume fields are.
+    let formal_state = handle.machine_state_watch_rx.borrow().clone();
+    let operator_instruction_revision = formal_state.operator_instruction_revision.clone();
+    let operator_instruction_effect = formal_state
+        .operator_instruction_effect
+        .iter()
+        .map(|(key, effect)| (key.clone(), format!("{effect:?}")))
+        .collect::<BTreeMap<_, _>>();
+    let operator_instruction_digest = formal_state.operator_instruction_digest.clone();
+    let operator_instruction_body_bytes = formal_state.operator_instruction_body_bytes.clone();
+    let operator_instruction_target_kind = formal_state
+        .operator_instruction_target_kind
+        .iter()
+        .map(|(key, kind)| (key.clone(), format!("{kind:?}")))
+        .collect::<BTreeMap<_, _>>();
+    let operator_instruction_target_profile =
+        formal_state.operator_instruction_target_profile.clone();
+    let operator_instruction_target_member = formal_state
+        .operator_instruction_target_member
+        .iter()
+        .map(|(key, member)| (key.clone(), format!("{member:?}")))
+        .collect::<BTreeMap<_, _>>();
+    let operator_instruction_generation = formal_state.operator_instruction_generation;
+    let member_instruction_owed = formal_state
+        .member_instruction_owed
+        .iter()
+        .map(|(identity, generation)| (format!("{identity:?}"), *generation))
+        .collect::<BTreeMap<_, _>>();
+    let member_instruction_recorded = formal_state
+        .member_instruction_recorded
+        .iter()
+        .map(|(identity, generation)| (format!("{identity:?}"), *generation))
+        .collect::<BTreeMap<_, _>>();
+    let member_instruction_blocked = formal_state
+        .member_instruction_blocked
+        .iter()
+        .map(|(identity, block)| (format!("{identity:?}"), format!("{block:?}")))
+        .collect::<BTreeMap<_, _>>();
 
     Some(MobRuntimeParitySnapshotSummary {
         phase: phase.as_str().to_string(),
@@ -90291,6 +90683,17 @@ async fn mob_runtime_parity_snapshot_summary(
         spawn_profile_authority_provider_params_digests,
         spawn_profile_authority_output_schema_digests,
         spawn_profile_authority_external_addressable,
+        operator_instruction_revision,
+        operator_instruction_effect,
+        operator_instruction_digest,
+        operator_instruction_body_bytes,
+        operator_instruction_target_kind,
+        operator_instruction_target_profile,
+        operator_instruction_target_member,
+        operator_instruction_generation,
+        member_instruction_owed,
+        member_instruction_recorded,
+        member_instruction_blocked,
         orphan_budget,
         topology_default_policy,
         external_member_rebind_capability,
@@ -90799,6 +91202,64 @@ fn mob_runtime_parity_field_value(
                 .spawn_profile_authority_external_addressable
                 .keys()
                 .map(|k| (k.clone(), 0u64))
+                .collect(),
+        )),
+        // Operator instructions, from the runtime's formal state.
+        "operator_instruction_revision" => Some(MobRuntimeParityExprValue::Map(
+            snapshot.operator_instruction_revision.clone(),
+        )),
+        "operator_instruction_effect" => Some(MobRuntimeParityExprValue::Map(
+            snapshot
+                .operator_instruction_effect
+                .keys()
+                .map(|key| (key.clone(), 0))
+                .collect(),
+        )),
+        "operator_instruction_digest" => Some(MobRuntimeParityExprValue::Map(
+            snapshot
+                .operator_instruction_digest
+                .keys()
+                .map(|key| (key.clone(), 0))
+                .collect(),
+        )),
+        "operator_instruction_body_bytes" => Some(MobRuntimeParityExprValue::Map(
+            snapshot.operator_instruction_body_bytes.clone(),
+        )),
+        "operator_instruction_target_kind" => Some(MobRuntimeParityExprValue::Map(
+            snapshot
+                .operator_instruction_target_kind
+                .keys()
+                .map(|key| (key.clone(), 0))
+                .collect(),
+        )),
+        "operator_instruction_target_profile" => Some(MobRuntimeParityExprValue::Map(
+            snapshot
+                .operator_instruction_target_profile
+                .keys()
+                .map(|key| (key.clone(), 0))
+                .collect(),
+        )),
+        "operator_instruction_target_member" => Some(MobRuntimeParityExprValue::Map(
+            snapshot
+                .operator_instruction_target_member
+                .keys()
+                .map(|key| (key.clone(), 0))
+                .collect(),
+        )),
+        "operator_instruction_generation" => Some(MobRuntimeParityExprValue::U64(
+            snapshot.operator_instruction_generation,
+        )),
+        "member_instruction_owed" => Some(MobRuntimeParityExprValue::Map(
+            snapshot.member_instruction_owed.clone(),
+        )),
+        "member_instruction_recorded" => Some(MobRuntimeParityExprValue::Map(
+            snapshot.member_instruction_recorded.clone(),
+        )),
+        "member_instruction_blocked" => Some(MobRuntimeParityExprValue::Map(
+            snapshot
+                .member_instruction_blocked
+                .keys()
+                .map(|key| (key.clone(), 0))
                 .collect(),
         )),
         "externally_addressable_runtime_ids" => Some(MobRuntimeParityExprValue::Set(
@@ -99189,6 +99650,10 @@ mod member_instruction_gates;
 /// host-store realm: recorded store-only, without a wake.
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 mod operator_instruction_host_store;
+/// Operator instructions on a mob: records, targets, delivery to live,
+/// dormant and unborn members, retire, reset, restart and refusals.
+#[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+mod operator_instruction_rows;
 /// #1390: stop and shutdown await interrupted members' end of turn as typed
 /// signals, concurrently and off the actor loop.
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]

@@ -4703,6 +4703,33 @@ fn seed_mob_authority_sync_from_events(
                     "recover_external_peer_unwired",
                 )?;
             }
+            // Operator instructions: a committed record owes its members at
+            // its generation, as the live write did, and a delivery wave's
+            // records close the obligations they closed, for the session
+            // each member is bound to at this point of the replay.
+            MobEventKind::OperatorInstructionCommitted(committed) => {
+                apply_seeded_mob_signal(
+                    authority,
+                    super::operator_instruction_delivery::recover_operator_instruction_signal(
+                        committed,
+                    ),
+                    "recover_operator_instruction",
+                )?;
+            }
+            MobEventKind::MemberInstructionTargetsRecorded(recorded) => {
+                let signals =
+                    super::operator_instruction_delivery::recover_member_instruction_target_signals(
+                        authority.state(),
+                        recorded,
+                    );
+                for signal in signals {
+                    apply_seeded_mob_signal(
+                        authority,
+                        signal,
+                        "recover_member_instruction_target",
+                    )?;
+                }
+            }
             _ => {}
         }
     }
@@ -4954,7 +4981,11 @@ pub(crate) fn identity_generation_highwaters(
             | MobEventKind::SupervisorEscalation { .. }
             | MobEventKind::SupervisorEscalationFailed { .. }
             | MobEventKind::OrchestratorResumeNotificationFailed { .. }
-            | MobEventKind::OperatorActionRecorded { .. } => {}
+            | MobEventKind::OperatorActionRecorded { .. }
+            // Operator-instruction generations are their own counter
+            // (`operator_instruction_generation_highwater`).
+            | MobEventKind::OperatorInstructionCommitted(_)
+            | MobEventKind::MemberInstructionTargetsRecorded(_) => {}
         }
     }
     highwaters
@@ -4975,6 +5006,21 @@ fn recover_identity_generation_highwaters(
                 generation: mob_dsl::Generation::from_domain(generation),
             },
             "recover_identity_generation_highwater",
+        )?;
+    }
+    // The operator-instruction generation the mob had reached when its last
+    // reset committed: the epoch replay sees only the records after it, and
+    // a member seated after this restart must be owed a generation above any
+    // its session holds.
+    let operator_instruction_generation =
+        super::operator_instruction_delivery::operator_instruction_generation_highwater(events);
+    if operator_instruction_generation > 0 {
+        apply_seeded_mob_signal(
+            authority,
+            mob_dsl::MobMachineSignal::RecoverOperatorInstructionGenerationHighwater {
+                generation: operator_instruction_generation,
+            },
+            "recover_operator_instruction_generation_highwater",
         )?;
     }
     seal_identity_generation_highwater(authority, "resume_seal_generation_highwater")
@@ -8142,6 +8188,17 @@ impl MobBuilder {
         self
     }
 
+    /// How many dormant members' operator-instruction snapshots the mob
+    /// records at once (default 16). A write that selects many dormant
+    /// members records each member's session store-only, without waking it,
+    /// at most `concurrency` at a time; deliveries through live member
+    /// sessions run in their own bounded lane, so a live session that holds
+    /// its turn boundary never stalls the dormant ones.
+    pub fn with_member_instruction_delivery_concurrency(mut self, concurrency: usize) -> Self {
+        self.member_residency.instruction_delivery_concurrency = concurrency.max(1);
+        self
+    }
+
     /// How the mob materializes its seated members when it starts
     /// ([`MemberRestorePolicy`], default [`MemberRestorePolicy::OnDemand`]).
     ///
@@ -9453,6 +9510,10 @@ impl MobBuilder {
                 custody_deferrals,
                 supervisor_bridge: supervisor_bridge.clone(),
                 machine_state_watch_rx,
+                operator_instruction_delivery:
+                    super::operator_instruction_delivery::OperatorInstructionDeliveryShared::new(
+                        wiring.member_residency.instruction_delivery_concurrency,
+                    ),
                 reachability_observations,
                 phase_watch_rx: preview_phase_rx,
                 realtime_session_factory: realtime_session_factory.clone(),
@@ -10328,6 +10389,10 @@ impl MobBuilder {
         let legacy_recovered_session_bindings =
             recovered_session_bindings_without_endpoint(epoch_events);
         let recorded_continuity = recorded_continuity_intents(epoch_events);
+        let operator_instruction_bodies =
+            super::operator_instruction_delivery::OperatorInstructionBodies::from_events(
+                epoch_events,
+            );
         let mut new_recovered_session_bindings_without_endpoint = HashSet::new();
         let listed_sessions = session_service
             .list(meerkat_core::service::SessionQuery::default())
@@ -10465,6 +10530,7 @@ impl MobBuilder {
             member_build_preparer: member_residency.build_preparer.as_ref(),
             host_read_handle: &host_read_handle,
             unreadable_view_is_retryable: false,
+            operator_instruction_bodies: &operator_instruction_bodies,
         };
         restore_resumed_members(
             &restore_context,
@@ -11110,6 +11176,13 @@ impl MobBuilder {
             // The actor task's end guard closes admission if the task is lost.
             let task_end_ownership = Arc::clone(&ownership);
             let task_end_admission_closed_tx = admission_closed_tx.clone();
+            // The operator-instruction delivery owner's bookkeeping, shared by
+            // the launched handle (its status read) and the actor (a retiring
+            // member's release waits on the member's delivery lock).
+            let operator_instruction_delivery =
+                super::operator_instruction_delivery::OperatorInstructionDeliveryShared::new(
+                    member_residency.instruction_delivery_concurrency,
+                );
             let handle = MobHandle {
                 // Explicit launch-site mint (A16): the launching process IS the
                 // owning operator — not ambient inference (gotcha #19).
@@ -11131,6 +11204,7 @@ impl MobBuilder {
                 custody_deferrals: custody_deferrals.clone(),
                 supervisor_bridge: supervisor_bridge.clone(),
                 machine_state_watch_rx: machine_state_watch_tx.subscribe(),
+                operator_instruction_delivery: Arc::clone(&operator_instruction_delivery),
                 reachability_observations: Arc::clone(&reachability_observations),
                 phase_watch_rx,
                 realtime_session_factory,
@@ -11302,6 +11376,13 @@ impl MobBuilder {
                 has_orchestrator,
                 notify_orchestrator_on_resume,
                 member_residency,
+                operator_instructions:
+                    super::operator_instruction_delivery::OperatorInstructionShell::new(
+                        super::operator_instruction_delivery::OperatorInstructionBodies::from_events(
+                            &durable_events,
+                        ),
+                        Arc::clone(&operator_instruction_delivery),
+                    ),
                 boot_set_basis,
                 startup_boot_attempts: boot_plan.awaiting_ready,
                 run_tasks: BTreeMap::new(),
@@ -11752,6 +11833,20 @@ impl MobBuilder {
                     .await;
                 });
             }
+            // The operator-instruction delivery owner: delivers every owed
+            // member's snapshot for the actor's lifetime.
+            {
+                let delivery_task =
+                    super::operator_instruction_delivery::OperatorInstructionDeliveryReconciler::run_owned(
+                        handle.non_owning(),
+                        Arc::clone(&operator_instruction_delivery),
+                    );
+                actor.actor_io_tasks.spawn(async move {
+                    #[cfg(test)]
+                    let _startup_worker_guard = ActorOwnedStartupWorkerGuard::new(actor_runtime_id);
+                    delivery_task.await;
+                });
+            }
             if remote_intent_reconciler_enabled {
                 let completion_reconciler_task =
                     super::placed_completion_reconciler::PlacedCompletionReconciler::run_owned(
@@ -12013,6 +12108,10 @@ pub(super) struct ResumeMemberRestoreContext<'a> {
     /// then ends retryable. A start's restore pass fails only that member
     /// with the read failure as its diagnostic (the boot rule).
     pub(super) unreadable_view_is_retryable: bool,
+    /// The bodies of the mob's Active operator-instruction records: a member
+    /// whose restore mints its session carries its snapshot in it.
+    pub(super) operator_instruction_bodies:
+        &'a super::operator_instruction_delivery::OperatorInstructionBodies,
 }
 
 /// Everything a member's restore writes, applied in the member's turn.
@@ -13865,6 +13964,17 @@ async fn provision_fresh_member_session(
     }
     let admitted_bridge_session_id =
         super::actor::admit_bridge_session_for_spawn(&mut provision_request.create_session);
+    // The session this restore mints is born with the member's operator
+    // instruction snapshot (an unborn seat's first wake, a recreated
+    // session).
+    super::operator_instruction_delivery::carry_member_instruction_birth(
+        &mut provision_request.create_session,
+        base.state(),
+        ctx.operator_instruction_bodies,
+        &definition.id,
+        &entry.agent_identity,
+        entry.role.as_str(),
+    )?;
     provision_request.generated_self_owned_operation_owner =
         Some(authorize_seeded_session_provision_operation_owner(
             &mut authority,

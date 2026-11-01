@@ -4152,6 +4152,57 @@ macro_rules! delegate_mob_session_service {
                     .await
             }
 
+            // Forwarded exactly: a member's operator-instruction snapshot,
+            // its release and its read go to the inner durable owner. The
+            // trait defaults refuse, so behind this wrapper every member's
+            // delivery would be blocked.
+            async fn record_member_instruction_target(
+                self: Arc<Self>,
+                delivery: meerkat_mob::MemberInstructionDelivery,
+            ) -> Result<
+                meerkat_core::InstructionRecordReceipt,
+                meerkat_core::service::SessionInstructionError,
+            > {
+                Arc::clone(&self.inner)
+                    .record_member_instruction_target(delivery)
+                    .await
+            }
+
+            async fn release_member_instruction_target(
+                self: Arc<Self>,
+                release: meerkat_mob::MemberInstructionRelease,
+            ) -> Result<
+                meerkat_core::InstructionReleaseDisposition,
+                meerkat_core::service::SessionInstructionError,
+            > {
+                Arc::clone(&self.inner)
+                    .release_member_instruction_target(release)
+                    .await
+            }
+
+            async fn read_member_instructions(
+                &self,
+                session_ids: &[meerkat_core::SessionId],
+            ) -> Vec<
+                Result<
+                    meerkat_core::service::SessionInstructionRead,
+                    meerkat_core::service::SessionInstructionError,
+                >,
+            > {
+                self.inner.read_member_instructions(session_ids).await
+            }
+
+            async fn bind_seated_member_session(
+                &self,
+                session_id: &meerkat_core::SessionId,
+                mob_id: &str,
+                member: &str,
+            ) -> Result<(), meerkat_core::service::SessionError> {
+                self.inner
+                    .bind_seated_member_session(session_id, mob_id, member)
+                    .await
+            }
+
             // Forwarded exactly: the inner service observes the durable
             // source from authority, catalog and lifecycle rows without a
             // body read. Required since meerkat 0.8.47; a wrapper that
@@ -5619,6 +5670,55 @@ impl MobSessionService for AfterCreateMobSessionService {
     ) -> Result<meerkat_core::InstructionActivationMutation, SessionError> {
         self.inner
             .activate_instruction_under_runtime_turn_boundary(session_id, request, write_fence)
+            .await
+    }
+
+    // Forwarded exactly, as in `delegate_mob_session_service!`: a member's
+    // operator-instruction snapshot, its release and its read.
+    async fn record_member_instruction_target(
+        self: Arc<Self>,
+        delivery: meerkat_mob::MemberInstructionDelivery,
+    ) -> Result<
+        meerkat_core::InstructionRecordReceipt,
+        meerkat_core::service::SessionInstructionError,
+    > {
+        Arc::clone(&self.inner)
+            .record_member_instruction_target(delivery)
+            .await
+    }
+
+    async fn release_member_instruction_target(
+        self: Arc<Self>,
+        release: meerkat_mob::MemberInstructionRelease,
+    ) -> Result<
+        meerkat_core::InstructionReleaseDisposition,
+        meerkat_core::service::SessionInstructionError,
+    > {
+        Arc::clone(&self.inner)
+            .release_member_instruction_target(release)
+            .await
+    }
+
+    async fn read_member_instructions(
+        &self,
+        session_ids: &[meerkat_core::SessionId],
+    ) -> Vec<
+        Result<
+            meerkat_core::service::SessionInstructionRead,
+            meerkat_core::service::SessionInstructionError,
+        >,
+    > {
+        self.inner.read_member_instructions(session_ids).await
+    }
+
+    async fn bind_seated_member_session(
+        &self,
+        session_id: &meerkat_core::SessionId,
+        mob_id: &str,
+        member: &str,
+    ) -> Result<(), meerkat_core::service::SessionError> {
+        self.inner
+            .bind_seated_member_session(session_id, mob_id, member)
             .await
     }
 

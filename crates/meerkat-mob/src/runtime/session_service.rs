@@ -1418,6 +1418,95 @@ pub trait MobSessionService:
         ))
     }
 
+    /// Record a mob member's operator-instruction snapshot in the member's
+    /// session, as MobMachine authorized it
+    /// ([`crate::MemberInstructionDelivery`], which only the mob runtime
+    /// mints): through the session's actor while it is live, store-only
+    /// under its hosting claim while it is dormant, never waking,
+    /// registering or materializing it. A generation the session already
+    /// recorded answers "already recorded" and writes nothing. A target the
+    /// session's own host wrote before the mob seated it (an attach) becomes
+    /// the mob's with this snapshot; another mob's target is refused.
+    ///
+    /// The default is a typed refusal, never a silent success: a decorator
+    /// that does not forward it blocks its members' deliveries visibly
+    /// (`durability_unavailable`). Every production wrapper over a durable
+    /// owner forwards it.
+    async fn record_member_instruction_target(
+        self: Arc<Self>,
+        delivery: crate::operator_instruction::MemberInstructionDelivery,
+    ) -> Result<
+        meerkat_core::InstructionRecordReceipt,
+        meerkat_core::service::SessionInstructionError,
+    > {
+        let _ = delivery;
+        Err(meerkat_core::service::SessionInstructionError::DurabilityUnavailable)
+    }
+
+    /// Release a retiring member's session target on behalf of its mob, as
+    /// MobMachine authorized it ([`crate::MemberInstructionRelease`]): the
+    /// target empties and is unowned, so a mob's later record can own it.
+    /// The session's host cannot: the member binding a mob stamps is never
+    /// cleared, so the host's writes and adoption stay refused
+    /// (`owned_by_mob`). Never wakes the session. A target no owner holds
+    /// answers "already unowned"; another owner's target is refused.
+    async fn release_member_instruction_target(
+        self: Arc<Self>,
+        release: crate::operator_instruction::MemberInstructionRelease,
+    ) -> Result<
+        meerkat_core::InstructionReleaseDisposition,
+        meerkat_core::service::SessionInstructionError,
+    > {
+        let _ = release;
+        Err(meerkat_core::service::SessionInstructionError::DurabilityUnavailable)
+    }
+
+    /// Read member sessions' committed operator-instruction state (each
+    /// one's recorded target and the slots its own entry rows put in effect)
+    /// without materializing them, one answer per id in order. A mob's
+    /// status read asks for one page of its members at once, so a service
+    /// resolves each model's lowering once per page.
+    async fn read_member_instructions(
+        &self,
+        session_ids: &[SessionId],
+    ) -> Vec<
+        Result<
+            meerkat_core::service::SessionInstructionRead,
+            meerkat_core::service::SessionInstructionError,
+        >,
+    > {
+        session_ids
+            .iter()
+            .map(|_| Err(meerkat_core::service::SessionInstructionError::DurabilityUnavailable))
+            .collect()
+    }
+
+    /// Stamp the member binding a dormant resume seat implies on the seat's
+    /// stored session, store-only, before the seat commits
+    /// (`PersistentSessionService::bind_seated_member_session`):
+    /// a session that names no member binding (its host's own) becomes the
+    /// member's at the seat, without a wake, so its host's
+    /// operator-instruction writes are refused from then on and the mob's
+    /// first snapshot takes over the target its host wrote before. A dormant
+    /// seat asks it only for a resume seat whose session names no binding.
+    ///
+    /// The default is a typed refusal, never a silent success: a wrapper over
+    /// a durable session owner must forward it, or its dormant resume seats
+    /// over such a session are refused.
+    async fn bind_seated_member_session(
+        &self,
+        session_id: &SessionId,
+        mob_id: &str,
+        member: &str,
+    ) -> Result<(), SessionError> {
+        let _ = (session_id, mob_id, member);
+        Err(SessionError::Unsupported(
+            "this session service binds no dormant seat's member session; a wrapper must \
+             forward bind_seated_member_session"
+                .to_string(),
+        ))
+    }
+
     /// Commit one provider-final client-delegation transcript through the
     /// canonical session actor, SessionDocument authority, and runtime-backed
     /// persistent projection.
@@ -3566,6 +3655,53 @@ where
     ) -> Result<meerkat_core::InstructionActivationMutation, SessionError> {
         meerkat_session::PersistentSessionService::<B>::activate_instruction_under_runtime_turn_boundary(
             self, session_id, request, write_fence,
+        )
+        .await
+    }
+
+    async fn record_member_instruction_target(
+        self: Arc<Self>,
+        delivery: crate::operator_instruction::MemberInstructionDelivery,
+    ) -> Result<
+        meerkat_core::InstructionRecordReceipt,
+        meerkat_core::service::SessionInstructionError,
+    > {
+        let (session_id, record) = delivery.into_parts();
+        self.record_mob_instruction_target(&session_id, record)
+            .await
+    }
+
+    async fn release_member_instruction_target(
+        self: Arc<Self>,
+        release: crate::operator_instruction::MemberInstructionRelease,
+    ) -> Result<
+        meerkat_core::InstructionReleaseDisposition,
+        meerkat_core::service::SessionInstructionError,
+    > {
+        self.release_mob_instruction_target(release.session_id(), release.mob_id().as_str())
+            .await
+    }
+
+    async fn read_member_instructions(
+        &self,
+        session_ids: &[SessionId],
+    ) -> Vec<
+        Result<
+            meerkat_core::service::SessionInstructionRead,
+            meerkat_core::service::SessionInstructionError,
+        >,
+    > {
+        self.read_sessions_instructions(session_ids).await
+    }
+
+    async fn bind_seated_member_session(
+        &self,
+        session_id: &SessionId,
+        mob_id: &str,
+        member: &str,
+    ) -> Result<(), SessionError> {
+        meerkat_session::PersistentSessionService::<B>::bind_seated_member_session(
+            self, session_id, mob_id, member,
         )
         .await
     }

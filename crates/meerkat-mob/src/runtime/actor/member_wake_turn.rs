@@ -250,6 +250,10 @@ struct WakeRestoreInput {
     )>,
     durable_endpoint: Option<mob_dsl::MemberPeerEndpoint>,
     member_bound_sessions: HashSet<SessionId>,
+    /// The bodies of the mob's Active operator-instruction records, for the
+    /// snapshot a session this wake mints carries.
+    operator_instruction_bodies:
+        super::super::operator_instruction_delivery::OperatorInstructionBodies,
 }
 
 /// Test probe of one mob's member wake restores (step B): the members whose
@@ -609,6 +613,7 @@ impl MobActor {
             followed,
             durable_endpoint,
             member_bound_sessions,
+            operator_instruction_bodies: self.operator_instructions.bodies.clone(),
         };
         #[cfg(test)]
         let (probe_mob, probe_member) = (self.definition.id.clone(), identity.clone());
@@ -1003,6 +1008,7 @@ impl MobActor {
             member_build_preparer: None,
             host_read_handle: &self.member_wakes.host_read_handle,
             unreadable_view_is_retryable: false,
+            operator_instruction_bodies: &self.operator_instructions.bodies,
         };
         let mut commit = MemberRestoreCommit {
             authority: &mut self.dsl_authority,
@@ -1755,6 +1761,7 @@ async fn plan_member_wake(input: WakeRestoreInput) -> Result<WakePlan, MobError>
         followed,
         durable_endpoint,
         member_bound_sessions,
+        operator_instruction_bodies,
     } = input;
     let bridge_session_id = SessionId::parse(&candidate.machine_session_id.0).map_err(|error| {
         MobError::Internal(format!(
@@ -1789,6 +1796,7 @@ async fn plan_member_wake(input: WakeRestoreInput) -> Result<WakePlan, MobError>
         host_read_handle: &host_read_handle,
         // A view the store cannot serve now ends this wake retryable.
         unreadable_view_is_retryable: true,
+        operator_instruction_bodies: &operator_instruction_bodies,
     };
     // The overlay the followed source holds in this process, or the one its
     // rebuild would compose, computed here, off the actor, without waking it.

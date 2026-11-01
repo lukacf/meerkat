@@ -55,6 +55,14 @@ pub use meerkat_machine_schema::catalog::dsl::mob_machine::{
     EntryPlacementKind, FirstBootRequestKind, HostPreparationCause, IdentityEntryVerdict,
     UnseatedEntryCause,
 };
+// Operator instructions: a record's slot effect and target kind, why a
+// member's delivery is blocked or deferred, why a write is refused, and the
+// target predicate the machine's helper states. The schema's own types, one
+// definition for both instantiations of the machine.
+pub use meerkat_machine_schema::catalog::dsl::mob_machine::{
+    InstructionEffect, InstructionTargetKind, MemberInstructionBlock, MemberInstructionDeferReason,
+    OperatorInstructionRefusal, operator_instruction_target_applies,
+};
 
 pub type MobToolCallerProvenance = meerkat_core::service::MobToolCallerProvenance;
 pub type OpaquePrincipalToken = meerkat_core::service::OpaquePrincipalToken;
@@ -103,8 +111,20 @@ impl Default for ResumeMemberBinding {
 }
 
 /// Bridging type for agent identity. Maps to `crate::ids::AgentIdentity`.
+/// `Default` is required by the `OptionValueExt::get("value")` unwrap path
+/// used in the operator-instruction arms that record a member target, as the
+/// schema's own bridging `AgentIdentity` derives it.
 #[derive(
-    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
 )]
 pub struct AgentIdentity(pub String);
 
@@ -10340,6 +10360,73 @@ mod tests {
                 .contains_key(&member.identity)
         );
         assert!(authority.state().runtime_retire_archive_only.is_empty());
+    }
+
+    /// A live member's releasing retire unbinds it before its session is
+    /// disposed of: the release verdict of its operator-instruction target
+    /// names the session the retire moved to its runtime's pending
+    /// retirement, and authorizes its release for a host that keeps the
+    /// session, since the member's session recorded the mob's snapshot.
+    #[test]
+    fn a_live_members_releasing_retire_authorizes_its_sessions_release() {
+        let mut authority = MobMachineAuthority::new();
+        let member = seat_live_member_with_endpoint(&mut authority, "instruction-release", 47);
+        authority
+            .apply_signal(MobMachineSignal::SetOperatorInstruction {
+                slot: "[\"app.example\",\"tone\"]".to_string(),
+                revision: 1,
+                digest: format!("sha256:{}", "1".repeat(64)),
+                body_bytes: 10,
+                target_kind: InstructionTargetKind::Mob,
+                target_profile: String::new(),
+                target_member: None,
+            })
+            .expect("the write commits");
+        authority
+            .apply_signal(MobMachineSignal::RecordMemberInstructionTarget {
+                agent_identity: member.identity.clone(),
+                session_id: member.session_id.clone(),
+                generation: 1,
+            })
+            .expect("the member's session records the snapshot");
+        assert_eq!(
+            authority
+                .state()
+                .member_instruction_recorded
+                .get(&member.identity),
+            Some(&1)
+        );
+        let retire = MobMachineMutator::apply(
+            &mut authority,
+            retire_input(&member, Some(member.session_id.clone())),
+        )
+        .expect("the live member's releasing retire is admitted");
+        assert!(
+            routes_runtime_retire(&retire),
+            "a live member's retire routes its runtime retire"
+        );
+        assert!(
+            !authority
+                .state()
+                .member_session_bindings
+                .contains_key(&member.identity),
+            "the releasing retire unbound the member"
+        );
+        let release = authority
+            .apply_signal(MobMachineSignal::ResolveMemberInstructionRelease {
+                agent_identity: member.identity.clone(),
+                session_id: member.session_id.clone(),
+                disposal: MemberSessionDisposal::RuntimeReleasedOnlyHostOwned,
+            })
+            .expect("the release verdict resolves");
+        assert_eq!(
+            release.effects(),
+            [MobMachineEffect::MemberInstructionReleaseAuthorized {
+                agent_identity: member.identity.clone(),
+                session_id: member.session_id.clone(),
+            }]
+            .as_slice()
+        );
     }
 
     /// A Waking member's retirement closes its open attempt in

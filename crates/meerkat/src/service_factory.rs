@@ -585,9 +585,24 @@ impl SessionAgent for FactoryAgent {
         meerkat_core::InstructionRecordReceipt,
         meerkat_core::service::SessionInstructionError,
     > {
+        // A mob's delivery: a target the session's own host wrote before
+        // the mob seated it (an attach) is the mob's from its first delivery.
         self.agent
             .session_mut()
             .record_instruction_target(record)
+            .map_err(meerkat_core::service::SessionInstructionError::from)
+    }
+
+    fn release_instruction_target_control(
+        &mut self,
+        mob_id: &str,
+    ) -> Result<
+        meerkat_core::InstructionReleaseDisposition,
+        meerkat_core::service::SessionInstructionError,
+    > {
+        self.agent
+            .session_mut()
+            .release_instruction_target(mob_id)
             .map_err(meerkat_core::service::SessionInstructionError::from)
     }
 
@@ -1867,6 +1882,17 @@ impl SessionAgentBuilder for FactoryAgentBuilder {
             .ok()
             .and_then(|registry| registry.profile_for_provider(identity.provider, &identity.model))
             .map(|profile| profile.inline_video)
+    }
+
+    async fn instruction_lowering_for_identity(
+        &self,
+        identity: &meerkat_core::SessionLlmIdentity,
+    ) -> Option<meerkat_core::InstructionLowering> {
+        // As for inline video: a config that cannot be read freshly answers
+        // "unknown", never a lowering from a stale snapshot.
+        let config = self.resolve_config().await.ok()?;
+        let registry = config.model_registry(meerkat_models::canonical()).ok()?;
+        Some(registry.instruction_lowering_for_identity(&config, identity))
     }
 
     async fn build_agent(

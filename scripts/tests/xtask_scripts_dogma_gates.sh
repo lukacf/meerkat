@@ -423,7 +423,7 @@ trap 'rm -rf "$tlc_env_tmp"' EXIT
 # durable_decision_audit) generated a state, its fifteen witnesses violated,
 # and with --mutants each seeded defect's invariant violated (the generated
 # first_presentation_is_a_reading included).
-# instruction_boundary_audit.sh (session_document) requires its five
+# instruction_boundary_audit.sh (session_document) requires its six
 # witnesses violated, and with --mutants each seeded defect's target
 # invariant violated.
 # created_identity_audit.sh (mob_machine) requires a final distinct-state
@@ -434,6 +434,13 @@ trap 'rm -rf "$tlc_env_tmp"' EXIT
 # activation_body_retirement_audit.sh (session_document) requires its three
 # witnesses violated, and with --mutants each seeded defect's target
 # invariant violated.
+# operator_instruction_delivery_audit.sh (mob_machine) requires a final
+# distinct-state count for each of its two runs, a coverage block in which
+# each covered action of both runs generated a state, its seven step
+# witnesses and four state witnesses violated, and with --mutants each
+# seeded defect's target property violated and its live-only delivery and
+# bound-only release mutants' runs to end without an error (the success line
+# above).
 printf '%s\n' \
   '#!/bin/sh' \
   'printf "%s\n" "$JAVA_TOOL_OPTIONS" > "$TLC_JAVA_OPTIONS_CAPTURE"' \
@@ -588,6 +595,9 @@ printf '%s\n' \
   'echo "Error: Invariant NotAuditWitnessReleasedInstructionsRevoked is violated."' \
   'echo "Error: Invariant AuditUnownedRunStartRevokesWhatIsInEffect is violated."' \
   'echo "Error: Invariant AuditReleaseEmptiesTheTarget is violated."' \
+  'echo "Error: Invariant NotAuditWitnessAdopted is violated."' \
+  'echo "Error: Invariant AuditMemberSessionTakesNoHostWrite is violated."' \
+  'echo "Error: Invariant AuditOnlyAMemberSessionTargetIsTakenOver is violated."' \
   'echo "Error: Invariant AuditEffectiveHoldsOnlyActiveSlots is violated."' \
   'echo "Error: Invariant NotAuditWitnessBodyRetired is violated."' \
   'echo "Error: Invariant NotAuditWitnessCopiedRetiredHeadKept is violated."' \
@@ -962,6 +972,22 @@ printf '%s\n' \
   'echo "Error: Invariant AuditNamesAdoptionExactlyOne is violated."' \
   'echo "Error: Invariant AuditNamesLaneExactlyOne is violated."' \
   'echo "Error: Action property AuditNoSeatUnderReservedName is violated."' \
+  'for action in SetOperatorInstructionNewRunning SetOperatorInstructionAdvanceRunning SetOperatorInstructionDuplicateRunning SetOperatorInstructionStaleRunning SetOperatorInstructionConflictRunning RevokeOperatorInstructionUnknownSlotRunning RevokeOperatorInstructionStaleRunning RevokeOperatorInstructionDuplicateRunning RevokeOperatorInstructionConflictRunning RevokeOperatorInstructionAdvanceRunning PrepareMemberInstructionDeliveryNotOwedRunning PrepareMemberInstructionDeliveryDeliverRunning PrepareMemberInstructionDeliveryUnbornRunning PrepareMemberInstructionDeliveryUnboundRunning RecordMemberInstructionTargetNotOwedRunning RecordMemberInstructionTargetStaleSessionRunning RecordMemberInstructionTargetSupersededRunning RecordMemberInstructionTargetCurrentRunning RecordMemberInstructionTargetUnmintedRunning RefuseMemberInstructionTargetNotOwedRunning RefuseMemberInstructionTargetStaleSessionRunning RefuseMemberInstructionTargetSupersededRunning RefuseMemberInstructionTargetBlockedRunning PrepareMemberInstructionDeliveryRetiringRunning RetireRunningReleasingArchiveOnly ResolveMemberInstructionReleaseAuthorizedRunning ResolveMemberInstructionReleaseNotNeededRunning; do echo "<$action line 1, col 1 to line 1, col 2 of module model>: 1:1"; done' \
+  'echo "Error: Action property NotAuditWitnessProfileWriteOwesOne is violated."' \
+  'echo "Error: Action property NotAuditWitnessRetargetOwesLeaver is violated."' \
+  'echo "Error: Action property NotAuditWitnessRecordedReowed is violated."' \
+  'echo "Error: Action property NotAuditWitnessBlockedThenUnblocked is violated."' \
+  'echo "Error: Action property NotAuditWitnessRecordCloses is violated."' \
+  'echo "Error: Action property NotAuditWitnessSeatAfterWriteOwed is violated."' \
+  'echo "Error: Action property NotAuditWitnessUnseatDropsFacts is violated."' \
+  'echo "Error: Invariant NotAuditWitnessDormantDeliverable is violated."' \
+  'echo "Error: Invariant NotAuditWitnessUnbornOwedDeferred is violated."' \
+  'echo "Error: Invariant NotAuditWitnessUnboundOwedDeferred is violated."' \
+  'echo "Error: Invariant NotAuditWitnessRetiringReleasable is violated."' \
+  'echo "Error: Action property AuditWriteOwesExactlyTheSelected is violated."' \
+  'echo "Error: Invariant AuditDeliversOnlyToBoundLocalBornMembers is violated."' \
+  'echo "Error: Action property AuditSeatOwesTheGeneration is violated."' \
+  'echo "Error: Action property AuditUnseatLeavesNoFact is violated."' \
   'echo "State 1: <Initial predicate>"' \
   > "$tlc_env_tmp/tlc"
 chmod +x "$tlc_env_tmp/tlc"

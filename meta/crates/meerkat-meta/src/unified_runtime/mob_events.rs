@@ -635,6 +635,8 @@ fn event_kind_label(kind: &MobEventKind) -> &'static str {
         MobEventKind::OperatorActionRecorded { .. } => "operator_action_recorded",
         MobEventKind::ObjectiveOwnerBound { .. } => "objective_owner_bound",
         MobEventKind::ObjectiveConcluded { .. } => "objective_concluded",
+        MobEventKind::OperatorInstructionCommitted(_) => "operator_instruction_committed",
+        MobEventKind::MemberInstructionTargetsRecorded(_) => "member_instruction_targets_recorded",
     }
 }
 
@@ -813,7 +815,9 @@ pub(crate) fn extract_structural_fields(
         | MobEventKind::MembersWiredBatch { .. }
         | MobEventKind::MembersUnwired { .. }
         | MobEventKind::TopologyViolation { .. }
-        | MobEventKind::OperatorActionRecorded { .. } => (None, None, None),
+        | MobEventKind::OperatorActionRecorded { .. }
+        | MobEventKind::OperatorInstructionCommitted(_)
+        | MobEventKind::MemberInstructionTargetsRecorded(_) => (None, None, None),
     }
 }
 

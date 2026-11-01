@@ -215,7 +215,7 @@ def run(*args):
 # runtime builds on leaves those to the push).
 RATCHETS = {
     "machine-authority-docs-gate": ("governance-docs-gate", "governance_gates"),
-    "runtime-authority-bypass": ("governance-gates", "governance_gates"),
+    "runtime-authority-bypass": ("ratchets", "governance_gates"),
     "seam-inventory": ("governance-gates", "governance_gates"),
     "rmat-audit": ("governance-gates", "governance_gates"),
     "verify-schema-freshness": ("ratchets", "generated_contract"),

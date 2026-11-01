@@ -10,11 +10,13 @@
 \* does (one session, two slots, revisions 1..2, a small and a budget-sized
 \* body, two mobs, every run start, all three lowerings, folds at and after
 \* a run's first request, session writes, mob records, rebinds and releases,
-\* interleaved), and checks the machine's own state. The audit's few
-\* variables model only the run around the session: whether a run is open,
-\* whether its first request was sent, whether the transcript has
-\* conversation rows, which slots an application revoked, and which mob
-\* released the target.
+\* interleaved, before and after a mob seats the session as a member's),
+\* and checks the machine's own state. The audit's few variables model only
+\* the run around the session: whether a run is open, whether its first
+\* request was sent, whether the transcript has conversation rows, which
+\* slots an application revoked, which mob released the target, and the
+\* session's binding fact (its metadata names a mob member binding: set
+\* once, when a mob seats the session, and never cleared).
 \*
 \* Invariants (each a property of the last step, through audit_breach, or of
 \* the state):
@@ -55,20 +57,30 @@
 \*     empty one.
 \*   AuditTargetWithinBudget: the target's Active bodies never exceed the
 \*     active budget.
+\*   AuditMemberSessionTakesNoHostWrite: a mob member's session takes no
+\*     write and no adoption of its own host: its target and owner stay as
+\*     they were.
+\*   AuditOnlyAMemberSessionTargetIsTakenOver: a mob record takes a
+\*     session-owned target only on a mob member's session, whose host
+\*     wrote it before the mob seated the session (an attach); any other
+\*     session-owned target refuses the record.
 \*
 \* The witnesses (NotAuditWitness*, expected violations, checked in one TLC
 \* run each): an application happened, an applied revoke, a mob-owned
 \* target in effect, a target another mob bound after its owning mob
-\* released it, and a released mob's instructions revoked at a run start.
-\* The runner's --mutants mode seeds ten defects into a copy of the
+\* released it, a released mob's instructions revoked at a run start, and a
+\* record that took over a member's session-owned target (an attach).
+\* The runner's --mutants mode seeds twelve defects into a copy of the
 \* generated model and requires TLC to refuse each with the invariant it
 \* targets, run as the only invariant: apply on ResumeRun, keep a revoked
 \* slot in effect at an application, apply a mid-run fold from the target,
 \* accept a stale session write, skip the leading-prefix check, accept
 \* another mob's record, let a rebind take a mob-owned target (its
 \* ownership guard dropped), record a session write over the active budget,
-\* keep a released mob's instructions at a run start, and keep the target on
-\* a release.
+\* keep a released mob's instructions at a run start, keep the target on a
+\* release, accept a host write on a member's session (its binding guard
+\* dropped), and take over a session-owned target no mob seated (the
+\* takeover's binding guard dropped).
 \*
 \* The TLC config is DERIVED from the generated ci.cfg on every run by
 \* instruction_boundary_audit.sh (its constants, its invariants and its
@@ -105,11 +117,11 @@ AuditSnapshots ==
            AuditActiveSlot("b", 1, [digest |-> "dx", bytes |-> 1])) }
 
 VARIABLES in_run, run_start_open, conversed, revoked_applied, released_from, rebound,
-          revoked_after_release, audit_breach
+          revoked_after_release, member_bound, adopted, audit_breach
 
 audit_vars ==
     << in_run, run_start_open, conversed, revoked_applied, released_from, rebound,
-       revoked_after_release, audit_breach >>
+       revoked_after_release, member_bound, adopted, audit_breach >>
 audit_all_vars == << vars, audit_vars >>
 
 AuditSeeded == AuditSession \in DOMAIN session_instruction_owner
@@ -177,6 +189,8 @@ AuditInit ==
     /\ released_from = ""
     /\ rebound = FALSE
     /\ revoked_after_release = FALSE
+    /\ member_bound = FALSE
+    /\ adopted = FALSE
     /\ audit_breach = {}
 
 \* The shell recovers the session once (here, a session no target was ever
@@ -185,25 +199,37 @@ AuditSeed ==
     /\ ~AuditSeeded
     /\ RecoverSessionInstructionState(AuditSession, "Unowned", "", 0, 0)
     /\ UNCHANGED << in_run, run_start_open, conversed, revoked_applied, released_from, rebound,
-                    revoked_after_release >>
+                    revoked_after_release, member_bound, adopted >>
+    /\ audit_breach' = {}
+
+\* A mob seats the session as a member's (a spawn, or an attach of the
+\* host's session): the session's metadata names the member binding from
+\* then on.
+AuditBind ==
+    /\ AuditSeeded
+    /\ ~member_bound
+    /\ member_bound' = TRUE
+    /\ UNCHANGED << vars, in_run, run_start_open, conversed, revoked_applied, released_from,
+                    rebound, revoked_after_release, adopted >>
     /\ audit_breach' = {}
 
 \* A session host writes one slot: an activation of a body at a revision,
 \* or a revoke at a revision.
 AuditWrite(s, r, eff, dig, byt) ==
     /\ AuditSeeded
-    /\ \/ SetSessionInstructionNew(AuditSession, s, r, eff, dig, byt)
-       \/ SetSessionInstructionAdvance(AuditSession, s, r, eff, dig, byt)
-       \/ SetSessionInstructionActiveBudgetExceeded(AuditSession, s, r, eff, dig, byt)
-       \/ SetSessionInstructionDuplicate(AuditSession, s, r, eff, dig, byt)
-       \/ SetSessionInstructionStale(AuditSession, s, r, eff, dig, byt)
-       \/ SetSessionInstructionConflict(AuditSession, s, r, eff, dig, byt)
-       \/ SetSessionInstructionOwnedByMob(AuditSession, s, r, eff, dig, byt)
-       \/ SetSessionInstructionSlotLimitExceeded(AuditSession, s, r, eff, dig, byt)
-       \/ SetSessionInstructionUnknownSlot(AuditSession, s, r, eff, dig, byt)
+    /\ \/ SetSessionInstructionNew(AuditSession, s, r, eff, dig, byt, member_bound)
+       \/ SetSessionInstructionAdvance(AuditSession, s, r, eff, dig, byt, member_bound)
+       \/ SetSessionInstructionActiveBudgetExceeded(AuditSession, s, r, eff, dig, byt, member_bound)
+       \/ SetSessionInstructionDuplicate(AuditSession, s, r, eff, dig, byt, member_bound)
+       \/ SetSessionInstructionStale(AuditSession, s, r, eff, dig, byt, member_bound)
+       \/ SetSessionInstructionConflict(AuditSession, s, r, eff, dig, byt, member_bound)
+       \/ SetSessionInstructionOwnedByMob(AuditSession, s, r, eff, dig, byt, member_bound)
+       \/ SetSessionInstructionSlotLimitExceeded(AuditSession, s, r, eff, dig, byt, member_bound)
+       \/ SetSessionInstructionUnknownSlot(AuditSession, s, r, eff, dig, byt, member_bound)
+       \/ SetSessionInstructionMemberSession(AuditSession, s, r, eff, dig, byt, member_bound)
     /\ revoked_applied' = AuditRevokedNext
     /\ UNCHANGED << in_run, run_start_open, conversed, released_from, rebound,
-                    revoked_after_release >>
+                    revoked_after_release, member_bound, adopted >>
     /\ audit_breach' =
            (IF AuditEffectiveChanged THEN {"EffectiveChangedOutsideRunStart"} ELSE {})
            \cup (IF /\ AuditSlotOf(AuditTargetNext, s) # AuditSlotOf(AuditTarget, s)
@@ -211,37 +237,49 @@ AuditWrite(s, r, eff, dig, byt) ==
                     /\ AuditTargetNext.revision[s] <= AuditTarget.revision[s]
                  THEN {"SessionWriteLoweredRevision"} ELSE {})
            \cup (IF AuditMobTargetTaken THEN {"MobTargetTakenWithoutRelease"} ELSE {})
+           \cup (IF member_bound /\ (AuditTargetNext # AuditTarget \/ AuditOwnerNext # AuditOwner)
+                 THEN {"MemberSessionTookAHostWrite"} ELSE {})
 
 \* A mob delivers a whole member snapshot at a generation.
 AuditRecord(m, g, snap) ==
     /\ AuditSeeded
-    /\ \/ RecordInstructionTargetAdvance(AuditSession, m, g, snap.revision, snap.effect, snap.digest, snap.bytes)
-       \/ RecordInstructionTargetActiveBudgetExceeded(AuditSession, m, g, snap.revision, snap.effect, snap.digest, snap.bytes)
-       \/ RecordInstructionTargetSlotLimitExceeded(AuditSession, m, g, snap.revision, snap.effect, snap.digest, snap.bytes)
-       \/ RecordInstructionTargetAlreadyRecorded(AuditSession, m, g, snap.revision, snap.effect, snap.digest, snap.bytes)
-       \/ RecordInstructionTargetOwnedBySession(AuditSession, m, g, snap.revision, snap.effect, snap.digest, snap.bytes)
-       \/ RecordInstructionTargetOwnedByOtherMob(AuditSession, m, g, snap.revision, snap.effect, snap.digest, snap.bytes)
+    /\ \/ RecordInstructionTargetAdvance(AuditSession, m, g, snap.revision, snap.effect, snap.digest, snap.bytes, member_bound)
+       \/ RecordInstructionTargetActiveBudgetExceeded(AuditSession, m, g, snap.revision, snap.effect, snap.digest, snap.bytes, member_bound)
+       \/ RecordInstructionTargetSlotLimitExceeded(AuditSession, m, g, snap.revision, snap.effect, snap.digest, snap.bytes, member_bound)
+       \/ RecordInstructionTargetAlreadyRecorded(AuditSession, m, g, snap.revision, snap.effect, snap.digest, snap.bytes, member_bound)
+       \/ RecordInstructionTargetOwnedBySession(AuditSession, m, g, snap.revision, snap.effect, snap.digest, snap.bytes, member_bound)
+       \/ RecordInstructionTargetOwnedByOtherMob(AuditSession, m, g, snap.revision, snap.effect, snap.digest, snap.bytes, member_bound)
+       \/ RecordInstructionTargetAdopt(AuditSession, m, g, snap.revision, snap.effect, snap.digest, snap.bytes, member_bound)
+       \/ RecordInstructionTargetAdoptActiveBudgetExceeded(AuditSession, m, g, snap.revision, snap.effect, snap.digest, snap.bytes, member_bound)
+       \/ RecordInstructionTargetAdoptSlotLimitExceeded(AuditSession, m, g, snap.revision, snap.effect, snap.digest, snap.bytes, member_bound)
     /\ revoked_applied' = AuditRevokedNext
     /\ rebound' = (rebound \/ (released_from \notin {"", m} /\ AuditOwnerNext = "Mob" /\ AuditOwnerMobNext = m))
-    /\ UNCHANGED << in_run, run_start_open, conversed, released_from, revoked_after_release >>
+    /\ adopted' = (adopted \/ (AuditOwner = "Session" /\ AuditOwnerNext = "Mob"))
+    /\ UNCHANGED << in_run, run_start_open, conversed, released_from, revoked_after_release,
+                    member_bound >>
     /\ audit_breach' =
            (IF AuditEffectiveChanged THEN {"EffectiveChangedOutsideRunStart"} ELSE {})
            \cup (IF AuditMobTargetTaken THEN {"MobTargetTakenWithoutRelease"} ELSE {})
+           \cup (IF AuditOwner = "Session" /\ AuditOwnerNext # "Session" /\ ~member_bound
+                 THEN {"UnboundSessionTargetTakenOver"} ELSE {})
 
 \* An explicit attach or a standalone adoption rebinds the owner.
 AuditRebind(owner, m) ==
     /\ AuditSeeded
-    /\ \/ RebindInstructionOwner(AuditSession, owner, m)
-       \/ RebindInstructionOwnerUnowned(AuditSession, owner, m)
+    /\ \/ RebindInstructionOwner(AuditSession, owner, m, member_bound)
+       \/ RebindInstructionOwnerUnowned(AuditSession, owner, m, member_bound)
+       \/ RebindInstructionOwnerMemberSession(AuditSession, owner, m, member_bound)
     /\ revoked_applied' = AuditRevokedNext
     /\ UNCHANGED << in_run, run_start_open, conversed, released_from, rebound,
-                    revoked_after_release >>
+                    revoked_after_release, member_bound, adopted >>
     /\ audit_breach' =
            (IF AuditEffectiveChanged THEN {"EffectiveChangedOutsideRunStart"} ELSE {})
            \cup (IF AuditMobTargetTaken THEN {"MobTargetTakenWithoutRelease"} ELSE {})
            \cup (IF \/ (AuditOwner = "Unowned" /\ AuditTargetNext # AuditEmptySlots)
                     \/ (AuditOwner # "Unowned" /\ AuditTargetNext # AuditEffectiveNext)
                  THEN {"RebindStartedFromTheWrongTarget"} ELSE {})
+           \cup (IF member_bound /\ owner = "Session" /\ AuditOwnerNext # AuditOwner
+                 THEN {"MemberSessionTookAHostWrite"} ELSE {})
 
 \* A mob releases a member's target (a retire, a destroy).
 AuditRelease(m) ==
@@ -252,7 +290,8 @@ AuditRelease(m) ==
        \/ ReleaseInstructionTargetOwnedBySession(AuditSession, m)
     /\ released_from' = IF AuditOwner = "Mob" /\ AuditOwnerNext = "Unowned" THEN AuditOwnerMob ELSE released_from
     /\ revoked_applied' = AuditRevokedNext
-    /\ UNCHANGED << in_run, run_start_open, conversed, rebound, revoked_after_release >>
+    /\ UNCHANGED << in_run, run_start_open, conversed, rebound, revoked_after_release,
+                    member_bound, adopted >>
     /\ audit_breach' =
            (IF AuditEffectiveChanged THEN {"EffectiveChangedOutsideRunStart"} ELSE {})
            \cup (IF AuditMobTargetTaken /\ AuditOwnerMob # m THEN {"MobTargetTakenWithoutRelease"} ELSE {})
@@ -300,7 +339,7 @@ AuditRunStart(kind, lowering) ==
     /\ in_run' = (kind # "NoRun")
     /\ run_start_open' = (kind = "FreshRun")
     /\ conversed' = (conversed \/ kind # "NoRun")
-    /\ UNCHANGED << released_from, rebound >>
+    /\ UNCHANGED << released_from, rebound, member_bound, adopted >>
 
 \* A compaction folds the entry rows at a request boundary of the open run;
 \* it is a run-start fold only at the run's first request.
@@ -324,7 +363,8 @@ AuditFold(lowering) ==
                     \cup (IF AuditMobTargetTaken THEN {"MobTargetTakenWithoutRelease"} ELSE {})
     /\ revoked_applied' = AuditRevokedNext
     /\ revoked_after_release' = (revoked_after_release \/ AuditRevokesAfterRelease)
-    /\ UNCHANGED << in_run, run_start_open, conversed, released_from, rebound >>
+    /\ UNCHANGED << in_run, run_start_open, conversed, released_from, rebound, member_bound,
+                    adopted >>
 
 \* The open run sends its first request; a later fold is mid-run.
 AuditFirstRequest ==
@@ -332,7 +372,7 @@ AuditFirstRequest ==
     /\ run_start_open
     /\ run_start_open' = FALSE
     /\ UNCHANGED << vars, in_run, conversed, revoked_applied, released_from, rebound,
-                    revoked_after_release >>
+                    revoked_after_release, member_bound, adopted >>
     /\ audit_breach' = {}
 
 AuditRunEnd ==
@@ -340,11 +380,12 @@ AuditRunEnd ==
     /\ in_run' = FALSE
     /\ run_start_open' = FALSE
     /\ UNCHANGED << vars, conversed, revoked_applied, released_from, rebound,
-                    revoked_after_release >>
+                    revoked_after_release, member_bound, adopted >>
     /\ audit_breach' = {}
 
 AuditNext ==
     \/ AuditSeed
+    \/ AuditBind
     \/ \E s \in AuditSlots, r \in AuditRevisions, body \in AuditBodies :
            AuditWrite(s, r, "Active", body.digest, body.bytes)
     \/ \E s \in AuditSlots, r \in AuditRevisions : AuditWrite(s, r, "Absent", "", 0)
@@ -378,6 +419,8 @@ AuditRebindStartsFromTheRightTarget == "RebindStartedFromTheWrongTarget" \notin 
 AuditTargetWithinBudget ==
     AuditSeeded =>
         session_document_instruction_active_bytes(AuditTarget.effect, AuditTarget.bytes) <= AuditBudget
+AuditMemberSessionTakesNoHostWrite == "MemberSessionTookAHostWrite" \notin audit_breach
+AuditOnlyAMemberSessionTargetIsTakenOver == "UnboundSessionTargetTakenOver" \notin audit_breach
 
 \* Reachability goals, checked as expected violations.
 AuditWitnessApplied == AuditSeeded /\ \E s \in AuditSlots : AuditActiveIn(AuditEffective, s)
@@ -393,4 +436,6 @@ AuditWitnessReboundAfterRelease == rebound
 NotAuditWitnessReboundAfterRelease == ~AuditWitnessReboundAfterRelease
 AuditWitnessReleasedInstructionsRevoked == revoked_after_release
 NotAuditWitnessReleasedInstructionsRevoked == ~AuditWitnessReleasedInstructionsRevoked
+AuditWitnessAdopted == adopted
+NotAuditWitnessAdopted == ~AuditWitnessAdopted
 ====

@@ -191,8 +191,9 @@ pub use operator_instructions::{
     InstructionEntryKind, InstructionEntryLoweringRefusal, InstructionEntryPlacement,
     InstructionRevision, InstructionSlot, InvalidInstructionRevision,
     MAX_OPERATOR_INSTRUCTION_ACTIVE_BYTES, MAX_OPERATOR_INSTRUCTION_SLOTS,
-    RunStartInstructionApplication, effective_operator_instructions,
-    materialize_operator_instruction_messages, validate_operator_instruction_messages,
+    OPERATOR_INSTRUCTION_MOB_EVENT_SCHEMA_VERSION, RunStartInstructionApplication,
+    effective_operator_instructions, materialize_operator_instruction_messages,
+    validate_operator_instruction_messages,
 };
 pub(crate) use operator_instructions::{
     is_operator_instruction_entry, rows_besides_operator_instruction_entries,

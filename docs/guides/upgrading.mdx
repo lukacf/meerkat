@@ -71,6 +71,21 @@ it no longer compiles:
   root it reports. A builder or service that builds no comms of its own
   answers `SessionCommsIdentityRoot::NotKept`.
 
+Forward these new methods too. They have defaults, so a wrapper without them
+compiles, but the default disables what they carry:
+
+- a `MobSessionService` wrapper: `record_member_instruction_target`,
+  `release_member_instruction_target` and `read_member_instructions`. Their
+  defaults refuse `durability_unavailable`, so a mob's operator instructions
+  never reach the members behind the wrapper (each is reported blocked), a
+  retiring member's target is never released (the mob logs it), and the
+  status read reports every member unreadable.
+- a `SessionAgent` wrapper: `release_instruction_target_control`, the live
+  session's half of that release. Its default refuses the same way.
+- a `SessionAgentBuilder` wrapper: `instruction_lowering_for_identity`. Its
+  default (`None`) leaves the status read unable to report that a model
+  cannot carry operator instructions (`lowering_unavailable`).
+
 ### Declared identity entries
 
 0.9.9 adds the declared apply (`MobHandle::apply_declared_roster`, Rust
@@ -158,6 +173,27 @@ withdrawals keeps its wire form, so stored items, keyed-create digests and
 attention continuation keys do not change.
 
 ### Downgrading to 0.9.8
+
+Check for mobs that used operator instructions first. A mob that recorded an
+operator instruction journals rows at mob event schema 10. Core 0.9.8 and
+0.9.7 refuse such a journal ("unsupported stored mob event
+schema_version=10; expected 9"), and their realm restore (the mob roots of
+the rkat CLI, RPC and MCP hosts) stops at the first such mob, so every mob of
+that realm fails to restore and every mob verb answers the error. A Meta
+gateway whose own mob recorded an operator instruction does not resume its
+mob. Before any downgrade to 0.9.8 or 0.9.7:
+
+1. Run `rkat storage doctor` on 0.9.9.
+2. For each mob listed under `operator-instruction-mob-events`, destroy the
+   mob, or move its database (`mobs/<name>.db` in the realm's state
+   directory, the path the finding names) out of that directory.
+3. Only then start the older binary.
+
+The doctor reads the mob databases on disk only. For a realm on a host store,
+look in the host's store for mob events at schema 10. A member session that
+recorded its mob's snapshot is written at session envelope 5, which 0.9.8
+refuses session by session; the doctor lists those sessions under
+`operator-instruction-envelope`.
 
 Durable decisions live in their own file, `approval_decisions.sqlite3`,
 beside `approvals.json` under the store path; 0.9.9 creates it with the first

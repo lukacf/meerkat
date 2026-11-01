@@ -18484,6 +18484,65 @@ impl meerkat_mob::MobSessionService for MobCliSessionService {
         .await
     }
 
+    async fn record_member_instruction_target(
+        self: Arc<Self>,
+        delivery: meerkat_mob::MemberInstructionDelivery,
+    ) -> Result<
+        meerkat_core::InstructionRecordReceipt,
+        meerkat_core::service::SessionInstructionError,
+    > {
+        <meerkat::PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::record_member_instruction_target(
+            Arc::clone(&self.inner),
+            delivery,
+        )
+        .await
+    }
+
+    async fn release_member_instruction_target(
+        self: Arc<Self>,
+        release: meerkat_mob::MemberInstructionRelease,
+    ) -> Result<
+        meerkat_core::InstructionReleaseDisposition,
+        meerkat_core::service::SessionInstructionError,
+    > {
+        <meerkat::PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::release_member_instruction_target(
+            Arc::clone(&self.inner),
+            release,
+        )
+        .await
+    }
+
+    async fn read_member_instructions(
+        &self,
+        session_ids: &[meerkat_core::types::SessionId],
+    ) -> Vec<
+        Result<
+            meerkat_core::service::SessionInstructionRead,
+            meerkat_core::service::SessionInstructionError,
+        >,
+    > {
+        <meerkat::PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::read_member_instructions(
+            &self.inner,
+            session_ids,
+        )
+        .await
+    }
+
+    async fn bind_seated_member_session(
+        &self,
+        session_id: &meerkat_core::types::SessionId,
+        mob_id: &str,
+        member: &str,
+    ) -> Result<(), meerkat_core::service::SessionError> {
+        <meerkat::PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::bind_seated_member_session(
+            &self.inner,
+            session_id,
+            mob_id,
+            member,
+        )
+        .await
+    }
+
     #[cfg(feature = "openai-live")]
     async fn validate_live_bridge_member_eligibility(
         &self,

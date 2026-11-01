@@ -6391,6 +6391,11 @@ pub struct MobHandle {
     /// surfaces that must remain observable while a mutating command is
     /// awaiting shell cleanup.
     pub(super) machine_state_watch_rx: tokio::sync::watch::Receiver<mob_dsl::MobMachineState>,
+    /// The operator-instruction delivery owner's bookkeeping, shared with the
+    /// actor: the last retryable failure of each member's delivery (the
+    /// status read shows it) and the per-member delivery locks.
+    pub(super) operator_instruction_delivery:
+        Arc<super::operator_instruction_delivery::OperatorInstructionDeliveryShared>,
     pub(super) reachability_observations: Arc<ReachabilityObservations>,
     /// Read-only receiver for the actor's terminal-phase projection. The
     /// actor (sole writer) publishes the current DSL phase after every

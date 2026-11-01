@@ -140,8 +140,9 @@ repos:
   # targets, generated contract freshness, Web SDK tests, wasm check). They
   # ran on every push (497-2725 s a push on 2026-10-14..16) and CI runs each
   # of them before merge: the ratchets job (generated contracts; machine
-  # drift on a machine-authority change), governance-gates (the typed
-  # governance gates on a machine-authority or dogma change), example-web
+  # drift on a machine-authority change; the runtime authority bypass audit
+  # on every Rust change), governance-gates (the typed governance gates on
+  # a machine-authority or dogma change), example-web
   # (the Web SDK suites) and wasm-check, all selected by the same changed
   # paths. No Clippy either: the required CI Clippy lanes lint every
   # package this hook used to (scripts/test-pre-push-ratchets.sh pins all of

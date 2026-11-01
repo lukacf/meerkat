@@ -53,12 +53,28 @@ async function sidebarActivity() {
   });
   const sidebar = () => page.getByTestId("sidebar-root");
   // The Show filter lives in the roster view options popover (A5), opened
-  // from the mast's trigger; a choice keeps it open.
+  // from the mast's trigger. The scenario only acts on a settled popover,
+  // open or gone, never one that is closing, and closes it after each use,
+  // so every step starts from the same state.
   const viewOptions = () => sidebar().getByTestId("sidebar-view-options");
+  async function viewSettled() {
+    await page.waitForFunction(() => {
+      const popover = document.querySelector('[data-testid="sidebar-view-options"]');
+      return !popover || popover.getAttribute("data-state") === "open";
+    }, null, { timeout: 5_000 });
+  }
   async function openView() {
+    await viewSettled();
     if (await viewOptions().count()) return;
     await sidebar().getByTestId("sidebar-view-menu").click();
     await viewOptions().waitFor();
+    await viewSettled();
+  }
+  async function closeView() {
+    await viewSettled();
+    if (!(await viewOptions().count())) return;
+    await viewOptions().press("Escape");
+    await viewOptions().waitFor({ state: "detached", timeout: 5_000 });
   }
   const activity = () => sidebar().getByRole("group", { name: "Agent activity", exact: true });
   const rows = () => sidebar().locator('[data-testid^="sidebar-agent:"]');
@@ -84,6 +100,7 @@ async function sidebarActivity() {
     if (!expected.length && (name !== "All" || await search().inputValue())) {
       await sidebar().getByRole("status").filter({ hasText: "No matching agents." }).waitFor();
     }
+    await closeView();
   }
   async function capture(label) {
     await openView();
@@ -103,6 +120,7 @@ async function sidebarActivity() {
     result.geometry.push({ label, ...geometry });
     await fs.mkdir(evidence, { recursive: true });
     await page.screenshot({ path: path.join(evidence, `stock-sidebar-activity-${label}.png`), fullPage: true });
+    await closeView();
   }
   try {
     // Runtime startup readiness can precede the console's terminal phase projection.
@@ -197,6 +215,7 @@ async function sidebarActivity() {
     await assertRows(expectedActivityOrder(result.activityOwner), "last activity sort follows the owner's activity");
     await sidebar().getByTestId("sidebar-view-sort:manual").click();
     await assertRows(baselineOrder, "manual sort restores the roster order");
+    await closeView();
     await page.setViewportSize({ width: 1600, height: 1000 });
     await capture("completed-light-1600");
     assertSidebarCompletion(result.finalFrames, { toolId, answer });

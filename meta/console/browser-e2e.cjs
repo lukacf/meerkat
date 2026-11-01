@@ -1952,8 +1952,15 @@ async function runSidebarManualAgentOrderProof() {
     // Sort by name and by last activity, then back to the manual order. The
     // roster view lives in the mast's view options popover (A5); a change
     // keeps it open, Escape closes it.
+    // Only a settled popover (open, or gone) decides whether to open it.
+    const viewSettled = () => page.waitForFunction(() => {
+      const popover = document.querySelector('[data-testid="sidebar-view-options"]');
+      return !popover || popover.getAttribute("data-state") === "open";
+    }, null, { timeout: 5_000 });
     const chooseView = async (option) => {
+      await viewSettled();
       if (!(await page.getByTestId("sidebar-view-options").count())) await page.getByTestId("sidebar-view-menu").click();
+      await viewSettled();
       await page.getByTestId(option).click();
       assert.equal(await page.getByTestId(option).getAttribute("aria-pressed"), "true", `${option} is pressed`);
     };

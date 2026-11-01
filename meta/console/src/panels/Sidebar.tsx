@@ -2715,9 +2715,11 @@ export const Sidebar = React.memo(function Sidebar({
     () => sidebarDragPreviewRows(virtualRows, draggingOrder),
     [virtualRows, draggingOrder],
   );
-  // A click that ends a drag does not open the agent it ended on.
+  // A click that ends a drag does not open the agent it ended on. Opening an
+  // agent closes the roster view menu: the user has moved on.
   const selectUnlessDropped = React.useCallback((agent: ConsoleAgent) => {
     if (suppressOrderClickRef.current) return;
+    setViewMenuOpen(false);
     onSelect(agent);
   }, [onSelect]);
 

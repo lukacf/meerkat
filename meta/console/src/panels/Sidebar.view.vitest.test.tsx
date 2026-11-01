@@ -174,6 +174,22 @@ describe("Roster view menu (A5)", () => {
     expect(focused() === "sidebar-search").toBe(false);
   });
 
+  it("closes the roster view when an agent is opened, by pointer or keyboard", () => {
+    const onSelect = vi.fn();
+    const view = render(<Sidebar {...props} onSelect={onSelect} />);
+    fireEvent.click(view.getByTestId("sidebar-view-menu"));
+    expect(view.queryByRole("dialog", { name: "Roster view" }) !== null).toBe(true);
+    fireEvent.click(view.getByTestId("sidebar-agent:a"));
+    expect(onSelect).toHaveBeenCalledTimes(1);
+    expect(view.queryByRole("dialog") === null).toBe(true);
+    expect(view.getByTestId("sidebar-view-menu").getAttribute("aria-expanded")).toBe("false");
+
+    fireEvent.click(view.getByTestId("sidebar-view-menu"));
+    fireEvent.keyDown(view.getByTestId("sidebar-agent:b"), { key: "Enter" });
+    expect(onSelect).toHaveBeenCalledTimes(2);
+    expect(view.queryByRole("dialog") === null).toBe(true);
+  });
+
   it("offers Clear filters when nothing matches", () => {
     const view = render(<Sidebar {...props} />);
     fireEvent.change(view.getByTestId("sidebar-search"), { target: { value: "nobody" } });

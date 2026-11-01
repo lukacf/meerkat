@@ -430,3 +430,84 @@ describe("GatingInboxPanel host-provided attention", () => {
     expect(view.getByTestId("host-attention:host:a")).toBeTruthy();
   });
 });
+
+describe("Approvals at a glance (v2)", () => {
+  const now = Date.now();
+  const DAY = 24 * 3_600_000;
+  const requestRow = (id: string, action: string, deadlineIn: number, extra: Record<string, unknown> = {}) => normalizePendingApproval({
+    pending_id: id, action_id: `action:${id}`, action, actor_id: "billing", risk_tier: "r3",
+    created_at_ms: now - 10 * 60_000, deadline_at_ms: now + deadlineIn, ...extra,
+  })!;
+  const ready = (requests: ReturnType<typeof requestRow>[]): PendingApprovalSnapshot => ({ scopeKey: "scope", status: "ready", requests, decisions: {}, readOnly: false, updatedAtMs: now });
+  const seededAudit = [
+    { audit_id: "a1", event_type: "pending_created", action_id: "refund", risk_tier: "r3", actor_id: "billing", outcome: "pending_approval", timestamp_ms: now - 50 * 60_000, detail: { action: "Refund 1,240 EUR on order 77310" } },
+    { audit_id: "a2", event_type: "approval_decided", action_id: "refund", risk_tier: "r3", actor_id: "billing", outcome: "allowed", timestamp_ms: now - 40 * 60_000, detail: { decision: "approve", approver_id: "ana.lima@example.com" } },
+    { audit_id: "a3", event_type: "pending_created", action_id: "waive", risk_tier: "r3", actor_id: "dispatch", outcome: "pending_approval", timestamp_ms: now - 30 * 60_000, detail: { action: "Waive shipping fees this week" } },
+    { audit_id: "a4", event_type: "rejection_decided", action_id: "waive", risk_tier: "r3", actor_id: "dispatch", outcome: "safe_draft", timestamp_ms: now - 20 * 60_000, detail: { decision: "reject", approver_id: "jonas.berg@example.com" } },
+    { audit_id: "a5", event_type: "evaluated", action_id: "credit", risk_tier: "r2", actor_id: "billing", outcome: "allowed_with_audit", timestamp_ms: now - 10 * 60_000, detail: { action: "Apply a 10 EUR goodwill credit" } },
+    { audit_id: "a6", event_type: "evaluated", action_id: "label", risk_tier: "r0", actor_id: "returns", outcome: "allowed", timestamp_ms: now - 5 * 60_000, detail: { action: "Re-send a return label" } },
+    { audit_id: "a7", event_type: "timeout_fallback", action_id: "cancel", risk_tier: "r3", actor_id: "billing", outcome: "safe_draft", timestamp_ms: now - 2 * DAY, detail: { fallback: "safe_draft" } },
+  ];
+
+  it("answers what waits and how long there is, soonest deadline first", () => {
+    const requests = [
+      requestRow("late", "Raise the refund threshold", 2 * 3_600_000),
+      requestRow("soon", "Publish the incident on the status page", 50_000),
+      requestRow("mid", "Send the delay notice", 15 * 60_000),
+    ];
+    const view = render(<GatingInboxPanel pending={[]} audit={seededAudit} onDecide={vi.fn()} resource={ready(requests)} auditLimit={50} />);
+    const cards = Array.from(view.container.querySelectorAll("[data-approval-id]"), (card) => card.getAttribute("data-approval-id"));
+    expect(cards).toEqual(["soon", "mid", "late"]);
+    expect(view.getByTestId("gating-glance:waiting").textContent?.includes("3")).toBe(true);
+    expect(view.getByTestId("gating-glance:waiting").textContent?.includes("3 high risk")).toBe(true);
+    const deadline = view.getByTestId("gating-glance:deadline");
+    expect(deadline.getAttribute("data-tone")).toBe("warn");
+    expect(/in \d+s/.test(deadline.textContent ?? "")).toBe(true);
+    expect(deadline.textContent?.includes("Publish the incident on the status page")).toBe(true);
+    expect(view.getByTestId("gating-summary").textContent?.includes("3 pending · 2 allowed automatically · next deadline in")).toBe(true);
+    expect(view.getByTestId("gating-countdown:soon").getAttribute("data-tone")).toBe("warn");
+  });
+
+  it("counts today's decisions and the risk mix of the recorded window", () => {
+    const view = render(<GatingInboxPanel pending={[]} audit={seededAudit} onDecide={vi.fn()} resource={ready([])} />);
+    const decided = view.getByTestId("gating-glance:decided").textContent ?? "";
+    expect(decided.includes("1 approved · 1 rejected")).toBe(true);
+    expect(decided.includes("timed out")).toBe(false);
+    const risk = view.getByTestId("gating-risk-mix");
+    expect(risk.querySelector('[role="img"]')?.getAttribute("aria-label")).toBe("Risk of the recorded actions: Minimal 1, Low 0, Elevated 1, High 3");
+    expect(Array.from(risk.querySelectorAll("[data-tier]"), (segment) => segment.getAttribute("data-tier"))).toEqual(["r0", "r2", "r3"]);
+    expect(view.getByText("No pending approvals.")).toBeTruthy();
+  });
+
+  it("titles a decision by the request it decided, newest first, by day", () => {
+    const view = render(<GatingInboxPanel pending={[]} audit={seededAudit} onDecide={vi.fn()} resource={ready([])} />);
+    fireEvent.click(view.getByTestId("gating-tab:audit"));
+    const decision = view.getByTestId("gating-audit:a2");
+    expect(decision.querySelector(".cc-row__title")?.textContent).toBe("Refund 1,240 EUR on order 77310");
+    expect(view.getByTestId("gating-audit:a4").querySelector(".cc-row__title")?.textContent).toBe("Waive shipping fees this week");
+    expect(view.container.textContent?.includes("Gate action")).toBe(false);
+    const order = Array.from(view.container.querySelectorAll<HTMLElement>("[data-testid^='gating-audit:']"), (row) => row.getAttribute("data-testid"));
+    expect(order.slice(0, 6)).toEqual(["gating-audit:a6", "gating-audit:a5", "gating-audit:a4", "gating-audit:a3", "gating-audit:a2", "gating-audit:a1"]);
+    const days = Array.from(view.container.querySelectorAll(".gating-day__label"), (label) => label.textContent);
+    expect(days[0]?.startsWith("Today")).toBe(true);
+    expect(days.length).toBe(2);
+    // The decisions strip: one mark per decision of the last day, in its shape.
+    const strip = view.getByTestId("gating-decisions-strip");
+    expect(strip.querySelector("[data-testid='gating-decision:a2']")?.getAttribute("data-shape")).toBe("dot");
+    expect(strip.querySelector("[data-testid='gating-decision:a4']")?.getAttribute("data-shape")).toBe("diamond");
+    expect(strip.querySelector("[data-testid='gating-decision:a7']") === null).toBe(true);
+  });
+
+  it("says the counts cover the newest records when the read is full", () => {
+    const audit = Array.from({ length: 50 }, (_, index) => ({ audit_id: `e${index}`, event_type: "evaluated", action_id: `act${index}`, risk_tier: "r1", outcome: "allowed", timestamp_ms: now - index * 60_000 }));
+    const view = render(<GatingInboxPanel pending={[]} audit={audit} onDecide={vi.fn()} resource={ready([])} auditLimit={50} />);
+    expect(view.getByTestId("gating-summary").textContent?.includes("50 allowed automatically in the last 50 records")).toBe(true);
+    fireEvent.click(view.getByTestId("gating-tab:auto"));
+    expect(view.getByTestId("gating-audit-window").textContent).toBe("The newest 50 records. 50 of them were allowed automatically.");
+  });
+
+  it("hides the glance strip where approvals do not apply", () => {
+    const view = render(<GatingInboxPanel pending={[]} audit={[]} onDecide={vi.fn()} resource={{ scopeKey: "scope", status: "unsupported", requests: [], decisions: {}, readOnly: true }} />);
+    expect(view.queryByTestId("gating-glance") === null).toBe(true);
+  });
+});

@@ -1,15 +1,18 @@
 import React from "react";
-import { ApprovalCard, HostAttentionCard } from "../../../packages/console-components/src/conversation/approval-card";
-import { normalizeGatingAuditEntry } from "../../../packages/console-core/src/control-plane";
+import { ApprovalCard, HostAttentionCard, deadlineWords, useApprovalClock } from "../../../packages/console-components/src/conversation/approval-card";
 import type { GatingAuditEntryView } from "../../../packages/console-core/src/control-plane";
 import { hostDecideLinks, type HostAttentionSnapshot, type HostAttentionSourceConfig } from "../../../packages/console-core/src/host-attention";
 import type { PendingApprovalSnapshot } from "../../../packages/console-core/src/pending-approvals";
 import {
   Button,
   Chip,
+  Count,
+  DotStrip,
   EmptyState,
+  FigureTile,
+  GlanceStrip,
+  IconButton,
   KeyValueList,
-  KitGlyph,
   ListRow,
   LoadingState,
   Notice,
@@ -21,18 +24,41 @@ import {
   RelativeTime,
   RowList,
   StatusDot,
+  StatusMark,
   StatusRow,
   TechnicalId,
   agentDisplayName,
   formatAbsoluteTime,
+  formatClockTime,
   formatDuration,
   humanizeEnum,
+  joinMeta,
+  plural,
   riskTierWord,
   riskTone,
+  standardPanelMenu,
   toEpochMs,
   useAgentDirectory,
+  usePanelDensity,
+  useShowTechnicalIds,
 } from "../../../packages/console-components/src/panel-kit";
-import type { AgentDirectory, EmptyStateKind, Tone } from "../../../packages/console-components/src/panel-kit";
+import type { AgentDirectory, DotStripItem, EmptyStateKind, SummaryFact, Tone } from "../../../packages/console-components/src/panel-kit";
+import {
+  RISK_TIERS,
+  actionTitles,
+  auditRows,
+  byDeadline,
+  decidedSince,
+  decisionEvents,
+  groupByDay,
+  recordOf,
+  riskMix,
+  startOfDay,
+  type AuditRow,
+  type DecisionEvent,
+  type DecisionKind,
+  type RawRecord,
+} from "./gating-model";
 
 interface GatingInboxPanelProps {
   pending: unknown[];
@@ -48,6 +74,9 @@ interface GatingInboxPanelProps {
   auditUpdatedAtMs?: number | null;
   /** Why the last refresh of the recorded approvals failed, if it did. */
   auditError?: string | null;
+  /** How many records the audit read asks for: a full read is a window of
+   * the newest records, and its counts say so. */
+  auditLimit?: number;
   selectedPendingId?: string;
   /** Host-provided attention items, listed on Pending after the approvals. */
   hostAttention?: HostAttentionSnapshot;
@@ -60,11 +89,7 @@ interface GatingInboxPanelProps {
 
 type Tab = "pending" | "auto" | "audit" | "policies";
 
-type RawRecord = Record<string, unknown>;
-
-function recordOf(value: unknown): RawRecord {
-  return value && typeof value === "object" && !Array.isArray(value) ? value as RawRecord : {};
-}
+const DAY_MS = 24 * 3_600_000;
 
 function textOf(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
@@ -91,9 +116,11 @@ function payloadSummary(entry: RawRecord): string {
 }
 
 /// The action people read: the label the request carried ("Send message"),
-/// else the action ID in words. The raw ID stays in the row's tooltip.
-function actionTitle(raw: RawRecord, record: GatingAuditEntryView): string {
-  const label = textOf(recordOf(raw.detail).action) || textOf(raw.action);
+/// else the label of another record of the same action (a decision row
+/// carries none), else the action ID in words. The raw ID stays in the
+/// row's tooltip.
+function actionTitle(raw: RawRecord, record: GatingAuditEntryView, titles?: ReadonlyMap<string, string>): string {
+  const label = textOf(recordOf(raw.detail).action) || textOf(raw.action) || (record.actionId ? titles?.get(record.actionId) : "") || "";
   return label || humanizeEnum(record.actionId) || humanizeEnum(record.eventType) || "Unknown action";
 }
 
@@ -120,7 +147,9 @@ function recordVerdict(record: GatingAuditEntryView): { label: string; tone: Ton
   if (record.decision === "escalate") return { label: "Escalated", tone: "warn" };
   if (record.automaticAllowance) return { label: "Allowed automatically", tone: "ok" };
   switch (record.eventType) {
-    case "timeout_fallback": return { label: "Timed out", tone: "warn" };
+    // No one decided in time and the safe fallback applied: a quiet mark,
+    // as on the decisions strip.
+    case "timeout_fallback": return { label: "Timed out", tone: "neutral" };
     case "pending_created": return { label: "Requested", tone: "neutral" };
     case "approval_notification": return { label: "Approver notified", tone: "neutral" };
     case "conflict_blocked": return { label: "Blocked", tone: "warn" };
@@ -177,6 +206,7 @@ function GatingRecordRow({
   expanded,
   onToggle,
   actions,
+  titles,
 }: {
   /// The row's key in its test ID: the request or audit ID, or a position.
   pid: string;
@@ -186,6 +216,7 @@ function GatingRecordRow({
   expanded: boolean;
   onToggle: () => void;
   actions?: React.ReactNode;
+  titles?: ReadonlyMap<string, string>;
 }) {
   const directory = useAgentDirectory();
   const actor = record.actorId || (kind === "pending" ? textOf(raw.agent) || textOf(raw.identity) || textOf(raw.actor) : "");
@@ -203,7 +234,7 @@ function GatingRecordRow({
         testId={`gating-${kind}:${pid}`}
         dataAttributes={{ "data-risk": record.riskTier }}
         lead={<StatusDot tone={riskTone(record.riskTier)} className="gitem__risk" />}
-        title={actionTitle(raw, record)}
+        title={actionTitle(raw, record, titles)}
         titleAttr={record.actionId || undefined}
         subtitle={(
           <span className="gitem__facts">
@@ -212,7 +243,7 @@ function GatingRecordRow({
         )}
         meta={(
           <>
-            {verdict ? <Chip tone={verdict.tone}>{verdict.label}</Chip> : null}
+            {verdict ? <Chip tone={verdict.tone} mark variant="quiet">{verdict.label}</Chip> : null}
             {waited !== null ? <span className="gitem__waited">{`Waiting ${formatDuration(waited)}`}</span> : null}
             {recordedAt !== null ? <RelativeTime value={recordedAt} /> : null}
           </>
@@ -252,6 +283,128 @@ const RESOURCE_STATE: Record<
   unavailable: { text: "Approvals unavailable", empty: "unavailable", tone: "warn" },
 };
 
+const DECISION_MARK: Record<DecisionKind, { shape: DotStripItem["shape"]; tone: Tone; word: string; plural: string }> = {
+  approve: { shape: "dot", tone: "ok", word: "Approved", plural: "approved" },
+  reject: { shape: "diamond", tone: "crit", word: "Rejected", plural: "rejected" },
+  escalate: { shape: "triangle", tone: "warn", word: "Escalated", plural: "escalated" },
+  timeout: { shape: "hollow", tone: "neutral", word: "Timed out", plural: "timed out" },
+};
+
+/** The width of an element, followed as it resizes (a fallback where the
+ * browser cannot observe it). */
+function useWidth(fallback: number): [React.RefCallback<HTMLElement>, number] {
+  const [width, setWidth] = React.useState(fallback);
+  const observer = React.useRef<ResizeObserver | null>(null);
+  const ref = React.useCallback((element: HTMLElement | null) => {
+    observer.current?.disconnect();
+    observer.current = null;
+    if (!element || typeof ResizeObserver === "undefined") return;
+    const measure = () => {
+      const next = Math.floor(element.clientWidth);
+      if (next > 0) setWidth((current) => (Math.abs(current - next) >= 2 ? next : current));
+    };
+    observer.current = new ResizeObserver(measure);
+    observer.current.observe(element);
+    measure();
+  }, []);
+  React.useEffect(() => () => observer.current?.disconnect(), []);
+  return [ref, width];
+}
+
+/** Decisions (or automatic allowances) on the last day's axis: one mark per
+ * decision, in its tone's shape, with the legend counted below. */
+function DecisionsStrip({
+  events,
+  now,
+  automatic,
+}: {
+  events: ReadonlyArray<{ id: string; at: number; kind: DecisionKind | "auto"; title: string; approverId?: string }>;
+  now: number;
+  automatic: boolean;
+}) {
+  const directory = useAgentDirectory();
+  const [ref, width] = useWidth(560);
+  // The axis spans the last day, or less when everything happened lately:
+  // the last hour, 3, 6 or 12 hours, so recent marks do not pile up at "now".
+  const recent = events.filter((event) => event.at >= now - DAY_MS && event.at <= now + 60_000);
+  const oldest = recent.reduce((min, event) => Math.min(min, event.at), now);
+  const hours = [1, 3, 6, 12, 24].find((span) => now - oldest <= span * 3_600_000 * 0.92) ?? 24;
+  const start = now - hours * 3_600_000;
+  const windowWords = hours === 1 ? "last hour" : `last ${hours} hours`;
+  const shown = recent.filter((event) => event.at >= start);
+  const counts = new Map<string, number>();
+  for (const event of shown) counts.set(event.kind, (counts.get(event.kind) ?? 0) + 1);
+  const items: DotStripItem[] = shown.map((event) => {
+    const mark = event.kind === "auto" ? { shape: "dot" as const, tone: "ok" as Tone, word: "Allowed automatically" } : DECISION_MARK[event.kind];
+    const by = event.approverId ? ` by ${agentDisplayName(event.approverId, directory)}` : "";
+    return {
+      id: event.id,
+      t: event.at,
+      shape: mark.shape,
+      tone: mark.tone,
+      label: `${mark.word}${by}: ${event.title}, ${formatClockTime(event.at)}`,
+    };
+  });
+  const legend = automatic
+    ? [{ key: "auto", tone: "ok" as Tone, text: `${counts.get("auto") ?? 0} allowed automatically` }]
+    : (Object.keys(DECISION_MARK) as DecisionKind[]).map((kind) => ({ key: kind, tone: DECISION_MARK[kind].tone, text: `${counts.get(kind) ?? 0} ${DECISION_MARK[kind].plural}` }));
+  const label = automatic
+    ? `${plural(shown.length, "action")} allowed automatically in the ${windowWords}`
+    : `${plural(shown.length, "decision")} in the ${windowWords}: ${legend.map((entry) => entry.text).join(", ")}`;
+  return (
+    <section className="gating-strip" aria-label={automatic ? `Allowed automatically, ${windowWords}` : `Decisions, ${windowWords}`}>
+      <div className="gating-strip__head">
+        <span className="gating-strip__label" data-testid="gating-strip-window">{automatic ? `Allowed automatically · ${windowWords}` : `Decisions · ${windowWords}`}</span>
+        <span className="gating-strip__legend">
+          {legend.map((entry) => (
+            <span key={entry.key} className="gating-strip__legend-item" data-tone={entry.tone}>
+              <StatusMark tone={entry.tone} />
+              {entry.text}
+            </span>
+          ))}
+        </span>
+      </div>
+      <div className="gating-strip__plot" ref={ref}>
+        <DotStrip
+          testId="gating-decisions-strip"
+          testIdPrefix="gating-decision"
+          items={items}
+          start={start}
+          end={now}
+          width={Math.max(160, width)}
+          height={20}
+          markSize={8}
+          axis
+          now={now}
+          label={label}
+        />
+      </div>
+    </section>
+  );
+}
+
+/** The risk mix of the recorded window as an ordinal ink ramp, R0 lightest
+ * to R2 darkest, R3 in the negative tone; the words in the legend. */
+function RiskMix({ mix }: { mix: ReturnType<typeof riskMix> }) {
+  const known = mix.r0 + mix.r1 + mix.r2 + mix.r3;
+  const words = RISK_TIERS.map((tier) => `${riskTierWord(tier)} ${mix[tier]}`).join(", ");
+  return (
+    <span className="gating-risk" data-testid="gating-risk-mix">
+      <span className="gating-risk__bar" role="img" aria-label={`Risk of the recorded actions: ${words}`}>
+        {known > 0 ? RISK_TIERS.map((tier) => (mix[tier] > 0 ? (
+          <span
+            key={tier}
+            className="gating-risk__seg"
+            data-tier={tier}
+            style={{ flexGrow: mix[tier] }}
+            title={`${riskTierWord(tier)} risk (${tier.toUpperCase()}): ${plural(mix[tier], "action")}`}
+          />
+        ) : null)) : null}
+      </span>
+    </span>
+  );
+}
+
 export function GatingInboxPanel({
   pending,
   audit,
@@ -262,6 +415,7 @@ export function GatingInboxPanel({
   onRefreshAudit,
   auditUpdatedAtMs,
   auditError,
+  auditLimit,
   selectedPendingId,
   hostAttention,
   hostDecideSources,
@@ -271,6 +425,8 @@ export function GatingInboxPanel({
   const tabIds = React.useId();
   const [selectedId, setSelectedId] = React.useState<string | null>(null);
   const [expandedId, setExpandedId] = React.useState<string | null>(null);
+  const [density, setDensity] = usePanelDensity("gating");
+  const [showTechnicalIds, setShowTechnicalIds] = useShowTechnicalIds("gating");
   const listRef = React.useRef<HTMLDivElement>(null);
   const pendingRequests = resource?.requests.filter((request) => request.status === "pending" && resource.decisions[request.pendingId]?.phase !== "settled");
   const pendingKnown = !resource || resource.status === "ready";
@@ -291,9 +447,21 @@ export function GatingInboxPanel({
     selected?.focus({ preventScroll: true });
   }, [selectedPendingId, selectedRequestAvailable, tab]);
 
-  const auditEntries = audit.map((raw) => ({ raw: recordOf(raw), record: normalizeGatingAuditEntry(raw) }));
+  const auditEntries = React.useMemo(() => auditRows(audit), [audit]);
   const automaticallyAllowed = auditEntries.filter((entry) => entry.record.automaticAllowance);
   const automaticCount = automaticallyAllowed.length;
+  const auditCapped = auditLimit !== undefined && audit.length >= auditLimit;
+  const titles = React.useMemo(() => actionTitles(auditEntries, resource?.requests ?? []), [auditEntries, resource?.requests]);
+  const decisions = React.useMemo(() => decisionEvents(auditEntries, titles), [auditEntries, titles]);
+  const queue = React.useMemo(() => (pendingRequests ? byDeadline(pendingRequests) : []), [pendingRequests]);
+  const deadlines = queue.map((request) => request.deadlineAtMs).filter((deadline): deadline is number => deadline !== undefined);
+  const now = useApprovalClock(deadlines);
+  const next = queue.find((request) => request.deadlineAtMs !== undefined);
+  const nextWords = next?.deadlineAtMs !== undefined ? deadlineWords(next.deadlineAtMs, now) : null;
+  const decidedToday = decidedSince(decisions, startOfDay(now));
+  const mix = riskMix(auditEntries);
+  const highRisk = queue.filter((request) => request.riskTier === "r3" || request.riskTier === "r4").length;
+  const oldest = queue.reduce<number | null>((min, request) => (request.createdAtMs !== undefined && (min === null || request.createdAtMs < min) ? request.createdAtMs : min), null);
 
   const toggle = (key: string) => setExpandedId((current) => (current === key ? null : key));
 
@@ -318,6 +486,9 @@ export function GatingInboxPanel({
   let content: React.ReactNode;
   if (tab === "pending" && resource) {
     const state = resource.status === "ready" ? null : RESOURCE_STATE[resource.status];
+    // Soonest deadline first; a request decided here stays in place until
+    // the owner drops it.
+    const cards = byDeadline(resource.requests);
     content = (
       <>
         {state && resource.requests.length === 0 ? (
@@ -328,11 +499,16 @@ export function GatingInboxPanel({
           <Notice tone={state.tone} role="status">{state.text}</Notice>
         ) : null}
         {resource.status === "ready" && pendingRequests?.length === 0 ? (
-          <EmptyState title="No pending approvals." body="Requests that need a decision appear here." inline={hostShown} />
+          <EmptyState
+            illustration={hostShown ? undefined : "approvals-clear"}
+            title="No pending approvals."
+            body="Requests that need a decision appear here, soonest deadline first."
+            inline={hostShown}
+          />
         ) : null}
-        {resource.requests.length ? (
+        {cards.length ? (
           <div className="gating-inbox__cards">
-            {resource.requests.map((request) => (
+            {cards.map((request) => (
               <div
                 key={request.pendingId}
                 tabIndex={-1}
@@ -357,55 +533,37 @@ export function GatingInboxPanel({
     );
   } else if (tab === "policies") {
     content = <EmptyState kind="unavailable" role="status" title="Policy details are not available in this console." />;
-  } else {
-    const rows = tab === "pending"
-      ? pending.map((raw) => ({ raw: recordOf(raw), record: normalizeGatingAuditEntry(raw) }))
-      : tab === "auto" ? automaticallyAllowed : auditEntries;
-    const showActions = tab === "pending" && !readOnly;
+  } else if (tab === "pending") {
+    const rows = pending.map((raw, index) => ({ raw: recordOf(raw), record: auditRows([raw])[0].record, index }));
+    const showActions = !readOnly;
     content = (
       <>
-        {tab !== "pending" ? (
-          <Notice className="gating-inbox__note">Approval records do not confirm execution.</Notice>
-        ) : null}
         {rows.length === 0 ? (
-          <EmptyState title={`No ${tab} items.`} inline={hostShown} />
+          <EmptyState title="No pending items." inline={hostShown} />
         ) : (
           <RowList>
-            {rows.map(({ raw, record }, index) => {
-              const pid = (tab === "pending" ? record.pendingId : record.auditId) || `item-${index}`;
-              const key = `${tab}:${pid}`;
+            {rows.map(({ raw, record, index }) => {
+              const pid = record.pendingId || `item-${index}`;
+              const key = `pending:${pid}`;
               return (
                 <GatingRecordRow
                   key={pid}
                   pid={pid}
                   raw={raw}
                   record={record}
-                  kind={tab === "pending" ? "pending" : "audit"}
+                  kind="pending"
                   expanded={expandedId === key}
                   onToggle={() => toggle(key)}
+                  titles={titles}
                   actions={showActions ? (
                     <>
-                      <Button
-                        size="sm"
-                        variant="primary"
-                        data-testid={`gating-action:${pid}:approve`}
-                        onClick={() => onDecide(pid, "approve")}
-                      >
+                      <Button size="sm" variant="positive" data-testid={`gating-action:${pid}:approve`} onClick={() => onDecide(pid, "approve")}>
                         Approve
                       </Button>
-                      <Button
-                        size="sm"
-                        variant="danger"
-                        data-testid={`gating-action:${pid}:reject`}
-                        onClick={() => onDecide(pid, "reject")}
-                      >
+                      <Button size="sm" variant="danger" data-testid={`gating-action:${pid}:reject`} onClick={() => onDecide(pid, "reject")}>
                         Reject
                       </Button>
-                      <Button
-                        size="sm"
-                        data-testid={`gating-action:${pid}:escalate`}
-                        onClick={() => onDecide(pid, "escalate")}
-                      >
+                      <Button size="sm" data-testid={`gating-action:${pid}:escalate`} onClick={() => onDecide(pid, "escalate")}>
                         Escalate
                       </Button>
                     </>
@@ -414,6 +572,59 @@ export function GatingInboxPanel({
               );
             })}
           </RowList>
+        )}
+        {hostList}
+      </>
+    );
+  } else {
+    const rows: AuditRow[] = tab === "auto" ? automaticallyAllowed : auditEntries;
+    const groups = groupByDay(rows, now);
+    const stripEvents = tab === "auto"
+      ? automaticallyAllowed.flatMap(({ record, at, raw }, index) => (at === null ? [] : [{
+        id: record.auditId || `auto-${index}`,
+        at,
+        kind: "auto" as const,
+        title: actionTitle(raw, record, titles),
+      }]))
+      : decisions;
+    content = (
+      <>
+        <Notice className="gating-inbox__note">Approval records do not confirm execution.</Notice>
+        {rows.length > 0 ? <DecisionsStrip events={stripEvents as ReadonlyArray<DecisionEvent | { id: string; at: number; kind: "auto"; title: string }>} now={now} automatic={tab === "auto"} /> : null}
+        {auditCapped ? (
+          <p className="gating-inbox__window" data-testid="gating-audit-window">
+            {`The newest ${auditLimit} records. ${tab === "auto" ? `${automaticCount} of them were allowed automatically.` : "Older records are not loaded."}`}
+          </p>
+        ) : null}
+        {rows.length === 0 ? (
+          <EmptyState title={`No ${tab} items.`} inline={hostShown} />
+        ) : (
+          groups.map((group) => (
+            <section key={group.key} className="gating-day" data-testid={`gating-day:${group.key}`}>
+              <div className="gating-day__label">
+                {group.label}
+                <Count value={group.rows.length} />
+              </div>
+              <RowList>
+                {group.rows.map(({ raw, record }, index) => {
+                  const pid = record.auditId || `item-${group.key}-${index}`;
+                  const key = `${tab}:${pid}`;
+                  return (
+                    <GatingRecordRow
+                      key={pid}
+                      pid={pid}
+                      raw={raw}
+                      record={record}
+                      kind="audit"
+                      expanded={expandedId === key}
+                      onToggle={() => toggle(key)}
+                      titles={titles}
+                    />
+                  );
+                })}
+              </RowList>
+            </section>
+          ))
         )}
         {hostList}
       </>
@@ -429,21 +640,91 @@ export function GatingInboxPanel({
     ? `Couldn't refresh the approval records (${auditError}). Showing the ones loaded before.`
     : null;
 
+  const automaticWords = `${automaticCount} allowed automatically${auditCapped ? ` in the last ${auditLimit} records` : ""}`;
+  const summary: Array<SummaryFact | null> = approvalsUnsupported
+    ? [{ key: "unsupported", text: "Not available on this connection", announce: false }]
+    : [
+      pendingKnown ? { key: "pending", text: `${pendingCount} pending`, tone: pendingCount > 0 ? "warn" : undefined, testId: "gating-summary-pending" } : null,
+      { key: "auto", text: automaticWords },
+      nextWords ? { key: "deadline", text: nextWords.past ? "a deadline has passed" : `next deadline ${nextWords.text}`, announce: false, testId: "gating-summary-deadline" } : null,
+    ];
+  const glance = approvalsUnsupported ? null : (
+    <GlanceStrip ariaLabel="Approvals at a glance" testId="gating-glance" className="gating-glance">
+      <FigureTile
+        label="Waiting"
+        value={pendingKnown ? pendingCount : 0}
+        loading={!pendingKnown}
+        tone={pendingKnown && pendingCount > 0 ? "warn" : undefined}
+        foot={pendingKnown ? joinMeta(
+          highRisk ? `${highRisk} high risk` : null,
+          oldest !== null ? `oldest ${formatDuration(Math.max(0, now - oldest))}` : pendingCount === 0 ? "nothing needs you" : null,
+        ) : undefined}
+        testId="gating-glance:waiting"
+      />
+      <FigureTile
+        label="Next deadline"
+        value={nextWords ? nextWords.text : "None"}
+        tone={nextWords?.tone === "neutral" ? undefined : nextWords?.tone}
+        loading={!pendingKnown}
+        foot={next ? next.action : pendingKnown ? "no request has a deadline" : undefined}
+        title={next?.deadlineAtMs !== undefined ? `Deadline ${formatAbsoluteTime(next.deadlineAtMs)}` : undefined}
+        className="gating-glance__deadline"
+        testId="gating-glance:deadline"
+      />
+      <FigureTile
+        label="Decided today"
+        value={decidedToday.total}
+        foot={decidedToday.total
+          ? joinMeta(
+            decidedToday.approve ? `${decidedToday.approve} approved` : null,
+            decidedToday.reject ? `${decidedToday.reject} rejected` : null,
+            decidedToday.escalate ? `${decidedToday.escalate} escalated` : null,
+            decidedToday.timeout ? `${decidedToday.timeout} timed out` : null,
+          )
+          : "no decisions yet today"}
+        title={auditCapped ? `Counted in the newest ${auditLimit} records` : undefined}
+        testId="gating-glance:decided"
+      />
+      <FigureTile
+        label="Risk mix"
+        value={mix.total}
+        unit={mix.total === 1 ? "action" : "actions"}
+        meter={<RiskMix mix={mix} />}
+        foot={RISK_TIERS.map((tier) => `${tier.toUpperCase()} ${mix[tier]}`).join(" · ")}
+        title={RISK_TIERS.map((tier) => `${riskTierWord(tier)} risk: ${mix[tier]}`).join(", ")}
+        className="gating-glance__risk"
+        testId="gating-glance:risk"
+      />
+    </GlanceStrip>
+  );
+
   return (
-    <PanelShell className="gating-inbox" testId="gating-panel">
+    <PanelShell className="gating-inbox" testId="gating-panel" density={density} showTechnicalIds={showTechnicalIds}>
       <PanelHeader
         className="gating__head"
         title="Approvals"
-        subtitle={approvalsUnsupported
-          ? "Not available on this connection"
-          : pendingKnown
-            ? `${pendingCount} pending · ${automaticCount} allowed automatically`
-            : `${automaticCount} allowed automatically`}
+        summary={summary}
+        summaryTestId="gating-summary"
+        freshness={updatedShown !== undefined && updatedShown !== null ? { at: updatedShown } : undefined}
         divider={false}
-        actions={refreshShown ? (
-          <Button icon={<KitGlyph name="refresh" />} onClick={refreshShown}>Refresh approvals</Button>
+        tools={refreshShown ? (
+          <IconButton label="Refresh approvals" glyph="refresh" data-testid="gating-refresh" onClick={refreshShown} />
         ) : undefined}
+        menu={{
+          label: "More actions for Approvals",
+          triggerTestId: "gating-menu",
+          items: standardPanelMenu({
+            density,
+            onDensityChange: setDensity,
+            showTechnicalIds,
+            onShowTechnicalIdsChange: setShowTechnicalIds,
+            getCopyData: () => ({ pending: resource ? resource.requests.map((request) => request.raw) : pending, audit }),
+            onRefresh: refreshShown,
+            testIdPrefix: "gating",
+          }),
+        }}
       />
+      {glance}
       <PanelTabs<Tab>
         ariaLabel="Approval views"
         idBase={tabIds}
@@ -456,7 +737,7 @@ export function GatingInboxPanel({
           { id: "policies", label: "Policies", testId: "gating-tab:policies" },
         ]}
       />
-      <StatusRow updatedAt={updatedShown} error={errorShown} errorTestId="gating-audit-error" />
+      <StatusRow mode="toast" error={errorShown} errorTestId="gating-audit-error" updatedAt={updatedShown ?? undefined} onRetry={refreshShown} />
       <PanelBody className="gating-inbox__body">
         <PanelTabPanel className="gating-inbox__content" ref={listRef} idBase={tabIds} tab={tab}>{content}</PanelTabPanel>
       </PanelBody>

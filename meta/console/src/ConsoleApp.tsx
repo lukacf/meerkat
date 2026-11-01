@@ -279,6 +279,8 @@ export interface ConsoleAppProps {
 
 type RoutingPanelData = ReturnType<typeof buildRoutingSectionView>;
 type GatingPanelData = { pending: unknown[]; audit: unknown[]; updatedAtMs?: number };
+/** The recorded approvals the Approvals panel reads: the newest 50. */
+const GATING_AUDIT_LIMIT = 50;
 type RoutingReadState = {
   scope: string;
   loading: boolean;
@@ -3509,7 +3511,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
   const [gatingAuditError, setGatingAuditError] = React.useState<string | null>(null);
   const refreshGatingAudit = React.useCallback(() => panelRefreshFlight("gating-audit", async () => {
     try {
-      const audit = await executeHeadlessCommand(CONSOLE_COMMAND_NAMES.listGatingAudit, controlWorkbenchTarget("gating"), { limit: 50 }) as { entries?: unknown[] };
+      const audit = await executeHeadlessCommand(CONSOLE_COMMAND_NAMES.listGatingAudit, controlWorkbenchTarget("gating"), { limit: GATING_AUDIT_LIMIT }) as { entries?: unknown[] };
       setGatingData({ pending: [], audit: Array.isArray(audit?.entries) ? audit.entries : [], updatedAtMs: Date.now() });
       setGatingAuditError(null);
     } catch (error) {
@@ -5795,6 +5797,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           onRefreshAudit={() => void refreshGatingAudit().catch(() => {})}
           auditUpdatedAtMs={gatingData.updatedAtMs}
           auditError={gatingAuditError}
+          auditLimit={GATING_AUDIT_LIMIT}
           audit={gatingData.audit}
           onDecide={(pid, decision) => void onGatingDecision(pid, decision)}
           readOnly={consoleReadOnly}
@@ -5865,6 +5868,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           onRefreshAudit={() => void refreshGatingAudit().catch(() => {})}
           auditUpdatedAtMs={gatingData.updatedAtMs}
           auditError={gatingAuditError}
+          auditLimit={GATING_AUDIT_LIMIT}
           audit={gatingData.audit}
           onDecide={(pid, decision) => void onGatingDecision(pid, decision)}
           readOnly={consoleReadOnly}

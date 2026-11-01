@@ -6804,6 +6804,75 @@ mod tests {
 
     #[cfg(not(target_arch = "wasm32"))]
     #[tokio::test]
+    async fn sqlite_list_and_snapshot_cuts_keep_the_most_recently_updated_items() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("workgraph.sqlite3");
+        let store = std::sync::Arc::new(crate::SqliteWorkGraphStore::open(&path).expect("open"));
+        let service = WorkGraphService::with_scope(store, "realm", WorkNamespace::default());
+        let mut created = Vec::new();
+        for title in ["a", "b", "c"] {
+            created.push(
+                service
+                    .create(CreateWorkItemRequest {
+                        title: title.to_string(),
+                        ..Default::default()
+                    })
+                    .await
+                    .expect("create"),
+            );
+        }
+        let (a, c) = (created[0].clone(), created[2].clone());
+        service
+            .update(crate::UpdateWorkItemRequest {
+                id: a.id.clone(),
+                realm_id: None,
+                namespace: None,
+                expected_revision: a.revision,
+                title: Some("a (updated)".to_string()),
+                description: None,
+                priority: None,
+                completion_policy: None,
+                labels: None,
+                due_at: None,
+                not_before: None,
+                snoozed_until: None,
+                external_refs: Vec::new(),
+            })
+            .await
+            .expect("update a");
+
+        // Most recently updated first: both cuts drop `b`, updated longest ago.
+        let expected = vec![a.id, c.id];
+        let listed = service
+            .list(WorkItemFilter {
+                limit: Some(2),
+                ..WorkItemFilter::default()
+            })
+            .await
+            .expect("list");
+        assert_eq!(
+            listed.into_iter().map(|item| item.id).collect::<Vec<_>>(),
+            expected
+        );
+        let snapshot = service
+            .snapshot(crate::WorkGraphSnapshotFilter {
+                limit: Some(2),
+                ..Default::default()
+            })
+            .await
+            .expect("snapshot");
+        assert_eq!(
+            snapshot
+                .items
+                .into_iter()
+                .map(|item| item.id)
+                .collect::<Vec<_>>(),
+            expected
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
     async fn sqlite_item_without_machine_state_fails_closed_on_read() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("workgraph.sqlite3");

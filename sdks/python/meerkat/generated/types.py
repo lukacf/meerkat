@@ -4649,7 +4649,9 @@ class WorkEdge:
 
 @dataclass
 class WorkEvidenceRef:
-    """Wire payload for WorkEvidenceRef."""
+    """A typed pointer to evidence for a work item. Evidence is append-only:
+nothing edits or removes a ref, and a later ref can withdraw earlier ones
+by listing their ids in `withdraws`."""
     id: str
     kind: str
     confirmation_kind: Optional[WorkEvidenceKind] = None
@@ -4657,6 +4659,7 @@ class WorkEvidenceRef:
     execution_binding_id: Optional[str] = None
     label: Optional[str] = None
     summary: Optional[str] = None
+    withdraws: Optional[list[str]] = None
 
     @classmethod
     def from_wire(cls, value: Any) -> "WorkEvidenceRef":
@@ -4672,6 +4675,7 @@ class WorkEvidenceRef:
             kind=_expect_wire_str(_require_wire_field(data, 'kind', 'WorkEvidenceRef'), 'WorkEvidenceRef.kind'),
             label=(_expect_wire_str(data['label'], 'WorkEvidenceRef.label') if data.get('label') is not None else None),
             summary=(_expect_wire_str(data['summary'], 'WorkEvidenceRef.summary') if data.get('summary') is not None else None),
+            withdraws=([_expect_wire_str(_item, 'WorkEvidenceRef.withdraws[]') for _item in _expect_wire_list(data['withdraws'], 'WorkEvidenceRef.withdraws')] if data.get('withdraws') is not None else None),
         )
 
 
@@ -5291,7 +5295,10 @@ class ForkInstructionRefusalCauseActivation(TypedDict, total=False):
 class ForkInstructionRefusalCauseMemberHostUnsupported(TypedDict, total=False):
     kind: Required[Literal['member_host_unsupported']]
 
-ForkInstructionRefusalCause = ForkInstructionRefusalCausePolicyRefuses | ForkInstructionRefusalCauseNotEffectiveInSource | ForkInstructionRefusalCauseLineageBodyBudgetExceeded | ForkInstructionRefusalCauseActivation | ForkInstructionRefusalCauseMemberHostUnsupported
+class ForkInstructionRefusalCauseHeadBodyRetired(TypedDict, total=False):
+    kind: Required[Literal['head_body_retired']]
+
+ForkInstructionRefusalCause = ForkInstructionRefusalCausePolicyRefuses | ForkInstructionRefusalCauseNotEffectiveInSource | ForkInstructionRefusalCauseLineageBodyBudgetExceeded | ForkInstructionRefusalCauseActivation | ForkInstructionRefusalCauseMemberHostUnsupported | ForkInstructionRefusalCauseHeadBodyRetired
 
 @dataclass
 class ForkInstructionRefusal:
@@ -9884,6 +9891,7 @@ class WireSessionMessageSystem(TypedDict, total=False):
     instruction_activation: NotRequired[Optional[InstructionActivationIdentity]]
     instruction_entry: NotRequired[Optional[dict[str, Any] | Any]]
     prompt_version: NotRequired[Optional[SystemPromptVersionIdentity]]
+    retired_instruction_body: NotRequired[Optional[dict[str, Any] | Any]]
     role: Required[Literal['system']]
 
 class WireSessionMessageSystemNotice(TypedDict, total=False):

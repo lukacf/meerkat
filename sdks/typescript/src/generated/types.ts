@@ -3371,6 +3371,7 @@ export interface WorkEvidenceRef {
   kind: string;
   label?: string | null;
   summary?: string | null;
+  withdraws?: string[];
 }
 
 export interface WorkGraphEvent {
@@ -3770,7 +3771,11 @@ export interface ForkInstructionRefusalCauseMemberHostUnsupported {
   kind: "member_host_unsupported";
 }
 
-export type ForkInstructionRefusalCause = ForkInstructionRefusalCausePolicyRefuses | ForkInstructionRefusalCauseNotEffectiveInSource | ForkInstructionRefusalCauseLineageBodyBudgetExceeded | ForkInstructionRefusalCauseActivation | ForkInstructionRefusalCauseMemberHostUnsupported;
+export interface ForkInstructionRefusalCauseHeadBodyRetired {
+  kind: "head_body_retired";
+}
+
+export type ForkInstructionRefusalCause = ForkInstructionRefusalCausePolicyRefuses | ForkInstructionRefusalCauseNotEffectiveInSource | ForkInstructionRefusalCauseLineageBodyBudgetExceeded | ForkInstructionRefusalCauseActivation | ForkInstructionRefusalCauseMemberHostUnsupported | ForkInstructionRefusalCauseHeadBodyRetired;
 
 export interface ForkInstructionRefusal {
   cause: ForkInstructionRefusalCause;
@@ -7753,6 +7758,7 @@ export interface WireSessionMessageSystem {
   instruction_activation?: InstructionActivationIdentity | null;
   instruction_entry?: Record<string, unknown> | unknown | null;
   prompt_version?: SystemPromptVersionIdentity | null;
+  retired_instruction_body?: Record<string, unknown> | unknown | null;
   role: "system";
 }
 
@@ -7972,6 +7978,7 @@ export function parseWorkEvidenceRef(value: unknown): WorkEvidenceRef {
     kind: expectWireString(requireWireField(data, "kind", "WorkEvidenceRef"), "WorkEvidenceRef.kind"),
     ...(data["label"] === undefined || data["label"] === null ? {} : { label: expectWireString(data["label"], "WorkEvidenceRef.label") }),
     ...(data["summary"] === undefined || data["summary"] === null ? {} : { summary: expectWireString(data["summary"], "WorkEvidenceRef.summary") }),
+    ...(data["withdraws"] === undefined || data["withdraws"] === null ? {} : { withdraws: expectWireArray(data["withdraws"], "WorkEvidenceRef.withdraws").map((entry) => expectWireString(entry, "WorkEvidenceRef.withdraws[]")) }),
   };
 }
 

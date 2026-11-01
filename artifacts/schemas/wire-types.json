@@ -11136,6 +11136,7 @@
         ]
       },
       "WorkEvidenceRef": {
+        "description": "A typed pointer to evidence for a work item. Evidence is append-only:\nnothing edits or removes a ref, and a later ref can withdraw earlier ones\nby listing their ids in `withdraws`.",
         "properties": {
           "confirmation_kind": {
             "anyOf": [
@@ -11184,6 +11185,14 @@
               "string",
               "null"
             ]
+          },
+          "withdraws": {
+            "description": "Ids of earlier evidence refs on the same item that this ref withdraws.\nA ref is withdrawn when a later ref on the item lists its id; nothing\nis edited or removed. A withdrawal names only earlier refs, never its\nown id or another withdrawal; confirmation and execution evidence can\nneither be withdrawn nor withdraw. Omitted when empty, so a ref without\nwithdrawals keeps its encoding.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
           }
         },
         "required": [
@@ -12091,6 +12100,7 @@
         ]
       },
       "WorkEvidenceRef": {
+        "description": "A typed pointer to evidence for a work item. Evidence is append-only:\nnothing edits or removes a ref, and a later ref can withdraw earlier ones\nby listing their ids in `withdraws`.",
         "properties": {
           "confirmation_kind": {
             "anyOf": [
@@ -12139,6 +12149,14 @@
               "string",
               "null"
             ]
+          },
+          "withdraws": {
+            "description": "Ids of earlier evidence refs on the same item that this ref withdraws.\nA ref is withdrawn when a later ref on the item lists its id; nothing\nis edited or removed. A withdrawal names only earlier refs, never its\nown id or another withdrawal; confirmation and execution evidence can\nneither be withdrawn nor withdraw. Omitted when empty, so a ref without\nwithdrawals keeps its encoding.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
           }
         },
         "required": [
@@ -12461,6 +12479,7 @@
         ]
       },
       "WorkEvidenceRef": {
+        "description": "A typed pointer to evidence for a work item. Evidence is append-only:\nnothing edits or removes a ref, and a later ref can withdraw earlier ones\nby listing their ids in `withdraws`.",
         "properties": {
           "confirmation_kind": {
             "anyOf": [
@@ -12509,6 +12528,14 @@
               "string",
               "null"
             ]
+          },
+          "withdraws": {
+            "description": "Ids of earlier evidence refs on the same item that this ref withdraws.\nA ref is withdrawn when a later ref on the item lists its id; nothing\nis edited or removed. A withdrawal names only earlier refs, never its\nown id or another withdrawal; confirmation and execution evidence can\nneither be withdrawn nor withdraw. Omitted when empty, so a ref without\nwithdrawals keeps its encoding.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
           }
         },
         "required": [
@@ -35614,6 +35641,30 @@
         ],
         "type": "object"
       },
+      "RetiredInstructionBody": {
+        "additionalProperties": false,
+        "description": "The typed marker of an instruction activation row whose body a\ncompaction retired, because a later activation row of its key superseded\nit. The row keeps its [`InstructionActivationIdentity`], whose digest\nstill binds the body, and this marker keeps the body's length; the row's\ncontent is the retired header (`[meerkat-retired-instruction-v1]`).",
+        "properties": {
+          "body_bytes": {
+            "description": "The UTF-8 byte length of the retired body.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "render_version": {
+            "description": "The render version of the retired header:\n[`crate::RETIRED_INSTRUCTION_RENDER_VERSION_V1`]. Render versions are\nadditive and permanently ratcheted.",
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "render_version",
+          "body_bytes"
+        ],
+        "type": "object"
+      },
       "RevisedPromptDisposition": {
         "oneOf": [
           {
@@ -37369,6 +37420,18 @@
           }
         ]
       },
+      "WireRetiredInstructionBody": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/RetiredInstructionBody",
+            "description": "A marker this version knows."
+          },
+          {
+            "description": "A marker this version does not know, as it was sent."
+          }
+        ],
+        "description": "Public wire form of the marker of an instruction activation row whose\nbody a compaction retired.\n\nReads are tolerant: a marker reads as [`Self::Known`] whenever its fields\ndecode (a later render version with the same two fields included), and\none with a field this version does not know reads as [`Self::Raw`], the\nvalue as it was sent, and is written back the same. It never fails the\nhistory page or bridge message that carries it; either form marks the\nrow's body as retired. The session document keeps the closed core type."
+      },
       "WireServerToolKind": {
         "description": "Wire projection of `meerkat_core::ServerToolKind`.\n\nMirrors the typed semantic owner of a provider-executed tool. The core enum\nis `#[non_exhaustive]`; a future semantic kind that lacks an explicit arm in\nthe forward `From` surfaces as `Unknown { debug }` rather than silently\ncollapsing into a plausible-but-wrong kind. SDK consumers route on the\n`kind` discriminator and treat `unknown` as unrecognized.\n\n**When a new core variant is added, add an explicit arm in the forward\n`From` impl above the wildcard — `Unknown` is the floor, not the\ndestination.**",
         "oneOf": [
@@ -37484,6 +37547,17 @@
                   }
                 ],
                 "description": "Typed replacement-slot identity. Historical versions remain\nvisible on history/revision reads even though model materialization\nselects only the latest version for each key."
+              },
+              "retired_instruction_body": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireRetiredInstructionBody"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The marker of an instruction activation row whose body a\ncompaction retired, because a later activation row of its key\nsuperseded it: `content` is then the retired header, which names\nthe key, the revision and the body's length. Read-only: no write\naccepts it. A marker whose form this reader does not know reads\nraw instead of failing the read."
               },
               "role": {
                 "const": "system",
@@ -39855,7 +39929,7 @@
             "type": "object"
           },
           {
-            "description": "Re-activating the effective bodies would exceed the retained\nactivation-body budget of the lineage.",
+            "description": "Re-activating the effective bodies would exceed the activation-body\nbudget: the live bodies of the child's transcript, the copied rows'\nincluded, a retired body not counted.",
             "properties": {
               "kind": {
                 "const": "lineage_body_budget_exceeded",
@@ -39895,6 +39969,19 @@
             "properties": {
               "kind": {
                 "const": "member_host_unsupported",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Re-activation was asked for, but the last copied row of a key holds\nno body: a compaction of the source retired it, because a later row\nof the key superseded it, and the fork's prefix ends before that row.\nA fork at a later boundary copies the superseding row with its body;\na host can also activate the key in the child itself.",
+            "properties": {
+              "kind": {
+                "const": "head_body_retired",
                 "type": "string"
               }
             },
@@ -46338,7 +46425,7 @@
             "type": "object"
           },
           {
-            "description": "Re-activating the effective bodies would exceed the retained\nactivation-body budget of the lineage.",
+            "description": "Re-activating the effective bodies would exceed the activation-body\nbudget: the live bodies of the child's transcript, the copied rows'\nincluded, a retired body not counted.",
             "properties": {
               "kind": {
                 "const": "lineage_body_budget_exceeded",
@@ -46378,6 +46465,19 @@
             "properties": {
               "kind": {
                 "const": "member_host_unsupported",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Re-activation was asked for, but the last copied row of a key holds\nno body: a compaction of the source retired it, because a later row\nof the key superseded it, and the fork's prefix ends before that row.\nA fork at a later boundary copies the superseding row with its body;\na host can also activate the key in the child itself.",
+            "properties": {
+              "kind": {
+                "const": "head_body_retired",
                 "type": "string"
               }
             },
@@ -49296,6 +49396,30 @@
             "type": "string"
           }
         ]
+      },
+      "RetiredInstructionBody": {
+        "additionalProperties": false,
+        "description": "The typed marker of an instruction activation row whose body a\ncompaction retired, because a later activation row of its key superseded\nit. The row keeps its [`InstructionActivationIdentity`], whose digest\nstill binds the body, and this marker keeps the body's length; the row's\ncontent is the retired header (`[meerkat-retired-instruction-v1]`).",
+        "properties": {
+          "body_bytes": {
+            "description": "The UTF-8 byte length of the retired body.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "render_version": {
+            "description": "The render version of the retired header:\n[`crate::RETIRED_INSTRUCTION_RENDER_VERSION_V1`]. Render versions are\nadditive and permanently ratcheted.",
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "render_version",
+          "body_bytes"
+        ],
+        "type": "object"
       },
       "RevisedPromptDisposition": {
         "oneOf": [
@@ -53001,6 +53125,18 @@
           }
         ]
       },
+      "WireRetiredInstructionBody": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/RetiredInstructionBody",
+            "description": "A marker this version knows."
+          },
+          {
+            "description": "A marker this version does not know, as it was sent."
+          }
+        ],
+        "description": "Public wire form of the marker of an instruction activation row whose\nbody a compaction retired.\n\nReads are tolerant: a marker reads as [`Self::Known`] whenever its fields\ndecode (a later render version with the same two fields included), and\none with a field this version does not know reads as [`Self::Raw`], the\nvalue as it was sent, and is written back the same. It never fails the\nhistory page or bridge message that carries it; either form marks the\nrow's body as retired. The session document keeps the closed core type."
+      },
       "WireRunStopCompletion": {
         "description": "Completion class delivered to one contributor of a stopped run.\n\nA batch contributor of a cancelled run receives `cancelled`. An\nunretained durable Steer join is terminalized through the runtime\ntermination carrier, so its completion is `runtime_terminated` while its\ncommitted terminal is `cancelled`: read `terminal` for the lifecycle fact.",
         "enum": [
@@ -53243,6 +53379,17 @@
                   }
                 ],
                 "description": "Typed replacement-slot identity. Historical versions remain\nvisible on history/revision reads even though model materialization\nselects only the latest version for each key."
+              },
+              "retired_instruction_body": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireRetiredInstructionBody"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The marker of an instruction activation row whose body a\ncompaction retired, because a later activation row of its key\nsuperseded it: `content` is then the retired header, which names\nthe key, the revision and the body's length. Read-only: no write\naccepts it. A marker whose form this reader does not know reads\nraw instead of failing the read."
               },
               "role": {
                 "const": "system",
@@ -65829,7 +65976,7 @@
             "type": "object"
           },
           {
-            "description": "Re-activating the effective bodies would exceed the retained\nactivation-body budget of the lineage.",
+            "description": "Re-activating the effective bodies would exceed the activation-body\nbudget: the live bodies of the child's transcript, the copied rows'\nincluded, a retired body not counted.",
             "properties": {
               "kind": {
                 "const": "lineage_body_budget_exceeded",
@@ -65869,6 +66016,19 @@
             "properties": {
               "kind": {
                 "const": "member_host_unsupported",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Re-activation was asked for, but the last copied row of a key holds\nno body: a compaction of the source retired it, because a later row\nof the key superseded it, and the fork's prefix ends before that row.\nA fork at a later boundary copies the superseding row with its body;\na host can also activate the key in the child itself.",
+            "properties": {
+              "kind": {
+                "const": "head_body_retired",
                 "type": "string"
               }
             },
@@ -70058,6 +70218,30 @@
           "failed"
         ],
         "type": "string"
+      },
+      "RetiredInstructionBody": {
+        "additionalProperties": false,
+        "description": "The typed marker of an instruction activation row whose body a\ncompaction retired, because a later activation row of its key superseded\nit. The row keeps its [`InstructionActivationIdentity`], whose digest\nstill binds the body, and this marker keeps the body's length; the row's\ncontent is the retired header (`[meerkat-retired-instruction-v1]`).",
+        "properties": {
+          "body_bytes": {
+            "description": "The UTF-8 byte length of the retired body.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "render_version": {
+            "description": "The render version of the retired header:\n[`crate::RETIRED_INSTRUCTION_RENDER_VERSION_V1`]. Render versions are\nadditive and permanently ratcheted.",
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "render_version",
+          "body_bytes"
+        ],
+        "type": "object"
       },
       "RevisedPromptDisposition": {
         "oneOf": [
@@ -74901,6 +75085,18 @@
           }
         ]
       },
+      "WireRetiredInstructionBody": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/RetiredInstructionBody",
+            "description": "A marker this version knows."
+          },
+          {
+            "description": "A marker this version does not know, as it was sent."
+          }
+        ],
+        "description": "Public wire form of the marker of an instruction activation row whose\nbody a compaction retired.\n\nReads are tolerant: a marker reads as [`Self::Known`] whenever its fields\ndecode (a later render version with the same two fields included), and\none with a field this version does not know reads as [`Self::Raw`], the\nvalue as it was sent, and is written back the same. It never fails the\nhistory page or bridge message that carries it; either form marks the\nrow's body as retired. The session document keeps the closed core type."
+      },
       "WireRunStopCompletion": {
         "description": "Completion class delivered to one contributor of a stopped run.\n\nA batch contributor of a cancelled run receives `cancelled`. An\nunretained durable Steer join is terminalized through the runtime\ntermination carrier, so its completion is `runtime_terminated` while its\ncommitted terminal is `cancelled`: read `terminal` for the lifecycle fact.",
         "enum": [
@@ -75143,6 +75339,17 @@
                   }
                 ],
                 "description": "Typed replacement-slot identity. Historical versions remain\nvisible on history/revision reads even though model materialization\nselects only the latest version for each key."
+              },
+              "retired_instruction_body": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireRetiredInstructionBody"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The marker of an instruction activation row whose body a\ncompaction retired, because a later activation row of its key\nsuperseded it: `content` is then the retired header, which names\nthe key, the revision and the body's length. Read-only: no write\naccepts it. A marker whose form this reader does not know reads\nraw instead of failing the read."
               },
               "role": {
                 "const": "system",
@@ -87842,7 +88049,7 @@
             "type": "object"
           },
           {
-            "description": "Re-activating the effective bodies would exceed the retained\nactivation-body budget of the lineage.",
+            "description": "Re-activating the effective bodies would exceed the activation-body\nbudget: the live bodies of the child's transcript, the copied rows'\nincluded, a retired body not counted.",
             "properties": {
               "kind": {
                 "const": "lineage_body_budget_exceeded",
@@ -87882,6 +88089,19 @@
             "properties": {
               "kind": {
                 "const": "member_host_unsupported",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Re-activation was asked for, but the last copied row of a key holds\nno body: a compaction of the source retired it, because a later row\nof the key superseded it, and the fork's prefix ends before that row.\nA fork at a later boundary copies the superseding row with its body;\na host can also activate the key in the child itself.",
+            "properties": {
+              "kind": {
+                "const": "head_body_retired",
                 "type": "string"
               }
             },
@@ -90800,6 +91020,30 @@
             "type": "string"
           }
         ]
+      },
+      "RetiredInstructionBody": {
+        "additionalProperties": false,
+        "description": "The typed marker of an instruction activation row whose body a\ncompaction retired, because a later activation row of its key superseded\nit. The row keeps its [`InstructionActivationIdentity`], whose digest\nstill binds the body, and this marker keeps the body's length; the row's\ncontent is the retired header (`[meerkat-retired-instruction-v1]`).",
+        "properties": {
+          "body_bytes": {
+            "description": "The UTF-8 byte length of the retired body.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "render_version": {
+            "description": "The render version of the retired header:\n[`crate::RETIRED_INSTRUCTION_RENDER_VERSION_V1`]. Render versions are\nadditive and permanently ratcheted.",
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "render_version",
+          "body_bytes"
+        ],
+        "type": "object"
       },
       "RevisedPromptDisposition": {
         "oneOf": [
@@ -94505,6 +94749,18 @@
           }
         ]
       },
+      "WireRetiredInstructionBody": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/RetiredInstructionBody",
+            "description": "A marker this version knows."
+          },
+          {
+            "description": "A marker this version does not know, as it was sent."
+          }
+        ],
+        "description": "Public wire form of the marker of an instruction activation row whose\nbody a compaction retired.\n\nReads are tolerant: a marker reads as [`Self::Known`] whenever its fields\ndecode (a later render version with the same two fields included), and\none with a field this version does not know reads as [`Self::Raw`], the\nvalue as it was sent, and is written back the same. It never fails the\nhistory page or bridge message that carries it; either form marks the\nrow's body as retired. The session document keeps the closed core type."
+      },
       "WireRunStopCompletion": {
         "description": "Completion class delivered to one contributor of a stopped run.\n\nA batch contributor of a cancelled run receives `cancelled`. An\nunretained durable Steer join is terminalized through the runtime\ntermination carrier, so its completion is `runtime_terminated` while its\ncommitted terminal is `cancelled`: read `terminal` for the lifecycle fact.",
         "enum": [
@@ -94747,6 +95003,17 @@
                   }
                 ],
                 "description": "Typed replacement-slot identity. Historical versions remain\nvisible on history/revision reads even though model materialization\nselects only the latest version for each key."
+              },
+              "retired_instruction_body": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireRetiredInstructionBody"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The marker of an instruction activation row whose body a\ncompaction retired, because a later activation row of its key\nsuperseded it: `content` is then the retired header, which names\nthe key, the revision and the body's length. Read-only: no write\naccepts it. A marker whose form this reader does not know reads\nraw instead of failing the read."
               },
               "role": {
                 "const": "system",
@@ -107157,7 +107424,7 @@
             "type": "object"
           },
           {
-            "description": "Re-activating the effective bodies would exceed the retained\nactivation-body budget of the lineage.",
+            "description": "Re-activating the effective bodies would exceed the activation-body\nbudget: the live bodies of the child's transcript, the copied rows'\nincluded, a retired body not counted.",
             "properties": {
               "kind": {
                 "const": "lineage_body_budget_exceeded",
@@ -107197,6 +107464,19 @@
             "properties": {
               "kind": {
                 "const": "member_host_unsupported",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Re-activation was asked for, but the last copied row of a key holds\nno body: a compaction of the source retired it, because a later row\nof the key superseded it, and the fork's prefix ends before that row.\nA fork at a later boundary copies the superseding row with its body;\na host can also activate the key in the child itself.",
+            "properties": {
+              "kind": {
+                "const": "head_body_retired",
                 "type": "string"
               }
             },
@@ -107346,7 +107626,7 @@
         "type": "object"
       },
       {
-        "description": "Re-activating the effective bodies would exceed the retained\nactivation-body budget of the lineage.",
+        "description": "Re-activating the effective bodies would exceed the activation-body\nbudget: the live bodies of the child's transcript, the copied rows'\nincluded, a retired body not counted.",
         "properties": {
           "kind": {
             "const": "lineage_body_budget_exceeded",
@@ -107386,6 +107666,19 @@
         "properties": {
           "kind": {
             "const": "member_host_unsupported",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "Re-activation was asked for, but the last copied row of a key holds\nno body: a compaction of the source retired it, because a later row\nof the key superseded it, and the fork's prefix ends before that row.\nA fork at a later boundary copies the superseding row with its body;\na host can also activate the key in the child itself.",
+        "properties": {
+          "kind": {
+            "const": "head_body_retired",
             "type": "string"
           }
         },
@@ -107488,6 +107781,7 @@
         ]
       },
       "WorkEvidenceRef": {
+        "description": "A typed pointer to evidence for a work item. Evidence is append-only:\nnothing edits or removes a ref, and a later ref can withdraw earlier ones\nby listing their ids in `withdraws`.",
         "properties": {
           "confirmation_kind": {
             "anyOf": [
@@ -107536,6 +107830,14 @@
               "string",
               "null"
             ]
+          },
+          "withdraws": {
+            "description": "Ids of earlier evidence refs on the same item that this ref withdraws.\nA ref is withdrawn when a later ref on the item lists its id; nothing\nis edited or removed. A withdrawal names only earlier refs, never its\nown id or another withdrawal; confirmation and execution evidence can\nneither be withdrawn nor withdraw. Omitted when empty, so a ref without\nwithdrawals keeps its encoding.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
           }
         },
         "required": [
@@ -108107,6 +108409,13 @@
                     "string",
                     "null"
                   ]
+                },
+                "withdraws": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array",
+                  "uniqueItems": true
                 }
               },
               "required": [
@@ -108554,6 +108863,7 @@
         ]
       },
       "WorkEvidenceRef": {
+        "description": "A typed pointer to evidence for a work item. Evidence is append-only:\nnothing edits or removes a ref, and a later ref can withdraw earlier ones\nby listing their ids in `withdraws`.",
         "properties": {
           "confirmation_kind": {
             "anyOf": [
@@ -108602,6 +108912,14 @@
               "string",
               "null"
             ]
+          },
+          "withdraws": {
+            "description": "Ids of earlier evidence refs on the same item that this ref withdraws.\nA ref is withdrawn when a later ref on the item lists its id; nothing\nis edited or removed. A withdrawal names only earlier refs, never its\nown id or another withdrawal; confirmation and execution evidence can\nneither be withdrawn nor withdraw. Omitted when empty, so a ref without\nwithdrawals keeps its encoding.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
           }
         },
         "required": [
@@ -109275,6 +109593,13 @@
                     "string",
                     "null"
                   ]
+                },
+                "withdraws": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array",
+                  "uniqueItems": true
                 }
               },
               "required": [
@@ -110059,6 +110384,13 @@
                     "string",
                     "null"
                   ]
+                },
+                "withdraws": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array",
+                  "uniqueItems": true
                 }
               },
               "required": [
@@ -110823,6 +111155,13 @@
                     "string",
                     "null"
                   ]
+                },
+                "withdraws": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array",
+                  "uniqueItems": true
                 }
               },
               "required": [
@@ -119031,7 +119370,7 @@
             "type": "object"
           },
           {
-            "description": "Re-activating the effective bodies would exceed the retained\nactivation-body budget of the lineage.",
+            "description": "Re-activating the effective bodies would exceed the activation-body\nbudget: the live bodies of the child's transcript, the copied rows'\nincluded, a retired body not counted.",
             "properties": {
               "kind": {
                 "const": "lineage_body_budget_exceeded",
@@ -119071,6 +119410,19 @@
             "properties": {
               "kind": {
                 "const": "member_host_unsupported",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Re-activation was asked for, but the last copied row of a key holds\nno body: a compaction of the source retired it, because a later row\nof the key superseded it, and the fork's prefix ends before that row.\nA fork at a later boundary copies the superseding row with its body;\na host can also activate the key in the child itself.",
+            "properties": {
+              "kind": {
+                "const": "head_body_retired",
                 "type": "string"
               }
             },
@@ -120013,7 +120365,7 @@
             "type": "object"
           },
           {
-            "description": "Re-activating the effective bodies would exceed the retained\nactivation-body budget of the lineage.",
+            "description": "Re-activating the effective bodies would exceed the activation-body\nbudget: the live bodies of the child's transcript, the copied rows'\nincluded, a retired body not counted.",
             "properties": {
               "kind": {
                 "const": "lineage_body_budget_exceeded",
@@ -120053,6 +120405,19 @@
             "properties": {
               "kind": {
                 "const": "member_host_unsupported",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Re-activation was asked for, but the last copied row of a key holds\nno body: a compaction of the source retired it, because a later row\nof the key superseded it, and the fork's prefix ends before that row.\nA fork at a later boundary copies the superseding row with its body;\na host can also activate the key in the child itself.",
+            "properties": {
+              "kind": {
+                "const": "head_body_retired",
                 "type": "string"
               }
             },
@@ -130376,6 +130741,30 @@
         ],
         "type": "object"
       },
+      "RetiredInstructionBody": {
+        "additionalProperties": false,
+        "description": "The typed marker of an instruction activation row whose body a\ncompaction retired, because a later activation row of its key superseded\nit. The row keeps its [`InstructionActivationIdentity`], whose digest\nstill binds the body, and this marker keeps the body's length; the row's\ncontent is the retired header (`[meerkat-retired-instruction-v1]`).",
+        "properties": {
+          "body_bytes": {
+            "description": "The UTF-8 byte length of the retired body.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "render_version": {
+            "description": "The render version of the retired header:\n[`crate::RETIRED_INSTRUCTION_RENDER_VERSION_V1`]. Render versions are\nadditive and permanently ratcheted.",
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "render_version",
+          "body_bytes"
+        ],
+        "type": "object"
+      },
       "RevisedPromptDisposition": {
         "oneOf": [
           {
@@ -132143,6 +132532,18 @@
           }
         ]
       },
+      "WireRetiredInstructionBody": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/RetiredInstructionBody",
+            "description": "A marker this version knows."
+          },
+          {
+            "description": "A marker this version does not know, as it was sent."
+          }
+        ],
+        "description": "Public wire form of the marker of an instruction activation row whose\nbody a compaction retired.\n\nReads are tolerant: a marker reads as [`Self::Known`] whenever its fields\ndecode (a later render version with the same two fields included), and\none with a field this version does not know reads as [`Self::Raw`], the\nvalue as it was sent, and is written back the same. It never fails the\nhistory page or bridge message that carries it; either form marks the\nrow's body as retired. The session document keeps the closed core type."
+      },
       "WireServerToolKind": {
         "description": "Wire projection of `meerkat_core::ServerToolKind`.\n\nMirrors the typed semantic owner of a provider-executed tool. The core enum\nis `#[non_exhaustive]`; a future semantic kind that lacks an explicit arm in\nthe forward `From` surfaces as `Unknown { debug }` rather than silently\ncollapsing into a plausible-but-wrong kind. SDK consumers route on the\n`kind` discriminator and treat `unknown` as unrecognized.\n\n**When a new core variant is added, add an explicit arm in the forward\n`From` impl above the wildcard — `Unknown` is the floor, not the\ndestination.**",
         "oneOf": [
@@ -132258,6 +132659,17 @@
                   }
                 ],
                 "description": "Typed replacement-slot identity. Historical versions remain\nvisible on history/revision reads even though model materialization\nselects only the latest version for each key."
+              },
+              "retired_instruction_body": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireRetiredInstructionBody"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The marker of an instruction activation row whose body a\ncompaction retired, because a later activation row of its key\nsuperseded it: `content` is then the retired header, which names\nthe key, the revision and the body's length. Read-only: no write\naccepts it. A marker whose form this reader does not know reads\nraw instead of failing the read."
               },
               "role": {
                 "const": "system",
@@ -139778,6 +140190,7 @@
         ]
       },
       "WorkEvidenceRef": {
+        "description": "A typed pointer to evidence for a work item. Evidence is append-only:\nnothing edits or removes a ref, and a later ref can withdraw earlier ones\nby listing their ids in `withdraws`.",
         "properties": {
           "confirmation_kind": {
             "anyOf": [
@@ -139826,6 +140239,14 @@
               "string",
               "null"
             ]
+          },
+          "withdraws": {
+            "description": "Ids of earlier evidence refs on the same item that this ref withdraws.\nA ref is withdrawn when a later ref on the item lists its id; nothing\nis edited or removed. A withdrawal names only earlier refs, never its\nown id or another withdrawal; confirmation and execution evidence can\nneither be withdrawn nor withdraw. Omitted when empty, so a ref without\nwithdrawals keeps its encoding.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
           }
         },
         "required": [
@@ -145029,6 +145450,7 @@
         ]
       },
       "WorkEvidenceRef": {
+        "description": "A typed pointer to evidence for a work item. Evidence is append-only:\nnothing edits or removes a ref, and a later ref can withdraw earlier ones\nby listing their ids in `withdraws`.",
         "properties": {
           "confirmation_kind": {
             "anyOf": [
@@ -145077,6 +145499,14 @@
               "string",
               "null"
             ]
+          },
+          "withdraws": {
+            "description": "Ids of earlier evidence refs on the same item that this ref withdraws.\nA ref is withdrawn when a later ref on the item lists its id; nothing\nis edited or removed. A withdrawal names only earlier refs, never its\nown id or another withdrawal; confirmation and execution evidence can\nneither be withdrawn nor withdraw. Omitted when empty, so a ref without\nwithdrawals keeps its encoding.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
           }
         },
         "required": [
@@ -175097,6 +175527,30 @@
         ],
         "type": "object"
       },
+      "RetiredInstructionBody": {
+        "additionalProperties": false,
+        "description": "The typed marker of an instruction activation row whose body a\ncompaction retired, because a later activation row of its key superseded\nit. The row keeps its [`InstructionActivationIdentity`], whose digest\nstill binds the body, and this marker keeps the body's length; the row's\ncontent is the retired header (`[meerkat-retired-instruction-v1]`).",
+        "properties": {
+          "body_bytes": {
+            "description": "The UTF-8 byte length of the retired body.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "render_version": {
+            "description": "The render version of the retired header:\n[`crate::RETIRED_INSTRUCTION_RENDER_VERSION_V1`]. Render versions are\nadditive and permanently ratcheted.",
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "render_version",
+          "body_bytes"
+        ],
+        "type": "object"
+      },
       "RevisedPromptDisposition": {
         "oneOf": [
           {
@@ -176807,6 +177261,18 @@
           }
         ]
       },
+      "WireRetiredInstructionBody": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/RetiredInstructionBody",
+            "description": "A marker this version knows."
+          },
+          {
+            "description": "A marker this version does not know, as it was sent."
+          }
+        ],
+        "description": "Public wire form of the marker of an instruction activation row whose\nbody a compaction retired.\n\nReads are tolerant: a marker reads as [`Self::Known`] whenever its fields\ndecode (a later render version with the same two fields included), and\none with a field this version does not know reads as [`Self::Raw`], the\nvalue as it was sent, and is written back the same. It never fails the\nhistory page or bridge message that carries it; either form marks the\nrow's body as retired. The session document keeps the closed core type."
+      },
       "WireServerToolKind": {
         "description": "Wire projection of `meerkat_core::ServerToolKind`.\n\nMirrors the typed semantic owner of a provider-executed tool. The core enum\nis `#[non_exhaustive]`; a future semantic kind that lacks an explicit arm in\nthe forward `From` surfaces as `Unknown { debug }` rather than silently\ncollapsing into a plausible-but-wrong kind. SDK consumers route on the\n`kind` discriminator and treat `unknown` as unrecognized.\n\n**When a new core variant is added, add an explicit arm in the forward\n`From` impl above the wildcard — `Unknown` is the floor, not the\ndestination.**",
         "oneOf": [
@@ -176922,6 +177388,17 @@
                   }
                 ],
                 "description": "Typed replacement-slot identity. Historical versions remain\nvisible on history/revision reads even though model materialization\nselects only the latest version for each key."
+              },
+              "retired_instruction_body": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireRetiredInstructionBody"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The marker of an instruction activation row whose body a\ncompaction retired, because a later activation row of its key\nsuperseded it: `content` is then the retired header, which names\nthe key, the revision and the body's length. Read-only: no write\naccepts it. A marker whose form this reader does not know reads\nraw instead of failing the read."
               },
               "role": {
                 "const": "system",
@@ -185013,6 +185490,30 @@
         ],
         "type": "object"
       },
+      "RetiredInstructionBody": {
+        "additionalProperties": false,
+        "description": "The typed marker of an instruction activation row whose body a\ncompaction retired, because a later activation row of its key superseded\nit. The row keeps its [`InstructionActivationIdentity`], whose digest\nstill binds the body, and this marker keeps the body's length; the row's\ncontent is the retired header (`[meerkat-retired-instruction-v1]`).",
+        "properties": {
+          "body_bytes": {
+            "description": "The UTF-8 byte length of the retired body.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "render_version": {
+            "description": "The render version of the retired header:\n[`crate::RETIRED_INSTRUCTION_RENDER_VERSION_V1`]. Render versions are\nadditive and permanently ratcheted.",
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "render_version",
+          "body_bytes"
+        ],
+        "type": "object"
+      },
       "RevisedPromptDisposition": {
         "oneOf": [
           {
@@ -186727,6 +187228,18 @@
           }
         ]
       },
+      "WireRetiredInstructionBody": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/RetiredInstructionBody",
+            "description": "A marker this version knows."
+          },
+          {
+            "description": "A marker this version does not know, as it was sent."
+          }
+        ],
+        "description": "Public wire form of the marker of an instruction activation row whose\nbody a compaction retired.\n\nReads are tolerant: a marker reads as [`Self::Known`] whenever its fields\ndecode (a later render version with the same two fields included), and\none with a field this version does not know reads as [`Self::Raw`], the\nvalue as it was sent, and is written back the same. It never fails the\nhistory page or bridge message that carries it; either form marks the\nrow's body as retired. The session document keeps the closed core type."
+      },
       "WireServerToolKind": {
         "description": "Wire projection of `meerkat_core::ServerToolKind`.\n\nMirrors the typed semantic owner of a provider-executed tool. The core enum\nis `#[non_exhaustive]`; a future semantic kind that lacks an explicit arm in\nthe forward `From` surfaces as `Unknown { debug }` rather than silently\ncollapsing into a plausible-but-wrong kind. SDK consumers route on the\n`kind` discriminator and treat `unknown` as unrecognized.\n\n**When a new core variant is added, add an explicit arm in the forward\n`From` impl above the wildcard — `Unknown` is the floor, not the\ndestination.**",
         "oneOf": [
@@ -186842,6 +187355,17 @@
                   }
                 ],
                 "description": "Typed replacement-slot identity. Historical versions remain\nvisible on history/revision reads even though model materialization\nselects only the latest version for each key."
+              },
+              "retired_instruction_body": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireRetiredInstructionBody"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The marker of an instruction activation row whose body a\ncompaction retired, because a later activation row of its key\nsuperseded it: `content` is then the retired header, which names\nthe key, the revision and the body's length. Read-only: no write\naccepts it. A marker whose form this reader does not know reads\nraw instead of failing the read."
               },
               "role": {
                 "const": "system",
@@ -194157,6 +194681,30 @@
         ],
         "type": "object"
       },
+      "RetiredInstructionBody": {
+        "additionalProperties": false,
+        "description": "The typed marker of an instruction activation row whose body a\ncompaction retired, because a later activation row of its key superseded\nit. The row keeps its [`InstructionActivationIdentity`], whose digest\nstill binds the body, and this marker keeps the body's length; the row's\ncontent is the retired header (`[meerkat-retired-instruction-v1]`).",
+        "properties": {
+          "body_bytes": {
+            "description": "The UTF-8 byte length of the retired body.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "render_version": {
+            "description": "The render version of the retired header:\n[`crate::RETIRED_INSTRUCTION_RENDER_VERSION_V1`]. Render versions are\nadditive and permanently ratcheted.",
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "render_version",
+          "body_bytes"
+        ],
+        "type": "object"
+      },
       "RevisedPromptDisposition": {
         "oneOf": [
           {
@@ -195867,6 +196415,18 @@
           }
         ]
       },
+      "WireRetiredInstructionBody": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/RetiredInstructionBody",
+            "description": "A marker this version knows."
+          },
+          {
+            "description": "A marker this version does not know, as it was sent."
+          }
+        ],
+        "description": "Public wire form of the marker of an instruction activation row whose\nbody a compaction retired.\n\nReads are tolerant: a marker reads as [`Self::Known`] whenever its fields\ndecode (a later render version with the same two fields included), and\none with a field this version does not know reads as [`Self::Raw`], the\nvalue as it was sent, and is written back the same. It never fails the\nhistory page or bridge message that carries it; either form marks the\nrow's body as retired. The session document keeps the closed core type."
+      },
       "WireServerToolKind": {
         "description": "Wire projection of `meerkat_core::ServerToolKind`.\n\nMirrors the typed semantic owner of a provider-executed tool. The core enum\nis `#[non_exhaustive]`; a future semantic kind that lacks an explicit arm in\nthe forward `From` surfaces as `Unknown { debug }` rather than silently\ncollapsing into a plausible-but-wrong kind. SDK consumers route on the\n`kind` discriminator and treat `unknown` as unrecognized.\n\n**When a new core variant is added, add an explicit arm in the forward\n`From` impl above the wildcard — `Unknown` is the floor, not the\ndestination.**",
         "oneOf": [
@@ -195982,6 +196542,17 @@
                   }
                 ],
                 "description": "Typed replacement-slot identity. Historical versions remain\nvisible on history/revision reads even though model materialization\nselects only the latest version for each key."
+              },
+              "retired_instruction_body": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireRetiredInstructionBody"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The marker of an instruction activation row whose body a\ncompaction retired, because a later activation row of its key\nsuperseded it: `content` is then the retired header, which names\nthe key, the revision and the body's length. Read-only: no write\naccepts it. A marker whose form this reader does not know reads\nraw instead of failing the read."
               },
               "role": {
                 "const": "system",
@@ -197575,6 +198146,30 @@
         ],
         "type": "object"
       },
+      "RetiredInstructionBody": {
+        "additionalProperties": false,
+        "description": "The typed marker of an instruction activation row whose body a\ncompaction retired, because a later activation row of its key superseded\nit. The row keeps its [`InstructionActivationIdentity`], whose digest\nstill binds the body, and this marker keeps the body's length; the row's\ncontent is the retired header (`[meerkat-retired-instruction-v1]`).",
+        "properties": {
+          "body_bytes": {
+            "description": "The UTF-8 byte length of the retired body.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "render_version": {
+            "description": "The render version of the retired header:\n[`crate::RETIRED_INSTRUCTION_RENDER_VERSION_V1`]. Render versions are\nadditive and permanently ratcheted.",
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "render_version",
+          "body_bytes"
+        ],
+        "type": "object"
+      },
       "RevisedPromptDisposition": {
         "oneOf": [
           {
@@ -199285,6 +199880,18 @@
           }
         ]
       },
+      "WireRetiredInstructionBody": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/RetiredInstructionBody",
+            "description": "A marker this version knows."
+          },
+          {
+            "description": "A marker this version does not know, as it was sent."
+          }
+        ],
+        "description": "Public wire form of the marker of an instruction activation row whose\nbody a compaction retired.\n\nReads are tolerant: a marker reads as [`Self::Known`] whenever its fields\ndecode (a later render version with the same two fields included), and\none with a field this version does not know reads as [`Self::Raw`], the\nvalue as it was sent, and is written back the same. It never fails the\nhistory page or bridge message that carries it; either form marks the\nrow's body as retired. The session document keeps the closed core type."
+      },
       "WireServerToolKind": {
         "description": "Wire projection of `meerkat_core::ServerToolKind`.\n\nMirrors the typed semantic owner of a provider-executed tool. The core enum\nis `#[non_exhaustive]`; a future semantic kind that lacks an explicit arm in\nthe forward `From` surfaces as `Unknown { debug }` rather than silently\ncollapsing into a plausible-but-wrong kind. SDK consumers route on the\n`kind` discriminator and treat `unknown` as unrecognized.\n\n**When a new core variant is added, add an explicit arm in the forward\n`From` impl above the wildcard — `Unknown` is the floor, not the\ndestination.**",
         "oneOf": [
@@ -199521,6 +200128,17 @@
               }
             ],
             "description": "Typed replacement-slot identity. Historical versions remain\nvisible on history/revision reads even though model materialization\nselects only the latest version for each key."
+          },
+          "retired_instruction_body": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireRetiredInstructionBody"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The marker of an instruction activation row whose body a\ncompaction retired, because a later activation row of its key\nsuperseded it: `content` is then the retired header, which names\nthe key, the revision and the body's length. Read-only: no write\naccepts it. A marker whose form this reader does not know reads\nraw instead of failing the read."
           },
           "role": {
             "const": "system",
@@ -201453,6 +202071,30 @@
         ],
         "type": "object"
       },
+      "RetiredInstructionBody": {
+        "additionalProperties": false,
+        "description": "The typed marker of an instruction activation row whose body a\ncompaction retired, because a later activation row of its key superseded\nit. The row keeps its [`InstructionActivationIdentity`], whose digest\nstill binds the body, and this marker keeps the body's length; the row's\ncontent is the retired header (`[meerkat-retired-instruction-v1]`).",
+        "properties": {
+          "body_bytes": {
+            "description": "The UTF-8 byte length of the retired body.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "render_version": {
+            "description": "The render version of the retired header:\n[`crate::RETIRED_INSTRUCTION_RENDER_VERSION_V1`]. Render versions are\nadditive and permanently ratcheted.",
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "render_version",
+          "body_bytes"
+        ],
+        "type": "object"
+      },
       "RevisedPromptDisposition": {
         "oneOf": [
           {
@@ -203163,6 +203805,18 @@
           }
         ]
       },
+      "WireRetiredInstructionBody": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/RetiredInstructionBody",
+            "description": "A marker this version knows."
+          },
+          {
+            "description": "A marker this version does not know, as it was sent."
+          }
+        ],
+        "description": "Public wire form of the marker of an instruction activation row whose\nbody a compaction retired.\n\nReads are tolerant: a marker reads as [`Self::Known`] whenever its fields\ndecode (a later render version with the same two fields included), and\none with a field this version does not know reads as [`Self::Raw`], the\nvalue as it was sent, and is written back the same. It never fails the\nhistory page or bridge message that carries it; either form marks the\nrow's body as retired. The session document keeps the closed core type."
+      },
       "WireServerToolKind": {
         "description": "Wire projection of `meerkat_core::ServerToolKind`.\n\nMirrors the typed semantic owner of a provider-executed tool. The core enum\nis `#[non_exhaustive]`; a future semantic kind that lacks an explicit arm in\nthe forward `From` surfaces as `Unknown { debug }` rather than silently\ncollapsing into a plausible-but-wrong kind. SDK consumers route on the\n`kind` discriminator and treat `unknown` as unrecognized.\n\n**When a new core variant is added, add an explicit arm in the forward\n`From` impl above the wildcard — `Unknown` is the floor, not the\ndestination.**",
         "oneOf": [
@@ -203278,6 +203932,17 @@
                   }
                 ],
                 "description": "Typed replacement-slot identity. Historical versions remain\nvisible on history/revision reads even though model materialization\nselects only the latest version for each key."
+              },
+              "retired_instruction_body": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireRetiredInstructionBody"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The marker of an instruction activation row whose body a\ncompaction retired, because a later activation row of its key\nsuperseded it: `content` is then the retired header, which names\nthe key, the revision and the body's length. Read-only: no write\naccepts it. A marker whose form this reader does not know reads\nraw instead of failing the read."
               },
               "role": {
                 "const": "system",
@@ -207796,6 +208461,13 @@
                     "string",
                     "null"
                   ]
+                },
+                "withdraws": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array",
+                  "uniqueItems": true
                 }
               },
               "required": [
@@ -208532,6 +209204,13 @@
                     "string",
                     "null"
                   ]
+                },
+                "withdraws": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array",
+                  "uniqueItems": true
                 }
               },
               "required": [
@@ -209085,6 +209764,13 @@
                 "string",
                 "null"
               ]
+            },
+            "withdraws": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array",
+              "uniqueItems": true
             }
           },
           "required": [

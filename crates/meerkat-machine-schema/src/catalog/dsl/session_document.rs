@@ -6168,7 +6168,9 @@ machine! {
             }
         }
 
-        // Not a fresh run start, or nothing pending.
+        // Not a fresh run start, or nothing pending, on a recovered session.
+        // A resumed run reads no slot, so the recovery is a guard of its own:
+        // no instruction input is answered for a session never recovered.
         transition ResolveRunStartInstructionsNoChange {
             on input ResolveRunStartInstructions {
                 session_id,
@@ -6178,6 +6180,7 @@ machine! {
             }
             guard {
                 self.lifecycle_phase == Phase::Ready
+                && self.session_instruction_entry_sequence.contains_key(session_id)
                 && (run_start != InstructionRunStart::FreshRun
                     || instruction_change_pending(
                         self.session_instruction_target_revision.get_cloned(session_id).get("value"),

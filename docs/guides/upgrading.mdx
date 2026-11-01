@@ -126,6 +126,24 @@ before its deadline; past it, it expires the same way, unless its execution
 permit was outstanding at the downgrade: that decision waits for its owner to
 settle the permit (record the commit, or release or refuse the permit).
 
+0.9.8 does not know a same-session successor's rotation (a
+`MobHandle::respawn_member`, the declared apply's role migration or
+runtime-mode restamp, and `MobHandle::respawn` of an identity entry's
+member), which 0.9.9 records on the retirement's start row. One that a crash
+interrupted after its start and before its end is, for 0.9.8, a plain
+retirement: 0.9.8 skips the record, restores the member under its old role
+and comms name, and its start re-drives the retirement to its end, which
+retires the member and archives the session the successor was to keep. No
+successor is seated, under the new role or the old one: the member ends
+whole, it is never split across two names, but it is gone. Before a
+downgrade, finish every pending same-session successor on 0.9.9. Its member
+is listed Retiring (`MobHandle::list_members_including_retiring`); an
+identity entry's reads `rotation_in_flight` as `Some(SameSession)`
+(`MobHandle::identity_entry`, counted by `IdentityCensus::rotation_in_flight`).
+A start of the mob on 0.9.9 finishes it, as do `respawn_member` again under
+the profile it started with and `MobHandle::redrive_retirement`; one whose
+profile left the definition finishes once that profile is restored.
+
 0.9.8 reads the rows the declared apply writes as plain member rows: its
 seats are member spawn rows, and its unlisted retirements plain retirements.
 0.9.8 ignores the fields it does not know on them: an entry, the cause on a

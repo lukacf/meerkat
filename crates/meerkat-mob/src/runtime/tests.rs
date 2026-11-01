@@ -65395,6 +65395,86 @@ async fn test_turn_driven_without_adapter_refuses_a_session_spawn_typed() {
     );
 }
 
+/// A spawn policy's auto-spawn of a local session member in a mob with no
+/// runtime is refused typed before anything of it exists, as a spawn is. The
+/// mob is created (its profiles are TurnDriven, its worker externally
+/// addressable so that the work's admission does not refuse first), and work
+/// submitted to an identity the policy resolves to a worker answers
+/// `MissingMemberCapability` (`OutboundCommsRuntime`). Nothing was
+/// installed: no roster entry, no pending spawn, no binding and no profile
+/// authority in MobMachine, and no session.
+///
+/// RED: drop the guard from `stage_policy_spawn`: the auto-spawn stages and
+/// provisions, and the provisioner answers Internal.
+#[tokio::test]
+async fn test_turn_driven_without_adapter_refuses_a_policy_auto_spawn_typed() {
+    let mut def = sample_definition();
+    for profile in def.profiles.values_mut().filter_map(|b| b.as_inline_mut()) {
+        profile.runtime_mode = crate::MobRuntimeMode::TurnDriven;
+        profile.external_addressable = true;
+    }
+    let service = Arc::new(MockSessionService::new());
+    let handle = MobBuilder::new(def, MobStorage::in_memory())
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("a TurnDriven mob with no runtime is created");
+    handle
+        .set_spawn_policy(Some(Arc::new(StaticWorkerSpawnPolicy)))
+        .await
+        .expect("set spawn policy");
+
+    let target = AgentIdentity::from("policy-no-runtime");
+    let refused = tokio::time::timeout(
+        Duration::from_secs(30),
+        handle.submit_work(
+            AgentRuntimeId::initial(target.clone()),
+            FenceToken::new(0),
+            WorkRef::new(),
+            WorkSpec::new(
+                "queued for a policy spawn with no runtime".to_string(),
+                WorkOrigin::External,
+            ),
+        ),
+    )
+    .await
+    .expect("the submission answers");
+    assert!(
+        matches!(
+            &refused,
+            Err(MobError::MissingMemberCapability {
+                member_id,
+                capability: crate::error::MobMemberCapability::OutboundCommsRuntime,
+                ..
+            }) if member_id == &target
+        ),
+        "the policy auto-spawn is refused typed: {refused:?}"
+    );
+    assert!(
+        handle
+            .get_member(&target)
+            .await
+            .expect("roster read")
+            .is_none(),
+        "no roster entry"
+    );
+    let state = handle
+        .query_machine_state()
+        .await
+        .expect("machine state after the refusal");
+    let dsl_identity = crate::machines::mob_machine::AgentIdentity::from("policy-no-runtime");
+    assert!(
+        state.pending_spawn_count == 0
+            && !state.identity_to_runtime.contains_key(&dsl_identity)
+            && !state.member_session_bindings.contains_key(&dsl_identity)
+            && !state
+                .spawn_profile_authority_profile_names
+                .contains_key(&dsl_identity),
+        "no pending spawn, no binding and no profile authority"
+    );
+    assert_eq!(service.active_session_count().await, 0, "no session");
+}
+
 async fn wait_for_start_turn_call_count(
     service: &MockSessionService,
     expected: u64,

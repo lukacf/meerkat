@@ -1610,67 +1610,27 @@ async fn roster_anchor(
     )
 }
 
-/// A refused respawn of each named member left nothing behind: the journal
-/// holds no new row, MobMachine holds no rotation of the member, no
-/// retirement of it was published, and its roster anchor is unchanged.
-async fn assert_nothing_happened(
-    handle: &MobHandle,
-    storage: &MobStorage,
-    journal_before: usize,
-    anchors_before: &[(
-        &str,
-        (Generation, crate::ids::FenceToken, Option<SessionId>),
-    )],
-) {
-    let journal = storage
-        .events
-        .poll(0, usize::MAX)
-        .await
-        .expect("read the journal");
-    assert_eq!(journal.len(), journal_before, "no row was written");
-    for (name, before) in anchors_before {
-        let dsl_identity = dsl::AgentIdentity::from_domain(&id(name));
-        {
-            let state = handle.machine_state_watch_rx.borrow();
-            assert!(
-                !state.member_rotation_targets.contains_key(&dsl_identity)
-                    && !state
-                        .member_rotation_session_ids
-                        .contains_key(&dsl_identity),
-                "MobMachine holds no rotation of {name}"
-            );
-        }
-        assert!(
-            handle.retirement_settlement(&id(name)).is_none(),
-            "no retirement of {name} was published"
-        );
-        assert_eq!(
-            &roster_anchor(handle, name).await,
-            before,
-            "{name}'s roster anchor is unchanged"
-        );
-    }
-}
-
-/// `respawn_member` of a member that is not runtime-backed (its mob has no
-/// runtime) is refused typed before anything starts, and so is `respawn` of
-/// an identity entry's member in the same mob: MobMachine refuses a
-/// fresh-life respawn of an entry, so it is routed to the same-session path,
-/// which refuses it the same way. Nothing happens: the journal holds no new
-/// row, MobMachine holds no rotation of either member, no retirement of
-/// either is published, and both roster anchors are unchanged. The mob's
+/// A member's seat in a mob with no runtime is refused typed, for a worker
+/// and for an identity entry alike: a seat builds nothing, but the member's
+/// first wake builds it through the spawn provision path, which a mob with
+/// no runtime cannot serve, so a seat would leave a member that never wakes.
+/// Both are answered `Refused` with `MobError::MissingMemberCapability`
+/// (`OutboundCommsRuntime`), the refusal a spawn of either answers, and
+/// nothing is seated: neither is a member or an entry, MobMachine binds
+/// neither, and the journal holds no new row. Such a mob holds no member of
+/// a local session, so the not-runtime-backed refusal of `respawn_member`
+/// (`plan_member_respawn`) has no member to answer while it runs. The mob's
 /// definition holds no AutonomousHost profile: the builder refuses one in a
-/// mob with no runtime. Both members are seated Dormant, which builds
-/// nothing: a spawn's provision needs the runtime this mob does not have.
+/// mob with no runtime.
 ///
-/// RED: drop the runtime-backed check from `plan_member_respawn`: the
-/// respawn starts the member's retirement.
+/// RED: drop the runtime guard from `plan_dormant_seat`: both are seated
+/// Dormant, on sessions their first wake cannot build.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn respawn_member_of_a_member_that_is_not_runtime_backed_is_refused_typed() {
+async fn seating_a_member_in_a_mob_with_no_runtime_is_refused_typed() {
     let service = Arc::new(MockSessionService::new());
     let storage = MobStorage::in_memory();
     let keys = tempfile::tempdir().expect("a comms identity root");
-    let mut definition = with_unique_mob_id(sample_definition(), "respawn-no-runtime");
+    let mut definition = with_unique_mob_id(sample_definition(), "seat-no-runtime");
     for profile in definition
         .profiles
         .values_mut()
@@ -1684,61 +1644,62 @@ async fn respawn_member_of_a_member_that_is_not_runtime_backed_is_refused_typed(
         .create()
         .await
         .expect("create the mob");
-    let seated = tokio::time::timeout(
-        STEP,
-        handle.seat_dormant_members(vec![
-            worker_spec("no-runtime"),
-            entry_spec("no-runtime-entry"),
-        ]),
-    )
-    .await
-    .expect("the seat answers")
-    .expect("the seat batch commits");
-    assert!(
-        seated
-            .iter()
-            .all(|outcome| matches!(outcome, crate::runtime::DormantSeatOutcome::Seated { .. })),
-        "the member and the host's entry are seated: {seated:?}"
-    );
     let journal_before = storage
         .events
         .poll(0, usize::MAX)
         .await
         .expect("read the journal")
         .len();
-    let anchors_before = [
-        ("no-runtime", roster_anchor(&handle, "no-runtime").await),
-        (
-            "no-runtime-entry",
-            roster_anchor(&handle, "no-runtime-entry").await,
-        ),
-    ];
+    let names = ["no-runtime", "no-runtime-entry"];
     let refused = tokio::time::timeout(
         STEP,
-        handle.respawn_member(id("no-runtime"), MemberRespawn::new()),
+        handle.seat_dormant_members(vec![worker_spec(names[0]), entry_spec(names[1])]),
     )
     .await
-    .expect("the respawn answers");
-    assert!(
-        matches!(
-            &refused,
-            Err(MobError::UnsupportedForMode { reason, .. }) if reason.contains("runtime-backed")
-        ),
-        "{refused:?}"
+    .expect("the seat answers")
+    .expect("the seat batch answers");
+    assert_eq!(refused.len(), names.len(), "{refused:?}");
+    for (outcome, name) in refused.iter().zip(names) {
+        assert!(
+            matches!(
+                outcome,
+                crate::runtime::DormantSeatOutcome::Refused {
+                    agent_identity,
+                    error: MobError::MissingMemberCapability {
+                        capability: crate::error::MobMemberCapability::OutboundCommsRuntime,
+                        ..
+                    },
+                } if agent_identity.as_str() == name
+            ),
+            "{name}'s seat is refused typed: {outcome:?}"
+        );
+        assert!(
+            handle
+                .get_member(&id(name))
+                .await
+                .expect("roster read")
+                .is_none(),
+            "{name} is not seated"
+        );
+        let dsl_identity = dsl::AgentIdentity::from_domain(&id(name));
+        let state = handle.machine_state_watch_rx.borrow();
+        assert!(
+            !state.identity_to_runtime.contains_key(&dsl_identity)
+                && !state.member_session_bindings.contains_key(&dsl_identity)
+                && !state.identity_entry_origins.contains_key(&dsl_identity),
+            "MobMachine holds no member and no entry of {name}"
+        );
+    }
+    assert_eq!(
+        storage
+            .events
+            .poll(0, usize::MAX)
+            .await
+            .expect("read the journal")
+            .len(),
+        journal_before,
+        "no row was written"
     );
-    let refused_entry = tokio::time::timeout(STEP, handle.respawn(id("no-runtime-entry"), None))
-        .await
-        .expect("the respawn answers");
-    assert!(
-        matches!(
-            &refused_entry,
-            Err(crate::runtime::handle::MobRespawnError::Mob(
-                MobError::UnsupportedForMode { reason, .. }
-            )) if reason.contains("runtime-backed")
-        ),
-        "the entry is routed to the same-session path: {refused_entry:?}"
-    );
-    assert_nothing_happened(&handle, &storage, journal_before, &anchors_before).await;
 }
 
 /// `respawn_member` on a service that keeps no durable sessions is refused

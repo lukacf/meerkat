@@ -9694,7 +9694,10 @@ impl MobHandle {
     /// through the ordinary spawn path and answered
     /// [`super::DormantSeatOutcome::Embodied`]. A fork, a placed member and a
     /// member that inherits its creator's tool visibility are refused.
-    /// Seating needs the members' comms transport and a running mob. A seat
+    /// Seating needs the members' comms transport, a running mob and the
+    /// mob's runtime: in a mob with no runtime a local session member's seat
+    /// is refused ([`MobError::MissingMemberCapability`]), as its spawn is,
+    /// since its first wake could not build it. A seat
     /// on inproc comms (the default) reads its member's key under the root
     /// the session service reports for its agent builds
     /// ([`super::MobSessionService::session_comms_identity_root`]), the root

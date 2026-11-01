@@ -2,7 +2,7 @@
 // square, words, and the pieces panels and tests reach for.
 
 export { GraphView, SVG_LIMITS } from "./graph-view";
-export { GraphList, LIST_WINDOW_THRESHOLD, connectionsSummary, graphListRows } from "./list-twin";
+export { GraphList, LIST_WINDOW_THRESHOLD, connectionCount, connectionsSummary, graphListRows } from "./list-twin";
 export type { GraphListConnection, GraphListProps, GraphListRow, GraphListSort } from "./list-twin";
 export { StatusSquare } from "./status-square";
 export type { StatusSquareProps } from "./status-square";

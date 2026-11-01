@@ -4,7 +4,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 
 import { GraphView } from "./graph-view";
-import { GraphList, connectionsSummary, graphListRows } from "./list-twin";
+import { GraphList, connectionCount, connectionsSummary, graphListRows } from "./list-twin";
 import { StatusSquare } from "./status-square";
 import { estimateLabelWidth, markGeometry } from "../layout/geometry";
 import { graphSummary, nodeAccessibleName, vizRelationWord } from "./words";
@@ -418,6 +418,16 @@ describe("the list twin", () => {
     expect(rendered.length).toBeGreaterThan(0);
     expect(rendered.length).toBeLessThan(100);
     expect(container.querySelector("table")).toHaveAttribute("aria-rowcount", "501");
+  });
+
+  it("carries the status and the connection count on the meta line a narrow list shows", () => {
+    const { nodes, edges } = team();
+    render(<GraphList nodes={nodes} edges={edges} lanes={lanes} ariaLabel="Agents" testIdPrefix="topology" />);
+    const fold = (id: string) => screen.getByTestId(`topology-list-row:${id}`).querySelector(".cc-viz-list__fold")!.textContent;
+    expect(fold("triage")).toBe("Working · 2 connections");
+    expect(fold("router")).toBe(" · Idle · 3 connections");
+    expect(connectionCount(1)).toBe("1 connection");
+    expect(connectionCount(0)).toBe("No connections");
   });
 });
 

@@ -102,59 +102,97 @@ export function FigureTile({
 }) {
   const markTone = live ? "live" : tone;
   const changeTone = delta ? deltaTone(delta) : undefined;
+  const hasOf = of !== undefined && of !== null && of !== "";
+  const hasFoot = Boolean(delta || foot);
+  // A loading tile keeps every line box of the loaded one (spec A3.7: the
+  // skeleton has the real layout's shape and loading moves nothing): the
+  // value, "of" and unit keep their boxes around a non-breaking space, the
+  // skeleton bar lies over the value, the trend keeps its slot, and the meter
+  // and the foot keep their boxes, hidden. The foot line is there even
+  // without a foot, so a tile is as tall with or without one.
+  const blank = "\u00a0";
+  // The spaces between the parts lay out as nothing (every container here is
+  // a flex box) but keep the words apart in the tile's text and name: the
+  // figure never runs into its foot ("1" and "1 agent on them" read "11").
   const content = (
     <>
       <span className="cc-figure__label">
         {markTone ? <StatusMark tone={markTone} /> : null}
         <span className="cc-figure__label-text">{label}</span>
-      </span>
+      </span>{" "}
       <span className="cc-figure__fig">
-        {loading ? (
-          <span className="cc-figure__skeleton" aria-hidden="true" />
-        ) : (
+        <span className="cc-figure__value">
+          {loading ? (
+            <>
+              {blank}
+              <span className="cc-figure__skeleton" aria-hidden="true" />
+            </>
+          ) : (
+            formatFigure(value)
+          )}
+        </span>
+        {hasOf ? (
           <>
-            <span className="cc-figure__value">{formatFigure(value)}</span>
-            {of !== undefined && of !== null && of !== "" ? <span className="cc-figure__of">of {formatFigure(of)}</span> : null}
-            {unit ? <span className="cc-figure__of">{unit}</span> : null}
+            {" "}
+            <span className="cc-figure__of">{loading ? blank : `of ${formatFigure(of)}`}</span>
           </>
-        )}
+        ) : null}
+        {unit ? (
+          <>
+            {" "}
+            <span className="cc-figure__of">{loading ? blank : unit}</span>
+          </>
+        ) : null}
         {hero && meter ? <span className="cc-figure__meter">{meter}</span> : null}
-        {!hero && trend && !loading ? (
-          <Sparkline
-            className="cc-figure__trend"
-            values={trend}
-            width={96}
-            height={20}
-            kind={trendKind}
-            live={trendLive}
-            label={trendLabel ?? `${typeof label === "string" ? label : "Figure"} trend`}
-          />
+        {!hero && trend ? (
+          loading ? (
+            <span className="cc-figure__trend" style={{ width: 96, height: 20 }} aria-hidden="true" />
+          ) : (
+            <Sparkline
+              className="cc-figure__trend"
+              values={trend}
+              width={96}
+              height={20}
+              kind={trendKind}
+              live={trendLive}
+              label={trendLabel ?? `${typeof label === "string" ? label : "Figure"} trend`}
+            />
+          )
         ) : null}
         {!hero && meter ? <span className="cc-figure__meter">{meter}</span> : null}
       </span>
-      {delta || foot ? (
-        <span className="cc-figure__foot">
-          {delta ? (
-            <span className="cc-figure__delta" data-tone={changeTone}>
-              <KitGlyph name="arrow-right" className={cx("cc-figure__arrow", delta.value > 0 ? "is-up" : delta.value < 0 ? "is-down" : "is-flat")} />
-              {formatDelta(delta)}
-            </span>
-          ) : null}
-          {foot ? <span className="cc-figure__foot-text">{foot}</span> : null}
-        </span>
-      ) : null}
+      {hasFoot ? " " : null}
+      <span className="cc-figure__foot">
+        {delta ? (
+          <span className="cc-figure__delta" data-tone={changeTone}>
+            <KitGlyph name="arrow-right" className={cx("cc-figure__arrow", delta.value > 0 ? "is-up" : delta.value < 0 ? "is-down" : "is-flat")} />
+            {formatDelta(delta)}
+          </span>
+        ) : null}
+        {delta && foot ? " " : null}
+        {foot ? <span className="cc-figure__foot-text">{foot}</span> : null}
+      </span>
     </>
   );
-  const classes = cx("cc-figure", hero && "cc-figure--hero", onActivate && "is-interactive", pressed && "is-pressed", className);
+  const classes = cx("cc-figure", hero && "cc-figure--hero", onActivate && "is-interactive", pressed && "is-pressed", loading && "is-loading", className);
   if (onActivate) {
     return (
-      <button type="button" className={classes} data-tone={markTone} aria-pressed={Boolean(pressed)} title={title} data-testid={testId} onClick={onActivate}>
+      <button
+        type="button"
+        className={classes}
+        data-tone={markTone}
+        aria-pressed={Boolean(pressed)}
+        aria-busy={loading || undefined}
+        title={title}
+        data-testid={testId}
+        onClick={onActivate}
+      >
         {content}
       </button>
     );
   }
   return (
-    <div className={classes} data-tone={markTone} title={title} data-testid={testId}>
+    <div className={classes} data-tone={markTone} aria-busy={loading || undefined} title={title} data-testid={testId}>
       {content}
     </div>
   );

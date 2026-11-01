@@ -2,6 +2,8 @@ import { fireEvent, render } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  ActivityBars,
+  BarcodeLegend,
   BarcodeMeter,
   DotStrip,
   FigureTile,
@@ -10,6 +12,8 @@ import {
   Meter,
   MiniBar,
   ProgressRing,
+  placeAxisLabel,
+  placeTickLabels,
   Sparkline,
   barcodeUnitsPerSegment,
   binCounts,
@@ -45,6 +49,107 @@ describe("time axis", () => {
     expect(ticks[3].major).toBe(true);
   });
 
+  it("keeps tick labels inside the chart, sliding the edge ones inward", () => {
+    const tick = (x: number, label: string) => ({ t: x, label, major: false, x });
+    // "Sat 3" is about 30 px wide at 9.5 px: centred at x 4 it would start at -11.
+    const placed = placeTickLabels([tick(4, "Sat 3"), tick(80, "Sat 10"), tick(156, "Sat 17"), tick(318, "Sat 31")], 320, { endReserve: 24 });
+    expect(placed.map((label) => label.label)).toEqual(["Sat 3", "Sat 10", "Sat 17", "Sat 31"]);
+    for (const label of placed) {
+      const half = (label.label.length * 9.5 * 0.66) / 2;
+      expect([label.label, label.labelX - half >= 0, label.labelX + half <= 320 - 24]).toEqual([label.label, true, true]);
+    }
+    expect(placed[1].labelX).toBe(80);
+    // A label that would meet the one before it is left out.
+    expect(placeTickLabels([tick(10, "06:00"), tick(20, "12:00")], 200).map((label) => label.label)).toEqual(["06:00"]);
+  });
+
+  it("draws a DotStrip's first and last tick labels inside the strip", () => {
+    // The first midnight tick lands about 10 px in, where a centred
+    // "Fri 30" (about 34 px wide) would lose its start to the edge.
+    const start = DAY_START - 14 * HOUR;
+    const end = start + 30 * 24 * HOUR;
+    const view = render(<DotStrip items={[{ id: "a", t: start + HOUR, label: "First" }]} start={start} end={end} width={320} height={18} axis now={end} label="1 record" testId="strip" />);
+    const labels = Array.from(view.getByTestId("strip").querySelectorAll("text.cc-viz-tick"));
+    expect(labels.length > 2).toBe(true);
+    for (const label of labels) {
+      const text = label.textContent ?? "";
+      const x = Number(label.getAttribute("x"));
+      const anchor = label.getAttribute("text-anchor");
+      const half = (text.length * 9.5 * 0.66) / 2;
+      const left = anchor === "end" ? x - 2 * half : anchor === "middle" ? x - half : x;
+      const right = anchor === "end" ? x : anchor === "middle" ? x + half : x + 2 * half;
+      expect([text, left >= 0, right <= 320]).toEqual([text, true, true]);
+    }
+  });
+
+  it("puts the now label at its marker, inside the strip, with no tick label on it", () => {
+    const start = DAY_START + 9 * HOUR;
+    const spans = (view: ReturnType<typeof render>) =>
+      Array.from(view.getByTestId("strip").querySelectorAll("text.cc-viz-tick")).map((text) => {
+        const label = text.textContent ?? "";
+        const x = Number(text.getAttribute("x"));
+        const half = (label.length * 9.5 * 0.66) / 2;
+        return { label, left: x - half, right: x + half, now: text.classList.contains("cc-dots__now-label") };
+      });
+    const check = (now: number, expectNear: (x: number) => boolean) => {
+      const view = render(<DotStrip items={[]} start={start} end={start + 24 * HOUR} width={320} height={18} axis now={now} label="no records" testId="strip" />);
+      const labels = spans(view);
+      const nowLabel = labels.find((label) => label.now);
+      expect(Boolean(nowLabel && expectNear((nowLabel.left + nowLabel.right) / 2))).toBe(true);
+      for (const label of labels) {
+        expect([label.label, label.left >= 0, label.right <= 320]).toEqual([label.label, true, true]);
+        if (!label.now && nowLabel) expect([label.label, label.right <= nowLabel.left || label.left >= nowLabel.right]).toEqual([label.label, true]);
+      }
+      view.unmount();
+    };
+    // A window that starts at now: the label sits at the left end, not the right.
+    check(start, (x) => x < 20);
+    // Now in the middle: the label centres on the marker.
+    check(start + 12 * HOUR, (x) => Math.abs(x - 160) < 2);
+    // A window that ends at now: the right end, as before.
+    check(start + 24 * HOUR, (x) => x > 300);
+    expect(placeAxisLabel(2, "now", 320).labelX > 2).toBe(true);
+    expect(placeAxisLabel(160, "now", 320).labelX).toBe(160);
+  });
+
+  it("says now at the end of the activity bars only when the window ends now", () => {
+    const nowText = (view: ReturnType<typeof render>) =>
+      Array.from(view.container.querySelectorAll("text.cc-viz-tick")).some((text) => text.textContent === "now");
+    const current = render(<ActivityBars values={[1, 2, 3, 4]} label="10 turns" />);
+    expect(nowText(current)).toBe(true);
+    const past = render(<ActivityBars values={[1, 2, 3, 4]} end={Date.now() - 3 * 24 * HOUR} label="10 turns three days ago" />);
+    expect(nowText(past)).toBe(false);
+    // An hour label next to the end never runs into "now": at 01:36 the 00
+    // tick falls 20 px from the right end of a 300 px chart, under "now".
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(DAY_START + 1.6 * HOUR);
+      const late = render(<ActivityBars values={Array.from({ length: 24 }, () => 1)} width={300} label="24 turns" testId="late" />);
+      const labels = Array.from(late.getByTestId("late").querySelectorAll("text.cc-viz-tick"))
+        .map((text) => {
+          const label = text.textContent ?? "";
+          const x = Number(text.getAttribute("x"));
+          const half = (label.length * 9.5 * 0.66) / 2;
+          return { label, left: x - half, right: x + half };
+        })
+        .sort((a, b) => a.left - b.left);
+      expect(labels.map((label) => label.label)).toEqual(["06", "12", "18", "now"]);
+      for (const label of labels) expect([label.label, label.left >= 0, label.right <= 300]).toEqual([label.label, true, true]);
+      for (let index = 1; index < labels.length; index += 1) {
+        expect([labels[index].label, labels[index].left >= labels[index - 1].right]).toEqual([labels[index].label, true]);
+      }
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("names the day at midnight on an automatic clock axis", () => {
+    const ticks = timeTicks(DAY_START + 13 * HOUR, DAY_START + 37 * HOUR, { step: 6 * HOUR });
+    expect(ticks.map((tick) => tick.label)).toEqual(["18:00", "Sat 31", "06:00", "12:00"]);
+    const literal = timeTicks(DAY_START + 13 * HOUR, DAY_START + 37 * HOUR, { step: 6 * HOUR, format: "clock" });
+    expect(literal[1].label).toBe("00:00");
+  });
+
   it("counts times into bins and orders a brushed range", () => {
     expect(binCounts([0, 1, 9, 10, 25, 31], 0, 30, 3)).toEqual([3, 1, 1]);
     expect(binIndex(30, 0, 30, 3)).toBe(2);
@@ -75,10 +180,22 @@ describe("figures", () => {
     );
     expect(view.getByRole("group", { name: "Topology at a glance" }) !== null).toBe(true);
     const tile = view.getByTestId("tile");
-    expect(tile.textContent?.startsWith("Active now2of 7")).toBe(true);
+    expect(tile.textContent?.startsWith("Active now 2 of 7")).toBe(true);
     expect(tile.querySelector('.cc-mark[data-tone="live"]') !== null).toBe(true);
     expect(tile.querySelector('svg[role="img"]')?.getAttribute("aria-label")).toBe("Active now trend");
     expect(view.getByTestId("problems").querySelector(".cc-figure__delta")?.getAttribute("data-tone")).toBe("crit");
+  });
+
+  it("keeps a figure apart from its unit and its foot in the tile's text", () => {
+    // "1" and "1 agent on them" once read "11" to anything reading the text.
+    const view = render(
+      <GlanceStrip>
+        <FigureTile label="In progress" value={1} foot="1 agent on them" testId="live" />
+        <FigureTile label="To finish" value={3} unit="steps" delta={{ value: 1, period: "1h ago" }} foot="Critical path" testId="steps" />
+      </GlanceStrip>,
+    );
+    expect(view.getByTestId("live").textContent).toBe("In progress 1 1 agent on them");
+    expect(view.getByTestId("steps").textContent).toBe("To finish 3 steps +1 vs 1h ago Critical path");
   });
 
   it("makes a filtering figure a pressed button, and holds a skeleton while loading", () => {
@@ -90,8 +207,54 @@ describe("figures", () => {
     fireEvent.click(button);
     expect(onActivate).toHaveBeenCalledTimes(1);
     view.rerender(<FigureTile label="Blocked" value={1} loading testId="tile" />);
-    expect(view.getByTestId("tile").querySelector(".cc-figure__skeleton") !== null).toBe(true);
-    expect(view.getByTestId("tile").querySelector(".cc-figure__value") === null).toBe(true);
+    const loading = view.getByTestId("tile");
+    expect(loading.getAttribute("aria-busy")).toBe("true");
+    // The value keeps its box around a non-breaking space; no figure shows.
+    expect(loading.querySelector(".cc-figure__value .cc-figure__skeleton") !== null).toBe(true);
+    expect(loading.querySelector(".cc-figure__value")?.textContent).toBe("\u00a0");
+  });
+
+  it("keeps every box of the loaded tile while loading, for each kind of tile", () => {
+    // jsdom has no layout, so this compares the boxes the two tiles lay out:
+    // the same elements in the same order, the loading one hiding its
+    // contents (the stylesheet test pins how), never dropping a box. The
+    // gallery's browser check measures the heights.
+    const ring = <ProgressRing done={1} inProgress={1} total={5} size={24} />;
+    const kinds: Array<[string, Omit<Parameters<typeof FigureTile>[0], "loading">]> = [
+      ["plain", { label: "Ready", value: 2 }],
+      ["foot", { label: "Ready", value: 2, foot: "can start now" }],
+      ["of", { label: "Done", value: 1, of: 9, foot: "none today" }],
+      ["unit", { label: "To finish", value: 3, unit: "steps", foot: "Critical path" }],
+      ["delta", { label: "Messages", value: 48, delta: { value: 12, period: "the hour before" }, foot: "rising" }],
+      ["trend", { label: "Given", value: 1284, trend: [1, 3, 2, 5], trendLive: true, foot: "to 3 agents" }],
+      ["meter", { label: "Checks", value: 3, of: 4, meter: ring, foot: "holding" }],
+      ["hero", { label: "Records", value: 74, unit: "active", hero: true, meter: ring, foot: "+9 written this week" }],
+      ["button", { label: "Blocked", value: 1, tone: "warn", foot: "Publish to all regions", onActivate: () => {} }],
+    ];
+    const LAYOUT = [
+      "cc-figure__label",
+      "cc-mark",
+      "cc-figure__label-text",
+      "cc-figure__fig",
+      "cc-figure__value",
+      "cc-figure__of",
+      "cc-figure__trend",
+      "cc-figure__meter",
+      "cc-figure__foot",
+      "cc-figure__delta",
+      "cc-figure__foot-text",
+    ];
+    const boxes = (tile: Element): string[] =>
+      Array.from(tile.querySelectorAll("*"))
+        .map((element) => LAYOUT.find((name) => element.classList.contains(name)))
+        .filter((name): name is string => Boolean(name));
+    for (const [kind, props] of kinds) {
+      const loaded = render(<FigureTile {...props} testId={`loaded-${kind}`} />).getByTestId(`loaded-${kind}`);
+      const loading = render(<FigureTile {...props} loading testId={`loading-${kind}`} />).getByTestId(`loading-${kind}`);
+      expect([kind, boxes(loading)]).toEqual([kind, boxes(loaded)]);
+      expect(loading.tagName).toBe(loaded.tagName);
+      expect(loaded.querySelector(".cc-figure__foot") !== null).toBe(true);
+    }
   });
 });
 
@@ -128,6 +291,15 @@ describe("micro charts", () => {
     expect(barcodeUnitsPerSegment(300, 40)).toBe(10);
     const big = render(<BarcodeMeter filled={300} label="300 agents" segments={40} testId="big" />);
     expect(big.getByTestId("big").querySelector("svg")?.getAttribute("aria-label")).toBe("300 agents (1 segment = 10 agents)");
+  });
+
+  it("agrees the legend's helper word with its number unless the caller names it", () => {
+    const one = render(<BarcodeMeter filled={7} live={1} outlined={1} label="8 agents" segments={24} legend testId="one" />);
+    expect(one.getByTestId("one").querySelector(".cc-barcode-legend")?.textContent).toBe("7 long-lived1 helper1 active now");
+    const two = render(<BarcodeLegend filled={5} outlined={2} />);
+    expect(two.container.textContent).toBe("5 long-lived2 helpers");
+    const named = render(<BarcodeLegend filled={5} outlined={1} labels={{ outlined: "workers" }} />);
+    expect(named.container.textContent).toBe("5 long-lived1 workers");
   });
 
   it("ranks heat cells by quantile, zero apart, with a table twin", () => {

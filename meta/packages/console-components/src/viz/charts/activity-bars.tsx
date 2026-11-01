@@ -2,7 +2,7 @@ import { useState, type KeyboardEvent, type PointerEvent } from "react";
 
 import { ChartTooltip } from "../../panel-kit/chart-tooltip";
 import { cx } from "../../panel-kit/cx";
-import { createTimeScale, formatTimeTick } from "./time-axis";
+import { createTimeScale, formatTimeTick, placeAxisLabel, placeTickLabels } from "./time-axis";
 
 const HOUR = 3_600_000;
 
@@ -47,6 +47,8 @@ export function ActivityBars({
   const n = values.length;
   const stop = end ?? Date.now();
   const start = stop - span;
+  // "now" names the right end only when the window ends now (within a bin).
+  const endsNow = end === undefined || Math.abs(Date.now() - stop) <= span / Math.max(1, n);
   const tickH = ticks ? 12 : 0;
   const plotH = Math.max(4, height - tickH - 1);
   const baseline = plotH + 0.5;
@@ -54,10 +56,15 @@ export function ActivityBars({
   const barW = n > 0 ? Math.max(0.5, (width - gap * (n - 1)) / n) : 0;
   const max = values.reduce((acc, value) => Math.max(acc, Number.isFinite(value) ? value : 0), 0);
   const scale = createTimeScale({ start, end: stop, range: [0, width] });
+  // Hour labels centre on their ticks, slide inside at the edges and keep
+  // clear of the "now" label (the same tick-label pass as DotStrip).
+  const nowLabel = ticks && endsNow ? placeAxisLabel(width, "now", width) : null;
   const hourTicks = ticks
-    ? scale
-      .ticks({ step: 6 * HOUR, format: "hour" })
-      .filter((tick) => tick.x >= 0 && tick.x <= width - 28)
+    ? placeTickLabels(
+        scale.ticks({ step: 6 * HOUR, format: "hour" }).filter((tick) => tick.x >= 0 && tick.x <= width),
+        width,
+        { avoid: nowLabel ? [nowLabel] : [] },
+      )
     : [];
   const binStart = (index: number) => start + (index * span) / Math.max(1, n);
   const pick = (clientX: number, element: Element) => {
@@ -110,12 +117,12 @@ export function ActivityBars({
           );
         })}
         {hourTicks.map((tick) => (
-          <text key={tick.t} className="cc-viz-tick" x={tick.x} y={height - 1}>
+          <text key={tick.t} className="cc-viz-tick" x={tick.labelX} y={height - 1} textAnchor="middle">
             {tick.label}
           </text>
         ))}
-        {ticks ? (
-          <text className="cc-viz-tick" x={width} y={height - 1} textAnchor="end">
+        {nowLabel ? (
+          <text className="cc-viz-tick" x={nowLabel.labelX} y={height - 1} textAnchor="middle">
             now
           </text>
         ) : null}

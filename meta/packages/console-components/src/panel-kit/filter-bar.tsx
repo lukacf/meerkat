@@ -140,8 +140,8 @@ export function FilterBar({
       ) : null}
       {chips?.length ? (
         <span className="cc-filterbar__chips">
-          {chips.map((chip, index) => (
-            <FilterChip key={chip.key ?? chip.testId ?? index} {...chip} />
+          {chips.map(({ key, ...chip }, index) => (
+            <FilterChip key={key ?? chip.testId ?? index} {...chip} />
           ))}
         </span>
       ) : null}

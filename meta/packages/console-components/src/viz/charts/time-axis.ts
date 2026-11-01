@@ -44,7 +44,8 @@ export interface TimeTickOptions {
   count?: number;
   /** A fixed step in ms (rounded to the nearest nice step otherwise). */
   step?: number;
-  /** "hour" reads "06", "clock" "06:00", "day" "Mon 2" (default: by step). */
+  /** "hour" reads "06", "clock" "06:00", "day" "Mon 2" (default: by step;
+   * an automatic clock axis names the day at midnight). */
   format?: TimeTickFormat;
 }
 
@@ -113,16 +114,82 @@ function alignUp(t: number, step: number): number {
 export function timeTicks(start: number, end: number, options: TimeTickOptions = {}): TimeTick[] {
   if (!(end > start)) return [];
   const step = options.step ?? niceTimeStep(end - start, options.count ?? 5);
-  const format: Exclude<TimeTickFormat, "auto"> =
-    options.format && options.format !== "auto" ? options.format : step >= DAY ? "day" : "clock";
+  const auto = !options.format || options.format === "auto";
+  const format: Exclude<TimeTickFormat, "auto"> = auto ? (step >= DAY ? "day" : "clock") : (options.format as Exclude<TimeTickFormat, "auto">);
   const ticks: TimeTick[] = [];
   for (let t = alignUp(start, step); t <= end && ticks.length < 500; ) {
     const date = new Date(t);
-    ticks.push({ t, label: formatTimeTick(t, format), major: date.getHours() === 0 && date.getMinutes() === 0 });
+    const major = date.getHours() === 0 && date.getMinutes() === 0;
+    // An automatic clock axis names the day at midnight ("Sun 1", not
+    // "00:00"), so a span across midnight says which day it reaches.
+    ticks.push({ t, label: formatTimeTick(t, auto && major ? "day" : format), major });
     // Day steps follow the calendar (a daylight-saving day is 23 or 25 h).
     t = step >= DAY ? new Date(date.getFullYear(), date.getMonth(), date.getDate() + Math.round(step / DAY)).getTime() : t + step;
   }
   return ticks;
+}
+
+/** A tick label placed on the axis: its centre, kept inside the chart. */
+export interface PlacedTickLabel extends TimeTick {
+  /** The tick's own x. */
+  x: number;
+  /** Where the label centres: the tick's x, slid inward at an edge. */
+  labelX: number;
+}
+
+/** Where an axis label lies: its centre and its estimated edges. */
+export interface AxisLabelSpan {
+  labelX: number;
+  left: number;
+  right: number;
+}
+
+/** The estimated half width of an axis label in the tick font (mono: 0.6 em
+ * a character in IBM Plex Mono, 0.66 em allowed for a fallback face, and a
+ * pixel each side), so nothing needs measuring. */
+function labelHalf(label: string, fontSize: number): number {
+  return (label.length * fontSize * 0.66) / 2 + 1;
+}
+
+/** An axis label centred at `x` ("now" at its marker), slid inward to stay
+ * inside a chart `width` wide. */
+export function placeAxisLabel(x: number, label: string, width: number, fontSize = 9.5): AxisLabelSpan {
+  const half = labelHalf(label, fontSize);
+  const labelX = Math.min(Math.max(x, half), Math.max(half, width - half));
+  return { labelX, left: labelX - half, right: labelX + half };
+}
+
+/**
+ * Tick labels centred on their ticks but kept inside a chart `width` wide: a
+ * label that would cross the left edge, or the right edge less `endReserve`,
+ * slides inward, and one that would then meet the label before it, or a
+ * label in `avoid` (the "now" label, wherever its marker is), is left out.
+ */
+export function placeTickLabels(
+  ticks: ReadonlyArray<TimeTick & { x: number }>,
+  width: number,
+  {
+    fontSize = 9.5,
+    endReserve = 0,
+    gap = 6,
+    avoid = [],
+  }: { fontSize?: number; endReserve?: number; gap?: number; avoid?: ReadonlyArray<AxisLabelSpan> } = {},
+): PlacedTickLabel[] {
+  const placed: PlacedTickLabel[] = [];
+  let lastEnd = -Infinity;
+  for (const tick of ticks) {
+    const half = labelHalf(tick.label, fontSize);
+    const right = width - endReserve;
+    if (right - half < half) continue;
+    const labelX = Math.min(Math.max(tick.x, half), right - half);
+    const left = labelX - half;
+    const end = labelX + half;
+    if (left < lastEnd + gap) continue;
+    if (avoid.some((span) => left < span.right + gap && end > span.left - gap)) continue;
+    placed.push({ ...tick, labelX });
+    lastEnd = end;
+  }
+  return placed;
 }
 
 /** The "now" marker: its x and label when now is inside the domain. */

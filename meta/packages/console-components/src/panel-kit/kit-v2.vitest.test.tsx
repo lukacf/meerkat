@@ -24,6 +24,7 @@ import {
   EmptyIllustration,
   EmptyState,
   LoadingState,
+  Notice,
   TechnicalDetails,
   IconButton,
   OverflowMenu,
@@ -274,7 +275,69 @@ function PopoverProbe({ onClose, onFocusMove }: { onClose: (reason: string) => v
   );
 }
 
+function ClosingProbe({ onClose }: { onClose: (reason: string) => void }) {
+  const anchorRef = useRef<HTMLButtonElement | null>(null);
+  const [open, setOpen] = useState(true);
+  return (
+    <>
+      <button type="button" ref={anchorRef}>
+        Anchor
+      </button>
+      <button type="button" data-testid="outside">
+        Outside
+      </button>
+      <Popover
+        open={open}
+        anchorRef={anchorRef}
+        onClose={(reason) => {
+          onClose(reason);
+          setOpen(false);
+        }}
+        ariaLabel="Probe"
+        testId="probe-popover"
+      >
+        <button type="button">Inside</button>
+      </Popover>
+    </>
+  );
+}
+
+/** Browsers animate and jsdom does not: with this, a popover that faded out
+ * on close (it once did) stays mounted here as it did in a browser. */
+function withAnimate(run: () => void) {
+  const original = Element.prototype.animate;
+  Element.prototype.animate = (() => ({ cancel() {}, finished: Promise.resolve() })) as unknown as typeof original;
+  try {
+    run();
+  } finally {
+    Element.prototype.animate = original;
+  }
+}
+
 describe("popover", () => {
+  it("unmounts at once on a press outside, never lingering open", () => {
+    withAnimate(() => {
+      const onClose = vi.fn();
+      const view = render(<ClosingProbe onClose={onClose} />);
+      expect(view.getByTestId("probe-popover").getAttribute("data-state")).toBe("open");
+      fireEvent.pointerDown(view.getByTestId("outside"));
+      expect(onClose).toHaveBeenCalledWith("outside");
+      expect(view.queryByTestId("probe-popover") === null).toBe(true);
+    });
+  });
+
+  it("unmounts at once when focus moves outside it", () => {
+    withAnimate(() => {
+      const onClose = vi.fn();
+      const view = render(<ClosingProbe onClose={onClose} />);
+      const inside = view.getByRole("button", { name: "Inside" });
+      expect(document.activeElement === inside).toBe(true);
+      fireEvent.focusOut(inside, { relatedTarget: view.getByTestId("outside") });
+      expect(onClose).toHaveBeenCalledWith("focus");
+      expect(view.queryByTestId("probe-popover") === null).toBe(true);
+    });
+  });
+
   it("can take focus while it is placed: transparent, never visibility hidden", () => {
     // Browsers skip focus inside a visibility: hidden subtree (jsdom does
     // not), so a popover hidden that way kept focus on its trigger and
@@ -404,10 +467,56 @@ describe("panel header v2", () => {
     fireEvent.click(view.getByTestId("workgraph-view-toggle:tree"));
     expect(onChange).toHaveBeenCalledWith("tree");
     expect(view.getByRole("button", { name: "Refresh work items" }).closest(".cc-reveal") !== null).toBe(true);
+    // The switch stays in the header at every width (pinned scenarios press
+    // it in a 180 px pane): no folded copy in the menu. Its words stay the
+    // names and become tooltips, for the narrow pane's glyph-only buttons.
+    expect(graph.getAttribute("title")).toBe("Graph");
+    expect(graph.querySelector(".cc-seg__label")?.textContent).toBe("Graph");
+    expect(view.getByRole("button", { name: "Outline" }).getAttribute("data-testid")).toBe("workgraph-view-toggle:tree");
     fireEvent.click(view.getByTestId("workgraph-menu"));
-    // The folded copy of the view switch never repeats the switch's ids.
-    expect(view.getByTestId("workgraph-view-toggle:graph:menu").getAttribute("aria-checked")).toBe("true");
+    expect(view.getByRole("menu").querySelector('[role="menuitemradio"]') === null).toBe(true);
     expect(view.getAllByTestId("workgraph-view-toggle:graph").length).toBe(1);
+    // A view without a menu adds no overflow trigger.
+    view.rerender(
+      <PanelHeader
+        title="WorkGraph"
+        view={{ ariaLabel: "WorkGraph view", value: "graph", onChange, options: [{ id: "graph", label: "Graph", glyph: "graph" }, { id: "tree", label: "Outline" }] }}
+      />,
+    );
+    expect(view.container.querySelector(".cc-menu-trigger") === null).toBe(true);
+    // An option without a glyph keeps its plain words.
+    expect(view.getByRole("button", { name: "Outline" }).innerHTML).toBe("Outline");
+  });
+
+  it("wraps its actions to their own row instead of folding or overflowing a narrow pane", async () => {
+    const fs = await import("node:fs");
+    const path = await import("node:path");
+    const css = fs.readFileSync(path.join(__dirname, "../styles/panel-kit.css"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+    const block = (start: number) => {
+      let depth = 0;
+      for (let index = css.indexOf("{", start); index < css.length; index += 1) {
+        if (css[index] === "{") depth += 1;
+        else if (css[index] === "}" && --depth === 0) return css.slice(start, index + 1);
+      }
+      return "";
+    };
+    const narrow = block(css.indexOf("@container cc-panel (max-width: 479px)"));
+    const rule = (source: string, selector: string) => {
+      const match = new RegExp(`(^|[{}])\\s*${selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*\\{([^}]*)\\}`).exec(source);
+      return match ? match[2] : "";
+    };
+    // Everywhere: the v2 header wraps, the title keeps 240 px before the actions move down.
+    expect(rule(css, ".cc-panel-head--v2")).toMatch(/flex-wrap:\s*wrap/);
+    expect(rule(css, ".cc-panel-head--v2 .cc-panel-head__text")).toMatch(/flex:\s*1 1 240px/);
+    // Under 480 px: the actions take a full row and wrap inside it; the switch is never hidden.
+    expect(narrow.length > 0).toBe(true);
+    expect(rule(narrow, ".cc-panel-head__actions")).toMatch(/flex-basis:\s*100%/);
+    expect(rule(narrow, ".cc-panel-head--v2 .cc-panel-head__actions")).toMatch(/flex-wrap:\s*wrap/);
+    expect(/\.cc-panel-head__view\s*\{[^}]*display:\s*none/.test(narrow)).toBe(false);
+    // Glyph-only options hide their words visually, never from the name.
+    const label = rule(narrow, ".cc-panel-head__view .cc-seg__btn.has-glyph .cc-seg__label");
+    expect(label).toMatch(/clip-path:\s*inset\(50%\)/);
+    expect(/display:\s*none|visibility:\s*hidden/.test(label)).toBe(false);
   });
 });
 
@@ -676,6 +785,19 @@ describe("states and illustrations", () => {
     expect(Array.from(view.container.querySelectorAll("svg.cc-illus")).every((svg) => svg.childElementCount > 0)).toBe(true);
   });
 
+  it("gives a notice its tone's shape, and a live notice the live mark", () => {
+    const view = render(
+      <>
+        <Notice tone="warn" testId="warn">2 records wait for approval.</Notice>
+        <Notice tone="live" testId="live">Triage is replying now.</Notice>
+      </>,
+    );
+    expect(view.getByTestId("warn").querySelector(".cc-glyph")?.getAttribute("data-glyph")).toBe("warning");
+    const live = view.getByTestId("live");
+    expect(live.querySelector(".cc-glyph") === null).toBe(true);
+    expect(live.querySelector('.cc-mark[data-tone="live"]') !== null).toBe(true);
+  });
+
   it("draws graph and timeline skeletons, announced politely", () => {
     const view = render(
       <div>
@@ -826,6 +948,26 @@ describe("filter bar", () => {
     fireEvent.keyDown(view.getByTestId("elsewhere"), { key: "/" });
     expect(document.activeElement === view.getByTestId("filter-search")).toBe(true);
   });
+
+  it("takes each chip's key as its React key, never spread into the chip", () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const view = render(
+        <FilterBar
+          ariaLabel="Memory filters"
+          chips={[
+            { key: "facts", label: "Facts", count: 12, pressed: false, onToggle: () => {} },
+            { key: "gotchas", label: "Gotchas", count: 3, pressed: true, onToggle: () => {} },
+          ]}
+        />,
+      );
+      expect(view.getAllByRole("button", { pressed: true }).map((chip) => chip.textContent)).toEqual(["Gotchas3"]);
+      const spread = error.mock.calls.filter((call) => String(call[0]).includes('"key" prop is being spread'));
+      expect(spread.length).toBe(0);
+    } finally {
+      error.mockRestore();
+    }
+  });
 });
 
 describe("navigation", () => {
@@ -861,5 +1003,81 @@ describe("navigation", () => {
     view.rerender(<NewItemsPill count={3} onClick={onClick} />);
     fireEvent.click(view.getByRole("button", { name: "3 new events" }));
     expect(onClick).toHaveBeenCalledTimes(1);
+  });
+});
+
+/** Selector specificity as [ids, classes and pseudo-classes, types]. */
+function specificity(selector: string): [number, number, number] {
+  const body = selector.replace(/::[\w-]+/g, "");
+  const ids = (body.match(/#[\w-]+/g) ?? []).length;
+  const classes = (body.match(/\.[\w-]+|\[[^\]]*\]|:(?!:)[\w-]+(\([^)]*\))?/g) ?? []).length;
+  const types = (body.replace(/\[[^\]]*\]|\([^)]*\)/g, "").match(/(^|[\s>+~])[a-z][\w-]*/gi) ?? []).length;
+  return [ids, classes, types];
+}
+
+function outranks(a: [number, number, number], b: [number, number, number]): boolean {
+  for (let index = 0; index < 3; index += 1) if (a[index] !== b[index]) return a[index] > b[index];
+  return false;
+}
+
+describe("kit stylesheet", () => {
+  it("draws the glance strip's rules over the figures' border reset", async () => {
+    const fs = await import("node:fs");
+    const path = await import("node:path");
+    const css = fs.readFileSync(path.join(__dirname, "../styles/panel-kit.css"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+    const rules = [...css.matchAll(/([^{}]+)\{([^{}]*)\}/g)].map((match) => ({ selector: match[1].trim(), body: match[2] }));
+    const divider = rules.find((rule) => rule.selector.startsWith(".cc-glance >") && /border-left:\s*1px solid/.test(rule.body));
+    const reset = rules.find((rule) => rule.selector === ".cc-figure" && /border:\s*0/.test(rule.body));
+    expect(Boolean(divider && reset)).toBe(true);
+    // Equal specificity would leave the rule to source order, and the reset
+    // comes after it: the divider must outrank the reset outright.
+    expect(outranks(specificity(divider!.selector), specificity(reset!.selector))).toBe(true);
+  });
+
+  it("keeps a loading figure's boxes: hidden, never removed, and the foot line always there", async () => {
+    const fs = await import("node:fs");
+    const path = await import("node:path");
+    const css = fs.readFileSync(path.join(__dirname, "../styles/panel-kit.css"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+    const rules = [...css.matchAll(/([^{}]+)\{([^{}]*)\}/g)].map((match) => ({ selector: match[1].trim().replace(/\s+/g, " "), body: match[2] }));
+    const body = (selector: string) => rules.filter((rule) => rule.selector === selector).map((rule) => rule.body).join(" ");
+    expect(body(".cc-figure__foot")).toMatch(/min-height:\s*1\.4em/);
+    expect(body(".cc-figure__foot")).toMatch(/line-height:\s*1\.4/);
+    expect(body(".cc-figure__skeleton")).toMatch(/position:\s*absolute/);
+    expect(body(".cc-figure.is-loading .cc-figure__value")).toMatch(/position:\s*relative/);
+    expect(body(".cc-figure.is-loading .cc-figure__meter, .cc-figure.is-loading .cc-figure__foot > *")).toMatch(/visibility:\s*hidden/);
+    // Nothing a loading tile holds is taken out of the layout.
+    const loadingRules = rules.filter((rule) => rule.selector.includes(".is-loading"));
+    expect(loadingRules.length > 0).toBe(true);
+    expect(loadingRules.filter((rule) => /display:\s*none|height:/.test(rule.body)).map((rule) => rule.selector)).toEqual([]);
+  });
+
+  it("wraps four or more figures to two rows between 480 and 719 px, rules kept", async () => {
+    const fs = await import("node:fs");
+    const path = await import("node:path");
+    const css = fs.readFileSync(path.join(__dirname, "../styles/panel-kit.css"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+    const start = css.indexOf("@container cc-panel (min-width: 480px) and (max-width: 719px)");
+    expect(start >= 0).toBe(true);
+    let depth = 0;
+    let end = start;
+    for (let index = css.indexOf("{", start); index < css.length; index += 1) {
+      if (css[index] === "{") depth += 1;
+      else if (css[index] === "}" && --depth === 0) {
+        end = index;
+        break;
+      }
+    }
+    const rules = [...css.slice(css.indexOf("{", start) + 1, end).matchAll(/([^{}]+)\{([^{}]*)\}/g)].map((match) => ({ selector: match[1].trim(), body: match[2] }));
+    const body = (selector: string) => rules.find((rule) => rule.selector === selector)?.body ?? "";
+    const four = ".cc-glance:has(> :nth-child(4))";
+    const five = ".cc-glance:has(> :nth-child(5))";
+    const onlyFour = `${four}:not(:has(> :nth-child(5)))`;
+    expect(body(four)).toMatch(/grid-template-columns:\s*repeat\(2,/);
+    expect(body(five)).toMatch(/grid-template-columns:\s*repeat\(3,/);
+    expect(body(`${onlyFour} > :nth-child(2n + 1)`)).toMatch(/border-left:\s*0/);
+    expect(body(`${onlyFour} > :nth-child(n + 3)`)).toMatch(/border-top:\s*1px solid/);
+    expect(body(`${five} > :nth-child(3n + 1)`)).toMatch(/border-left:\s*0/);
+    expect(body(`${five} > :nth-child(n + 4)`)).toMatch(/border-top:\s*1px solid/);
+    // A row's first figure drops the divider: the reset outranks it.
+    expect(outranks(specificity(`${five} > :nth-child(3n + 1)`), specificity(".cc-glance > :nth-child(n + 2)"))).toBe(true);
   });
 });

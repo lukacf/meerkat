@@ -283,15 +283,24 @@ def settling_clock():
 
 
 class WorkflowShapeTests(unittest.TestCase):
-    def test_only_a_dispatch_starts_it_with_exactly_three_inputs(self):
+    def test_only_a_dispatch_starts_it_with_exactly_five_inputs(self):
         source = text()
         on_block = source.split("\non:\n", 1)[1].split("\npermissions:\n", 1)[0]
         self.assertIn("  workflow_dispatch:\n", on_block)
         for trigger in ("push:", "pull_request", "schedule:", "tags:", "workflow_run", "release:"):
             self.assertNotIn(trigger, on_block)
-        self.assertEqual(re.findall(r"^      ([a-z_]+):$", on_block, re.M),
-                         ["release_mode", "source_sha", "artifact_selection"])
+        self.assertEqual(re.findall(r"^      ([a-z_0-9]+):$", on_block, re.M),
+                         ["release_mode", "source_sha", "artifact_selection", "candidate_review",
+                          "candidate_review_sha256"])
         self.assertIn("        options: [candidate, publish]\n", on_block)
+
+    def test_the_candidate_review_reaches_only_resolve_and_publish_through_env(self):
+        for job in JOBS:
+            block = job_block(job)
+            expected = 1 if job in ("resolve", "publish") else 0
+            self.assertEqual(block.count("          CANDIDATE_REVIEW: ${{ inputs.candidate_review }}\n"), expected, job)
+            self.assertEqual(block.count("          CANDIDATE_REVIEW_SHA256: ${{ inputs.candidate_review_sha256 }}\n"),
+                             expected, job)
 
     def test_no_job_reads_a_secret_and_tokens_are_the_run_token(self):
         source = text()
@@ -887,7 +896,8 @@ class ResolveTests(unittest.TestCase):
     def resolve(self, directory, head, **env):
         output = directory / f"output-{uuid.uuid4().hex}"
         values = {"GITHUB_SHA": head, "GITHUB_WORKFLOW_SHA": head, "RELEASE_MODE": "candidate", "SOURCE_SHA": head,
-                  "ARTIFACT_SELECTION": "", "GITHUB_OUTPUT": str(output)}
+                  "ARTIFACT_SELECTION": "", "CANDIDATE_REVIEW": "", "CANDIDATE_REVIEW_SHA256": "",
+                  "GITHUB_OUTPUT": str(output)}
         values.update(env)
         with environment(**values), working_directory(directory), contextlib.redirect_stdout(io.StringIO()):
             forge.resolve()
@@ -910,6 +920,8 @@ class ResolveTests(unittest.TestCase):
                                  ({"SOURCE_SHA": OTHER}, "SOURCE_SHA"),
                                  ({"GITHUB_SHA": OTHER}, "checkout/event/workflow"),
                                  ({"ARTIFACT_SELECTION": "{}"}, "selection"),
+                                 ({"CANDIDATE_REVIEW": "e30="}, "candidate review is only valid for publish"),
+                                 ({"CANDIDATE_REVIEW_SHA256": "0" * 64}, "candidate review is only valid for publish"),
                                  ({"GITHUB_REF": "refs/tags/forge-v0.2.0"}, "branch"),
                                  ({"RELEASE_MODE": "promote"}, "mode")):
                 with self.subTest(env=env), self.assertRaisesRegex(forge.ProtocolError, message):
@@ -925,20 +937,25 @@ class ResolveTests(unittest.TestCase):
             with self.assertRaisesRegex(forge.ProtocolError, "invalid Forge version"):
                 self.resolve(directory, head)
 
-    def test_publish_reads_only_the_selection_from_main(self):
-        selection = json.dumps(selection_value())
+    def test_publish_reads_only_the_selection_and_its_review_from_main(self):
+        selected = selection_value()
+        selection = json.dumps(selected)
+        review = review_env(json.dumps(projection_value(selected, manifest_value())).encode())
+        other = selection_value("ab" * 32)
         with fixture_directory() as directory:
             head = git_fixture(directory, {"broken": True})
             outputs = self.resolve(directory, head, RELEASE_MODE="publish", SOURCE_SHA="",
-                                   ARTIFACT_SELECTION=selection)
+                                   ARTIFACT_SELECTION=selection, **review)
             self.assertEqual((outputs["mode"], outputs["version"], outputs["tag"], outputs["publishable"]),
                              ("publish", "", "", "false"))
             for env, message in (({"GITHUB_REF": "refs/heads/ci/x"}, "from main"),
                                  ({"SOURCE_SHA": head}, "SOURCE_SHA"),
-                                 ({"ARTIFACT_SELECTION": "{}"}, "selection")):
+                                 ({"ARTIFACT_SELECTION": "{}"}, "selection"),
+                                 ({"CANDIDATE_REVIEW": "", "CANDIDATE_REVIEW_SHA256": ""}, "candidate review SHA-256"),
+                                 ({"ARTIFACT_SELECTION": json.dumps(other)}, "another candidate")):
                 with self.subTest(env=env), self.assertRaisesRegex(forge.ProtocolError, message):
                     self.resolve(directory, head, RELEASE_MODE="publish",
-                                 **{"SOURCE_SHA": "", "ARTIFACT_SELECTION": selection, **env})
+                                 **{"SOURCE_SHA": "", "ARTIFACT_SELECTION": selection, **review, **env})
 
 
 class FetchTests(unittest.TestCase):
@@ -1123,6 +1140,23 @@ def manifest_value(ref=forge.MAIN, ci=None, packages=None):
 def selection_value(manifest_sha="9" * 64):
     return {"schema_version": 1, "kind": "forge-accepted-candidate", "repository": REPO, "run_id": RUN,
             "run_attempt": ATTEMPT, "manifest_artifact": {"id": 90, "digest": "8" * 64, "manifest_sha256": manifest_sha}}
+
+
+JOIN_DIGESTS = {"a5_join": "1a" * 32, "application_join": "2b" * 32, "guide_join": "3c" * 32}
+
+
+def projection_value(selection, manifest):
+    """Forge's accepted candidate review projection for this exact candidate."""
+    return {"schema": forge.REVIEW_SCHEMA,
+            "candidate": {"run_id": selection["run_id"], "run_attempt": selection["run_attempt"],
+                          "manifest_sha256": selection["manifest_artifact"]["manifest_sha256"],
+                          "packages": {item["target"]: item["sha256"] for item in manifest["packages"]}},
+            "joins": dict(JOIN_DIGESTS), "outcomes": {name: "accepted" for name in JOIN_DIGESTS}, "verdict": "accepted"}
+
+
+def review_env(data, digest=None):
+    """The two publish-only inputs: the projection's exact bytes (base64) and their SHA-256."""
+    return {"CANDIDATE_REVIEW": base64.b64encode(data).decode(), "CANDIDATE_REVIEW_SHA256": digest or sha256(data)}
 
 
 class ManifestTests(unittest.TestCase):
@@ -1781,14 +1815,30 @@ class RereadTests(unittest.TestCase):
 
 
 class PublishTests(unittest.TestCase):
-    def publish(self, directory, *, manifest=None, existing=None, latest_after="v0.9.3", selection_sha=None):
+    def publish(self, directory, *, manifest=None, existing=None, latest_after="v0.9.3", selection_sha=None,
+                review=None, observed=None):
+        """review(selected, manifest) returns the dispatch's review env; default: the exact candidate's."""
         manifest = manifest or manifest_value()
         manifest_bytes = json.dumps(manifest).encode()
         selected = selection_value(selection_sha or sha256(manifest_bytes))
+        review_inputs = (review or (lambda s, m: review_env(json.dumps(projection_value(s, m)).encode())))(
+            selected, manifest)
         artifacts = {90: {forge.MANIFEST: manifest_bytes, forge.MANIFEST_PROVENANCE: b"manifest bundle"},
                      11: package_members()}
         calls, uploads, latest = [], [], ["v0.9.3", latest_after]
+        published, readbacks, stdout = {}, [], io.StringIO()
+        if observed is not None:
+            observed.update(calls=calls, uploads=uploads, published=published, readbacks=readbacks,
+                            selected=selected, review=review_inputs)
         state = {"release": existing}
+
+        def upload(tag, path):
+            uploads.append(path.name)
+            published[path.name] = path.read_bytes()
+
+        def readback(release, expected, *_):
+            calls.append(["readback"])
+            readbacks.append({name: path.read_bytes() for name, path in expected.items() if name == forge.SELECTION})
 
         def api(endpoint, *, pages=False):
             if endpoint.endswith(f"actions/runs/{RUN}"):
@@ -1821,18 +1871,22 @@ class PublishTests(unittest.TestCase):
             mock.patch.object(forge.rc, "download_release_inventory",
                               lambda inv, folder: (folder.mkdir(), [(folder / n).write_bytes(existing["bytes"][n])
                                                                     for n in inv])),
-            mock.patch.object(forge.rc, "upload", lambda tag, path: uploads.append(path.name)),
-            mock.patch.object(forge.rc, "readback", lambda *a: calls.append(["readback"])),
+            mock.patch.object(forge.rc, "upload", upload),
+            mock.patch.object(forge.rc, "readback", readback),
             mock.patch.object(forge, "recheck_forge_ci", lambda value: calls.append(["forge_ci"])),
         ]
-        env = {"RELEASE_MODE": "publish", "ARTIFACT_SELECTION": json.dumps(selected)}
+        env = {"RELEASE_MODE": "publish", "ARTIFACT_SELECTION": json.dumps(selected), **review_inputs}
         with contextlib.ExitStack() as stack:
             for patch in patches:
                 stack.enter_context(patch)
             stack.enter_context(environment(**env))
             stack.enter_context(working_directory(directory))
-            stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
-            forge.publish(None)
+            stack.enter_context(contextlib.redirect_stdout(stdout))
+            try:
+                forge.publish(None)
+            finally:
+                if observed is not None:
+                    observed["stdout"] = stdout.getvalue()
         return calls, uploads
 
     def test_publication_is_a_bound_prerelease_that_never_becomes_latest(self):
@@ -1867,6 +1921,105 @@ class PublishTests(unittest.TestCase):
             with self.subTest(label), fixture_directory() as directory, \
                     self.assertRaisesRegex(forge.ProtocolError, message):
                 self.publish(directory, **options)
+
+    def test_the_candidate_review_gate_passes_and_the_selection_stays_identity_only(self):
+        observed = {}
+        with fixture_directory() as directory:
+            self.publish(directory, observed=observed)
+        digest = observed["review"]["CANDIDATE_REVIEW_SHA256"]
+        self.assertIn(f"candidate acceptance gate passed: review {digest}\n", observed["stdout"])
+        # The public SELECTION asset: its serialized bytes and their readback are the identity-only selection.
+        identity = forge.rc.json_bytes(observed["selected"])
+        self.assertEqual(observed["published"][forge.SELECTION], identity)
+        self.assertEqual(observed["readbacks"], [{forge.SELECTION: identity}] * 2)
+        self.assertEqual(set(json.loads(identity)), {"schema_version", "kind", "repository", "run_id", "run_attempt",
+                                                     "manifest_artifact"})
+        # The projection is neither published nor printed; only its SHA-256 is.
+        printed = observed["stdout"] + json.dumps(observed["calls"])
+        projection = base64.b64decode(observed["review"]["CANDIDATE_REVIEW"])
+        for secret in (*JOIN_DIGESTS.values(), forge.REVIEW_SCHEMA, observed["review"]["CANDIDATE_REVIEW"]):
+            self.assertNotIn(secret, printed)
+        for data in observed["published"].values():
+            self.assertNotIn(projection, data)
+            for value in JOIN_DIGESTS.values():
+                self.assertNotIn(value.encode(), data)
+        self.assertEqual(sorted(observed["uploads"]), sorted([forge.SELECTION, forge.MANIFEST, forge.MANIFEST_PROVENANCE,
+                                                              *package_members()]))
+
+    def test_the_candidate_review_gate_refuses_before_any_write(self):
+        def changed(change, raw=None):
+            def review(selected, manifest):
+                value = projection_value(selected, manifest)
+                change(value)
+                return review_env(raw(value) if raw else json.dumps(value).encode())
+            return review
+
+        def other_candidate(selected, manifest):
+            # Forge's counterexample: a genuinely accepted projection for candidate A, dispatched
+            # with a selection for candidate B that is otherwise consistent.
+            accepted_for_a = projection_value({**selected, "run_id": RUN + 7,
+                                               "manifest_artifact": {**selected["manifest_artifact"],
+                                                                     "manifest_sha256": "ab" * 32}}, manifest)
+            return review_env(json.dumps(accepted_for_a).encode())
+
+        def nested(*keys, value):
+            def change(projection):
+                item = projection
+                for key in keys[:-1]:
+                    item = item[key]
+                item[keys[-1]] = value
+            return change
+
+        cases = {
+            "another candidate": (other_candidate, "accepts another candidate"),
+            "another attempt": (changed(nested("candidate", "run_attempt", value=ATTEMPT + 1)), "another candidate"),
+            "another manifest": (changed(nested("candidate", "manifest_sha256", value="6f" * 32)), "another candidate"),
+            "sha mismatch": (lambda s, m: review_env(json.dumps(projection_value(s, m)).encode(), "0" * 64),
+                             "differ from their SHA-256"),
+            "no review": (lambda s, m: {}, "candidate review SHA-256"),
+            "not base64": (lambda s, m: {"CANDIDATE_REVIEW": "!not base64!", "CANDIDATE_REVIEW_SHA256": "0" * 64},
+                           "not base64"),
+            "not JSON": (lambda s, m: review_env(b"{\"schema\":"), "not strict JSON"),
+            "duplicate key": (changed(lambda v: None, raw=lambda v: json.dumps(v).encode()[:-1] + b', "verdict": "accepted"}'),
+                              "duplicate JSON key"),
+            "outcome failed": (changed(nested("outcomes", "a5_join", value="failed")), "a5_join outcome is not accepted"),
+            "outcome unresolved": (changed(nested("outcomes", "guide_join", value="unresolved")),
+                                   "guide_join outcome is not accepted"),
+            "verdict failed": (changed(nested("verdict", value="failed")), "verdict is not accepted"),
+            "missing join": (changed(lambda v: v["joins"].pop("guide_join")), "joins fields"),
+            "package mismatch": (changed(nested("candidate", "packages", "linux-x86_64", value="7a" * 32)),
+                                 "other package digests"),
+            "package target": (changed(lambda v: v["candidate"].__setitem__("packages", {"macos-arm64": "7a" * 32})),
+                               "other package digests"),
+            "extra key": (changed(lambda v: v.__setitem__("note", "x")), "candidate review fields"),
+            "uppercase digest": (changed(nested("joins", "a5_join", value="1A" * 32)), "a5_join SHA-256"),
+            "bool run id": (changed(nested("candidate", "run_id", value=True)), "positive integer"),
+            "nonpositive run id": (changed(nested("candidate", "run_id", value=0)), "positive integer"),
+            "oversize": (lambda s, m: review_env(b" " * (forge.MAX_REVIEW_BYTES + 1)), "exceeds 64 KiB"),
+        }
+        for label, (review, message) in cases.items():
+            observed = {}
+            with self.subTest(label), fixture_directory() as directory:
+                with self.assertRaisesRegex(forge.ProtocolError, message):
+                    self.publish(directory, review=review, observed=observed)
+                self.assertFalse([call for call in observed["calls"]
+                                  if call[:3] == ["gh", "release", "create"] or call[:2] == ["gh", "api"]
+                                  or call[:1] in (["tag"], ["readback"])])
+                self.assertEqual(observed["uploads"], [])
+                self.assertNotIn("candidate acceptance gate passed", observed["stdout"])
+
+    def test_the_candidate_selection_is_still_emitted_identity_only(self):
+        manifest = manifest_value()
+        with fixture_directory() as directory:
+            path = directory / forge.MANIFEST
+            path.write_bytes(forge.rc.json_bytes(manifest))
+            out = io.StringIO()
+            args = forge.parse_args(["selection", "--manifest-file", str(path), "--artifact-id", "90",
+                                     "--artifact-digest", "8" * 64])
+            with environment(GITHUB_STEP_SUMMARY=""), contextlib.redirect_stdout(out):
+                forge.selection(args)
+            emitted = forge.validate_selection(forge.rc.parse_json(out.getvalue()))
+        self.assertEqual(emitted, selection_value(sha256(forge.rc.json_bytes(manifest))))
 
     def test_the_published_verify_command_pins_main_and_the_source(self):
         notes = forge.release_notes(manifest_value())

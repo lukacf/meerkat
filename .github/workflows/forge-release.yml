@@ -38,6 +38,16 @@ on:
         required: false
         default: ""
         type: string
+      candidate_review:
+        description: "Publish only: base64 of Forge's candidate review projection bytes"
+        required: false
+        default: ""
+        type: string
+      candidate_review_sha256:
+        description: "Publish only: the SHA-256 of the candidate review projection bytes"
+        required: false
+        default: ""
+        type: string
 
 permissions:
   # require_ci_green and collect read workflow runs and artifacts. A
@@ -74,6 +84,8 @@ jobs:
           RELEASE_MODE: ${{ inputs.release_mode }}
           SOURCE_SHA: ${{ inputs.source_sha }}
           ARTIFACT_SELECTION: ${{ inputs.artifact_selection }}
+          CANDIDATE_REVIEW: ${{ inputs.candidate_review }}
+          CANDIDATE_REVIEW_SHA256: ${{ inputs.candidate_review_sha256 }}
         run: python3 scripts/forge-release.py resolve
 
   build_package:
@@ -293,4 +305,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_MODE: ${{ needs.resolve.outputs.mode }}
           ARTIFACT_SELECTION: ${{ inputs.artifact_selection }}
+          CANDIDATE_REVIEW: ${{ inputs.candidate_review }}
+          CANDIDATE_REVIEW_SHA256: ${{ inputs.candidate_review_sha256 }}
         run: python3 scripts/forge-release.py publish

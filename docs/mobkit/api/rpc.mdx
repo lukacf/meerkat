@@ -4,7 +4,7 @@ description: "JSON-RPC 2.0 protocol for Meta runtime operations: gating, memory,
 icon: "plug"
 ---
 
-*Mirrored from MobKit main at [7ddc67a590ba](https://github.com/lukacf/meerkat/commit/7ddc67a590bad60c06c52c374fde290127cc2016) on 2026-10-31; MobKit version 0.9.6 at that commit.*
+*Mirrored from MobKit main at [6e73abee5f2d](https://github.com/lukacf/meerkat/commit/6e73abee5f2d5e5c24d114979e9c6465c4bbc2f0) on 2026-11-01; MobKit version 0.9.7 at that commit.*
 
 Meta exposes its operational API over JSON-RPC 2.0. SDK gateways use JSON lines over stdio, while the embedded console uses `POST /console/rpc` for console-specific methods and explicitly implemented runtime operations. The HTTP dispatcher is not a general stdio passthrough; check `meta/capabilities` on the surface you use.
 
@@ -277,7 +277,7 @@ errors. SDKs surface it on `RpcError.data`.
 | `-32052` | Core's history for the identity cannot be read now, or the wake failed in a way a retry can clear: nothing was spawned. This includes a send or dispatch to an identity a host adopted whose intent declares a live member that Core has not brought live yet (after a restart, until the previous process's identity lease expires): Meta never wakes it and queues nothing, and the same request, sent again, is delivered once Core holds the member. Or a delivery reached a member whose session Core holds no durable copy of: nothing was delivered, Core settles the member, and Meta starts no fresh session in its place; deliver again. Or a send, dispatch or peer message reached a member of a stopped mob, a live member included (a peer sender sees `peer_wake_refused` with the reason `mob_not_running`). Or `meta/retire` reached a member that is being woken or has work in flight: Core does not release it now, nothing was interrupted, and the retire succeeds once the member is quiescent. Or Core refused a `meta/reset` or `meta/delete_identity` before any of it started (the mob is not running, or another lifecycle operation of the member is in progress): nothing was retired, the rotation is not recorded, and no later start carries it out; ask again. `IdentityHistoryUnavailableError` in both SDKs. | `{kind: "identity_history_unavailable", identity?, retryable: true}` (`identity` when the refusal names one), `{kind: "identity_wake_retryable", identity, session_id, retryable: true}` (`session_id` may be `null`) or `{kind: "identity_session_absent", identity, session_id, retryable: true}` |
 | `-32053` | A host adopted the identity (Core holds an identity intent row for it), so Meta's lifecycle verbs leave it alone. A send or dispatch to it answers `-32053` only when its intent declares no live member, when Core reports its convergence blocked (`repair_blocked`, `quarantined`, `tombstoned`, `drain_blocked`), or when Meta cannot read one of them; otherwise it answers `-32052`. `IdentityHostAdoptedError` in both SDKs. | `{kind: "identity_host_adopted", identity, retryable: false}` |
 | `-32055` | `meta/fork_member` (Console) refused a side chat. `kind: "fork_source_unavailable"` when the agent cannot be forked now, and nothing was forked: `cause` is `running` (it is working or owes queued work; fork again when it is idle), `no_session` (it has no conversation: it is a seat that was never woken, and it is not woken for the fork), `remote_read_unavailable` or `authority_unavailable` (its alias could not be pinned to a current identity; `detail` carries the identity authority's refusal). `kind: "fork_source_changed"` when the agent moved to another session between the fork's checks and the fork (it was reset or respawned in between), and `kind: "unwired_seat_unavailable"` (`wiring.rule` `seated_with_peers` with `peers`) when a seated side chat had peer edges after all: either side chat is retired again, and `retired` says whether that succeeded. | `{kind, source_member_id?, cause?, detail?, wiring?, agent_identity?, retired?}` |
-| `-32015` | `meta/bound_member_transcript` target session is live/running (transcript surgery only supports reject-while-active); quiesce the member first (retire or park it), then retry. Also `meta/member_activate_instruction` refused at its safe boundary (runtime work still queued at the turn boundary, open live channel, no materialized session, fenced-store backoff); retry at your own next boundary | `meta/member_activate_instruction`: `{class: "admission", instruction_activation_code}` |
+| `-32015` | `meta/bound_member_transcript` target session is live/running (transcript surgery only supports reject-while-active); quiesce the member first (retire or park it), then retry. Also `meta/prune_member_system_rows` while the member runs a turn or holds an active runtime admission; retry when it is idle. Also `meta/member_activate_instruction` refused at its safe boundary (runtime work still queued at the turn boundary, open live channel, no materialized session, fenced-store backoff); retry at your own next boundary | `meta/member_activate_instruction`: `{class: "admission", instruction_activation_code}` |
 | `-32016` | operator verb exists but its gateway wiring is absent (no compaction-floor registry / no concrete transcript-edit service threaded into the RPC context) | none |
 | `-32017` | a covered unified/stdin read arm exhausted its deadline. The member's meerkat session task and the mob actor loop are strict sequential command loops, so a read issued while the member is mid-turn queues behind that turn instead of degrading; the wrapped arms (`identity/resolved_tools`, `identity/routing_status`, `member_status`, `list_members`, `get_member`, `find_members`, `flow_status`, `list_runs`) give up after the read budget and say so. The read is abandoned, never half-applied. Budget defaults to 30s, overridable with `META_CONSOLE_READ_TIMEOUT_SECS` (clamped to 1..3600). The independent HTTP console dispatcher does not apply this wrapper. | `{kind: "console_read_timeout", arm, awaiting, timeout_secs}` |
 | `-32018` | stdio gateway: an ordinary request arrived before `meta/init` settled. It was refused at once, not queued. Startup provider callbacks must not issue ordinary RPCs on the runtime that is starting. `meta/shutdown` is still admitted. | `{kind: "init_in_progress", method}` |
@@ -286,7 +286,7 @@ errors. SDKs surface it on `RpcError.data`.
 | `-32044` | A mob announcement method on a gateway that did not enable mob announcements (see [Mob announcements](#mob-announcements-optional)). `MobAnnouncementsUnavailableError` in both SDKs. | `{kind: "mob_announcements_unavailable"}` |
 | `-32045` | Mob announcement conflict: a source key already bound to other content, a stale subscription or source revision, a collector step from a cursor version another step already moved, a reused operation id, a batch that moved. `AnnouncementConflictError` in both SDKs; a source's stale revision is `SourceStaleRevisionError` and a moved cursor `SourceVersionConflictError`, both carrying the source's current position. | `{kind: "announcement_conflict", existing}`, `{kind: "stale_revision", current_revision}` (a subscription), `{kind: "stale_revision", current_revision, current_version, generation, cursor}` (a source), `{kind: "source_version_conflict", current_version, cursor, state, revision}`, `{kind: "operation_reused"}` or `{kind: "batch_moved", current}` |
 | `-32046` | `meta/mob_announcements/subscriptions/put` start frontier outside a mob's announcements: older than what is retained, or beyond its head (a mob that has announced nothing yet is at head 0). `AnnouncementFrontierError` in both SDKs. | `{kind: "gap", mob_id, earliest_retained}` or `{kind: "frontier_beyond_head", mob_id, head}` |
-| `-32047` | Mob announcement typed refusal. `AnnouncementRefusedError` in both SDKs. | `{kind}`: `governed_runtime`, `unknown_member` (with `member`), `unusable_member`, `unusable_peer`, `subscription_cancelled`, `subscription_ended` (with `end`), `member_mismatch`, `unrelated_mob` (with `mob_id`; member tools only), `ambiguous_mob` (with `mob_id`, or `kept_route`), `child_member_limit` (with `limit`, and `mob_id` for the bound per mob), `native_unavailable`, `not_held` (with `batch_id`; see [Delivery handling](#delivery-handling)) or `candidate_launch` (a change on a candidate launch; see [Mob announcements](#mob-announcements-optional)). A candidate launch also answers `candidate_launch` for `meta/retire`, `meta/retire_member`, `meta/respawn`, `meta/respawn_member`, `meta/reset`, `meta/reset_all`, `meta/delete_identity`, `meta/reconcile_identity`, `meta/rediscover`, `meta/cross_mob/wire`, `meta/cross_mob/unwire`, `meta/cross_mob/wire_local`, `meta/cross_mob/unwire_local` and `meta/topology/apply`, whose stored roster and wiring are the authoritative launch's to change (`meta/reconcile_edges` answers a dry run instead), for `meta/gating/decide`, whose decision resumes the authoritative launch's work, for the methods that create a session (`meta/spawn_member`, `meta/ensure_member`, `meta/spawn_helper`, `meta/fork_helper`, `meta/attach_existing_session` and, on the Console, `meta/fork_member`), and for member input and member run control: `meta/send`, `meta/send_message`, `meta/interact`, `meta/dispatch`, `meta/delivery/send`, `meta/cross_mob/send`, `meta/run_flow`, `meta/reload_member`, `meta/identity/warm`, `meta/stop_member_run`, `meta/force_cancel_member`, `meta/compact_member`, `meta/member_activate_instruction` and `meta/live/open`, and on the Console `meta/console/send`, `meta/console/voice/open`, `meta/console/recover_send` and the console schedule writes (`meta/schedule/create`, `meta/schedule/update`, `meta/schedule/pause`, `meta/schedule/resume` and `meta/schedule/delete`); for the member declaration mutations `mob/adopt_member_identity_declaration` and `mob/apply_member_tool_declaration`; and for the operator changes, each of which writes state the authoritative launch reads, runs a tool or a host process, or sends: the WorkGraph writes (every `meta/workgraph/*` method that changes the graph), `meta/call_tool`, `meta/routing/routes/add`, `meta/routing/routes/delete`, `meta/memory/index`, `meta/memory/quarantine/decide`, `meta/agent_memory/remember`, `meta/agent_memory/update`, `meta/agent_memory/forget`, `meta/mob_labels/set`, `meta/mob_labels/delete`, `meta/run_labels/set`, `meta/run_labels/delete`, `meta/access/set`, `meta/access/enable`, `meta/access/rules/upsert`, `meta/access/rules/delete`, `meta/access/groups/set`, `meta/access/groups/delete`, `meta/console/revoke_sessions`, `meta/blob/upload`, `meta/cancel_flow`, `jobs/cancel`, `jobs/retry`, `monitors/start`, the live channel verbs (`meta/live/close`, `meta/live/refresh`, `meta/live/send_input`, `meta/live/commit_input`, `meta/live/interrupt`, `meta/live/truncate`, `meta/live/playback_complete`, `meta/live/replacement_required`, `meta/live/playback_owner/register`, `meta/live/playback_owner/revoke` and `live/webrtc/answer`), a `meta/mobpacks/deploy` with `execute`, a `meta/mobpacks/validate` with `rkat_validate`, a Flow Editor draft write (`meta/mobpacks/create`, `meta/mobpacks/save`, `meta/mobpacks/delete`, `meta/mobpacks/undo` and `meta/mobpacks/redo`) except to a `store_path` the caller names outside the state directory and the gateway home that is not the store `META_FLOW_EDITOR_DRAFT_STORE` names, a `meta/session_store/bigquery` row insert, a `meta/gating/evaluate` of an R3 action that names an approval route (`approval_recipient` and `approval_channel`), every call passed through to a loaded module, and `meta/reconcile`. It answers on the stdio gateway and on `POST /console/rpc`, before anything is read or written; `POST /console/send`, `POST /console/send/recover` and `POST /console/mcp-apps/call-tool` answer HTTP `409` `candidate_launch` (see `mob_composition` in [SDK and gateway runtime options](/mobkit/reference/configuration#sdk-and-gateway-runtime-options)); for sources (see [Mob announcement sources](#mob-announcement-sources)) `source_paused`, `source_ended`, `principal_changed` (with `pinned_digest`, `offered_digest`), `baseline_required`, `stream_not_baselined` (with `streams`), `backfill_bound_exceeded` (with `remaining`, and `stream` for a stream's bound), `deletions_unobservable`, `topic_owned` and `topic_owned_by_source` (with `topic`, `source_id`), `source_identity_taken` (with `source_id`), `identity_immutable`, `principal_not_allowed` (with `principal_kind`), `audience_not_covered` and `no_direct_route` (with `source_id`, `topic`), `route_overlap` (with `source_id`, `member`), `route_conflict` (with `conflict: "conversation"`, `source_id`), `route_selector_unsupported` (with `selector`) or `source_limit` (with `limit`, and `mob_id`, `null` for the gateway's bound); for declarations (see [Mob announcement declarations](#mob-announcement-declarations)) `declaration_rollback` (with `applied`), `declaration_digest_conflict` (with `revision`), `role_template_limit` (with `limit`) or `subscription_id_taken` (with `subscription_id`) |
+| `-32047` | Mob announcement typed refusal. `AnnouncementRefusedError` in both SDKs. | `{kind}`: `governed_runtime`, `unknown_member` (with `member`), `unusable_member`, `unusable_peer`, `subscription_cancelled`, `subscription_ended` (with `end`), `member_mismatch`, `unrelated_mob` (with `mob_id`; member tools only), `ambiguous_mob` (with `mob_id`, or `kept_route`), `child_member_limit` (with `limit`, and `mob_id` for the bound per mob), `native_unavailable`, `not_held` (with `batch_id`; see [Delivery handling](#delivery-handling)) or `candidate_launch` (a change on a candidate launch; see [Mob announcements](#mob-announcements-optional)). A candidate launch also answers `candidate_launch` for `meta/retire`, `meta/retire_member`, `meta/respawn`, `meta/respawn_member`, `meta/reset`, `meta/reset_all`, `meta/delete_identity`, `meta/reconcile_identity`, `meta/rediscover`, `meta/cross_mob/wire`, `meta/cross_mob/unwire`, `meta/cross_mob/wire_local`, `meta/cross_mob/unwire_local` and `meta/topology/apply`, whose stored roster and wiring are the authoritative launch's to change (`meta/reconcile_edges` answers a dry run instead), for `meta/gating/decide`, whose decision resumes the authoritative launch's work, for the methods that create a session (`meta/spawn_member`, `meta/ensure_member`, `meta/spawn_helper`, `meta/fork_helper`, `meta/attach_existing_session` and, on the Console, `meta/fork_member`), and for member input and member run control: `meta/send`, `meta/send_message`, `meta/interact`, `meta/dispatch`, `meta/delivery/send`, `meta/cross_mob/send`, `meta/run_flow`, `meta/reload_member`, `meta/identity/warm`, `meta/stop_member_run`, `meta/force_cancel_member`, `meta/compact_member`, `meta/bound_member_transcript`, `meta/prune_member_system_rows`, `meta/member_activate_instruction` and `meta/live/open`, and on the Console `meta/console/send`, `meta/console/voice/open`, `meta/console/recover_send` and the console schedule writes (`meta/schedule/create`, `meta/schedule/update`, `meta/schedule/pause`, `meta/schedule/resume` and `meta/schedule/delete`); for the member declaration mutations `mob/adopt_member_identity_declaration` and `mob/apply_member_tool_declaration`; and for the operator changes, each of which writes state the authoritative launch reads, runs a tool or a host process, or sends: the WorkGraph writes (every `meta/workgraph/*` method that changes the graph), `meta/call_tool`, `meta/routing/routes/add`, `meta/routing/routes/delete`, `meta/memory/index`, `meta/memory/quarantine/decide`, `meta/agent_memory/remember`, `meta/agent_memory/update`, `meta/agent_memory/forget`, `meta/mob_labels/set`, `meta/mob_labels/delete`, `meta/run_labels/set`, `meta/run_labels/delete`, `meta/access/set`, `meta/access/enable`, `meta/access/rules/upsert`, `meta/access/rules/delete`, `meta/access/groups/set`, `meta/access/groups/delete`, `meta/console/revoke_sessions`, `meta/blob/upload`, `meta/cancel_flow`, `jobs/cancel`, `jobs/retry`, `monitors/start`, the live channel verbs (`meta/live/close`, `meta/live/refresh`, `meta/live/send_input`, `meta/live/commit_input`, `meta/live/interrupt`, `meta/live/truncate`, `meta/live/playback_complete`, `meta/live/replacement_required`, `meta/live/playback_owner/register`, `meta/live/playback_owner/revoke` and `live/webrtc/answer`), a `meta/mobpacks/deploy` with `execute`, a `meta/mobpacks/validate` with `rkat_validate`, a Flow Editor draft write (`meta/mobpacks/create`, `meta/mobpacks/save`, `meta/mobpacks/delete`, `meta/mobpacks/undo` and `meta/mobpacks/redo`) except to a `store_path` the caller names outside the state directory and the gateway home that is not the store `META_FLOW_EDITOR_DRAFT_STORE` names, a `meta/session_store/bigquery` row insert, a `meta/gating/evaluate` of an R3 action that names an approval route (`approval_recipient` and `approval_channel`), every call passed through to a loaded module, and `meta/reconcile`. It answers on the stdio gateway and on `POST /console/rpc`, before anything is read or written; `POST /console/send`, `POST /console/send/recover` and `POST /console/mcp-apps/call-tool` answer HTTP `409` `candidate_launch` (see `mob_composition` in [SDK and gateway runtime options](/mobkit/reference/configuration#sdk-and-gateway-runtime-options)); for sources (see [Mob announcement sources](#mob-announcement-sources)) `source_paused`, `source_ended`, `principal_changed` (with `pinned_digest`, `offered_digest`), `baseline_required`, `stream_not_baselined` (with `streams`), `backfill_bound_exceeded` (with `remaining`, and `stream` for a stream's bound), `deletions_unobservable`, `topic_owned` and `topic_owned_by_source` (with `topic`, `source_id`), `source_identity_taken` (with `source_id`), `identity_immutable`, `principal_not_allowed` (with `principal_kind`), `audience_not_covered` and `no_direct_route` (with `source_id`, `topic`), `route_overlap` (with `source_id`, `member`), `route_conflict` (with `conflict: "conversation"`, `source_id`), `route_selector_unsupported` (with `selector`) or `source_limit` (with `limit`, and `mob_id`, `null` for the gateway's bound); for declarations (see [Mob announcement declarations](#mob-announcement-declarations)) `declaration_rollback` (with `applied`), `declaration_digest_conflict` (with `revision`), `role_template_limit` (with `limit`) or `subscription_id_taken` (with `subscription_id`) |
 | `-32048` | A mob announcement method names a subscription, delivery, source or mob that does not exist here. `AnnouncementNotFoundError` in both SDKs. | `{kind: "unknown_subscription"}`, `{kind: "unknown_delivery"}`, `{kind: "unknown_source"}` or `{kind: "unknown_mob", mobs}` |
 
 `meta/init` refuses the members' native realm and auth binding
@@ -691,7 +691,9 @@ the fork, the fork activates the same revision and body in the side chat as
 the host. Any other stays inactive, and the side chat refuses its first turn
 naming it until a host activates it (`meta/member_activate_instruction`). The
 result lists each with `state` `inherited` or `inactive` and a `reason`
-(`not_effective_in_source`, `body_unreadable` or `activation_refused`). Under
+(`not_effective_in_source`, `body_unreadable`, `head_body_retired` (the
+source's own head of the key holds a retired body, which only a torn source
+document does at the tail) or `activation_refused`). Under
 the `refuse` fork instruction policy a fork of an activated agent answers
 Meerkat's `-32037` `fork_instruction_refused`.
 
@@ -2331,7 +2333,7 @@ construction and agent tool calls are scope-pinned to it.
 | `meta/workgraph/close` | `{id, expected_revision, status?, namespace?}`; `status` is `completed` (default), `cancelled`, or `failed` | `{item}` |
 | `meta/workgraph/block` | `{id, expected_revision, namespace?}`; blocker edges are `link` with kind `blocks` | `{item}` |
 | `meta/workgraph/link` | `{kind, from_id, to_id, namespace?}`; `kind` is `blocks`, `parent`, `related`, `supersedes`, or `derived_from` | `{edge: WorkEdge}` |
-| `meta/workgraph/evidence/add` | `{id, expected_revision, evidence: {kind, id, label?, summary?}, namespace?}`; `evidence` is an object, not a string | `{item}` |
+| `meta/workgraph/evidence/add` | `{id, expected_revision, evidence: {kind, id, label?, summary?, withdraws?}, namespace?}`; `evidence` is an object, not a string; `withdraws` lists the ids of earlier evidence on the item that the new ref withdraws (nothing is removed; a withdrawal of an unknown id, of the ref's own id, of another withdrawal, or of confirmation or execution evidence is refused `-32602`) | `{item}` |
 | `meta/workgraph/policy/escalate` | `{binding_id, id, expected_revision, completion_policy, namespace?}`; the authority witness is fetched server-side from `binding_id`, `authority_projection` is rejected | `{item}` |
 | `meta/workgraph/goal/create` | `{title, description?, target, mode?, completion_policy?, delegated_authority?, namespace?}`; `target` is `{kind: "session", session_id}`, `{kind: "identity", identity}`, or `{kind: "owner", owner_key: {kind, id}}`; `mode` defaults to `pursue` | `{item, attention}` |
 | `meta/workgraph/goal/confirm` | `{binding_id, expected_revision, evidence?: {kind, id, label?, summary?}, namespace?}`; omitted evidence is derived from the goal's completion policy; `confirmation_kind` / `confirming_owner_key` are rejected | `{item, attention}` |
@@ -2494,6 +2496,93 @@ audit note recorded on the rewrite reason).
 Result: `bounded`, `removed`, `kept`, `message_count`, `parent_revision`,
 `revision` (or `bounded: false` with `removed: 0` when the transcript is
 already within `keep_last`).
+
+### `meta/prune_member_system_rows`
+
+Host-only. Removes the ordinary System rows the host names from the
+member's current session in one audited rewrite (Meerkat's
+`SessionServiceTranscriptEditExt::prune_system_rows`), and keeps every other
+row: the precise remedy for stale prompts that earlier boots wrote. The
+member is addressed by `identity` through the same identity-control gate as
+`meta/bound_member_transcript`. A dormant member is not woken and no model is
+called; an idle live member's session converges on the commit, and its next
+turn reads the pruned transcript.
+
+Params:
+
+- `identity` (required).
+- `remove`: the rows to remove, each `{index, content_sha256}` as a member
+  history read showed it: `index` is the row's 0-based message index (the
+  index space of the history read), and `content_sha256` is
+  `sha256:<64 lowercase hex>` over the row's content as UTF-8 text. Gateway
+  and Meerkat never choose the rows: read the history, pick the rows, send
+  them. Only ordinary System rows are removed, and nothing guards the last
+  one: the host chooses.
+- `retire_superseded_activation_bodies` (default `false`): the same commit
+  also retires the body of every instruction activation row that a later
+  activation of its key superseded, in place, as a compaction does; a key's
+  newest body is never retired.
+- `expected_parent_revision` (optional): an extra compare-and-swap on the
+  transcript head. The per-row digest is the main guard: a row that changed
+  since the read is refused. A stale revision is refused too (see Errors),
+  so chaining calls on the `revision` a previous call returned fails
+  whenever a turn ran in between: read the history again rather than chain.
+- `note` (optional): the audit note. The commit's reason kind is always
+  `system-row-prune`; there is no caller-supplied reason.
+
+The rows after a removed one move up. An instruction activation row keeps
+its place among the conversation rows; a prune that moves one to another
+offset, or retires a body, writes the session document at envelope 5, which
+Meerkat 0.9.8 refuses, while a prune of rows after the last activation row
+with nothing retired leaves it at envelope 4. The session's pending
+compaction projection intents carry forward unchanged, as for every
+same-session rewrite, so an unsettled projection does not refuse the prune.
+The commit replaces one range, from the first removed row to the last
+retired one, and its rewrite record keeps that range's earlier rows for
+the session's rewrite retention: with the retire option on a transcript
+whose stale prompts open it, that is most of the transcript, a one-time
+growth of the stored document.
+
+Result: `identity`, `session_id`, `pruned`, `removed_rows`,
+`retired_bodies`, `message_count`, `revision`, and `parent_revision` when
+`pruned`. `pruned` is `false` (with zero counts) when the request names no
+row and there is no body to retire; nothing is written then.
+
+Errors:
+
+- `-32602` with `data {kind: "system_row_prune_refused", index, cause}`: the
+  row at `index` cannot be removed, and nothing was written. `cause` is
+  `out_of_bounds`, `duplicate_index`, `not_a_system_row`,
+  `prompt_version_row`, `instruction_activation_row`,
+  `operator_instruction_entry_row`, `digest_mismatch` (the transcript changed
+  since your read: read it again) or `before_operator_instruction_entry` (an
+  operator-instruction entry follows the row in its group of System rows,
+  and removing the row would move the entry; a group of System rows is a
+  run of consecutive System rows, which any other row, a system notice
+  included, ends). `SystemRowPruneRefusedError` in both SDKs.
+- `-32602` with `data {kind: "transcript_revision_conflict", expected,
+  actual}`: `expected_parent_revision` is not the session's current
+  revision `actual`, because a turn ran or another edit committed since the
+  read; nothing was written. Read the history again.
+  `TranscriptRevisionConflictError` in both SDKs.
+- `-32015`: the member is running a turn or holds an active runtime
+  admission. Retry when it is idle.
+- `-32603` with the data a held wake answers: a session Core holds (a
+  durable tail held for recovery, a refused recovery, quarantined
+  evidence) answers `{kind: "mob_member_session_resume_held",
+  durable_resume_hold, ...}`, and one whose committed document fails its
+  audited-endpoint check `{kind: "mob_member_session_repair_required",
+  operator_path, ...}`; the session is kept and nothing was written.
+  `IdentityWakeHeldError` in both SDKs.
+- `-32047` `candidate_launch` on a candidate launch.
+- `-32016` when the gateway has no concrete transcript-edit service.
+- `-32000`, the catch-all, `prune_member_system_rows failed: <cause>` or a
+  message naming the state: an identity with no current session, a member
+  placed on another host (the gateway's transcript service holds no session
+  for it, as for `meta/bound_member_transcript`; no operator verb has a
+  typed refusal for a placed member yet, and one waits for the member-host
+  bridge to carry the request), an archived session, or a malformed session
+  document. Read the history again before you retry.
 
 ### `meta/member_activate_instruction`
 
@@ -3433,10 +3522,24 @@ the applied one, so an apply made at runtime stands across a restart until
 the options move past it; options at the applied revision with other
 content are logged once as a warning.
 
+A call the reconcile makes that does not answer within 30 seconds (a store
+call, a read of this gateway's runtime, or the schedule service) stops it
+there, as a storage failure does: the apply answers `native_unavailable`
+(`-32047`), or `-32000` for a store call, and may already have recorded its
+revision and made part of it, so retry it with the same revision and
+declarations; the records it had not reached are finished at the next
+health pass once the call answers. Until that call ends, a reconcile or a
+read that would call the same method stops at once. `declarations/get`,
+and an apply's read of its result, answer `-32000` when one of their store
+reads does not answer within 30 seconds or meets one still running.
+
 `declarations/get` reads the applied `revision` (0 before any) and its
 `digest`, and `records`, one per declared source and subscription and one
 per child of a declared role template: `{kind, id, status, refusal?,
-collection?, delivery?}`. `kind` is `source`, `subscription` or
+collection?, delivery?}`. A record dropped from the declarations stays
+listed until its drop takes effect: a drop refused for now, or a dropped
+source until the schedule service has reconciled its runner after its end.
+`kind` is `source`, `subscription` or
 `role_child`; `status` is `applied`, `pending`, `suppressed`, or `left` for
 a role child whose member left the role; `refusal` is `{kind, message}`. An
 applied source carries `collection` (`baselining`, `backfilling`, `live`,

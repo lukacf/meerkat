@@ -4,7 +4,7 @@ description: "Why the gateways bind loopback, how to publish them behind a rever
 icon: "server"
 ---
 
-*Mirrored from MobKit main at [7ddc67a590ba](https://github.com/lukacf/meerkat/commit/7ddc67a590bad60c06c52c374fde290127cc2016) on 2026-10-31; MobKit version 0.9.6 at that commit.*
+*Mirrored from MobKit main at [6e73abee5f2d](https://github.com/lukacf/meerkat/commit/6e73abee5f2d5e5c24d114979e9c6465c4bbc2f0) on 2026-11-01; MobKit version 0.9.7 at that commit.*
 
 Both bundled gateways, the console/admin `meta_gateway` and the SDK-facing
 `rpc_gateway`, bind `127.0.0.1` on an ephemeral port unless the launch selects
@@ -292,8 +292,9 @@ counts the journal events left. One identity's side effects keep the
 journal's order, so a step the new gateway takes for an identity the stopped
 one still owed side effects runs its own after those, in the background:
 init never waits for them. A session bridge that
-cannot read Core's journal turns the side effects off: the gateway reports
-`lifecycle_projection_off` once, and its status and health read degraded.
+cannot read Core's journal, or Core's standing of an identity's member, turns
+the side effects off: the gateway reports `lifecycle_projection_off` once,
+and its status and health read degraded.
 They read degraded too while the projection keeps failing (`stalled`): its
 cursor could not be read or started three times in a row, or three runs in a
 row failed, of the new gateway's steps or of the backlog.

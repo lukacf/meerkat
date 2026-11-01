@@ -972,6 +972,23 @@ describe("kit stylesheet", () => {
     expect(outranks(specificity(divider!.selector), specificity(reset!.selector))).toBe(true);
   });
 
+  it("keeps a loading figure's boxes: hidden, never removed, and the foot line always there", async () => {
+    const fs = await import("node:fs");
+    const path = await import("node:path");
+    const css = fs.readFileSync(path.join(__dirname, "../styles/panel-kit.css"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+    const rules = [...css.matchAll(/([^{}]+)\{([^{}]*)\}/g)].map((match) => ({ selector: match[1].trim().replace(/\s+/g, " "), body: match[2] }));
+    const body = (selector: string) => rules.filter((rule) => rule.selector === selector).map((rule) => rule.body).join(" ");
+    expect(body(".cc-figure__foot")).toMatch(/min-height:\s*1\.4em/);
+    expect(body(".cc-figure__foot")).toMatch(/line-height:\s*1\.4/);
+    expect(body(".cc-figure__skeleton")).toMatch(/position:\s*absolute/);
+    expect(body(".cc-figure.is-loading .cc-figure__value")).toMatch(/position:\s*relative/);
+    expect(body(".cc-figure.is-loading .cc-figure__meter, .cc-figure.is-loading .cc-figure__foot > *")).toMatch(/visibility:\s*hidden/);
+    // Nothing a loading tile holds is taken out of the layout.
+    const loadingRules = rules.filter((rule) => rule.selector.includes(".is-loading"));
+    expect(loadingRules.length > 0).toBe(true);
+    expect(loadingRules.filter((rule) => /display:\s*none|height:/.test(rule.body)).map((rule) => rule.selector)).toEqual([]);
+  });
+
   it("wraps four or more figures to two rows between 480 and 719 px, rules kept", async () => {
     const fs = await import("node:fs");
     const path = await import("node:path");

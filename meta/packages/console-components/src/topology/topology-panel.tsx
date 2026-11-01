@@ -444,7 +444,8 @@ export function TopologyPanel({
     window: windowId,
     focus,
     reveal,
-  }), [focus, graph, reveal, showChannelsNow, show.helpers, windowId]);
+    now,
+  }), [focus, graph, now, reveal, showChannelsNow, show.helpers, windowId]);
   // The list names every relation of a row, a roster channel's routes too.
   const listEdges = React.useMemo(() => topologyVizEdges(graph, {
     showHelpers: show.helpers,
@@ -462,6 +463,14 @@ export function TopologyPanel({
     const node = op && frame.identity ? baseGraph.resolve(frame.identity) : null;
     return op && node && frame.timestampMs ? [{ id: frame.id, node, op, at: frame.timestampMs }] : [];
   }), [activity, baseGraph]);
+  // When each agent's memory was last given to a turn (its newest memory read).
+  const memoryGiven = React.useMemo(() => {
+    const given = new Map<string, number>();
+    for (const event of memoryEvents) {
+      if (event.op === "read" && event.at > (given.get(event.node) || 0)) given.set(event.node, event.at);
+    }
+    return given;
+  }, [memoryEvents]);
   const tools = React.useMemo(() => openTools(activity, (reference) => baseGraph.resolve(reference)), [activity, baseGraph]);
 
   // Editing: the management state decides; the drawer and the editor act.
@@ -641,6 +650,7 @@ export function TopologyPanel({
       nowOf={(agent) => topologyNowLine(agent, model.statusById.get(agent.id), tools.get(agent.id) || null, now)}
       activityOf={(agent) => topologyAgentDay(activitySource, agent.ref.identity || agent.id, now)}
       memoryOf={(agent) => memoryById.get(agent.ref.identity || agent.id) || null}
+      memoryGivenOf={(agent) => memoryGiven.get(agent.id) ?? null}
       management={management}
       onRequestMutation={onRequestMutation}
       canConnect={canConnectFrom}

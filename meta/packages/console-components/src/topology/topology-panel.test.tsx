@@ -417,6 +417,26 @@ describe("TopologyPanel", () => {
     }));
   });
 
+  test("the drawer says when an idle agent last moved and when its memory was last given", () => {
+    const now = Date.now();
+    render(
+      <TopologyPanel
+        view="graph"
+        activity={[{ id: "inject", event: "memory.injected", identity: "billing", timestampMs: now - 2 * 60_000, data: {} }]}
+        agents={[agent("billing", {
+          progress: { health: "healthy", run_state: "idle", in_flight_work: 0, last_progress_at_ms: now - 4 * 60_000, last_progress_event: "became_idle" },
+        })]}
+        nodes={[queryNode("billing"), queryNode("dispatch")]}
+        links={[link("billing", "dispatch", { actual: true, declared: true, desired: true })]}
+        memoryScopes={[{ identity: "billing", records: 12 }]}
+      />,
+    );
+    pressNode("billing");
+    const drawer = screen.getByTestId("topology-drawer");
+    expect(drawer).toHaveTextContent("last active 4m ago");
+    expect(drawer).toHaveTextContent("12 records · last given 2m ago");
+  });
+
   test("the overflow menu holds the window, the edge mode and the filters", () => {
     render(<TopologyPanel view="graph" activity={[]} agents={[]} nodes={NODES} management={management} onRequestMutation={vi.fn()} />);
     openMenu();

@@ -4,7 +4,7 @@
 // panel's words and counts are tested without a renderer.
 
 import type { Tone } from "../panel-kit/tone";
-import { humanizeEnum, plural } from "../panel-kit/format";
+import { formatRelativeTime, humanizeEnum, plural } from "../panel-kit/format";
 import type { VizEdge, VizLane, VizNode, VizNodeKind, VizTone } from "../viz/graph/types";
 import type { TopoAgent, TopoEdge, TopoGraph, TopoSource } from "./data";
 import type {
@@ -249,7 +249,7 @@ function labelOf(graph: TopoGraph, id: string): string {
 }
 
 /** "Triage to Support · 12 messages in the last hour". */
-export function topologyEdgeTitle(graph: TopoGraph, edge: TopoEdge, window: TopologyWindow): string {
+export function topologyEdgeTitle(graph: TopoGraph, edge: TopoEdge, window: TopologyWindow, now?: number): string {
   const from = labelOf(graph, edge.from);
   const to = labelOf(graph, edge.to);
   switch (edge.relation) {
@@ -259,6 +259,9 @@ export function topologyEdgeTitle(graph: TopoGraph, edge: TopoEdge, window: Topo
       const parts = [backward > 0
         ? `${from} and ${to} · ${plural(forward + backward, "message")} ${window.phrase} (${forward} and ${backward})`
         : `${from} to ${to} · ${plural(forward, "message")} ${window.phrase}`];
+      // "last 2m ago": when the newest of them was sent.
+      const last = edge.lastAtMs && now ? formatRelativeTime(edge.lastAtMs, now) : "";
+      if (last) parts.push(last === "just now" ? "the last one just now" : `last ${last}`);
       if (edge.wired) parts.push("wired");
       return parts.join(" · ");
     }
@@ -493,7 +496,7 @@ export function buildTopologyView(graph: TopoGraph, options: TopologyViewOptions
  */
 export function topologyVizEdges(
   graph: TopoGraph,
-  options: Pick<TopologyViewOptions, "showHelpers" | "showChannels" | "focus" | "reveal" | "window">,
+  options: Pick<TopologyViewOptions, "showHelpers" | "showChannels" | "focus" | "reveal" | "window" | "now">,
 ): VizEdge[] {
   const window = TOPOLOGY_WINDOWS[options.window || DEFAULT_TOPOLOGY_WINDOW];
   const showHelpers = options.showHelpers !== false;
@@ -514,7 +517,7 @@ export function topologyVizEdges(
       }
     }
     if (options.focus && !(options.focus.has(edge.from) || options.focus.has(edge.to))) continue;
-    edges.push(toVizEdge(graph, edge, window));
+    edges.push(toVizEdge(graph, edge, window, options.now));
   }
   return edges;
 }
@@ -523,7 +526,7 @@ function joinWords(...parts: Array<string | null | undefined>): string {
   return parts.filter(Boolean).join(" · ");
 }
 
-function toVizEdge(graph: TopoGraph, edge: TopoEdge, window: TopologyWindow): VizEdge {
+function toVizEdge(graph: TopoGraph, edge: TopoEdge, window: TopologyWindow, now?: number): VizEdge {
   const base: VizEdge = {
     id: edge.id,
     from: edge.from,
@@ -534,7 +537,7 @@ function toVizEdge(graph: TopoGraph, edge: TopoEdge, window: TopologyWindow): Vi
     // A pair an operator disconnected on purpose is declared, not degraded:
     // no warn mark.
     ...(edge.suppressed ? { mark: null } : {}),
-    title: topologyEdgeTitle(graph, edge, window),
+    title: topologyEdgeTitle(graph, edge, window, now),
     attributes: {
       "data-topology-relation": edge.relation,
       ...(edge.degraded ? { "data-degraded": "true" } : {}),

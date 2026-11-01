@@ -151,6 +151,12 @@ describe("topology view model", () => {
     assert.equal(traffic?.weight, 12);
     assert.equal(traffic?.directed, true);
     assert.equal(traffic?.title, "Triage to Support · 12 messages in the last hour · wired");
+    // With the clock: when the newest of them was sent.
+    const timed = buildTopologyView(team(), options({ now: 1_000 + 2 * 60_000 }));
+    assert.equal(
+      timed.edges.find((edge) => edge.relation === "traffic")?.title,
+      "Triage to Support · 12 messages in the last hour · last 2m ago · wired",
+    );
     assert.equal(view.edges.find((edge) => edge.id === "wired:delivery:gate")?.attributes?.["data-suppressed"], "true");
     // Hovering a member draws its own roster route; hovering the channel draws them all.
     const member = buildTopologyView(team(), options({ reveal: new Set(["gate"]) }));

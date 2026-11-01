@@ -69,6 +69,8 @@ export interface TopologyDrawerProps {
   nowOf: (agent: TopoAgent) => TopologyNowLine | null;
   activityOf: (agent: TopoAgent) => TopologyAgentActivity | null;
   memoryOf: (agent: TopoAgent) => ConsoleTopologyMemoryScope | null;
+  /** When the agent's memory was last given to a turn (a memory read), if seen. */
+  memoryGivenOf?: (agent: TopoAgent) => number | null;
   management?: TopologyManagementState | null;
   onRequestMutation?: (intent: TopologyMutationIntent) => void | Promise<void>;
   /** The agent can be connected from here: Connect to... shows. */
@@ -110,7 +112,10 @@ export function topologyNowLine(
     return { text: phase || "Working on a turn", live: true };
   }
   if (status?.health === "crit") return { text: status.healthWord === "Broken" ? "Broken" : "Stuck: its run makes no progress", live: false };
-  return { text: "Idle", live: false };
+  // When it last moved: the runtime's own progress clock.
+  const lastMs = agent.agent?.progress?.last_progress_at_ms;
+  const since = typeof lastMs === "number" && lastMs > 0 ? formatRelativeTime(lastMs, now) : "";
+  return { text: "Idle", ...(since ? { detail: `last active ${since}` } : {}), live: false };
 }
 
 function label(graph: TopoGraph, id: string): string {
@@ -201,6 +206,7 @@ function AgentDrawer(props: TopologyDrawerProps & { agent: TopoAgent }): React.J
   const nowLine = props.nowOf(agent);
   const activity = props.activityOf(agent);
   const memory = props.memoryOf(agent);
+  const memoryGivenAt = props.memoryGivenOf?.(agent) ?? null;
   const rows = connectionRows(graph, agent, props.window, management, Boolean(onRequestMutation));
   const role = humanizeEnum(agent.role);
   const subtitle = [
@@ -315,6 +321,7 @@ function AgentDrawer(props: TopologyDrawerProps & { agent: TopoAgent }): React.J
               <p className="topo-drawer__fact">
                 {plural(memory.records, "record")}
                 {memory.quarantined ? ` · ${memory.quarantined} quarantined` : ""}
+                {memoryGivenAt ? ` · last given ${formatRelativeTime(memoryGivenAt, props.now)}` : ""}
               </p>
             </DrawerSection>
           ) : null}

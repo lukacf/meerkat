@@ -1049,14 +1049,16 @@ export function WorkGraphPanel({
           options: [
             {
               id: "graph",
-              label: <><KitGlyph name="graph" className="workgraph__view-glyph" />Graph</>,
+              label: <><KitGlyph name="graph" className="workgraph__view-glyph" /><span className="workgraph__view-label">Graph</span></>,
               ariaLabel: "Graph",
+              title: "Graph",
               testId: "workgraph-view-toggle:graph",
             },
             {
               id: "tree",
-              label: <><KitGlyph name="tree" className="workgraph__view-glyph" />Outline</>,
+              label: <><KitGlyph name="tree" className="workgraph__view-glyph" /><span className="workgraph__view-label">Outline</span></>,
               ariaLabel: "Outline",
+              title: "Outline",
               testId: "workgraph-view-toggle:tree",
             },
           ],

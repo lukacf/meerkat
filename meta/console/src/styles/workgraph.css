@@ -81,6 +81,23 @@
   padding-bottom: max(40px, 8%);
 }
 
+/* The view switch stays in the header at every width (the 098 contract's
+   browser scenario workgraph-header-click-across-refresh presses it in a
+   180 px pane); under 480 px the kit would fold a header's view into its
+   menu. Its labels already drop to glyphs there. */
+@container cc-panel (max-width: 479px) {
+  .workgraph__head .cc-panel-head__view { display: inline-flex; }
+  .workgraph__head .workgraph__view-label { display: none; }
+  .workgraph__head .workgraph__view-glyph { margin-right: 0; }
+  /* The switch, Refresh and the menu take their own row under the title. */
+  .workgraph__head.cc-panel-head--v2 { flex-wrap: wrap; row-gap: 8px; }
+  .workgraph__head.cc-panel-head--v2 .cc-panel-head__actions {
+    flex-basis: 100%;
+    justify-content: flex-start;
+    margin-left: 0;
+  }
+}
+
 /* === Graph view ====================================================== */
 
 .workgraph-graph {

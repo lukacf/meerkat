@@ -6,7 +6,6 @@
  * only in its own log), so the retired member's lane and its retire row
  * come from that backfill.
  */
-import React from "react";
 import { act, cleanup, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 

@@ -59615,24 +59615,33 @@ var INVALID_ACCESS_REASONS = {
 function isKnownInvalidAccessReason(reason) {
   return reason !== void 0 && Object.hasOwn(INVALID_ACCESS_REASONS, reason);
 }
-function invalidAccessNotice({ reason, detail }) {
-  const known = isKnownInvalidAccessReason(reason) ? INVALID_ACCESS_REASONS[reason] : null;
-  const words2 = known?.words ?? "The resulting access configuration is not valid";
-  const shown = detail && (known === null || known.showDetail) ? " (".concat(detail, ")") : "";
-  return "Changes were not saved. ".concat(words2).concat(shown, "; your draft is retained for correction.");
+function keepsDraft(edit) {
+  return edit === "admins" || edit === "rule" || edit === "group";
 }
-function accessSaveNotice(failure) {
+var GROUP_DELETE_WORDS = {
+  unknown_group: "The group is still used by a rule",
+  unknown_approver_group: "The group is still used by an approver"
+};
+function invalidAccessNotice({ reason, detail }, edit) {
+  const token = isKnownInvalidAccessReason(reason) ? reason : null;
+  const known = token ? INVALID_ACCESS_REASONS[token] : null;
+  const words2 = (token && edit === "group-delete" ? GROUP_DELETE_WORDS[token] : void 0) ?? known?.words ?? "The resulting access configuration is not valid";
+  const shown = detail && (known === null || known.showDetail) ? " (".concat(detail, ")") : "";
+  return keepsDraft(edit) ? "Changes were not saved. ".concat(words2).concat(shown, "; your draft is retained for correction.") : "Changes were not saved. ".concat(words2).concat(shown, ".");
+}
+function accessSaveNotice(failure, edit) {
+  const draft = keepsDraft(edit);
   switch (failure.kind) {
     case "revision_conflict":
       return "Access configuration changed. Review the latest settings before saving again.";
     case "owner_changed":
       return "The access configuration owner changed. Review the latest settings before saving again.";
     case "unavailable":
-      return "Changes were not saved. Checked access saves are unavailable; your draft is retained.";
+      return draft ? "Changes were not saved. Checked access saves are unavailable; your draft is retained." : "Changes were not saved. Checked access saves are unavailable.";
     case "invalid":
-      return invalidAccessNotice(failure);
+      return invalidAccessNotice(failure, edit);
     case "failed":
-      return "Changes were not saved. Your draft is retained; refresh Console access before trying again.";
+      return draft ? "Changes were not saved. Your draft is retained; refresh Console access before trying again." : "Changes were not saved. Refresh Console access before trying again.";
   }
 }
 
@@ -68373,7 +68382,7 @@ function AccessPanel({
     testId: "access-summary-standing"
   });
   const reviewNeeded = requiresReview && canReview;
-  const alertText = error48 || (saveFailure ? accessSaveNotice(saveFailure) : null);
+  const alertText = error48 || (saveFailure ? accessSaveNotice(saveFailure, saveFailure.edit) : null);
   const groupFormShown = canEdit || groupBase !== null;
   const groupEditedInPlace = editingGroup !== null && groups.some(([name2]) => name2 === editingGroup);
   const ruleEditedInPlace = ruleDraft !== null && editingRuleId !== null && rules.some((rule) => rule.id === editingRuleId);
@@ -68598,7 +68607,7 @@ function AccessPanel({
               Button,
               {
                 "data-testid": "access-toggle-enabled",
-                onClick: () => void mutate("immediate", captureBase(), (base) => onSetEnabled(!enabled, base)),
+                onClick: () => void mutate("toggle", captureBase(), (base) => onSetEnabled(!enabled, base)),
                 children: enabled ? "Disable enforcement" : "Enable enforcement"
               }
             ) : null,
@@ -68711,7 +68720,7 @@ function AccessPanel({
                     "data-testid": "access-group-delete:".concat(name2),
                     onClick: () => {
                       if (window.confirm('Delete group "'.concat(name2, '"?'))) {
-                        void mutate("immediate", captureBase(), (base) => onDeleteGroup(name2, base));
+                        void mutate("group-delete", captureBase(), (base) => onDeleteGroup(name2, base));
                       }
                     },
                     children: "Delete"
@@ -68795,7 +68804,7 @@ function AccessPanel({
                       "data-testid": "access-rule-delete:".concat(rule.id),
                       onClick: () => {
                         if (window.confirm(ruleDeleteConfirmText(rule))) {
-                          void mutate("immediate", captureBase(), (base) => onDeleteRule(rule.id, base));
+                          void mutate("rule-delete", captureBase(), (base) => onDeleteRule(rule.id, base));
                         }
                       },
                       children: "Delete"

@@ -72,6 +72,16 @@ function now(): number {
   return typeof performance !== "undefined" ? performance.now() : Date.now();
 }
 
+const subscribeNothing = () => () => undefined;
+
+/**
+ * False while React renders on a server (renderToString, renderToStaticMarkup),
+ * where no layout effect ever measures the frame; true in a browser or jsdom.
+ */
+function useClientRender(): boolean {
+  return React.useSyncExternalStore(subscribeNothing, () => true, () => false);
+}
+
 /** The element's size; `measured` turns true once it has been read (zero in jsdom). */
 function useElementSize(ref: React.RefObject<HTMLElement | null>): { width: number; height: number; measured: boolean } {
   const [size, setSize] = React.useState({ width: 0, height: 0, measured: false });
@@ -291,6 +301,10 @@ export const GraphView = React.forwardRef<GraphViewHandle, GraphViewProps>(funct
   const canvasRef = React.useRef<HTMLCanvasElement | null>(null);
   const particleRef = React.useRef<SVGGElement | null>(null);
   const size = useElementSize(rootRef);
+  // A browser draws after the frame's first measure; a server render, which
+  // never measures, draws at the default size.
+  const clientRender = useClientRender();
+  const drawable = size.measured || !clientRender;
   const reduced = useReducedMotion(rootRef);
   const measures = useMeasures(rootRef);
   const onScreen = useOnScreen(rootRef);
@@ -1307,7 +1321,7 @@ export const GraphView = React.forwardRef<GraphViewHandle, GraphViewProps>(funct
       {useCanvas ? <canvas ref={canvasRef} className="cc-viz-graph__canvas" aria-hidden="true" /> : null}
       <svg ref={svgRef} className="cc-viz-graph__svg" data-testid={testIds.svg} width="100%" height="100%">
         {/* The drawing waits for the frame's first measure (one layout, not two). */}
-        {size.measured ? (
+        {drawable ? (
         <>
         {kind === "lanes" ? (
           <LanesLayer

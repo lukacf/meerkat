@@ -3378,6 +3378,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_foreign_or_malformed_cursor_is_invalid_arguments() {
+        let service = WorkGraphService::with_scope(
+            Arc::new(MemoryWorkGraphStore::new()),
+            "realm",
+            WorkNamespace::default(),
+        );
+        for index in 0..3 {
+            service
+                .create(create_req(&format!("item {index}")))
+                .await
+                .expect("create");
+        }
+        // Not a cursor, another version, and an undecodable body.
+        for (tool, cursor) in [
+            ("workgraph_list", "garbage"),
+            ("workgraph_snapshot", "wg0.e30"),
+            ("workgraph_ready", "wg1.%%%"),
+        ] {
+            let error = crate::handle_unscoped_workgraph_tools_call(
+                &service,
+                tool,
+                &json!({ "cursor": cursor }),
+            )
+            .await
+            .expect_err("a malformed cursor is refused");
+            assert_eq!(
+                error.code,
+                crate::WorkGraphToolErrorCode::InvalidArguments,
+                "{tool} {cursor}: {error:?}"
+            );
+        }
+        // A list cursor continues list only.
+        let list = tool_page(&service, "workgraph_list", json!({ "limit": 1 })).await;
+        let cursor = next_cursor(&list);
+        for tool in ["workgraph_ready", "workgraph_snapshot"] {
+            let error = crate::handle_unscoped_workgraph_tools_call(
+                &service,
+                tool,
+                &json!({ "limit": 1, "cursor": cursor }),
+            )
+            .await
+            .expect_err("a list cursor is foreign to this read");
+            assert_eq!(
+                error.code,
+                crate::WorkGraphToolErrorCode::InvalidArguments,
+                "{tool}: {error:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn blocked_dependencies_are_not_ready_until_completed() {
         let service = WorkGraphService::with_scope(
             Arc::new(MemoryWorkGraphStore::new()),

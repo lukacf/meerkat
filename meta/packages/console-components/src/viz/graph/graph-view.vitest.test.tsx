@@ -282,8 +282,11 @@ describe("GraphView", () => {
       const [x1, y1] = at("v1");
       const [x3] = at("v3");
       expect(view.scale).toBe(1);
-      // The labels sit on the right: nothing is reserved left of the first mark.
-      expect(Math.abs((x1 - r) * view.scale + view.tx - 8)).toBeLessThanOrEqual(3);
+      // The labels sit on the right: nothing is reserved left of the first mark
+      // (the picture is centred across any slack the width leaves).
+      const left = (x1 - r) * view.scale + view.tx;
+      expect(left).toBeGreaterThanOrEqual(8);
+      expect(left).toBeLessThanOrEqual(8 + 8);
       expect((x3 + r + 5 + estimateLabelWidth("v3")) * view.scale + view.tx).toBeLessThanOrEqual(420 - 8);
       // Pinned to the top: the first row (24 px) starts 8 px in.
       expect(y1 * view.scale + view.ty).toBeLessThanOrEqual(8 + 12 + 1);

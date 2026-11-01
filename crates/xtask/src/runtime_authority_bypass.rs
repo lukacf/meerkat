@@ -362,7 +362,7 @@ fn workspace_production_sources(root: &Path) -> Result<Vec<SourceFile>> {
                 stack.push(path);
                 continue;
             }
-            if !path.extension().is_some_and(|ext| ext == "rs") {
+            if path.extension().is_none_or(|ext| ext != "rs") {
                 continue;
             }
             let rel = path

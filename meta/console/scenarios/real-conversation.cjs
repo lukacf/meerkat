@@ -5,6 +5,7 @@ const path = require("node:path");
 const { chromium } = require("playwright");
 const { randomUUID } = require("node:crypto");
 const { startFixture, eventually, rpc } = require("../acceptance-runtime.cjs");
+const { startFromEmptyFirstPane } = require("./empty-first-pane.cjs");
 
 const evidence = process.env.META_BROWSER_EVIDENCE || path.join(__dirname, "../../output/playwright/console-acceptance");
 const prose = index => `## Investigation ${index}\n\nThe reviewer checks the **candidate workgraph** and records the exact evidence. Repeated phrase, repeated phrase. Unicode: A\u030A, \u00e5 and \ud83d\ude80.\n\n- [x] Source inspected\n- [ ] Peer review pending\n\n| Check | Result |\n| --- | --- |\n| Runtime | Healthy |\n| Delivery | Confirmed |\n\n\`\`\`ts\nconst check = ${index};\n\`\`\`\n\n[Reference](https://example.com) and ![remote tracking image](https://example.com/tracker.png).\n\n`;
@@ -1117,6 +1118,8 @@ async function olderHistory(host) {
     const history = await timeline(fixture);
     assert(history.frames.length >= 1000 && Number(history.latest_cursor.split(":").at(-1)) > 1000,
       "actual owner history crosses both the recent-page and raw-scan boundaries");
+    // Today's backfill pre-fills the agent's log when Today is open, so the stock console starts from an empty first pane.
+    if (host === "stock") await startFromEmptyFirstPane(page, "real-stock-history-prepend");
     await open(page, fixture, host, monitor);
     const viewport = transcript(page, host);
     const ownerPages = () => fixture.observations.flatMap(item => {

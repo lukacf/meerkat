@@ -3386,6 +3386,12 @@ impl MobActor {
                             "the same-session rotation of '{identity}' found no session to keep"
                         )));
                     };
+                    #[cfg(test)]
+                    if retirement_stage_test_hooks::take_kept_session_release_failure(&session) {
+                        return Err(MobError::Internal(
+                            "injected kept-session release failure".to_string(),
+                        ));
+                    }
                     if unborn {
                         return Ok(mob_dsl::MemberSessionDisposal::KeptForSuccessor);
                     }
@@ -6989,6 +6995,30 @@ pub(crate) mod retirement_stage_test_hooks {
     static DEGRADE_BEFORE_INGRESS_DETACH: Mutex<Vec<SessionId>> = Mutex::new(Vec::new());
     static REFUSED_INGRESS_STAGE_RELOADS: Mutex<Vec<SessionId>> = Mutex::new(Vec::new());
     static INGRESS_STAGE_RELOADS: Mutex<Vec<SessionId>> = Mutex::new(Vec::new());
+    static FAILING_KEPT_SESSION_RELEASES: Mutex<Vec<SessionId>> = Mutex::new(Vec::new());
+
+    /// The next kept-session release stage of a same-session rotation's
+    /// retirement of `session` fails, once: the retirement settles stuck at
+    /// that stage.
+    pub(crate) fn fail_next_kept_session_release(session: &SessionId) {
+        FAILING_KEPT_SESSION_RELEASES
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(session.clone());
+    }
+
+    /// Whether the kept-session release failure armed for `session` has not
+    /// fired yet.
+    pub(crate) fn kept_session_release_failure_armed(session: &SessionId) -> bool {
+        FAILING_KEPT_SESSION_RELEASES
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .contains(session)
+    }
+
+    pub(super) fn take_kept_session_release_failure(session: &SessionId) -> bool {
+        take_armed(&FAILING_KEPT_SESSION_RELEASES, session)
+    }
 
     /// The reason of the refusal [`refuse_next_ingress_stage_reload`] arms.
     pub(crate) const INJECTED_RELOAD_REFUSAL: &str =

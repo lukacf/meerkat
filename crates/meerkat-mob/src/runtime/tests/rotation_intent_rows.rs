@@ -52,17 +52,24 @@ impl RotationMob {
 
     /// [`Self::new`], with `configure` applied to the mob's builder.
     async fn new_with(label: &str, configure: impl FnOnce(MobBuilder) -> MobBuilder) -> Self {
+        Self::of_definition(label, sample_definition(), configure).await
+    }
+
+    /// A mob of `definition`, with `configure` applied to its builder after
+    /// the fixture's own settings (so it can replace them).
+    async fn of_definition(
+        label: &str,
+        definition: MobDefinition,
+        configure: impl FnOnce(MobBuilder) -> MobBuilder,
+    ) -> Self {
         let keys = tempfile::tempdir().expect("a comms identity root");
         let service = Arc::new(MockSessionService::new());
         let _adapter = service.enable_runtime_adapter();
         let storage = MobStorage::in_memory();
         let handle = configure(
-            MobBuilder::new(
-                with_unique_mob_id(sample_definition(), label),
-                storage.clone(),
-            )
-            .with_session_service(service.clone())
-            .with_member_comms_identity_root(keys.path()),
+            MobBuilder::new(with_unique_mob_id(definition, label), storage.clone())
+                .with_session_service(service.clone())
+                .with_member_comms_identity_root(keys.path()),
         )
         .create()
         .await
@@ -85,6 +92,15 @@ impl RotationMob {
     /// host-pending ([`MobBuilder::with_host_pending_members`]): it keeps its
     /// own record of their preparation.
     async fn crash_and_restart_host_pending(&mut self, host_pending: &[&str]) {
+        let host_pending: Vec<AgentIdentity> = host_pending.iter().copied().map(id).collect();
+        self.crash_and_restart_with(|builder| builder.with_host_pending_members(host_pending))
+            .await;
+    }
+
+    /// [`Self::crash_and_restart`], with `configure` applied to the resume's
+    /// builder after the fixture's own settings (a mob on network comms
+    /// resumes on them).
+    async fn crash_and_restart_with(&mut self, configure: impl FnOnce(MobBuilder) -> MobBuilder) {
         let restarted = Arc::new(self.service.cold_restart_preserving_durable_state().await);
         let _ = restarted.enable_runtime_adapter();
         crash_stop_and_release_routes(self.handle.clone()).await;
@@ -92,12 +108,13 @@ impl RotationMob {
         self.handle = tokio::time::timeout(
             STEP,
             Box::pin(
-                MobBuilder::for_resume(self.storage.clone())
-                    .with_session_service(self.service.clone())
-                    .with_member_comms_identity_root(self.keys.path())
-                    .with_host_pending_members(host_pending.iter().copied().map(id))
-                    .notify_orchestrator_on_resume(false)
-                    .resume(),
+                configure(
+                    MobBuilder::for_resume(self.storage.clone())
+                        .with_session_service(self.service.clone())
+                        .with_member_comms_identity_root(self.keys.path())
+                        .notify_orchestrator_on_resume(false),
+                )
+                .resume(),
             ),
         )
         .await
@@ -706,7 +723,7 @@ async fn assert_kept_topology(mob: &RotationMob, external: &TrustedPeerDescripto
     );
 }
 
-/// A message from `from` to `to` over their kept edge is carried.
+/// A message from `from` to `to` over their edge is carried.
 async fn send_over_kept_edge(mob: &RotationMob, from: &str, to: &str) {
     let body = format!("a message from {from} to {to}");
     let receipt = tokio::time::timeout(
@@ -720,7 +737,7 @@ async fn send_over_kept_edge(mob: &RotationMob, from: &str, to: &str) {
     )
     .await
     .expect("the send answers")
-    .expect("the kept edge carries the message");
+    .expect("the edge carries the message");
     assert_eq!(receipt.to, id(to));
 }
 
@@ -929,6 +946,451 @@ async fn a_declared_migration_survives_a_restart_before_its_first_build() {
         Some(dsl::MemberMaterializationPhase::Live),
         "the successor wakes under the new role after the restart"
     );
+}
+
+/// The sample definition with the roles of a role move under declared
+/// wiring: `member`, wired to `helper`, and `steward`, wired to `auditor`
+/// (`role_wiring`), each a worker otherwise.
+fn role_move_definition() -> MobDefinition {
+    let mut definition = sample_definition();
+    let worker = definition
+        .profiles
+        .get(&ProfileName::from("worker"))
+        .cloned()
+        .expect("the worker profile");
+    for role in ["member", "helper", "steward", "auditor"] {
+        definition
+            .profiles
+            .insert(ProfileName::from(role), worker.clone());
+    }
+    definition.wiring.role_wiring = vec![
+        RoleWiringRule {
+            a: ProfileName::from("member"),
+            b: ProfileName::from("helper"),
+        },
+        RoleWiringRule {
+            a: ProfileName::from("steward"),
+            b: ProfileName::from("auditor"),
+        },
+    ];
+    definition
+}
+
+/// A turn-driven spec of `name` under `role`: it owes no kickoff.
+fn role_spec(role: &str, name: &str) -> SpawnMemberSpec {
+    let mut spec = SpawnMemberSpec::new(role, id(name));
+    spec.runtime_mode = Some(crate::MobRuntimeMode::TurnDriven);
+    spec
+}
+
+/// Whether MobMachine holds the member edge between `a` and `b`.
+fn edge_held(mob: &RotationMob, a: &str, b: &str) -> bool {
+    let edge = dsl::WiringEdge::new(
+        dsl::AgentIdentity::from_domain(&id(a)),
+        dsl::AgentIdentity::from_domain(&id(b)),
+    );
+    mob.handle
+        .machine_state_watch_rx
+        .borrow()
+        .wiring_edges
+        .contains(&edge)
+}
+
+/// Whether a member wiring row after `name`'s `MemberRetired` row of
+/// `generation` joins `name` and `peer`.
+fn wired_after_retirement(
+    journal: &[MobEvent],
+    name: &str,
+    generation: Generation,
+    peer: &str,
+) -> bool {
+    let Some(retired) = journal.iter().position(|event| {
+        matches!(
+            &event.kind,
+            MobEventKind::MemberRetired {
+                agent_identity,
+                generation: retired,
+                ..
+            } if agent_identity.as_str() == name && *retired == generation
+        )
+    }) else {
+        return false;
+    };
+    let joins = |a: &AgentIdentity, b: &AgentIdentity| {
+        (a.as_str() == name && b.as_str() == peer) || (a.as_str() == peer && b.as_str() == name)
+    };
+    journal[retired..].iter().any(|event| match &event.kind {
+        MobEventKind::MembersWired { a, b } => joins(a, b),
+        MobEventKind::MembersWiredBatch { edges } => {
+            edges.iter().any(|edge| joins(&edge.a, &edge.b))
+        }
+        _ => false,
+    })
+}
+
+/// The name under which `holder`'s comms runtime trusts the endpoint
+/// MobMachine records for `peer`; `None` while either is missing.
+async fn trusted_name(mob: &RotationMob, holder: &str, peer: &str) -> Option<String> {
+    let peer_id = mob
+        .handle
+        .machine_state_watch_rx
+        .borrow()
+        .member_peer_ids
+        .get(&dsl::AgentIdentity::from_domain(&id(peer)))
+        .map(|peer_id| peer_id.0.clone())?;
+    let peer_id = meerkat_core::comms::PeerId::parse(&peer_id).ok()?;
+    let session = mob.handle.resolve_bridge_session_id(&id(holder)).await?;
+    let comms = mob.service.comms_runtime(&session).await?;
+    comms
+        .peers()
+        .await
+        .into_iter()
+        .find(|entry| entry.peer_id == peer_id)
+        .map(|entry| entry.name.as_str().to_string())
+}
+
+/// Wait, within one step, until `holder` trusts the endpoint MobMachine
+/// records for `peer`, and return the name it trusts it under.
+async fn trusts_under(mob: &RotationMob, holder: &str, peer: &str) -> String {
+    let deadline = tokio::time::Instant::now() + STEP;
+    loop {
+        if let Some(name) = trusted_name(mob, holder, peer).await {
+            return name;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "{holder} never trusted the endpoint recorded for {peer}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// Wait, within one step, until `name`'s retirement settles stuck at the
+/// kept session's release.
+async fn stuck_at_session_release(mob: &RotationMob, name: &str) {
+    let deadline = tokio::time::Instant::now() + STEP;
+    loop {
+        let settlement = mob
+            .handle
+            .retirement_settlement(&id(name))
+            .map(|watch| watch.current());
+        if matches!(
+            &settlement,
+            Some(crate::runtime::RetirementSettlement::Stuck { stage, .. })
+                if stage.as_str() == "retire-session-release"
+        ) {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "{name}'s retirement never settled stuck at the session release: {settlement:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// MobMachine holds `name`'s same-session move to `role`, stuck: the role
+/// it started with is pinned, and no endpoint is recorded (on network comms
+/// the successor's first wake registers one).
+fn assert_started_role(mob: &RotationMob, name: &str, role: &str) {
+    let dsl_identity = dsl::AgentIdentity::from_domain(&id(name));
+    let state = mob.handle.machine_state_watch_rx.borrow();
+    assert_eq!(
+        state.member_rotation_targets.get(&dsl_identity),
+        Some(&dsl::RotationTarget::SameSession),
+        "{name}'s same-session rotation stands"
+    );
+    assert_eq!(
+        state
+            .member_rotation_profile_names
+            .get(&dsl_identity)
+            .map(String::as_str),
+        Some(role),
+        "MobMachine pins the role {name}'s move started with"
+    );
+    assert!(
+        !state
+            .member_rotation_peer_endpoints
+            .contains_key(&dsl_identity),
+        "on network comms {name}'s move records no endpoint"
+    );
+}
+
+/// A re-issue of `name`'s stuck move to `steward` under any other role (its
+/// own, implicitly and by name, or a third one) is refused retryable before
+/// anything runs, naming the started role: no row is written, the role stays
+/// pinned and the move stays stuck.
+async fn assert_reissues_refused(mob: &RotationMob, name: &str) {
+    let journal_before = mob.journal().await.len();
+    for request in [
+        MemberRespawn::new(),
+        MemberRespawn::new().with_profile("member"),
+        MemberRespawn::new().with_profile("helper"),
+    ] {
+        let refused = tokio::time::timeout(STEP, mob.handle.respawn_member(id(name), request))
+            .await
+            .expect("the re-issue answers");
+        assert!(
+            matches!(
+                &refused,
+                Err(MobError::LifecycleOperationPending { intent })
+                    if intent.contains("under role steward")
+            ),
+            "a re-issue of {name}'s move under another role is refused: {refused:?}"
+        );
+    }
+    assert_eq!(
+        mob.journal().await.len(),
+        journal_before,
+        "no row was written"
+    );
+    assert_started_role(mob, name, "steward");
+    assert!(
+        matches!(
+            mob.handle
+                .retirement_settlement(&id(name))
+                .map(|watch| watch.current()),
+            Some(crate::runtime::RetirementSettlement::Stuck { stage, .. })
+                if stage.as_str() == "retire-session-release"
+        ),
+        "{name}'s move stays stuck"
+    );
+}
+
+/// `name`'s move to `steward` finished on `session`: one batch seats the
+/// successor at generation 1 under `steward` on the same session and wires
+/// its declared edge to the auditor; MobMachine holds no rotation of it, and
+/// holds that edge but not its own role's edge to the helper. Once both ends
+/// are woken (the successor's first wake registers its endpoint under the
+/// new role's comms name), the auditor trusts it under that name, MobMachine
+/// records the endpoint under it, and a message crosses the edge both ways.
+/// A message over the ended edge is refused.
+async fn assert_moved(mob: &RotationMob, name: &str, session: &SessionId) {
+    let journal = mob.journal().await;
+    assert_eq!(
+        successor_in_the_terminal_batch(&journal, name, Generation::new(0)),
+        Some((
+            Generation::new(1),
+            ProfileName::from("steward"),
+            Some(session.clone())
+        )),
+        "one batch seats {name} under steward on its own session"
+    );
+    assert!(
+        wired_after_retirement(&journal, name, Generation::new(0), "mover-auditor"),
+        "the move journals {name}'s declared edge to the auditor"
+    );
+    assert_eq!(&mob.session(name).await, session);
+    let dsl_identity = dsl::AgentIdentity::from_domain(&id(name));
+    {
+        let state = mob.handle.machine_state_watch_rx.borrow();
+        assert_eq!(
+            state
+                .member_profile_names
+                .get(&dsl_identity)
+                .map(String::as_str),
+            Some("steward"),
+            "MobMachine seats {name} under the started role"
+        );
+        assert!(
+            !state.member_rotation_targets.contains_key(&dsl_identity)
+                && !state
+                    .member_rotation_profile_names
+                    .contains_key(&dsl_identity),
+            "MobMachine holds no rotation of {name}"
+        );
+    }
+    assert!(
+        edge_held(mob, name, "mover-auditor"),
+        "{name} is wired to the auditor"
+    );
+    assert!(
+        !edge_held(mob, name, "mover-helper"),
+        "{name}'s own role's edge to the helper ended"
+    );
+    let wired_to = mob
+        .handle
+        .get_member(&id(name))
+        .await
+        .expect("roster read")
+        .expect("the successor is seated")
+        .wired_to;
+    assert!(
+        wired_to.contains(&id("mover-auditor")) && !wired_to.contains(&id("mover-helper")),
+        "the roster wires {name} to the auditor only: {wired_to:?}"
+    );
+
+    let new_name = crate::runtime::actor::render_member_comms_name(
+        mob.handle.mob_id().as_str(),
+        "steward",
+        name,
+    )
+    .expect("a member comms name");
+    for member in [name, "mover-auditor"] {
+        tokio::time::timeout(STEP, mob.handle.ensure_member_live(&id(member)))
+            .await
+            .expect("the wake answers")
+            .expect("the member wakes");
+    }
+    assert_eq!(
+        trusts_under(mob, "mover-auditor", name).await,
+        new_name,
+        "the auditor trusts {name} under the new role's comms name"
+    );
+    trusts_under(mob, name, "mover-auditor").await;
+    assert_eq!(
+        mob.handle
+            .machine_state_watch_rx
+            .borrow()
+            .member_peer_endpoints
+            .get(&dsl_identity)
+            .map(|endpoint| endpoint.name.0.clone()),
+        Some(new_name),
+        "MobMachine records {name}'s endpoint under the new role's comms name"
+    );
+    send_over_kept_edge(mob, "mover-auditor", name).await;
+    send_over_kept_edge(mob, name, "mover-auditor").await;
+    let refused = mob
+        .handle
+        .send_peer_message(
+            id("mover-helper"),
+            id(name),
+            "over the ended edge",
+            meerkat_core::types::HandlingMode::Queue,
+        )
+        .await;
+    assert!(
+        matches!(&refused, Err(MobError::WiringError(_))),
+        "the ended edge carries nothing: {refused:?}"
+    );
+}
+
+/// A role move that got stuck is finished only under the role it started
+/// with, on network comms, with peers and edges, and after a restart too.
+/// The definition wires the member's own role (`member`) to a helper and
+/// the new one (`steward`) to an auditor. A `respawn_member` naming
+/// `steward` records no endpoint (the successor's first wake registers one)
+/// and MobMachine pins the started role; the kept session's release fails
+/// once, so the move settles stuck at that stage. While it stands, a
+/// re-issue under the member's own role, or a third one, is refused
+/// retryable, naming the started role, and writes nothing. A re-issue under
+/// `steward` finishes it: the successor is seated under `steward` on the same
+/// session, the helper's edge has ended, the auditor's declared edge is wired
+/// and journaled, and once the successor's first wake registers its endpoint
+/// under the new role's comms name, the auditor trusts that name and a
+/// message crosses the edge both ways. A second member's move, stuck the same
+/// way before a crash, is recorded again by the restarted mob with its
+/// started role pinned by the replay; the restarted mob's own re-drive sticks
+/// at the same stage, and the same refusals and the same finish follow.
+///
+/// RED: restore the endpoint comparison in `retirement_reply_under_rotation`
+/// (a re-issue of a same-session rotation that recorded no endpoint passes
+/// whatever role it names): the own-role re-issue passes the re-issue check
+/// and re-drives the stuck move, so it is not refused naming the started
+/// role. Drop the started role from the replay arm
+/// (`RecoverMemberRotationIntentSameSession`): the replay records the second
+/// member's stuck move without it, which the invariant that a same-session
+/// rotation holds its started role refuses, and the restart fails.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stuck_role_move_is_finished_only_under_the_role_it_started_with() {
+    use crate::runtime::actor::retirement_stage_test_hooks as stages;
+
+    let mut mob = RotationMob::of_definition(
+        "role-move-network",
+        role_move_definition(),
+        MobBuilder::with_network_member_comms,
+    )
+    .await;
+    for (role, name) in [
+        ("helper", "mover-helper"),
+        ("auditor", "mover-auditor"),
+        ("member", "mover"),
+        ("member", "mover-late"),
+    ] {
+        mob.handle
+            .spawn_spec(role_spec(role, name))
+            .await
+            .expect("spawn the member");
+    }
+    for name in ["mover", "mover-late"] {
+        assert!(
+            edge_held(&mob, name, "mover-helper"),
+            "{name}'s own role wires it to the helper"
+        );
+    }
+
+    // The move, stuck at the kept session's release.
+    let session = mob.session("mover").await;
+    stages::fail_next_kept_session_release(&session);
+    let stuck = tokio::time::timeout(
+        STEP,
+        mob.handle
+            .respawn_member(id("mover"), MemberRespawn::new().with_profile("steward")),
+    )
+    .await
+    .expect("the move answers");
+    assert!(
+        matches!(
+            &stuck,
+            Err(MobError::MemberRetirementStuck { stage, .. }) if stage == "retire-session-release"
+        ),
+        "the move is stuck at the kept session's release: {stuck:?}"
+    );
+    assert_started_role(&mob, "mover", "steward");
+    assert_reissues_refused(&mob, "mover").await;
+    let receipt = tokio::time::timeout(
+        STEP,
+        mob.handle
+            .respawn_member(id("mover"), MemberRespawn::new().with_profile("steward")),
+    )
+    .await
+    .expect("the re-issue answers")
+    .expect("a re-issue under the started role finishes the move");
+    assert_eq!(receipt.identity, id("mover"));
+    assert_moved(&mob, "mover", &session).await;
+
+    // The same across a restart: the second move is stuck before the crash,
+    // and the restarted mob's own re-drive sticks at the same stage.
+    let late_session = mob.session("mover-late").await;
+    stages::fail_next_kept_session_release(&late_session);
+    let stuck = tokio::time::timeout(
+        STEP,
+        mob.handle.respawn_member(
+            id("mover-late"),
+            MemberRespawn::new().with_profile("steward"),
+        ),
+    )
+    .await
+    .expect("the move answers");
+    assert!(
+        matches!(
+            &stuck,
+            Err(MobError::MemberRetirementStuck { stage, .. }) if stage == "retire-session-release"
+        ),
+        "the second move is stuck at the kept session's release: {stuck:?}"
+    );
+    stages::fail_next_kept_session_release(&late_session);
+    mob.crash_and_restart_with(MobBuilder::with_network_member_comms)
+        .await;
+    stuck_at_session_release(&mob, "mover-late").await;
+    assert!(
+        !stages::kept_session_release_failure_armed(&late_session),
+        "the restarted mob's own re-drive reached the kept session's release"
+    );
+    assert_started_role(&mob, "mover-late", "steward");
+    assert_reissues_refused(&mob, "mover-late").await;
+    let receipt = tokio::time::timeout(
+        STEP,
+        mob.handle.respawn_member(
+            id("mover-late"),
+            MemberRespawn::new().with_profile("steward"),
+        ),
+    )
+    .await
+    .expect("the re-issue answers")
+    .expect("a re-issue under the started role finishes the move after the restart");
+    assert_eq!(receipt.identity, id("mover-late"));
+    assert_moved(&mob, "mover-late", &late_session).await;
 }
 
 /// A runtime-mode restamp is one same-session step: `respawn_member` naming
@@ -1589,6 +2051,108 @@ async fn same_session_successor_rows_replay_under_097() {
     handle.shutdown().await.expect("shut the fixture mob down");
 }
 
+/// Rollback of a same-session role move, lane-run leg: needs the published
+/// Core 0.9.7 (`meerkat-mob` 0.9.7).
+///
+/// This build writes the fixture: a persistent mob store (SQLite) at
+/// `$MEERKAT_ROLLBACK_FIXTURE_DIR/same-session-role-move/mob.sqlite`, whose
+/// definition wires `lead` to `worker` (`role_wiring`), holding a worker
+/// wired to a peer worker and then moved to `lead` on its own session
+/// (`respawn_member` naming `lead`): its preserving retirement start row
+/// with the rotation record, whose next endpoint is the member's own key
+/// under the `lead` comms name, and its terminal batch, whose `MemberRetired`
+/// and `MemberSpawned` rows name the same session, the `MemberSpawned` row
+/// under `lead` with that endpoint, followed by the declared `lead` edge to
+/// the peer. The build checks that shape before it shuts the mob down. The
+/// lane resumes the store with Core 0.9.7, which ignores the rotation
+/// record, and checks: the resume succeeds; the member is listed `active` at
+/// generation 1 under `lead` on the same session, with the endpoint its
+/// `MemberSpawned` row records (its own key under the new name); it is wired
+/// to the peer; and a delivery to it wakes it under the new name.
+///
+/// RED: a role-move row 0.9.7 cannot replay (a `MemberSpawned` row under
+/// another role on the session the retirement kept, read as a collision; an
+/// endpoint under a new name with the retired incarnation's key, refused as
+/// a reused peer id; or a stored key it refuses) fails the resume, or leaves
+/// the member unlisted, under its old role, or unwired.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "lane:rollback - writes the fixture the published Core 0.9.7 resumes"]
+async fn same_session_role_move_rows_replay_under_097() {
+    let dir = rollback_fixture_dir("same-session-role-move");
+    let (handle, _service) = open_rotation_fixture_of(
+        &dir,
+        "rollback-same-session-role-move",
+        sample_definition_with_cross_role_wiring(),
+    )
+    .await;
+    for name in ["moved", "moved-peer"] {
+        handle
+            .spawn_spec(worker_spec(name))
+            .await
+            .expect("spawn the member");
+    }
+    handle
+        .wire(id("moved"), id("moved-peer"))
+        .await
+        .expect("wire the members");
+    let session = handle
+        .resolve_bridge_session_id(&id("moved"))
+        .await
+        .expect("the member is bound to a session");
+    let dsl_identity = dsl::AgentIdentity::from_domain(&id("moved"));
+    let peer_id = handle
+        .machine_state_watch_rx
+        .borrow()
+        .member_peer_ids
+        .get(&dsl_identity)
+        .cloned()
+        .expect("the member's endpoint");
+    tokio::time::timeout(
+        STEP,
+        handle.respawn_member(id("moved"), MemberRespawn::new().with_profile("lead")),
+    )
+    .await
+    .expect("the role move answers")
+    .expect("the member moves to the lead role on its own session");
+
+    let entry = handle
+        .get_member(&id("moved"))
+        .await
+        .expect("roster read")
+        .expect("the successor is seated");
+    assert_eq!(
+        (entry.role.clone(), entry.generation),
+        (ProfileName::from("lead"), Generation::new(1))
+    );
+    assert_eq!(
+        handle.resolve_bridge_session_id(&id("moved")).await,
+        Some(session),
+        "the successor keeps the member's session"
+    );
+    let lead_name =
+        crate::runtime::actor::render_member_comms_name(handle.mob_id().as_str(), "lead", "moved")
+            .expect("a member comms name");
+    {
+        let state = handle.machine_state_watch_rx.borrow();
+        assert_eq!(
+            state
+                .member_peer_endpoints
+                .get(&dsl_identity)
+                .map(|endpoint| (endpoint.name.0.clone(), endpoint.peer_id.clone())),
+            Some((lead_name, peer_id)),
+            "the successor's endpoint is the member's key under the lead comms name"
+        );
+        assert!(
+            state.wiring_edges.contains(&dsl::WiringEdge::new(
+                dsl_identity.clone(),
+                dsl::AgentIdentity::from_domain(&id("moved-peer")),
+            )),
+            "the declared lead edge joins the peer"
+        );
+    }
+    handle.shutdown().await.expect("shut the fixture mob down");
+}
+
 fn rollback_fixture_dir(name: &str) -> std::path::PathBuf {
     let dir = std::path::PathBuf::from(
         std::env::var_os("MEERKAT_ROLLBACK_FIXTURE_DIR")
@@ -1605,9 +2169,17 @@ async fn open_rotation_fixture(
     dir: &std::path::Path,
     mob_id: &str,
 ) -> (MobHandle, Arc<MockSessionService>) {
+    open_rotation_fixture_of(dir, mob_id, sample_definition()).await
+}
+
+/// [`open_rotation_fixture`] of `definition`.
+async fn open_rotation_fixture_of(
+    dir: &std::path::Path,
+    mob_id: &str,
+    mut definition: MobDefinition,
+) -> (MobHandle, Arc<MockSessionService>) {
     let service = Arc::new(MockSessionService::new());
     let _adapter = service.enable_runtime_adapter();
-    let mut definition = sample_definition();
     definition.id = MobId::from(mob_id);
     let handle = MobBuilder::new(
         definition,

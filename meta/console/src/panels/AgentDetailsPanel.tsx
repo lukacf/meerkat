@@ -334,9 +334,9 @@ export function AgentDetailsPanel({
         </GlanceStrip>
       ) : null}
       <PanelBody className="agent-details__body">
-        {inspect === undefined ? (
+        {view === undefined ? (
           <LoadingState label="Loading agent details" rows={4} />
-        ) : inspect === null ? (
+        ) : view === null ? (
           <EmptyState
             kind="error"
             title="Couldn't load this agent's details"

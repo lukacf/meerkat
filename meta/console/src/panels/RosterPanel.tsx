@@ -87,6 +87,8 @@ interface RosterPanelProps {
   };
   /** A fixed clock (tests, the gallery). */
   now?: () => number;
+  /** The agent whose drawer is open when the panel first shows (the gallery). */
+  defaultOpenMemberId?: string;
 }
 
 type Bucket = AgentBucket;
@@ -272,6 +274,7 @@ export function RosterPanel({
   actionLabels,
   actionVisibility,
   now,
+  defaultOpenMemberId,
 }: RosterPanelProps): React.JSX.Element {
   const ledger = useActivityLedger({ tickMs: 30_000 });
   const nowMs = now ? now() : ledger.nowMs;
@@ -285,8 +288,8 @@ export function RosterPanel({
   const [query, setQuery] = React.useState("");
   const [filter, setFilter] = React.useState<Filter>("all");
   const [stateFilter, setStateFilter] = React.useState<StateFilter | null>(null);
-  const [sel, setSel] = React.useState<string>(selectedMemberId || "");
-  const [detailOpen, setDetailOpen] = React.useState(false);
+  const [sel, setSel] = React.useState<string>(defaultOpenMemberId || selectedMemberId || "");
+  const [detailOpen, setDetailOpen] = React.useState(Boolean(defaultOpenMemberId));
   const [expanded, setExpanded] = React.useState<ReadonlySet<string>>(() => new Set());
 
   React.useEffect(() => {
@@ -535,7 +538,7 @@ export function RosterPanel({
                 filled={longLived}
                 outlined={helpers}
                 live={workingLongLived}
-                width={132}
+                width={width > 0 && width < 480 ? 72 : width > 0 && width < ROSTER_CARDS_MIN_WIDTH ? 104 : 132}
                 label={`${plural(members.length, "agent")}: ${longLived} long-lived, ${plural(helpers, "helper")}, ${working.length} working now`}
               />
             }

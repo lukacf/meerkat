@@ -29,6 +29,7 @@ import type { ConsoleAgent } from "../types";
 import { agentHealth, type AgentHealth, type AgentHealthKind } from "../lib/agent-status";
 import { useActivityLedger } from "../lib/activity-ledger";
 import { HOUR_MS, agentActivity, healthReason, hourCeiling, hourLabel, seriesWords, type AgentActivity } from "../lib/agent-activity";
+import { useElementWidth } from "../lib/use-element-width";
 
 /** The team facts Health reads besides its agents (`health_overview.live_snapshot`). */
 export interface HealthTeamSnapshot {
@@ -56,6 +57,8 @@ const KIND_ORDER: Readonly<Record<AgentHealthKind, number>> = {
 const HEALTHY_TILES_SHOWN = 24;
 /** Rows of the activity grid: the busiest agents. */
 const HEAT_ROWS_SHOWN = 24;
+/** Room for the agents' names at the left of the activity grid. */
+const HEAT_LABEL_WIDTH = 140;
 
 type HealthFilter = "healthy" | "working" | "degraded" | "stalled" | "repair";
 
@@ -91,6 +94,14 @@ function healthOf(row: IdentityStatusRow, label: string, agent: ConsoleAgent | u
     },
     { openRun: activity.openRun },
   );
+}
+
+/** A tile's second line: the role, and the reachability only where it is
+ * not the usual "Can receive messages". */
+function tileSubtitle(row: IdentityStatusRow): string {
+  const role = row.role ? humanizeEnum(row.role) : "";
+  const reach = row.addressability === "addressable" ? "" : reachabilityWords(row.addressability);
+  return [role, reach].filter(Boolean).join(" · ");
 }
 
 /** "router · delivery": the loaded modules' names in words. */
@@ -224,6 +235,12 @@ export function HealthPanel({
   const fineShown = showAllHealthy || filter ? fine : fine.slice(0, HEALTHY_TILES_SHOWN);
   const tiles = [...problems, ...fineShown];
 
+  const heatRef = React.useRef<HTMLDivElement | null>(null);
+  const heatWidth = useElementWidth(heatRef);
+  // Cells grow with the pane, 8 to 16 px, so the grid reads at every width.
+  const heatCell = heatWidth > 0
+    ? Math.max(8, Math.min(16, Math.floor((heatWidth - HEAT_LABEL_WIDTH) / 24) - 3))
+    : 10;
   const endMs = hourCeiling(nowMs);
   const heat = React.useMemo(() => {
     const ranked = entries
@@ -317,7 +334,7 @@ export function HealthPanel({
                           mark={<AgentAvatar name={entry.name} size={22} live={entry.health.kind === "working"} />}
                           title={<span title={entry.identity}>{entry.name}</span>}
                           activateLabel={openable ? `${entry.name}, ${entry.health.word}` : undefined}
-                          subtitle={reachabilityWords(entry.row.addressability)}
+                          subtitle={tileSubtitle(entry.row) || undefined}
                           status={<StatusPill tone={entry.health.tone}>{entry.health.word}</StatusPill>}
                           now={{ text: unobservedReason ? `Not observed: ${String(unobservedReason).replace(/_/g, " ")}` : entry.reason, live: entry.health.kind === "working" }}
                           trend={{
@@ -348,10 +365,13 @@ export function HealthPanel({
               padded
               testId="health-activity"
             >
+              <div ref={heatRef} className="health__heat-measure" aria-hidden="true" />
               <HeatStrip
                 rows={heat.rows}
                 columns={heatColumns}
-                rowLabelWidth={132}
+                rowLabelWidth={HEAT_LABEL_WIDTH}
+                cell={heatCell}
+                gap={heatCell >= 12 ? 3 : 2}
                 columnTick={(index) => (index % 3 === 0 ? heatColumns[index].slice(0, 2) : null)}
                 label={heat.busiest && heat.busiest.total > 0
                   ? `Events per agent per hour over the last 24 hours; busiest ${heat.busiest.entry.name} with ${heat.busiest.total}`

@@ -112,3 +112,5 @@
 .roster__peer.is-static { padding-left: 8px; color: var(--_cc-foreground-muted); cursor: default; }
 .roster__peer.is-static:hover { border-color: var(--_cc-border-soft); background: transparent; }
 .roster__drawer .cc-heat { max-width: 100%; overflow-x: auto; }
+/* Four short rows in the drawer: labels a step smaller than the cells' pitch. */
+.roster__drawer .cc-heat__label { font-size: 9.5px; }

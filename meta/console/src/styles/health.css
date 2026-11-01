@@ -36,6 +36,8 @@
 .health__more:hover { text-decoration: underline; }
 .health__more:focus-visible { outline: 2px solid var(--_cc-focus-ring); outline-offset: 2px; border-radius: var(--_cc-radius-xs); }
 
+.health__heat-measure { height: 0; }
+.health .cc-heat { max-width: 100%; overflow-x: auto; }
 .health__heat-note,
 .health__note {
   font-size: var(--_cc-panel-fs-meta);

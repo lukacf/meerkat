@@ -3827,6 +3827,179 @@ mod tests {
         assert_eq!(snapshot.next_cursor, None, "{snapshot:?}");
     }
 
+    /// A store that serves its event ledger through `list_events` alone and
+    /// keeps the trait defaults for `list_public_events` and
+    /// `latest_event_seq`. It holds no items, edges or bindings.
+    struct LedgerOnlyStore {
+        events: Vec<WorkGraphEvent>,
+    }
+
+    fn ledger_only_refusal() -> crate::WorkGraphError {
+        crate::WorkGraphError::UnsupportedBackend("ledger-only test store".to_string())
+    }
+
+    #[async_trait]
+    impl WorkGraphStore for LedgerOnlyStore {
+        fn kind(&self) -> WorkGraphStoreKind {
+            WorkGraphStoreKind::Custom
+        }
+
+        async fn get_store_time_utc(&self) -> Result<DateTime<Utc>, crate::WorkGraphError> {
+            Ok(Utc::now())
+        }
+
+        async fn insert_item(
+            &self,
+            _item: WorkItem,
+            _event: WorkGraphEvent,
+        ) -> Result<WorkItem, crate::WorkGraphError> {
+            Err(ledger_only_refusal())
+        }
+
+        async fn update_item_cas(
+            &self,
+            _item: WorkItem,
+            _expected_previous_revision: u64,
+            _event: WorkGraphEvent,
+        ) -> Result<WorkItem, crate::WorkGraphError> {
+            Err(ledger_only_refusal())
+        }
+
+        async fn update_item_and_attention_cas(
+            &self,
+            _item: WorkItem,
+            _expected_previous_revision: u64,
+            _item_event: WorkGraphEvent,
+            _attention_updates: Vec<(WorkAttentionBinding, u64, WorkGraphEvent)>,
+        ) -> Result<WorkItem, crate::WorkGraphError> {
+            Err(ledger_only_refusal())
+        }
+
+        async fn get_item(
+            &self,
+            _realm_id: &str,
+            _namespace: &WorkNamespace,
+            _id: &WorkItemId,
+        ) -> Result<Option<WorkItem>, crate::WorkGraphError> {
+            Ok(None)
+        }
+
+        async fn list_items(
+            &self,
+            _filter: WorkItemFilter,
+        ) -> Result<Vec<WorkItem>, crate::WorkGraphError> {
+            Ok(Vec::new())
+        }
+
+        async fn list_attention_matching_bounded(
+            &self,
+            _filter: AttentionListRequest,
+            _observed_at: DateTime<Utc>,
+            _limit: usize,
+        ) -> Result<Vec<WorkAttentionBinding>, crate::WorkGraphError> {
+            Ok(Vec::new())
+        }
+
+        async fn insert_edge(
+            &self,
+            _edge: WorkEdge,
+            _event: WorkGraphEvent,
+        ) -> Result<WorkEdge, crate::WorkGraphError> {
+            Err(ledger_only_refusal())
+        }
+
+        async fn list_edges(
+            &self,
+            _realm_id: &str,
+            _namespace: &WorkNamespace,
+        ) -> Result<Vec<WorkEdge>, crate::WorkGraphError> {
+            Ok(Vec::new())
+        }
+
+        async fn list_events(
+            &self,
+            filter: WorkGraphEventFilter,
+        ) -> Result<Vec<WorkGraphEvent>, crate::WorkGraphError> {
+            Ok(self
+                .events
+                .iter()
+                .filter(|event| {
+                    filter
+                        .after_seq
+                        .is_none_or(|after| event.seq.is_some_and(|seq| seq > after))
+                })
+                .take(filter.limit.unwrap_or(usize::MAX))
+                .cloned()
+                .collect())
+        }
+    }
+
+    /// On a store that keeps the trait defaults, execution events between
+    /// public ones never end an events walk early: a page that leaves public
+    /// events behind says so.
+    #[tokio::test]
+    async fn a_default_store_events_page_is_not_cut_short_by_execution_events() {
+        let item = WorkItemId::new("work_ledger").expect("item id");
+        // Two public events, three execution events, two more public events.
+        let events = [
+            WorkGraphEventKind::Created,
+            WorkGraphEventKind::Updated,
+            WorkGraphEventKind::ExecutionBound,
+            WorkGraphEventKind::ExecutionTransitioned,
+            WorkGraphEventKind::ExecutionTransitioned,
+            WorkGraphEventKind::Updated,
+            WorkGraphEventKind::Updated,
+        ]
+        .into_iter()
+        .zip(1..)
+        .map(|(kind, seq)| {
+            let mut event = WorkGraphEvent::item(
+                "realm".to_string(),
+                WorkNamespace::default(),
+                item.clone(),
+                kind,
+                Utc::now(),
+                json!({}),
+            );
+            event.seq = Some(seq);
+            event
+        })
+        .collect();
+        let service = WorkGraphService::with_scope(
+            Arc::new(LedgerOnlyStore { events }),
+            "realm",
+            WorkNamespace::default(),
+        );
+
+        let first = tool_page(&service, "workgraph_events", json!({ "limit": 2 })).await;
+        let seqs = |page: &serde_json::Value| {
+            page["events"]
+                .as_array()
+                .expect("events")
+                .iter()
+                .map(|event| event["seq"].as_i64().expect("seq"))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(seqs(&first), vec![1, 2], "{first}");
+        assert_eq!(
+            first["truncated"],
+            json!(true),
+            "public events remain past the execution events: {first}"
+        );
+        assert_eq!(first["next_after_seq"], json!(2), "{first}");
+        assert_eq!(first["event_high_water_mark"], json!(7), "{first}");
+
+        let rest = tool_page(
+            &service,
+            "workgraph_events",
+            json!({ "limit": 2, "after_seq": 2 }),
+        )
+        .await;
+        assert_eq!(seqs(&rest), vec![6, 7], "{rest}");
+        assert_eq!(rest["truncated"], json!(false), "{rest}");
+        assert!(rest.get("next_after_seq").is_none(), "{rest}");
+    }
+
     #[tokio::test]
     async fn blocked_dependencies_are_not_ready_until_completed() {
         let service = WorkGraphService::with_scope(

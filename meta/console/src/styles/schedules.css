@@ -1,59 +1,207 @@
-/* Console schedules in an agent's details pane.
+/* Schedules: the workbench panel and the section in an agent's details.
    Split from console-host.css (imported there, in this order). */
 
-/* Console schedules in an agent's details pane. */
+/* The agenda chart lives in the kit package; this sheet loads it for the
+   console. */
+@import url("../../../packages/console-components/src/styles/agenda.css");
+
+/* ── Schedules panel (spec B10) ─────────────────────────────── */
+.schedules__frame {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+}
+.schedules__main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  padding-bottom: var(--_cc-sp-8, 24px);
+}
+.schedules__notice { margin: var(--_cc-sp-4, 8px) var(--_cc-panel-pad-x) 0; }
+.schedules__toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--_cc-sp-4, 8px) var(--_cc-sp-6, 16px);
+  padding: var(--_cc-sp-5, 12px) var(--_cc-panel-pad-x) var(--_cc-sp-4, 8px);
+}
+.schedules__agenda,
+.schedules__week { display: flex; flex-direction: column; min-width: 0; }
+.schedules__agenda .cc-agenda { padding: 0 var(--_cc-panel-pad-x); }
+.schedules__agenda .cc-panel-empty--inline,
+.schedules__week .cc-panel-empty--inline { padding: var(--_cc-sp-6, 16px) var(--_cc-panel-pad-x); }
+.schedules__week { padding: var(--_cc-sp-6, 16px) var(--_cc-panel-pad-x) 0; gap: var(--_cc-sp-5, 12px); }
+.schedules__caption {
+  margin: 0;
+  font-size: var(--_cc-panel-fs-meta);
+  color: var(--_cc-foreground-meta);
+}
+
+/* The agenda's legend: the marks and their words. */
+.schedules__legend {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 14px;
+  font-size: var(--_cc-panel-fs-meta);
+  color: var(--_cc-foreground-meta);
+}
+.schedules__legend-item { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.schedules__kind {
+  display: inline-block;
+  flex: none;
+  width: 12px;
+  height: 12px;
+  overflow: visible;
+  fill: none;
+  stroke: none;
+  vertical-align: middle;
+}
+
+/* The list: schedules grouped by agent. */
+.schedules__list { display: flex; flex-direction: column; min-width: 0; }
+.schedules__list > .schedules__toolbar { justify-content: flex-start; }
+.schedules__group { min-width: 0; }
+.schedules__group-head {
+  display: flex;
+  align-items: center;
+  gap: var(--_cc-sp-4, 8px);
+  min-width: 0;
+  padding: var(--_cc-sp-6, 16px) var(--_cc-panel-pad-x) var(--_cc-sp-3, 6px);
+  border-bottom: 1px solid var(--_cc-border-soft);
+  font-size: var(--_cc-fs-card, 13px);
+  font-weight: 600;
+}
+.schedules__group-note {
+  min-width: 0;
+  margin-left: auto;
+  overflow: hidden;
+  font-size: var(--_cc-panel-fs-meta);
+  font-weight: 400;
+  color: var(--_cc-foreground-meta);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.schedules__group .cc-entity__sub { display: block; }
+.schedules__actions { display: inline-flex; align-items: center; gap: 2px; }
+.schedules__actions .schedules__delete { color: var(--_cc-negative-ink); }
+.schedules__group .cc-entity--row.is-confirming .cc-entity__actions { opacity: 1; }
+.schedules__no-run { font-size: 11px; color: var(--_cc-foreground-meta); white-space: nowrap; }
+
+/* The drawer: the form and a schedule's details. */
+.console-schedules__form.schedules__form {
+  border: 0;
+  border-radius: 0;
+  padding: 0;
+  background: transparent;
+}
+.schedules__detail-text {
+  margin: 0;
+  font-size: var(--_cc-panel-fs-body);
+  color: var(--_cc-foreground);
+  overflow-wrap: anywhere;
+}
+.schedules__message {
+  margin: 0;
+  padding: 8px 12px;
+  border-left: 2px solid var(--_cc-border-strong);
+  border-radius: 0 var(--_cc-radius-sm) var(--_cc-radius-sm) 0;
+  background: var(--_cc-surface-soft);
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--_cc-foreground);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.schedules__runs {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: var(--_cc-panel-fs-body);
+  font-variant-numeric: tabular-nums;
+}
+.schedules__runs li { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+
+@container cc-panel (max-width: 480px) {
+  .schedules__legend { display: none; }
+  .schedules__group-note { display: none; }
+}
+
+/* ── Console schedules in an agent's details pane ───────────── */
 .console-schedules {
   display: flex; flex-direction: column; gap: 10px;
   margin-top: 20px; padding: 0 var(--_cc-panel-pad-x);
-  border-top: 1px solid var(--line);
+  border-top: 1px solid var(--_cc-border-soft);
 }
 .console-schedules__head { padding-left: 0; padding-right: 0; }
 .console-schedules__note,
-.console-schedules__hint { margin: 0; font-size: 12px; color: var(--ink-muted); }
+.console-schedules__hint { margin: 0; font-size: 12px; color: var(--_cc-foreground-muted); }
 .console-schedules .cc-panel-empty--inline { padding-left: 0; padding-right: 0; }
+
+/* The next run and the next seven days, above the list. */
+.console-schedules__glance { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.console-schedules__next {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px;
+  margin: 0;
+  font-size: var(--_cc-panel-fs-body);
+  color: var(--_cc-foreground);
+}
+.console-schedules__next-label {
+  font-size: var(--_cc-panel-fs-label, 10.5px); font-weight: 600;
+  letter-spacing: 0.08em; text-transform: uppercase;
+  color: var(--_cc-foreground-meta);
+}
+.console-schedules__next-name { font-weight: 500; }
+.console-schedules__strip { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.console-schedules__strip-label { font-size: var(--_cc-panel-fs-meta); color: var(--_cc-foreground-meta); }
+
 .console-schedules__list {
   list-style: none; margin: 0; padding: 0;
-  border-top: 1px solid var(--line);
+  border-top: 1px solid var(--_cc-border-soft);
 }
 .console-schedules__item {
   display: flex; flex-direction: column; gap: 4px;
   padding: 10px 0;
-  border-bottom: 1px solid var(--line);
+  border-bottom: 1px solid var(--_cc-border-soft);
 }
 .console-schedules__row { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-width: 0; }
 .console-schedules__row strong {
   min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  font-size: 13px; font-weight: 500; color: var(--ink);
+  font-size: 13px; font-weight: 500; color: var(--_cc-foreground);
 }
-.console-schedules__content { margin: 0; font-size: 12.5px; color: var(--ink); white-space: pre-wrap; overflow-wrap: anywhere; }
-.console-schedules__meta { margin: 0; font-size: 11.5px; color: var(--ink-meta); }
+.console-schedules__content { margin: 0; font-size: 12.5px; color: var(--_cc-foreground); white-space: pre-wrap; overflow-wrap: anywhere; }
+.console-schedules__meta { margin: 0; font-size: 11.5px; color: var(--_cc-foreground-meta); }
 .console-schedules__actions { margin-top: 4px; }
 .console-schedules__form {
-  display: flex; flex-direction: column; gap: 10px;
+  display: flex; flex-direction: column; gap: 12px;
   padding: 12px 14px;
-  border: 1px solid var(--line);
-  border-radius: var(--r-md);
-  background: var(--bg-sunken);
+  border: 1px solid var(--_cc-border-soft);
+  border-radius: var(--_cc-radius-md);
+  background: var(--_cc-surface-soft);
 }
-.console-schedules__field { display: flex; flex-direction: column; gap: 4px; font-size: 11.5px; color: var(--ink-meta); }
-.console-schedules__field input,
-.console-schedules__field select,
-.console-schedules__field textarea {
-  font: inherit; font-family: var(--sans); font-size: 12.5px; color: var(--ink);
-  background: var(--bg); border: 1px solid var(--line);
-  border-radius: var(--r-sm); padding: 5px 8px;
-  min-height: 28px;
+.console-schedules__field {
+  display: flex; flex-direction: column; gap: 4px;
+  min-width: 0;
+  font-size: var(--_cc-panel-fs-meta); color: var(--_cc-foreground-meta);
 }
-.console-schedules__field input:focus-visible,
-.console-schedules__field select:focus-visible,
-.console-schedules__field textarea:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
-.console-schedules__field textarea { resize: vertical; }
+.console-schedules__field .cc-input,
+.console-schedules__field .cc-select,
+.console-schedules__field .cc-select__control { width: 100%; }
+.console-schedules__field textarea.cc-input { font-size: 12.5px; }
 .console-schedules__inline { display: flex; flex-wrap: wrap; gap: 10px; }
+.console-schedules__inline > .console-schedules__field { flex: 1 1 120px; }
 .console-schedules__days {
   display: flex; flex-wrap: wrap; gap: 10px;
   margin: 0; padding: 6px 10px;
-  border: 1px solid var(--line); border-radius: var(--r-sm);
-  font-size: 12px; color: var(--ink-muted);
+  border: 1px solid var(--_cc-border-soft); border-radius: var(--_cc-radius-sm);
+  font-size: 12px; color: var(--_cc-foreground-muted);
 }
+.console-schedules__days legend { padding: 0 4px; font-size: var(--_cc-panel-fs-meta); color: var(--_cc-foreground-meta); }
 .console-schedules__days label { display: inline-flex; align-items: center; gap: 4px; }
-

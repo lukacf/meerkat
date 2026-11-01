@@ -222,9 +222,12 @@ import {
   type MemoryRecordDetail,
 } from "./panels/MemoryPanel";
 import { RosterPanel } from "./panels/RosterPanel";
-import { AgentDetailsPanel } from "./panels/AgentDetailsPanel";
+import { AgentDetailsPanel, type AgentWorkItem } from "./panels/AgentDetailsPanel";
 import { HealthPanel } from "./panels/HealthPanel";
+import type { ConsoleHealthSnapshot, WorkGraphWireItem } from "./types";
 import { SchedulesSection } from "./panels/SchedulesSection";
+import { SchedulesPanel } from "./panels/SchedulesPanel";
+import { topologyLineage } from "./lib/agent-lineage";
 import {
   WORKGRAPH_EVENTS_LIMIT,
   WORKGRAPH_SNAPSHOT_LIMIT,
@@ -464,14 +467,24 @@ function normalizeConsoleInspectResult(
       ? (record.identity as Record<string, unknown>)
       : null;
   if (!identityRecord) return null;
-  return normalizeIdentityInspectViewState({
+  // The newer inspect answer (`identity{health, visibility, runtime_key,
+  // runtime_member_id, ...}`, `peers`): its `health` is the record's
+  // availability ("ready", "hidden_by_policy", "retired"), not a member
+  // state, so it never becomes the state the status words read ("Ready"):
+  // a retired record reads retired, any other is a live member whose health
+  // words come from its progress. The runtime key and visibility stay for
+  // Technical details.
+  const text = (value: unknown) => (typeof value === "string" && value.trim() ? value.trim() : undefined);
+  const availability = text(identityRecord.health);
+  const normalized = normalizeIdentityInspectViewState({
     identity: identityRecord.identity,
     display_name: identityRecord.display_name,
     role:
       identityRecord.labels && typeof identityRecord.labels === "object"
         ? (identityRecord.labels as Record<string, unknown>).role
         : undefined,
-    state: identityRecord.health,
+    state: availability === "retired" ? "retired" : text(identityRecord.state) ?? "active",
+    progress: identityRecord.progress,
     addressability:
       identityRecord.addressable === true ? "addressable" : "internal_only",
     session_id: identityRecord.session_id,
@@ -482,6 +495,41 @@ function normalizeConsoleInspectResult(
     },
     topology_peers: Array.isArray(record.peers) ? record.peers : [],
   });
+  if (!normalized) return null;
+  const runtimeKey = text(identityRecord.runtime_key);
+  const visibility = text(identityRecord.visibility);
+  return {
+    ...normalized,
+    ...(runtimeKey ? { runtime_key: runtimeKey } : {}),
+    ...(visibility ? { visibility } : {}),
+  } as IdentityInspectViewState;
+}
+
+/** The open work items an agent owns or has claimed, from the WorkGraph
+ * snapshot the console last read (empty until WorkGraph is read): owner keys
+ * name the agent by identity or end in it ("mob/<mob>/agent/<identity>"). */
+function agentWorkItems(
+  items: readonly WorkGraphWireItem[] | undefined,
+  identity: string,
+  agent: ConsoleAgent | undefined,
+): AgentWorkItem[] {
+  const keys = new Set([identity, agent?.identity, agent?.member_id].filter((key): key is string => Boolean(key)));
+  const names = (key: { id?: string } | undefined) => {
+    const id = key?.id?.trim();
+    return Boolean(id) && (keys.has(id!) || keys.has(id!.split("/").filter(Boolean).pop() || ""));
+  };
+  const open = new Set(["open", "ready", "in_progress", "blocked"]);
+  return (items || [])
+    .filter((item) => item.id && open.has(item.status || "") && (names(item.claim?.owner?.key) || names(item.owner?.key)))
+    .sort((left, right) => (left.status === "in_progress" ? 0 : 1) - (right.status === "in_progress" ? 0 : 1))
+    .slice(0, 8)
+    .map((item) => ({
+      id: item.id!,
+      title: item.title || item.id!,
+      status: item.status || "open",
+      claimedAt: item.claim?.claimed_at ?? null,
+      priority: item.priority ?? null,
+    }));
 }
 
 const DEFAULT_APPROVER_ID = "console-ops-lead";
@@ -5744,7 +5792,17 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
         identity={target.identity}
         inspect={inspect}
         agent={agent}
+        agents={agents}
+        work={agentWorkItems(workGraphData.items, target.identity, agent)}
+        spawnedBy={topologyLineage(topologyQueryResult)[target.identity]}
         stateLabel={inspect ? identityStateLabel(inspect) : null}
+        onOpenChat={
+          configuredActionVisibility.chat !== false && agent
+            ? () => consoleNavigation.openAgent?.(target.identity, "chat")
+            : undefined
+        }
+        openChatLabel={configuredActionLabels.chat}
+        onRefresh={() => void refreshInspectIdentity(target.identity).catch(() => {})}
         actions={{
           respawn: canRespawn ? { label: configuredActionLabels.respawn, onClick: () => void onLifecycleAction(target.identity, "meta/respawn") } : undefined,
           reset: canReset ? { label: configuredActionLabels.reset, onClick: () => void onLifecycleAction(target.identity, "meta/reset") } : undefined,
@@ -5769,15 +5827,22 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     );
   }
 
-  function renderHealthPanel(identities: IdentityStatusRow[]) {
+  function renderHealthPanel(snapshot: ConsoleHealthSnapshot | null | undefined) {
     return (
       <HealthPanel
-        identities={identities}
+        identities={snapshot?.identities || []}
         stateLabel={identityStateLabel}
+        agents={agents}
+        team={snapshot ? {
+          running: snapshot.running,
+          loadedModules: snapshot.loaded_modules,
+          loadedModuleCount: snapshot.loaded_module_count,
+          unobserved: snapshot.unobserved,
+        } : null}
         canOpen={(identity) => agents.some((candidate) => candidate.identity === identity || candidate.member_id === identity)}
         onOpen={(identity) => {
-          const agent = agents.find((candidate) => candidate.identity === identity || candidate.member_id === identity);
-          if (agent) handleShowRosterDetails(agent);
+          // Beside Health, not in its place (spec B11).
+          consoleNavigation.openAgent?.(identity, "details");
         }}
       />
     );
@@ -5959,15 +6024,14 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       );
     }
     if (target.kind === "health")
-      return renderHealthPanel(
-        experience?.health_overview?.live_snapshot?.identities || [],
-      );
+      return renderHealthPanel(experience?.health_overview?.live_snapshot);
     if (target.kind === "timeline")
       return <TimelinePanel frames={activityRef.current} />;
     if (target.kind === "roster")
       return (
         <RosterPanel
           agents={agents}
+          lineage={topologyLineage(topologyQueryResult)}
           selectedMemberId={selectedRosterMemberId}
           onSelect={(a) => setSelectedRosterMemberId(a.member_id)}
           onChat={(a) => openAgentChat(a)}
@@ -6151,6 +6215,19 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
         />
       );
     }
+    if (target.kind === "schedules")
+      return (
+        <SchedulesPanel
+          agents={agents}
+          offer={scheduleOffer}
+          readOnly={consoleReadOnly}
+          accessEnforcing={accessEnforcing}
+          run={runScheduleCommand}
+          // Lists older than 15 s are read again at most once a minute while
+          // the console renders (the panel's Refresh reads them at once).
+          refreshToken={Math.floor(Date.now() / 60_000)}
+        />
+      );
     return (
       <PanelShell>
         <EmptyState kind="unavailable" title="This panel isn't available in this console" />

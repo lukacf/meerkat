@@ -1,2 +1,47 @@
-/* Health panel (no rules of its own yet; built from the panel kit).
-   Split from console-host.css (imported there, in this order). */
+/* Health panel (console v2 spec B11).
+   Split from console-host.css (imported there, in this order). Built from
+   the panel kit (PanelHeader v2, GlanceStrip, EntityCard tiles, HeatStrip);
+   only the tile grid and its notes are Health's own. */
+
+.health__body { padding-bottom: var(--_cc-sp-8); }
+
+/* Small multiples: one tile per agent, the worst first. */
+.health__tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(264px, 1fr));
+  gap: var(--_cc-sp-5);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.health__cell { display: flex; min-width: 0; }
+.health__cell > .cc-entity { flex: 1 1 auto; }
+.health__tile { gap: 8px; }
+.health__tile .cc-entity__now { font-size: 12px; color: var(--_cc-foreground-muted); }
+.health__tile[data-tone="crit"] .cc-entity__now,
+.health__tile[data-tone="warn"] .cc-entity__now { color: var(--_cc-foreground); }
+.health__cell[data-health="retired"] .health__tile { opacity: 0.62; }
+
+.health__more {
+  align-self: flex-start;
+  margin-top: var(--_cc-sp-5);
+  padding: 2px 0;
+  border: 0;
+  background: transparent;
+  color: var(--_cc-link-ink);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.health__more:hover { text-decoration: underline; }
+.health__more:focus-visible { outline: 2px solid var(--_cc-focus-ring); outline-offset: 2px; border-radius: var(--_cc-radius-xs); }
+
+.health__heat-measure { height: 0; }
+.health .cc-heat { max-width: 100%; overflow-x: auto; }
+.health__heat-note,
+.health__note {
+  font-size: var(--_cc-panel-fs-meta);
+  color: var(--_cc-foreground-meta);
+}
+.health__note { margin: 6px 0 0; }
+.health__modules { gap: 4px; }

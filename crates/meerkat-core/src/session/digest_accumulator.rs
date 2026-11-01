@@ -1335,7 +1335,10 @@ mod tests {
         assert_eq!(messages.verified_entry_row_count(), 2);
 
         messages.record_verified_entry_rows(5);
-        assert_eq!(messages.remove_row(3), Some(user("m3")));
+        // The row itself, as the buffer holds it: a fresh row of the same
+        // text carries another timestamp.
+        let row_3 = messages[3].clone();
+        assert_eq!(messages.remove_row(3), Some(row_3));
         assert_eq!(messages.verified_entry_row_count(), 3);
         assert_eq!(
             messages.digest().unwrap(),

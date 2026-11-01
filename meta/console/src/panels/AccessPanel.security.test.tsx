@@ -428,6 +428,42 @@ describe("checked access edits", () => {
     expect(screen.queryByTestId("access-error")).toBeNull();
   });
 
+  // A delete and the enforcement toggle keep no draft, so their notices claim
+  // none; a group delete that a rule still needs is worded from the delete's
+  // side, with the owner's detail naming the rule.
+  it("words a refused delete or enforcement change without a draft, and a refused group delete from its own side", async () => {
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    const input = props();
+    const config = {
+      ...input.config,
+      groups: { ops: { members: ["alice@example.test"] } },
+      rules: [{ id: "ops-senders", effect: "allow" as const, groups: ["ops"], actions: ["agent.send"] }],
+    };
+    input.onDeleteGroup = vi.fn(async () => ({ kind: "invalid" as const, reason: "unknown_group", detail: 'access rule ops-senders: unknown group "ops"' }));
+    input.onDeleteRule = vi.fn(async () => ({ kind: "failed" as const }));
+    input.onSetEnabled = vi.fn(async () => ({ kind: "unavailable" as const }));
+    const notice = () => screen.getByTestId("access-error").textContent;
+
+    let view = render(<AccessPanel {...input} config={config} />);
+    fireEvent.click(screen.getByTestId("access-tab:groups"));
+    await act(async () => { fireEvent.click(screen.getByTestId("access-group-delete:ops")); });
+    expect(input.onDeleteGroup).toHaveBeenCalledTimes(1);
+    expect(notice()).toBe('Changes were not saved. The group is still used by a rule (access rule ops-senders: unknown group "ops").');
+    view.unmount();
+
+    view = render(<AccessPanel {...input} config={config} />);
+    fireEvent.click(screen.getByTestId("access-tab:rules"));
+    await act(async () => { fireEvent.click(screen.getByTestId("access-rule-delete:ops-senders")); });
+    expect(input.onDeleteRule).toHaveBeenCalledTimes(1);
+    expect(notice()).toBe("Changes were not saved. Refresh Console access before trying again.");
+    view.unmount();
+
+    render(<AccessPanel {...input} config={config} />);
+    await act(async () => { fireEvent.click(screen.getByTestId("access-toggle-enabled")); });
+    expect(input.onSetEnabled).toHaveBeenCalledTimes(1);
+    expect(notice()).toBe("Changes were not saved. Checked access saves are unavailable.");
+  });
+
   it("disables a conflicted group draft beside live member inspection until an explicit review", async () => {
     const input = props();
     const member = "reader@example.test";

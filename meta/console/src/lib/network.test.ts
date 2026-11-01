@@ -14,7 +14,7 @@ import {
 } from "./network";
 import { mapFramesToTimelineEntries } from "./adapters";
 import type { ConsoleFrame } from "../types";
-import { accessSaveFailure, accessSaveNotice } from "./errors";
+import { accessSaveFailure, accessSaveNotice, type AccessSaveEdit } from "./errors";
 
 // Wait until `condition` holds or fail after `timeoutMs`. The timeline
 // subscription reconnects after a jittered 200-300 ms backoff, and parallel
@@ -1014,7 +1014,7 @@ test("access RPC preserves structured owner evidence and requires exact code and
       await assert.rejects(callConsoleRpc("http://console.test", "meta/access/set", { checked_v1: {} }), (error: unknown) => {
         assert.deepEqual((error as { rpcError?: unknown }).rpcError, row.error, "the transport must retain the owner's structured evidence");
         assert.equal(accessSaveFailure(error).kind, row.expected, "neither a coincidental code nor message text establishes the outcome");
-        assert.doesNotMatch(accessSaveNotice(accessSaveFailure(error)), /private|missing field/);
+        assert.doesNotMatch(accessSaveNotice(accessSaveFailure(error), "admins"), /private|missing field/);
         return true;
       });
     }
@@ -1072,8 +1072,8 @@ test("an invalid access save names the owner's reason in the Console's words, wi
       await assert.rejects(callConsoleRpc("http://console.test", "meta/access/rules/upsert", { checked_v1: {} }), (thrown: unknown) => {
         const failure = accessSaveFailure(thrown);
         assert.equal(failure.kind, "invalid", JSON.stringify(row.data));
-        assert.equal(accessSaveNotice(failure), row.expected, JSON.stringify(row.data));
-        assert.doesNotMatch(accessSaveNotice(failure), /PRIVATE_MESSAGE_CANARY/, "the error's message text is never shown");
+        assert.equal(accessSaveNotice(failure, "rule"), row.expected, JSON.stringify(row.data));
+        assert.doesNotMatch(accessSaveNotice(failure, "rule"), /PRIVATE_MESSAGE_CANARY/, "the error's message text is never shown");
         return true;
       });
     }
@@ -1083,6 +1083,37 @@ test("an invalid access save names the owner's reason in the Console's words, wi
   assert.deepEqual(accessSaveFailure(refusal({ reason: "unknown_group", detail: 'access rule ops: unknown group "ghosts"', extra: "ignored" })),
     { kind: "invalid", reason: "unknown_group", detail: 'access rule ops: unknown group "ghosts"' });
   assert.deepEqual(accessSaveFailure(refusal({ reason: { kind: "unknown_group" }, detail: null })), { kind: "invalid" });
+});
+
+test("a refused delete or enforcement change claims no draft, and a refused group delete says what still uses the group", () => {
+  const refusal = (data: Record<string, unknown>) => ({ rpcError: { code: -32602, message: "Invalid access configuration.", data: { kind: "invalid_access_config", ...data } } });
+  const typed = (code: number, kind: string) => ({ rpcError: { code, message: "PRIVATE_MESSAGE_CANARY", data: { kind } } });
+  const usedByRule = refusal({ reason: "unknown_group", detail: 'access rule ops-senders: unknown group "ops"' });
+  const usedByApprover = refusal({ reason: "unknown_approver_group", detail: 'approver lead: unknown group "ops"' });
+  const rows: Array<[edit: AccessSaveEdit, error: unknown, notice: string]> = [
+    // A group delete that a rule or an approver still needs: the group exists
+    // and is in use, and a delete keeps no draft.
+    ["group-delete", usedByRule, 'Changes were not saved. The group is still used by a rule (access rule ops-senders: unknown group "ops").'],
+    ["group-delete", usedByApprover, 'Changes were not saved. The group is still used by an approver (approver lead: unknown group "ops").'],
+    // The same reasons on a save of a draft keep their words and the draft.
+    ["rule", usedByRule, 'Changes were not saved. A rule names a group that does not exist (access rule ops-senders: unknown group "ops"); your draft is retained for correction.'],
+    ["group", usedByApprover, 'Changes were not saved. An approver names a group that does not exist (approver lead: unknown group "ops"); your draft is retained for correction.'],
+    // Deletes and the enforcement toggle keep no draft, whatever the failure.
+    ["rule-delete", refusal({ reason: "unknown_rule", detail: "unknown access rule id: ops" }), "Changes were not saved. The rule to delete does not exist (unknown access rule id: ops)."],
+    ["toggle", refusal({ reason: "enabled_without_admins", detail: "access control cannot be enabled without at least one admin subject" }), "Changes were not saved. Enforcement needs at least one admin."],
+    ["toggle", refusal({}), "Changes were not saved. The resulting access configuration is not valid."],
+    ["group-delete", typed(-32004, "access_mutation_unavailable"), "Changes were not saved. Checked access saves are unavailable."],
+    ["rule-delete", typed(-32000, "access_persistence_failed"), "Changes were not saved. Refresh Console access before trying again."],
+    // Edits of a draft keep it, as before.
+    ["admins", typed(-32004, "access_mutation_unavailable"), "Changes were not saved. Checked access saves are unavailable; your draft is retained."],
+    ["group", typed(-32000, "access_persistence_failed"), "Changes were not saved. Your draft is retained; refresh Console access before trying again."],
+    // A conflict or a new owner reads the same for every edit.
+    ["toggle", typed(-32009, "access_revision_conflict"), "Access configuration changed. Review the latest settings before saving again."],
+    ["group-delete", typed(-32009, "access_owner_changed"), "The access configuration owner changed. Review the latest settings before saving again."],
+  ];
+  for (const [edit, error, notice] of rows) {
+    assert.equal(accessSaveNotice(accessSaveFailure(error), edit), notice, `${edit}: ${JSON.stringify(error)}`);
+  }
 });
 
 test("ordinary console interaction code -32004 retains its existing send disposition", async () => {

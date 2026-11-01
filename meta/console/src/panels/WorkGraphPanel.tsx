@@ -1054,7 +1054,7 @@ export function WorkGraphPanel({
   // The legend's work, without a chip on the picture: the Graph's link kinds
   // (the ones it has) can be hidden and shown again here.
   if (viewMode === "graph") {
-    const present = new Set(model.links.map((link) => link.relation));
+    const present = new Set<VizRelation>(model.links.map((link) => link.relation));
     const toggles = WORKGRAPH_LINK_TOGGLES.filter((toggle) => present.has(toggle.relation));
     if (toggles.length) {
       viewOptions.push({ kind: "separator", id: "links-sep" });

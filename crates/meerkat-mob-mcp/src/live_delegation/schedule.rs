@@ -852,6 +852,49 @@ mod tests {
         );
     }
 
+    /// The scheduling reads walk every voice item: an open voice item and a
+    /// blocker with a full page of newer voice items in front of them are
+    /// both seen.
+    #[tokio::test]
+    async fn an_open_voice_item_and_a_blocker_past_the_first_page_are_both_seen() {
+        let workgraph = voice_workgraph().await;
+        let old_open = voice_item(&workgraph, "the old request").await;
+        let blocker = voice_item(&workgraph, "the old blocker").await;
+        // A full page of newer voice items (the WorkGraph maximum, 1000).
+        for index in 0..1000 {
+            voice_item(&workgraph, &format!("newer request {index}")).await;
+        }
+        let waiting = voice_item(&workgraph, "the waiting request").await;
+        workgraph
+            .service
+            .link(meerkat::LinkWorkItemsRequest {
+                realm_id: None,
+                namespace: None,
+                kind: WorkEdgeKind::Blocks,
+                from_id: blocker.clone(),
+                to_id: waiting.clone(),
+            })
+            .await
+            .expect("blocks edge");
+
+        let readiness = workgraph
+            .channel_readiness(&LiveChannelId::new("schedule-test-channel"))
+            .await
+            .expect("channel readiness");
+        assert!(
+            readiness.ready.contains(&old_open),
+            "the old open voice item is offered"
+        );
+        assert_eq!(
+            workgraph.disposition_after_worker_turn(&waiting).await,
+            Ok(WorkItemDisposition::Waiting {
+                blockers: vec![(blocker, "the old blocker".to_string())],
+                explicit_block: false,
+            }),
+            "the old blocker is named"
+        );
+    }
+
     /// #1820 follow-up: the four simple statuses come from the item alone. A
     /// terminal or running item is classified with no namespace snapshot,
     /// even when a stale Blocks edge still points at it; only Open and

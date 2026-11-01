@@ -3,6 +3,7 @@ import type { ReactNode } from "react";
 import { cx } from "./cx";
 import { EmptyIllustration, type IllustrationName } from "./empty-illustration";
 import { KitGlyph, type KitGlyphName } from "./glyphs";
+import { StatusMark } from "./status-mark";
 import { TechnicalDetails, type TechnicalDetail } from "./technical-details";
 import type { Tone } from "./tone";
 
@@ -187,7 +188,14 @@ export function Notice({
 }) {
   return (
     <div className={cx("cc-notice", flush && "cc-notice--flush", className)} data-tone={tone} data-testid={testId} role={role}>
-      <KitGlyph name={NOTICE_GLYPH[tone]} className="cc-notice__icon" />
+      {tone === "live" ? (
+        // Live speaks with its own mark (the accent dot and its pulse), not an icon.
+        <span className="cc-notice__icon cc-notice__icon--mark" aria-hidden="true">
+          <StatusMark tone="live" />
+        </span>
+      ) : (
+        <KitGlyph name={NOTICE_GLYPH[tone]} className="cc-notice__icon" />
+      )}
       <div className="cc-notice__text">{children}</div>
       {action ? <div className="cc-notice__action">{action}</div> : null}
     </div>

@@ -219,12 +219,14 @@ export function DetailDrawer({
       <header className="cc-drawer__head">
         {mark ? <span className="cc-drawer__mark">{mark}</span> : null}
         <div className="cc-drawer__titles">
-          <Heading ref={headingRef} className={cx("cc-drawer__title", titleClassName)} tabIndex={-1}>
-            {title}
-          </Heading>
+          <div className="cc-drawer__title-row">
+            <Heading ref={headingRef} className={cx("cc-drawer__title", titleClassName)} tabIndex={-1}>
+              {title}
+            </Heading>
+            {status ? <span className="cc-drawer__status">{status}</span> : null}
+          </div>
           {subtitle ? <div className="cc-drawer__sub">{subtitle}</div> : null}
         </div>
-        {status ? <span className="cc-drawer__status">{status}</span> : null}
         <span className="cc-drawer__tools">
           {onOpenInPane ? <IconButton glyph="open" label={openInPaneLabel} size="sm" onClick={onOpenInPane} /> : null}
           {onClose ? <IconButton glyph="close" label={closeLabel} size="sm" onClick={close} data-testid={closeTestId} /> : null}

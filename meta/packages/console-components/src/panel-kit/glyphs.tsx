@@ -231,7 +231,7 @@ const PATHS = {
     </>
   ),
   routing: <path d="M3 12h6l4-5h7M13 17h7M9 12l4 5M17 4l3 3-3 3M17 14l3 3-3 3" />,
-  logs: <path d="M4 6h2M9 6h11M4 12h2M9 12h11M4 18h2M9 18h7" />,
+  logs: <path d="M4 4v16M8 7h12M8 12h8M8 17h10" />,
   health: <path d="M3 12h4l2-5 4 10 2-5h6" />,
   access: (
     <>

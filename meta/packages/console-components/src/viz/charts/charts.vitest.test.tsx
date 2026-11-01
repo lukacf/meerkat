@@ -2,6 +2,7 @@ import { fireEvent, render } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  BarcodeLegend,
   BarcodeMeter,
   DotStrip,
   FigureTile,
@@ -43,6 +44,13 @@ describe("time axis", () => {
     expect(ticks.map((tick) => tick.label)).toEqual(["06", "12", "18", "00"]);
     expect(ticks.every((tick) => new Date(tick.t).getMinutes() === 0 && new Date(tick.t).getHours() % 6 === 0)).toBe(true);
     expect(ticks[3].major).toBe(true);
+  });
+
+  it("names the day at midnight on an automatic clock axis", () => {
+    const ticks = timeTicks(DAY_START + 13 * HOUR, DAY_START + 37 * HOUR, { step: 6 * HOUR });
+    expect(ticks.map((tick) => tick.label)).toEqual(["18:00", "Sat 31", "06:00", "12:00"]);
+    const literal = timeTicks(DAY_START + 13 * HOUR, DAY_START + 37 * HOUR, { step: 6 * HOUR, format: "clock" });
+    expect(literal[1].label).toBe("00:00");
   });
 
   it("counts times into bins and orders a brushed range", () => {
@@ -128,6 +136,15 @@ describe("micro charts", () => {
     expect(barcodeUnitsPerSegment(300, 40)).toBe(10);
     const big = render(<BarcodeMeter filled={300} label="300 agents" segments={40} testId="big" />);
     expect(big.getByTestId("big").querySelector("svg")?.getAttribute("aria-label")).toBe("300 agents (1 segment = 10 agents)");
+  });
+
+  it("agrees the legend's helper word with its number unless the caller names it", () => {
+    const one = render(<BarcodeMeter filled={7} live={1} outlined={1} label="8 agents" segments={24} legend testId="one" />);
+    expect(one.getByTestId("one").querySelector(".cc-barcode-legend")?.textContent).toBe("7 long-lived1 helper1 active now");
+    const two = render(<BarcodeLegend filled={5} outlined={2} />);
+    expect(two.container.textContent).toBe("5 long-lived2 helpers");
+    const named = render(<BarcodeLegend filled={5} outlined={1} labels={{ outlined: "workers" }} />);
+    expect(named.container.textContent).toBe("5 long-lived1 workers");
   });
 
   it("ranks heat cells by quantile, zero apart, with a table twin", () => {

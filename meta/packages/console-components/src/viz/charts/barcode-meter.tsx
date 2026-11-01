@@ -24,7 +24,7 @@ export function BarcodeLegend({
   filled,
   outlined = 0,
   live = 0,
-  labels = DEFAULT_LABELS,
+  labels = {},
   unitNote,
   className,
 }: {
@@ -37,9 +37,10 @@ export function BarcodeLegend({
   className?: string;
 }) {
   const words = {
-    filled: labels?.filled ?? DEFAULT_LABELS.filled,
-    outlined: labels?.outlined ?? (outlined === 1 ? "helper" : DEFAULT_LABELS.outlined),
-    live: labels?.live ?? DEFAULT_LABELS.live,
+    filled: labels.filled ?? DEFAULT_LABELS.filled,
+    // A label of the caller's own is used as given; the default agrees in number.
+    outlined: labels.outlined ?? (outlined === 1 ? "helper" : DEFAULT_LABELS.outlined),
+    live: labels.live ?? DEFAULT_LABELS.live,
   };
   return (
     <span className={cx("cc-barcode-legend", className)}>

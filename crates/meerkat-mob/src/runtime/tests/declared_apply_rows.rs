@@ -1005,11 +1005,22 @@ async fn candidate_apply_writes_nothing_and_answers_every_identity_typed() {
 
 /// Apply a complete roster of `members` declared identities, restart, and
 /// apply the same roster again: the second apply answers every identity
-/// `Kept`, in chunks of [`DECLARED_APPLY_CHUNK`], appends no journal row,
-/// creates and reads no session and wakes no member. Returns the time the
-/// restart and the second apply took together.
-async fn unchanged_roster_appends_no_row_and_wakes_none(members: usize) -> Duration {
+/// `Kept`, in chunks of `chunk` identities (the mob's override of
+/// [`DECLARED_APPLY_CHUNK`], when given), appends no journal row, creates
+/// and reads no session and wakes no member. Returns the time the restart
+/// and the second apply took together.
+async fn unchanged_roster_appends_no_row_and_wakes_none(
+    members: usize,
+    chunk: Option<usize>,
+) -> Duration {
     let mut mob = ApplyMob::new("apply-unchanged").await;
+    if let Some(chunk) = chunk {
+        crate::runtime::declared_apply::set_declared_apply_chunk_for_test(
+            mob.handle.mob_id(),
+            chunk,
+        );
+    }
+    let chunk = chunk.unwrap_or(DECLARED_APPLY_CHUNK);
     let names: Vec<String> = (0..members)
         .map(|index| format!("declared-{index:05}"))
         .collect();
@@ -1045,6 +1056,15 @@ async fn unchanged_roster_appends_no_row_and_wakes_none(members: usize) -> Durat
         "every identity keeps its seat"
     );
     assert!(second.unlisted.is_empty());
+    let per_apply: Vec<usize> = (0..members)
+        .step_by(chunk)
+        .map(|start| chunk.min(members - start))
+        .collect();
+    assert_eq!(
+        crate::runtime::declared_apply::declared_apply_decisions_for_test(mob.handle.mob_id()),
+        [per_apply.clone(), per_apply].concat(),
+        "each apply decides the roster in chunks of {chunk}, one machine step each"
+    );
     assert_eq!(
         mob.journal().await.len(),
         journal,
@@ -1079,27 +1099,41 @@ async fn unchanged_roster_appends_no_row_and_wakes_none(members: usize) -> Durat
     elapsed
 }
 
+/// The chunk of the lane's unchanged-roster row, in place of
+/// [`DECLARED_APPLY_CHUNK`].
+const UNCHANGED_ROSTER_TEST_CHUNK: usize = 8;
+
 /// An unchanged roster of two chunks and one identity more writes nothing:
-/// see [`unchanged_roster_appends_no_row_and_wakes_none`].
+/// see [`unchanged_roster_appends_no_row_and_wakes_none`]. The row's chunks
+/// are [`UNCHANGED_ROSTER_TEST_CHUNK`] identities (the mob's chunk
+/// override): a debug build checks every MobMachine invariant after each
+/// machine step and each replayed row, some of them quadratic in the seated
+/// members, so two chunks of [`DECLARED_APPLY_CHUNK`] take many minutes
+/// there. The real chunk at scale is
+/// [`unchanged_roster_of_10000_dormant_identities_appends_no_row_and_wakes_none`].
 ///
 /// Guard: MobMachine decides each declaration in memory, so an
 /// unchanged roster writes no row and wakes no member.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn unchanged_roster_of_two_chunks_appends_no_row_and_wakes_none() {
-    unchanged_roster_appends_no_row_and_wakes_none(2 * DECLARED_APPLY_CHUNK + 1).await;
+    unchanged_roster_appends_no_row_and_wakes_none(
+        2 * UNCHANGED_ROSTER_TEST_CHUNK + 1,
+        Some(UNCHANGED_ROSTER_TEST_CHUNK),
+    )
+    .await;
 }
 
 /// [`unchanged_roster_of_two_chunks_appends_no_row_and_wakes_none`] at
-/// 10,000 identities, inside the 60 s restart bound: the restart and the
-/// apply of the unchanged roster together. The counters are the assertion;
-/// the wall clock is a smoke bound. Run explicitly, in the release profile,
-/// as the other scale rows are.
+/// 10,000 identities and the real chunk, inside the 60 s restart bound: the
+/// restart and the apply of the unchanged roster together. The counters are
+/// the assertion; the wall clock is a smoke bound. Run explicitly, in the
+/// release profile, as the other scale rows are.
 ///
 /// Guard: the gate of the in-memory decision at the roster sizes hosts run.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "scale row: run explicitly in the release profile"]
 async fn unchanged_roster_of_10000_dormant_identities_appends_no_row_and_wakes_none() {
-    let elapsed = unchanged_roster_appends_no_row_and_wakes_none(10_000).await;
+    let elapsed = unchanged_roster_appends_no_row_and_wakes_none(10_000, None).await;
     assert!(
         elapsed < Duration::from_mins(1),
         "the restart and the unchanged apply took {elapsed:?}"

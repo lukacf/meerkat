@@ -33,6 +33,56 @@ use super::state::{MobCommand, ScopeAdmissionSubject};
 /// seats one seat step commits: the dormant seat's chunk.
 pub const DECLARED_APPLY_CHUNK: usize = super::dormant_seat::DORMANT_SEAT_CHUNK;
 
+/// Test override of [`DECLARED_APPLY_CHUNK`], per mob, so a row crosses the
+/// apply's chunk boundaries with a few identities: a debug build checks
+/// every MobMachine invariant after each machine step, some of them
+/// quadratic in the seated members, so a roster of hundreds of identities
+/// takes many minutes there.
+#[cfg(test)]
+static DECLARED_APPLY_CHUNK_FOR_TEST: std::sync::Mutex<BTreeMap<crate::ids::MobId, usize>> =
+    std::sync::Mutex::new(BTreeMap::new());
+
+/// Make the declared apply of `mob_id` take `size` identities per chunk.
+#[cfg(test)]
+pub(in crate::runtime) fn set_declared_apply_chunk_for_test(
+    mob_id: &crate::ids::MobId,
+    size: usize,
+) {
+    if let Ok(mut chunks) = DECLARED_APPLY_CHUNK_FOR_TEST.lock() {
+        chunks.insert(mob_id.clone(), size);
+    }
+}
+
+/// The size of every chunk of declarations the applies of a mob decided,
+/// in order: the structural witness that an apply decides in chunks.
+#[cfg(test)]
+static DECLARED_APPLY_DECISIONS_FOR_TEST: std::sync::Mutex<
+    BTreeMap<crate::ids::MobId, Vec<usize>>,
+> = std::sync::Mutex::new(BTreeMap::new());
+
+#[cfg(test)]
+fn record_declared_apply_decision_for_test(mob_id: &crate::ids::MobId, declarations: usize) {
+    if let Ok(mut decisions) = DECLARED_APPLY_DECISIONS_FOR_TEST.lock() {
+        decisions
+            .entry(mob_id.clone())
+            .or_default()
+            .push(declarations);
+    }
+}
+
+/// Test read: the size of every chunk of declarations the applies of
+/// `mob_id` decided, in order.
+#[cfg(test)]
+pub(in crate::runtime) fn declared_apply_decisions_for_test(
+    mob_id: &crate::ids::MobId,
+) -> Vec<usize> {
+    DECLARED_APPLY_DECISIONS_FOR_TEST
+        .lock()
+        .ok()
+        .and_then(|decisions| decisions.get(mob_id).cloned())
+        .unwrap_or_default()
+}
+
 /// A host's declared roster ([`super::MobHandle::apply_declared_roster`]).
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
@@ -986,11 +1036,13 @@ impl super::MobHandle {
         &self,
         declarations: Vec<IdentityDeclaration>,
     ) -> Result<Vec<DeclarationVerdict>, MobError> {
+        let chunk_size = self.declared_apply_chunk();
         let mut verdicts = Vec::with_capacity(declarations.len());
         let mut declarations = declarations.into_iter().peekable();
         while declarations.peek().is_some() {
-            let chunk: Vec<IdentityDeclaration> =
-                declarations.by_ref().take(DECLARED_APPLY_CHUNK).collect();
+            let chunk: Vec<IdentityDeclaration> = declarations.by_ref().take(chunk_size).collect();
+            #[cfg(test)]
+            let decided = chunk.len();
             verdicts.extend(
                 self.send_actor_command(|reply_tx| MobCommand::DeclareIdentityEntries {
                     declarations: chunk,
@@ -998,8 +1050,24 @@ impl super::MobHandle {
                 })
                 .await??,
             );
+            #[cfg(test)]
+            record_declared_apply_decision_for_test(self.mob_id(), decided);
         }
         Ok(verdicts)
+    }
+
+    /// The identities one step of this mob's declared apply takes:
+    /// [`DECLARED_APPLY_CHUNK`], or a test's override for the mob.
+    fn declared_apply_chunk(&self) -> usize {
+        #[cfg(test)]
+        if let Some(size) = DECLARED_APPLY_CHUNK_FOR_TEST
+            .lock()
+            .ok()
+            .and_then(|chunks| chunks.get(self.mob_id()).copied())
+        {
+            return size.max(1);
+        }
+        DECLARED_APPLY_CHUNK
     }
 
     /// The seat a SeatOwed verdict owes: on a first-boot request's session,
@@ -1094,9 +1162,10 @@ impl super::MobHandle {
         outcome: &mut DeclaredRosterOutcome,
     ) -> Vec<OwedSeat> {
         let mut fresh_after_loss = Vec::new();
+        let chunk_size = self.declared_apply_chunk();
         let mut seats = seats.into_iter().peekable();
         while seats.peek().is_some() {
-            let chunk: Vec<OwedSeat> = seats.by_ref().take(DECLARED_APPLY_CHUNK).collect();
+            let chunk: Vec<OwedSeat> = seats.by_ref().take(chunk_size).collect();
             let specs: Vec<SpawnMemberSpec> = chunk.iter().map(|seat| seat.spec.clone()).collect();
             let answers = match self.seat_dormant_members(specs).await {
                 Ok(answers) => answers,

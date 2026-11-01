@@ -1780,7 +1780,7 @@ mod schema_floor_tests {
                 .await
                 .expect("load advanced session")
                 .expect("advanced session exists");
-            assert_eq!(saved.version(), 4);
+            assert_eq!(saved.version(), meerkat_core::SESSION_VERSION);
             assert_eq!(saved.metadata(), loaded.metadata());
             assert_eq!(saved.messages(), loaded.messages());
             let document: serde_json::Value =

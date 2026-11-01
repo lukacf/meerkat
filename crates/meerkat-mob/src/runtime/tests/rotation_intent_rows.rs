@@ -1198,7 +1198,8 @@ async fn assert_nothing_happened(
 /// row, MobMachine holds no rotation of either member, no retirement of
 /// either is published, and both roster anchors are unchanged. The mob's
 /// definition holds no AutonomousHost profile: the builder refuses one in a
-/// mob with no runtime.
+/// mob with no runtime. Both members are seated Dormant, which builds
+/// nothing: a spawn's provision needs the runtime this mob does not have.
 ///
 /// RED: drop the runtime-backed check from `plan_member_respawn`: the
 /// respawn starts the member's retirement.
@@ -1206,6 +1207,7 @@ async fn assert_nothing_happened(
 async fn respawn_member_of_a_member_that_is_not_runtime_backed_is_refused_typed() {
     let service = Arc::new(MockSessionService::new());
     let storage = MobStorage::in_memory();
+    let keys = tempfile::tempdir().expect("a comms identity root");
     let mut definition = with_unique_mob_id(sample_definition(), "respawn-no-runtime");
     for profile in definition
         .profiles
@@ -1216,17 +1218,26 @@ async fn respawn_member_of_a_member_that_is_not_runtime_backed_is_refused_typed(
     }
     let handle = MobBuilder::new(definition, storage.clone())
         .with_session_service(service)
+        .with_member_comms_identity_root(keys.path())
         .create()
         .await
         .expect("create the mob");
-    handle
-        .spawn_spec(worker_spec("no-runtime"))
-        .await
-        .expect("spawn the member");
-    handle
-        .spawn_spec(entry_spec("no-runtime-entry"))
-        .await
-        .expect("the host declares a spawned entry");
+    let seated = tokio::time::timeout(
+        STEP,
+        handle.seat_dormant_members(vec![
+            worker_spec("no-runtime"),
+            entry_spec("no-runtime-entry"),
+        ]),
+    )
+    .await
+    .expect("the seat answers")
+    .expect("the seat batch commits");
+    assert!(
+        seated
+            .iter()
+            .all(|outcome| matches!(outcome, crate::runtime::DormantSeatOutcome::Seated { .. })),
+        "the member and the host's entry are seated: {seated:?}"
+    );
     let journal_before = storage
         .events
         .poll(0, usize::MAX)

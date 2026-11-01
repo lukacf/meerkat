@@ -78,63 +78,145 @@
   position: relative;
   z-index: 30;
 }
+/* ── Header (spec B17): the agent, its status and live line, its actions ──
+   Two lines beside a 28 px avatar: the name, "Role · group" and the
+   status pill; under them the live line ("Running web search · 12 s")
+   or the last activity. Kit buttons on the right, the overflow menu last. */
 .conv__head {
-  padding: 14px 24px 12px;
-  border-bottom: 1px solid var(--line);
+  padding: 12px 24px 11px;
+  border-bottom: 1px solid var(--_cc-border-soft);
   display: flex; align-items: center; gap: 12px;
   flex: none;
   position: relative;
   z-index: 30;
+  background: var(--_cc-surface-card);
+  font-family: var(--_cc-font-display);
 }
-.conv__notice {
+.conv__head .conv__avatar { flex: none; }
+.conv__target {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.conv__title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.conv__title {
+  flex: 0 1 auto;
+  min-width: 4ch;
+  font-size: var(--_cc-panel-fs-title);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  line-height: 1.3;
+  color: var(--_cc-foreground);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.conv__role {
+  flex: 0 10 auto;
+  min-width: 0;
+  font-size: var(--_cc-panel-fs-meta);
+  color: var(--_cc-foreground-meta);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.conv__status { flex: none; }
+.conv__live {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  min-height: 18px;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--_cc-foreground-meta);
+  font-variant-numeric: tabular-nums;
+}
+.conv__live[data-live="true"] { color: var(--_cc-foreground); }
+.conv__live-text,
+.conv__last-active {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.conv__live .conv__sep { color: var(--_cc-foreground-meta); }
+.conv__elapsed {
+  flex: none;
+  color: var(--_cc-foreground-meta);
+  font-variant-numeric: tabular-nums;
+}
+.conv__actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+}
+.conv__action .conv__action-label { white-space: nowrap; }
+.conv__actions .conv__menu { margin-left: -2px; }
+
+/* Respawn and Retire ask first: a strip under the header row. */
+.conv__confirm {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
   padding: 8px 24px;
-  border-bottom: 1px solid var(--line);
-  background: var(--bg-sunken);
-  font-size: 13px;
+  border-bottom: 1px solid var(--_cc-border-soft);
+  background: var(--_cc-surface-soft);
+  font-family: var(--_cc-font-display);
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--_cc-foreground);
+}
+.conv__confirm-mark { flex: none; }
+.conv__confirm-text { flex: 1 1 24ch; min-width: 0; margin: 0; }
+.conv__confirm-text strong { font-weight: 600; }
+.conv__confirm-actions { display: flex; align-items: center; gap: 6px; flex: none; }
+
+/* Notices under the header: the side chat's source, its own notice, a stop
+   receipt. Quiet strips on the sunken surface with a leading mark. */
+.conv__notice {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 24px;
+  border-bottom: 1px solid var(--_cc-border-soft);
+  background: var(--_cc-surface-soft);
+  color: var(--_cc-foreground);
+  font-family: var(--_cc-font-display);
+  font-size: 12.5px;
+  line-height: 1.45;
   flex: none;
 }
-.conv__notice--side-chat {
-  display: flex; align-items: center; gap: 12px;
-  background: var(--accent-soft);
-}
-.conv__notice-text { flex: 1; min-width: 0; }
-.conv__notice-action {
-  display: inline-flex; align-items: center; gap: 5px; flex: none;
-  padding: 3px 10px; font-size: 11.5px; color: var(--ink-muted);
-  border: 1px solid var(--line); border-radius: var(--r-sm);
-  font-family: var(--disp);
-  background: transparent;
-}
-.conv__notice-action svg { width: 12px; height: 12px; }
-.conv__notice-action:hover { color: var(--ink); border-color: var(--line-strong); }
-.conv__avatar {
-  width: 28px; height: 28px;
-  border-radius: 50%;
-  background: var(--accent-soft);
-  color: var(--accent);
-  display: grid; place-items: center;
-  font-family: var(--disp); font-size: 12px; font-weight: 600;
+.conv__notice--side-chat { gap: 10px; }
+.conv__notice-icon {
+  display: inline-flex;
   flex: none;
+  color: var(--_cc-foreground-meta);
 }
-[data-cc-variant="terminal"] .conv__avatar { border-radius: 0; background: transparent; border: 1px solid var(--accent); }
-.conv__target { flex: 1; min-width: 0; }
-.conv__title { font-size: 14px; font-weight: 600; letter-spacing: -0.008em; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.conv__identity { font-family: var(--mono); font-size: 11px; color: var(--ink-dim); margin-top: 1px; }
-.conv__target .conv__identity { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.conv__actions { margin-left: auto; display: flex; gap: 6px; flex: none; }
-.conv__action {
-  display: inline-flex; align-items: center; justify-content: center; gap: 5px;
-  min-width: 28px; min-height: 28px; flex: none;
-  padding: 4px 10px; font-size: 11.5px; color: var(--ink-muted);
-  border: 1px solid var(--line); border-radius: var(--r-sm);
-  font-family: var(--disp);
-  background: transparent;
+.conv__notice-icon svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.75;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
-.conv__action-icon { display: inline-flex; }
-.conv__action-icon svg { width: 14px; height: 14px; }
-.conv__action-label { white-space: nowrap; }
-.conv__action:hover:not(:disabled) { color: var(--ink); border-color: var(--line-strong); }
-.conv__action:disabled { opacity: 0.45; cursor: default; }
+.conv__notice-mark { flex: none; }
+.conv__notice-text { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.conv__notice-text strong { font-weight: 600; }
+.conv__notice-text .cc-agent--link { font: inherit; font-weight: 600; }
+.conv__notice-action { flex: none; }
 
 .conv__body {
   flex: 1; overflow-y: auto; overflow-x: hidden;
@@ -881,14 +963,29 @@
 [data-cc-variant="terminal"] .composer__send { border-radius: 0; }
 .composer__send:disabled { background: var(--line-strong); color: var(--ink-faint); cursor: default; }
 
+/* The composer footer (spec B17): facts about the destination in meta ink,
+   a status fact led by its mark ("To: Billing · Specialist · ● active ·
+   ◉ writing a reply"). */
 .composer__footer {
   margin-top: 8px;
-  display: flex; align-items: center; gap: 10px;
-  font-family: var(--mono); font-size: 10.5px; color: var(--ink-dim);
-  flex-wrap: wrap;
+  display: flex; align-items: center; flex-wrap: wrap;
+  gap: 2px 6px;
+  font-family: var(--_cc-font-display);
+  font-size: var(--_cc-panel-fs-meta);
+  line-height: 1.4;
+  color: var(--_cc-foreground-meta);
+  font-variant-numeric: tabular-nums;
 }
-.composer__footer .dot { width: 5px; height: 5px; border-radius: 50%; background: var(--ok); }
-[data-cc-variant="terminal"] .composer__footer .dot { border-radius: 0; }
+.composer__fact {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+}
+.composer__fact > .cc-mark { flex: none; }
+.composer__to b { font-weight: 600; color: var(--_cc-foreground-muted); }
+.composer__sep { color: var(--_cc-foreground-meta); }
+.composer__fact[data-tone="crit"] { color: var(--_cc-negative-ink); }
 
 /* Compact overrides when view content lives inside a narrow pane */
 .pane__body .msg {
@@ -901,47 +998,87 @@
 }
 .pane__body .msg__time { padding-top: 0; }
 .pane__body .conv__body { padding: 14px 16px 8px 46px; gap: 10px; }
-.pane__body .conv__head { padding: 12px 16px 10px; gap: 8px; }
+.pane__body .conv__head { padding: 10px 16px 9px; }
+.pane__body .conv__notice,
+.pane__body .conv__confirm { padding-inline: 16px; }
 .pane__body .composer { padding: 10px 16px 12px; }
 
 .conv__history-status { flex: none; padding: 4px 16px; color: var(--ink-muted); font-size: 12px; }
 
 
-.conv__head--compact { padding-block: 6px; gap: 8px; }
-.conv__head--compact .conv__avatar { width: 22px; height: 22px; font-size: 10px; }
-.conv__head--compact .conv__title { font-size: 12px; }
-.conv__head--compact .conv__action { min-height: 28px; }
-.conv__action:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
-.conv__identity { color: var(--ink-muted); }
-@container (max-width: 440px) {
-  .conv__head, .pane__body .conv__head { padding-inline: 10px; gap: 6px; }
+/* A console pane's header: the same two lines, tighter. */
+.conv__head--compact { padding-block: 9px 8px; gap: 10px; }
+.conv__head--compact .conv__title { font-size: 14px; }
+/* Narrow panes (the header frame is the query container): the role and
+   group give way first, then the action labels (icons keep their names and
+   tooltips), then the spacing. */
+@container (max-width: 720px) {
+  .conv__role { display: none; }
+}
+@container (max-width: 600px) {
   .conv__actions { gap: 4px; }
-  .conv__action { width: 28px; padding: 4px; border-color: transparent; }
-  .conv__action:hover:not(:disabled) { background: var(--bg-elev-2); }
-  .conv__action-icon svg { width: 16px; height: 16px; }
-  .conv__action-label { display: none; }
+  .conv__action.cc-btn { width: var(--_cc-panel-control-h); padding: 0; }
+  .conv__action .conv__action-label { display: none; }
+  .conv__action .cc-btn__icon svg { width: 16px; height: 16px; }
+}
+@container (max-width: 440px) {
+  .conv__head, .pane__body .conv__head { padding-inline: 10px; gap: 8px; }
+  .conv__confirm, .pane__body .conv__confirm { padding-inline: 10px; }
+  .conv__action.cc-btn { border-color: transparent; }
+  .conv__action.cc-btn:hover:not(:disabled) { background: var(--_cc-surface-hover); }
 }
 
-.conv > .queue-storage-note { font-size: 12px; color: var(--ink-muted); padding: 6px 16px; }
+/* Where the queue is kept: a caption under the queue, in meta ink. */
+.conv > .queue-storage-note {
+  display: block;
+  flex: none;
+  padding: 0 16px 6px 40px;
+  background: var(--_cc-surface-card);
+  font-family: var(--_cc-font-display);
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--_cc-foreground-meta);
+}
+.conv > .queue-storage-error {
+  flex: none;
+  margin: 0;
+  padding: 4px 16px 6px 40px;
+  font-family: var(--_cc-font-display);
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--_cc-negative-ink);
+  overflow-wrap: anywhere;
+}
 
+/* Older queued messages to import: a quiet notice with one action. */
 .queue-import {
-  display: flex; align-items: center; gap: 8px; flex: none;
-  margin: 4px 16px 6px; padding: 6px 8px;
-  border: 1px solid var(--line); border-radius: var(--r-md);
-  background: var(--bg-sunken); color: var(--ink-muted);
-  font-family: var(--sans); font-size: 12px; line-height: 1.4;
+  display: flex; align-items: center; gap: 10px; flex: none;
+  margin: 6px 16px;
+  padding: 8px 10px;
+  border: 1px solid var(--_cc-border-soft);
+  border-radius: var(--_cc-radius-md);
+  background: var(--_cc-surface-soft);
+  color: var(--_cc-foreground-muted);
+  font-family: var(--_cc-font-display);
+  font-size: 12px;
+  line-height: 1.4;
 }
-.queue-import__icon { display: inline-flex; flex: none; }
-.queue-import__icon svg { width: 16px; height: 16px; }
+.queue-import__icon { display: inline-flex; flex: none; color: var(--_cc-foreground-meta); }
+.queue-import__icon svg {
+  width: 16px; height: 16px;
+  fill: none; stroke: currentColor; stroke-width: 1.75;
+  stroke-linecap: round; stroke-linejoin: round;
+}
 .queue-import__text { display: flex; flex-direction: column; flex: 1; min-width: 0; overflow-wrap: anywhere; }
-.queue-import__title { color: var(--ink); font-weight: 500; }
+.queue-import__title { color: var(--_cc-foreground); font-weight: 600; }
 .queue-import__action {
-  flex: none; min-height: 28px; padding: 4px 10px;
-  border: 1px solid var(--line); border-radius: var(--r-sm);
-  background: var(--bg-elev-1); color: var(--ink);
+  flex: none; min-height: 28px; padding: 0 10px;
+  border: 1px solid var(--_cc-border-strong); border-radius: var(--_cc-radius-sm);
+  background: var(--_cc-surface-card); color: var(--_cc-foreground);
   font: inherit; font-weight: 500; cursor: pointer;
+  transition: border-color var(--_cc-dur-fast) ease, background var(--_cc-dur-fast) ease;
 }
-.queue-import__action:hover { background: var(--bg-elev-2); border-color: var(--line-strong); }
-.queue-import__action:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.queue-import__action:hover { background: var(--_cc-surface-hover); border-color: var(--_cc-foreground-muted); }
+.queue-import__action:focus-visible { outline: 2px solid var(--_cc-focus-ring); outline-offset: 2px; }
 
 

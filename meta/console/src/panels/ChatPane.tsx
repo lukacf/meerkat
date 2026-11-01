@@ -38,6 +38,13 @@ import {
   WorkGraphCard,
   copyTextToClipboard,
   type WorkGraphCardActions,
+  AgentName,
+  Button,
+  StatusMark,
+  createAgentDirectory,
+  statusTone,
+  useConsoleNavigation,
+  type Tone,
 } from "@console-components";
 import type { ConsoleAgent } from "../types";
 import { responsePhaseWords } from "../lib/agents";
@@ -54,6 +61,7 @@ import {
 } from "../lib/composer-attachment-text";
 import { countRender } from "../lib/render-counts";
 import { useTurnWindow, type TurnWindow } from "./transcript-window";
+import { ChatHeader, runningToolOf } from "./chat-header";
 
 const NO_TURN_IDS: ReadonlySet<string> = new Set();
 
@@ -1792,6 +1800,29 @@ const ComposerTextarea = React.memo(function ComposerTextarea({
   );
 });
 
+/// The agent a side chat was forked from: a link to it where the console
+/// can open agents, its name otherwise.
+function SideChatSourceName({ id, label }: { id?: string | null; label: string }) {
+  const navigation = useConsoleNavigation();
+  const directory = React.useMemo(() => (id ? createAgentDirectory([{ id, label }]) : undefined), [id, label]);
+  if (!id || !navigation?.openAgent) return <>{label}</>;
+  return <AgentName id={id} link directory={directory} testId="side-chat-source" />;
+}
+
+/// One fact in the composer footer, after its separator: the words in meta
+/// ink, with the tone's mark when the fact is a status.
+function FooterFact({ tone, children }: { tone?: Tone; children: React.ReactNode }) {
+  return (
+    <>
+      <span className="composer__sep" aria-hidden="true">·</span>
+      <span className="composer__fact" data-tone={tone}>
+        {tone ? <StatusMark tone={tone} /> : null}
+        {children}
+      </span>
+    </>
+  );
+}
+
 export function ChatPane({
   windowed = transcriptWindowingDefault(),
   agent,
@@ -2222,8 +2253,12 @@ export function ChatPane({
     },
     [requestOlderHistory, scheduleActiveTurnUpdate],
   );
-  const initial = (agentLabel || "?").trim().charAt(0).toUpperCase() || "?";
-  const state = (agent?.state || "unknown").toLowerCase();
+  const state = (agent?.state || "").trim().toLowerCase();
+  // The tool the header names while the agent runs one.
+  const runningTool = React.useMemo(
+    () => (phase === "tool-executing" ? runningToolOf(entries) : null),
+    [phase, entries],
+  );
   const canAttachImages = !readOnly && agent?.model_capabilities?.image_input === true;
   // Access control can grant view without send; `false` means the runtime
   // explicitly withheld the send affordance. Unknown (absent) stays sendable.
@@ -2519,55 +2554,51 @@ export function ChatPane({
         }
       }}
     >
-      <div className="conv__head-frame">
-      <div className={`conv__head${headerVariant === "compact" ? " conv__head--compact" : ""}`}>
-        <div className="conv__avatar">{initial}</div>
-        <div className="conv__target">
-          <div className="conv__title" title={identity}>{agentLabel}</div>
-          {headerVariant === "full" ? <div className="conv__identity">
-            {identity}{agent?.role ? ` · ${agent.role}` : ""}
-          </div> : null}
-        </div>
-        <div className="conv__actions">
-          {([
-            { id: "details", label: inspectLabel, icon: "i-info", onClick: onInspect },
-            { id: "fork-side-chat", label: forkSideChatLabel, icon: "i-branch", onClick: onForkSideChat, disabledReason: forkSideChatDisabledReason },
-            { id: "stop-run", label: stopRunLabel, icon: "i-stop", onClick: onStopRun },
-            { id: "respawn", label: respawnLabel, icon: "i-refresh", onClick: agent?.affordances?.can_respawn ? onRespawn : undefined },
-            { id: "retire", label: retireLabel, icon: "i-archive", onClick: agent?.affordances?.can_retire ? onRetire : undefined },
-          ] as { id: string; label: string; icon: string; onClick?: () => void; disabledReason?: string | null }[]).filter(action => action.onClick).map(action => (
-            <button key={action.id} type="button" className="conv__action" onClick={action.onClick}
-              disabled={Boolean(action.disabledReason)}
-              aria-label={action.label} title={action.disabledReason ? `${action.label} - ${action.disabledReason}` : `${action.label} - ${identity}`} data-testid={`conv-action:${action.id}`}>
-              <span className="conv__action-icon" aria-hidden="true"><Icon name={action.icon} /></span>
-              <span className="conv__action-label">{action.label}</span>
-            </button>
-          ))}
-        </div>
-      </div>
-      </div>
+      <ChatHeader
+        identity={identity}
+        agentLabel={agentLabel}
+        agent={agent}
+        phase={phase}
+        toolName={runningTool?.name}
+        toolCallId={runningTool?.callId}
+        toolPeer={runningTool?.peer}
+        compact={headerVariant === "compact"}
+        onInspect={onInspect}
+        inspectLabel={inspectLabel}
+        onForkSideChat={onForkSideChat}
+        forkSideChatLabel={forkSideChatLabel}
+        forkSideChatDisabledReason={forkSideChatDisabledReason}
+        onStopRun={onStopRun}
+        stopRunLabel={stopRunLabel}
+        onRespawn={agent?.affordances?.can_respawn ? onRespawn : undefined}
+        respawnLabel={respawnLabel}
+        onRetire={agent?.affordances?.can_retire ? onRetire : undefined}
+        retireLabel={retireLabel}
+      />
       {sideChatOfLabel ? (
         <div className="conv__notice conv__notice--side-chat" role="note" data-testid={`side-chat-banner:${identity}`}>
+          <span className="conv__notice-icon" aria-hidden="true"><Icon name="i-branch" /></span>
           <span className="conv__notice-text">
-            Side chat of <strong>{sideChatOfLabel}</strong>. It started from the agent's conversation; the agent itself is unchanged.
+            Side chat of <strong><SideChatSourceName id={agent?.side_chat_of} label={sideChatOfLabel} /></strong>. It started from the agent's conversation; the agent itself is unchanged.
           </span>
           {onCloseSideChat ? (
-            <button type="button" className="conv__notice-action" onClick={onCloseSideChat}
+            <Button size="sm" className="conv__notice-action" icon={<Icon name="i-close" />} onClick={onCloseSideChat}
               aria-label={closeSideChatLabel} data-testid={`side-chat-close:${identity}`}>
-              <Icon name="i-close" />
-              <span>{closeSideChatLabel}</span>
-            </button>
+              {closeSideChatLabel}
+            </Button>
           ) : null}
         </div>
       ) : null}
       {sideChatNotice ? (
         <div className="conv__notice" role="status" data-testid={`side-chat-notice:${identity}`}>
-          {sideChatNotice}
+          <StatusMark tone="info" className="conv__notice-mark" />
+          <span className="conv__notice-text">{sideChatNotice}</span>
         </div>
       ) : null}
       {runStopNotice ? (
         <div className="conv__notice" role="status" data-testid={`run-stop-notice:${identity}`}>
-          {runStopNotice}
+          <StatusMark tone="neutral" className="conv__notice-mark" />
+          <span className="conv__notice-text">{runStopNotice}</span>
         </div>
       ) : null}
       <TranscriptView
@@ -2683,27 +2714,20 @@ export function ChatPane({
           />
         </div>
         <div className="composer__footer">
-          <span>To: <b style={{ color: "var(--ink-muted)" }} title={identity}>{agentLabel}</b></span>
-          {voiceActive && <span>· text to background agent</span>}
+          <span className="composer__fact composer__to">To: <b title={identity}>{agentLabel}</b></span>
+          {voiceActive && <FooterFact>text to background agent</FooterFact>}
           {/* The role, unless it only repeats the name ("To: Coordinator"). */}
-          {agent?.role && humanizeEnum(agent.role).toLowerCase() !== agentLabel.trim().toLowerCase() && (<>
-            <span>·</span>
-            <span>{humanizeEnum(agent.role)}</span>
-          </>)}
-          <span>·</span>
-          <span className="dot" style={{
-            background: state === "active" || state === "running" ? "var(--ok)" :
-                        state.includes("degrade") ? "var(--warn)" :
-                        state === "retired" ? "var(--ink-faint)" : "var(--ink-dim)",
-          }} />
-          <span>{state}</span>
-          {/* What the agent is doing, in the footer's own ink: the accent is
-              for things that act. */}
-          {phase && <><span>·</span><span>{responsePhaseWords(phase)}</span></>}
-          {readOnly && <><span>·</span><span>view only</span></>}
-          {!readOnly && sendWithheld && <><span>·</span><span>send not permitted</span></>}
-          {!readOnly && !canAttachImages && <><span>·</span><span>model cannot see images</span></>}
-          {attachmentError && <><span>·</span><span style={{ color: "var(--crit-ink)" }}>{attachmentError}</span></>}
+          {agent?.role && humanizeEnum(agent.role).toLowerCase() !== agentLabel.trim().toLowerCase() && (
+            <FooterFact>{humanizeEnum(agent.role)}</FooterFact>
+          )}
+          {state && <FooterFact tone={statusTone(state)}>{state}</FooterFact>}
+          {/* What the agent is doing: its mark is the accent (happening now),
+              its words stay in the footer's meta ink. */}
+          {phase && <FooterFact tone="live">{responsePhaseWords(phase)}</FooterFact>}
+          {readOnly && <FooterFact tone="locked">view only</FooterFact>}
+          {!readOnly && sendWithheld && <FooterFact tone="locked">send not permitted</FooterFact>}
+          {!readOnly && !canAttachImages && <FooterFact>model cannot see images</FooterFact>}
+          {attachmentError && <FooterFact tone="crit">{attachmentError}</FooterFact>}
         </div>
       </div>
     </div>

@@ -30,6 +30,7 @@ import {
 } from "../lib/workgraph-layout";
 import type { WorkGraphActivityDay, WorkGraphModel } from "../lib/workgraph-layout";
 import { formatWorkGraphTimestamp } from "../lib/workgraph-time";
+import { useNavigationFocus } from "../lib/navigation-focus";
 import {
   Button,
   Chip,
@@ -729,6 +730,15 @@ export function WorkGraphPanel({
     setSelectedId(itemId);
     if (itemId) setActivityOpen(false);
   };
+  // A link elsewhere opened an item (spec A4.7): the Graph shows it selected,
+  // with its drawer, and pans it into view.
+  const [revealRequest, setRevealRequest] = React.useState<{ id: string } | null>(null);
+  const focusWorkItem = (itemId: string) => {
+    setViewMode("graph");
+    select(itemId);
+    setRevealRequest({ id: itemId });
+  };
+  useNavigationFocus("work-item", focusWorkItem);
 
   const shellProps = {
     className: "workgraph",
@@ -888,6 +898,8 @@ export function WorkGraphPanel({
         canManage={canManage}
         handlers={handlers}
         cacheKey="panel"
+        // Only while the item asked for is still the one selected.
+        revealRequest={revealRequest && revealRequest.id === selected ? revealRequest : null}
         footer={(
           <ActivityStrip
             events={data.events}

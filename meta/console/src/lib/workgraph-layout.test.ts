@@ -316,6 +316,12 @@ test("graph edges carry their kind and words; done goals fold and cancelled item
   assert.ok(!graph.nodes.some((node) => node.id === "dropped"));
   assert.equal(graph.notDrawn, 0, "folded and option-hidden items are not 'not drawn'");
 
+  // A done goal that holds the selected item opens; selecting its header does not.
+  const childOfOld = model.order.find((id) => model.items.get(id)!.frameId === "old-goal" && id !== "old-goal")!;
+  assert.equal(buildWorkGraphGraph(model, { now: NOW, selectedId: childOfOld }).frames.find((frame) => frame.id === "old-goal")!.collapsed, false);
+  assert.ok(buildWorkGraphGraph(model, { now: NOW, selectedId: childOfOld }).nodes.some((node) => node.id === childOfOld));
+  assert.equal(buildWorkGraphGraph(model, { now: NOW, selectedId: "old-goal" }).frames.find((frame) => frame.id === "old-goal")!.collapsed, true);
+
   const open = buildWorkGraphGraph(model, { now: NOW, showDone: true, showCancelled: true });
   assert.equal(open.frames.find((frame) => frame.id === "old-goal")!.collapsed, false);
   assert.equal(open.frames.find((frame) => frame.id === "old-goal")!.meta, "2 of 2 done");

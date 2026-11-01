@@ -630,6 +630,9 @@ export interface WorkGraphGraphViewProps {
   aside?: { title: string; content: React.ReactNode; onClose: () => void; testId?: string } | null;
   /// "<scope>": the view's per-panel caches (minimap toggle) key on it.
   cacheKey?: string;
+  /// Bring this item into view once it is drawn (a link from another panel
+  /// opened it). A new object asks again, even for the same item.
+  revealRequest?: { id: string } | null;
 }
 
 const NO_EVENTS: WorkGraphWireEvent[] = [];
@@ -666,6 +669,7 @@ export function WorkGraphGraphView({
   footer,
   aside,
   cacheKey,
+  revealRequest = null,
 }: WorkGraphGraphViewProps): React.JSX.Element {
   const directory = useAgentDirectory();
   const now = useNow();
@@ -691,7 +695,43 @@ export function WorkGraphGraphView({
     [model, selectedId, showDone, showCancelled, highlightCriticalPath, directory, minute, doneBy],
   );
   const graphRef = React.useRef<GraphViewHandle | null>(null);
+  const canvasRef = React.useRef<HTMLDivElement | null>(null);
   const selection = React.useMemo(() => (selectedId ? [selectedId] : []), [selectedId]);
+
+  // A link from elsewhere asked for an item: once its card is drawn, pan it
+  // into view, and again over the next frames while the drawer docks and
+  // narrows the canvas.
+  const pendingReveal = React.useRef<string | null>(null);
+  React.useEffect(() => {
+    if (revealRequest) pendingReveal.current = revealRequest.id;
+  }, [revealRequest]);
+  React.useEffect(() => {
+    const id = pendingReveal.current;
+    if (!id || !graph.nodes.some((node) => node.id === id)) return undefined;
+    const drawn = () => Array.from(canvasRef.current?.querySelectorAll('[data-testid="workgraph-graph-node"]') ?? [])
+      .some((element) => element.getAttribute("data-item-id") === id);
+    if (typeof requestAnimationFrame !== "function") {
+      if (drawn()) {
+        graphRef.current?.reveal(id);
+        pendingReveal.current = null;
+      }
+      return undefined;
+    }
+    let waited = 0;
+    let settled = 0;
+    let handle = 0;
+    const step = () => {
+      if (drawn()) {
+        graphRef.current?.reveal(id);
+        if (settled++ < 3) handle = requestAnimationFrame(step);
+        else pendingReveal.current = null;
+      } else if (waited++ < 60) {
+        handle = requestAnimationFrame(step);
+      }
+    };
+    step();
+    return () => cancelAnimationFrame(handle);
+  }, [graph.nodes, revealRequest]);
   const drawnItems = graph.nodes.filter((node) => node.kind === "item").length;
   const goals = graph.nodes.length - drawnItems;
   const ariaLabel = joinMeta(
@@ -734,7 +774,7 @@ export function WorkGraphGraphView({
 
   const main = (
     <div className="workgraph-graph__main">
-      <div className="workgraph-graph__canvas">
+      <div className="workgraph-graph__canvas" ref={canvasRef}>
         {graph.notDrawn > 0 ? (
           <span className="workgraph-graph__overflow" data-testid="workgraph-graph-overflow">
             {`+${graph.notDrawn} more ${graph.notDrawn === 1 ? "item" : "items"} not drawn`}

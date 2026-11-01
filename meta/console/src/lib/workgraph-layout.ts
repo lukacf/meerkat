@@ -878,9 +878,19 @@ export function buildWorkGraphGraph(model: WorkGraphModel, options: WorkGraphGra
   const lod = model.items.size >= WORKGRAPH_LARGE_ITEM_COUNT;
   const selectedId = options.selectedId ?? null;
   const frameById = new Map(model.frames.map((frame) => [frame.id, frame]));
+  // A done goal folds to its header, unless it holds the selected item
+  // (opened from another panel, or chosen in the drawer's links).
+  const holdsSelection = new Set<string>();
+  const selectedEntry = selectedId ? model.items.get(selectedId) : undefined;
+  if (selectedEntry) {
+    const start = selectedEntry.frameId === selectedEntry.id
+      ? frameById.get(selectedEntry.id)?.parentFrameId ?? null
+      : selectedEntry.frameId;
+    for (let current = start; current; current = frameById.get(current)?.parentFrameId ?? null) holdsSelection.add(current);
+  }
   const collapsedFrames = new Set<string>();
   for (const frame of model.frames) {
-    if (frame.state === "done" && (lod || !options.showDone)) collapsedFrames.add(frame.id);
+    if (frame.state === "done" && (lod || !options.showDone) && !holdsSelection.has(frame.id)) collapsedFrames.add(frame.id);
   }
   // A nested frame inside a collapsed frame is folded with it.
   const folded = (frameId: string | null): boolean => {

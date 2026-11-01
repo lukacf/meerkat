@@ -1,8 +1,9 @@
-import { act, fireEvent, render } from "@testing-library/react";
+import { act, fireEvent, render, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { WorkGraphWireEdge, WorkGraphWireItem } from "../types";
 import { WorkGraphGraphView } from "./WorkGraphGraphView";
+import { NavigationFocusProvider } from "../lib/navigation-focus";
 import { WorkGraphPanel } from "./WorkGraphPanel";
 import type { WorkGraphPanelData } from "./WorkGraphPanel";
 
@@ -131,6 +132,22 @@ describe("WorkGraphGraphView goal zoom", () => {
   });
 });
 
+describe("WorkGraphGraphView reveal", () => {
+  it("pans an item another panel asked for into view, and leaves the zoom alone", async () => {
+    sizeTheCanvas();
+    const view = render(<WorkGraphGraphView items={items} edges={edges} attention={[]} />);
+    const transform = () => view.getByTestId("workgraph-graph-viewport").getAttribute("transform") ?? "";
+    const scale = () => /scale\(([\d.]+)\)/.exec(transform())?.[1];
+    for (let step = 0; step < 8; step += 1) fireEvent.click(view.getByTestId("workgraph-graph-zoom:in"));
+    const zoomed = transform();
+    const zoomedScale = scale();
+    // The goal's header sits at the frame's top left, off screen at this zoom.
+    view.rerender(<WorkGraphGraphView items={items} edges={edges} attention={[]} revealRequest={{ id: "root" }} />);
+    await waitFor(() => expect(transform() === zoomed).toBe(false));
+    expect(scale()).toBe(zoomedScale);
+  });
+});
+
 describe("WorkGraphGraphView drawer", () => {
   it("opens on a node and says what blocks the item and what it unblocks", () => {
     const onSelect = vi.fn();
@@ -193,5 +210,32 @@ describe("WorkGraphPanel", () => {
     fireEvent.click(toggle);
     expect(toggle.getAttribute("aria-pressed")).toBe("false");
     expect(accented()).toEqual([]);
+  });
+});
+
+describe("WorkGraphPanel navigation", () => {
+  it("opens an item another panel links to: the Graph, the item selected, its drawer", () => {
+    const done = vi.fn();
+    const view = render(
+      <NavigationFocusProvider value={{ request: { kind: "work-item", id: "child-stuck", serial: 1 }, done }}>
+        <WorkGraphPanel data={panelData()} canManage={false} onRefresh={() => {}} />
+      </NavigationFocusProvider>,
+    );
+    expect(done.mock.calls.map((call) => call[0])).toEqual([1]);
+    expect(view.getByTestId("workgraph-view-toggle:graph").getAttribute("aria-pressed")).toBe("true");
+    const drawer = view.getByTestId("workgraph-graph-detail");
+    expect(drawer.querySelector(".workgraph-graph__detail-title")?.textContent).toBe("child-stuck");
+  });
+
+  it("leaves requests for other views alone", () => {
+    const done = vi.fn();
+    const view = render(
+      <NavigationFocusProvider value={{ request: { kind: "route", id: "route-1", serial: 2 }, done }}>
+        <WorkGraphPanel data={panelData()} canManage={false} onRefresh={() => {}} />
+      </NavigationFocusProvider>,
+    );
+    expect(done.mock.calls.length).toBe(0);
+    // Nothing selected: no item drawer, whichever view the panel remembers.
+    expect(view.queryByTestId("workgraph-graph-detail") === null).toBe(true);
   });
 });

@@ -1363,13 +1363,21 @@ PY
 drop_guard("BeginMemberRotationSameSessionRunning", "member_peer_ids")
 PY
 
-  # A same-session terminal that keeps the member's endpoint whatever the
-  # role: a successor under another role keeps the old role's comms name,
-  # which its wake under the new role refuses.
+  # A same-session terminal that takes the same-role branch whatever the
+  # role: a successor under another role keeps the member's endpoint and its
+  # peer id (the material stays coherent, and an endpoint is owed only by a
+  # member with none), so it keeps the old role's comms name, which its wake
+  # under the new role refuses. No machine invariant reads an endpoint's
+  # name: only the audit's own property refuses it.
   mutate roles role_move_keeps_old_name "Action property AuditRoleMoveTakesItsEndpoint" <<'PY'
 for arm in ("CommitMemberRotationSameSessionRunning", "CommitMemberRotationSameSessionStopped",
             "CommitMemberRotationSameSessionKickoffRunning", "CommitMemberRotationSameSessionKickoffStopped"):
     keep_var(arm, "member_peer_endpoints")
+    keep_var(arm, "member_peer_ids")
+    replace_update(arm, "member_boot_obligation_owed",
+                   'IF ((agent_identity \\in DOMAIN member_peer_endpoints) = TRUE) '
+                   'THEN MapRemove(member_boot_obligation_owed, agent_identity) '
+                   'ELSE MapSet(member_boot_obligation_owed, agent_identity, "EndpointPending")')
 PY
 
   # A declared migration ends the role hold before its terminal commits the

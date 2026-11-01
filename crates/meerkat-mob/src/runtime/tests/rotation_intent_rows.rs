@@ -2246,7 +2246,7 @@ async fn an_interrupted_role_move_ends_as_a_plain_retirement_under_097() {
 
     let journal = storage
         .events
-        .poll(0, usize::MAX)
+        .replay_all()
         .await
         .expect("read the fixture's journal");
     let record = recorded_rotation(&journal, "moving", Generation::new(0))

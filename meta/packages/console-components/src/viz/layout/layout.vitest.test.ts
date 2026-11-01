@@ -170,6 +170,19 @@ describe("layered layout", () => {
     expect(frame("g1").w).toBe(frame("g2").w);
   });
 
+  it("fills the view's width with frames, and bounds the picture without padding", () => {
+    const nodes: LayoutNode[] = [card("g", { kind: "goal", h: 34 }), card("a", { frame: "g" }), card("b", { frame: "g" })];
+    const layout = layoutLayered(nodes, [blocks("a", "b")], [{ id: "g", label: "Goal" }], options);
+    const frame = layout.frames[0];
+    expect(frame.w).toBe(options.width);
+    expect(layout.bounds).toEqual({ x: frame.x, y: frame.y, w: frame.w, h: frame.h });
+    // Items stay left-aligned in a wide frame.
+    expect(layout.nodes.get("a")!.x - layout.nodes.get("a")!.w / 2).toBe(frame.x + LAYERED.padX);
+    // Without frames the block keeps its own width.
+    const loose = layoutLayered([card("a"), card("b")], [blocks("a", "b")], [], options);
+    expect(loose.bounds.w).toBeLessThan(options.width);
+  });
+
   it("collapses a frame to its header and routes edges into it to the header", () => {
     const nodes: LayoutNode[] = [card("done", { kind: "goal", h: 34 }), card("x", { frame: "done" }), card("y")];
     const layout = layoutLayered(nodes, [blocks("x", "y")], [{ id: "done", label: "Done goal", collapsed: true }], options);

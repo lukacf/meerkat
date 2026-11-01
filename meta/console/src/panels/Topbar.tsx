@@ -1,4 +1,9 @@
 import React from "react";
+import { Chip } from "../../../packages/console-components/src/panel-kit/chip";
+import { IconButton } from "../../../packages/console-components/src/panel-kit/button";
+import { ViewOptions, type ViewOptionsControl } from "../../../packages/console-components/src/panel-kit/view-options";
+import { Icon } from "../icon";
+import type { ConsoleDisplayKey, ConsoleDisplaySettings, ConsoleTheme } from "./Tweaks";
 
 interface TopbarProps {
   mobName: string;
@@ -8,8 +13,14 @@ interface TopbarProps {
   brandLogoAlt?: string;
   mobStatus?: string;
   environment?: string;
-  theme: "dark" | "light";
+  theme: ConsoleTheme;
   onToggleTheme: () => void;
+  /** The Display settings (B21); without them the Display button is absent. */
+  display?: ConsoleDisplaySettings;
+  /** Whether the user has made any display choice of their own. */
+  displayChosen?: boolean;
+  onChooseDisplay?: <K extends ConsoleDisplayKey>(key: K, value: ConsoleDisplaySettings[K]) => void;
+  onResetDisplay?: () => void;
   sidebarCollapsed: boolean;
   railCollapsed: boolean;
   railVisible?: boolean;
@@ -40,6 +51,114 @@ function PanelGlyph({ side, open }: { side: "left" | "right"; open: boolean }): 
   );
 }
 
+/** The team's state in words: "running", "stopped", "not observed". */
+export function teamStateWords(status: string): string {
+  switch (status) {
+    case "unknown":
+      return "not observed";
+    default:
+      return status.replace(/_/g, " ");
+  }
+}
+
+/**
+ * The Display popover (B21): theme, style, density (the default for panels
+ * without their own choice) and motion, applied at once. Reset forgets the
+ * user's choices, so the configured defaults apply again.
+ */
+function DisplayOptions({
+  display,
+  chosen,
+  onChoose,
+  onReset,
+}: {
+  display: ConsoleDisplaySettings;
+  chosen: boolean;
+  onChoose: <K extends ConsoleDisplayKey>(key: K, value: ConsoleDisplaySettings[K]) => void;
+  onReset: () => void;
+}): React.JSX.Element {
+  const [open, setOpen] = React.useState(false);
+  const triggerRef = React.useRef<HTMLButtonElement | null>(null);
+  const popoverId = `${React.useId()}-display`;
+  const controls: ReadonlyArray<ViewOptionsControl<string>> = [
+    {
+      label: "Theme",
+      testId: "display-theme",
+      value: display.theme,
+      options: [
+        { id: "light", label: "Light", testId: "display-theme:light" },
+        { id: "dark", label: "Dark", testId: "display-theme:dark" },
+      ],
+      onChange: (id: string) => onChoose("theme", id === "dark" ? "dark" : "light"),
+    },
+    {
+      label: "Style",
+      testId: "display-style",
+      value: display.variant,
+      options: [
+        { id: "rams", label: "Rams", testId: "display-style:rams" },
+        { id: "terminal", label: "Terminal", testId: "display-style:terminal" },
+        { id: "graphite", label: "Graphite", testId: "display-style:graphite" },
+      ],
+      onChange: (id: string) => onChoose("variant", id === "terminal" || id === "graphite" ? id : "rams"),
+    },
+    {
+      label: "Density",
+      testId: "display-density",
+      value: display.density,
+      options: [
+        { id: "comfortable", label: "Comfortable", testId: "display-density:comfortable" },
+        { id: "compact", label: "Compact", testId: "display-density:compact" },
+      ],
+      onChange: (id: string) => onChoose("density", id === "compact" ? "compact" : "comfortable"),
+      hint: "The roster, and panels without their own choice.",
+    },
+    {
+      label: "Motion",
+      testId: "display-motion",
+      value: display.motion,
+      options: [
+        { id: "system", label: "System", testId: "display-motion:system" },
+        { id: "reduced", label: "Reduced", testId: "display-motion:reduced" },
+      ],
+      onChange: (id: string) => onChoose("motion", id === "reduced" ? "reduced" : "system"),
+      hint: display.motion === "reduced" ? "Pulses and movement stop." : "Follows your system setting.",
+    },
+  ];
+  return (
+    <>
+      <IconButton
+        ref={triggerRef}
+        label="Display"
+        title="Display settings"
+        icon={<Icon name="i-sliders" />}
+        badge={chosen}
+        aria-haspopup="dialog"
+        aria-expanded={open}
+        aria-controls={open ? popoverId : undefined}
+        className="meta-topbar__icon"
+        data-testid="display-options"
+        onClick={() => setOpen((value) => !value)}
+      />
+      <ViewOptions
+        open={open}
+        anchorRef={triggerRef}
+        onClose={() => setOpen(false)}
+        ariaLabel="Display"
+        controls={controls}
+        onReset={onReset}
+        resetDisabled={!chosen}
+        resetLabel="Reset display"
+        resetTestId="display-reset"
+        width={272}
+        id={popoverId}
+        testId="display-options-popover"
+        className="meta-topbar__display"
+      />
+    </>
+  );
+}
+
 export function Topbar({
   mobName,
   connectionStatus,
@@ -50,12 +169,17 @@ export function Topbar({
   environment = "dev",
   theme,
   onToggleTheme,
+  display,
+  displayChosen = false,
+  onChooseDisplay,
+  onResetDisplay,
   sidebarCollapsed,
   railCollapsed,
   railVisible = true,
   onToggleSidebar,
   onToggleRail,
 }: TopbarProps): React.JSX.Element {
+  const stateWords = teamStateWords(mobStatus);
   return (
     <div className="meta-topbar" data-testid="meta-topbar">
       <button
@@ -75,26 +199,30 @@ export function Topbar({
           : <span className="meta-topbar__brand-mark" />}
         <span>{brandLabel}</span>
       </div>
-      <div className="meta-topbar__mob">
-        <span className="meta-topbar__mob-status" data-status={mobStatus} title={mobStatus} />
-        <span>{mobName}</span>
-        <span className="dim">· {mobStatus}</span>
+      {/* The team and its state: the mark's shape and colour, and the words. */}
+      <div className="meta-topbar__mob meta-topbar__team" data-testid="topbar-team">
+        <span className="meta-topbar__mob-status" data-status={mobStatus} title={stateWords} aria-hidden="true" />
+        <span className="meta-topbar__team-name">{mobName}</span>
+        <span className="meta-topbar__team-state">{stateWords}</span>
       </div>
-      <div className="meta-topbar__mob">
-        <span>env:</span>
-        <span>{environment}</span>
-      </div>
+      {environment ? (
+        <div className="meta-topbar__env" data-testid="topbar-environment">
+          <Chip tone="neutral" title={`Environment: ${environment}`}>{environment}</Chip>
+        </div>
+      ) : null}
       <div className="meta-topbar__spacer" />
       {connectionStatus}
       <div className="meta-topbar__util">
-        <button
-          type="button"
-          onClick={onToggleTheme}
+        {display && onChooseDisplay && onResetDisplay ? (
+          <DisplayOptions display={display} chosen={displayChosen} onChoose={onChooseDisplay} onReset={onResetDisplay} />
+        ) : null}
+        <IconButton
+          label={`Switch to ${theme === "dark" ? "light" : "dark"} mode`}
+          icon={<Icon name={theme === "dark" ? "i-sun" : "i-moon"} />}
+          className="meta-topbar__icon"
           data-testid="theme-toggle"
-          title={`Switch to ${theme === "dark" ? "light" : "dark"} mode`}
-        >
-          {theme === "dark" ? "☾ dark" : "☀ light"}
-        </button>
+          onClick={onToggleTheme}
+        />
       </div>
       {railVisible ? (
         <button

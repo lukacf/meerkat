@@ -30,7 +30,7 @@ import {
   useConsoleDockController,
 } from "@console-components";
 import type { ConversationBlobReader, MarkdownUrlPolicy, WorkGraphCardActions } from "@console-components";
-import { AgentDirectoryProvider, EmptyState, LoadingState, PanelHeader, PanelShell, SelectField, createAgentDirectory } from "@console-components";
+import { AgentDirectoryProvider, EmptyState, LoadingState, PanelDensityDefaultProvider, PanelHeader, PanelShell, SelectField, createAgentDirectory } from "@console-components";
 import { forgetOwnSends, rememberOwnSend } from "./lib/turn-origin";
 import type {
   ConsoleDockState,
@@ -223,7 +223,7 @@ import {
 import { RoutingPanel } from "./panels/RoutingPanel";
 import { LogsPanel } from "./panels/LogsPanel";
 import { Topbar } from "./panels/Topbar";
-import { useConsoleVariant, type ConsoleTheme } from "./panels/Tweaks";
+import { useConsoleDisplay, type ConsoleTheme } from "./panels/Tweaks";
 import {
   Sidebar as DesignSidebar,
   normalizeNavKind,
@@ -1040,17 +1040,15 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     phase: "connecting", stale: true, freshness: "unknown",
   });
   const [transportRetry, setTransportRetry] = React.useState(0);
-  const [theme, setTheme] = React.useState<ConsoleTheme>(() => {
-    try {
-      return (
-        (localStorage.getItem("meta-console-theme") as ConsoleTheme) ||
-        "light"
-      );
-    } catch {
-      return "light";
-    }
+  // Display settings (B21): the user's own choices, else the configured
+  // appearance defaults (applied while the user has made no choice, never
+  // written), else the console's defaults.
+  const display = useConsoleDisplay({
+    theme: normalizeConsoleTheme(experience?.console_config?.appearance?.default_theme) ?? undefined,
+    variant: normalizeConsoleVariant(experience?.console_config?.appearance?.default_variant) ?? undefined,
   });
-  const [variant, setVariant] = useConsoleVariant();
+  const theme = display.settings.theme;
+  const variant = display.settings.variant;
   const sidebarStorageScope = React.useMemo(
     () => sidebarPreferencesScope(baseUrl, experience),
     [baseUrl, experience],
@@ -2665,30 +2663,8 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     return () => window.clearInterval(timer);
   }, [loadExperience]);
 
-  React.useEffect(() => {
-    const appearance = experience?.console_config?.appearance;
-    if (!appearance) return;
-    const configuredTheme = normalizeConsoleTheme(appearance.default_theme);
-    if (configuredTheme) {
-      try {
-        if (!localStorage.getItem("meta-console-theme"))
-          setTheme(configuredTheme);
-      } catch {
-        setTheme(configuredTheme);
-      }
-    }
-    const configuredVariant = normalizeConsoleVariant(
-      appearance.default_variant,
-    );
-    if (configuredVariant) {
-      try {
-        if (!localStorage.getItem("meta-console-variant"))
-          setVariant(configuredVariant);
-      } catch {
-        setVariant(configuredVariant);
-      }
-    }
-  }, [experience?.console_config?.appearance, setVariant]);
+  // The configured appearance applies through useConsoleDisplay: a default
+  // the user has not overridden, never written to storage.
 
   React.useEffect(() => {
     const configured = experience?.console_config?.layout?.sidebar_collapsed;
@@ -5664,12 +5640,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
 
   function toggleTheme() {
     const next: ConsoleTheme = theme === "dark" ? "light" : "dark";
-    setTheme(next);
-    try {
-      localStorage.setItem("meta-console-theme", next);
-    } catch {
-      /* ignore */
-    }
+    display.choose("theme", next);
   }
 
   function renderPanelBody(panel: {
@@ -5950,8 +5921,9 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     <ActivityLedgerProvider ledger={timelineScope.ledger}>
     <HostDecideSourcesProvider value={hostAttentionSources}>
     <div
-      className="cc-theme-scope meta-shell"
+      className={`cc-theme-scope meta-shell${display.settings.motion === "reduced" ? " reduced-motion" : ""}`}
       data-cc-theme={theme}
+      data-cc-density={display.settings.density}
       data-cc-variant={variant}
       data-testid="meerkat-console"
     >
@@ -5982,6 +5954,10 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
         environment={environmentLabel}
         theme={theme}
         onToggleTheme={toggleTheme}
+        display={display.settings}
+        displayChosen={Object.keys(display.chosen).length > 0}
+        onChooseDisplay={display.choose}
+        onResetDisplay={display.reset}
         sidebarCollapsed={sidebarCollapsed}
         railCollapsed={railCollapsed}
         railVisible={railVisible}
@@ -6014,6 +5990,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           approvals={activeApprovals}
           onOpenApproval={openApproval}
           hostAttentionCount={hostAttention?.items.length || 0}
+          density={display.settings.density}
           activeControl={sidebarActiveControl}
           openControls={sidebarOpenControls}
           navAttention={sidebarNavAttention}
@@ -6025,6 +6002,8 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           onPointerDown={handleSidebarResize}
         />
         <div className="main">
+          {/* Panels without a density of their own follow the Display density (B21). */}
+          <PanelDensityDefaultProvider density={display.settings.density}>
           <MetaDock
             viewState={dock.viewState}
             agents={agents}
@@ -6048,6 +6027,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
               } else openDockTarget(target);
             }}
           />
+          </PanelDensityDefaultProvider>
           {dock.focusedTarget?.kind !== "agent-chat" ? voiceBar : null}
         </div>
         {railVisible ? (

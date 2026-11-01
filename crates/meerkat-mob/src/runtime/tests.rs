@@ -90494,7 +90494,9 @@ fn mob_runtime_parity_field_value(
         "member_wake_attempt_sequence" | "member_materialization_drift_count" => {
             Some(MobRuntimeParityExprValue::U64(0))
         }
-        "boot_plan_sealed" => Some(MobRuntimeParityExprValue::Bool(false)),
+        "boot_plan_sealed"
+        // The declared apply's open fact: the parity probes open no apply.
+        | "declared_apply_open" => Some(MobRuntimeParityExprValue::Bool(false)),
         "member_restore_policy" => Some(MobRuntimeParityExprValue::String("OnDemand".to_string())),
         "composition_authority" => Some(MobRuntimeParityExprValue::String(
             "Authoritative".to_string(),

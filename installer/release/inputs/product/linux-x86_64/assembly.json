@@ -12,13 +12,13 @@
     "other_targets"
   ],
   "archive": "meerkat-connect-gateway-0.9.5-linux-x86_64.tar.gz",
-  "archive_sha256": "147414661aa56ad5f7d4dca818c23b09e8f71fac5a40feee48861cd0ca6a86ba",
-  "archive_bytes": 482238167,
-  "binary_sha256": "b9b2205afb95c1c9aebb20e2bdf0ccd8040de1f54b737f3acfa13cf8f574d13b",
+  "archive_sha256": "86f6bc883b38de5c06520a928ff2c64aa8170e2fe1fd9ab594cc532a9ad2d816",
+  "archive_bytes": 482238079,
+  "binary_sha256": "1bf67a1966621cad906a899793179b3e0f9c2d894574a1ae8860b34540af7453",
   "binary_bytes": 898696272,
   "resources_sha256": "aba32d4a5bf2a2238cae8aa5993ea83ce5fb8c2c79167cd05d30675d6c0fd8ae",
   "resource_component_sha256": "197b9f6c65fb5e7af4542d80e414123148633deb7e8dddadd04f410b4594d27c",
-  "build_record_sha256": "2a4ed564c343be175ccfa32e92319e5cecc7c2f1259e51213d19dae40dba72b8",
+  "build_record_sha256": "3c9bd3c09bb2d123fb947d999869dd15046e4a9b419ebc9493f4f358b357887a",
   "qualification": {
     "candidate": {
       "target": "linux-x86_64",
@@ -26,12 +26,12 @@
       "resources_sha256": "aba32d4a5bf2a2238cae8aa5993ea83ce5fb8c2c79167cd05d30675d6c0fd8ae",
       "binary_kind": "toolkit_gateway",
       "binary": {
-        "sha256": "b9b2205afb95c1c9aebb20e2bdf0ccd8040de1f54b737f3acfa13cf8f574d13b",
+        "sha256": "1bf67a1966621cad906a899793179b3e0f9c2d894574a1ae8860b34540af7453",
         "size": 898696272
       },
       "resource_build_record_sha256": "d0cbde86f22e68b40b0303de4605b3744399bfb52350131982604fdf330beaaf"
     },
-    "installed_gateway_verification_sha256": "7c190f5495516f3b81e7d2653c52878f75f6659d80d11d06990a7555cca00362",
+    "installed_gateway_verification_sha256": "c10449e6171e8ffc1bbc7a0906e1712fcc99eb1b7a1c2198efe92825e8ba0f91",
     "cli_tty_qualified": false
   },
   "assembler_sha256": "d709405ff8dac41486aee737d22ab7a718cccd4ea4de018dfafa6850ebebc4bb",
@@ -65,7 +65,7 @@
     ],
     "raw_tar_bytes": 1683425280,
     "raw_tar_limit": 4294967296,
-    "archive_bytes": 482238167,
+    "archive_bytes": 482238079,
     "archive_limit": 2147483647,
     "archive_king_member_limit": 1073741824,
     "archive_within_king_member_limit": true
@@ -85,16 +85,16 @@
   "resource_build_record_sha256": "d0cbde86f22e68b40b0303de4605b3744399bfb52350131982604fdf330beaaf",
   "release_version": "0.9.5",
   "derived_binary": {
-    "record_sha256": "abfbde9df2c7f2cdb964b327bc8609f2e3b86a32216b15c4c068fe159eab686f",
+    "record_sha256": "bce8c2f2ce30d7c3361419484c55cd0a7c5a281b42637af012c614796933a8d3",
     "kind": "meerkat_connect_derived_gateway",
     "derivation": "strip_debug",
     "original": {
-      "path": "/mnt/connect-release/a1/parent/20261031T215548Z/binary/toolkit_gateway",
-      "sha256": "938c232480c0b1f3dbd13f07ccf511dd0b339f15193927e275ae2a222cb9cb8a",
+      "path": "/mnt/connect-release/a1/parent/20261101T113908Z/binary/toolkit_gateway",
+      "sha256": "102598814924ba043ade5d772e6dc44b684c54cd2bd7707a74ca4f553ed645c8",
       "size": 2544390736
     },
     "derived": {
-      "sha256": "b9b2205afb95c1c9aebb20e2bdf0ccd8040de1f54b737f3acfa13cf8f574d13b",
+      "sha256": "1bf67a1966621cad906a899793179b3e0f9c2d894574a1ae8860b34540af7453",
       "size": 898696272
     },
     "records": {
@@ -103,12 +103,12 @@
       "transformation_result": "transformation-result.json"
     },
     "transformation": {
-      "start_sha256": "d7c2449ea4abe3d13ba2ed450a99ffd685a773690b269625c0a89c26a989a4ec",
-      "result_sha256": "22df464f70793379cfb2630cf1a2fe7477de68685564babd4ddb1068020c07d7",
+      "start_sha256": "88a4e37570af5576f6a1222327206cdfc00b312332bb56f6694d6661d1df28d7",
+      "result_sha256": "02c85ae5b30ac19ea731c9f7311760752101bb6f6df12566e09cd488db90bf5a",
       "argv": [
         "/usr/bin/x86_64-linux-gnu-objcopy",
         "--strip-debug",
-        "/mnt/connect-release/a1/parent/20261031T215548Z/binary/toolkit_gateway",
+        "/mnt/connect-release/a1/parent/20261101T113908Z/binary/toolkit_gateway",
         "/mnt/connect-release/a1/out/derived-gateway/toolkit_gateway"
       ],
       "tool": {
@@ -126,7 +126,7 @@
         "entry": 137648000,
         "flags": 0
       },
-      "build_id": "148ad3dd1925cb17a1a0254c8c61fafb91b24127",
+      "build_id": "98e45ec29e10b72a0a373c3309cea18122c58abc",
       "needed": [
         "libgcc_s.so.1",
         "libm.so.6",

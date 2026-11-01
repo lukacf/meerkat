@@ -155,7 +155,7 @@ class OrdinaryMetaStartup:
         if (any(options.get(name) is not None for name in (
                 "mob_config_path", "mob_config_inline", "application_tool_policies",
                 "prepared_application_bundle", "prepared_application_digest",
-                "declare_spec_update_expected_revision"))
+                "declare_spec_update_expected_revision", "gateway_transport"))
                 or options.get("gateway_bin") not in (None, str(self.gateway.path))
                 or options.get("persistent_state") != str(self.root / ".mobkit/state")
                 or options.get("roster_provider") is not self.application
@@ -169,9 +169,20 @@ class OrdinaryMetaStartup:
                 if self._policy_bytes else None),
             init_deadline=self.startup_timeout)
         _model_builder_options(self, options)
+        # The ordinary Meta gateway uses 16 MiB workers; give its Core
+        # process-owned member/cleanup runtimes the same budget. Keep this
+        # host choice on the native child, without changing the app environment.
+        from meerkat_meta._transport import PersistentTransport
+        gateway_bin = str(self.gateway.path)
+
+        def gateway_transport():
+            return PersistentTransport(gateway_bin,
+                env={"RKAT_WORKER_STACK_BYTES": "16777216"})
+
+        options["gateway_transport"] = gateway_transport
         self.config = MetaBuilderConfig(**options)
         self._config_providers = tuple(getattr(self.config, name) for name in (
-            "session_builder", "runtime_store", "agent_customizer", "auth_config"))
+            "session_builder", "runtime_store", "agent_customizer", "auth_config", "gateway_transport"))
         self._http_options = tuple(getattr(self.config, name) for name in (
             "http_listen", "http_public_base_url", "allow_remote", "console_require_app_auth",
             "console_config_path"))
@@ -196,7 +207,7 @@ class OrdinaryMetaStartup:
                 or config.declare_spec_update_expected_revision is not None
                 or self._model_configuration is None and config.meerkat_config_path is not None
                 or any(getattr(config, name) is not original for name, original in zip(
-                    ("session_builder", "runtime_store", "agent_customizer", "auth_config"), self._config_providers))
+                    ("session_builder", "runtime_store", "agent_customizer", "auth_config", "gateway_transport"), self._config_providers))
                 or tuple(getattr(config, name) for name in (
                     "http_listen", "http_public_base_url", "allow_remote", "console_require_app_auth",
                     "console_config_path")) != self._http_options):

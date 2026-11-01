@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { isLogFrameVisible, logIdentityLabel, sanitizeLogFrameData, summarizeLogFrame } from "./LogsPanel";
+// The panel's model (pure): this node test bundle cannot resolve React.
+import { isLogFrameVisible, logIdentityLabel, sanitizeLogFrameData, summarizeLogFrame } from "./activity/logs-model";
 import { createAgentDirectory } from "../../../packages/console-components/src/panel-kit/agents";
 import type { ConsoleFrame } from "../types";
 

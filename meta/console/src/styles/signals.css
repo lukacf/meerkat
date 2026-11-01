@@ -59,80 +59,105 @@
 }
 
 .rail__head {
-  padding: 14px 16px 8px;
+  padding: 14px 16px 6px;
   display: flex; align-items: baseline; gap: 10px;
-  border-bottom: 1px solid var(--line);
-  min-height: 44px;
+  min-height: 0;
   flex: none;
 }
 .rail__title {
-  font-size: 10px;
-  letter-spacing: 0.14em;
+  font-size: var(--_cc-panel-fs-label, 10.5px);
+  letter-spacing: 0.1em;
   text-transform: uppercase;
-  color: var(--ink-dim);
+  color: var(--_cc-foreground-meta);
   font-weight: 600;
-  font-family: var(--disp);
+  font-family: var(--_cc-font-display);
 }
 .rail__sub {
   margin-left: auto;
-  font-family: var(--mono);
-  font-size: 10px;
-  color: var(--ink-meta);
+  font-family: var(--_cc-font-mono);
+  font-size: 10.5px;
+  color: var(--_cc-foreground-meta);
+  font-variant-numeric: tabular-nums;
 }
-.rail__filters {
-  display: flex; gap: 0;
-  padding: 0; border-bottom: 1px solid var(--line);
+/* The 15-minute pulse: one bar a minute, the live minute in the accent. */
+.rail__pulse {
   flex: none;
+  padding: 2px 16px 10px;
+  line-height: 0;
 }
-.rail__filter {
-  flex: 1;
-  padding: 8px 10px;
-  font-size: 11px;
-  color: var(--ink-dim);
-  border-right: 1px solid var(--line);
-  border-left: none;
-  border-top: none;
-  border-bottom: none;
-  font-family: var(--disp);
-  background: transparent;
+.rail__pulse .cc-spark { display: block; width: 100%; }
+.rail__pulse .cc-spark__svg { width: 100%; height: 22px; }
+
+/* Presets: a segmented control across the rail. */
+.rail__filters.cc-seg {
+  display: flex;
+  flex: none;
+  margin: 0 12px 8px;
 }
-.rail__filter:last-child { border-right: none; }
-.rail__filter.is-active {
-  color: var(--ink);
-  background: var(--bg-elev-1);
-  box-shadow: inset 0 -2px 0 var(--accent);
-}
-.rail__filter:hover:not(.is-active) { color: var(--ink); }
-.rail__filter-count {
-  font-family: var(--mono);
-  font-size: 10px;
-  color: var(--ink-meta);
-  margin-left: 4px;
+.rail__filters.cc-seg .cc-seg__btn {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding-left: 8px;
+  padding-right: 8px;
+  justify-content: center;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .rail__list {
-  flex: 1; overflow-y: auto;
-  padding: 2px 0;
+  flex: 1;
+  overflow-y: auto;
+  padding: 0 0 12px;
   min-height: 0;
+  border-top: 1px solid var(--_cc-border-soft);
 }
 .rail__empty {
-  padding: 20px 14px;
-  color: var(--ink-meta);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 28px 16px;
+  color: var(--_cc-foreground-meta);
   font-size: 12px;
+  text-align: center;
 }
 
+/* ── A signal ───────────────────────────────────────────────────
+   The tone's 4 px rule, then the mark, the label (the row's button) and
+   the time; the detail; the agent and the row's actions. */
 .signal {
+  position: relative;
   display: grid;
-  grid-template-columns: 4px 1fr auto;
-  gap: 10px;
-  padding: 10px 14px 10px 10px;
-  border-bottom: 1px solid var(--line);
+  grid-template-columns: 3px minmax(0, 1fr);
+  column-gap: 11px;
+  padding: 10px 14px 10px 0;
+  border-bottom: 1px solid var(--_cc-border-soft);
   cursor: pointer;
+  transition: background var(--_cc-dur-fast, 120ms) ease;
 }
-.signal:hover { background: var(--bg-elev-1); }
+.signal:hover { background: var(--_cc-surface-hover); }
+.signal__bar {
+  align-self: stretch;
+  border-radius: 0 1px 1px 0;
+  background: transparent;
+}
+.signal[data-sev="critical"] .signal__bar { background: var(--_cc-negative); }
+.signal[data-sev="warning"] .signal__bar { background: var(--_cc-warning); }
+.signal[data-tone="live"] .signal__bar { background: var(--_cc-viz-live); }
+
+.signal__body { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.signal__head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+.signal__mark { flex: none; }
 /* The label is the row's button: it reads as the plain label, and the row
    draws its focus ring. */
 .signal__hit {
   display: block;
+  flex: 1 1 auto;
   min-width: 0;
   margin: 0;
   padding: 0;
@@ -144,27 +169,28 @@
   cursor: pointer;
 }
 .signal__hit:focus-visible {
-  outline: 2px solid var(--focus-ring);
+  outline: 2px solid var(--_cc-focus-ring);
   outline-offset: 2px;
 }
 @supports selector(:has(*)) {
   .signal__hit:focus-visible { outline: none; }
-  .signal:has(> .signal__body > .signal__hit:focus-visible) {
-    outline: 2px solid var(--focus-ring);
+  .signal:has(> .signal__body .signal__hit:focus-visible) {
+    outline: 2px solid var(--_cc-focus-ring);
     outline-offset: -2px;
   }
 }
-.signal__bar { background: var(--ink-faint); border-radius: 1px; }
-.signal[data-sev="critical"] .signal__bar { background: var(--crit); }
-.signal[data-sev="warning"]  .signal__bar { background: var(--warn); }
-.signal[data-sev="info"]     .signal__bar { background: var(--ink-dim); opacity: 0.6; }
-
-.signal__body { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
 .signal__label {
-  font-size: 12px; font-weight: 500; color: var(--ink);
-  display: flex; align-items: center; gap: 8px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-size: 12.5px;
+  font-weight: 600;
+  line-height: 1.35;
+  color: var(--_cc-foreground);
   letter-spacing: -0.003em;
 }
+.signal__label > :not(.signal__chevron):not(.signal__count) { min-width: 0; }
 /* A grouped row's disclosure mark, turned down while the group is open. */
 .signal__chevron {
   flex: none;
@@ -172,88 +198,112 @@
   height: 0;
   border-top: 3.5px solid transparent;
   border-bottom: 3.5px solid transparent;
-  border-left: 5px solid var(--ink-meta);
-  transition: transform 120ms ease;
+  border-left: 5px solid var(--_cc-foreground-meta);
+  transition: transform var(--_cc-dur-fast, 120ms) ease;
 }
 .signal[data-expanded="true"] .signal__chevron { transform: rotate(90deg); }
 .signal__count {
-  font-family: var(--mono);
+  flex: none;
+  font-family: var(--_cc-font-mono);
   font-size: 10px;
-  color: var(--ink-dim);
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  padding: 1px 5px;
+  font-weight: 400;
+  color: var(--_cc-foreground-meta);
+  border: 1px solid var(--_cc-border-soft);
+  border-radius: var(--_cc-radius-pill);
+  padding: 0 5px;
+}
+.signal__time {
+  flex: none;
   margin-left: auto;
+  font-family: var(--_cc-font-mono);
+  font-size: 10.5px;
+  color: var(--_cc-foreground-meta);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
 }
-.signal[data-sev="critical"] .signal__label::before {
-  content: ""; width: 5px; height: 5px; border-radius: 50%; background: var(--crit);
-  box-shadow: 0 0 0 3px color-mix(in oklch, var(--crit) 18%, transparent);
-}
-[data-cc-variant="terminal"] .signal[data-sev="critical"] .signal__label::before { border-radius: 0; }
-
 .signal__detail {
-  font-size: 11.5px; color: var(--ink-muted);
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  padding-left: 15px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--_cc-foreground-muted);
+  overflow-wrap: anywhere;
+}
+.signal__foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  min-height: 24px;
+  padding-left: 15px;
 }
 /* The agent's display name (the raw key is in its tooltip). */
 .signal__agent {
-  font-size: 11px;
-  color: var(--ink-meta);
+  min-width: 0;
+  font-size: 11.5px;
+  color: var(--_cc-foreground-muted);
 }
+.signal__agent .cc-agent__name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.signal__actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+  flex: none;
+}
+.signal__review { height: 22px; }
+/* "Open in Memory" pivot on live memory signals: opens the Memory panel at the
+   record the frame names. */
+.signal__memory-pivot {
+  height: 22px;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--_cc-foreground);
+  background: transparent;
+  border: 1px solid var(--_cc-border-soft);
+  border-radius: var(--_cc-radius-sm);
+  padding: 0 8px;
+  cursor: pointer;
+}
+.signal__memory-pivot:hover { border-color: var(--_cc-border-strong); background: var(--_cc-surface-card); }
+.signal__memory-pivot:focus-visible { outline: 2px solid var(--_cc-focus-ring); outline-offset: 1px; }
 .signal__events {
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  margin-top: 6px;
-  padding-left: 12px;
-  border-left: 1px solid var(--line);
+  gap: 2px;
+  margin: 4px 0 0 15px;
+  padding-left: 10px;
+  border-left: 1px solid var(--_cc-border-soft);
 }
 .signal__event {
   display: flex;
   flex-direction: column;
   gap: 1px;
-  padding: 4px 0;
+  padding: 4px 6px;
   text-align: left;
   background: transparent;
   border: none;
+  border-radius: var(--_cc-radius-sm);
   color: inherit;
-  font-family: var(--disp);
-}
-.signal__event:hover .signal__event-label {
-  color: var(--ink);
-}
-/* "Open in Memory" pivot on live memory signals: opens the Memory panel at the
-   record the frame names. */
-.signal__memory-pivot {
-  align-self: flex-start;
-  font: inherit;
-  font-size: 10.5px;
-  color: var(--accent);
-  background: none;
-  border: 1px solid var(--line);
-  border-radius: var(--r-sm);
-  padding: 1px 6px;
-  margin-top: 2px;
+  font-family: var(--_cc-font-display);
   cursor: pointer;
 }
-.signal__memory-pivot:hover { border-color: var(--accent); }
+.signal__event:hover { background: var(--_cc-surface-card); }
+.signal__event:hover .signal__event-label { color: var(--_cc-foreground); }
+.signal__event:focus-visible { outline: 2px solid var(--_cc-focus-ring); outline-offset: -2px; }
 .signal__event-label {
-  color: var(--ink-muted);
-  font-size: 11px;
+  color: var(--_cc-foreground-muted);
+  font-size: 11.5px;
   font-weight: 500;
 }
 .signal__event-detail {
-  color: var(--ink-dim);
-  font-size: 10.5px;
+  color: var(--_cc-foreground-meta);
+  font-size: 11px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.signal__meta {
-  display: flex; flex-direction: column; align-items: flex-end; gap: 2px;
-}
-.signal__time {
-  font-family: var(--mono); font-size: 10px; color: var(--ink-meta);
-  white-space: nowrap;
-}
-

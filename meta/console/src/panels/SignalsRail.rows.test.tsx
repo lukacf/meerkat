@@ -1,6 +1,7 @@
 import { cleanup, fireEvent, render, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { SignalsRail } from "./SignalsRail";
+import { ConsoleNavigationProvider } from "../../../packages/console-components/src/panel-kit";
 import type { ConsoleFrame } from "../types";
 
 afterEach(() => { cleanup(); });
@@ -72,6 +73,37 @@ describe("Signals rail rows", () => {
     fireEvent.click(pivot);
     expect(onSelect.mock.calls.length).toBe(2);
     expect(onSelect.mock.calls[1][0].id).toBe("mem-quarantine");
+    expect(view.container.querySelectorAll(NESTED_CONTROLS).length).toBe(0);
+  });
+});
+
+describe("Signals lead somewhere", () => {
+  it("draws the 15-minute pulse and offers Review on an approval waiting for a decision", () => {
+    const onOpenApproval = vi.fn();
+    const approvals = [{ pendingId: "pending-1", action: "Refund 1,240 EUR on order 77310", actorId: "billing", status: "pending", createdAtMs: now - 60_000, deadlineAtMs: now + 3_600_000 }];
+    const view = render(<SignalsRail frames={frames} collapsed={false} approvals={approvals} onOpenApproval={onOpenApproval} />);
+    expect(view.getByTestId("signals-pulse")).toBeTruthy();
+    const approval = view.getByTestId("signal:single:approval:pending-1");
+    expect(approval.getAttribute("data-sev")).toBe("warning");
+    expect(approval.textContent).toContain("Approval requested");
+    expect(approval.textContent).toContain("Refund 1,240 EUR on order 77310");
+    fireEvent.click(within(approval).getByRole("button", { name: "Review" }));
+    expect(onOpenApproval).toHaveBeenCalledWith("pending-1");
+    expect(view.container.querySelectorAll(NESTED_CONTROLS).length).toBe(0);
+  });
+
+  it("opens a turn's chat through the console's navigation", () => {
+    const openAgent = vi.fn();
+    const view = render(
+      <ConsoleNavigationProvider value={{ openAgent }}>
+        <SignalsRail frames={frames} collapsed={false} />
+      </ConsoleNavigationProvider>,
+    );
+    fireEvent.click(view.getByTestId("signal-open:interaction:turn-1"));
+    expect(openAgent).toHaveBeenCalledWith("incident-commander", "chat");
+    // The agent's name opens its details.
+    fireEvent.click(within(view.getByTestId("signal:interaction:turn-1")).getByRole("button", { name: /Incident commander/ }));
+    expect(openAgent).toHaveBeenLastCalledWith("incident-commander", "details");
     expect(view.container.querySelectorAll(NESTED_CONTROLS).length).toBe(0);
   });
 });

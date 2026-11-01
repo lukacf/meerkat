@@ -1,0 +1,724 @@
+/* Sidebar: nav buttons, roster sections and agent rows.
+   Split from console-host.css (imported there, in this order). */
+
+/* Sidebar nav buttons */
+.sidebar__section--nav {
+  display: flex; flex-direction: column; gap: 1px;
+  padding: 10px 0 6px;
+  flex: none;
+}
+.sidebar__navitem {
+  display: flex; align-items: center;
+  justify-content: center;
+  min-height: 28px;
+  padding: 5px 8px;
+  font-family: var(--disp);
+  font-size: 11px;
+  color: var(--ink-muted);
+  text-align: center;
+  border: 1px solid var(--line);
+  background: var(--bg-elev-1);
+  border-radius: var(--r-sm);
+  cursor: pointer;
+  text-decoration: none;
+}
+.sidebar__navitem:hover {
+  background: var(--bg-elev-2);
+  color: var(--ink);
+  border-color: var(--line-strong);
+}
+.sidebar__navitem:focus-visible {
+  outline: 1.5px solid var(--focus);
+  outline-offset: -2px;
+}
+
+/* ══════════════════════════════════════════════════════════════
+   Component tweaks for existing ConsoleSidebar / ConsoleActivityRail
+   so they pick up the Rams look cleanly.
+   ══════════════════════════════════════════════════════════════ */
+
+/* Sidebar rows: tighter density, mono ids, no giant border radius */
+.cc-console-sidebar { gap: 10px; }
+.cc-sidebar-block { gap: 4px; }
+.cc-sidebar-block__title {
+  color: var(--ink-dim);
+  font-family: var(--disp);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  font-weight: 600;
+}
+.cc-sidebar-section__header-title { font-weight: 550; }
+.cc-sidebar-section__header-subtitle,
+.cc-sidebar-row__subtitle {
+  font-family: var(--mono);
+  color: var(--ink-dim);
+  font-size: 10.5px;
+  letter-spacing: 0;
+}
+.cc-sidebar-row,
+.cc-sidebar-section__header { border-radius: var(--r-sm); }
+.cc-sidebar-row.is-selected {
+  background: var(--bg-elev-1);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+.cc-sidebar-row:hover { background: var(--bg-elev-1); }
+.cc-sidebar-action-strip__button {
+  border-radius: var(--r-sm);
+  font-family: var(--disp);
+}
+.cc-sidebar-action-strip__button:hover {
+  background: var(--bg-elev-1);
+}
+
+/* ══════════════════════════════════════════════════════════════
+   Sidebar (agents, sections, rows)
+   ══════════════════════════════════════════════════════════════ */
+
+.sidebar {
+  background: var(--bg-sunken);
+  border-right: 1px solid var(--line);
+  overflow: hidden;
+  font-family: var(--sans);
+  padding-bottom: 0;
+  min-width: 0;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.sidebar__mast {
+  padding: 14px 14px 10px;
+  border-bottom: 1px solid var(--line);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex: none;
+}
+.sidebar__mast-title {
+  color: var(--ink);
+  font-size: 15px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+.sidebar__mast-sub {
+  color: var(--ink-dim);
+  font-family: var(--mono);
+  font-size: 10.5px;
+  margin-top: 2px;
+}
+
+/* Collapsed sidebar - content is fully replaced by a thin vertical
+   "grip" bar centered in the rail. The actual collapse toggle lives
+   in the topbar; this is just a visual signal that the column has
+   content waiting behind it. */
+.sidebar--collapsed {
+  padding: 0;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.sidebar__grip {
+  width: 2px;
+  height: 28px;
+  background: var(--line-strong);
+  border-radius: 1px;
+  opacity: 0.7;
+  display: block;
+}
+
+.sidebar__search {
+  padding: 12px;
+  border-bottom: 1px solid var(--line);
+  flex: none;
+}
+.sidebar__search input {
+  width: 100%;
+  background: var(--bg-elev-1);
+  border: 1px solid var(--line);
+  color: var(--ink);
+  padding: 6px 10px;
+  font: inherit; font-size: 12px;
+  border-radius: var(--r-sm);
+  font-family: var(--mono);
+  user-select: text;
+  -webkit-user-select: text;
+}
+.sidebar__activity-filters { display: flex; gap: 2px; margin-top: 8px; }
+.sidebar__activity-filters button {
+  flex: 1; min-width: 0; padding: 5px 2px; border: 0; border-radius: var(--r-sm);
+  background: transparent; color: var(--ink-dim); font: inherit; font-size: 11px; cursor: pointer;
+}
+.sidebar__activity-filters button:hover { color: var(--ink); background: var(--bg-hover); }
+.sidebar__activity-filters button[aria-pressed="true"] { color: var(--ink); background: var(--bg-elev-2); box-shadow: inset 0 0 0 1px var(--line); }
+.sidebar__activity-filters button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.sidebar__view { display: flex; gap: 6px; margin-top: 8px; }
+.sidebar__view-control {
+  flex: 1; min-width: 0;
+  display: flex; align-items: center; gap: 5px;
+  font-size: 11px; color: var(--ink-dim);
+}
+.sidebar__view-control select {
+  flex: 1; min-width: 0;
+  padding: 3px 4px;
+  border: 1px solid var(--line); border-radius: var(--r-sm);
+  background: var(--bg-elev-1); color: var(--ink);
+  font: inherit; font-size: 11px;
+}
+.sidebar__view-control select:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+.sidebar__search input::placeholder { color: var(--ink-faint); }
+.sidebar__search input:focus { outline: none; border-color: var(--line-strong); background: var(--bg-elev-2); }
+
+.sidebar__section {
+  padding: 12px 0 6px;
+  border-bottom: 1px solid var(--line);
+}
+.sidebar__section:last-child { border-bottom: none; }
+.sidebar__sec-head {
+  display: flex; align-items: baseline; gap: 8px;
+  padding: 0 14px 6px;
+}
+.sidebar__sec-head--button {
+  width: 100%;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+.sidebar__order-target {
+  position: relative;
+}
+.sidebar__order-target[data-reorderable="true"] {
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+.sidebar__order-target[data-reorderable="true"]:active {
+  cursor: grabbing;
+}
+.sidebar__order-target[data-drag-over="before"]::before,
+.sidebar__order-target[data-drag-over="after"]::after,
+.sidebar__section[data-drag-over="before"] .sidebar__order-target::before,
+.sidebar__section[data-drag-over="after"] .sidebar__order-target::after {
+  content: "";
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  height: 2px;
+  background: var(--accent);
+  border-radius: 1px;
+}
+.sidebar__order-target[data-drag-over="before"]::before,
+.sidebar__section[data-drag-over="before"] .sidebar__order-target::before {
+  top: 1px;
+}
+.sidebar__order-target[data-drag-over="after"]::after,
+.sidebar__section[data-drag-over="after"] .sidebar__order-target::after {
+  bottom: 1px;
+}
+
+.sidebar__drag-preview {
+  position: fixed;
+  top: 0;
+  left: 0;
+  z-index: 1000;
+  pointer-events: none;
+  max-height: min(420px, calc(100vh - 32px));
+  overflow: hidden;
+  border: 1px solid var(--line-strong);
+  background: color-mix(in oklch, var(--bg-sunken) 92%, transparent);
+  box-shadow: 0 14px 36px color-mix(in oklch, black 22%, transparent);
+  opacity: 0.62;
+  transform-origin: top left;
+}
+
+.sidebar__drag-preview-section,
+.sidebar__drag-preview-subgroup,
+.sidebar__drag-preview-empty,
+.sidebar__drag-preview-agent {
+  box-sizing: border-box;
+}
+
+.sidebar__drag-preview-section {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-height: 36px;
+  padding: 12px 14px 7px;
+  border-bottom: 1px solid var(--line);
+  background: var(--bg-elev-1);
+}
+
+.sidebar__drag-preview-section[data-pinned="true"] {
+  background: color-mix(in oklch, var(--accent) 9%, var(--bg-elev-1));
+}
+
+.sidebar__drag-preview-subgroup {
+  display: flex;
+  align-items: center;
+  min-height: 28px;
+  padding: 8px 14px 3px;
+  color: var(--ink-faint);
+  font-family: var(--disp);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.sidebar__drag-preview-empty {
+  min-height: 44px;
+  padding: 10px 14px;
+  color: var(--ink-dim);
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.sidebar__drag-preview-agent {
+  display: grid;
+  grid-template-columns: 10px 1fr;
+  align-items: center;
+  gap: 10px;
+  min-height: 58px;
+  padding: 8px 12px;
+  color: var(--ink);
+}
+
+.sidebar__drag-preview-agent--child {
+  grid-template-columns: 24px 7px 1fr;
+  padding-left: 20px;
+}
+
+.sidebar__drag-preview-agent--child::before {
+  content: "";
+  width: 12px;
+  height: 18px;
+  border-left: 1px solid var(--line-strong);
+  border-bottom: 1px solid var(--line-strong);
+  justify-self: end;
+  align-self: start;
+  opacity: 0.75;
+}
+
+.sidebar__drag-preview-agent--child[data-depth="2"] {
+  grid-template-columns: 42px 7px 1fr;
+  padding-left: 30px;
+}
+
+.sidebar__drag-preview-agent--child[data-depth="3"] {
+  grid-template-columns: 64px 7px 1fr;
+  padding-left: 40px;
+}
+
+.sidebar__drag-preview-agent--child .agent__dot {
+  grid-column: 2;
+}
+
+.sidebar__drag-preview-agent-body {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  gap: 1px;
+}
+
+.sidebar__drag-preview-agent--child .sidebar__drag-preview-agent-body {
+  grid-column: 3;
+}
+
+.sidebar__sec-head--button:hover .sidebar__sec-label { color: var(--ink-muted); }
+.sidebar__sec-label {
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--ink-dim);
+  font-weight: 600;
+  font-family: var(--disp);
+}
+.sidebar__sec-count {
+  font-size: 10px;
+  color: var(--ink-faint);
+  font-family: var(--mono);
+}
+.sidebar__sec-spacer { flex: 1; }
+
+.sidebar__navgrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px;
+  padding: 0 10px 4px;
+}
+
+.sidebar__virtual-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  contain: strict;
+}
+
+.sidebar__virtual-space {
+  position: relative;
+  min-height: 100%;
+}
+
+.sidebar__virtual-row {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  overflow: hidden;
+  will-change: transform;
+}
+
+.sidebar__virtual-row--section {
+  border-top: 1px solid var(--line);
+}
+
+.sidebar__virtual-row--section .sidebar__section {
+  padding: 10px 0 0;
+  border-bottom: none;
+}
+.sidebar__virtual-row--section .sidebar__section[data-pinned="true"] {
+  background: color-mix(in oklch, var(--accent) 5%, transparent);
+}
+
+.sidebar__virtual-row--agent .agent {
+  height: 72px;
+}
+
+.sidebar__virtual-row--agent .agent__badges {
+  flex-wrap: nowrap;
+  overflow: hidden;
+  min-width: 0;
+}
+
+.sidebar__virtual-row--agent .agent__badge {
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+.sidebar__virtual-row--agent .agent__badge span,
+.sidebar__virtual-row--agent .agent__badge strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sidebar__subgroup {
+  display: flex;
+  align-items: center;
+  min-height: 22px;
+  width: 100%;
+  padding: 8px 14px 3px;
+  border: 0;
+  background: transparent;
+  color: var(--ink-faint);
+  font-family: var(--disp);
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  text-align: left;
+}
+.sidebar__subgroup--button {
+  cursor: pointer;
+}
+.sidebar__subgroup--button:hover {
+  color: var(--ink-muted);
+}
+
+.sidebar__empty {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 8px 14px 10px;
+  font-size: 11px;
+  color: var(--ink-dim);
+  font-family: var(--mono);
+}
+.sidebar__empty-title {
+  color: var(--ink-muted);
+  font-family: var(--disp);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+/* A roster row: the agent's button and, beside it, its pin and copy actions.
+   The button shares the row's columns (a subgrid), so the actions keep their
+   own column without sitting inside the button. The first column includes
+   the button's left padding. */
+.agent-row {
+  display: grid;
+  grid-template-columns: 22px 1fr auto auto;
+  column-gap: 10px;
+  align-items: center;
+  position: relative;
+}
+.agent-row--child { grid-template-columns: 40px 7px 1fr auto auto; }
+.agent-row--child[data-depth="2"] { grid-template-columns: 72px 7px 1fr auto auto; }
+.agent-row--child[data-depth="3"] { grid-template-columns: 104px 7px 1fr auto auto; }
+.agent-row > .agent__actions { grid-row: 1; grid-column: -3; }
+.agent {
+  display: grid;
+  grid-row: 1;
+  grid-column: 1 / -1;
+  grid-template-columns: subgrid;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  cursor: pointer;
+  border: none;
+  width: 100%;
+  text-align: left;
+  position: relative;
+  min-height: 32px;
+  background: transparent;
+  color: var(--ink);
+}
+.agent-row:hover > .agent { background: var(--bg-elev-1); }
+.agent.is-active {
+  background: var(--bg-elev-1);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+.agent--child { padding-left: 20px; }
+.agent--child[data-depth="2"] { padding-left: 30px; }
+.agent--child[data-depth="3"] { padding-left: 40px; }
+.agent--child::before {
+  content: "";
+  width: 12px;
+  height: 18px;
+  border-left: 1px solid var(--line-strong);
+  border-bottom: 1px solid var(--line-strong);
+  justify-self: end;
+  align-self: start;
+  opacity: 0.75;
+}
+.agent--child[data-depth="2"]::before,
+.agent--child[data-depth="3"]::before {
+  width: 24px;
+}
+.agent--child .agent__dot { grid-column: 2; }
+.agent--child .agent__body { grid-column: 3; }
+.agent__dot {
+  width: 7px; height: 7px; border-radius: 50%;
+  background: var(--ink-faint);
+  justify-self: center;
+}
+[data-cc-variant="terminal"] .agent__dot { border-radius: 0; width: 6px; height: 6px; }
+.agent[data-state="active"] .agent__dot { background: var(--ok); }
+.agent[data-state="degraded"] .agent__dot {
+  background: var(--warn);
+  animation: pulse-dot 1.4s infinite ease-in-out;
+}
+.agent[data-state="retired"] .agent__dot { background: var(--ink-faint); opacity: 0.5; }
+
+@keyframes pulse-dot {
+  0%, 100% { box-shadow: 0 0 0 0 color-mix(in oklch, var(--warn) 40%, transparent); }
+  50%      { box-shadow: 0 0 0 4px color-mix(in oklch, var(--warn) 0%, transparent); }
+}
+
+.agent__body {
+  display: flex; flex-direction: column; min-width: 0;
+  gap: 1px;
+}
+.agent__name {
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--ink);
+  letter-spacing: -0.003em;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.agent[data-state="retired"] .agent__name { color: var(--ink-dim); }
+.agent__detail {
+  display: flex;
+  min-width: 0;
+  font-size: 11px;
+  color: var(--ink-dim);
+  white-space: nowrap;
+}
+.agent__detail-kind { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.agent__detail-separator { flex: none; white-space: pre; }
+.agent__detail-status { flex: none; }
+/* Manual order: a grip on hover or focus, and a line where the row lands. */
+.agent__grip {
+  position: absolute;
+  left: 1px;
+  top: 50%;
+  width: 8px;
+  height: 18px;
+  transform: translateY(-50%);
+  cursor: grab;
+  touch-action: none;
+  opacity: 0;
+  color: var(--ink-faint);
+  background-image: radial-gradient(currentColor 1px, transparent 1.4px);
+  background-size: 4px 4px;
+  transition: opacity 120ms ease;
+}
+.agent-row:hover .agent__grip,
+.agent:focus-visible .agent__grip { opacity: 1; }
+/* Without hover (touch screens) the grip always shows. */
+@media (hover: none) {
+  .agent__grip { opacity: 1; }
+}
+.agent__grip:hover { color: var(--ink-muted); }
+.agent__grip:active { cursor: grabbing; }
+/* A dragged row fades with its pin and copy actions, which sit beside it. */
+.agent[data-dragging="true"],
+.agent[data-dragging="true"] + .agent__actions { opacity: 0.5; }
+.agent__drop-line {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  height: 2px;
+  background: var(--accent);
+  border-radius: 1px;
+  pointer-events: none;
+}
+.agent__drop-line[data-where="before"] { top: 1px; }
+.agent__drop-line[data-where="after"] { bottom: 1px; }
+.agent__badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+  padding-top: 3px;
+}
+.agent__badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  max-width: 100%;
+  border: 1px solid var(--line);
+  background: var(--bg-elev-1);
+  color: var(--ink-dim);
+  border-radius: 5px;
+  padding: 1px 4px;
+  font-family: var(--mono);
+  font-size: 9.5px;
+  line-height: 1.3;
+}
+.agent__badge strong {
+  color: var(--ink-muted);
+  font-weight: 600;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.agent__badge[data-tone="warning"] { border-color: color-mix(in oklch, var(--warn) 45%, var(--line)); }
+.agent__badge[data-tone="critical"] { border-color: color-mix(in oklch, var(--danger) 45%, var(--line)); }
+.agent__badge[data-tone="success"] { border-color: color-mix(in oklch, var(--ok) 45%, var(--line)); }
+[data-cc-variant="terminal"] .agent__badge { border-radius: 0; }
+
+.agent__meta {
+  grid-column: -2;
+  display: flex; flex-direction: column; align-items: flex-end;
+  gap: 3px;
+  color: var(--ink-dim);
+}
+.agent__actions {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+}
+.agent__pin {
+  width: 24px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--ink-faint);
+  border-radius: var(--r-sm);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 120ms ease, color 120ms ease, border-color 120ms ease, background 120ms ease;
+}
+.agent-row:hover .agent__pin,
+.agent__pin:focus-visible {
+  opacity: 1;
+}
+.agent__pin:hover,
+.agent__pin[data-active="true"] {
+  color: var(--ink-muted);
+  border-color: var(--line);
+  background: var(--bg-elev-1);
+}
+.agent__pin[data-active="true"] {
+  color: var(--accent);
+}
+.agent__pin-icon {
+  width: 14px;
+  height: 14px;
+  stroke: currentColor;
+  fill: none;
+  stroke-width: 1.8;
+}
+/* The copy action shows just left of the pin while the pointer is on the
+   row's actions (the pin, or the copy action itself) or the row has keyboard
+   focus. It sits over the end of the name, so it moves nothing and covers
+   neither the pin nor the pulse and inbox count, and a click on the row's
+   name, even in a narrow roster, never lands on it. */
+.agent__copy {
+  position: absolute;
+  right: 100%;
+  top: 50%;
+  transform: translateY(-50%);
+  display: none;
+  border-radius: var(--r-sm);
+  background: var(--bg-elev-1);
+}
+.agent__actions:hover .agent__copy,
+.agent:focus-visible + .agent__actions .agent__copy,
+.agent__copy:focus-within { display: inline-flex; }
+.agent__copy .cc-copy-btn {
+  width: 24px;
+  height: 24px;
+  border: 1px solid transparent;
+  border-radius: var(--r-sm);
+  background: transparent;
+  box-shadow: none;
+  color: var(--ink-faint);
+  cursor: pointer;
+}
+.agent__copy .cc-copy-btn:hover,
+.agent__copy .cc-copy-btn:focus-visible {
+  color: var(--ink-muted);
+  border-color: var(--line);
+  background: var(--bg-elev-1);
+}
+.agent__copy .cc-copy-btn[data-copied="true"] {
+  color: var(--ok);
+  background: transparent;
+  box-shadow: none;
+}
+.agent__pulse {
+  display: flex; align-items: flex-end; gap: 1.5px;
+  height: 12px;
+}
+.agent__pulse span {
+  width: 2px; background: var(--ink-faint); border-radius: 1px;
+  min-height: 1px;
+}
+[data-cc-variant="terminal"] .agent__pulse span { border-radius: 0; }
+.agent[data-state="active"] .agent__pulse span { background: var(--ink-dim); }
+.agent.is-active .agent__pulse span { background: var(--accent); }
+
+.agent__inbox {
+  font-family: var(--mono);
+  font-size: 10px;
+  padding: 1px 5px;
+  border-radius: 8px;
+  background: var(--accent);
+  color: var(--bg);
+  font-weight: 600;
+  line-height: 1.3;
+}
+[data-cc-variant="terminal"] .agent__inbox { border-radius: 0; }
+

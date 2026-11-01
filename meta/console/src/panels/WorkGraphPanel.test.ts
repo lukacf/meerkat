@@ -624,9 +624,9 @@ test("workgraph goals render as cards holding their attention and items; plain i
   assert.ok(!html.includes('data-testid="workgraph-panel-action:child-done:close"'));
   assert.ok(!html.includes('data-testid="workgraph-panel-action:child-stuck:close"'));
   assert.ok(html.includes("Blocked by child-run"));
-  // In progress is the info tone, never the accent.
+  // In progress is the live tone: the accent's own meaning, "happening now".
   const running = html.slice(html.indexOf('data-testid="workgraph-panel-item:child-run"'));
-  assert.match(running, /^[^>]*>\s*<span class="cc-row__lead"><span class="cc-dot" data-tone="info"/);
+  assert.match(running, /^[^>]*>\s*<span class="cc-row__lead"><span class="cc-dot" data-tone="live"/);
   // Activity is a sentence about the title, not a kind and an id.
   assert.ok(html.includes("Rotate the API keys was created"));
   assert.ok(!html.includes("item created · loose"));
@@ -726,7 +726,7 @@ test("workgraph graph nodes are keyboard reachable buttons named by title and st
   assert.match(unselected, /data-item-id="root"[^>]*tabindex="0"/, "without a selection the first node is the tab stop");
   assert.ok(html.includes('aria-label="Ship it, Open"'));
   assert.ok(html.includes('aria-label="child-run, In progress"'));
-  assert.ok(html.includes('data-tone="info"'), "in progress nodes take the info tone");
+  assert.ok(html.includes('data-tone="live"'), "in progress nodes take the live tone");
   assert.ok(html.includes("workgraph-graph__node-ring"), "the selected node carries the selection ring");
   assert.ok(!html.includes('role="img"'), "the graph is a group people can enter, not an image");
 });

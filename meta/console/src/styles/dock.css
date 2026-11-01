@@ -1,0 +1,316 @@
+/* MetaDock: workspace tabs, splits, panes and the pane menu.
+   Split from console-host.css (imported there, in this order). */
+
+/* Dock inside the new shell */
+.main .cc-dock-panel.is-solitary {
+  background: var(--bg-elev-1);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  margin: 6px;
+}
+
+/* ── Dock / Panels ───────────────────────────────────────────── */
+
+.cc-dock-panel.is-solitary {
+  background: var(--bg-elev-1);
+  border: none;
+  border-radius: 0;
+  box-shadow: none;
+}
+
+.cc-dock.is-single-tab .cc-dock__tab-strip,
+.cc-dock.is-single-tab .cc-dock__tabs { display: flex; }
+
+.cc-dock__tab-strip {
+  padding: 6px 8px 0 8px;
+  background: var(--bg);
+  border-bottom: 1px solid var(--line);
+}
+
+.cc-dock__tab-actions { margin-right: auto; }
+
+.cc-dock-tab,
+.cc-dock-tab.is-active {
+  border-radius: var(--r-sm) var(--r-sm) 0 0;
+  border: 1px solid transparent;
+  box-shadow: none;
+  font-family: var(--disp);
+  font-size: 12px;
+  color: var(--ink-muted);
+}
+.cc-dock-tab { background: transparent; }
+.cc-dock-tab.is-active {
+  background: var(--bg-elev-1);
+  border-color: var(--line);
+  border-bottom-color: transparent;
+  color: var(--ink);
+  font-weight: 500;
+}
+.cc-dock.is-single-panel { gap: 0; }
+
+.cc-dock.is-single-panel .cc-dock-panel__floating-actions {
+  opacity: 0;
+  transition: opacity 150ms ease;
+}
+.cc-dock.is-single-panel .cc-dock-panel:hover .cc-dock-panel__floating-actions {
+  opacity: 1;
+}
+
+/* ══════════════════════════════════════════════════════════════
+   Meta Dock (workspaces → splits → panes, Ghostty-style)
+   ══════════════════════════════════════════════════════════════ */
+
+.mkdock {
+  display: flex; flex-direction: column;
+  height: 100%; min-height: 0;
+  background: var(--bg);
+}
+.wstabs {
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+  padding: 6px 8px 0;
+  background: var(--bg);
+  border-bottom: 1px solid var(--line);
+  overflow-x: auto;
+  flex-shrink: 0;
+  min-height: 36px;
+}
+.wstab {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 10px;
+  font-family: var(--disp);
+  font-size: 12px;
+  color: var(--ink-dim);
+  border: 1px solid transparent;
+  border-bottom: none;
+  border-radius: var(--r-sm) var(--r-sm) 0 0;
+  background: transparent;
+  cursor: pointer;
+  max-width: 220px;
+  min-width: 0;
+  position: relative;
+  top: 1px;
+  transition: background 120ms ease, color 120ms ease;
+}
+.wstab:hover { background: var(--bg-elev-1); color: var(--ink); }
+.wstab.is-active {
+  background: var(--bg-elev-1);
+  border-color: var(--line);
+  color: var(--ink);
+  font-weight: 500;
+}
+.wstab__mark {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--ink-faint);
+  flex-shrink: 0;
+}
+.wstab.is-active .wstab__mark { background: var(--accent); }
+[data-cc-variant="terminal"] .wstab__mark { border-radius: 0; }
+.wstab__name {
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  min-width: 40px;
+  flex: 1 1 auto;
+}
+.wstab__count {
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 5px;
+  border-radius: 8px;
+  background: var(--bg-sunken);
+  color: var(--ink-dim);
+  line-height: 1.3;
+}
+.wstab.is-active .wstab__count { background: var(--bg); color: var(--ink-muted); }
+[data-cc-variant="terminal"] .wstab__count { border-radius: 0; }
+.wstab__close {
+  width: 16px; height: 16px;
+  display: grid; place-items: center;
+  color: var(--ink-faint);
+  border-radius: 2px;
+  font-size: 13px;
+  flex-shrink: 0;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+}
+.wstab__close:hover { color: var(--crit); background: var(--bg-sunken); }
+.wstab__add {
+  width: 28px;
+  display: grid; place-items: center;
+  color: var(--ink-dim);
+  font-size: 16px;
+  border-radius: var(--r-sm);
+  margin-left: 4px;
+  align-self: center;
+  height: 24px;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+}
+.wstab__add:hover { color: var(--ink); background: var(--bg-elev-1); }
+
+/* Dock / splits */
+.dock {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  padding: 6px;
+  background: var(--bg);
+  display: flex;
+  position: relative;
+  overflow: hidden;
+}
+.dock > * { flex: 1; min-width: 0; min-height: 0; }
+
+.split {
+  display: grid;
+  width: 100%; height: 100%;
+  min-width: 0; min-height: 0;
+}
+.split--h { grid-template-rows: 1fr; }
+.split--v { grid-template-columns: 1fr; }
+
+.split__handle {
+  background: transparent;
+  position: relative;
+  z-index: 2;
+}
+.split__handle--h { cursor: col-resize; }
+.split__handle--v { cursor: row-resize; }
+.split__handle::after {
+  content: "";
+  position: absolute;
+  background: transparent;
+  transition: background 120ms ease;
+}
+.split__handle--h::after { top: 0; bottom: 0; left: 1px; right: 1px; }
+.split__handle--v::after { left: 0; right: 0; top: 1px; bottom: 1px; }
+.split__handle:hover::after,
+.split__handle:active::after { background: var(--accent); opacity: 0.5; }
+
+.pane {
+  display: flex; flex-direction: column;
+  min-width: 0; min-height: 0;
+  background: var(--bg-elev-1);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  margin: 2px;
+  overflow: hidden;
+  position: relative;
+  transition: border-color 120ms ease;
+}
+[data-cc-variant="terminal"] .pane { border-radius: 0; }
+.pane.is-focused {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent), var(--_cc-shadow-md);
+}
+[data-cc-variant="terminal"] .pane.is-focused {
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
+.pane__bar {
+  display: flex; align-items: center; gap: 6px;
+  padding: 0 8px 0 12px;
+  min-height: 32px;
+  border-bottom: 1px solid var(--line);
+  background: var(--bg-elev-2);
+  font-family: var(--disp);
+  font-size: 12px;
+  flex-shrink: 0;
+}
+.pane__title {
+  display: flex; align-items: center; gap: 6px;
+  color: var(--ink);
+  font-weight: 500;
+  padding: 4px 6px;
+  border-radius: var(--r-sm);
+  font-family: var(--disp);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  min-width: 0;
+}
+.pane__title:hover { background: var(--bg-elev-1); }
+.pane__title-text {
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  max-width: 180px;
+}
+.pane__caret { font-size: 9px; color: var(--ink-dim); margin-left: 2px; }
+.pane__spacer { flex: 1; }
+.pane__btn {
+  width: 22px; height: 22px;
+  display: grid; place-items: center;
+  color: var(--ink-dim);
+  border-radius: var(--r-sm);
+  font-size: 13px;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  line-height: 1;
+}
+.pane__btn:hover { color: var(--ink); background: var(--bg-elev-1); }
+.pane__close:hover { color: var(--crit); }
+
+.pane__body {
+  flex: 1; min-height: 0;
+  display: flex; flex-direction: column;
+  overflow: hidden;
+  background: var(--bg-elev-1);
+}
+
+/* Pane menu (retarget dropdown) */
+.pane-menu__scrim {
+  position: fixed; inset: 0; z-index: 40; background: transparent;
+}
+.pane-menu {
+  position: absolute;
+  top: 34px; left: 8px;
+  z-index: 50;
+  min-width: 240px;
+  background: var(--bg-elev-1);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-md);
+  padding: 6px;
+  box-shadow: var(--_cc-shadow-md);
+  display: flex; flex-direction: column;
+  max-height: 60vh; overflow-y: auto;
+}
+.pane-menu__label {
+  font-size: 9.5px; letter-spacing: 0.14em; text-transform: uppercase;
+  color: var(--ink-dim); padding: 6px 8px 4px; font-weight: 600; font-family: var(--disp);
+}
+.pane-menu__item {
+  display: grid; grid-template-columns: 10px 1fr auto; gap: 10px;
+  align-items: center;
+  padding: 6px 8px; border-radius: var(--r-sm);
+  text-align: left;
+  font-size: 12px;
+  color: var(--ink);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  width: 100%;
+}
+.pane-menu__item:hover { background: var(--bg-elev-2); }
+.pane-menu__item .agent__dot { margin: 0; justify-self: center; }
+.pane-menu__name {
+  min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-weight: 500;
+}
+/* An identity is demoted detail: muted, smaller monospace, lighter than the
+   name, and middle-truncated so its distinguishing tail stays visible. */
+.pane-menu__id {
+  display: inline-flex;
+  justify-self: end;
+  min-width: 0; max-width: 150px;
+  overflow: hidden; white-space: nowrap;
+  font-family: var(--mono); font-size: 10.5px; font-weight: 400;
+  color: var(--ink-meta);
+}
+.pane-menu__id-head { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pane-menu__id-tail { flex: none; white-space: nowrap; }
+.pane-menu__sep { height: 1px; background: var(--line); margin: 4px 0; }
+

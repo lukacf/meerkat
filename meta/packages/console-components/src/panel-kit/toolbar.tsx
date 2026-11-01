@@ -1,7 +1,7 @@
 import { useId, type ChangeEvent, type ComponentPropsWithRef, type ReactNode } from "react";
 
 import { cx } from "./cx";
-import { KitGlyph } from "./glyphs";
+import { KitGlyph, type KitGlyphName } from "./glyphs";
 
 /** A row of filters and view controls under the header or tabs. Wraps. */
 export function Toolbar({
@@ -23,13 +23,15 @@ export function Toolbar({
 }
 
 /** A labelled search input with the search glyph. The label is visually
- * hidden unless `showLabel`; the input always has an accessible name. */
+ * hidden unless `showLabel`; the input always has an accessible name.
+ * `shortcut` shows the key that focuses it ("/") at the right. */
 export function SearchField({
   label,
   showLabel,
   value,
   onChange,
   placeholder,
+  shortcut,
   className,
   inputClassName,
   testId,
@@ -39,12 +41,14 @@ export function SearchField({
   showLabel?: boolean;
   value: string;
   onChange: (value: string, event: ChangeEvent<HTMLInputElement>) => void;
+  /** The key hint at the right ("/"); decorative. */
+  shortcut?: string;
   inputClassName?: string;
   testId?: string;
 }) {
   const id = useId();
   return (
-    <div className={cx("cc-field", "cc-search", className)}>
+    <div className={cx("cc-field", "cc-search", shortcut && "cc-search--shortcut", className)}>
       <label htmlFor={id} className={showLabel ? "cc-field__label" : "cc-visually-hidden"}>
         {label}
       </label>
@@ -60,6 +64,11 @@ export function SearchField({
           data-testid={testId}
           {...rest}
         />
+        {shortcut && !value ? (
+          <kbd className="cc-search__key" aria-hidden="true">
+            {shortcut}
+          </kbd>
+        ) : null}
       </span>
     </div>
   );
@@ -72,13 +81,16 @@ export interface SelectOption {
 }
 
 /** A styled native select with a visible (or visually hidden) label and the
- * kit chevron. The native element keeps keyboard and assistive behaviour. */
+ * kit chevron. The native element keeps keyboard and assistive behaviour.
+ * `variant="chip"` is the quiet scope chip next to a panel title (A3.1):
+ * "Operations team v", still a native select with its accessible name. */
 export function SelectField({
   label,
   showLabel = true,
   value,
   options,
   onChange,
+  variant = "field",
   className,
   selectClassName,
   testId,
@@ -90,6 +102,7 @@ export function SelectField({
   value: string;
   options: ReadonlyArray<SelectOption>;
   onChange: (value: string, event: ChangeEvent<HTMLSelectElement>) => void;
+  variant?: "field" | "chip";
   selectClassName?: string;
   testId?: string;
   /** Accessible name when it must differ from the visible label. */
@@ -97,7 +110,7 @@ export function SelectField({
 }) {
   const id = useId();
   return (
-    <div className={cx("cc-field", className)}>
+    <div className={cx("cc-field", variant === "chip" && "cc-field--chip", className)}>
       <label htmlFor={id} className={showLabel ? "cc-field__label" : "cc-visually-hidden"}>
         {label}
       </label>
@@ -126,9 +139,13 @@ export function SelectField({
 export interface SegmentOption<Id extends string = string> {
   id: Id;
   label: ReactNode;
+  /** A leading kit glyph (view switches: lanes, clusters, tree, list). */
+  glyph?: KitGlyphName;
   count?: number | string | null;
   testId?: string;
   ariaLabel?: string;
+  title?: string;
+  disabled?: boolean;
 }
 
 /** Mutually exclusive view or filter buttons with aria-pressed. */
@@ -157,13 +174,24 @@ export function SegmentedControl<Id extends string>({
           <button
             key={option.id}
             type="button"
-            className={cx("cc-seg__btn", pressed && "is-active")}
+            className={cx("cc-seg__btn", pressed && "is-active", option.glyph && "has-glyph")}
             aria-pressed={pressed}
             aria-label={option.ariaLabel}
+            // A glyph option can show its glyph alone (a narrow panel header):
+            // its words stay its name and become its tooltip.
+            title={option.title ?? (option.glyph && typeof option.label === "string" ? option.label : undefined)}
+            disabled={option.disabled}
             data-testid={option.testId}
             onClick={() => onChange(option.id)}
           >
-            {option.label}
+            {option.glyph ? (
+              <>
+                <KitGlyph name={option.glyph} className="cc-seg__glyph" />
+                <span className="cc-seg__label">{option.label}</span>
+              </>
+            ) : (
+              option.label
+            )}
             {option.count !== null && option.count !== undefined && option.count !== "" ? (
               <>
                 {" "}

@@ -5011,6 +5011,29 @@ async fn memory_panel_retain_readable_records<T>(
     Ok(())
 }
 
+/// The refusal of a memory read keyed by an identity the caller may not
+/// read, naming the identity as the console names it.
+fn memory_panel_identity_denied(
+    response_id: Value,
+    caller: MemoryPanelCaller<'_>,
+    identity: &str,
+) -> Value {
+    let identity = namespace_console_identity(identity, caller.namespace);
+    response_value(
+        response_id,
+        None,
+        Some(JsonRpcError {
+            code: ACCESS_DENIED_RPC_CODE,
+            message: format!("access denied: {ACTION_AGENT_MEMORY_READ}"),
+            data: Some(json!({
+                "kind": "access_denied",
+                "action": ACTION_AGENT_MEMORY_READ,
+                "resource": identity,
+            })),
+        }),
+    )
+}
+
 /// Keep the pending promotions whose source the caller may read. A
 /// promotion names its source by id: a record, judged by
 /// [`memory_panel_record_visible`], or, for a promotion the steward made from
@@ -8951,8 +8974,13 @@ async fn handle_console_aggregator_rpc(
     if let Some(response) = handle_access_admin_rpc(access, access_view, &request) {
         return response;
     }
-    if let Some(error) =
-        console_rpc_access_violation(access_view, request.method.as_str(), &request.params)
+    // The identity a record listing is filtered by is judged in
+    // `shared_panels::dispatch`, under the name this Console gives it and
+    // after its runtimes' access attributes are recorded; this check would
+    // judge the store's bare name, before either.
+    if shared_panels::identity_listing(request.method.as_str(), &request.params).is_none()
+        && let Some(error) =
+            console_rpc_access_violation(access_view, request.method.as_str(), &request.params)
     {
         return response_value(response_id, None, Some(error));
     }

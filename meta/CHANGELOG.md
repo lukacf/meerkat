@@ -385,7 +385,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   written for a name no member holds) is now withheld while a deny scoped by
   a role, a label or another agent applies to the memory read or view
   action, instead of being decided by its bare name, which such a deny
-  cannot match.
+  cannot match. The identity a shared record listing is filtered by
+  (`identity`) is judged the same way: before, it was checked under the
+  bare name before the attributes were recorded, so a grant written for the
+  namespaced name was refused and a deny on it answered an empty listing.
 - The quarantine queue (`meta/memory/panel/quarantine`) lists a pending
   gated promotion only to a caller who may read both its target scope and
   its source record or proposal (a promotion the steward made from a

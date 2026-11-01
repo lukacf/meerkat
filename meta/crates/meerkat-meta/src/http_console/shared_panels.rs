@@ -35,6 +35,23 @@ pub(super) const MEMORY_READ_METHODS: &[&str] = &[
     "meta/memory/panel/harvests",
 ];
 
+/// The identity a record listing is filtered by, when the generic entry
+/// check would judge the listing by that name: `identity` given, with no mob
+/// or operator `scope`. The name is the store's bare identity, so this
+/// Console judges it in [`dispatch`] instead, under the name it gives the
+/// identity and after recording its runtimes' access attributes.
+pub(super) fn identity_listing(method: &str, params: &Value) -> Option<String> {
+    if method != "meta/memory/panel/records"
+        || matches!(
+            memory_panel_scope_param(params).as_deref(),
+            Some("mob" | "operator")
+        )
+    {
+        return None;
+    }
+    normalized_console_rpc_string_param(params, "identity")
+}
+
 pub(super) fn is_read(method: &str) -> bool {
     MEMORY_READ_METHODS.contains(&method)
         || crate::rpc::workgraph_methods::is_workgraph_read_method(method)
@@ -87,9 +104,12 @@ pub(super) async fn dispatch(
     };
     let stale_id = id.clone();
     let response = match request.method.as_str() {
-        "meta/memory/panel/records" => {
-            handle_memory_panel_records(store, caller, &params, id).await
-        }
+        "meta/memory/panel/records" => match identity_listing(&request.method, &params) {
+            Some(identity) if !memory_panel_identity_visible(caller, &identity) => {
+                memory_panel_identity_denied(id, caller, &identity)
+            }
+            _ => handle_memory_panel_records(store, caller, &params, id).await,
+        },
         "meta/memory/panel/record" => handle_memory_panel_record(store, caller, &params, id).await,
         "meta/memory/panel/quarantine" => {
             handle_memory_panel_quarantine(store, caller, &params, id).await

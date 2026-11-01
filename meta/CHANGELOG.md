@@ -189,6 +189,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   over several runtimes or none). `ConsoleLiveSnapshot` gains `mob_id`
   (`None` from `ConsoleLiveSnapshot::new`), which a host that builds its own
   snapshot sets to name its team.
+- The results of `meta/memory/panel/dreams` and `meta/memory/panel/dream_runs`
+  carry `withheld_by_access`: true when access withholds the dream history of
+  at least one realm, whether or not that realm has runs, so a client can
+  tell withheld history from none. `MemoryPanelStore` gains two provided
+  methods the dream history check uses: `holds_quarantine_evidence(realm)`
+  (whether the realm holds a quarantined record, or a tombstoned one that was
+  ever quarantined) and `realm_scopes(realm)` (every scope that holds a
+  record, a proposal or a gated promotion, and each harvested identity). The
+  bundled SQLite store implements both, `realm_scopes` from the records scope
+  index without reading a record; the defaults answer `true` and list the
+  scopes of `scope_overview`.
 
 ### Changed
 
@@ -361,20 +372,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   row by both its record and the identity it went into. A record's detail
   (`meta/memory/panel/record`) likewise lists only the injections into
   identities the caller may read. Before, the Console hid some of these rows
-  in the browser after they had arrived. Dream history
-  (`meta/memory/panel/dreams` and `dream_runs`) spans a realm's scopes and
-  can describe quarantined content, so it now lists a realm's runs only to a
-  caller who may read every memory scope the realm holds (each identity with
-  memory there, its mobs by `mob.memory.read` and, once operator records
-  exist, `operator.memory.read`) and, while the realm holds quarantined
-  content (a quarantined record, or a tombstoned one that was ever
-  quarantined), also holds `memory.quarantine.review`. Any other caller gets
-  the usual answer with none of that realm's runs and the new result field
-  `withheld_by_access: true` (`false` otherwise), so a client can tell
-  withheld history from none. `MemoryPanelStore` gains
-  `holds_quarantine_evidence(realm)` for this check; the bundled SQLite store
-  answers it with one query, and its default answers `true`, which keeps a
-  realm's dream history to reviewers under access control.
+  in the browser after they had arrived.
+- On a shared Console the memory panel reads judge each identity under the
+  name the Console gives it, `<namespace>/<identity>`, after recording the
+  access attributes of its runtimes, as its send route does. Before, every
+  memory read there, the record listing, record detail and quarantine queue
+  included, judged the store's bare identity with no attributes recorded,
+  so a deny on the name the Console shows, or on a role or label, removed no
+  row. On either console an identity whose attributes are not known (memory
+  written for a name no member holds) is now withheld while a deny scoped by
+  a role, a label or another agent applies to the memory read or view
+  action, instead of being decided by its bare name, which such a deny
+  cannot match.
+- Dream history (`meta/memory/panel/dreams` and `dream_runs`) spans a
+  realm's scopes and can describe quarantined content, so it now lists a
+  realm's runs only to a caller who may read every memory scope the realm
+  names (the scopes of its records, proposals and gated promotions, and its
+  harvested identities) and, while the realm holds quarantined content (a
+  quarantined record, or a tombstoned one that was ever quarantined), also
+  holds `memory.quarantine.review`. For any other caller those runs are left
+  out, and `withheld_by_access` (see Added) is true when access withholds the
+  dream history of at least one realm, whether or not that realm has runs.
 
 ### Known limitations
 

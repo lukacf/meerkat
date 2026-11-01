@@ -444,27 +444,48 @@ pub trait WorkGraphStore: Send + Sync {
 
     /// Return a bounded public event page while omitting internal execution
     /// lifecycle events before applying the caller's visible limit.
+    ///
+    /// The default pages through [`Self::list_events`] until it holds `limit`
+    /// public events or the ledger ends, so execution events never end a page
+    /// early: `WorkGraphService::events_page` reads one event past its page
+    /// and reports `truncated` from it. A store that serves pages should
+    /// override this to filter in one read, as the built-in stores do.
     async fn list_public_events(
         &self,
         mut filter: WorkGraphEventFilter,
     ) -> Result<Vec<WorkGraphEvent>, WorkGraphError> {
         let visible_limit = filter.limit.unwrap_or(usize::MAX);
-        if visible_limit == 0 {
-            return Ok(Vec::new());
+        let mut page = Vec::new();
+        while page.len() < visible_limit {
+            let wanted = visible_limit - page.len();
+            filter.limit = Some(wanted);
+            let batch = self.list_events(filter.clone()).await?;
+            let ledger_ended = batch.len() < wanted;
+            let last_seq = batch.last().and_then(|event| event.seq);
+            page.extend(
+                batch
+                    .into_iter()
+                    .filter(|event| !is_internal_execution_event(event.kind)),
+            );
+            // Continue after the last event read; a batch without a sequence,
+            // or one that did not move past the previous position, ends the
+            // page rather than read the same events again.
+            match last_seq {
+                Some(seq) if !ledger_ended && filter.after_seq.is_none_or(|after| seq > after) => {
+                    filter.after_seq = Some(seq);
+                }
+                _ => break,
+            }
         }
-        // Custom stores get a single bounded read by default. Built-in stores
-        // override this method so visibility is filtered before applying the
-        // caller's limit.
-        filter.limit = Some(visible_limit);
-        Ok(self
-            .list_events(filter)
-            .await?
-            .into_iter()
-            .filter(|event| !is_internal_execution_event(event.kind))
-            .collect())
+        Ok(page)
     }
 
     /// Highest sequence matching a scope without retaining the event history.
+    ///
+    /// The default reads every event of the scope through
+    /// [`Self::list_events`]. Every list and ready page reads it, so a store
+    /// that serves pages should override it with an indexed read, as the
+    /// built-in stores do.
     async fn latest_event_seq(
         &self,
         filter: WorkGraphEventFilter,

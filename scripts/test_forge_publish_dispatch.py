@@ -277,6 +277,32 @@ class DispatchTests(unittest.TestCase):
         self.refused("a5_join provider program differs from the candidate's inputs", join=provider)
         self.refused("carries a candidate block", join=a5_candidate)
 
+    def test_a_join_for_another_target_refuses_even_when_consistent(self):
+        # Connect's C1 control, through the record-reading dispatcher: either slot's record names
+        # macos-arm64 with that target's actual package digest. Every file digest and the
+        # projection's join digests are recomputed from the changed records, so only the
+        # agreed target can refuse it.
+        for slot in ("application_join", "guide_join"):
+            def mac(name, record, slot=slot):
+                if name == slot:
+                    record["target"] = "macos-arm64"
+                    record["subjects"]["package_sha256"] = forge.manifest_packages(manifest_value())["macos-arm64"]
+
+            with self.subTest(slot):
+                self.refused(f"{slot} record must cover linux-x86_64", join=mac)
+
+    def test_every_join_must_cover_the_same_target(self):
+        # Were a kind ever allowed for another target, the joins must still cover one target.
+        def mac(name, record):
+            if name == "guide_join":
+                record["target"] = "macos-arm64"
+                record["subjects"]["package_sha256"] = forge.manifest_packages(manifest_value())["macos-arm64"]
+
+        kinds = copy.deepcopy(tool.JOIN_KINDS)
+        kinds["guide_join"]["connect_guide_candidate_join"]["target"] = "macos-arm64"
+        with mock.patch.object(tool, "JOIN_KINDS", kinds):
+            self.refused("the joins cover different targets", join=mac)
+
     def test_an_unknown_kind_refuses(self):
         def unknown(slot, record):
             if slot == "guide_join":

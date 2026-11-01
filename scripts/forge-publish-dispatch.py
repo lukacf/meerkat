@@ -16,10 +16,11 @@ emits. It then checks:
 - the projection, with the publish job's own parser: strict, accepted, naming
   this candidate, its package map equal to the candidate manifest's, and its
   join digests equal to the digests of the actual join files;
-- each join record by its kind (JOIN_KINDS): accepted, and naming this
-  candidate's identity and subjects. The A5 owner join has no candidate block,
-  so its component identities are compared with the candidate's own release
-  inputs instead. An unknown kind is refused.
+- each join record by its kind (JOIN_KINDS): accepted, for its kind's one
+  agreed target, and naming this candidate's identity and subjects. The A5
+  owner join has no candidate block, so its component identities are compared
+  with the candidate's own release inputs instead. An unknown kind is refused,
+  and every join must cover the same target.
 
 The request is derived only from these checked bytes; the caller supplies
 paths and expected digests, never request values. --dry-run prints the
@@ -208,20 +209,27 @@ def check_a5_join(record, slot, context):
 
 
 # Each join slot's accepted record kinds; extend when Connect defines another kind.
+# Each join slot's accepted record kinds, with the one target each kind's contract fixes for
+# this selected tuple (Connect 884e273e, Forge f010d2fe). Extend when Connect defines another
+# kind; a multi-target kind has to be an explicit new entry.
 JOIN_KINDS = {
-    "a5_join": {"connect_a5_owner_join": check_a5_join},
-    "application_join": {"connect_application_candidate_join": check_candidate_join},
-    "guide_join": {"connect_guide_candidate_join": check_candidate_join},
+    "a5_join": {"connect_a5_owner_join": {"check": check_a5_join, "target": "linux-x86_64"}},
+    "application_join": {"connect_application_candidate_join": {"check": check_candidate_join, "target": "linux-x86_64"}},
+    "guide_join": {"connect_guide_candidate_join": {"check": check_candidate_join, "target": "linux-x86_64"}},
 }
 
 
 def check_join(slot, data, context):
+    """Checks one join record by its kind and returns the target it covers."""
     record = strict_json(data, f"{slot} record")
     require(isinstance(record, dict), f"{slot} record is not an object")
     kinds = JOIN_KINDS[slot]
     require(record.get("kind") in kinds, f"{slot} record kind {record.get('kind')!r} is not one this tool checks")
     require(record.get("disposition") == "accepted", f"{slot} record is not accepted")
-    kinds[record["kind"]](record, slot, context)
+    kind = kinds[record["kind"]]
+    require(record.get("target") == kind["target"], f"{slot} record must cover {kind['target']}")
+    kind["check"](record, slot, context)
+    return record["target"]
 
 
 # --- The request ----------------------------------------------------------------------------------
@@ -240,8 +248,8 @@ def build_request(args, work):
     for slot, data in joins.items():
         require(review["joins"][slot] == rc.hash_bytes(data), f"the candidate review covers another {slot} record")
     context = {"selection": selection, "manifest": manifest, "inputs": release_inputs(manifest)}
-    for slot, data in joins.items():
-        check_join(slot, data, context)
+    targets = {slot: check_join(slot, data, context) for slot, data in joins.items()}
+    require(len(set(targets.values())) == 1, "the joins cover different targets")
     return {"workflow": WORKFLOW_FILE, "repository": rc.repository(), "ref": "main", "inputs": {
         "release_mode": "publish",
         "artifact_selection": json.dumps(selection, sort_keys=True, separators=(",", ":")),

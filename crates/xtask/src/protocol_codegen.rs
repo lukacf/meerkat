@@ -5043,6 +5043,7 @@ fn generate_session_document_authority(machine: &MachineSchema) -> Result<String
         "InstructionWriteRefusal",
         "InstructionDeferReason",
         "InstructionFoldSource",
+        "ActivationHeadOrigin",
     ] {
         emit_session_document_named_string_enum(&mut out, machine, enum_name)?;
     }
@@ -5158,6 +5159,7 @@ fn session_document_default_variant(name: &str) -> Result<&'static str> {
         "InstructionWriteRefusal" => Ok("StaleRevision"),
         "InstructionDeferReason" => Ok("LeadingPrefixOnly"),
         "InstructionFoldSource" => Ok("Effective"),
+        "ActivationHeadOrigin" => Ok("Own"),
         other => bail!("unknown SessionDocumentMachine enum `{other}`"),
     }
 }
@@ -5645,6 +5647,36 @@ fn emit_session_document_native_helpers(out: &mut String) -> Result<()> {
         out,
         "        .filter(|(slot, _)| effect.get(slot) == Some(&InstructionEffect::Active))"
     )?;
+    writeln!(out, "        .collect()")?;
+    writeln!(out, "}}")?;
+    writeln!(out)?;
+    writeln!(
+        out,
+        "/// Per activation key of `rows`, the rows a retirement leaves retired:"
+    )?;
+    writeln!(
+        out,
+        "/// every row but the newest, or the recovered `retired` count when that"
+    )?;
+    writeln!(
+        out,
+        "/// is more. A key `retired` does not name counts none retired."
+    )?;
+    writeln!(out, "fn session_document_activation_retired_after(")?;
+    writeln!(out, "    rows: BTreeMap<String, u64>,")?;
+    writeln!(out, "    retired: BTreeMap<String, u64>,")?;
+    writeln!(out, ") -> BTreeMap<String, u64> {{")?;
+    writeln!(out, "    rows.into_iter()")?;
+    writeln!(out, "        .map(|(key, count)| {{")?;
+    writeln!(
+        out,
+        "            let already = retired.get(&key).copied().unwrap_or(0);"
+    )?;
+    writeln!(
+        out,
+        "            (key, already.max(count.saturating_sub(1)))"
+    )?;
+    writeln!(out, "        }})")?;
     writeln!(out, "        .collect()")?;
     writeln!(out, "}}")?;
     writeln!(out)?;
@@ -6406,6 +6438,7 @@ fn session_document_type_is_copy(type_name: &str) -> bool {
             | "InstructionWriteRefusal"
             | "InstructionDeferReason"
             | "InstructionFoldSource"
+            | "ActivationHeadOrigin"
     )
 }
 
@@ -6480,6 +6513,8 @@ fn validate_session_document_authority_schema(machine: &MachineSchema) -> Result
         "ReleaseInstructionTarget",
         "ResolveRunStartInstructions",
         "AuthorizeInstructionFold",
+        "RecoverSessionActivationBodies",
+        "AuthorizeActivationBodyRetirement",
     ] {
         machine
             .inputs
@@ -6532,6 +6567,7 @@ fn validate_session_document_authority_schema(machine: &MachineSchema) -> Result
         "InstructionEntryNotNeeded",
         "InstructionApplicationDeferred",
         "InstructionFoldAuthorized",
+        "ActivationBodyRetirementAuthorized",
     ] {
         machine
             .effects
@@ -6582,6 +6618,7 @@ fn validate_session_document_authority_schema(machine: &MachineSchema) -> Result
         "InstructionWriteRefusal",
         "InstructionDeferReason",
         "InstructionFoldSource",
+        "ActivationHeadOrigin",
     ] {
         let binding = machine
             .named_types

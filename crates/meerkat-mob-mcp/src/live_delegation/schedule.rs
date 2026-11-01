@@ -421,15 +421,11 @@ impl VoiceWorkGraph {
             session_id,
             delegation_ref,
             transcript,
-            Some(WorkEvidenceRef {
-                kind: "superseded_voice_item".to_string(),
-                id: item.id.to_string(),
-                label: Some("replaced voice item".to_string()),
-                summary: Some(failed_blockers_evidence_summary(failed)),
-                confirmation_kind: None,
-                confirming_owner_key: None,
-                execution_binding_id: None,
-            }),
+            Some(
+                WorkEvidenceRef::new("superseded_voice_item", item.id.to_string())
+                    .with_label("replaced voice item")
+                    .with_summary(failed_blockers_evidence_summary(failed)),
+            ),
         )
         .await
     }
@@ -447,33 +443,11 @@ impl VoiceWorkGraph {
         labels.insert(VOICE_WORK_LABEL.to_string());
         labels.insert(channel_work_label(channel_id));
         let mut evidence_refs = vec![
-            WorkEvidenceRef {
-                kind: "live_delegation".to_string(),
-                id: delegation_ref.to_string(),
-                label: Some("provider delegation".to_string()),
-                summary: None,
-                confirmation_kind: None,
-                confirming_owner_key: None,
-                execution_binding_id: None,
-            },
-            WorkEvidenceRef {
-                kind: "live_channel".to_string(),
-                id: channel_id.to_string(),
-                label: Some("live channel".to_string()),
-                summary: None,
-                confirmation_kind: None,
-                confirming_owner_key: None,
-                execution_binding_id: None,
-            },
-            WorkEvidenceRef {
-                kind: "live_session".to_string(),
-                id: session_id.to_string(),
-                label: Some("source session".to_string()),
-                summary: None,
-                confirmation_kind: None,
-                confirming_owner_key: None,
-                execution_binding_id: None,
-            },
+            WorkEvidenceRef::new("live_delegation", delegation_ref)
+                .with_label("provider delegation"),
+            WorkEvidenceRef::new("live_channel", channel_id.to_string()).with_label("live channel"),
+            WorkEvidenceRef::new("live_session", session_id.to_string())
+                .with_label("source session"),
         ];
         evidence_refs.extend(extra_evidence);
         let item = self
@@ -509,15 +483,12 @@ impl VoiceWorkGraph {
                 realm_id: None,
                 namespace: None,
                 expected_revision: current.revision,
-                evidence: WorkEvidenceRef {
-                    kind: "live_delegation_result".to_string(),
-                    id: result_evidence_digest(summary),
-                    label: Some("a different label".to_string()),
-                    summary: Some("different content".to_string()),
-                    confirmation_kind: None,
-                    confirming_owner_key: None,
-                    execution_binding_id: None,
-                },
+                evidence: WorkEvidenceRef::new(
+                    "live_delegation_result",
+                    result_evidence_digest(summary),
+                )
+                .with_label("a different label")
+                .with_summary("different content"),
             })
             .await
             .expect("conflicting evidence");
@@ -739,15 +710,12 @@ impl VoiceWorkGraph {
                     realm_id: None,
                     namespace: None,
                     expected_revision: current.revision,
-                    evidence: WorkEvidenceRef {
-                        kind: "live_delegation_result".to_string(),
-                        id: result_evidence_digest(summary),
-                        label: Some("worker result".to_string()),
-                        summary: Some(truncate_chars(summary, EVIDENCE_SUMMARY_CHARS)),
-                        confirmation_kind: None,
-                        confirming_owner_key: None,
-                        execution_binding_id: None,
-                    },
+                    evidence: WorkEvidenceRef::new(
+                        "live_delegation_result",
+                        result_evidence_digest(summary),
+                    )
+                    .with_label("worker result")
+                    .with_summary(truncate_chars(summary, EVIDENCE_SUMMARY_CHARS)),
                 })
                 .await
                 .map_err(|error| {
@@ -882,15 +850,12 @@ mod tests {
                 realm_id: None,
                 namespace: None,
                 expected_revision: current.revision,
-                evidence: WorkEvidenceRef {
-                    kind: "live_delegation_result".to_string(),
-                    id: result_evidence_digest(summary),
-                    label: Some("worker result".to_string()),
-                    summary: Some(truncate_chars(summary, EVIDENCE_SUMMARY_CHARS)),
-                    confirmation_kind: None,
-                    confirming_owner_key: None,
-                    execution_binding_id: None,
-                },
+                evidence: WorkEvidenceRef::new(
+                    "live_delegation_result",
+                    result_evidence_digest(summary),
+                )
+                .with_label("worker result")
+                .with_summary(truncate_chars(summary, EVIDENCE_SUMMARY_CHARS)),
             })
             .await
             .expect("evidence from the failed attempt");

@@ -625,6 +625,7 @@ pub use wire::{
     WireRenderMetadata,
     WireRenderSalience,
     WireResolvedModelCapabilities,
+    WireRetiredInstructionBody,
     WireRouteInstallObligation,
     WireRunResult,
     WireRunStopCompletion,

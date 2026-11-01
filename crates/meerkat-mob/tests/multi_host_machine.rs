@@ -297,6 +297,7 @@ fn begin_spawn_local(
         effective_profile_override_present: false,
         effective_model_override_present: false,
         entry_custody: false,
+        created_custody: false,
     }
 }
 
@@ -337,6 +338,7 @@ fn begin_spawn_remote(
         effective_profile_override_present: false,
         effective_model_override_present: false,
         entry_custody: false,
+        created_custody: false,
     }
 }
 

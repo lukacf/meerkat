@@ -638,15 +638,25 @@ monotonic revision: inline in the options, in a packaged sidecar file read
 at init and at each apply, or applied at runtime. The store keeps the
 applied revision, its digest and the declarations in one row, and a mark
 per record a declaration made: its kind and id, the revision and digest of
-its declared form, its status and its refusal. Reconciles run one at a time
-under one gate: at startup before the dispatcher starts (bounded, so a
-fault never holds delivery), at each apply, at each change of the mob set
-and, while a record is pending, at every health pass. The reconciler creates, replaces and ends only marked records, through
-the owner's own put and verb paths, with operation ids derived from the
-step, the record, its digest and its revision, so a crash re-run replays
-what committed. A record the runtime refuses for now is pending with its
-typed refusal, and an operator's end or cancel is suppressed until the
-declaration of the record changes.
+its declared form, its status and its refusal, and whether the step after
+its put (a source's runner reconcile, the drop of a subscription's ended
+mobs) is still owed. Reconciles run one at a time under one gate: at
+startup before the dispatcher starts (bounded, so a fault never holds
+delivery), at each apply, at each change of the mob set and, while the
+declarations owe one (a record pending or owing its step, the options at a
+newer revision, or a mark missing, kept for a refused drop, or at an older
+digest than its declaration), at every health pass. Every holder of the
+gate waits on any one call for at most 30 seconds: a call past it stops
+the holder there, as a storage failure does, and until that call ends no
+holder calls its method again. The reconciler creates, replaces and ends
+only marked records, through the owner's own put and verb paths, with
+operation ids derived from the step, the record, its digest and its
+revision, so a crash re-run replays what committed. A record the runtime
+refuses for now is pending with its typed refusal, and an operator's end or
+cancel is suppressed until the declaration of the record changes. A dropped
+record keeps its mark, and so stays listed by `declarations/get`, until its
+end or cancel and, for a source, its runner's reconcile after the end have
+taken effect.
 
 A role template (`members: {mob_id, role}`) is kept in its own table,
 shares one id space with subscriptions and never delivers. At each capture

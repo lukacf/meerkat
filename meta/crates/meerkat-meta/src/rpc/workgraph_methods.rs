@@ -379,18 +379,10 @@ fn default_confirm_evidence(
         meerkat::WorkCompletionPolicy::Supervisor { .. } => "supervisor_confirmation",
         meerkat::WorkCompletionPolicy::ReviewerQuorum { .. } => "reviewer_confirmation",
     };
-    meerkat::WorkEvidenceRef {
-        kind: kind.to_string(),
-        id: binding_id.as_str().to_string(),
-        label: None,
-        summary: None,
-        confirmation_kind: None,
-        confirming_owner_key: None,
-        // Confirmation evidence is keyed on the ATTENTION binding; a work
-        // EXECUTION binding (meerkat 0.8.16 flow-execution provenance) does
-        // not exist on this path.
-        execution_binding_id: None,
-    }
+    // Confirmation evidence is keyed on the ATTENTION binding; a work
+    // EXECUTION binding (meerkat 0.8.16 flow-execution provenance) does not
+    // exist on this path, and the constructor leaves it unset.
+    meerkat::WorkEvidenceRef::new(kind, binding_id.as_str())
 }
 
 /// Parse wire-supplied `goal/confirm` evidence. Only provenance fields are
@@ -428,17 +420,13 @@ fn parse_confirm_evidence(value: &Value) -> Result<meerkat::WorkEvidenceRef, Jso
                 .ok_or_else(|| invalid_params(format!("evidence.{name} must be a string"))),
         }
     };
-    Ok(meerkat::WorkEvidenceRef {
-        kind: field("kind")?,
-        id: field("id")?,
-        label: optional("label")?,
-        summary: optional("summary")?,
-        confirmation_kind: None,
-        confirming_owner_key: None,
-        // The wire surface does not carry an execution binding; typed
-        // execution provenance stays server-minted (0.8.16 vocabulary).
-        execution_binding_id: None,
-    })
+    // The wire surface does not carry an execution binding; typed execution
+    // provenance stays server-minted (0.8.16 vocabulary), and the constructor
+    // leaves it unset.
+    let mut evidence = meerkat::WorkEvidenceRef::new(field("kind")?, field("id")?);
+    evidence.label = optional("label")?;
+    evidence.summary = optional("summary")?;
+    Ok(evidence)
 }
 
 /// Fetch the live attention projection for `binding_id` — the server-side

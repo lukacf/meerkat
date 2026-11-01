@@ -98,6 +98,12 @@ test("instructions a fork could not inherit are named, with why", () => {
     ]),
     "Not inherited: app.skills/billing (not active in the source). This side chat cannot answer until it is activated.",
   );
+  assert.equal(
+    inactiveInstructionNotice([
+      { namespace: "app.skills", key: "calendar", state: "inactive", reason: "head_body_retired" },
+    ]),
+    "Not inherited: app.skills/calendar (its text is retired in the source). This side chat cannot answer until it is activated.",
+  );
 });
 
 test("typed fork refusals read as what the operator can do", () => {

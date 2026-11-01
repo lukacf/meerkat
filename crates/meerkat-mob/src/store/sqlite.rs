@@ -4169,6 +4169,41 @@ impl std::fmt::Debug for SqliteMobIdentityStore {
 }
 
 impl SqliteMobIdentityStore {
+    /// Store `stored` as `identity`'s row of the intents table, in place of
+    /// any row it had, as a later build would write it (a created entry's
+    /// row carries no declaration scope, session or lineage projection).
+    #[cfg(test)]
+    pub(crate) async fn put_identity_row_for_test(
+        &self,
+        mob_id: &MobId,
+        identity: &AgentIdentity,
+        stored: Vec<u8>,
+    ) -> Result<(), MobStoreError> {
+        let path = self.path.clone();
+        let store_instance_id = self.store_instance_id.clone();
+        let mob_id = mob_id.clone();
+        let identity = identity.clone();
+        run_sqlite_task(self.observer_owner(), move || {
+            let mut conn = open_existing_identity_write_connection(&path, &store_instance_id)?;
+            let tx = begin_identity_immediate(&mut conn, &store_instance_id)?;
+            tx.execute(
+                "INSERT INTO mob_identity_intents
+                     (mob_id, agent_identity, declaration_scope, session_id, lineage_id, record_json)
+                 VALUES (?1, ?2, NULL, NULL, NULL, ?3)
+                 ON CONFLICT(mob_id, agent_identity) DO UPDATE SET
+                     declaration_scope = NULL,
+                     session_id = NULL,
+                     lineage_id = NULL,
+                     record_json = excluded.record_json",
+                params![mob_id.as_str(), identity.as_str(), stored],
+            )
+            .map_err(se)?;
+            tx.commit().map_err(se)?;
+            Ok(())
+        })
+        .await
+    }
+
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn with_clock(
         path: PathBuf,
@@ -4663,16 +4698,47 @@ fn query_member_binding_intent_rows(
 ) -> Result<BTreeMap<AgentIdentity, crate::runtime::MemberIdentityManagement>, MobStoreError> {
     let identities = {
         let mut statement = conn
-            .prepare("SELECT agent_identity FROM mob_identity_intents WHERE mob_id = ?1")
+            .prepare(
+                "SELECT agent_identity, typeof(record_json), CAST(record_json AS BLOB)
+                 FROM mob_identity_intents WHERE mob_id = ?1",
+            )
             .map_err(se)?;
         let rows = statement
-            .query_map(params![mob_id.as_str()], |row| row.get::<_, String>(0))
+            .query_map(params![mob_id.as_str()], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Vec<u8>>(2)?,
+                ))
+            })
             .map_err(se)?;
-        rows.map(|row| row.map(AgentIdentity::from).map_err(se))
-            .collect::<Result<Vec<_>, _>>()?
+        rows.map(|row| {
+            row.map(|(identity, storage_type, bytes)| {
+                (AgentIdentity::from(identity), storage_type, bytes)
+            })
+            .map_err(se)
+        })
+        .collect::<Result<Vec<_>, _>>()?
     };
     let mut intent_rows = BTreeMap::new();
-    for identity in identities {
+    for (identity, storage_type, bytes) in identities {
+        // A created entry's row is MobMachine's to drive; one this build
+        // cannot read, or one that seals another mob or identity than its
+        // physical key names, is unreadable, as the created scan reads it.
+        if storage_type == "blob"
+            && let Some(created) = crate::identity::classify_created_identity_row(&bytes)
+        {
+            let management = match &created {
+                crate::identity::CreatedIdentityObservation::Created(record)
+                    if record.mob_id != *mob_id || record.agent_identity != identity =>
+                {
+                    crate::runtime::MemberIdentityManagement::IntentUnreadable
+                }
+                created => super::created_row_management(created),
+            };
+            intent_rows.insert(identity, management);
+            continue;
+        }
         let observation = query_identity_intent_observation(conn, mob_id, &identity)?;
         if let Some(management) = super::intent_row_management(&observation) {
             intent_rows.insert(identity, management);
@@ -5059,7 +5125,7 @@ fn recompute_sqlite_present_incident_wiring(
 ) -> Result<(), MobStoreError> {
     let mut statement = tx
         .prepare(
-            "SELECT agent_identity, CAST(record_json AS BLOB)
+            "SELECT agent_identity, typeof(record_json), CAST(record_json AS BLOB)
              FROM mob_identity_intents
              WHERE mob_id = ?1
              ORDER BY agent_identity",
@@ -5067,12 +5133,25 @@ fn recompute_sqlite_present_incident_wiring(
         .map_err(se)?;
     let rows = statement
         .query_map(params![mob_id.as_str()], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Vec<u8>>(2)?,
+            ))
         })
         .map_err(se)?;
     let mut records = Vec::new();
     for row in rows {
-        let (physical_identity, bytes) = row.map_err(se)?;
+        let (physical_identity, storage_type, bytes) = row.map_err(se)?;
+        // A created entry's row (schema version 2 and later) carries no
+        // host-adopted wiring: the recompute leaves it out and never rewrites
+        // it, as the intent scan leaves it out, so it blocks no adoption of
+        // another identity.
+        if storage_type == "blob"
+            && crate::identity::classify_created_identity_row(&bytes).is_some()
+        {
+            continue;
+        }
         let record: IdentityIntentRecord = decode_json(&bytes)?;
         record.validate().map_err(|error| {
             identity_authority_blocked(
@@ -5653,6 +5732,13 @@ impl MobIdentityStore for SqliteMobIdentityStore {
                     storage_type,
                     bytes,
                 ) = row.map_err(se)?;
+                // A created entry's row (schema version 2 and later) is no
+                // identity intent: the created identity scan reads it.
+                if storage_type == "blob"
+                    && crate::identity::classify_created_identity_row(&bytes).is_some()
+                {
+                    continue;
+                }
                 let identity_key = decode_required_identity_text(
                     &identity_type,
                     identity_bytes.clone(),
@@ -5818,6 +5904,13 @@ impl MobIdentityStore for SqliteMobIdentityStore {
                 bytes,
             ) in selected
             {
+                // A created entry's row (schema version 2 and later) is no
+                // identity intent: the created identity scan reads it.
+                if storage_type == "blob"
+                    && crate::identity::classify_created_identity_row(&bytes).is_some()
+                {
+                    continue;
+                }
                 let identity_key = decode_required_identity_text(
                     &identity_type,
                     identity_bytes.clone(),
@@ -5874,6 +5967,144 @@ impl MobIdentityStore for SqliteMobIdentityStore {
                 observations.insert(identity, observation);
             }
             Ok(super::IdentityIntentScanPage { observations, next })
+        })
+        .await
+    }
+
+    async fn scan_created_identities_page(
+        &self,
+        mob_id: &MobId,
+        after: Option<&super::IdentityIntentScanCursor>,
+        limit: usize,
+    ) -> Result<super::CreatedIdentityScanPage, MobStoreError> {
+        if limit == 0 || limit > super::IDENTITY_INTENT_SCAN_PAGE_MAX {
+            return Err(MobStoreError::Internal(format!(
+                "created identity scan limit must be in 1..={}, got {limit}",
+                super::IDENTITY_INTENT_SCAN_PAGE_MAX
+            )));
+        }
+        let path = self.path.clone();
+        let store_instance_id = self.store_instance_id.clone();
+        let mob_id = mob_id.clone();
+        let after = after.cloned();
+        run_sqlite_task(self.observer_owner(), move || {
+            let conn = open_existing_identity_read_connection(&path, &store_instance_id)?;
+            let after_storage_class = after
+                .as_ref()
+                .map(super::IdentityIntentScanCursor::storage_class);
+            let after_identity = after
+                .as_ref()
+                .map(super::IdentityIntentScanCursor::physical_identity);
+            let fetch_limit = i64::try_from(limit.saturating_add(1)).map_err(|_| {
+                MobStoreError::Internal("created identity scan limit overflow".to_string())
+            })?;
+            let mut stmt = conn
+                .prepare(
+                    "SELECT typeof(agent_identity), CAST(agent_identity AS BLOB),
+                            typeof(record_json), CAST(record_json AS BLOB)
+                     FROM mob_identity_intents
+                     WHERE mob_id = ?1
+                       AND (
+                           ?2 IS NULL
+                           OR typeof(agent_identity) > ?2
+                           OR (
+                               typeof(agent_identity) = ?2
+                               AND CAST(agent_identity AS BLOB) > ?3
+                           )
+                       )
+                     ORDER BY typeof(agent_identity), CAST(agent_identity AS BLOB)
+                     LIMIT ?4",
+                )
+                .map_err(se)?;
+            let rows = stmt
+                .query_map(
+                    params![
+                        mob_id.as_str(),
+                        after_storage_class,
+                        after_identity,
+                        fetch_limit
+                    ],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, Vec<u8>>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, Vec<u8>>(3)?,
+                        ))
+                    },
+                )
+                .map_err(se)?;
+            let mut selected = rows.collect::<Result<Vec<_>, _>>().map_err(se)?;
+            let has_more = selected.len() > limit;
+            if has_more {
+                selected.pop();
+            }
+            let next = if has_more {
+                let Some((identity_type, identity_bytes, ..)) = selected.last() else {
+                    return Err(MobStoreError::Internal(
+                        "created identity scan continuation has no returned row".to_string(),
+                    ));
+                };
+                Some(super::IdentityIntentScanCursor::new(
+                    identity_type.clone(),
+                    identity_bytes.clone(),
+                ))
+            } else {
+                None
+            };
+            let mut observations = BTreeMap::new();
+            for (identity_type, identity_bytes, storage_type, bytes) in selected {
+                // A row of another storage class than this build writes is
+                // unreadable for the identity its key names: the intent
+                // readers report it malformed, and its name is reserved,
+                // never read as free.
+                let observation = if storage_type == "blob" {
+                    let Some(observation) = crate::identity::classify_created_identity_row(&bytes)
+                    else {
+                        continue;
+                    };
+                    observation
+                } else {
+                    crate::identity::CreatedIdentityObservation::Unreadable {
+                        evidence_digest: identity_raw_evidence_digest(&bytes),
+                        detail: format!(
+                            "identity row uses SQLite storage class '{storage_type}', expected \
+                             blob"
+                        ),
+                    }
+                };
+                // A row whose physical key cannot name its identity, or names
+                // another identity than the row, is unreadable for the
+                // identity the key names.
+                let identity_key = decode_required_identity_text(
+                    &identity_type,
+                    identity_bytes.clone(),
+                    "agent_identity",
+                );
+                let identity = AgentIdentity::from(identity_key.clone().unwrap_or_else(|_| {
+                    format!(
+                        "malformed-physical-identity:{identity_type}:{}",
+                        identity_raw_evidence_digest(&identity_bytes)
+                    )
+                }));
+                let observation = match observation {
+                    crate::identity::CreatedIdentityObservation::Created(record)
+                        if identity_key.is_err()
+                            || record.mob_id != mob_id
+                            || record.agent_identity != identity =>
+                    {
+                        crate::identity::CreatedIdentityObservation::Unreadable {
+                            evidence_digest: identity_raw_evidence_digest(&bytes),
+                            detail: "created identity row does not match its physical \
+                                     mob/identity key"
+                                .to_string(),
+                        }
+                    }
+                    other => other,
+                };
+                observations.insert(identity, observation);
+            }
+            Ok(super::CreatedIdentityScanPage { observations, next })
         })
         .await
     }
@@ -13291,7 +13522,7 @@ mod tests {
                     params![
                         mob_id.as_str(),
                         identity,
-                        br#"{"schema_version":2,"future_shape":true}"#.as_slice()
+                        br#"{"schema_version":1,"future_shape":true}"#.as_slice()
                     ],
                 )
                 .unwrap();
@@ -13356,7 +13587,7 @@ mod tests {
                     params![
                         mob_id.as_str(),
                         identity,
-                        br#"{"schema_version":2,"future_shape":true}"#.as_slice()
+                        br#"{"schema_version":1,"future_shape":true}"#.as_slice()
                     ],
                 )
                 .unwrap();
@@ -13387,6 +13618,251 @@ mod tests {
             Some("member-text")
         );
         assert!(valid.next.is_none());
+    }
+
+    /// A created identity entry's row (schema version 2) and every row of a
+    /// later schema are the created identity scan's, never the intent
+    /// readers': the intent scan and the intent list read the host-adopted
+    /// rows alone; the created scan reads a valid created row as `Created`
+    /// and any other as `Unreadable` for its identity alone, a created row
+    /// stored under another identity's key included; and the member binding
+    /// reader classifies a created row as a created entry and that
+    /// mismatched one as unreadable.
+    ///
+    /// RED: let `list_identity_intents` read the version 2 rows (it answers
+    /// them `Unsupported`), or let the member binding reader take a created
+    /// row without its physical key check (it answers the mismatched row
+    /// `CreatedEntry`).
+    #[tokio::test]
+    async fn sqlite_created_rows_are_the_created_scans_and_never_an_intents() {
+        let (_dir, path) = temp_db_path();
+        let stores = SqliteMobStores::open(&path).unwrap();
+        let mob_id = MobId::from("sqlite-created-rows");
+        let created_for = |identity: &str| {
+            crate::identity::CreatedIdentityRecord::sealed(
+                mob_id.clone(),
+                AgentIdentity::from(identity),
+                1,
+                crate::identity::CreatedIdentityPresence::Present,
+                crate::identity::CreatedIdentityProvenance::new(format!("create-{identity}"), 1),
+            )
+            .unwrap()
+        };
+        let created = created_for("created");
+        let store = stores.identity_store();
+        for (identity, row) in [
+            (
+                "adopted",
+                br#"{"schema_version":1,"future_shape":true}"#.to_vec(),
+            ),
+            ("created", serde_json::to_vec(&created).unwrap()),
+            (
+                "later",
+                br#"{"schema_version":2,"future_shape":true}"#.to_vec(),
+            ),
+            // A created row stored under another identity's key.
+            (
+                "mismatched",
+                serde_json::to_vec(&created_for("sealed-elsewhere")).unwrap(),
+            ),
+            ("much-later", br#"{"schema_version":9999}"#.to_vec()),
+        ] {
+            store
+                .put_identity_row_for_test(&mob_id, &AgentIdentity::from(identity), row)
+                .await
+                .unwrap();
+        }
+
+        let intents = store
+            .scan_identity_intents_page(&mob_id, None, 8)
+            .await
+            .unwrap();
+        assert_eq!(
+            intents
+                .observations
+                .keys()
+                .map(AgentIdentity::as_str)
+                .collect::<Vec<_>>(),
+            ["adopted"]
+        );
+        assert_eq!(
+            store
+                .list_identity_intents(&mob_id)
+                .await
+                .unwrap()
+                .keys()
+                .map(AgentIdentity::as_str)
+                .collect::<Vec<_>>(),
+            ["adopted"],
+            "the intent list leaves the created rows out as the scan does"
+        );
+        let mut rows = BTreeMap::new();
+        let mut after = None;
+        loop {
+            let page = store
+                .scan_created_identities_page(&mob_id, after.as_ref(), 2)
+                .await
+                .unwrap();
+            rows.extend(page.observations);
+            match page.next {
+                Some(next) => after = Some(next),
+                None => break,
+            }
+        }
+        assert_eq!(
+            rows.keys().map(AgentIdentity::as_str).collect::<Vec<_>>(),
+            ["created", "later", "mismatched", "much-later"]
+        );
+        assert_eq!(
+            rows.get(&AgentIdentity::from("created")),
+            Some(&crate::identity::CreatedIdentityObservation::Created(
+                created
+            ))
+        );
+        for unreadable in ["later", "mismatched", "much-later"] {
+            assert!(
+                matches!(
+                    rows.get(&AgentIdentity::from(unreadable)),
+                    Some(crate::identity::CreatedIdentityObservation::Unreadable { .. })
+                ),
+                "{unreadable}"
+            );
+        }
+        let read = read_member_binding_store_at(path.clone())
+            .await
+            .expect("read the store");
+        let management = read
+            .intent_rows
+            .get(&mob_id)
+            .expect("the mob's intent rows");
+        assert_eq!(
+            management.get(&AgentIdentity::from("created")),
+            Some(&crate::runtime::MemberIdentityManagement::CreatedEntry)
+        );
+        for unreadable in ["later", "mismatched"] {
+            assert_eq!(
+                management.get(&AgentIdentity::from(unreadable)),
+                Some(&crate::runtime::MemberIdentityManagement::IntentUnreadable),
+                "{unreadable}"
+            );
+        }
+    }
+
+    /// The bytes of `identity`'s row of the intents table, as stored.
+    fn stored_intent_row(path: &Path, mob_id: &MobId, identity: &str) -> Vec<u8> {
+        Connection::open(path)
+            .unwrap()
+            .query_row(
+                "SELECT CAST(record_json AS BLOB) FROM mob_identity_intents
+                 WHERE mob_id = ?1 AND agent_identity = ?2",
+                params![mob_id.as_str(), identity],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .unwrap()
+    }
+
+    /// An identity-first adoption in a mob whose intents table holds a
+    /// created entry's row and a later build's row adopts: the recompute of
+    /// the mob's present wiring reads the host-adopted rows alone, as the
+    /// intent scan does, and leaves both other rows as they are stored.
+    ///
+    /// RED: decode every row of the mob as a host-adopted intent in
+    /// `recompute_sqlite_present_incident_wiring` (the shape before this
+    /// fix): the adoption fails with `MobStoreError::Serialization` and rolls
+    /// back.
+    #[tokio::test]
+    async fn sqlite_an_adoption_beside_created_rows_adopts_and_keeps_them() {
+        let (_dir, path) = temp_db_path();
+        let stores = SqliteMobStores::open(&path).unwrap();
+        let store = stores.identity_store();
+        let mob_id = MobId::from("sqlite-adoption-beside-created");
+        let created = crate::identity::CreatedIdentityRecord::sealed(
+            mob_id.clone(),
+            AgentIdentity::from("created"),
+            1,
+            crate::identity::CreatedIdentityPresence::Present,
+            crate::identity::CreatedIdentityProvenance::new("create-1", 1),
+        )
+        .unwrap();
+        let kept = [
+            ("created", serde_json::to_vec(&created).unwrap()),
+            (
+                "later",
+                br#"{"schema_version":3,"a_later_field":true}"#.to_vec(),
+            ),
+        ];
+        for (identity, row) in &kept {
+            store
+                .put_identity_row_for_test(&mob_id, &AgentIdentity::from(*identity), row.clone())
+                .await
+                .unwrap();
+        }
+        let adopted = AgentIdentity::from("adopted");
+        let (request, compiled) = crate::identity::identity_adoption_fixture(
+            mob_id.clone(),
+            adopted.clone(),
+            "sqlite-adopt-beside-created",
+            SessionId::new(),
+        );
+        assert_eq!(
+            store
+                .adopt_member_identity_declaration(&request, &compiled)
+                .await
+                .expect("the adoption beside created rows"),
+            IdentityAdoptionOutcome::Adopted {
+                desired_revision: 1
+            }
+        );
+        assert_eq!(
+            store
+                .observe_identity_intent(&mob_id, &adopted)
+                .await
+                .unwrap(),
+            IdentityStoredObservation::Valid(compiled)
+        );
+        for (identity, row) in kept {
+            assert_eq!(
+                stored_intent_row(&path, &mob_id, identity),
+                row,
+                "{identity} is kept as stored"
+            );
+        }
+    }
+
+    /// The created identity scan reads a row stored in another SQLite
+    /// storage class than this build writes (blob) as unreadable for the
+    /// identity its key names, so MobMachine reserves the name and never
+    /// reads it as free; the intent readers report the row malformed.
+    ///
+    /// RED: skip such a row in the created identity scan (the shape before
+    /// this fix): the scan answers nothing for it.
+    #[tokio::test]
+    async fn sqlite_a_row_of_another_storage_class_reads_unreadable_to_the_created_scan() {
+        let (_dir, path) = temp_db_path();
+        let stores = SqliteMobStores::open(&path).unwrap();
+        let mob_id = MobId::from("sqlite-text-row");
+        Connection::open(&path)
+            .unwrap()
+            .execute(
+                "INSERT INTO mob_identity_intents
+                     (mob_id, agent_identity, declaration_scope, session_id, lineage_id, record_json)
+                 VALUES (?1, ?2, NULL, NULL, NULL, ?3)",
+                params![mob_id.as_str(), "text-row", r#"{"schema_version":2}"#],
+            )
+            .unwrap();
+        let page = stores
+            .identity_store()
+            .scan_created_identities_page(&mob_id, None, 8)
+            .await
+            .unwrap();
+        assert!(
+            matches!(
+                page.observations.get(&AgentIdentity::from("text-row")),
+                Some(crate::identity::CreatedIdentityObservation::Unreadable { .. })
+            ),
+            "{:?}",
+            page.observations
+        );
     }
 
     #[tokio::test]

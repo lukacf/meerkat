@@ -2443,6 +2443,31 @@ describe("parseWorkGraphExternalRef / parseWorkGraphEvidenceRef", () => {
       { kind: "self_attest", id: "ev-1", label: "lbl", summary: "sum" },
     );
   });
+
+  it("parses the ids an evidence ref withdraws", () => {
+    const ref = parseWorkGraphEvidenceRef({
+      kind: "note",
+      id: "ev-2",
+      withdraws: ["ev-1"],
+    });
+    assert.deepEqual(ref.withdraws, ["ev-1"]);
+  });
+
+  it("evidence ref withdraws defaults to empty", () => {
+    const ref = parseWorkGraphEvidenceRef({ kind: "self_attest", id: "ev-1" });
+    assert.deepEqual(ref.withdraws, []);
+  });
+
+  it("workGraphEvidenceInputToDict includes withdraws when set", () => {
+    assert.deepEqual(
+      workGraphEvidenceInputToDict({
+        kind: "note",
+        id: "ev-2",
+        withdraws: ["ev-1"],
+      }),
+      { kind: "note", id: "ev-2", withdraws: ["ev-1"] },
+    );
+  });
 });
 
 describe("parseWorkGraphItem", () => {

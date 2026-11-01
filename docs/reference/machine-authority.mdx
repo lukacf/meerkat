@@ -216,6 +216,75 @@ hold against the wakes of every cause and the explicit resume, held
 creation, and a placed identity's custody, remote commit, retirement and
 replay, with witnesses and mutants.
 
+Created identity entries (`IdentityEntryOrigin::Created`, since 0.9.9) are
+entries of the same map, recovered from the identity store at a start. After
+the journal replay and before the boot plan is sealed, the shell sends one
+`RecoverCreatedIdentityEntry` per created entry row, with the row's presence
+(`RecoveredPresence`: `Present`, `PresentUnseated`, `Tombstone`,
+`Unreadable`) and the session the identity's member was last bound to in the
+replayed journal, and MobMachine decides from them and its replayed facts, in
+Running or Stopped. A present row records a seated local member a `Created`
+entry, or, when the replay left the identity without a member, records the
+entry unseated (`SeatOwed`) with that session as its revival record; a
+pending row records it unseated for its host's preparation
+(`TemplatePreparation`); a removed row records the name's tombstone
+(`identity_entry_tombstones`); and an unreadable row, or one the replay
+contradicts (a tombstone of the name, or a spawn ladder open for it,
+included), reserves the name
+(`identity_entry_unreadable`). No arm records an entry for a tombstoned
+name, and no replay seats a member under one. The replay
+reserves the name of a member row whose origin token this build does not
+know the same way. A removed entry's name is never an entry or a member
+again; an unreadable name keeps what the replay recorded for it (a
+`Declared` entry, a member) and takes nothing new: the admission probe
+answers `IdentityNameReserved` (no spawn ladder opens, and every ladder
+close, the membership commits, the remote commit and the dormant seat,
+refuses a reserved name: a ladder opened before the reservation seats no
+member, and the shell aborts it with the name's admission answer,
+`MobError::IdentityMember`), the worker reconcile helpers
+skip it, the declared apply refuses it typed (`RefusedNameTombstoned`,
+`RefusedNameUnreadable`), the legacy adoption answers `NotAdoptable`, and
+the agent lane's admission answers the name's member `IdentityMember`.
+Custody of one origin never takes
+an entry of the other (`IdentityMemberOfAnotherOrigin`): entry custody takes
+a `Declared` entry's name only, and created custody (`BeginSpawnExec`'s and
+`ProbeMemberAdmission`'s `created_custody`, recorded in
+`spawn_exec_created_custody`) a `Created` entry owed its seat only, never
+both; the dormant seat that closes a created ladder takes the entry's revival
+record and keeps the member a `Created` entry. The declared apply never
+declares over a `Created` entry (`RefusedNameOwnedByCreated`), and its seal
+unlists readable `Declared` entries only. A reset keeps the reserved names,
+which the identity store holds, and drops created custody; the destroy
+clears both. The invariants `unseated_created_entry_is_preparing_or_owed`,
+`tombstone_is_never_an_entry` and `entry_custodies_are_disjoint` hold these
+facts. The shell re-seats an entry owed its seat once the mob runs, as the
+handle's own command through that created custody, and MobMachine's guards
+decide each seat.
+
+The ci profile has no identities, so the hand-written audit
+`specs/machines/mob_machine/created_identity_audit.sh` drives the created
+entries' arms in four runs:
+
+- The scan run scans a row of every presence, with and without a revival
+  record, in Running and Stopped, until the boot plan's seal. The rows are
+  for a replayed seated member (with or without its `Declared` entry's row)
+  and for an identity without a member. The run reaches every outcome, the
+  contradicted rows included, and exactly one arm answers every row.
+- The reseat run opens, aborts and seats spawn ladders with every pair of
+  custodies over the scanned rows, alongside the worker reconcile and the
+  destroy. It checks that no ladder opens for a reserved name, that a
+  ladder's custody matches its name's origin, that a seat under created
+  custody binds the entry's revival record, and that a row of a name an
+  open ladder acts for reserves it.
+- The names run drives the declared apply, its seal, the legacy adoption,
+  the agent lane's admission and the admission probe over `Created`,
+  removed and unreadable names. Exactly one arm answers each, and the seal
+  never touches a `Created` entry.
+- The placed run scans the row of a member seated on a member host.
+
+The audit seeds defects, one per invariant above, per action property and
+per guard a reachable state needs, and refuses each.
+
 Member rotations are `MobMachine` facts. A pending rotation records its
 identity's next session (`member_rotation_session_ids`), the endpoint it
 seats (`member_rotation_peer_endpoints`) and its target
@@ -269,6 +338,25 @@ release names and answers `Stale` for any other. The hand-written
 its `rotate-same` and `recover-rotation` runs, and replays a committed
 same-session terminal's rows, its kept edges among them, in its
 `replay-same` run.
+
+The retire of an identity that holds no roster incarnation (never a member,
+or already retired) is a `MobMachine` answer too, in every phase. The handle
+reads the roster only to choose the command: finding no incarnation, it asks
+the actor for `RetireAbsent`, the input the actor's own retirement submits
+when it meets an absent member, and answers what the machine answers.
+`RetireAbsent` has an arm in each phase (`RetireAbsentRunning`,
+`RetireAbsentStopped`, `RetireAbsentCompleted`, `RetireAbsentDestroyed`, the
+last for a destroyed mob whose actor still serves its destroy's retry). Each
+changes nothing while the identity maps to no runtime (`identity_absent`)
+and refuses an identity the machine still maps, such as a successor whose
+spawn committed after the caller read the roster. The handle answers that
+refusal as the spawn still in progress
+(`MobError::LifecycleOperationPending`, retryable). The input names no
+incarnation, so it never retires or cancels a later incarnation of the
+identity. The hand-written
+`specs/machines/mob_machine/member_lifecycle_audit.sh` fires the four arms
+and checks, in its scope run, that a `RetireAbsent` arm is enabled exactly
+when the identity maps to no runtime.
 
 ## Consumed Checkpoint Completion Recovery
 

@@ -4280,6 +4280,28 @@ impl MobActor {
         })
     }
 
+    /// MobMachine's answer to the retire of an identity with no roster
+    /// incarnation (`RetireAbsent`): in every phase it retires nothing and
+    /// changes nothing while the identity maps to no runtime, and it refuses
+    /// an identity the machine still maps. The actor's own retirement of an
+    /// absent member and the handle's retire of an identity its roster does
+    /// not list (`MobCommand::RetireAbsent`) both ask it, so no shell
+    /// answers that retire.
+    pub(super) fn retire_absent_admission(
+        &mut self,
+        identity: &AgentIdentity,
+        context: &str,
+    ) -> Result<(), MobError> {
+        self.apply_command_admission(
+            mob_dsl::MobMachineInput::RetireAbsent {
+                agent_identity: mob_dsl::AgentIdentity::from_domain(identity),
+            },
+            MobState::Running,
+            context,
+        )
+        .map(|_| ())
+    }
+
     pub(super) async fn start_retirement(
         &mut self,
         identity: AgentIdentity,
@@ -4397,15 +4419,7 @@ impl MobActor {
         }
         let entry = self.roster.read().await.get(&identity).cloned();
         let Some(entry) = entry else {
-            let result = self
-                .apply_command_admission(
-                    mob_dsl::MobMachineInput::RetireAbsent {
-                        agent_identity: mob_dsl::AgentIdentity::from_domain(&identity),
-                    },
-                    MobState::Running,
-                    "handle_retire_inner_absent",
-                )
-                .map(|_| ());
+            let result = self.retire_absent_admission(&identity, "handle_retire_inner_absent");
             match reply {
                 RetirementReply::Retire(reply) | RetirementReply::BatchRetire(reply) => {
                     let _ = reply.send(result);

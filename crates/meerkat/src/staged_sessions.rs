@@ -501,8 +501,8 @@ impl StagedSessionRegistry {
 
     /// Where the operator-instruction entry rows of the session the staged
     /// build resumes stand in that build's requests, read without promoting
-    /// the slot (`resumed_build_entry_placement`: a prompt row the build
-    /// authors counts as another System row). A model change of a session
+    /// the slot (`resumed_build_entry_placement`: a prompt row the build may
+    /// author counts as another System row). A model change of a session
     /// staged before its first build is judged on it. `Ok(None)` when no
     /// slot exists for `id`; an empty placement while a promotion is
     /// building the session (that build judges it) or when the build resumes

@@ -1262,6 +1262,23 @@ impl MobIdentityStore for SpiMobIdentityStore {
     }
 
     /// I: read.
+    async fn scan_created_identities_page(
+        &self,
+        mob_id: &MobId,
+        after: Option<&IdentityIntentScanCursor>,
+        limit: usize,
+    ) -> Result<super::super::CreatedIdentityScanPage, MobStoreError> {
+        self.bundle
+            .read(
+                identity_read(),
+                self.bundle
+                    .identity
+                    .scan_created_identities_page(mob_id, after, limit),
+            )
+            .await
+    }
+
+    /// I: read.
     async fn observe_identity_lease(
         &self,
         mob_id: &MobId,

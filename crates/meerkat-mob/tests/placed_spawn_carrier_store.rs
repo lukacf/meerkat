@@ -400,6 +400,7 @@ fn attempt_witnesses(
             effective_profile_override_present,
             effective_model_override_present,
             entry_custody: false,
+            created_custody: false,
         },
     )?;
     let pending_write =

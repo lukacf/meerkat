@@ -4276,6 +4276,14 @@ export interface WorkGraphEvidenceRef {
   readonly summary: string | null;
   readonly confirmationKind: string | null;
   readonly confirmingOwnerKey: WorkGraphOwnerKey | null;
+  /**
+   * Ids of earlier evidence on the same item that this ref withdraws. A ref
+   * is withdrawn when a later ref on the item lists its id; nothing is
+   * removed. Optional, so a ref a caller builds still type-checks: a missing
+   * field withdraws nothing, and `parseWorkGraphEvidenceRef` always sets it
+   * (`[]` when the gateway sends none).
+   */
+  readonly withdraws?: readonly string[];
 }
 
 export function parseWorkGraphEvidenceRef(raw: unknown): WorkGraphEvidenceRef {
@@ -4291,6 +4299,7 @@ export function parseWorkGraphEvidenceRef(raw: unknown): WorkGraphEvidenceRef {
       d.confirming_owner_key != null
         ? parseWorkGraphOwnerKey(d.confirming_owner_key)
         : null,
+    withdraws: asStringArray(d.withdraws),
   };
 }
 
@@ -4300,6 +4309,11 @@ export interface WorkGraphEvidenceInput {
   readonly id: string;
   readonly label?: string;
   readonly summary?: string;
+  /**
+   * Ids of earlier evidence on the same item that this ref withdraws.
+   * `workgraphAddEvidence` only: goal confirmation refuses the field.
+   */
+  readonly withdraws?: readonly string[];
 }
 
 export function workGraphEvidenceInputToDict(
@@ -4311,6 +4325,7 @@ export function workGraphEvidenceInputToDict(
   };
   if (evidence.label !== undefined) result.label = evidence.label;
   if (evidence.summary !== undefined) result.summary = evidence.summary;
+  if (evidence.withdraws !== undefined) result.withdraws = [...evidence.withdraws];
   return result;
 }
 
@@ -5949,7 +5964,10 @@ export function parseAnnouncementDeclarationRecord(raw: unknown): AnnouncementDe
 /**
  * `declarations/get` and `declarations/apply`: the applied `revision` (0
  * before any), its `digest`, and one record per declared source and
- * subscription and per child of a declared role template.
+ * subscription and per child of a declared role template. A record dropped
+ * from the declarations stays listed until its drop takes effect: a drop
+ * refused for now, or a dropped source until the schedule service has
+ * reconciled its runner after its end.
  */
 export interface AnnouncementDeclarationsView {
   readonly revision: number;

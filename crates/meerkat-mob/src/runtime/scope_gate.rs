@@ -141,6 +141,9 @@ impl MobCommand {
             //    lifecycle mutations classify as the destructive class).
             //    Respawn = destroy+recreate ⇒ its most privileged half. ──
             Self::Retire { .. }
+            // The retire of an identity the roster lists no incarnation of:
+            // the same verb, answered by MobMachine's RetireAbsent.
+            | Self::RetireAbsent { .. }
             | Self::RetireAll { .. }
             | Self::Respawn { .. }
             // Reload replaces the member's runtime registration in place; it
@@ -334,6 +337,7 @@ impl MobCommand {
             | Self::LifecycleSnapshot { .. }
             | Self::LifecycleNotificationBurst { .. }
             | Self::ParkActorForObservationTest { .. }
+            | Self::InjectUnreadableNameAtLadderOpenForTest { .. }
             | Self::QueueRoutedEffectForTest { .. }
             | Self::WakeMemberFromEffectForTest { .. }
             | Self::SpawnLiveMutationAwaitingActorForTest { .. }
@@ -429,6 +433,7 @@ impl MobCommand {
         use super::state::ScopeAdmissionSubject;
         match self {
             Self::Retire { agent_identity, .. }
+            | Self::RetireAbsent { agent_identity, .. }
             | Self::Respawn { agent_identity, .. }
             | Self::ReleaseMember { agent_identity, .. }
             | Self::ReloadMemberRegistration { agent_identity, .. }
@@ -626,6 +631,7 @@ impl MobCommand {
             | Self::LifecycleSnapshot { .. }
             | Self::LifecycleNotificationBurst { .. }
             | Self::ParkActorForObservationTest { .. }
+            | Self::InjectUnreadableNameAtLadderOpenForTest { .. }
             | Self::QueueRoutedEffectForTest { .. }
             | Self::WakeMemberFromEffectForTest { .. }
             | Self::SpawnLiveMutationAwaitingActorForTest { .. }
@@ -654,6 +660,9 @@ impl MobCommand {
                 let _ = reply_tx.send(Err(error));
             }
             Self::Retire { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(error));
+            }
+            Self::RetireAbsent { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(error));
             }
             Self::Respawn { reply_tx, .. } => {
@@ -963,6 +972,10 @@ impl MobCommand {
             }
             #[cfg(test)]
             Self::ParkActorForObservationTest { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(error));
+            }
+            #[cfg(test)]
+            Self::InjectUnreadableNameAtLadderOpenForTest { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(error));
             }
             #[cfg(test)]
@@ -1410,6 +1423,48 @@ mod tests {
                 assert!(denial.presented.is_empty());
             }
             other => panic!("expected embedded ScopeDenied, got {other:?}"),
+        }
+    }
+
+    // The handle's retire of an identity its roster lists no incarnation of
+    // is the retire verb: Retire-scoped, addressed to the member on the agent
+    // lane, still answered while admission is closed (it revives nothing),
+    // and denied typed on its own reply channel.
+    #[tokio::test]
+    async fn retire_absent_classifies_as_a_member_retire() {
+        let identity = crate::ids::AgentIdentity::from("m");
+        let (tx, _rx) = oneshot::channel();
+        let command = MobCommand::RetireAbsent {
+            agent_identity: identity.clone(),
+            reply_tx: tx,
+        };
+        assert_eq!(command.required_control_scope(), Some(ControlScope::Retire));
+        assert!(
+            !command.refused_while_admission_closed(),
+            "a closed mob still answers the retire of an absent identity"
+        );
+        assert!(
+            matches!(
+                command.agent_lane_admission(),
+                AgentLaneAdmission::Members(members) if members == vec![&identity]
+            ),
+            "the agent lane meets the retire as a command addressed to the member"
+        );
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        MobCommand::RetireAbsent {
+            agent_identity: identity,
+            reply_tx,
+        }
+        .reject_scope_denied(ScopeDenial {
+            required: ControlScope::Retire,
+            presented: BTreeSet::new(),
+        });
+        match reply_rx.await {
+            Ok(Err(MobError::ScopeDenied(denial))) => {
+                assert_eq!(denial.required, ControlScope::Retire);
+            }
+            other => panic!("expected typed ScopeDenied reply, got {other:?}"),
         }
     }
 }

@@ -4348,6 +4348,15 @@ fn seed_mob_authority_sync_from_events(
                         "recover_member_identity_entry",
                     )?;
                 }
+                // A row whose origin token this build does not know (a later
+                // release wrote it) reserves the name as unreadable: nothing
+                // acts on it, and it is never replayed as a worker's.
+                if member_spawned.unknown_identity_entry().is_some() {
+                    super::created_identity::reserve_unknown_origin_name(
+                        authority,
+                        &member_spawned.agent_identity,
+                    )?;
+                }
                 if member_spawned.placed_spawn_id().is_none()
                     && let Some(member_peer_endpoint) = member_spawned.member_peer_endpoint()
                 {
@@ -4516,6 +4525,12 @@ fn seed_mob_authority_sync_from_events(
                             origin: origin.to_machine(),
                         },
                         "recover_adopted_identity_entry",
+                    )?;
+                }
+                if recovered.unknown_identity_entry().is_some() {
+                    super::created_identity::reserve_unknown_origin_name(
+                        authority,
+                        &recovered.agent_identity,
                     )?;
                 }
             }
@@ -9317,6 +9332,20 @@ impl MobBuilder {
                 )?;
             }
             let repaired_epoch_events = &mob_events[repaired_epoch_start..];
+            // The identity store's created entry rows, after the replay and
+            // before the member plan (`RecoverCreatedIdentityEntry`): a store
+            // that cannot be read fails the start, never reads as no row.
+            if matches!(resumed_state, MobState::Running | MobState::Stopped)
+                && !destroy_storage_finalizing
+            {
+                super::created_identity::recover_created_identity_entries(
+                    initial_dsl_authority.as_mut(),
+                    storage.identity.as_ref(),
+                    &definition.id,
+                    repaired_epoch_events,
+                )
+                .await?;
+            }
 
             // Roster is a projection only. Build it after the authoritative
             // carrier/event reconciliation and machine recovery have succeeded.
@@ -9768,13 +9797,14 @@ impl MobBuilder {
         }
         .await;
         #[cfg(not(target_arch = "wasm32"))]
-        {
-            supervisor_startup_guard.settle(start_result).await
-        }
+        let handle = supervisor_startup_guard.settle(start_result).await?;
         #[cfg(target_arch = "wasm32")]
-        {
-            start_result
-        }
+        let handle = start_result?;
+        // A created entry owed its seat (a build that predates created
+        // entries retired its member) is seated again on its archived
+        // session, once the mob runs.
+        handle.reseat_owed_created_entries().await;
+        Ok(handle)
     }
 
     async fn sync_definition_with_spec_store(
@@ -11294,6 +11324,8 @@ impl MobBuilder {
                 stop_member_outcomes: BTreeMap::new(),
                 #[cfg(test)]
                 resume_readiness_fault: None,
+                #[cfg(test)]
+                unreadable_name_at_ladder_open: None,
                 pending_autonomous_stop: None,
                 next_autonomous_stop_ticket: 0,
                 pending_autonomous_stop_controls: VecDeque::new(),

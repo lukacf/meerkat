@@ -13,11 +13,13 @@ use std::fmt;
 const NATIVE_MACHINE_HELPERS: &[&str] = &[
     "runtime_delivery_recipient_outcomes_after_set",
     // SessionDocumentMachine: one session's slot map with one slot set, the
-    // body bytes of a slot set's Active slots, and the entries of a slot map
-    // whose slot is Active.
+    // body bytes of a slot set's Active slots, the entries of a slot map
+    // whose slot is Active, and the activation rows a retirement leaves
+    // retired per key.
     "session_document_instruction_slot_after_set",
     "session_document_instruction_active_bytes",
     "session_document_instruction_active_slots",
+    "session_document_activation_retired_after",
     "meerkat_machine_session_id_matches_string",
     "meerkat_peer_endpoint_set_cardinality_matches",
     "meerkat_peer_endpoint_set_contains_peer_id",

@@ -9216,6 +9216,12 @@ pub(super) struct MobActor {
     pub(super) stop_member_outcomes: BTreeMap<AgentIdentity, super::stop_report::MemberStopOutcome>,
     #[cfg(test)]
     pub(super) resume_readiness_fault: Option<super::state::ResumeReadinessFaultForTest>,
+    /// State injection, test builds only: the name a test armed to be
+    /// reserved as unreadable the moment its spawn ladder opens, with the
+    /// test's answer (`MobCommand::InjectUnreadableNameAtLadderOpenForTest`).
+    #[cfg(test)]
+    pub(super) unreadable_name_at_ladder_open:
+        Option<(AgentIdentity, oneshot::Sender<Result<(), MobError>>)>,
     /// Rotating admission cursor for the bounded off-actor interrupt window.
     pub(super) autonomous_stop_interrupt_cursor: usize,
     /// The Stop or Shutdown awaiting its interrupted members' end of turn.
@@ -17736,6 +17742,7 @@ impl MobActor {
                 effective_profile_override_present: false,
                 effective_model_override_present: false,
                 entry_custody,
+                created_custody: false,
             },
             "spawn_command_admission",
         )
@@ -17756,19 +17763,23 @@ impl MobActor {
     /// guard covers live runtime bindings, session bindings, and in-flight
     /// pending spawns, so this fully replaces the former shell-side
     /// `pending_spawns.contains_member` prechecks. An identity entry's name,
-    /// probed without entry custody, is refused
+    /// probed without entry custody, a created entry's name probed with
+    /// entry custody, and a reserved name (a removed created entry's, or
+    /// one whose entry this build cannot read) are refused
     /// [`MobError::IdentityMember`] before anything is created.
     fn probe_member_admission(
         &self,
         agent_identity: &AgentIdentity,
         entry_custody: bool,
     ) -> Result<(), MobError> {
-        match self.member_admission_verdict(agent_identity, entry_custody)? {
+        match self.member_admission_verdict(agent_identity, entry_custody, false)? {
             mob_dsl::MemberAdmissionVerdictKind::Admitted => Ok(()),
             mob_dsl::MemberAdmissionVerdictKind::DuplicateRejected => {
                 Err(MobError::MemberAlreadyExists(agent_identity.clone()))
             }
-            mob_dsl::MemberAdmissionVerdictKind::IdentityMemberRejected => {
+            mob_dsl::MemberAdmissionVerdictKind::IdentityMemberRejected
+            | mob_dsl::MemberAdmissionVerdictKind::IdentityMemberOfAnotherOrigin
+            | mob_dsl::MemberAdmissionVerdictKind::IdentityNameReserved => {
                 Err(MobError::IdentityMember {
                     member_id: agent_identity.clone(),
                 })
@@ -17778,20 +17789,76 @@ impl MobActor {
 
     /// MobMachine's member-admission verdict (`ProbeMemberAdmission`, a pure
     /// verdict in every lifecycle phase) for `agent_identity`, requested with
-    /// or without entry custody.
+    /// or without entry custody or created custody.
     fn member_admission_verdict(
         &self,
         agent_identity: &AgentIdentity,
         entry_custody: bool,
+        created_custody: bool,
     ) -> Result<mob_dsl::MemberAdmissionVerdictKind, MobError> {
         let prepared = self.prepare_dsl_input(
             mob_dsl::MobMachineInput::ProbeMemberAdmission {
                 agent_identity: mob_dsl::AgentIdentity::from_domain(agent_identity),
                 entry_custody,
+                created_custody,
             },
             "probe_member_admission",
         )?;
         Self::member_admission_verdict_from_effects(&prepared.effects)
+    }
+
+    /// The typed refusal of an act that would seat a member under a name
+    /// MobMachine reserved, as its admission answers the name
+    /// (`IdentityNameReserved`): `MobError::IdentityMember`. It types a spawn
+    /// ladder's close for a name reserved after the ladder opened
+    /// (`name_not_reserved` on the close arms), and refuses a fresh-life
+    /// respawn whose successor the reservation would refuse. `None` for any
+    /// other name.
+    fn reserved_name_refusal(&self, agent_identity: &AgentIdentity) -> Option<MobError> {
+        matches!(
+            self.member_admission_verdict(agent_identity, false, false),
+            Ok(mob_dsl::MemberAdmissionVerdictKind::IdentityNameReserved)
+        )
+        .then(|| MobError::IdentityMember {
+            member_id: agent_identity.clone(),
+        })
+    }
+
+    /// State injection, test builds only: when a test armed it for this name
+    /// (`MobCommand::InjectUnreadableNameAtLadderOpenForTest`), reserve the
+    /// name of the spawn ladder that just opened as unreadable in
+    /// MobMachine's state, as the boot scan's Unreadable arm does for a row
+    /// of a name under an open ladder, and answer the test. The live
+    /// authority keeps its owner token: only its state is replaced, by one
+    /// that holds every invariant. No production path reserves a name under
+    /// an open ladder.
+    #[cfg(test)]
+    fn inject_armed_unreadable_name_at_ladder_open(&mut self, agent_identity: &AgentIdentity) {
+        let Some((armed, injected_tx)) = self.unreadable_name_at_ladder_open.take() else {
+            return;
+        };
+        if armed != *agent_identity {
+            self.unreadable_name_at_ladder_open = Some((armed, injected_tx));
+            return;
+        }
+        // The Unreadable arm's whole update: the name is reserved and leaves
+        // the worker reconcile sets.
+        let name = mob_dsl::AgentIdentity::from_domain(agent_identity);
+        let mut state = self.dsl_authority.state().clone();
+        state.members_to_spawn.remove(&name);
+        state.members_to_retire.remove(&name);
+        state.identity_entry_unreadable.insert(name);
+        let injected = match mob_dsl::MobMachineAuthority::recover_from_state(state) {
+            Ok(recovered) => {
+                self.dsl_authority.restore_snapshot(recovered.snapshot());
+                self.publish_machine_state_projection();
+                Ok(())
+            }
+            Err(error) => Err(MobError::Internal(format!(
+                "the injected unreadable name breaks a MobMachine invariant: {error}"
+            ))),
+        };
+        let _ = injected_tx.send(injected);
     }
 
     /// The one member-admission verdict a `ProbeMemberAdmission` transition
@@ -17847,10 +17914,10 @@ impl MobActor {
     }
 
     /// A seat chunk's probes, on ONE fork of the authority instead of a
-    /// prepared authority per identity: for each `(identity, entry_custody)`,
-    /// its next generation ([`Self::mint_spawn_generation`]'s
+    /// prepared authority per identity: for each `(identity, entry_custody,
+    /// created_custody)`, its next generation ([`Self::mint_spawn_generation`]'s
     /// `ComputeRespawnGeneration`) and MobMachine's member-admission verdict
-    /// for its entry custody (`ProbeMemberAdmission`). Both are pure probes:
+    /// for its custody (`ProbeMemberAdmission`). Both are pure probes:
     /// they change no state, and the actor's state is fixed while it plans,
     /// so every answer, a refusal included, is the one a probe of its own
     /// would give. A prepared authority per identity copied the whole
@@ -17859,11 +17926,11 @@ impl MobActor {
     /// ones as named twice, so the verdict it plans with is that spec's own.
     fn probe_seat_chunk<'a>(
         &self,
-        specs: impl IntoIterator<Item = (&'a AgentIdentity, bool)>,
+        specs: impl IntoIterator<Item = (&'a AgentIdentity, bool, bool)>,
     ) -> BTreeMap<AgentIdentity, SeatChunkProbe> {
         let mut probe = self.dsl_authority.fork();
         let mut probes: BTreeMap<AgentIdentity, SeatChunkProbe> = BTreeMap::new();
-        for (agent_identity, entry_custody) in specs {
+        for (agent_identity, entry_custody, created_custody) in specs {
             if probes.contains_key(agent_identity) {
                 continue;
             }
@@ -17885,6 +17952,7 @@ impl MobActor {
                 mob_dsl::MobMachineInput::ProbeMemberAdmission {
                     agent_identity: dsl_identity,
                     entry_custody,
+                    created_custody,
                 },
             )
             .map_err(|error| {
@@ -18395,6 +18463,7 @@ impl MobActor {
             effective_model_override_present: false,
             // A policy auto-spawn is a worker: it never acts for an entry.
             entry_custody: false,
+            created_custody: false,
         };
         mob_dsl::MobMachineMutator::apply(&mut authority, begin_spawn)
             .map_err(|_| self.invalid_transition_to(MobState::Running))?;
@@ -29975,6 +30044,16 @@ impl MobActor {
                         }
                     }
                 }
+                // The handle's retire found no roster incarnation: MobMachine
+                // answers it (RetireAbsent), and nothing is retired.
+                MobCommand::RetireAbsent {
+                    agent_identity,
+                    reply_tx,
+                } => {
+                    let result =
+                        self.retire_absent_admission(&agent_identity, "retire_absent_command");
+                    let _ = reply_tx.send(result);
+                }
                 MobCommand::Respawn {
                     agent_identity,
                     initial_message,
@@ -31416,6 +31495,15 @@ impl MobActor {
                         )
                     });
                     let _ = reply_tx.send(result);
+                }
+                #[cfg(test)]
+                MobCommand::InjectUnreadableNameAtLadderOpenForTest {
+                    agent_identity,
+                    injected_tx,
+                    reply_tx,
+                } => {
+                    self.unreadable_name_at_ladder_open = Some((agent_identity, injected_tx));
+                    let _ = reply_tx.send(Ok(()));
                 }
                 #[cfg(test)]
                 MobCommand::DslT2Snapshot { reply_tx } => {
@@ -36061,6 +36149,9 @@ impl MobActor {
             // session: its spawn row records the notice, as a dormant seat's
             // row does.
             history_unavailable,
+            // Read only by the dormant seat of a created entry owed its seat;
+            // a spawn ignores it.
+            created_custody: _,
         } = spec;
         let agent_identity = AgentIdentity::from(identity.as_str());
         self.inline_step_watchdog
@@ -38351,6 +38442,9 @@ impl MobActor {
             // Set only by a dormant seat, whose spawns are local.
             fresh_session_id: _,
             history_unavailable: _,
+            // A placed spawn never acts for a created entry: only a dormant
+            // seat does.
+            created_custody: _,
         } = spec;
         let Some(host) = placement else {
             fail!(MobError::Internal(
@@ -38759,6 +38853,7 @@ impl MobActor {
                 effective_profile_override_present: effective_profile_override.is_some(),
                 effective_model_override_present: effective_model_override.is_some(),
                 entry_custody,
+                created_custody: false,
             },
             "enqueue_spawn_remote_open",
         ) {
@@ -39997,6 +40092,8 @@ impl MobActor {
             // Set only by a dormant seat, whose spawns are local.
             fresh_session_id: _,
             history_unavailable: _,
+            // A policy auto-spawn is a worker's.
+            created_custody: _,
         } = member_spec;
 
         if agent_identity.is_system_reserved() {
@@ -40769,6 +40866,7 @@ impl MobActor {
                     // The spawn acts for its name's identity entry exactly
                     // when its spec carried entry custody.
                     entry_custody: ctx.entry_custody,
+                    created_custody: false,
                 },
                 "finalize_spawn_admit_begin_spawn_exec",
             );
@@ -40782,6 +40880,10 @@ impl MobActor {
                 .await;
                 return Err(error);
             }
+            // State injection, test builds only: a test may reserve the name
+            // here, under the open ladder, which no production path does.
+            #[cfg(test)]
+            self.inject_armed_unreadable_name_at_ladder_open(agent_identity);
         }
         // Remote: the ladder was opened at enqueue (`BeginSpawnExecRemote`,
         // rung = MaterializePending); the member recipient trust window
@@ -40892,16 +40994,23 @@ impl MobActor {
         ) {
             Ok(prepared) => prepared,
             Err(error) => {
+                // A ladder whose name MobMachine reserved after it opened is
+                // refused its close: the refusal is the name's admission
+                // answer, typed, and the ladder is aborted below.
+                let reserved = self.reserved_name_refusal(agent_identity);
                 if let Some(remote) = ctx.remote.as_ref() {
                     // Guard refusal on the remote arm is proven pre-commit.
                     // Classify against machine-recorded facts, then release
                     // the exact host attempt and carrier before rolling back
                     // only trust installed by this admission attempt.
-                    let kind = if remote.ack.spec_digest_echo != remote.resolved_spec_digest {
+                    let kind = if reserved.is_some() {
+                        "name_reserved".to_string()
+                    } else if remote.ack.spec_digest_echo != remote.resolved_spec_digest {
                         "commit_refused_digest_echo".to_string()
                     } else {
                         "host_engine_version_changed".to_string()
                     };
+                    let error = reserved.unwrap_or(error);
                     let failure = boxed_arm_future(|| {
                         self.fail_remote_spawn_exec_after_recipient_trust(
                             agent_identity,
@@ -40933,7 +41042,7 @@ impl MobActor {
                 return Err(self.fold_spawn_exec_abort(
                     &dsl_identity,
                     agent_identity,
-                    error,
+                    reserved.unwrap_or(error),
                     "finalize_spawn_admit_commit_membership",
                 ));
             }
@@ -50952,6 +51061,15 @@ impl MobActor {
                 .map(|entry| entry.runtime_mode)
                 .ok_or_else(|| MobError::MemberNotFound(agent_identity.clone()))?;
             return Err(MobRespawnError::from(Self::respawn_refusal(mode, reason)));
+        }
+        // A fresh life's successor passes the spawn admission, which refuses
+        // a reserved name (a removed created entry's, or one this build
+        // cannot read): such a respawn would retire the member and then be
+        // refused its successor, leaving the name with no member. It is
+        // refused here, by the name's admission answer, before anything is
+        // retired.
+        if let Some(reserved) = self.reserved_name_refusal(&agent_identity) {
+            return Err(MobRespawnError::from(reserved));
         }
         let explicit_successor = successor_spec.is_some();
         let (placed_host, snapshot, replacement_spec, original_identity) =
@@ -67316,6 +67434,7 @@ mod runtime_observation_tests {
                 effective_profile_override_present: false,
                 effective_model_override_present: false,
                 entry_custody: false,
+                created_custody: false,
             },
         )
         .expect("BeginSpawnExec should open the spawn-exec phase");

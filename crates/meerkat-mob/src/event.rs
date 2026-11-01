@@ -221,7 +221,9 @@ impl<'de> Deserialize<'de> for MemberRef {
 // may also carry the internal `identity_entry` origin of an identity entry's
 // member (the binding row of a legacy adoption carries it on the unchanged
 // session); a reader that predates it ignores it, so the member reads as an
-// ordinary member there. A stored `MemberRetirementStarted` may also carry the
+// ordinary member there. An origin token this build does not know is kept as
+// stored, and the replay of its row reserves the identity's name as
+// unreadable. A stored `MemberRetirementStarted` may also carry the
 // internal `rotation` record of the rotation the retirement carries out; a
 // reader that predates it ignores it and replays the retirement as a plain
 // one. A stored `MemberRetirementStarted` may also carry the internal `cause`
@@ -1189,6 +1191,12 @@ pub struct MemberSpawnedEvent {
     /// decode it as absent.
     #[serde(skip, default)]
     pub(crate) identity_entry: Option<crate::runtime::IdentityEntryOrigin>,
+    /// The stored origin token of this row's identity entry when this build
+    /// does not know it (a row a later release wrote): the replay reserves
+    /// the identity's name as unreadable, and the internal codec writes the
+    /// token back as it was stored.
+    #[serde(skip, default)]
+    pub(crate) unknown_identity_entry: Option<String>,
     /// The role the session this row seats its member on was last built
     /// under, when the member takes another role there: a same-session
     /// successor's declared role migration
@@ -1242,6 +1250,7 @@ impl MemberSpawnedEvent {
             seat_session_unborn: false,
             seat_build_inputs: None,
             identity_entry: None,
+            unknown_identity_entry: None,
             resume_from_role: None,
             history_unavailable: None,
         }
@@ -1278,6 +1287,12 @@ impl MemberSpawnedEvent {
 
     pub(crate) fn identity_entry(&self) -> Option<crate::runtime::IdentityEntryOrigin> {
         self.identity_entry
+    }
+
+    /// The stored origin token of this row's identity entry when this build
+    /// does not know it.
+    pub(crate) fn unknown_identity_entry(&self) -> Option<&str> {
+        self.unknown_identity_entry.as_deref()
     }
 
     pub(crate) fn with_seat_session_unborn(mut self, seat_session_unborn: bool) -> Self {
@@ -1411,6 +1426,12 @@ pub struct MemberSessionBindingRecoveredEvent {
     /// before it decode it as absent.
     #[serde(skip, default)]
     pub(crate) identity_entry: Option<crate::runtime::IdentityEntryOrigin>,
+    /// The stored origin token of this row's identity entry when this build
+    /// does not know it (a row a later release wrote): the replay reserves
+    /// the identity's name as unreadable, and the internal codec writes the
+    /// token back as it was stored.
+    #[serde(skip, default)]
+    pub(crate) unknown_identity_entry: Option<String>,
 }
 
 impl MemberSessionBindingRecoveredEvent {
@@ -1426,6 +1447,7 @@ impl MemberSessionBindingRecoveredEvent {
             member_peer_endpoint: None,
             seat_session_born: false,
             identity_entry: None,
+            unknown_identity_entry: None,
         }
     }
 
@@ -1448,6 +1470,12 @@ impl MemberSessionBindingRecoveredEvent {
 
     pub(crate) fn identity_entry(&self) -> Option<crate::runtime::IdentityEntryOrigin> {
         self.identity_entry
+    }
+
+    /// The stored origin token of this row's identity entry when this build
+    /// does not know it.
+    pub(crate) fn unknown_identity_entry(&self) -> Option<&str> {
+        self.unknown_identity_entry.as_deref()
     }
 
     /// The row a seated member's first wake writes once it created the
@@ -1851,23 +1879,32 @@ pub(crate) fn encode_stored_mob_event(event: &MobEvent) -> Result<Vec<u8>, serde
     {
         kind.insert("seat_session_born".to_string(), Value::Bool(true));
     }
+    // The entry's origin, or the token of an origin this build does not
+    // know, written back as it was stored.
     let identity_entry = event
         .kind
         .member_spawned()
-        .and_then(MemberSpawnedEvent::identity_entry)
+        .and_then(|spawned| {
+            spawned
+                .identity_entry()
+                .map(|origin| origin.as_stored().to_string())
+                .or_else(|| spawned.unknown_identity_entry().map(str::to_string))
+        })
         .or_else(|| {
             event
                 .kind
                 .member_session_binding_recovered()
-                .and_then(MemberSessionBindingRecoveredEvent::identity_entry)
+                .and_then(|recovered| {
+                    recovered
+                        .identity_entry()
+                        .map(|origin| origin.as_stored().to_string())
+                        .or_else(|| recovered.unknown_identity_entry().map(str::to_string))
+                })
         });
     if let Some(identity_entry) = identity_entry
         && let Some(kind) = value.get_mut("kind").and_then(Value::as_object_mut)
     {
-        kind.insert(
-            "identity_entry".to_string(),
-            Value::String(identity_entry.as_stored().to_string()),
-        );
+        kind.insert("identity_entry".to_string(), Value::String(identity_entry));
     }
     if let Some(member_spawned) = event.kind.member_spawned()
         && let Some(resume_from_role) = member_spawned.resume_from_role()
@@ -2086,8 +2123,9 @@ pub(crate) fn decode_stored_mob_event(bytes: &[u8]) -> Result<MobEvent, serde_js
         .map(serde_json::from_value::<bool>)
         .transpose()?
         .unwrap_or(false);
-    // An origin this build does not know (a row a later release wrote)
-    // replays as an ordinary member.
+    // An origin this build does not know (a row a later release wrote) is
+    // kept as its stored token: the replay reserves the identity's name as
+    // unreadable, and an encode writes the token back.
     let stored_identity_entry = value
         .get_mut("kind")
         .and_then(Value::as_object_mut)
@@ -2102,8 +2140,7 @@ pub(crate) fn decode_stored_mob_event(bytes: &[u8]) -> Result<MobEvent, serde_js
             }
         })
         .map(serde_json::from_value::<String>)
-        .transpose()?
-        .and_then(|token| crate::runtime::IdentityEntryOrigin::from_stored(&token));
+        .transpose()?;
     let spawned_resume_from_role = value
         .get_mut("kind")
         .and_then(Value::as_object_mut)
@@ -2312,11 +2349,15 @@ pub(crate) fn decode_stored_mob_event(bytes: &[u8]) -> Result<MobEvent, serde_js
     {
         recovered.seat_session_born = true;
     }
-    if let Some(identity_entry) = stored_identity_entry {
+    if let Some(token) = stored_identity_entry {
+        let origin = crate::runtime::IdentityEntryOrigin::from_stored(&token);
+        let unknown = origin.is_none().then_some(token);
         if let Some(member_spawned) = event.kind.member_spawned_mut() {
-            member_spawned.identity_entry = Some(identity_entry);
+            member_spawned.identity_entry = origin;
+            member_spawned.unknown_identity_entry = unknown;
         } else if let Some(recovered) = event.kind.member_session_binding_recovered_mut() {
-            recovered.identity_entry = Some(identity_entry);
+            recovered.identity_entry = origin;
+            recovered.unknown_identity_entry = unknown;
         }
     }
     if let Some(resume_from_role) = spawned_resume_from_role
@@ -2994,7 +3035,7 @@ mod tests {
     /// MemberSpawned row and on a legacy adoption's binding row, stored by
     /// the internal codec only: the public payload never carries it, the
     /// stored row round-trips it, a row without it decodes as no entry, and
-    /// an origin token this build does not know replays as no entry.
+    /// an origin token this build does not know decodes as no known origin.
     #[test]
     fn stored_identity_entry_roundtrips_on_its_rows_and_stays_internal() {
         let sid = SessionId::from_uuid(Uuid::nil());
@@ -3063,7 +3104,7 @@ mod tests {
             for (replacement, label) in [
                 (None, "a row written before the field"),
                 (
-                    Some(serde_json::json!("created")),
+                    Some(serde_json::json!("a_later_origin")),
                     "an origin a later release wrote",
                 ),
             ] {
@@ -3091,6 +3132,66 @@ mod tests {
                 assert_eq!(origin, None, "{label} decodes as no entry");
             }
         }
+    }
+
+    /// A created entry's origin round-trips through its stored token, and an
+    /// origin token this build does not know is kept as stored: the row
+    /// decodes with no known origin and the token kept (its replay reserves
+    /// the name as unreadable), and an encode writes the token back
+    /// unchanged.
+    #[test]
+    fn an_unknown_stored_origin_token_is_kept_and_a_created_origin_round_trips() {
+        let sid = SessionId::from_uuid(Uuid::nil());
+        let identity = AgentIdentity::from("created-identity");
+        let runtime_id = AgentRuntimeId::new(identity.clone(), Generation::new(1));
+        let created = crate::runtime::IdentityEntryOrigin::Created;
+        let event = MobEvent {
+            cursor: 1,
+            timestamp: Utc::now(),
+            mob_id: MobId::from("test-mob"),
+            kind: MobEventKind::MemberSpawned(
+                MemberSpawnedEvent::new(
+                    identity.clone(),
+                    Generation::new(1),
+                    FenceToken::new(2),
+                    runtime_id,
+                    ProfileName::from("worker"),
+                )
+                .with_bridge_member_ref(Some(MemberRef::from_bridge_session_id(sid)))
+                .with_identity_entry(Some(created)),
+            ),
+        };
+        let encoded = encode_stored_mob_event(&event).expect("encode");
+        let stored: serde_json::Value = serde_json::from_slice(&encoded).expect("parse");
+        assert_eq!(
+            stored["event"]["kind"]["identity_entry"],
+            serde_json::json!("created")
+        );
+        let decoded = decode_stored_mob_event(&encoded).expect("decode");
+        let MobEventKind::MemberSpawned(spawned) = &decoded.kind else {
+            panic!("a spawn row: {decoded:?}");
+        };
+        assert_eq!(spawned.identity_entry(), Some(created));
+        assert_eq!(spawned.unknown_identity_entry(), None);
+
+        let mut later = stored.clone();
+        later["event"]["kind"]["identity_entry"] = serde_json::json!("a_later_origin");
+        let bytes = serde_json::to_vec(&later).expect("encode the later row");
+        let decoded = decode_stored_mob_event(&bytes).expect("decode the later row");
+        let MobEventKind::MemberSpawned(spawned) = &decoded.kind else {
+            panic!("a spawn row: {decoded:?}");
+        };
+        assert_eq!(spawned.identity_entry(), None);
+        assert_eq!(spawned.unknown_identity_entry(), Some("a_later_origin"));
+        let again: serde_json::Value = serde_json::from_slice(
+            &encode_stored_mob_event(&decoded).expect("encode the decoded row"),
+        )
+        .expect("parse");
+        assert_eq!(
+            again["event"]["kind"]["identity_entry"],
+            serde_json::json!("a_later_origin"),
+            "the token is written back as stored"
+        );
     }
 
     /// The rotation a retirement carries out rides its start row as an

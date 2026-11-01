@@ -248,6 +248,14 @@ fn storage(error: impl std::fmt::Display) -> AnnouncementStoreError {
     AnnouncementStoreError::Storage(error.to_string())
 }
 
+/// What a store call whose task failed (a panic) answers: a fixed storage
+/// failure. What the task failed with is logged, never carried into the
+/// error, which a caller can answer on the wire.
+pub(super) fn call_ended(error: tokio::task::JoinError) -> AnnouncementStoreError {
+    tracing::warn!(%error, "an announcement store call ended without an answer");
+    storage("an announcement store call ended without an answer")
+}
+
 fn encode(value: &impl Serialize) -> Result<String> {
     serde_json::to_string(value).map_err(storage)
 }
@@ -368,7 +376,7 @@ impl SqliteAnnouncementStore {
             Ok(value)
         })
         .await
-        .map_err(storage)?
+        .map_err(call_ended)?
     }
 }
 

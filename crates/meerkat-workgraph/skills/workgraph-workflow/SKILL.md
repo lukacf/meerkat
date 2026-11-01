@@ -43,6 +43,12 @@ scratch space and not semantic memory.
   closes the parent with the child's status.
 - Attach evidence with `workgraph_add_evidence` for artifacts, PRs, logs,
   summaries, external tickets, or other proof that the work changed state.
+- To withdraw evidence (a wrong reading, a superseded result), call
+  `workgraph_add_evidence` with a new ref that lists the earlier ref's `id`
+  in `withdraws`. Nothing is removed: a ref whose `id` a later ref lists in
+  `withdraws` is withdrawn and stays on the item. Withdraw only earlier refs
+  on the same item, never the new ref's own `id` or another withdrawal;
+  confirmation and execution evidence cannot be withdrawn.
 - Close with `workgraph_close` only when terminal truth exists, and always pass
   `status`. `completed` means the titled outcome happened. `failed` means it
   was attempted and did not happen: a refuted hypothesis or a fix that did not

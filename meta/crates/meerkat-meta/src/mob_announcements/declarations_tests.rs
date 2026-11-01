@@ -1701,6 +1701,677 @@ async fn a_reconcile_a_store_failure_stopped_is_finished_at_the_health_pass() {
     );
 }
 
+/// How long a declarations reconcile waits on one call before it stops
+/// there: the 30 seconds the dispatcher waits for the startup reconcile.
+const CALL_BOUND: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// How long a row allows an entry point to answer while a call of the
+/// reconcile it waits for never answers: past [`CALL_BOUND`], and short of
+/// [`HELD_PUT_BOUND`], after which a held put goes on by itself.
+const STOPS_WITHIN: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// `future`'s output, failing the row with `what` when it is not ready
+/// within [`STOPS_WITHIN`].
+async fn within<T>(what: &str, future: impl std::future::Future<Output = T>) -> T {
+    tokio::time::timeout(STOPS_WITHIN, future)
+        .await
+        .unwrap_or_else(|elapsed| panic!("{what}: {elapsed} after {STOPS_WITHIN:?}"))
+}
+
+/// Declarations at `revision` of agent:a's subscriptions `ids`, on ops.one
+/// and ops.two in turn.
+fn declaring_subscriptions(revision: u64, ids: &[&str]) -> serde_json::Value {
+    serde_json::json!({
+        "revision": revision,
+        "subscriptions": ids
+            .iter()
+            .zip(["ops.one", "ops.two"])
+            .map(|(id, topic)| declared_subscription(id, "agent:a", &[topic]))
+            .collect::<Vec<_>>(),
+    })
+}
+
+/// Source runners kept on a schedule service that answers no reconcile of a
+/// source's runner while it is wedged, as a schedule service that never
+/// answers.
+struct WedgedRunners {
+    wedged: tokio::sync::watch::Sender<bool>,
+    /// How many runner reconciles answered.
+    answered: AtomicU64,
+    /// The state each source had in the last runner reconcile that answered
+    /// for it, by source id.
+    reconciled: Mutex<BTreeMap<String, super::super::sources::SourceState>>,
+}
+
+impl WedgedRunners {
+    fn new() -> Self {
+        Self {
+            wedged: tokio::sync::watch::Sender::new(true),
+            answered: AtomicU64::new(0),
+            reconciled: Mutex::new(BTreeMap::new()),
+        }
+    }
+
+    /// Let the schedule service answer again, a reconcile that waits
+    /// included.
+    fn unwedge(&self) {
+        self.wedged.send_modify(|wedged| *wedged = false);
+    }
+
+    /// How many runner reconciles answered.
+    fn answered(&self) -> u64 {
+        self.answered.load(Ordering::SeqCst)
+    }
+
+    /// The state `source_id` had in the last runner reconcile that answered
+    /// for it.
+    fn last_reconciled(&self, source_id: &str) -> Option<super::super::sources::SourceState> {
+        self.reconciled.lock().unwrap().get(source_id).copied()
+    }
+}
+
+#[async_trait::async_trait]
+impl super::super::SourceRunners for WedgedRunners {
+    async fn reconcile(
+        &self,
+        source: &super::super::AnnouncementSource,
+    ) -> std::result::Result<(), String> {
+        let _ = self.wedged.subscribe().wait_for(|wedged| !*wedged).await;
+        self.reconciled
+            .lock()
+            .unwrap()
+            .insert(source.source_id.to_string(), source.state);
+        self.answered.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    async fn reconcile_all(
+        &self,
+        _: &[super::super::AnnouncementSource],
+    ) -> std::result::Result<(), String> {
+        Ok(())
+    }
+}
+
+/// A declarations reconcile waits on any one call for at most its bound, so
+/// a schedule service that never answers the reconcile of a declared
+/// source's runner does not hold `declarations/apply`: the apply answers
+/// once the reconcile stops there, refused `native_unavailable`. The source
+/// it put is marked with its runner step owed, so `declarations/get` lists
+/// it at once and it is the declarations' to change or drop. When the
+/// schedule service answers again, the call the stopped reconcile left
+/// answers, the next round's health pass finishes the owed step, and then
+/// nothing more is owed.
+#[tokio::test(start_paused = true)]
+async fn an_apply_whose_reconcile_meets_a_wedged_schedule_service_answers_at_the_bound() {
+    let harness = harness_with(native_serving(&[]));
+    let service = &harness.service;
+    let runners = Arc::new(WedgedRunners::new());
+    service
+        .install_source_runners(Arc::clone(&runners) as Arc<dyn super::super::SourceRunners>)
+        .await;
+    let audience = serde_json::json!([
+        { "kind": "member", "member": { "mob_id": OWN_MOB, "identity": "agent:a" } }
+    ]);
+    let started = tokio::time::Instant::now();
+    let refused = within(
+        "declarations/apply answers once its reconcile stops at the wedged schedule service",
+        try_apply(
+            service,
+            1,
+            serde_json::json!([declared_inbox(audience)]),
+            serde_json::json!([]),
+        ),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        started.elapsed() >= CALL_BOUND,
+        "the reconcile waited out its bound first: {:?}",
+        started.elapsed()
+    );
+    assert_eq!(
+        refusal_kind(&refused).as_deref(),
+        Some("native_unavailable"),
+        "{refused:?}"
+    );
+    let marked = (
+        serde_json::json!(1),
+        vec![("inbox".to_string(), "applied".to_string())],
+    );
+    assert_eq!(
+        revision_and_records(&within("declarations/get answers", declared(service)).await),
+        marked,
+        "the source put before the stop is marked at once, its runner step owed"
+    );
+    assert_eq!(runners.answered(), 0, "no runner reconcile answered yet");
+
+    runners.unwedge();
+    within("the round ends", service.run_round()).await.unwrap();
+    assert_eq!(
+        runners.answered(),
+        2,
+        "the stopped reconcile's runner call answers, and the retry finishes the owed step"
+    );
+    assert_eq!(revision_and_records(&declared(service).await), marked);
+    within("the next round ends", service.run_round())
+        .await
+        .unwrap();
+    assert_eq!(
+        runners.answered(),
+        2,
+        "the retry cleared the owed step: nothing more is owed"
+    );
+}
+
+/// A declarations read waits for a reconcile in flight only as long as the
+/// reconcile waits on its calls. The store never answers the startup
+/// reconcile's put of declared-b: `declarations/get` answers once the
+/// reconcile stops at the bound, with revision 2 and declared-a, and the
+/// reconcile ends with the store's failure. The put lands when the store
+/// answers at last, without a mark, as after a crash between a put and its
+/// mark, and the next round's health pass marks it, meeting the put's
+/// receipt.
+#[tokio::test(start_paused = true)]
+async fn a_declarations_read_answers_once_a_wedged_store_call_stops_the_reconcile() {
+    let applied = |ids: &[&str]| {
+        (
+            serde_json::json!(2),
+            ids.iter()
+                .map(|id| ((*id).to_string(), "applied".to_string()))
+                .collect::<Vec<_>>(),
+        )
+    };
+    let (_dir, inner) = temp_store();
+    let store = Arc::new(FaultyStore::new(inner, None));
+    store.run_health_passes();
+    let native = Arc::new(native_serving(&[]));
+    within(
+        "revision 1 reconciles",
+        declaring_over(&store, &native, declaring_subscriptions(1, &["declared-a"]))
+            .reconcile_declarations(),
+    )
+    .await
+    .unwrap();
+
+    let service = declaring_over(
+        &store,
+        &native,
+        declaring_subscriptions(2, &["declared-a", "declared-b"]),
+    );
+    let held = store.hold_put("declared-b");
+    let started = tokio::time::Instant::now();
+    let reconciling = tokio::spawn({
+        let service = service.clone();
+        async move { service.reconcile_declarations().await }
+    });
+    assert!(
+        held.reached(STOPS_WITHIN).await,
+        "the reconcile reaches declared-b's put"
+    );
+    let read = within(
+        "declarations/get answers once the reconcile stops at the wedged put",
+        try_host_call(&service, DECLARATIONS_GET, serde_json::json!({})),
+    )
+    .await
+    .unwrap();
+    assert!(
+        started.elapsed() >= CALL_BOUND,
+        "the reconcile waited out its bound first: {:?}",
+        started.elapsed()
+    );
+    assert_eq!(
+        revision_and_records(&read),
+        applied(&["declared-a"]),
+        "the stopped reconcile left declared-b without a mark"
+    );
+    let stopped = within("the reconcile ends", reconciling).await.unwrap();
+    assert!(
+        matches!(
+            stopped,
+            Err(AnnouncementError::Store(AnnouncementStoreError::Storage(_)))
+        ),
+        "a store call past its bound stops the reconcile as a store failure: {stopped:?}"
+    );
+
+    // The store answers the held put at last: declared-b is made, unmarked.
+    held.release();
+    within("the held put lands", async {
+        while subscription_state(&service, "declared-b").await.is_none() {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    })
+    .await;
+    assert_eq!(
+        revision_and_records(&declared(&service).await),
+        applied(&["declared-a"])
+    );
+    within("the round ends", service.run_round()).await.unwrap();
+    assert_eq!(
+        revision_and_records(&declared(&service).await),
+        applied(&["declared-a", "declared-b"]),
+        "the health pass marks the record the late put made"
+    );
+    assert_eq!(
+        subscription_state(&service, "declared-b").await.as_deref(),
+        Some("active")
+    );
+}
+
+/// A round's health pass retries a pending declared record under the
+/// declarations gate, so a call there that never answers held the round,
+/// and every delivery after it. The member check of a pending record's
+/// member never answers: the round ends once the retry stops at the bound,
+/// and the record stays pending as it was. When the check answers again,
+/// the round after the failed retry's pause makes the record.
+#[tokio::test(start_paused = true)]
+async fn a_round_whose_retry_meets_a_wedged_member_check_ends_at_the_bound() {
+    let harness = harness_with(native_serving(&["agent:b"]));
+    let service = &harness.service;
+    let audience = serde_json::json!([{ "kind": "role", "mob_id": OWN_MOB, "role": "triager" }]);
+    within(
+        "declarations/apply answers",
+        try_apply(
+            service,
+            1,
+            serde_json::json!([declared_inbox(audience)]),
+            serde_json::json!([declared_subscription(
+                "b-mail",
+                "agent:b",
+                &["mail.received"]
+            )]),
+        ),
+    )
+    .await
+    .unwrap();
+    let status = |view: &serde_json::Value| {
+        record(view, "subscription", "b-mail").map(|record| record["status"].clone())
+    };
+    assert_eq!(
+        status(&declared(service).await),
+        Some(serde_json::json!("pending"))
+    );
+
+    // agent:b takes the role, and its member check never answers.
+    harness.native.set_roster_facts("agent:b", "triager", &[]);
+    harness.native.wedge("agent:b");
+    let started = tokio::time::Instant::now();
+    within(
+        "the round ends once its retry stops at the wedged member check",
+        service.run_round(),
+    )
+    .await
+    .unwrap();
+    assert!(
+        started.elapsed() >= CALL_BOUND,
+        "the retry waited out its bound first: {:?}",
+        started.elapsed()
+    );
+    assert_eq!(
+        status(&declared(service).await),
+        Some(serde_json::json!("pending")),
+        "the stopped retry left the record as it was"
+    );
+
+    // The check answers again: the round after the failed retry's pause
+    // makes the record.
+    harness.native.unwedge("agent:b");
+    harness.clock.fetch_add(
+        AnnouncementConfig::default().settle_check_max_ms + 1,
+        Ordering::SeqCst,
+    );
+    within("the next round ends", service.run_round())
+        .await
+        .unwrap();
+    assert_eq!(
+        status(&declared(service).await),
+        Some(serde_json::json!("applied"))
+    );
+    assert_eq!(
+        subscription_state(service, "b-mail").await.as_deref(),
+        Some("active")
+    );
+}
+
+/// Retries against a call that stays wedged do not pile calls up on it. A
+/// call left running past its bound keeps its site until it ends, and a
+/// later holder of the declarations gate that would call there stops at
+/// once, without calling. Rounds that retry a pending record against one
+/// wedged member check make that check once: the first retry waits out the
+/// bound, and every later one stops at once. When the check answers, its
+/// site is free again: the next retry checks the member and makes the
+/// record.
+#[tokio::test(start_paused = true)]
+async fn retries_against_one_wedged_call_leave_one_call_running() {
+    const RETRIES: usize = 4;
+    let harness = harness_with(native_serving(&["agent:b"]));
+    let service = &harness.service;
+    let audience = serde_json::json!([{ "kind": "role", "mob_id": OWN_MOB, "role": "triager" }]);
+    within(
+        "declarations/apply answers",
+        try_apply(
+            service,
+            1,
+            serde_json::json!([declared_inbox(audience)]),
+            serde_json::json!([declared_subscription(
+                "b-mail",
+                "agent:b",
+                &["mail.received"]
+            )]),
+        ),
+    )
+    .await
+    .unwrap();
+    let status = |view: &serde_json::Value| {
+        record(view, "subscription", "b-mail").map(|record| record["status"].clone())
+    };
+
+    // agent:b takes the role, and its member check never answers.
+    harness.native.set_roster_facts("agent:b", "triager", &[]);
+    harness.native.wedge("agent:b");
+    let checked = harness.native.checks("agent:b");
+    let mut took = Vec::with_capacity(RETRIES);
+    for _ in 0..RETRIES {
+        let started = tokio::time::Instant::now();
+        within("the round ends", service.run_round()).await.unwrap();
+        took.push(started.elapsed());
+        // Past the failed retry's pause, so the next round retries.
+        harness.clock.fetch_add(
+            AnnouncementConfig::default().settle_check_max_ms + 1,
+            Ordering::SeqCst,
+        );
+    }
+    assert_eq!(
+        harness.native.checks("agent:b") - checked,
+        1,
+        "{RETRIES} retries against one wedged member check make it once: {took:?}"
+    );
+    assert!(
+        took[0] >= CALL_BOUND && took[1..].iter().all(|each| *each < CALL_BOUND),
+        "the first retry waits out its bound, and every later one stops at once: {took:?}"
+    );
+    assert_eq!(
+        status(&declared(service).await),
+        Some(serde_json::json!("pending"))
+    );
+
+    // The check answers: once it ends, its site is free.
+    harness.native.unwedge("agent:b");
+    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+    within("the next round ends", service.run_round())
+        .await
+        .unwrap();
+    assert_eq!(
+        harness.native.checks("agent:b") - checked,
+        2,
+        "the next retry checks the member again"
+    );
+    assert_eq!(
+        status(&declared(service).await),
+        Some(serde_json::json!("applied"))
+    );
+    assert_eq!(
+        subscription_state(service, "b-mail").await.as_deref(),
+        Some("active")
+    );
+}
+
+/// Every holder of the declarations gate waits on each call it makes for at
+/// most the bound, a read included: a read's own wait for the gate has no
+/// bound, but the gate is never held without one. The store never answers a
+/// `declarations/get`'s read of the role template children, which it makes
+/// under the gate: the read answers the store's failure at the bound and
+/// releases the gate, so a `declarations/apply` asked meanwhile answers
+/// after at most the bound. The apply's reconcile goes on, and only its read
+/// of the result meets the call still running at that site; once the store
+/// answers it, the declarations read whole.
+#[tokio::test(start_paused = true)]
+async fn an_apply_behind_a_read_wedged_on_a_store_call_waits_at_most_the_bound() {
+    let applied = |ids: &[&str]| {
+        (
+            serde_json::json!(2),
+            ids.iter()
+                .map(|id| ((*id).to_string(), "applied".to_string()))
+                .collect::<Vec<_>>(),
+        )
+    };
+    let (_dir, inner) = temp_store();
+    let store = Arc::new(FaultyStore::new(inner, None));
+    let native = Arc::new(native_serving(&[]));
+    let service = declaring_over(&store, &native, declaring_subscriptions(1, &["declared-a"]));
+    within("revision 1 reconciles", service.reconcile_declarations())
+        .await
+        .unwrap();
+
+    // A read takes the gate, and the store never answers its read of the
+    // role template children.
+    let held = store.hold_role_children();
+    let started = tokio::time::Instant::now();
+    let reading = tokio::spawn({
+        let service = service.clone();
+        async move { try_host_call(&service, DECLARATIONS_GET, serde_json::json!({})).await }
+    });
+    assert!(
+        held.reached(STOPS_WITHIN).await,
+        "the read reaches the role template children"
+    );
+    let refused = within(
+        "declarations/apply answers once the read stops at its wedged store call",
+        try_apply(
+            &service,
+            2,
+            serde_json::json!([]),
+            declaring_subscriptions(2, &["declared-a", "declared-b"])["subscriptions"].clone(),
+        ),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        started.elapsed() >= CALL_BOUND,
+        "the read held the gate for its bound first: {:?}",
+        started.elapsed()
+    );
+    assert!(
+        refused.code == -32000
+            && refused
+                .message
+                .contains("an earlier call of AnnouncementStore::role_children is still running"),
+        "the apply's read of its result meets the call still running there: {refused:?}"
+    );
+    let read = within("the read ends", reading).await.unwrap().unwrap_err();
+    assert_eq!(
+        read.code, -32000,
+        "the read answers the store's failure: {read:?}"
+    );
+
+    // The store answers the held read: once it ends, its site is free.
+    held.release();
+    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+    assert_eq!(
+        revision_and_records(&declared(&service).await),
+        applied(&["declared-a", "declared-b"]),
+        "the apply's reconcile went on once the read released the gate"
+    );
+}
+
+/// A source put before a stop at its runner reconcile is the declarations'
+/// at once: an apply that drops it while the schedule service still does
+/// not answer ends it, and its runner's schedule follows the end once the
+/// schedule service answers. That apply stops at the runner reconcile the
+/// end owes, since the earlier call still runs, and so does every retry
+/// while the wedge goes on: `declarations/get` lists the dropped source
+/// from its mark meanwhile, as it lists a drop refused for now. The call
+/// the first reconcile left answers with the source as it read it, live;
+/// the first retry past the pause after that reconciles the runner of the
+/// ended source and removes its mark.
+#[tokio::test(start_paused = true)]
+async fn an_apply_that_drops_a_source_put_before_a_wedged_runner_ends_it() {
+    let harness = harness_with(native_serving(&[]));
+    let service = &harness.service;
+    let runners = Arc::new(WedgedRunners::new());
+    service
+        .install_source_runners(Arc::clone(&runners) as Arc<dyn super::super::SourceRunners>)
+        .await;
+    let audience = serde_json::json!([
+        { "kind": "member", "member": { "mob_id": OWN_MOB, "identity": "agent:a" } }
+    ]);
+    within(
+        "revision 1 answers once its reconcile stops at the wedged schedule service",
+        try_apply(
+            service,
+            1,
+            serde_json::json!([declared_inbox(audience)]),
+            serde_json::json!([]),
+        ),
+    )
+    .await
+    .unwrap_err();
+
+    // Revision 2 drops the source while the schedule service still does not
+    // answer.
+    let dropping = within(
+        "revision 2 answers",
+        try_apply(service, 2, serde_json::json!([]), serde_json::json!([])),
+    )
+    .await;
+    let found = try_host_call(
+        service,
+        SOURCES_GET,
+        serde_json::json!({ "source_id": "inbox" }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        found["source"]["state"],
+        serde_json::json!("ended"),
+        "the dropped source is ended: {dropping:?}"
+    );
+    within("the round ends", service.run_round()).await.unwrap();
+    let during = revision_and_records(&declared(service).await);
+
+    // The schedule service answers, and the next round comes past the
+    // failed retry's pause.
+    runners.unwedge();
+    harness.clock.fetch_add(
+        AnnouncementConfig::default().settle_check_max_ms + 1,
+        Ordering::SeqCst,
+    );
+    within("the next round ends", service.run_round())
+        .await
+        .unwrap();
+    assert_eq!(
+        runners.last_reconciled("inbox"),
+        Some(super::super::sources::SourceState::Ended),
+        "the runner's schedule follows the end of the dropped source"
+    );
+    assert_eq!(
+        during,
+        (
+            serde_json::json!(2),
+            vec![("inbox".to_string(), "applied".to_string())]
+        ),
+        "while the end's runner reconcile waits, the dropped source is listed from its mark"
+    );
+    assert_eq!(
+        revision_and_records(&declared(service).await),
+        (serde_json::json!(2), Vec::<(String, String)>::new()),
+        "the retry that reconciled the runner removes the mark"
+    );
+}
+
+/// A reconcile that stops after it recorded a revision, before it replaced
+/// a record whose declaration changed under the same id, leaves that
+/// record's mark at its old digest; the health pass owes it a reconcile as
+/// for any stopped one. The member check of a changed subscription's
+/// replace never answers: the apply is refused once the reconcile stops,
+/// revision 2 recorded, and once the check answers the next round replaces
+/// the subscription with its new topics.
+#[tokio::test(start_paused = true)]
+async fn a_reconcile_stopped_before_it_replaced_a_changed_record_is_finished_at_the_health_pass() {
+    let harness = harness_with(native_serving(&[]));
+    let service = &harness.service;
+    let declaring =
+        |topic: &str| serde_json::json!([declared_subscription("a-mail", "agent:a", &[topic])]);
+    within(
+        "revision 1 applies",
+        try_apply(service, 1, serde_json::json!([]), declaring("ops.one")),
+    )
+    .await
+    .unwrap();
+
+    harness.native.wedge("agent:a");
+    let started = tokio::time::Instant::now();
+    let refused = within(
+        "revision 2 answers once its reconcile stops at the replace's member check",
+        try_apply(service, 2, serde_json::json!([]), declaring("ops.two")),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        started.elapsed() >= CALL_BOUND,
+        "the reconcile waited out its bound first: {:?}",
+        started.elapsed()
+    );
+    assert_eq!(
+        refusal_kind(&refused).as_deref(),
+        Some("native_unavailable"),
+        "{refused:?}"
+    );
+
+    harness.native.unwedge("agent:a");
+    within("the round ends", service.run_round()).await.unwrap();
+    let found = try_host_call(
+        service,
+        SUBSCRIPTIONS_GET,
+        serde_json::json!({ "subscription_id": "a-mail" }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        found["subscription"]["selector"]["topics"],
+        serde_json::json!(["ops.two"]),
+        "the health pass replaces the record whose declaration changed"
+    );
+}
+
+/// A call under the declarations gate whose task fails (a panic) answers
+/// nothing, and what it failed with is logged, never carried on: a declared
+/// subscription whose member check panics is pending, refused
+/// `native_unavailable` with a fixed text that names the call.
+#[tokio::test]
+async fn a_member_check_that_panics_leaves_its_record_pending_with_a_fixed_refusal() {
+    let harness = harness_with(native_serving(&[]));
+    let service = &harness.service;
+    harness.native.panic_at_check("agent:a");
+    within(
+        "revision 1 applies, its record pending",
+        try_apply(
+            service,
+            1,
+            serde_json::json!([]),
+            serde_json::json!([declared_subscription("a-mail", "agent:a", &["ops.one"])]),
+        ),
+    )
+    .await
+    .unwrap();
+    let view = declared(service).await;
+    let found = record(&view, "subscription", "a-mail");
+    assert_eq!(
+        found.map(|record| record["status"].clone()),
+        Some(serde_json::json!("pending")),
+        "{view}"
+    );
+    assert_eq!(
+        found.map(|record| record["refusal"].clone()),
+        Some(serde_json::json!({
+            "kind": "native_unavailable",
+            "message": "native state unavailable: NativeDelivery::check_member ended without an \
+                        answer"
+        })),
+        "the refusal names the call, not what its task failed with"
+    );
+}
+
 /// Options naming the applied revision with other declarations change
 /// nothing, as an apply at runtime moved the gateway past them: the gateway
 /// warns once per boot, naming the revision and both digests, and keeps the

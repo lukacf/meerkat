@@ -583,7 +583,7 @@ RotationArms == RBeginRotation \/ RCommitRotation
 RReseatOpen ==
     BeginSpawnExecFresh(Id1, Rid2, 2, 1, AuditDigest, FALSE, AuditMode, Some(Sess1), None, None,
                         FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE,
-                        None, None, None, None, FALSE, FALSE, FALSE)
+                        None, None, None, None, FALSE, FALSE, FALSE, FALSE)
 RReseat ==
     \E unborn \in BOOLEAN, ex \in BOOLEAN :
         CommitDormantSeatRunning(Id1, Rid2, 2, 1, FALSE, AuditMode, Sess1, None, FALSE, FALSE, unborn, FALSE, ex)
@@ -808,7 +808,7 @@ SAuthorize(id) ==
 SOpen(id, rid, fence, s) ==
     BeginSpawnExecFresh(id, rid, fence, 0, AuditDigest, FALSE, AuditMode, Some(s), None, None,
                         FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE,
-                        None, None, None, None, FALSE, FALSE, FALSE)
+                        None, None, None, None, FALSE, FALSE, FALSE, FALSE)
 
 \* Member 1: Rid1, fence 1, session 1; member 2: Rid2, fence 2, session 2.
 SIncarnation(id) ==

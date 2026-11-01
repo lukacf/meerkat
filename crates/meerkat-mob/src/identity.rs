@@ -1635,6 +1635,185 @@ impl IdentityIntentRecord {
     }
 }
 
+/// The schema version of a created identity entry's row in the identity
+/// store's intents table. A version 1 row there is a host-adopted identity
+/// intent ([`IdentityIntentRecord`]).
+pub const CREATED_IDENTITY_SCHEMA_VERSION: u32 = 2;
+
+/// The presence a created identity entry's row records.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "presence", rename_all = "snake_case", deny_unknown_fields)]
+#[non_exhaustive]
+pub enum CreatedIdentityPresence {
+    /// The entry is present: its member is seated, or owed its seat.
+    Present,
+    /// The entry's host preparation is pending: it has no member.
+    /// `attempt` is the current preparation attempt.
+    PendingPreparation { attempt: u64 },
+    /// The entry was removed: the row is its name's tombstone, and the name
+    /// is never an entry or a member again.
+    Removed,
+}
+
+/// The facts of an identity entry's creation its commit sealed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct CreatedIdentityProvenance {
+    /// The id of the operation that created the entry.
+    pub operation_id: String,
+    /// When the commit happened, in milliseconds since the Unix epoch.
+    pub created_at_ms: u64,
+}
+
+impl CreatedIdentityProvenance {
+    #[must_use]
+    pub fn new(operation_id: impl Into<String>, created_at_ms: u64) -> Self {
+        Self {
+            operation_id: operation_id.into(),
+            created_at_ms,
+        }
+    }
+}
+
+/// A created identity entry's desired record: its row in the identity
+/// store's intents table (schema version 2), beside the host-adopted identity
+/// intents (version 1). The entry's origin is Created; its presence and
+/// provenance are sealed in its authority digest. A row this build cannot
+/// read (another schema version, a field it does not know, a broken seal)
+/// reads unreadable for its identity alone
+/// ([`CreatedIdentityObservation::Unreadable`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct CreatedIdentityRecord {
+    pub schema_version: u32,
+    /// The mob the row belongs to, sealed with it.
+    pub mob_id: MobId,
+    pub agent_identity: AgentIdentity,
+    /// The entry's spec revision, from 1.
+    pub revision: u64,
+    pub presence: CreatedIdentityPresence,
+    pub provenance: CreatedIdentityProvenance,
+    /// Digest of the complete store-sealed row, itself excluded.
+    pub authority_digest: String,
+}
+
+impl CreatedIdentityRecord {
+    /// A sealed record of `agent_identity`'s created entry in `mob_id`.
+    pub fn sealed(
+        mob_id: MobId,
+        agent_identity: AgentIdentity,
+        revision: u64,
+        presence: CreatedIdentityPresence,
+        provenance: CreatedIdentityProvenance,
+    ) -> Result<Self, IdentityIntentError> {
+        let mut record = Self {
+            schema_version: CREATED_IDENTITY_SCHEMA_VERSION,
+            mob_id,
+            agent_identity,
+            revision,
+            presence,
+            provenance,
+            authority_digest: String::new(),
+        };
+        record.authority_digest = record.canonical_authority_digest()?;
+        record.validate()?;
+        Ok(record)
+    }
+
+    pub fn validate(&self) -> Result<(), IdentityIntentError> {
+        if self.schema_version != CREATED_IDENTITY_SCHEMA_VERSION {
+            return Err(IdentityIntentError::UnsupportedSchemaVersion {
+                record: "created_identity",
+                version: self.schema_version,
+            });
+        }
+        validate_text("mob_id", self.mob_id.as_str())?;
+        validate_identity(&self.agent_identity)?;
+        if self.revision == 0 {
+            return Err(IdentityIntentError::ZeroIntentRevision);
+        }
+        validate_text("operation_id", &self.provenance.operation_id)?;
+        if self.canonical_authority_digest()? != self.authority_digest {
+            return Err(IdentityIntentError::DigestMismatch);
+        }
+        Ok(())
+    }
+
+    /// The digest of the row's sealed content: everything but the digest
+    /// itself, under its own domain.
+    pub fn canonical_authority_digest(&self) -> Result<String, IdentityIntentError> {
+        #[derive(Serialize)]
+        struct AuthorityMaterial<'a> {
+            domain: &'static str,
+            schema_version: u32,
+            mob_id: &'a MobId,
+            agent_identity: &'a AgentIdentity,
+            revision: u64,
+            presence: &'a CreatedIdentityPresence,
+            provenance: &'a CreatedIdentityProvenance,
+        }
+        let bytes = serde_json::to_vec(&AuthorityMaterial {
+            domain: "meerkat.identity.created_authority.v2",
+            schema_version: self.schema_version,
+            mob_id: &self.mob_id,
+            agent_identity: &self.agent_identity,
+            revision: self.revision,
+            presence: &self.presence,
+            provenance: &self.provenance,
+        })
+        .map_err(|error| IdentityIntentError::Serialization(error.to_string()))?;
+        Ok(sha256_digest(&bytes))
+    }
+}
+
+/// How one row of the identity store's intents table reads to the created
+/// identity scan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum CreatedIdentityObservation {
+    /// A created entry's row this build reads and validates.
+    Created(CreatedIdentityRecord),
+    /// A row of schema version 2 or later that this build cannot read: the
+    /// identity reads unreadable, alone, and nothing acts on it.
+    Unreadable {
+        evidence_digest: String,
+        detail: String,
+    },
+}
+
+/// Classify one stored row of the identity store's intents table for the
+/// created identity scan. `None` for a host-adopted intent's row (schema
+/// version 1) and for a row whose schema version cannot be read: the intent
+/// readers report those ([`IdentityStoredObservation`]).
+#[must_use]
+pub fn classify_created_identity_row(bytes: &[u8]) -> Option<CreatedIdentityObservation> {
+    let version = serde_json::from_slice::<serde_json::Value>(bytes)
+        .ok()?
+        .get("schema_version")?
+        .as_u64()?;
+    if version < u64::from(CREATED_IDENTITY_SCHEMA_VERSION) {
+        return None;
+    }
+    let unreadable = |detail: String| CreatedIdentityObservation::Unreadable {
+        evidence_digest: sha256_digest(bytes),
+        detail,
+    };
+    Some(
+        match serde_json::from_slice::<CreatedIdentityRecord>(bytes) {
+            Ok(record) => match record.validate() {
+                Ok(()) => CreatedIdentityObservation::Created(record),
+                Err(error) => unreadable(error.to_string()),
+            },
+            Err(error) => unreadable(format!(
+                "created identity row (schema version {version}) does not match this build's \
+                 schema: {error}"
+            )),
+        },
+    )
+}
+
 /// Caller-chosen idempotency identity for one desired-member mutation.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]

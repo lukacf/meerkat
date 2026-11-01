@@ -138,7 +138,7 @@ impl MobActor {
         let mut probes = self.probe_seat_chunk(
             specs
                 .iter()
-                .map(|spec| (&spec.identity, spec.entry_custody)),
+                .map(|spec| (&spec.identity, spec.entry_custody, spec.created_custody)),
         );
         let mut named = BTreeSet::new();
         let mut entries = Vec::with_capacity(specs.len());
@@ -318,14 +318,26 @@ impl MobActor {
         // AlreadySeated; any other seat is the caller's rotation (a
         // rotation plans its next incarnation over the seated one).
         let dsl_identity = mob_dsl::AgentIdentity::from_domain(&agent_identity);
-        // A seat without entry custody never takes an identity entry's name:
-        // MobMachine's admission verdict refuses it typed, seated or not.
+        // A seat without the custody of its name's entry never takes an
+        // identity entry's name, and no seat takes a reserved name (a
+        // removed created entry's, or one whose entry this build cannot
+        // read): MobMachine's admission verdict refuses it typed, seated or
+        // not.
         if mode == SeatPlanMode::Seat {
             let admission = match admission {
                 Some(admission) => admission?,
-                None => self.member_admission_verdict(&agent_identity, spec.entry_custody)?,
+                None => self.member_admission_verdict(
+                    &agent_identity,
+                    spec.entry_custody,
+                    spec.created_custody,
+                )?,
             };
-            if admission == mob_dsl::MemberAdmissionVerdictKind::IdentityMemberRejected {
+            if matches!(
+                admission,
+                mob_dsl::MemberAdmissionVerdictKind::IdentityMemberRejected
+                    | mob_dsl::MemberAdmissionVerdictKind::IdentityMemberOfAnotherOrigin
+                    | mob_dsl::MemberAdmissionVerdictKind::IdentityNameReserved
+            ) {
                 return Err(MobError::IdentityMember {
                     member_id: agent_identity,
                 });
@@ -351,6 +363,12 @@ impl MobActor {
                     return Err(MobError::WiringError(format!(
                         "'{agent_identity}' cannot be seated dormant: the identity entry awaits \
                          its held creation, which the host's held protocol carries out"
+                    )));
+                }
+                mob_dsl::UnseatedEntryCause::TemplatePreparation => {
+                    return Err(MobError::WiringError(format!(
+                        "'{agent_identity}' cannot be seated dormant: the created identity entry \
+                         awaits its host's preparation"
                     )));
                 }
                 mob_dsl::UnseatedEntryCause::SeatOwed => {}
@@ -529,7 +547,7 @@ impl MobActor {
         // recorded when the entry's member retired brings the entry back on
         // it: the preparation admits that archived session.
         let revives_archived_session = launch == DormantSeatLaunch::Resume
-            && spec.entry_custody
+            && (spec.entry_custody || spec.created_custody)
             && self
                 .dsl_authority
                 .state()
@@ -568,6 +586,7 @@ impl MobActor {
             effective_model_override,
             definition_wiring: spec.definition_wiring,
             entry_custody: spec.entry_custody,
+            created_custody: spec.created_custody,
             authorize_input,
             authorized,
             observations,
@@ -919,8 +938,10 @@ impl MobActor {
             effective_model_override_present: false,
             // The seat acts for its name's identity entry exactly when its
             // spec carried entry custody; CommitDormantSeat then records the
-            // member an entry in the same step.
+            // member an entry in the same step. Created custody seats a
+            // created entry owed its seat, which stays a created entry.
             entry_custody: candidate.entry_custody,
+            created_custody: candidate.created_custody,
         };
         let seat = mob_dsl::MobMachineInput::CommitDormantSeat {
             agent_identity: dsl_identity,

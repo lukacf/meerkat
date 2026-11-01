@@ -520,6 +520,10 @@ pub(in crate::runtime) struct DormantSeatCandidate {
     /// entry. A rotation of a seated identity keeps the identity's standing
     /// and does not read it.
     pub(in crate::runtime) entry_custody: bool,
+    /// Whether the seat acts for the created identity entry of its name,
+    /// owed its seat: its spawn ladder's open carries it, and the seat keeps
+    /// the member a created entry.
+    pub(in crate::runtime) created_custody: bool,
     /// The generated `AuthorizeSpawnProfile` input and the authorization it
     /// must answer with.
     pub(in crate::runtime) authorize_input: mob_dsl::MobMachineInput,

@@ -81,12 +81,13 @@
 #   role hold) is owed or not, through an explicit resume (probed while
 #   the mob is still stopped and again once it runs). held: held
 #   creation and the held spawn, entries hosted on their first use, the
-#   dormant seat's refusal of both, and Stop, Resume and Complete, where the
-#   declaration and the seal refuse; the declared apply's open fact. placed:
-#   one bound host and the placed spawn ladder with or without entry
-#   custody, its remote commit, its retirement and the placed end. They
-#   check every generated invariant (the declared apply's among them:
-#   unseated_entry_is_not_a_member, retiring_entry_is_a_declared_entry,
+#   dormant seat's refusal of both, and Stop, Resume, Complete and the forced
+#   destroy (which ends the held spawn's ladder, its membership committed or
+#   not), where the declaration and the seal refuse; the declared apply's
+#   open fact. placed: one bound host and the placed spawn ladder with or
+#   without entry custody, its remote commit, its retirement and the placed
+#   end. They check every generated invariant (the declared apply's among
+#   them: unseated_entry_is_not_a_member, retiring_entry_is_a_declared_entry,
 #   held_creation_entry_was_never_created,
 #   archived_session_record_is_unseated,
 #   placed_entry_custody_is_hosted_on_first_use,
@@ -135,8 +136,10 @@
 # terminal that drops the entry, a dormant seat that ignores its ladder's
 # entry custody, a fresh-life respawn admitted for an entry and a
 # topology-preserving archive that takes an entry; in the other parts, one
-# per declared apply invariant and property, and one per guard of the
-# declared apply that a reachable state needs (see the mutants below). An
+# per declared apply invariant and property, one per guard of the declared
+# apply that a reachable state needs, and two forced destroys, one that
+# keeps a spawn ladder whose membership committed and one that keeps the
+# startup binding request that commit recorded (see the mutants below). An
 # anchor this script expects but cannot find fails the run. Each TLC run is
 # held to the canonical lane's per-run cap (tlc_run_cap.sh) and fails closed
 # as TLC INCOMPLETE.
@@ -184,11 +187,11 @@ in_part() {
 # Each run's distinct-state floor is 90% of the whole space its first green
 # run found, so a guard that silently disables arms fails the lane.
 entry_states=12960
-lifecycle_states=12041
-apply_states=1488
+lifecycle_states=12024
+apply_states=1476
 legacy_states=1952
 roles_states=1224
-held_states=2000
+held_states=2404
 placed_states=192
 hold_states=356
 resume_states=4126
@@ -431,16 +434,21 @@ held_covered_actions=(
   DeclareIdentityEntryRefusedNameHeldByWorker
   DeclareIdentityEntryMobNotRunningStopped
   DeclareIdentityEntryMobNotRunningCompleted
+  DeclareIdentityEntryMobNotRunningDestroyed
   SealDeclaredRosterSealed
   SealDeclaredRosterMobNotRunningStopped
   SealDeclaredRosterMobNotRunningCompleted
+  SealDeclaredRosterMobNotRunningDestroyed
+  DestroyFromAny
   OpenDeclaredApplyOpened
   OpenDeclaredApplyBusy
   OpenDeclaredApplyMobNotRunningStopped
   OpenDeclaredApplyMobNotRunningCompleted
+  OpenDeclaredApplyMobNotRunningDestroyed
   CloseDeclaredApplyRunning
   CloseDeclaredApplyStopped
   CloseDeclaredApplyCompleted
+  CloseDeclaredApplyDestroyed
 )
 
 placed_covered_actions=(
@@ -899,7 +907,7 @@ for witness in \
   "roles:Action property:RoleMoveTakesNewName" "roles:Action property:RoleMoveOwesEndpoint" \
   "held:Invariant:HeldWaiting" "held:Action property:HeldSpawnSeats" \
   "held:Invariant:Hosted" "held:Action property:EverCreatedOwedSeat" \
-  "held:Action property:ApplyBusy" \
+  "held:Action property:ApplyBusy" "held:Action property:DestroyEndsCommittedLadder" \
   "placed:Action property:PlacedCustody" "placed:Action property:PlacedWorker" \
   "placed:Action property:PlacedCustodyAborted" "placed:Action property:PlacedEntrySeated" \
   "placed:Action property:PlacedEndHosted" \
@@ -1043,12 +1051,12 @@ PY
 import os
 path = os.environ["MODEL"]
 text = open(path).read()
-old = " /\\ member \\notin DOMAIN arg_identity_entry_origins }"
+old = " /\\ member \\notin DOMAIN arg_identity_entry_origins"
 start = text.index("mob_machine_members_to_retire(")
 end = text.index("\n\n", start) if "\n\n" in text[start:] else len(text)
 head = text[start:end]
 assert head.count(old) == 1, "expected the entry filter once in mob_machine_members_to_retire"
-text = text[:start] + head.replace(old, " }") + text[end:]
+text = text[:start] + head.replace(old, "") + text[end:]
 open(path, "w").write(text)
 PY
 
@@ -1121,7 +1129,9 @@ keep_var("DestroyMob", "identity_entry_origins")
 PY
 
   # A forced destroy that keeps an open ladder's entry custody.
-  mutate lifecycle forced_destroy_keeps_custody "Invariant destroyed_mob_holds_no_member_lifecycle" <<'PY'
+  # (The destroy ends the ladder too, so the custody outlives its ladder.)
+  mutate lifecycle forced_destroy_keeps_custody \
+    "Invariant entry_custody_ladder_is_open|Invariant destroyed_mob_holds_no_member_lifecycle" <<'PY'
 keep_var("DestroyFromAny", "spawn_exec_entry_custody")
 PY
 
@@ -1507,6 +1517,20 @@ PY
   # dropped).
   mutate held apply_open_twice "Invariant AuditApplyOpenExactlyOne" <<'PY'
 drop_guard("OpenDeclaredApplyOpened", "declared_apply_open")
+PY
+
+  # A forced destroy that keeps the spawn ladders' phases: a ladder
+  # outlives the members, its membership committed or not.
+  mutate held destroy_keeps_ladder_phase \
+    "Invariant spawn_exec_membership_commit_requires_runtime|Invariant destroyed_mob_holds_no_member_lifecycle" <<'PY'
+keep_var("DestroyFromAny", "spawn_exec_phase")
+PY
+
+  # A forced destroy that keeps the startup binding requests, one of the
+  # member facts both destroys clear (the held run's membership commit
+  # records one; no arm of the run records a member state marker).
+  mutate held destroy_keeps_startup_request "Invariant destroyed_mob_holds_no_member_lifecycle" <<'PY'
+keep_var("DestroyFromAny", "member_startup_binding_requested")
 PY
 
   # A refusal answers beside the verdict's own arm in the placed run.

@@ -137,10 +137,44 @@ release plus the `lease_expired` fact.
 | `confirmation_kind` | `self_attest | host_confirmation | principal_confirmation | supervisor_confirmation | reviewer_confirmation`? | Typed completion-policy evidence classification |
 | `confirming_owner_key` | `WorkOwnerKey?` | Distinct confirming owner for supervisor/reviewer policy |
 | `execution_binding_id` | `WorkExecutionBindingId?` | Typed provenance reserved to the execution bridge |
+| `withdraws` | `string[]` | Ids of earlier evidence on the same item that this ref withdraws; omitted when empty |
 
 Evidence refs are pointers. WorkGraph does not own the artifact content.
 Reserved confirmation classifications cannot be minted by generic
 `workgraph_add_evidence` calls.
+
+### Withdrawing Evidence
+
+Evidence is append-only: nothing edits or removes a ref. To withdraw earlier
+evidence, add a new ref whose `withdraws` lists the ids of earlier refs on the
+same item. A ref is withdrawn when a later ref on the item lists its id. It
+stays in `evidence_refs`, so a reader marks it rather than dropping it; Rust
+hosts read the relation with `WorkItem::is_evidence_withdrawn`.
+
+- A withdrawal names only refs that come before it: earlier in
+  `evidence_refs`, or earlier in the same create request. It never names its
+  own id or another withdrawal. When several earlier refs share the id, it
+  withdraws all of them. A ref added later with that id is not withdrawn, so
+  adding evidence again reinstates it. Withdrawing an id again is allowed.
+- Confirmation evidence (a reserved confirmation kind or classification) and
+  execution evidence (`execution_binding_id` set) cannot be withdrawn, and a
+  withdrawing ref carries neither. A withdrawal therefore changes no
+  completion-policy accounting and no execution binding: added to an item, it
+  counts as one more evidence addition (refs given at creation are not
+  counted).
+- Withdrawal needs no permission of its own. Whoever may add evidence to an
+  item (on an attention-scoped surface, a projection with `can_add_evidence`)
+  may withdraw its ordinary evidence, including evidence a host or another
+  agent added. Refs carry no author, so a withdrawal records that a later ref
+  declares the evidence withdrawn, not that its author retracted it.
+- A refused withdrawal is an invalid-input error and writes nothing.
+- A ref without withdrawals keeps the encoding it had before the field
+  existed. A release before 0.9.9 reads items with withdrawals but ignores the
+  field, and drops it when it rewrites the item (any mutation of the item,
+  including a host sweep such as a lease-expiry observation); the withdrawing
+  refs then remain as ordinary evidence. The
+  [upgrade guide](/guides/upgrading) lists the effects on keyed-create
+  replays and attention continuation keys.
 
 ## Events And Durable Facts
 

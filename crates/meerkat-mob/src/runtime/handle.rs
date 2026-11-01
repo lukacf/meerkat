@@ -492,6 +492,27 @@ fn joined_retirement_result(
     }
 }
 
+/// What the retire of an identity its roster lists no incarnation of
+/// answers for the actor's reply to its `RetireAbsent` command. Every phase
+/// has a `RetireAbsent` arm whose only other guard is `identity_absent`, so
+/// MobMachine refuses the input only for an identity it still maps, and the
+/// actor gives that refusal as [`MobError::InvalidTransition`]. With no
+/// roster incarnation, that is an identity whose spawn committed its
+/// membership after the retire read the roster: the retire is answered as
+/// that spawn still in progress, [`MobError::LifecycleOperationPending`],
+/// as the actor answers a retire that meets the identity's retirement in
+/// flight. It is retryable: once the spawn settles, a retry retires the new
+/// incarnation, or answers `Ok(())` if the spawn was rolled back. Any other
+/// answer is unchanged.
+pub(super) fn retire_absent_refusal(agent_identity: &AgentIdentity, error: MobError) -> MobError {
+    match error {
+        MobError::InvalidTransition { .. } => MobError::LifecycleOperationPending {
+            intent: format!("spawn of member {agent_identity}"),
+        },
+        other => other,
+    }
+}
+
 fn pending_retirement_operations()
 -> &'static std::sync::Mutex<HashMap<RetirementOperationKey, Arc<PendingRetirementOperation>>> {
     static OPERATIONS: std::sync::OnceLock<
@@ -7248,6 +7269,13 @@ pub struct SpawnMemberSpec {
     /// archived session is gone from the store: the dormant seat's row
     /// records it. Set only by the declared apply; a spawn ignores it.
     pub(crate) history_unavailable: Option<super::HistoryUnavailable>,
+    /// Whether the request acts for the created identity entry of its name
+    /// ([`crate::IdentityEntryOrigin::Created`]), owed its seat: the seat of
+    /// such an entry on its archived session at a start. A dormant seat with
+    /// it takes only that entry's name, never another's, and keeps its
+    /// member a created entry. Never taken from caller-supplied arguments;
+    /// a spawn ignores it.
+    pub(crate) created_custody: bool,
 }
 
 impl std::fmt::Debug for SpawnMemberSpec {
@@ -7273,6 +7301,7 @@ impl std::fmt::Debug for SpawnMemberSpec {
             .field("auto_wire_parent", &self.auto_wire_parent)
             .field("definition_wiring", &self.definition_wiring)
             .field("entry_custody", &self.entry_custody)
+            .field("created_custody", &self.created_custody)
             .field("additional_instructions", &self.additional_instructions)
             .field("shell_env", &self.shell_env)
             .field("inherited_tool_filter", &self.inherited_tool_filter)
@@ -7313,7 +7342,7 @@ impl std::fmt::Debug for SpawnMemberSpec {
 impl SpawnMemberSpec {
     /// An agent-lane request claims neither a host root nor an identity
     /// entry: an agent never declares an entry, so its request carries no
-    /// entry custody, and an entry's name is refused to it
+    /// entry or created custody, and an entry's name is refused to it
     /// ([`MobError::IdentityMember`]).
     fn mark_agent_creation(&mut self) {
         if matches!(
@@ -7323,6 +7352,7 @@ impl SpawnMemberSpec {
             self.creation_origin = crate::member_creation::MemberCreationOrigin::Unproven;
         }
         self.entry_custody = false;
+        self.created_custody = false;
     }
 
     /// Attach exact runtime-proven parent ancestry to a child launch.
@@ -7377,6 +7407,7 @@ impl SpawnMemberSpec {
             inherited_operator_authority_bound: None,
             fresh_session_id: None,
             history_unavailable: None,
+            created_custody: false,
         }
     }
 
@@ -8458,8 +8489,9 @@ impl MobHandle {
 
     /// Elect the exact incarnation's singleflight retirement saga: join the
     /// one in flight or start it. `None` when the incarnation is already
-    /// absent. `bound_admission` holds scope admission and the roster
-    /// observation to `operation_deadline`.
+    /// absent and MobMachine answered the retire of the absent identity.
+    /// `bound_admission` holds scope admission, the roster observation and
+    /// that answer to `operation_deadline`.
     async fn join_or_start_retirement_operation(
         &self,
         agent_identity: AgentIdentity,
@@ -8534,9 +8566,24 @@ impl MobHandle {
                 roster.get(&agent_identity).cloned()
             };
             let Some(entry) = entry else {
-                // Retirement is idempotent. Once the exact roster incarnation is
-                // absent there is no authority to enqueue an identity-only command
-                // that could retire a later successor.
+                // Retirement is idempotent, and MobMachine owns that answer:
+                // with no roster incarnation to retire, the actor applies
+                // `RetireAbsent` for the identity in its own step, bounded
+                // like the admission above. The command names no
+                // incarnation and starts no retirement, so it can retire or
+                // cancel no later successor.
+                let absent = self.retire_absent_identity(agent_identity.clone());
+                if bound_admission {
+                    let remaining = operation_deadline.saturating_duration_since(Instant::now());
+                    tokio::time::timeout(remaining, absent)
+                        .await
+                        .map_err(|_| MobError::MemberRetirementAdmissionPending {
+                            member_id: agent_identity.clone(),
+                            stage: "retire_absent_admission".to_string(),
+                        })??;
+                } else {
+                    absent.await?;
+                }
                 return Ok(None);
             };
             let expected = super::state::RetireMemberIncarnation {
@@ -8638,6 +8685,23 @@ impl MobHandle {
             }
         };
         Ok(Some((key, pending)))
+    }
+
+    /// MobMachine's answer to the retire of `agent_identity`, whose roster
+    /// lists no incarnation: the actor applies `RetireAbsent` in its own step
+    /// and answers what the machine answers. In every phase that is `Ok(())`
+    /// while the identity maps to no runtime; the machine refuses an identity
+    /// it still maps, whose spawn committed after the roster read, and that
+    /// refusal is answered as the spawn in progress
+    /// ([`retire_absent_refusal`]).
+    async fn retire_absent_identity(&self, agent_identity: AgentIdentity) -> Result<(), MobError> {
+        let identity = agent_identity.clone();
+        self.send_actor_command(|reply_tx| MobCommand::RetireAbsent {
+            agent_identity,
+            reply_tx,
+        })
+        .await?
+        .map_err(|error| retire_absent_refusal(&identity, error))
     }
 
     // Machine commands are issued from inside calling agents' tool-dispatch
@@ -10341,9 +10405,12 @@ impl MobHandle {
     /// incarnation, read from the member binding history. An adopted member
     /// is an identity entry from then on: its adoption is journaled, a
     /// restart restores it from that row, and the label is never read for it
-    /// again. An identity that is an entry already answers
+    /// again. A declared entry whose name is not reserved already answers
     /// [`super::LegacyIdentityEntryAdoption::AlreadyAnEntry`] without
-    /// reading its spawn row. A worker holding the name answers
+    /// reading its spawn row; a created entry's name, a removed one and an
+    /// unreadable one (a declared entry's included) answer
+    /// [`super::LegacyIdentityEntryAdoption::NotAdoptable`]. A worker
+    /// holding the name answers
     /// [`super::LegacyIdentityEntryAdoption::NameHeldByWorker`]; a placed
     /// member, a member bound to no session or a retiring one
     /// [`super::LegacyIdentityEntryAdoption::NotAdoptable`]; an identity no
@@ -10352,8 +10419,8 @@ impl MobHandle {
     /// [`super::LegacyIdentityEntryAdoption::NonAuthoritative`]. None of
     /// these changes anything.
     ///
-    /// Refused typed unless the mob is Running, except that an identity that
-    /// is an entry already answers
+    /// Refused typed unless the mob is Running, except that a declared
+    /// entry whose name is not reserved answers
     /// [`super::LegacyIdentityEntryAdoption::AlreadyAnEntry`] in any
     /// lifecycle phase. The handle's principal must hold
     /// [`crate::ControlScope::Retire`]; the adoption is a host verb, so the
@@ -10378,12 +10445,17 @@ impl MobHandle {
             super::state::ScopeAdmissionSubject::LegacyAdoption(identity.clone()),
         )
         .await?;
-        // The adoption ran: the spawn row is not read again.
-        let already_an_entry = super::identity_entry::machine_entry_origin(
-            &self.machine_state_watch_rx.borrow(),
-            identity,
-        )
-        .is_some();
+        // The adoption ran: the spawn row is not read again. A created
+        // entry's name, and a reserved one (a declared entry's included), is
+        // no host's to adopt, which MobMachine answers.
+        let already_an_entry = {
+            let state = self.machine_state_watch_rx.borrow();
+            super::identity_entry::machine_entry_origin(&state, identity)
+                == Some(super::IdentityEntryOrigin::Declared)
+                && !state
+                    .identity_entry_unreadable
+                    .contains(&mob_dsl::AgentIdentity::from_domain(identity))
+        };
         if already_an_entry {
             return Ok(super::LegacyIdentityEntryAdoption::AlreadyAnEntry);
         }
@@ -14340,6 +14412,14 @@ impl MobHandle {
     /// first failure is returned after the rest ran; retrying converges,
     /// because a later retire still finds the remaining descendants.
     ///
+    /// Retiring an identity with no current incarnation (never a member, or
+    /// already retired) retires nothing and answers `Ok(())`. MobMachine
+    /// gives that answer, and it touches no later incarnation of the
+    /// identity. A retire that races a spawn of the same identity (the spawn
+    /// committed its membership after the retire read the roster) is refused
+    /// with [`MobError::LifecycleOperationPending`], which is retryable:
+    /// retried after the spawn settles, it retires the new incarnation.
+    ///
     /// A successful return is the terminal lifecycle barrier for work owned by
     /// this mob incarnation. New member work has been fenced, any Mob-owned
     /// session archive/checkpoint has completed, the exact runtime attachment
@@ -17007,14 +17087,19 @@ impl MobHandle {
     /// Transition Stopped -> Running.
     ///
     /// When the actor fail-stopped, this returns why, typed, as
-    /// [`Self::status`] does.
+    /// [`Self::status`] does. A created identity entry owed its seat is
+    /// seated again on its archived session once the mob runs (see
+    /// [`super::IdentityEntryOrigin::Created`]).
     pub async fn resume(&self) -> Result<(), MobError> {
         let deadline = Instant::now() + super::provisioner::EXPLICIT_RESUME_RETIRE_TOTAL_TIMEOUT;
         match self
             .execute_machine_command(MobMachineCommand::Resume { deadline })
             .await?
         {
-            MobMachineCommandResult::Unit => Ok(()),
+            MobMachineCommandResult::Unit => {
+                self.reseat_owed_created_entries().await;
+                Ok(())
+            }
             _ => Err(MobError::Internal(
                 "unexpected command result variant".into(),
             )),
@@ -20844,7 +20929,8 @@ impl MobHandle {
             )
             .await?
         else {
-            // The descendant is already absent: nothing is left to retire.
+            // The descendant is already absent and MobMachine answered its
+            // retire: nothing is left to retire.
             return Ok(RetireStepOutcome::Ran);
         };
         self.wait_for_retirement_operation(&key, pending).await
@@ -22112,6 +22198,7 @@ mod tests {
                 effective_profile_override_present: false,
                 effective_model_override_present: false,
                 entry_custody: false,
+                created_custody: false,
             },
         )
         .expect("begin spawn exec should admit");
@@ -22219,6 +22306,7 @@ mod tests {
                     effective_profile_override_present: false,
                     effective_model_override_present: false,
                     entry_custody: false,
+                    created_custody: false,
                 },
             )
             .expect("begin spawn exec should admit");
@@ -22580,6 +22668,7 @@ mod tests {
                 effective_profile_override_present: false,
                 effective_model_override_present: false,
                 entry_custody: false,
+                created_custody: false,
             },
         )
         .expect("begin spawn exec should admit");

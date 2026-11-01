@@ -14,9 +14,12 @@ use crate::session::operator_instructions::{
 };
 use crate::session::{
     InstructionEntryKind, TranscriptEditError, TranscriptRewriteSemantic,
-    transcript_messages_digest,
+    instruction_activation_offsets, instruction_activation_places, retired_activation_row,
+    superseded_activation_rows, transcript_messages_digest,
 };
-use crate::types::{AssistantBlock, Message};
+use crate::types::{
+    AssistantBlock, InstructionActivationId, InstructionKey, InstructionNamespace, Message,
+};
 use std::collections::BTreeSet;
 
 pub(crate) fn message_role_name(message: &Message) -> &'static str {
@@ -140,32 +143,64 @@ fn validate_instruction_activation_revision_transition(
             },
         )?;
     }
-    let activation_rows = |messages: &[Message], preserve_offsets: bool| {
-        messages
+    // Activation rows pair in order. A compaction may summarize the
+    // conversation around them. Any other rewrite keeps each at its place
+    // among the conversation rows (`instruction_activation_places`), or, as
+    // releases before activation places required, at its offset: the
+    // records those releases wrote keep validating. A paired row is the same
+    // row, or the exact retirement of a live parent row that a later row of
+    // its key follows in the revision. Retirement is allowed in any record
+    // and never required: who may retire is decided when a rewrite commits.
+    let parent = instruction_activation_places(&parent_body.messages);
+    let revision = instruction_activation_places(&revision_body.messages);
+    let superseded = superseded_activation_rows(&revision_body.messages);
+    let same_rows = parent.len() == revision.len()
+        && parent
             .iter()
-            .enumerate()
-            .filter_map(|(index, message)| {
-                let Message::System(system) = message else {
-                    return None;
-                };
-                system.instruction_activation.as_ref().map(|_| {
-                    (
-                        preserve_offsets.then_some(index),
-                        Message::System(system.clone()),
-                    )
-                })
-            })
-            .collect::<Vec<_>>()
-    };
-    let preserve_offsets = commit.selection.semantic() != TranscriptRewriteSemantic::Compaction;
-    if activation_rows(&parent_body.messages, preserve_offsets)
-        != activation_rows(&revision_body.messages, preserve_offsets)
-    {
+            .zip(&revision)
+            .all(|((_, parent_row), (_, revision_row))| {
+                parent_row == revision_row
+                    || retires_a_superseded_body(parent_row, revision_row, &superseded)
+            });
+    let kept_in_place = commit.selection.semantic() == TranscriptRewriteSemantic::Compaction
+        || parent
+            .iter()
+            .zip(&revision)
+            .all(|((parent_place, _), (revision_place, _))| parent_place == revision_place)
+        || instruction_activation_offsets(&parent_body.messages)
+            == instruction_activation_offsets(&revision_body.messages);
+    if !same_rows || !kept_in_place {
         return Err(TranscriptEditError::HistoryStateMalformed(
             "transcript rewrite changed an instruction activation boundary".to_string(),
         ));
     }
     validate_operator_instruction_entry_transition(commit, parent_body, revision_body)
+}
+
+/// Whether `revision_row` is the exact retired form of the live activation
+/// row `parent_row`, and `superseded` (the revision's activation rows that a
+/// later row of their key follows) names it. A retired row never turns live
+/// again, and its header and body length never change.
+fn retires_a_superseded_body(
+    parent_row: &Message,
+    revision_row: &Message,
+    superseded: &BTreeSet<(
+        InstructionNamespace,
+        InstructionKey,
+        InstructionActivationId,
+    )>,
+) -> bool {
+    let (Message::System(parent), Message::System(revision)) = (parent_row, revision_row) else {
+        return false;
+    };
+    let Some(identity) = revision.instruction_activation.as_ref() else {
+        return false;
+    };
+    superseded.contains(&(
+        identity.revision.namespace.clone(),
+        identity.revision.key.clone(),
+        identity.activation_id.clone(),
+    )) && retired_activation_row(parent).as_ref() == Some(revision)
 }
 
 /// Operator-instruction entry rows across one rewrite: a compaction fold

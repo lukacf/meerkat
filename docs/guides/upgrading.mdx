@@ -112,6 +112,51 @@ change.
 host wakes or seats its identities; consume exactly the first-boot requests
 the answer names; unlist an identity to remove it.
 
+### Created identity entries
+
+0.9.9 reads a second origin of identity entry, `Created`: an entry Core keeps
+as a row of its own in the identity store (schema version 2, beside the
+host-adopted identity intents of version 1). A start recovers every created
+entry row, and a name whose row is removed or that this build cannot read is
+reserved, never free (see
+[Identity entries](/reference/mob-architecture#identity-entries)). A mob
+that holds no created entry row sees no change but the new read answers.
+
+- **The entry reads have new answers.** `identity_entry` answers
+  `IdentityEntryRead::Unreadable` and `Removed`, the entries page lists
+  unreadable names apart (`IdentityEntryPage::unreadable`), and the census
+  counts created entries and removed and unreadable names;
+  `IdentityCensus::is_complete()` is false while a name is unreadable. The
+  member binding history answers `MemberIdentityManagement::CreatedEntry` for
+  a created entry. The enums are `#[non_exhaustive]`.
+- **The declared apply refuses created and reserved names.** A host roster
+  that lists a created entry's name, or a removed or unreadable one, is
+  answered `Refused` for that identity alone
+  (`DeclaredEntryRefusal::NameOwnedByCreated`, `NameTombstoned`,
+  `NameUnreadable`), and its seal never unlists a created entry.
+- **A host store opens over a row it cannot read.** A mob storage on the
+  host store SPI reads its identity intents one entry at a time: an entry
+  whose row this build cannot decode is kept as stored, read as unreadable
+  for its identity alone and written back untouched on every rewrite of the
+  group. Before, one such row failed the whole mob's open. An entry it
+  cannot attribute to an identity (an envelope or a key it cannot read)
+  still fails the open.
+- **A SQLite mob adopts beside a created row.** An identity-first adoption
+  reads the host-adopted intent rows alone, so a created entry's row no
+  longer refuses the adoption of another identity, and the intent list
+  leaves created rows out.
+
+### WorkGraph evidence refs (Rust)
+
+`WorkEvidenceRef` is `#[non_exhaustive]` and gains the field `withdraws` (see
+[Withdrawing Evidence](/reference/workgraph-reference#withdrawing-evidence)),
+so a struct literal outside `meerkat-workgraph` no longer compiles. Build a ref
+with `WorkEvidenceRef::new(kind, id)` and the builders `with_label`,
+`with_summary` and `with_withdraws`, or assign the public fields after `new`.
+The constructor sets no confirmation or execution provenance. A ref without
+withdrawals keeps its wire form, so stored items, keyed-create digests and
+attention continuation keys do not change.
+
 ### Downgrading to 0.9.8
 
 Durable decisions live in their own file, `approval_decisions.sqlite3`,
@@ -153,6 +198,42 @@ apply's seal started and a crash interrupted finishes under 0.9.8 as a plain
 retirement. Entries the apply holds unseated, role holds (with the run-start
 holds they place) and held creations live in memory only, so 0.9.8 sees none
 of them.
+
+A created identity entry's row is a row 0.9.8 does not know. On SQLite, 0.9.8
+reads it as an identity intent row it cannot read, for that identity alone:
+its member binding history answers `IntentUnreadable`. Its identity-first
+adoption, though, decodes every intent row of the mob, so 0.9.7 and 0.9.8
+refuse every new identity-first adoption in a mob that holds a created
+entry's row, while their reads stay per identity. Before a downgrade of a
+SQLite mob whose host adopts identities, export or remove its created
+identities. A worker reconcile of 0.9.8 that retires stale members can
+retire a created entry's member; once the host runs 0.9.9 again, the start
+re-seats the entry on the session that retirement archived. A host store is
+different: 0.9.8 decodes a mob's identity intents as a whole and does not
+open the mob's storage while one of them is a created entry's row. Before a
+downgrade, a mob on a host store must hold no created identity entry.
+
+0.9.8 reads WorkGraph items whose evidence withdraws earlier evidence, but it
+ignores `withdraws` and drops the field when it rewrites such an item (any
+mutation of the item, including a host sweep such as a lease-expiry
+observation). The withdrawing refs stay as ordinary evidence, and the refs
+they withdrew read as current again. Two more effects reach only requests and
+items that carry withdrawals. 0.9.8 digests a keyed create without the field,
+so replaying a key whose request carried `withdraws` answers `Conflict`
+instead of `Replayed`. An item with withdrawals projects without the field, so
+its attention continuation key changes once and a continuation recorded under
+0.9.9 does not match it. Keys, items and continuations without withdrawals
+are unaffected.
+
+A session whose document 0.9.9 writes at session envelope 5 does not
+downgrade: one that carries operator-instruction facts, one in which a
+compaction, or a system-row prune with
+`retire_superseded_activation_bodies`, retired a superseded instruction
+activation body (or a fork child that copied such a row), and one in which
+a rewrite moved an instruction activation row to another offset. 0.9.8 refuses such a session;
+`rkat storage doctor` lists them (Info finding
+`operator-instruction-envelope`) before you roll back. Every other session
+stays at envelope 4 and reads on 0.9.8 unchanged.
 
 ## Upgrading to 0.9.8
 

@@ -2019,6 +2019,9 @@ pub(crate) const CANDIDATE_LAUNCH_REFUSED_METHODS: &[&str] = &[
     "meta/stop_member_run",
     "meta/force_cancel_member",
     "meta/compact_member",
+    // Rewrites of a member's session transcript.
+    "meta/bound_member_transcript",
+    "meta/prune_member_system_rows",
     "meta/member_activate_instruction",
     "meta/live/open",
     "meta/console/send",
@@ -2698,6 +2701,7 @@ async fn handle_unified_rpc_json_inner(
                     "meta/wait_for_turn",
                     "meta/compact_member",
                     "meta/bound_member_transcript",
+                    "meta/prune_member_system_rows",
                     "meta/member_activate_instruction",
                     "meta/member_instruction_activations",
                     "meta/reconcile_identity",
@@ -6222,6 +6226,19 @@ async fn handle_unified_rpc_json_inner(
             ))
             .await
         }
+        "meta/prune_member_system_rows" => {
+            let ctx = match identity_ctx {
+                Some(ctx) => ctx,
+                None => return maybe_identity_not_configured(is_notification, response_id),
+            };
+            Box::pin(operator_methods::handle_prune_member_system_rows(
+                runtime,
+                ctx,
+                &request.params,
+                response_id,
+            ))
+            .await
+        }
         "meta/reconcile_identity" => {
             let ctx = match identity_ctx {
                 Some(ctx) => ctx,
@@ -8227,6 +8244,31 @@ mod tests {
                 refused_kind(method, &no_params),
                 None,
                 "a candidate still answers {method}"
+            );
+        }
+    }
+
+    /// A candidate launch acts nowhere: it refuses the operator verbs that
+    /// write a member's session transcript, typed, as it refuses member
+    /// input, and an authoritative launch serves them.
+    #[test]
+    fn a_candidate_launch_refuses_the_member_transcript_writes() {
+        for method in [
+            "meta/bound_member_transcript",
+            "meta/prune_member_system_rows",
+        ] {
+            let refused =
+                super::candidate_launch_refusal(false, None, method, &json!({}), json!(7))
+                    .and_then(|refusal| refusal.error)
+                    .and_then(|error| error.data);
+            assert_eq!(
+                refused,
+                Some(json!({ "kind": "candidate_launch" })),
+                "a candidate refuses {method}"
+            );
+            assert!(
+                super::candidate_launch_refusal(true, None, method, &json!({}), json!(7)).is_none(),
+                "an authoritative launch serves {method}"
             );
         }
     }

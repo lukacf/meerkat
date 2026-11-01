@@ -65,7 +65,8 @@
 \* lifecycle quiesce (DestroyMob, and the destroy admission
 \* AdmitDestroyCleanup, after which a member runtime destroyed still removes
 \* only that runtime), and every RetireAtScope verdict arm
-\* over every scope the domains can name, current or stale. The progress
+\* over every scope the domains can name, current or stale, and the
+\* RetireAbsent arms of a completed and a destroyed mob. The progress
 \* observations write only progress variables, and no guard of these arms,
 \* nor of the Retire arms the coherence property enables, reads one; so the
 \* smaller run loses no reachable value of the variables the verdicts and
@@ -114,6 +115,11 @@
 \*     can follow: a Retire arm for that incarnation is enabled, or the
 \*     incarnation is already Retiring, or its runtime is no longer live (a
 \*     state the unscoped Retire refuses as well).
+\*   AuditRetireAbsentAnsweredInEveryPhase (invariant): a RetireAbsent arm
+\*     is enabled exactly when the identity maps to no runtime. MobMachine,
+\*     not the handle, answers the retire of an identity with no roster
+\*     incarnation, in a running, stopped, completed or destroyed mob alike,
+\*     and refuses it for an identity it still maps.
 \*
 \* The runner requires every action it lists (covered_actions) to fire (TLC
 \* coverage), a floor of distinct states, and every AuditWitness* goal to
@@ -146,7 +152,9 @@
 \* requires AuditMintClearsExecutionHealth to fail, and makes
 \* ObserveRuntimeDestroyed end the mob, leave its runtime live, and reset the
 \* mob's run count, and requires AuditRuntimeDestroyedRemovesOnlyItsRuntime to
-\* fail for each.
+\* fail for each, and drops the RetireAbsentCompleted arm, and then only its
+\* identity_absent guard, and requires AuditRetireAbsentAnsweredInEveryPhase
+\* to fail for each.
 \*
 \* Not covered:
 \*   states reachable only through BeginSpawnExec* (spawn phases, spawn
@@ -257,6 +265,12 @@ AuditRetireStoppedNoBinding ==
 AuditRetireAbsent == RetireAbsentRunning(AuditIdentity)
 
 AuditRetireAbsentStopped == RetireAbsentStopped(AuditIdentity)
+
+\* The retire of an absent identity in a completed and a destroyed mob (the
+\* scope run reaches both phases).
+AuditRetireAbsentCompleted == RetireAbsentCompleted(AuditIdentity)
+
+AuditRetireAbsentDestroyed == RetireAbsentDestroyed(AuditIdentity)
 
 AuditRetireMember ==
     \E rid \in AuditRuntimes, fence \in AuditFences, s \in AuditSessions :
@@ -535,6 +549,8 @@ AuditScopeNext ==
     \/ AuditAdmitDestroy
     \/ AuditComplete
     \/ AuditDestroy
+    \/ AuditRetireAbsentCompleted
+    \/ AuditRetireAbsentDestroyed
     \/ AuditRetireAtScopeCurrentRunning
     \/ AuditRetireAtScopeCurrentStopped
     \/ AuditRetireAtScopeNoCurrentIncarnationRunning
@@ -674,6 +690,16 @@ AuditRetireAtScopeCoherent ==
             /\ \/ AuditRetireEnabledFor(rid)
                \/ AuditRetiring(rid)
                \/ rid \notin live_runtime_ids
+
+\* One RetireAbsent arm per phase answers the retire of the audit identity.
+AuditRetireAbsentEnabled ==
+    \/ ENABLED RetireAbsentRunning(AuditIdentity)
+    \/ ENABLED RetireAbsentStopped(AuditIdentity)
+    \/ ENABLED RetireAbsentCompleted(AuditIdentity)
+    \/ ENABLED RetireAbsentDestroyed(AuditIdentity)
+
+AuditRetireAbsentAnsweredInEveryPhase ==
+    AuditRetireAbsentEnabled <=> (AuditIdentity \notin DOMAIN identity_to_runtime)
 
 \* Reachability goals, each checked as an expected violation of its negation:
 \* a state goal as an invariant, a step goal as an action property.

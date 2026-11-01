@@ -29821,6 +29821,17 @@ default_model = "gemma"
     }
 
     #[test]
+    fn cli_workgraph_list_accepts_cursor() {
+        for read in ["list", "ready", "snapshot"] {
+            if let Err(error) =
+                Cli::try_parse_from(["rkat", "workgraph", read, "--cursor", "wg1.e30", "--json"])
+            {
+                panic!("rkat workgraph {read} --cursor should parse: {error}");
+            }
+        }
+    }
+
+    #[test]
     fn test_workgraph_cli_surface_is_not_defaulted_to_run() {
         let normalized = normalize_cli_args([
             "rkat".into(),

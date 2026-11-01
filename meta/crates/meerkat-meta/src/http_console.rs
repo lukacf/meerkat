@@ -17927,7 +17927,9 @@ comms = true
         let definition = MobDefinition::from_toml(&format!(
             "[mob]\nid = '{mob_id}'\n\
              [profiles.worker]\nmodel = 'gpt-5.5'\n\
-             [profiles.courier]\nmodel = 'gpt-5.5'\n"
+             [profiles.worker.tools]\ncomms = true\n\
+             [profiles.courier]\nmodel = 'gpt-5.5'\n\
+             [profiles.courier.tools]\ncomms = true\n"
         ))?;
         let runtime = Arc::new(
             crate::UnifiedRuntime::builder()

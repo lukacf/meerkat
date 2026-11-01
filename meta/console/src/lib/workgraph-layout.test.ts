@@ -311,13 +311,14 @@ test("graph edges carry their kind and words; done goals fold and cancelled item
   assert.equal(graph.edgeLabels, "always");
   const oldGoal = graph.frames.find((frame) => frame.id === "old-goal")!;
   assert.equal(oldGoal.collapsed, true);
-  assert.equal(oldGoal.meta, "2 of 2 done");
+  assert.equal(oldGoal.meta, "2 of 2 done · collapsed");
   assert.equal(graph.hiddenCancelled, 1);
   assert.ok(!graph.nodes.some((node) => node.id === "dropped"));
   assert.equal(graph.notDrawn, 0, "folded and option-hidden items are not 'not drawn'");
 
   const open = buildWorkGraphGraph(model, { now: NOW, showDone: true, showCancelled: true });
   assert.equal(open.frames.find((frame) => frame.id === "old-goal")!.collapsed, false);
+  assert.equal(open.frames.find((frame) => frame.id === "old-goal")!.meta, "2 of 2 done");
   assert.ok(open.nodes.some((node) => node.id === "dropped"));
   assert.equal(open.hiddenCancelled, 0);
 });

@@ -993,6 +993,8 @@ export function buildWorkGraphGraph(model: WorkGraphModel, options: WorkGraphGra
         meta: joinMeta(
           workGraphProgressText(frame.progress),
           hidden > 0 ? `+${hidden} ${hidden === 1 ? "item" : "items"}` : "",
+          // A folded goal says so: "Show done goals" in the menu opens it.
+          collapsedFrames.has(frame.id) ? "collapsed" : "",
         ),
         parent: frame.parentFrameId ?? undefined,
         order: index,

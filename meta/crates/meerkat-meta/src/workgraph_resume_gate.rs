@@ -47,6 +47,13 @@
 //! and was taken by another worker while it was down. It holds no claim any
 //! more, so the gate cannot see the move and the run continues. Its later
 //! WorkGraph writes are still revision-checked and conflict.
+//!
+//! The claim scan pages through every open item with the WorkGraph list
+//! cursor and does not use the pages' `changed_since_anchor`. A claimed item
+//! that a write moves ahead of the cursor before the scan reaches it is not
+//! seen, so the run continues, as in the known limit, and its later writes
+//! conflict on revision. An item comes back twice only after the store clock
+//! moved back; the scan then keeps the newest claimed sighting.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Mutex, MutexGuard, PoisonError};

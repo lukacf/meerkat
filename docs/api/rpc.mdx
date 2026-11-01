@@ -2373,7 +2373,8 @@ A walk over every page keeps these promises:
   pages. Those pages say `changed_since_anchor: true`, and `workgraph/events`
   with `after_seq` set to `anchor_event_seq` names every such item.
   Execution-binding events also move the ledger, so the flag can be true with
-  no public change.
+  no public change. The flag covers writes only: a change that writes no
+  event, such as readiness arriving as time passes, is not flagged.
 
 Items and edges are never deleted. There is no unlink or delete method on any
 surface and no tool for it; the graph is an append-only ledger. To take an item
@@ -2426,10 +2427,12 @@ however many it holds, and the cursor and `limit` then cut the sorted ready
 items. The result has the page fields of `workgraph/list`, where
 `total_items` counts every ready item. The cursor's order key is the priority,
 creation time and id: an item whose priority changes during a walk can move
-across the cursor either way, so it can be missing or appear twice, and an
-item that becomes ready behind the cursor is missing. `changed_since_anchor`
-reports both, and a reader that dedupes by `id` and keeps the higher
-`revision` is safe.
+across the cursor either way, so it can be missing or appear twice, and one
+whose readiness changes during the walk can be missing. `changed_since_anchor`
+flags the items an event changed after the anchor, such as a priority update
+or a blocker's close. Readiness that arrives by time passing (`not_before`,
+`snoozed_until`) writes no event, so it is not flagged. A reader that dedupes
+by `id` and keeps the higher `revision` is safe.
 
 ### workgraph/snapshot
 

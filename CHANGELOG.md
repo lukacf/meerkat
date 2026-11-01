@@ -1934,6 +1934,14 @@ them.
   CLI text ends with `N of M, more with --cursor <c>` or
   `more with --after-seq <n>`.
 
+- `meerkat-workgraph`: `WorkGraphService::snapshot_uncut` returns one
+  observation with every item a snapshot filter selects, built from the
+  snapshot body with no `limit` cut and no cursor (it ignores both). It is
+  for trusted in-process callers that need the whole selection in one
+  consistent read, such as live delegation scheduling; no tool, RPC method,
+  REST route, CLI command or Meta method offers it, and those keep the
+  bounded pages.
+
 - `meerkat-core`: a compaction retires the body of every instruction
   activation row that a later activation row of its key follows.
   `SessionDocumentMachine` decides which rows; the newest row of every key
@@ -2467,9 +2475,18 @@ them.
   history. Its scheduling snapshots read 100 voice items, terminal ones
   included, least recently updated first, so past 100 voice items a new item
   was never offered (the channel's queue stalled) and a worker's item failed
-  classification as missing from its namespace. They now walk every voice
-  item with the WorkGraph snapshot cursor, so an open voice item is offered
-  and a blocker is named however many voice items the mob holds.
+  classification as missing from its namespace. They now read every voice
+  item in one uncut namespace observation
+  (`WorkGraphService::snapshot_uncut`), so an open voice item is offered and
+  a blocker is named however many voice items the mob holds.
+
+- `meerkat-workgraph`: the `WorkGraphStore::list_public_events` default
+  fills its page with public events. It read one batch of `limit` events and
+  then dropped the execution events, so on a store that keeps the default an
+  events read could come back short while public events remained. It now
+  pages through `list_events` until it holds `limit` public events or the
+  ledger ends. The trait says that a store which serves pages should
+  override it and `latest_event_seq`, as the built-in stores do.
 
 ### Upgrade notes
 

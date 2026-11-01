@@ -387,7 +387,9 @@ cursor's order key, so rows never shift between pages:
   pages. Those pages say `changed_since_anchor: true`, and events with
   `after_seq` set to `anchor_event_seq` name every such item.
   Execution-binding events also move the ledger, so the flag can be true with
-  no public change.
+  no public change. The flag covers writes only: readiness that arrives by
+  time passing (`not_before`, `snoozed_until`) writes no event and is not
+  flagged.
 - A first snapshot page holds the edges between its own items; a continuation
   adds the edges from its items to the items at or before the cursor, so a
   walk sees every edge between the items it returned once.

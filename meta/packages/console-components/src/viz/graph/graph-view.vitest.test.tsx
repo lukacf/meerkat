@@ -1,5 +1,6 @@
 import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import React from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 
 import { GraphView } from "./graph-view";
@@ -190,6 +191,32 @@ describe("GraphView", () => {
     expect(goal.querySelectorAll(".cc-viz-ring-progress__arc")).toHaveLength(3);
     expect(goal.querySelector(".cc-viz-goal__trailing")).toHaveTextContent("Coordinator · Leading the work");
     expect(items.find((element) => element.getAttribute("data-item-id") === "b")).toHaveClass("is-accent");
+  });
+
+  it("draws in a server render, where no layout effect measures the frame", () => {
+    const nodes: VizNode[] = [
+      { id: "goal", kind: "goal", label: "Ship the 2.4 release", status: "in_progress" },
+      { id: "a", kind: "item", label: "Freeze the branch", frame: "goal", status: "completed", attributes: { "data-goal-id": "goal" }, className: "is-completed" },
+      { id: "b", kind: "item", label: "Run the suite", frame: "goal", status: "blocked", className: "is-blocked" },
+    ];
+    const edges: VizEdge[] = [{ id: "ab", from: "a", to: "b", relation: "blocks", attributes: { "data-kind": "blocks" } }];
+    const html = renderToStaticMarkup(
+      <GraphView
+        nodes={nodes}
+        edges={edges}
+        layout="layered"
+        ariaLabel="Work item dependency graph"
+        testIdPrefix="workgraph-graph"
+        testIds={{ root: "workgraph-graph-frame", node: "workgraph-graph-node", edge: "workgraph-graph-edge" }}
+        classNames={{ itemTitle: "workgraph-graph__node-title" }}
+      />,
+    );
+    expect(html.match(/data-testid="workgraph-graph-node"/g)).toHaveLength(3);
+    expect(html).toContain('data-testid="workgraph-graph-frame:goal"');
+    expect(html).toContain('data-goal-id="goal"');
+    expect(html).toMatch(/class="[^"]*\bis-blocked\b/);
+    expect(html).toMatch(/data-testid="workgraph-graph-edge"[^>]*data-kind="blocks"|data-kind="blocks"[^>]*data-testid="workgraph-graph-edge"/);
+    expect(html).toContain("workgraph-graph__node-title");
   });
 
   it("brings focusId into the tab order and returns focus through the handle", () => {

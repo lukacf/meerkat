@@ -1027,7 +1027,8 @@ test("an invalid access save names the owner's reason in the Console's words, wi
   const generic = "Changes were not saved. The resulting access configuration is not valid; your draft is retained for correction.";
   // Every reason docs/concepts/access-control.mdx lists, with the detail the
   // owner sends for it. The notice shows the detail when it names the rule,
-  // group or approver at fault; the other details only restate the words.
+  // action, group or approver at fault; the other details only restate the
+  // words.
   const reasons: Array<[reason: string, words: string, detail: string, detailShown: boolean]> = [
     ["enabled_without_admins", "Enforcement needs at least one admin", "access control cannot be enabled without at least one admin subject", false],
     ["empty_rule_id", "A rule needs an ID", "access rule id must not be empty", false],

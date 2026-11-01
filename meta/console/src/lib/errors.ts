@@ -49,8 +49,8 @@ export function accessSaveFailure(error: unknown): ConsoleAccessSaveFailure {
 // The reasons an owner gives for refusing an invalid access configuration, in
 // the Console's words. docs/concepts/access-control.mdx lists them, and the
 // list can grow. `showDetail` marks the reasons whose detail names the rule,
-// group or approver at fault, which the words cannot; the other details only
-// restate the words.
+// action, group or approver at fault, which the words cannot; the other
+// details only restate the words.
 const INVALID_ACCESS_REASONS = {
   enabled_without_admins: { words: "Enforcement needs at least one admin", showDetail: false },
   empty_rule_id: { words: "A rule needs an ID", showDetail: false },

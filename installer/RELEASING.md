@@ -20,7 +20,12 @@ packager reads, per target (`linux-x86_64`, `macos-arm64`):
     one file taken out of a pinned `.tar.gz`.
   URLs must be Meta or Connect release downloads, or PyPI files.
 - `selection`: the product owner's `forge-meta-toolkit-runtime-selection-v1`
-  document. Its artifact sizes and SHA-256 values must equal the pins.
+  document. Its artifact sizes and SHA-256 values must equal the pins. Its
+  `artifact_root` is provenance only, since `relocate_selection` replaces it and
+  every artifact path with the fetched input directory before any read: name the
+  release job's own fetch root on the GitHub-hosted runner,
+  `/home/runner/work/_temp/forge-inputs/<paths.artifact_root>`, a generic runner
+  path rather than a private path or user name.
 - `paths`: where each selected artifact sits among `files`, under
   `artifact_root`, in the form `launchkit.packaged_runtime.relocate_selection` reads.
 - `gateway`: the pinned guide gateway, outside the product root.

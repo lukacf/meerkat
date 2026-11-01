@@ -2443,12 +2443,33 @@ pub struct WorkGraphSnapshot {
     #[serde(default)]
     pub attention: Vec<WorkAttentionBinding>,
     pub ready_item_ids: Vec<WorkItemId>,
+    /// Items that matched the filter in this snapshot, before `limit` cut
+    /// them. Absent only from a server that predates the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_items: Option<usize>,
+    /// Matching items exist after the last item returned. Absent only from a
+    /// server that predates the field, which does not mean the page is
+    /// complete.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub truncated: Option<bool>,
 }
 
+/// One page of work items: `list` (most recently updated first) or `ready`
+/// (priority, then creation time, then id).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct WorkGraphItemsResponse {
     pub items: Vec<WorkItem>,
+    /// Items that matched the filter at this read (for `ready`, the ready
+    /// items), before `limit` cut them. Absent only from a server that
+    /// predates the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_items: Option<usize>,
+    /// Matching items exist after the last item returned. Absent only from a
+    /// server that predates the field, which does not mean the page is
+    /// complete.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub truncated: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

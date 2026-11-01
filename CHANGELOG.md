@@ -945,6 +945,29 @@ them.
   fields stay public for reading and assignment. A field added later is then
   not a break.
 
+- `meerkat-workgraph`, `meerkat-contracts`: WorkGraph reads report their cut
+  (see Added). `WorkGraphSnapshot` and `WorkGraphItemsResponse`
+  (meerkat-workgraph, re-exported by `meerkat`) and `WorkItemsResult`
+  (meerkat-contracts) gain the public fields `total_items: Option<usize>` and
+  `truncated: Option<bool>`, so code that builds one of them literally must
+  set them. Serde reads a payload without them as `None` (a server before
+  this release) and writes nothing for `None`.
+
+- Behaviour-only (not measured by the gate): `meerkat-workgraph`:
+  `WorkGraphService::list` and `snapshot` return the most recently updated
+  items first (`updated_at`, then `id`, both descending), so a `limit` cut
+  keeps the most recently updated items. They returned the least recently
+  updated first and kept those. `ready` and `snapshot` no longer refuse a
+  namespace with more than 1,000 live items, and `snapshot` one with more
+  than 1,000 edges touching a live item or 1,000 attention bindings
+  (`InvalidInput`: `invalid_arguments` from the tools, `INVALID_PARAMS` on
+  RPC, 400 on REST): they read the whole namespace and `limit` cuts the
+  result. `list` now reads every matching item of the namespace to order and
+  count them. `MemoryWorkGraphStore` and `SqliteWorkGraphStore` now order
+  `WorkGraphStore::list_items` most recently updated first as well, so a
+  `filter.limit` keeps the newest rows; they kept the least recently
+  updated.
+
 - `meerkat-core`, `meerkat-contracts`: a compaction retires superseded
   instruction activation bodies in place (see Added). `SystemMessage` gains
   the public field `retired_instruction_body: Option<RetiredInstructionBody>`,
@@ -1866,6 +1889,19 @@ them.
   upgrade guide lists the other downgrade effects). The `workgraph-workflow`
   skill says how to withdraw and how a withdrawal reads.
 
+- `meerkat-workgraph`: WorkGraph reads report their cut.
+  `WorkGraphService::list_page` and `ready_page` return a
+  `WorkGraphItemsResponse` with `total_items`, the items that matched before
+  the `limit` cut (for `ready_page`, the ready items), and `truncated`, true
+  when matching items exist after the last one returned; `snapshot` sets both
+  on `WorkGraphSnapshot`. `list` and `ready` keep their signatures and return
+  the page's items. The `workgraph_list` and `workgraph_ready` tool results,
+  `workgraph/list` and `workgraph/ready` (`WorkItemsResult`),
+  `workgraph/snapshot`, REST `GET /workgraph/items`, `/workgraph/ready` and
+  `/workgraph/snapshot`, and `rkat workgraph list`, `ready` and `snapshot`
+  with `--json` carry them. A result without them comes from an older server
+  and may still have been cut.
+
 - `meerkat-core`: a compaction retires the body of every instruction
   activation row that a later activation row of its key follows.
   `SessionDocumentMachine` decides which rows; the newest row of every key
@@ -2051,6 +2087,16 @@ them.
   that moved an instruction activation row, a retired instruction activation
   body) and how a release before 0.9.9 refuses such a session per store kind,
   instead of saying every listed session carries operator instructions.
+
+- `meerkat-workgraph`: `ready` and `snapshot` count the readiness inputs from
+  per-call indexes over their one namespace observation (items by id,
+  children by parent, blockers by blocked item) instead of scanning every
+  item or edge for each item, so a read costs about its items plus its
+  edges. The machine classifies readiness from the same counts. The SQLite
+  store reads the items of the requested realm and namespace only
+  (`idx_workgraph_items_realm_namespace_updated`), where it decoded every
+  item of the file and filtered them in Rust; the namespace read inside
+  every SQLite item write uses the same pushdown.
 
 ### Fixed
 
@@ -2384,6 +2430,14 @@ them.
   the typed cause `head_body_retired`, as a durable fork of a retired copied
   head is. Before, when the source session was unknown, it carried the
   retired header as the key's instruction text.
+
+- `meerkat-mob-mcp`: live delegation sees a new voice item after a long voice
+  history. Its scheduling snapshots read 100 voice items, terminal ones
+  included, least recently updated first, so past 100 voice items a new item
+  was never offered (the channel's queue stalled) and a worker's item failed
+  classification as missing from its namespace. They now read the 1,000 most
+  recently updated voice items. Once a cut leaves older voice items out,
+  they log at most one warning per voice request, with the voice item count.
 
 ### Upgrade notes
 

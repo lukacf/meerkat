@@ -697,6 +697,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   The Console names it. The reason is advisory: a reader that does not know
   a kind shows the key without one.
 
+- `meta/workgraph/list`, `meta/workgraph/ready` and `meta/workgraph/snapshot`
+  report their cut with Meerkat 0.9.9's `total_items` (the items that
+  matched before `limit`; for ready, the ready items) and `truncated`. List
+  and snapshot return the most recently updated items first, so a cut keeps
+  those, and ready and snapshot read a namespace of any size: they no longer
+  refuse one with more than 1,000 live items, edges or attention bindings.
+  The Console's WorkGraph panel reads both fields for its notice and takes
+  the server's `truncated` as given: a page of exactly 1,000 items that the
+  server reports complete no longer shows "the runtime holds more", which
+  the panel now says only for a runtime that sends no `truncated`.
+
 ### Fixed
 
 - `POST /console/send` on a Console with no local runtime records the

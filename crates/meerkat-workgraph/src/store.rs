@@ -210,6 +210,10 @@ pub trait WorkGraphStore: Send + Sync {
         id: &WorkItemId,
     ) -> Result<Option<WorkItem>, WorkGraphError>;
 
+    /// Every item matching `filter`; with `filter.limit`, the `limit` most
+    /// recently updated (`updated_at`, then id, descending).
+    /// `WorkGraphService::list_page` passes no limit and orders and cuts
+    /// itself.
     async fn list_items(&self, filter: WorkItemFilter) -> Result<Vec<WorkItem>, WorkGraphError>;
 
     /// Read one namespace's items, edges, and observation time from one store
@@ -1211,10 +1215,12 @@ impl WorkGraphStore for MemoryWorkGraphStore {
 
     async fn list_items(&self, filter: WorkItemFilter) -> Result<Vec<WorkItem>, WorkGraphError> {
         let guard = self.inner.read().await;
+        // Most recently updated first, so a limit keeps the newest items.
         let compare = |left: &WorkItem, right: &WorkItem| {
-            left.updated_at
-                .cmp(&right.updated_at)
-                .then_with(|| left.id.cmp(&right.id))
+            right
+                .updated_at
+                .cmp(&left.updated_at)
+                .then_with(|| right.id.cmp(&left.id))
         };
         if let Some(limit) = filter.limit {
             let mut items = Vec::with_capacity(limit.min(1024));
@@ -5174,11 +5180,40 @@ fn list_sqlite_items(
     conn: &Connection,
     filter: &WorkItemFilter,
 ) -> Result<Vec<WorkItem>, WorkGraphError> {
+    // Scope pushdown over the realm/namespace index, so a read decodes only
+    // the rows of its own scope. The Rust-side filter remains the final
+    // authority over every returned row.
+    let mut clauses: Vec<String> = Vec::new();
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+    if let Some(realm_id) = &filter.realm_id {
+        params.push(Box::new(realm_id.clone()));
+        clauses.push(format!("realm_id = ?{}", params.len()));
+    }
+    if !filter.all_namespaces
+        && let Some(namespace) = &filter.namespace
+    {
+        params.push(Box::new(namespace.as_str().to_string()));
+        clauses.push(format!("namespace = ?{}", params.len()));
+    }
+    let where_clause = if clauses.is_empty() {
+        String::new()
+    } else {
+        format!(" WHERE {}", clauses.join(" AND "))
+    };
+    // Most recently updated first, so a limit keeps the newest items. The
+    // RFC 3339 text the writers store (`+00:00`, an AutoSi fraction) sorts
+    // in time order.
+    let sql = format!(
+        "SELECT item_json FROM workgraph_items{where_clause}
+         ORDER BY updated_at_utc DESC, item_id DESC"
+    );
     let mut stmt = conn
-        .prepare("SELECT item_json FROM workgraph_items ORDER BY updated_at_utc ASC, item_id ASC")
+        .prepare(&sql)
         .map_err(|err| WorkGraphError::Store(err.to_string()))?;
     let rows = stmt
-        .query_map([], |row| row_json::<WorkItem>(row, 0))
+        .query_map(rusqlite::params_from_iter(params.iter()), |row| {
+            row_json::<WorkItem>(row, 0)
+        })
         .map_err(|err| WorkGraphError::Store(err.to_string()))?;
     let mut items = Vec::new();
     for row in rows {
@@ -6800,6 +6835,148 @@ mod tests {
         let service = WorkGraphService::with_scope(reopened, "realm", WorkNamespace::default());
         let fetched = service.get(None, None, item.id.clone()).await.expect("get");
         assert_eq!(fetched.title, "persist me");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn sqlite_list_and_snapshot_cuts_keep_the_most_recently_updated_items() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("workgraph.sqlite3");
+        let store = std::sync::Arc::new(crate::SqliteWorkGraphStore::open(&path).expect("open"));
+        let service = WorkGraphService::with_scope(store, "realm", WorkNamespace::default());
+        let mut created = Vec::new();
+        for title in ["a", "b", "c"] {
+            created.push(
+                service
+                    .create(CreateWorkItemRequest {
+                        title: title.to_string(),
+                        ..Default::default()
+                    })
+                    .await
+                    .expect("create"),
+            );
+        }
+        let (a, c) = (created[0].clone(), created[2].clone());
+        service
+            .update(crate::UpdateWorkItemRequest {
+                id: a.id.clone(),
+                realm_id: None,
+                namespace: None,
+                expected_revision: a.revision,
+                title: Some("a (updated)".to_string()),
+                description: None,
+                priority: None,
+                completion_policy: None,
+                labels: None,
+                due_at: None,
+                not_before: None,
+                snoozed_until: None,
+                external_refs: Vec::new(),
+            })
+            .await
+            .expect("update a");
+
+        // Most recently updated first: both cuts drop `b`, updated longest ago.
+        let expected = vec![a.id, c.id];
+        let listed = service
+            .list(WorkItemFilter {
+                limit: Some(2),
+                ..WorkItemFilter::default()
+            })
+            .await
+            .expect("list");
+        assert_eq!(
+            listed.into_iter().map(|item| item.id).collect::<Vec<_>>(),
+            expected
+        );
+        let snapshot = service
+            .snapshot(crate::WorkGraphSnapshotFilter {
+                limit: Some(2),
+                ..Default::default()
+            })
+            .await
+            .expect("snapshot");
+        assert_eq!(
+            snapshot
+                .items
+                .into_iter()
+                .map(|item| item.id)
+                .collect::<Vec<_>>(),
+            expected
+        );
+    }
+
+    /// The store-level limit keeps the most recently updated items: a, b and
+    /// c, then a is updated, and `list_items` with limit 2 returns a, then c.
+    async fn list_items_limit_keeps_the_most_recently_updated(
+        store: std::sync::Arc<dyn WorkGraphStore>,
+    ) {
+        let service =
+            WorkGraphService::with_scope(store.clone(), "realm", WorkNamespace::default());
+        let mut created = Vec::new();
+        for title in ["a", "b", "c"] {
+            created.push(
+                service
+                    .create(CreateWorkItemRequest {
+                        title: title.to_string(),
+                        ..Default::default()
+                    })
+                    .await
+                    .expect("create"),
+            );
+        }
+        let (a, c) = (created[0].clone(), created[2].clone());
+        service
+            .update(crate::UpdateWorkItemRequest {
+                id: a.id.clone(),
+                realm_id: None,
+                namespace: None,
+                expected_revision: a.revision,
+                title: Some("a (updated)".to_string()),
+                description: None,
+                priority: None,
+                completion_policy: None,
+                labels: None,
+                due_at: None,
+                not_before: None,
+                snoozed_until: None,
+                external_refs: Vec::new(),
+            })
+            .await
+            .expect("update a");
+
+        let listed = store
+            .list_items(WorkItemFilter {
+                realm_id: Some("realm".to_string()),
+                namespace: Some(WorkNamespace::default()),
+                limit: Some(2),
+                ..WorkItemFilter::default()
+            })
+            .await
+            .expect("list");
+        assert_eq!(
+            listed.into_iter().map(|item| item.id).collect::<Vec<_>>(),
+            vec![a.id, c.id]
+        );
+    }
+
+    #[tokio::test]
+    async fn memory_list_items_limit_keeps_the_most_recently_updated_items() {
+        list_items_limit_keeps_the_most_recently_updated(std::sync::Arc::new(
+            MemoryWorkGraphStore::new(),
+        ))
+        .await;
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn sqlite_list_items_limit_keeps_the_most_recently_updated_items() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        list_items_limit_keeps_the_most_recently_updated(std::sync::Arc::new(
+            crate::SqliteWorkGraphStore::open(dir.path().join("workgraph.sqlite3"))
+                .expect("sqlite store"),
+        ))
+        .await;
     }
 
     #[cfg(not(target_arch = "wasm32"))]

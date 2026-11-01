@@ -10,8 +10,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use meerkat::{
     AddEvidenceRequest, ClaimWorkItemRequest, CloseWorkItemRequest, CreateWorkItemRequest,
-    WorkEdgeKind, WorkEvidenceRef, WorkGraphService, WorkGraphSnapshotFilter, WorkItem, WorkItemId,
-    WorkOwner, WorkOwnerKey, WorkStatus,
+    WorkEdgeKind, WorkEvidenceRef, WorkGraphService, WorkGraphSnapshot, WorkGraphSnapshotFilter,
+    WorkItem, WorkItemId, WorkOwner, WorkOwnerKey, WorkStatus,
 };
 use meerkat_core::LiveChannelId;
 use meerkat_runtime::live_execution::LiveDelegationNarrationKind;
@@ -25,6 +25,10 @@ pub(super) const LIVE_DELEGATION_CHANNEL_WORKER_CAP: usize =
 
 /// Label every voice delegation item carries.
 pub(super) const VOICE_WORK_LABEL: &str = "voice";
+
+/// Voice items one scheduling snapshot reads: the most recently updated ones
+/// (the WorkGraph maximum). A snapshot that cut older voice items warns.
+const VOICE_SNAPSHOT_LIMIT: usize = 1000;
 
 const WORK_TITLE_CHARS: usize = 200;
 const NARRATION_TITLE_CHARS: usize = 120;
@@ -361,10 +365,25 @@ impl std::fmt::Display for WorkItemCloseFailure {
     }
 }
 
+/// The voice items a scheduling decision reads, terminal ones included
+/// (blockers may have finished, and may belong to another channel), most
+/// recently updated first.
+fn voice_snapshot_filter() -> WorkGraphSnapshotFilter {
+    WorkGraphSnapshotFilter {
+        labels: vec![VOICE_WORK_LABEL.to_string()],
+        include_terminal: true,
+        limit: Some(VOICE_SNAPSHOT_LIMIT),
+        ..WorkGraphSnapshotFilter::default()
+    }
+}
+
 /// WorkGraph access scoped the way the mob's members see it.
 #[derive(Clone)]
 pub(super) struct VoiceWorkGraph {
     service: WorkGraphService,
+    /// Set once a cut voice snapshot has been warned about for this voice
+    /// request; its clones share it.
+    snapshot_cut_warned: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Namespace snapshots taken to classify a worker's item (test count).
     #[cfg(test)]
     classification_snapshots: std::sync::Arc<std::sync::atomic::AtomicUsize>,
@@ -377,6 +396,7 @@ impl VoiceWorkGraph {
     pub(super) fn new(service: WorkGraphService) -> Self {
         Self {
             service,
+            snapshot_cut_warned: std::sync::Arc::default(),
             #[cfg(test)]
             classification_snapshots: std::sync::Arc::default(),
             #[cfg(test)]
@@ -494,6 +514,29 @@ impl VoiceWorkGraph {
             .expect("conflicting evidence");
     }
 
+    /// Warn at most once per voice request when a scheduling snapshot cut
+    /// voice items: each admitted request builds its own voice graph, which
+    /// its pending operation, the schedule pump and its worker share as
+    /// clones. The snapshot read only the most recently updated voice items,
+    /// so an older open item is not offered and an older blocker is not
+    /// named. Closed voice items count too, so past the limit every
+    /// scheduling pass would warn again.
+    fn warn_once_when_snapshot_cut(&self, snapshot: &WorkGraphSnapshot, read: &'static str) {
+        if snapshot.truncated == Some(true)
+            && let Some(total_items) = snapshot.total_items
+            && !self
+                .snapshot_cut_warned
+                .swap(true, std::sync::atomic::Ordering::Relaxed)
+        {
+            tracing::warn!(
+                read,
+                total_items,
+                limit = VOICE_SNAPSHOT_LIMIT,
+                "voice work snapshot read the {VOICE_SNAPSHOT_LIMIT} most recently updated of {total_items} voice items; an older open item is not offered and an older blocker is not named (warned once per voice request)"
+            );
+        }
+    }
+
     async fn get(&self, id: &WorkItemId) -> Result<WorkItem, String> {
         self.service
             .get(None, None, id.clone())
@@ -502,20 +545,18 @@ impl VoiceWorkGraph {
     }
 
     /// Scheduling facts for one channel's queue, read from one snapshot of
-    /// every voice item (blockers may belong to another channel).
+    /// the voice items of every channel (blockers may belong to another
+    /// channel).
     pub(super) async fn channel_readiness(
         &self,
         channel_id: &LiveChannelId,
     ) -> Result<ChannelReadiness, String> {
         let snapshot = self
             .service
-            .snapshot(WorkGraphSnapshotFilter {
-                labels: vec![VOICE_WORK_LABEL.to_string()],
-                include_terminal: true,
-                ..WorkGraphSnapshotFilter::default()
-            })
+            .snapshot(voice_snapshot_filter())
             .await
             .map_err(|error| format!("voice work readiness snapshot failed: {error}"))?;
+        self.warn_once_when_snapshot_cut(&snapshot, "readiness");
         let channel_label = channel_work_label(channel_id);
         let items_by_id = snapshot
             .items
@@ -612,13 +653,10 @@ impl VoiceWorkGraph {
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let snapshot = self
             .service
-            .snapshot(WorkGraphSnapshotFilter {
-                labels: vec![VOICE_WORK_LABEL.to_string()],
-                include_terminal: true,
-                ..WorkGraphSnapshotFilter::default()
-            })
+            .snapshot(voice_snapshot_filter())
             .await
             .map_err(|error| format!("voice work snapshot failed: {error}"))?;
+        self.warn_once_when_snapshot_cut(&snapshot, "classification");
         let items_by_id = snapshot
             .items
             .iter()
@@ -771,6 +809,47 @@ mod tests {
             .await
             .expect("voice item")
             .id
+    }
+
+    /// `count` voice items on the test channel, each closed as completed.
+    async fn closed_voice_items(workgraph: &VoiceWorkGraph, count: usize) {
+        for index in 0..count {
+            let item = voice_item(workgraph, &format!("finished request {index}")).await;
+            workgraph
+                .close(&item, WorkStatus::Completed, None)
+                .await
+                .expect("close the voice item");
+        }
+    }
+
+    /// A new voice item is offered after a long voice history. The
+    /// scheduling snapshot read the 100 least recently updated voice items,
+    /// all of them closed, so the new item never became ready and the queue
+    /// stalled.
+    #[tokio::test]
+    async fn a_new_voice_item_is_ready_after_150_closed_voice_items() {
+        let workgraph = voice_workgraph().await;
+        closed_voice_items(&workgraph, 150).await;
+        let item = voice_item(&workgraph, "the new request").await;
+        let readiness = workgraph
+            .channel_readiness(&LiveChannelId::new("schedule-test-channel"))
+            .await
+            .expect("channel readiness");
+        assert!(readiness.ready.contains(&item), "{readiness:?}");
+    }
+
+    /// A new voice item is classified after a long voice history. The
+    /// classification snapshot read the 100 least recently updated voice
+    /// items and reported the worker's item missing from its namespace.
+    #[tokio::test]
+    async fn a_new_voice_item_is_classified_after_150_closed_voice_items() {
+        let workgraph = voice_workgraph().await;
+        closed_voice_items(&workgraph, 150).await;
+        let item = voice_item(&workgraph, "the new request").await;
+        assert_eq!(
+            workgraph.disposition_after_worker_turn(&item).await,
+            Ok(WorkItemDisposition::ReleasedReady)
+        );
     }
 
     /// #1820 follow-up: the four simple statuses come from the item alone. A

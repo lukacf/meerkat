@@ -157,21 +157,32 @@ pub async fn handle_list(
         Ok(service) => service,
         Err(response) => return response,
     };
-    match service.list(filter).await {
-        Ok(items) => work_items_response(id, &items),
+    match service.list_page(filter).await {
+        Ok(page) => work_items_response(id, &page),
         Err(error) => map_workgraph_error(id, error),
     }
 }
 
-/// Serialize a typed work-item list into the contracts `WorkItemsResult`
+/// Serialize a typed work-item page into the contracts `WorkItemsResult`
 /// wire payload, failing closed on serialization (K17).
-fn work_items_response<T: serde::Serialize>(id: Option<RpcId>, items: &[T]) -> RpcResponse {
+fn work_items_response(id: Option<RpcId>, page: &meerkat::WorkGraphItemsResponse) -> RpcResponse {
     #[derive(serde::Serialize)]
-    struct WorkItemsResultRef<'a, T> {
-        items: &'a [T],
+    struct WorkItemsResultRef<'a> {
+        items: &'a [meerkat::WorkItem],
+        #[serde(skip_serializing_if = "Option::is_none")]
+        total_items: Option<usize>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        truncated: Option<bool>,
     }
 
-    RpcResponse::success(id, WorkItemsResultRef { items })
+    RpcResponse::success(
+        id,
+        WorkItemsResultRef {
+            items: &page.items,
+            total_items: page.total_items,
+            truncated: page.truncated,
+        },
+    )
 }
 
 pub async fn handle_ready(
@@ -200,8 +211,8 @@ pub async fn handle_ready(
         Ok(service) => service,
         Err(response) => return response,
     };
-    match service.ready(filter).await {
-        Ok(items) => work_items_response(id, &items),
+    match service.ready_page(filter).await {
+        Ok(page) => work_items_response(id, &page),
         Err(error) => map_workgraph_error(id, error),
     }
 }
@@ -273,5 +284,66 @@ pub async fn handle_events(
             RpcResponse::success(id, WorkEventsResultRef { events: &events })
         }
         Err(error) => map_workgraph_error(id, error),
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod tests {
+    use std::sync::Arc;
+
+    use serde_json::{Value, json};
+
+    use super::work_items_response;
+    use crate::protocol::{RpcId, RpcResponse};
+
+    fn result_json(response: &RpcResponse) -> Value {
+        let raw = response.result.as_ref().expect("result");
+        serde_json::from_str(raw.get()).expect("result json")
+    }
+
+    /// `workgraph/list` and `workgraph/ready` answer through
+    /// `work_items_response`: the rows, then the page's `total_items` and
+    /// `truncated`, each left out when the page carries none.
+    #[tokio::test]
+    async fn work_items_response_carries_the_page_fields() {
+        let service =
+            meerkat::WorkGraphService::new(Arc::new(meerkat::MemoryWorkGraphStore::new()));
+        for title in ["first", "second"] {
+            service
+                .create(meerkat::CreateWorkItemRequest {
+                    title: title.to_string(),
+                    ..Default::default()
+                })
+                .await
+                .expect("create");
+        }
+        let page = service
+            .list_page(meerkat::WorkItemFilter {
+                limit: Some(1),
+                ..Default::default()
+            })
+            .await
+            .expect("list page");
+
+        let result = result_json(&work_items_response(Some(RpcId::Num(1)), &page));
+        assert_eq!(
+            result["items"].as_array().map(Vec::len),
+            Some(1),
+            "{result}"
+        );
+        assert_eq!(result["total_items"], json!(2), "{result}");
+        assert_eq!(result["truncated"], json!(true), "{result}");
+
+        let bare = meerkat::WorkGraphItemsResponse {
+            items: page.items,
+            total_items: None,
+            truncated: None,
+        };
+        let result = result_json(&work_items_response(Some(RpcId::Num(2)), &bare));
+        let keys = result.as_object().expect("result object");
+        assert!(keys.contains_key("items"), "{result}");
+        assert!(!keys.contains_key("total_items"), "{result}");
+        assert!(!keys.contains_key("truncated"), "{result}");
     }
 }

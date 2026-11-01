@@ -253,15 +253,19 @@ async fn item_lifecycle_end_to_end() {
     let response = rpc(&runtime, "meta/workgraph/get", json!({ "id": item_id })).await;
     assert_eq!(result(&response)["item"]["id"], json!(item_id.clone()));
 
-    // list + ready
+    // list + ready, each with the page fields
     let response = rpc(&runtime, "meta/workgraph/list", json!({})).await;
     assert_eq!(result(&response)["items"].as_array().unwrap().len(), 1);
+    assert_eq!(result(&response)["total_items"], json!(1));
+    assert_eq!(result(&response)["truncated"], json!(false));
     let response = rpc(&runtime, "meta/workgraph/ready", json!({})).await;
     assert_eq!(
         result(&response)["items"][0]["id"],
         json!(item_id.clone()),
         "an open unclaimed item is ready"
     );
+    assert_eq!(result(&response)["total_items"], json!(1));
+    assert_eq!(result(&response)["truncated"], json!(false));
 
     // claim (upstream nested owner form)
     let response = rpc(
@@ -342,12 +346,14 @@ async fn item_lifecycle_end_to_end() {
     assert_eq!(edge["kind"], json!("related"));
     assert_eq!(edge["from_id"], json!(item_id.clone()));
 
-    // snapshot carries items + edges + high-water mark
+    // snapshot carries items + edges + high-water mark + the page fields
     let response = rpc(&runtime, "meta/workgraph/snapshot", json!({})).await;
     let snapshot = result(&response).clone();
     assert_eq!(snapshot["items"].as_array().unwrap().len(), 2);
     assert_eq!(snapshot["edges"].as_array().unwrap().len(), 1);
     assert!(snapshot["event_high_water_mark"].as_i64().is_some());
+    assert_eq!(snapshot["total_items"], json!(2));
+    assert_eq!(snapshot["truncated"], json!(false));
 
     // events tail
     let response = rpc(&runtime, "meta/workgraph/events", json!({ "limit": 100 })).await;

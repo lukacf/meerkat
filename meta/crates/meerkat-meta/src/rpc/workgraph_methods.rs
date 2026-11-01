@@ -599,8 +599,11 @@ pub(crate) async fn handle_workgraph_method(
         }
         "meta/workgraph/list" => {
             let filter: WorkItemFilter = parse_request(object)?;
-            let items = service.list(filter).await.map_err(workgraph_error_to_rpc)?;
-            Ok(serde_json::json!({ "items": items }))
+            let page = service
+                .list_page(filter)
+                .await
+                .map_err(workgraph_error_to_rpc)?;
+            Ok(to_result_value(&page))
         }
         "meta/workgraph/get" => {
             let request: WorkGraphIdParams = parse_request(object)?;
@@ -612,11 +615,11 @@ pub(crate) async fn handle_workgraph_method(
         }
         "meta/workgraph/ready" => {
             let filter: ReadyWorkFilter = parse_request(object)?;
-            let items = service
-                .ready(filter)
+            let page = service
+                .ready_page(filter)
                 .await
                 .map_err(workgraph_error_to_rpc)?;
-            Ok(serde_json::json!({ "items": items }))
+            Ok(to_result_value(&page))
         }
         "meta/workgraph/events" => {
             let filter: WorkGraphEventFilter = parse_request(object)?;

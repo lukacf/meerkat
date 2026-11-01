@@ -7,7 +7,8 @@ use crate::store::WorkGraphEventFilter;
 use crate::types::{
     AddEvidenceRequest, AttentionReassignRequest, ClaimWorkItemRequest, CloseWorkItemRequest,
     LinkWorkItemsRequest, PolicyEscalateRequest, ReadyWorkFilter, ReleaseWorkItemRequest,
-    UpdateWorkItemRequest, WorkGraphSnapshotFilter, WorkItemFilter, WorkItemId, WorkNamespace,
+    UpdateWorkItemRequest, WorkGraphItemsResponse, WorkGraphSnapshotFilter, WorkItemFilter,
+    WorkItemId, WorkNamespace,
 };
 use crate::{CreateWorkItemRequest, WorkGraphError, WorkGraphService};
 
@@ -307,19 +308,13 @@ pub(crate) async fn handle_workgraph_tools_call(
         }
         WorkGraphToolContract::List => {
             let filter: WorkItemFilter = parse(arguments)?;
-            service
-                .list(filter)
-                .await
-                .map(|items| json!({ "items": items }))
-                .map_err(map_error)
+            let page = service.list_page(filter).await.map_err(map_error)?;
+            page_value(&page)
         }
         WorkGraphToolContract::Ready => {
             let filter: ReadyWorkFilter = parse(arguments)?;
-            service
-                .ready(filter)
-                .await
-                .map(|items| json!({ "items": items }))
-                .map_err(map_error)
+            let page = service.ready_page(filter).await.map_err(map_error)?;
+            page_value(&page)
         }
         WorkGraphToolContract::Snapshot => {
             let filter: WorkGraphSnapshotFilter = parse(arguments)?;
@@ -460,6 +455,17 @@ impl From<WorkGraphEventFilterParams> for WorkGraphEventFilter {
             limit: value.limit,
         }
     }
+}
+
+/// A list or ready page in the shape RPC, REST and Meta send: the rows,
+/// then `total_items` and `truncated`, each omitted when absent.
+fn page_value(page: &WorkGraphItemsResponse) -> Result<Value, WorkGraphToolError> {
+    serde_json::to_value(page).map_err(|err| {
+        WorkGraphToolError::new(
+            WorkGraphToolErrorCode::InternalError,
+            format!("WorkGraph page is not encodable: {err}"),
+        )
+    })
 }
 
 fn parse<T: DeserializeOwned>(arguments: &Value) -> Result<T, WorkGraphToolError> {

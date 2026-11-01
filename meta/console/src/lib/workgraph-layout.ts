@@ -23,8 +23,9 @@ import { formatWorkGraphTimestamp } from "./workgraph-time";
 /// the outline and the tests all derive the same facts. Geometry belongs
 /// to the graph kit's layered layout; this file only says what to draw.
 
-/// Snapshot items requested per refresh (the server's maximum). The
-/// default of 100 silently kept the 100 least recently updated items.
+/// Snapshot items requested per refresh (the server's maximum). A larger
+/// graph is cut to the most recently updated items, and the snapshot
+/// reports the cut.
 export const WORKGRAPH_SNAPSHOT_LIMIT = 1000;
 /// Activity events read per refresh.
 export const WORKGRAPH_EVENTS_LIMIT = 200;

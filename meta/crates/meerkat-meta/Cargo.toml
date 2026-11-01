@@ -1,7 +1,7 @@
 [package]
 name = "meerkat-meta"
 description = "Companion orchestration platform for the Meerkat multi-agent runtime"
-version = "0.9.6"
+version = "0.9.7"
 edition.workspace = true
 license.workspace = true
 authors.workspace = true

@@ -22,7 +22,7 @@ use crate::identity_first::{AgentAddressability, AgentIdentity, DisplayName, Dur
 fn policy_json() -> Value {
     json!({
         "enabled": true,
-        "reserved_keys": {"labels": ["team", "clearance"], "context": ["project"]},
+        "reserved_keys": {"labels": ["team", "clearance"]},
         "authority_fields": {"clearance": {"values": ["basic", "elevated"]}},
         "peers": {"rules": [
             {"id": "leads", "target": {"profile": ["lead"]}, "outcome": "allow"},
@@ -517,7 +517,6 @@ fn policy_validation_refuses_typed() {
         policy.is_reserved_label("role"),
         "Meta's own keys are reserved"
     );
-    assert!(policy.is_reserved_context("project"));
     assert!(
         policy
             .authority_field("clearance")
@@ -727,6 +726,11 @@ fn policy_validation_refuses_typed() {
             "creator",
         ),
         (json!({"enabled": "yes"}), "enabled", "boolean"),
+        (
+            json!({"enabled": true, "reserved_keys": {"labels": [], "context": ["project"]}}),
+            "reserved_keys",
+            "context",
+        ),
     ];
     for (value, path, detail) in malformed {
         let refusal = refusal_of(&value);
@@ -874,6 +878,18 @@ fn normalization_refuses_typed() {
         create(&policy(), &lead(), &[lead_profile]).is_ok(),
         "any mob profile is allowed"
     );
+    // Context is no authority input: it may name any key, a reserved label
+    // key included, and no label key is reserved for context.
+    let mut free_context = spec("helper");
+    set_context(
+        &mut free_context,
+        json!({"team": "core", "project": "stars"}),
+    );
+    set_labels(&mut free_context, &[("project", "stars")]);
+    assert!(
+        create(&policy(), &lead(), &[free_context]).is_ok(),
+        "context keys are free"
+    );
 
     let cases = [
         spec_case(
@@ -888,11 +904,6 @@ fn normalization_refuses_typed() {
         spec_case(
             |spec| set_labels(spec, &[("role", "x")]),
             json!({"kind": "reserved_key", "key": "role", "field": "identities[0].spec.labels"}),
-        ),
-        spec_case(
-            |spec| set_labels(spec, &[("project", "x")]),
-            json!({"kind": "reserved_key", "key": "project",
-                   "field": "identities[0].spec.labels"}),
         ),
         spec_case(
             |spec| set_labels(spec, &[("bad key", "x")]),
@@ -923,15 +934,6 @@ fn normalization_refuses_typed() {
             |spec| set_labels(spec, &[("clearance", "top")]),
             json!({"kind": "authority_field_invalid", "key": "clearance",
                    "field": "identities[0].spec.labels"}),
-        ),
-        spec_case(
-            |spec| set_context(spec, json!({"project": "x"})),
-            json!({"kind": "reserved_key", "key": "project",
-                   "field": "identities[0].spec.context"}),
-        ),
-        spec_case(
-            |spec| set_context(spec, json!({"team": "x"})),
-            json!({"kind": "reserved_key", "key": "team", "field": "identities[0].spec.context"}),
         ),
         spec_case(
             |spec| {
@@ -1000,10 +1002,8 @@ fn normalization_refuses_typed() {
     };
     let refusal = create(&policy(), &human, &[spec("helper")]).expect_err("no rule");
     assert_eq!(
-        refusal.kind,
-        IdentityRefusalKind::CreationDenied {
-            change: ChangeClass::Create
-        },
+        refusal.to_data(),
+        json!({"kind": "change_denied", "change": "create"}),
         "no governing rule gets the default, deny"
     );
 }
@@ -1205,7 +1205,7 @@ fn the_console_updates_and_removes_any_identity_under_the_approval_rules() {
         .expect_err("removing a lead is denied");
     assert_eq!(
         refusal.to_data(),
-        json!({"kind": "creation_denied", "change": "remove"})
+        json!({"kind": "change_denied", "change": "remove"})
     );
     let removed = remove_identity_with(&targeted, &console, &entry_with("assistant", &[]))
         .expect("removing another profile's identity is planned");
@@ -1237,10 +1237,9 @@ fn update_and_remove_check_self_change_revision_and_change_classes() {
     };
     let refusal = update(&lead(), &entry, &stale).unwrap_err();
     assert_eq!(
-        refusal.kind,
-        IdentityRefusalKind::StaleRevision { current: 3 }
+        refusal.to_data(),
+        json!({"kind": "stale_spec", "current": 3, "field": "expected_revision"})
     );
-    assert_eq!(refusal.to_data()["current"], 3);
     assert_eq!(
         update(&lead(), &entry, &update_of(&entry, json!({})))
             .unwrap_err()
@@ -1286,7 +1285,7 @@ fn update_and_remove_check_self_change_revision_and_change_classes() {
     let migration = update_of(&entry, json!({"profile": "analyst"}));
     assert_eq!(
         update(&lead(), &entry, &migration).unwrap_err().to_data(),
-        json!({"kind": "creation_denied", "change": "profile"}),
+        json!({"kind": "change_denied", "change": "profile"}),
         "no rule lets an agent migrate a role, and the default denies"
     );
     let host = RequesterFacts::host("gateway");
@@ -2718,13 +2717,13 @@ fn every_refusal_token_is_the_closed_vocabulary() {
             // Policy.
             "batch_too_large",
             "validation_refused",
-            "creation_denied",
+            "change_denied",
             "invalid_request",
             "unsupported",
             // Identities and operations.
             "identity_unknown",
             "self_change_refused",
-            "stale_revision",
+            "stale_spec",
             "operation_reused",
             "admission_unsettled",
             "not_transferring",
@@ -2754,7 +2753,7 @@ fn every_refusal_token_is_the_closed_vocabulary() {
             "approver_not_eligible",
             "decided_before_presentation",
             // Admission.
-            "creation_held",
+            "changes_held",
             "host_preparation_pending",
             "candidate_launch",
             "identity_member",
@@ -2773,8 +2772,8 @@ fn every_refusal_token_is_the_closed_vocabulary() {
     assert_eq!(
         retryable,
         BTreeSet::from([
+            "changes_held",
             "consequences_unavailable",
-            "creation_held",
             "host_preparation_pending",
         ])
     );

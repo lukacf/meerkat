@@ -214,6 +214,14 @@ describe("topology view model", () => {
     assert.equal(topologyConnectionWords(view.counts), "none");
     assert.equal(topologyConnectionCount(view.counts), 0);
     assert.deepEqual(view.lanes.map((lane) => lane.id), ["Other"]);
+    // The runtime's own route to every member connects no one.
+    const roster = buildGraph([node("a"), node("b")], [], {
+      links: [],
+      routes: ["a", "b"].map((identity) => ({ key: `mob.member.${identity}`, channel: "notification", recipient: identity, managed: true })),
+    });
+    const rosterView = buildTopologyView(roster, options());
+    assert.equal(rosterView.hasRelations, false);
+    assert.equal(topologyConnectionWords(rosterView.counts), "none");
   });
 });
 

@@ -198,7 +198,7 @@ export interface TopologyViewModel {
   lanes: VizLane[];
   counts: TopologyCounts;
   problems: TopologyProblem[];
-  /** Any relation at all (wired, declared, cross, routes, helpers or messages). */
+  /** Any relation at all (wired, declared, cross, routes, helpers or messages); roster routes do not count. */
   hasRelations: boolean;
   statusById: Map<string, ConsoleTopologyAgentStatus>;
 }
@@ -479,7 +479,9 @@ export function buildTopologyView(graph: TopoGraph, options: TopologyViewOptions
   }
   problems.sort((left, right) => (left.tone === right.tone ? 0 : left.tone === "crit" ? -1 : 1));
 
-  const hasRelations = graph.edges.length > 0;
+  // A roster channel's routes (the runtime's own route to every member)
+  // connect no one: a team with only those has no connections yet.
+  const hasRelations = graph.edges.some((edge) => !(edge.relation === "route" && edge.managed));
   return { nodes, edges, lanes, counts, problems, hasRelations, statusById };
 }
 

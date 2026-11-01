@@ -49,16 +49,6 @@
 @container cc-panel (max-width: 640px) {
   .topo__view-option > span { display: none; }
 }
-/* A pane of about 500 px (two docked panes) already folds the glance strip
-   into 2 x 2 here; the kit folds every strip only under 480 px. */
-@container cc-panel (max-width: 539px) {
-  .topo .cc-glance {
-    grid-auto-flow: row;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-  .topo .cc-glance > .cc-figure:nth-child(2n + 1) { border-left: 0; }
-  .topo .cc-glance > .cc-figure:nth-child(n + 3) { border-top: 1px solid var(--_cc-border-soft); }
-}
 
 /* The map: the graph canvas full bleed, its notices over it. */
 .topo__map {

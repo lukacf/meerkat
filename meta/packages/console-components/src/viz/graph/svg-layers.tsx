@@ -6,12 +6,13 @@
 
 import React from "react";
 
-import type { LayoutPoint, PlacedCluster, PlacedFrame, PlacedLane } from "../layout/types";
+import { estimateLaneLabelWidth } from "../layout/geometry";
+import type { ClusterBundle, LayoutPoint, PlacedCluster, PlacedFrame, PlacedLane } from "../layout/types";
 import { bundleWidth } from "./edge-geometry";
 import type { LabelPlacement } from "./labels";
 import { FlagGlyph, MarkGlyph, ProgressRingShape, StatusSquareShape, chevronPath, itemStatusOf } from "./marks";
 import type { GlyphState } from "./marks";
-import type { GraphClassNames, VizAttributes, VizEdge, VizNode, VizNodeBox, VizProgress, VizViewport } from "./types";
+import type { GraphClassNames, VizAttributes, VizEdge, VizMemoryState, VizNode, VizNodeBox, VizProgress, VizViewport } from "./types";
 
 function cx(...parts: Array<string | false | null | undefined>): string {
   return parts.filter(Boolean).join(" ");
@@ -40,7 +41,11 @@ export interface NodeViewProps {
   accent: boolean;
   exiting: boolean;
   entering: boolean;
-  glyph: GlyphState;
+  /** Glyph state as primitives, so a hover re-renders only the nodes it changes. */
+  live: boolean;
+  memory: VizMemoryState;
+  memoryLit: GlyphState["memoryLit"];
+  badge: GlyphState["badge"];
   /** Clusters: draw the member as a dot of this radius (geometric). */
   dot: number;
   classNames?: GraphClassNames;
@@ -72,8 +77,8 @@ function nodeClass(props: NodeViewProps): string {
     props.selected && "is-selected",
     props.lit && "is-lit",
     props.downstream && "is-downstream",
-    (props.flash || props.glyph.live) && node.kind !== "item" && node.kind !== "goal" && "is-hot",
-    props.glyph.live && "is-live",
+    (props.flash || props.live) && node.kind !== "item" && node.kind !== "goal" && "is-hot",
+    props.live && "is-live",
     props.flash && "is-flash",
     props.accent && "is-accent",
     node.retired && "is-retired",
@@ -125,7 +130,7 @@ function ItemCardBody({ props }: { props: NodeViewProps }): React.JSX.Element {
       <rect className="cc-viz-card" x={left} y={top} width={w} height={h} rx={4} />
       {props.accent ? <rect className="cc-viz-card__rule" x={left} y={top} width={2} height={h} /> : null}
       <g transform={`translate(${square.x} ${square.y})`}>
-        <StatusSquareShape status={status} live={props.glyph.live} />
+        <StatusSquareShape status={status} live={props.live} />
       </g>
       <text className={cx("cc-viz-card__title", props.classNames?.itemTitle)} x={left + 28} y={titleY}>
         {props.title}
@@ -205,7 +210,7 @@ export const NodeView = React.memo(function NodeView(props: NodeViewProps): Reac
       data-node-id={node.id}
       data-kind={node.kind}
       data-tone={node.live ? "live" : node.tone}
-      data-live={props.glyph.live ? "true" : undefined}
+      data-live={props.live ? "true" : undefined}
       data-selected={props.selected ? "true" : undefined}
       data-testid={props.testId}
       role={interactive ? "button" : undefined}
@@ -222,7 +227,7 @@ export const NodeView = React.memo(function NodeView(props: NodeViewProps): Reac
         </g>
       ) : (
         <g className={props.dot > 0 ? "cc-viz-glyph" : "cc-viz-glyph cc-viz-k"}>
-          <MarkGlyph node={node} state={props.glyph} dot={props.dot || undefined} />
+          <MarkGlyph node={node} state={{ live: props.live, memory: props.memory, memoryLit: props.memoryLit, badge: props.badge }} dot={props.dot || undefined} />
           {props.decor}
         </g>
       )}
@@ -423,49 +428,49 @@ export const FrameView = React.memo(function FrameView({ frame, hasHeaderNode, l
 /** Clusters: one line per group pair, then each group's label and count under its rings. */
 export function ClustersLayer({ clusters, bundles, hot }: {
   clusters: readonly PlacedCluster[];
-  bundles: readonly { id: string; from: string; to: string; count: number }[];
+  bundles: readonly ClusterBundle[];
   hot: ReadonlySet<string>;
 }): React.JSX.Element {
   const byId = new Map(clusters.map((cluster) => [cluster.id, cluster]));
+  const at = (value: number) => Math.round(value * 10) / 10;
   return (
     <g className="cc-viz-clusters">
       {bundles.map((bundle) => {
         const a = byId.get(bundle.from);
         const b = byId.get(bundle.to);
         if (!a || !b) return null;
-        const dx = b.cx - a.cx;
-        const dy = b.cy - a.cy;
-        const length = Math.hypot(dx, dy) || 1;
-        const ux = dx / length;
-        const uy = dy / length;
-        const x0 = a.cx + ux * (a.r + 4);
-        const y0 = a.cy + uy * (a.r + 4);
-        const x1 = b.cx - ux * (b.r + 4);
-        const y1 = b.cy - uy * (b.r + 4);
-        if (length <= a.r + b.r + 8) return null;
+        // Touching groups need no line.
+        if (Math.hypot(b.cx - a.cx, b.cy - a.cy) <= a.r + b.r + 8) return null;
+        const { x0, y0, cx: qx, cy: qy, x1, y1, bowed } = bundle.route;
         return (
           <path
             key={bundle.id}
             className={cx("cc-viz-bundle", (hot.has(bundle.from) || hot.has(bundle.to)) && "is-hot")}
-            d={`M${Math.round(x0)} ${Math.round(y0)}L${Math.round(x1)} ${Math.round(y1)}`}
+            d={bowed ? `M${at(x0)} ${at(y0)}Q${at(qx)} ${at(qy)} ${at(x1)} ${at(y1)}` : `M${at(x0)} ${at(y0)}L${at(x1)} ${at(y1)}`}
             style={{ strokeWidth: bundleWidth(bundle.count) }}
             data-bundle={`${bundle.from}:${bundle.to}`}
             data-count={bundle.count}
           />
         );
       })}
-      {clusters.map((cluster) => (
-        <g key={cluster.id} className="cc-viz-cluster" transform={`translate(${Math.round(cluster.cx)} ${Math.round(cluster.cy + cluster.r + 14)})`}>
-          <g className="cc-viz-k">
-            <text className="cc-viz-cluster__label" textAnchor="middle" y={0}>
-              {cluster.label ? cluster.label.toUpperCase() : ""}
-            </text>
-            <text className="cc-viz-cluster__count" textAnchor="middle" y={13}>
-              {cluster.count}
-            </text>
+      {clusters.map((cluster) => {
+        const label = cluster.label ? cluster.label.toUpperCase() : "";
+        // A plate in the background colour: bundles pass under the label, not through it.
+        const plate = Math.max(estimateLaneLabelWidth(label), 8 * String(cluster.count).length) + 12;
+        return (
+          <g key={cluster.id} className="cc-viz-cluster" transform={`translate(${Math.round(cluster.cx)} ${Math.round(cluster.cy + cluster.r + 14)})`}>
+            <g className="cc-viz-k">
+              <rect className="cc-viz-cluster__plate" x={-plate / 2} y={-11} width={plate} height={30} rx={3} />
+              <text className="cc-viz-cluster__label" textAnchor="middle" y={0}>
+                {label}
+              </text>
+              <text className="cc-viz-cluster__count" textAnchor="middle" y={13}>
+                {cluster.count}
+              </text>
+            </g>
           </g>
-        </g>
-      ))}
+        );
+      })}
     </g>
   );
 }

@@ -4,7 +4,7 @@
 
 export { computeGraphLayout, effectiveLayoutKind, framesFor, toLayoutEdges, toLayoutNodes } from "./compute";
 export type { GraphLayoutInput } from "./compute";
-export { CLUSTERS, layoutClusters, ringSlots } from "./clusters";
+export { CLUSTERS, layoutClusters, ringSlots, routeBundle } from "./clusters";
 export { FORCE, forceAnchors, forceLayoutFrom, loadD3Force, runForce, seedForce } from "./force";
 export type { ForceRun } from "./force";
 export {
@@ -22,8 +22,9 @@ export type { Density, MarkGeometry, TextMeasure } from "./geometry";
 export { LANES, OTHER_LANE, layoutLanes } from "./lanes";
 export { LAYERED, layoutLayered, orderRanks, rankItems, routeBetween } from "./layered";
 export { RADIAL, RELATION_ORDER, layoutRadial, radialGroupOf } from "./radial";
-export { boundsOf, compareNodes, emptyLayout, unionBounds } from "./types";
+export { boundsOf, compareLabels, compareNodes, emptyLayout, unionBounds } from "./types";
 export type {
+  BundleRoute,
   ClusterBundle,
   EdgeRoute,
   GraphLayout,

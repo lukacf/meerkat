@@ -1,10 +1,12 @@
 import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import React from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 
 import { GraphView } from "./graph-view";
 import { GraphList, connectionsSummary, graphListRows } from "./list-twin";
 import { StatusSquare } from "./status-square";
+import { estimateLabelWidth, markGeometry } from "../layout/geometry";
 import { graphSummary, nodeAccessibleName, vizRelationWord } from "./words";
 import type { GraphViewHandle, VizEdge, VizNode } from "./types";
 
@@ -192,6 +194,32 @@ describe("GraphView", () => {
     expect(items.find((element) => element.getAttribute("data-item-id") === "b")).toHaveClass("is-accent");
   });
 
+  it("draws in a server render, where no layout effect measures the frame", () => {
+    const nodes: VizNode[] = [
+      { id: "goal", kind: "goal", label: "Ship the 2.4 release", status: "in_progress" },
+      { id: "a", kind: "item", label: "Freeze the branch", frame: "goal", status: "completed", attributes: { "data-goal-id": "goal" }, className: "is-completed" },
+      { id: "b", kind: "item", label: "Run the suite", frame: "goal", status: "blocked", className: "is-blocked" },
+    ];
+    const edges: VizEdge[] = [{ id: "ab", from: "a", to: "b", relation: "blocks", attributes: { "data-kind": "blocks" } }];
+    const html = renderToStaticMarkup(
+      <GraphView
+        nodes={nodes}
+        edges={edges}
+        layout="layered"
+        ariaLabel="Work item dependency graph"
+        testIdPrefix="workgraph-graph"
+        testIds={{ root: "workgraph-graph-frame", node: "workgraph-graph-node", edge: "workgraph-graph-edge" }}
+        classNames={{ itemTitle: "workgraph-graph__node-title" }}
+      />,
+    );
+    expect(html.match(/data-testid="workgraph-graph-node"/g)).toHaveLength(3);
+    expect(html).toContain('data-testid="workgraph-graph-frame:goal"');
+    expect(html).toContain('data-goal-id="goal"');
+    expect(html).toMatch(/class="[^"]*\bis-blocked\b/);
+    expect(html).toMatch(/data-testid="workgraph-graph-edge"[^>]*data-kind="blocks"|data-kind="blocks"[^>]*data-testid="workgraph-graph-edge"/);
+    expect(html).toContain("workgraph-graph__node-title");
+  });
+
   it("brings focusId into the tab order and returns focus through the handle", () => {
     const { nodes, edges } = team();
     const ref = React.createRef<GraphViewHandle>();
@@ -201,6 +229,146 @@ describe("GraphView", () => {
     act(() => ref.current!.focusNode("billing"));
     expect(document.activeElement).toBe(screen.getByTestId("t-node:billing"));
     expect(ref.current!.viewport()).toEqual(expect.objectContaining({ scale: expect.any(Number) }));
+  });
+
+  it("zooms to a node or to a goal's whole frame through the handle", () => {
+    // The graph's frame is 800 x 600; its chrome takes no room.
+    const rect = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      const [width, height] = this.classList.contains("cc-viz-graph") ? [800, 600] : [0, 0];
+      return { x: 0, y: 0, left: 0, top: 0, right: width, bottom: height, width, height, toJSON: () => ({}) } as DOMRect;
+    });
+    try {
+      const nodes: VizNode[] = [
+        { id: "goal", kind: "goal", label: "Ship the 2.4 release" },
+        ...Array.from({ length: 6 }, (_, index): VizNode => ({ id: `i${index}`, kind: "item", label: `Item ${index}`, frame: "goal", status: "open" })),
+      ];
+      const edges: VizEdge[] = Array.from({ length: 5 }, (_, index) => ({ id: `e${index}`, from: `i${index}`, to: `i${index + 1}`, relation: "blocks" }));
+      const ref = React.createRef<GraphViewHandle>();
+      render(<GraphView ref={ref} nodes={nodes} edges={edges} layout="layered" ariaLabel="g" testIdPrefix="t" legend="off" />);
+      act(() => ref.current!.fitTo(["i0"]));
+      const one = ref.current!.viewport();
+      expect(one.scale).toBe(1.6);
+      act(() => ref.current!.fitTo(["goal"]));
+      const frame = ref.current!.viewport();
+      expect(frame.scale).toBeLessThan(one.scale);
+      act(() => ref.current!.fitTo(["nobody"]));
+      expect(ref.current!.viewport()).toEqual(frame);
+    } finally {
+      rect.mockRestore();
+    }
+  });
+
+  it("fits a small layered graph by its right-hand labels, inside the given padding", () => {
+    const rect = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      const [width, height] = this.classList.contains("cc-viz-graph") ? [420, 64] : [0, 0];
+      return { x: 0, y: 0, left: 0, top: 0, right: width, bottom: height, width, height, toJSON: () => ({}) } as DOMRect;
+    });
+    try {
+      const first = "Version one, the first of them";
+      const nodes: VizNode[] = [
+        { id: "v1", kind: "agent", label: first },
+        { id: "v2", kind: "agent", label: "v2" },
+        { id: "v3", kind: "agent", label: "v3" },
+      ];
+      const edges: VizEdge[] = [
+        { id: "a", from: "v1", to: "v2", relation: "blocks" },
+        { id: "b", from: "v2", to: "v3", relation: "blocks" },
+      ];
+      const ref = React.createRef<GraphViewHandle>();
+      render(<GraphView ref={ref} nodes={nodes} edges={edges} layout="layered" ariaLabel="g" testIdPrefix="t" legend="off" controls={false} minimap="off" fitPadding={8} />);
+      const view = ref.current!.viewport();
+      const at = (id: string) => screen.getByTestId(`t-node:${id}`).getAttribute("transform")!.match(/translate\(([-\d.]+) ([-\d.]+)\)/)!.slice(1).map(Number);
+      const r = markGeometry("agent").outer;
+      const [x1, y1] = at("v1");
+      const [x3] = at("v3");
+      expect(view.scale).toBe(1);
+      // The labels sit on the right: nothing is reserved left of the first mark
+      // (the picture is centred across any slack the width leaves).
+      const left = (x1 - r) * view.scale + view.tx;
+      expect(left).toBeGreaterThanOrEqual(8);
+      expect(left).toBeLessThanOrEqual(8 + 8);
+      expect((x3 + r + 5 + estimateLabelWidth("v3")) * view.scale + view.tx).toBeLessThanOrEqual(420 - 8);
+      // Pinned to the top: the first row (24 px) starts 8 px in.
+      expect(y1 * view.scale + view.ty).toBeLessThanOrEqual(8 + 12 + 1);
+    } finally {
+      rect.mockRestore();
+    }
+  });
+
+  it("folds the legend in a narrow frame until it is unfolded, then stacks its rows", () => {
+    let frameWidth = 500;
+    const rect = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      const [width, height] = this.classList.contains("cc-viz-graph") ? [frameWidth, 600] : [0, 0];
+      return { x: 0, y: 0, left: 0, top: 0, right: width, bottom: height, width, height, toJSON: () => ({}) } as DOMRect;
+    });
+    try {
+      const { nodes, edges } = team();
+      const { unmount } = render(<GraphView nodes={nodes} edges={edges} lanes={lanes} layout="lanes" ariaLabel="g" testIdPrefix="t" />);
+      const legend = () => screen.getByTestId("t-legend");
+      expect(legend()).toHaveClass("is-collapsed");
+      fireEvent.click(within(legend()).getByRole("button", { name: "Legend" }));
+      expect(legend()).not.toHaveClass("is-collapsed");
+      expect(legend()).toHaveClass("is-stacked");
+      expect(screen.getByTestId("t-legend:wired")).toBeInTheDocument();
+      unmount();
+      frameWidth = 900;
+      render(<GraphView nodes={nodes} edges={edges} lanes={lanes} layout="lanes" ariaLabel="g" testIdPrefix="t" />);
+      expect(legend()).not.toHaveClass("is-collapsed");
+      expect(legend()).not.toHaveClass("is-stacked");
+    } finally {
+      rect.mockRestore();
+    }
+  });
+
+  it("highlights a hovered node's neighbours and lets the highlight linger a moment over empty space", async () => {
+    const { nodes, edges } = team();
+    const onHover = vi.fn();
+    render(<GraphView nodes={nodes} edges={edges} lanes={lanes} layout="lanes" ariaLabel="g" testIdPrefix="t" onHover={onHover} />);
+    const root = screen.getByTestId("t-graph");
+    fireEvent.pointerOver(screen.getByTestId("t-node:billing"));
+    expect(root).toHaveAttribute("data-hovering", "true");
+    expect(screen.getByTestId("t-node:router")).toHaveClass("is-lit");
+    expect(screen.getByTestId("t-node:support")).toHaveClass("is-lit");
+    expect(screen.getByTestId("t-node:triage")).not.toHaveClass("is-lit");
+    expect(onHover).toHaveBeenLastCalledWith({ node: "billing" });
+    // Empty space: still lit at once, cleared shortly after.
+    fireEvent.pointerOver(root.querySelector("svg")!);
+    expect(root).toHaveAttribute("data-hovering", "true");
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 150));
+    });
+    expect(root).not.toHaveAttribute("data-hovering");
+    expect(onHover).toHaveBeenLastCalledWith(null);
+    // Leaving the graph clears at once.
+    fireEvent.pointerOver(screen.getByTestId("t-node:router"));
+    expect(root).toHaveAttribute("data-hovering", "true");
+    fireEvent.pointerLeave(root);
+    expect(root).not.toHaveAttribute("data-hovering");
+  });
+
+  it("leaves plain wheel scrolling to the page unless asked to zoom with it", () => {
+    const { nodes, edges } = team();
+    const wheel = (target: Element, init: WheelEventInit) => {
+      const event = new WheelEvent("wheel", { deltaY: -100, bubbles: true, cancelable: true, ...init });
+      act(() => {
+        target.dispatchEvent(event);
+      });
+      return event.defaultPrevented;
+    };
+    const ref = React.createRef<GraphViewHandle>();
+    const { rerender } = render(<GraphView ref={ref} nodes={nodes} edges={edges} lanes={lanes} layout="lanes" ariaLabel="g" testIdPrefix="t" />);
+    const root = screen.getByTestId("t-graph");
+    const start = ref.current!.viewport().scale;
+    expect(wheel(root, {})).toBe(true);
+    const zoomed = ref.current!.viewport().scale;
+    expect(zoomed).toBeGreaterThan(start);
+    rerender(<GraphView ref={ref} nodes={nodes} edges={edges} lanes={lanes} layout="lanes" ariaLabel="g" testIdPrefix="t" wheelZoom="pinch" />);
+    expect(wheel(root, {})).toBe(false);
+    expect(ref.current!.viewport().scale).toBe(zoomed);
+    expect(wheel(root, { ctrlKey: true })).toBe(true);
+    expect(ref.current!.viewport().scale).toBeGreaterThan(zoomed);
+    rerender(<GraphView ref={ref} nodes={nodes} edges={edges} lanes={lanes} layout="lanes" ariaLabel="g" testIdPrefix="t" wheelZoom="off" />);
+    expect(wheel(root, { ctrlKey: true })).toBe(false);
   });
 
   it("draws above 300 nodes on a canvas with one focus proxy, and switches force to clusters above 150", () => {

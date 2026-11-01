@@ -271,7 +271,10 @@ export interface GraphViewProps {
   onOpen?: (id: string) => void;
   selectedEdge?: string | null;
   onEdgeSelect?: (id: string | null) => void;
-  /** Brings this node into view and makes it the graph's tab stop. */
+  /**
+   * Makes this node the graph's roving tab stop. It does not move the view:
+   * the handle's `reveal(id)` or `fitTo(ids)` brings a node into view.
+   */
   focusId?: string | null;
   onFocusChange?: (id: string | null) => void;
   onHover?: (target: { node?: string; edge?: string } | null) => void;
@@ -297,6 +300,18 @@ export interface GraphViewProps {
   minimap?: "auto" | "on" | "off";
   /** The zoom controls (bottom left). */
   controls?: boolean;
+  /**
+   * The mouse wheel. `always` (default): zooms at the pointer, Shift pans.
+   * `pinch`: zooms only on a trackpad pinch or Ctrl/Cmd + wheel and leaves
+   * plain scrolling to the page (a small graph inside a scrolling drawer).
+   * `off`: leaves every wheel event to the page.
+   */
+  wheelZoom?: "always" | "pinch" | "off";
+  /**
+   * Room the fit keeps clear on each side, in px: default 24 for layered,
+   * 32 for the others. The bottom also clears the legend and the controls.
+   */
+  fitPadding?: number;
   /** `auto`: SVG up to 300 nodes and 800 edges, canvas above. */
   renderer?: "auto" | "svg" | "canvas";
   /** `auto`: the A3.9 level of detail. */
@@ -332,6 +347,8 @@ export interface GraphViewProps {
 /** Imperative handle (`ref`) for panels: return focus, reveal, fit. */
 export interface GraphViewHandle {
   fit(): void;
+  /** Zooms to show these nodes; a goal shows its whole frame (double-click a goal header). */
+  fitTo(ids: readonly string[]): void;
   zoomBy(factor: number): void;
   reveal(id: string): void;
   /** Moves keyboard focus to the node (the drawer's Escape returns focus here). */

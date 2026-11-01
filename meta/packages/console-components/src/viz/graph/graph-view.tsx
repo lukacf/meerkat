@@ -17,7 +17,7 @@ import { GraphTooltip, Legend, Minimap, ZoomControls } from "./controls";
 import { edgeLength, edgeNormal, edgePath, edgeShape, angleAt, pointAt } from "./edge-geometry";
 import type { EdgeShape } from "./edge-geometry";
 import { isNavigationKey, nodeToward, readingOrder } from "./keyboard";
-import { fitText, outwardSides, placeLabels } from "./labels";
+import { LABEL_GAP, LABEL_HEIGHT, fitText, labelAt, outwardSides, placeLabels } from "./labels";
 import type { LabelInput, LabelPlacement, LabelSide } from "./labels";
 import { buildGraphModel, highlightFor } from "./model";
 import type { GraphModel, Highlight } from "./model";
@@ -61,7 +61,15 @@ export const SVG_LIMITS = { nodes: 300, edges: 800 } as const;
 const MOVE_MS = 320;
 /** Lanes never fit below this: further out the marks would crowd their labels. */
 const LANE_MIN_SCALE = 0.6;
+/** Below this frame width the legend starts folded and stacks its rows under its title. */
+const LEGEND_NARROW = 560;
+/** Layered frames sit this far in from the view's edges (px). */
+const CARD_FIT_PAD = 24;
+/** Item cards never fit below this: their titles stay at 10 px or more. */
+const CARD_MIN_SCALE = 0.85;
 const EXIT_MS = 200;
+/** How long a hover highlight outlives the pointer leaving its mark for empty space. */
+const HOVER_CLEAR_MS = 90;
 const LABEL_SETTLE_MS = 120;
 
 function cx(...parts: Array<string | false | null | undefined>): string {
@@ -70,6 +78,16 @@ function cx(...parts: Array<string | false | null | undefined>): string {
 
 function now(): number {
   return typeof performance !== "undefined" ? performance.now() : Date.now();
+}
+
+const subscribeNothing = () => () => undefined;
+
+/**
+ * False while React renders on a server (renderToString, renderToStaticMarkup),
+ * where no layout effect ever measures the frame; true in a browser or jsdom.
+ */
+function useClientRender(): boolean {
+  return React.useSyncExternalStore(subscribeNothing, () => true, () => false);
 }
 
 /** The element's size; `measured` turns true once it has been read (zero in jsdom). */
@@ -118,12 +136,25 @@ const ESTIMATES: Measures = {
 function useMeasures(ref: React.RefObject<HTMLElement | null>): Measures {
   const [family, setFamily] = React.useState<string | null>(null);
   const [epoch, setEpoch] = React.useState(0);
+  // Read once, and again when a theme or variant changes the face (terminal
+  // is monospace): a style read on every render forces a recalculation.
   React.useLayoutEffect(() => {
     const element = ref.current;
-    if (!element || typeof getComputedStyle !== "function") return;
-    const next = getComputedStyle(element).fontFamily || null;
-    setFamily((previous) => (previous === next ? previous : next));
-  });
+    if (!element || typeof getComputedStyle !== "function") return undefined;
+    const read = () => {
+      const next = getComputedStyle(element).fontFamily || null;
+      setFamily((previous) => (previous === next ? previous : next));
+    };
+    read();
+    if (typeof MutationObserver === "undefined") return undefined;
+    const observer = new MutationObserver(read);
+    observer.observe(element.ownerDocument.documentElement, {
+      attributes: true,
+      subtree: true,
+      attributeFilter: ["data-cc-theme", "data-cc-variant", "class"],
+    });
+    return () => observer.disconnect();
+  }, [ref]);
   React.useEffect(() => {
     // Widths change once web fonts arrive; nothing to redo when they already have.
     if (typeof document === "undefined" || !document.fonts?.ready || document.fonts.status === "loaded") return undefined;
@@ -263,6 +294,8 @@ export const GraphView = React.forwardRef<GraphViewHandle, GraphViewProps>(funct
     legend = "auto",
     minimap = "auto",
     controls = true,
+    wheelZoom = "always",
+    fitPadding,
     renderer = "auto",
     labels = "auto",
     edgeLabels = "auto",
@@ -278,6 +311,10 @@ export const GraphView = React.forwardRef<GraphViewHandle, GraphViewProps>(funct
   const canvasRef = React.useRef<HTMLCanvasElement | null>(null);
   const particleRef = React.useRef<SVGGElement | null>(null);
   const size = useElementSize(rootRef);
+  // A browser draws after the frame's first measure; a server render, which
+  // never measures, draws at the default size.
+  const clientRender = useClientRender();
+  const drawable = size.measured || !clientRender;
   const reduced = useReducedMotion(rootRef);
   const measures = useMeasures(rootRef);
   const onScreen = useOnScreen(rootRef);
@@ -298,7 +335,10 @@ export const GraphView = React.forwardRef<GraphViewHandle, GraphViewProps>(funct
   const hiddenSet = React.useMemo(() => new Set(hiddenList), [hiddenList]);
   const [focusMode, setFocusMode] = React.useState(false);
   const focusTarget = focusMode ? selection[0] ?? null : null;
-  const [legendCollapsed, setLegendCollapsed] = React.useState(legend === "collapsed");
+  // The legend starts folded where asked, and in a narrow frame (until the user unfolds it).
+  const [legendChoice, setLegendChoice] = React.useState<boolean | null>(null);
+  const narrowFrame = size.width > 0 && size.width < LEGEND_NARROW;
+  const legendCollapsed = legendChoice ?? (legend === "collapsed" || narrowFrame);
   const panel = panelOfKey(cacheKey) || testIdPrefix || "";
   const [minimapHidden, setMinimapHidden] = React.useState(() => readMinimapHidden(panel));
 
@@ -306,17 +346,22 @@ export const GraphView = React.forwardRef<GraphViewHandle, GraphViewProps>(funct
     () => buildGraphModel({ nodes, edges, showRetired, hiddenRelations: hiddenSet, focus: focusTarget }),
     [nodes, edges, showRetired, hiddenSet, focusTarget],
   );
+  const modelRef = React.useRef(model);
+  modelRef.current = model;
   const kind = effectiveLayoutKind(layoutKind, model.nodes.length);
   const cards = kind === "layered";
   const useCanvas = renderer === "canvas" || (renderer !== "svg" && (model.nodes.length > SVG_LIMITS.nodes || model.edges.length > SVG_LIMITS.edges));
   const tokens = useVizTokens(rootRef, useCanvas);
 
   // Layout. Lanes and clusters spread across the frame; force settles in idle chunks.
-  const layoutWidth = size.width > 0 ? Math.max(320, size.width - 2 * ZOOM.pad) : 960;
+  // Layered pictures sit closer to the frame's edge (the A3.9 WorkGraph frames, 24 px in).
+  const fitPad = fitPadding !== undefined && fitPadding >= 0 ? fitPadding : cards ? CARD_FIT_PAD : ZOOM.pad;
+  const layoutWidth = size.width > 0 ? Math.max(320, size.width - 2 * fitPad) : 960;
   const layoutHeight = size.height > 0 ? Math.max(200, size.height - 2 * ZOOM.pad) : 560;
   // The bottom-left chrome (legend and zoom controls) stays clear of the fitted picture.
   const chromeRef = React.useRef<HTMLDivElement | null>(null);
   const [chromeHeight, setChromeHeight] = React.useState(0);
+  const chromeKey = `${legend}:${controls}`;
   React.useLayoutEffect(() => {
     const element = chromeRef.current;
     if (!element) {
@@ -326,11 +371,12 @@ export const GraphView = React.forwardRef<GraphViewHandle, GraphViewProps>(funct
     const apply = () => setChromeHeight(Math.round(element.getBoundingClientRect().height));
     apply();
     if (typeof ResizeObserver === "undefined") return undefined;
+    // The observer follows the legend opening, folding and wrapping.
     const observer = new ResizeObserver(apply);
     observer.observe(element);
     return () => observer.disconnect();
-  });
-  const fitBottom = chromeHeight > 0 ? Math.max(ZOOM.pad, chromeHeight + 20) : ZOOM.pad;
+  }, [chromeKey]);
+  const fitBottom = chromeHeight > 0 ? Math.max(fitPad, chromeHeight + 20) : fitPad;
   const cachedRef = React.useRef<Map<string, LayoutPoint> | null>(null);
   if (cachedRef.current === null) cachedRef.current = cacheKey ? readPositionCache(cacheKey) : new Map();
   const [settled, setSettled] = React.useState<Map<string, LayoutPoint> | null>(null);
@@ -363,8 +409,13 @@ export const GraphView = React.forwardRef<GraphViewHandle, GraphViewProps>(funct
       const fitScale = Math.max(LANE_MIN_SCALE, Math.min(1, (size.height - ZOOM.pad - fitBottom) / first.bounds.h));
       if (fitScale < 0.98) return computeGraphLayout({ ...input, width: layoutWidth / fitScale });
     }
+    // Frames, likewise, fill the width at the scale that fits their height.
+    if (kind === "layered" && first.frames.length > 0 && first.bounds.h > 0 && size.height > 0) {
+      const fitScale = Math.max(CARD_MIN_SCALE, Math.min(1, (size.height - fitPad - fitBottom) / first.bounds.h));
+      if (fitScale < 0.98) return computeGraphLayout({ ...input, width: layoutWidth / fitScale });
+    }
     return first;
-  }, [kind, model, lanes, frames, center, density, layoutWidth, layoutHeight, measures.label, settled, size.height, fitBottom]);
+  }, [kind, model, lanes, frames, center, density, layoutWidth, layoutHeight, measures.label, settled, size.height, fitPad, fitBottom]);
   const layoutRef = React.useRef(layout);
   layoutRef.current = layout;
 
@@ -476,7 +527,7 @@ export const GraphView = React.forwardRef<GraphViewHandle, GraphViewProps>(funct
     });
   }, []);
   const limits: FitLimits = cards
-    ? { minScale: 0.85, maxScale: 1 }
+    ? { minScale: CARD_MIN_SCALE, maxScale: 1, alignTop: true }
     : kind === "lanes"
       ? { minScale: LANE_MIN_SCALE, maxScale: 1 }
       : kind === "clusters"
@@ -490,6 +541,16 @@ export const GraphView = React.forwardRef<GraphViewHandle, GraphViewProps>(funct
     for (const node of model.nodes) {
       const box = layout.nodes.get(node.id);
       if (!box || isCardKind(node.kind)) continue;
+      if (kind === "layered") {
+        // Layered marks carry their label on the right.
+        const r = markGeometry(node.kind, node.size).outer;
+        const half = Math.max(r, LABEL_HEIGHT / 2) + 2;
+        x0 = Math.min(x0, box.x - r - 2);
+        x1 = Math.max(x1, box.x + r + LABEL_GAP + measures.label(node.label) + 2);
+        y0 = Math.min(y0, box.y - half);
+        y1 = Math.max(y1, box.y + half);
+        continue;
+      }
       const half = Math.max(box.w / 2, measures.label(node.label) / 2 + 4);
       x0 = Math.min(x0, box.x - half);
       x1 = Math.max(x1, box.x + half);
@@ -497,11 +558,11 @@ export const GraphView = React.forwardRef<GraphViewHandle, GraphViewProps>(funct
       y1 = Math.max(y1, box.y + box.h / 2 + 22);
     }
     return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
-  }, [layout, model.nodes, measures.label]);
+  }, [layout, model.nodes, measures.label, kind]);
   const fit = React.useMemo(
-    () => fitViewport(fitBounds, size.width, size.height, limits, { top: ZOOM.pad, right: ZOOM.pad, bottom: fitBottom, left: ZOOM.pad }),
+    () => fitViewport(fitBounds, size.width, size.height, limits, { top: fitPad, right: fitPad, bottom: fitBottom, left: fitPad }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [fitBounds.x, fitBounds.y, fitBounds.w, fitBounds.h, size.width, size.height, limits.minScale, limits.maxScale, fitBottom],
+    [fitBounds.x, fitBounds.y, fitBounds.w, fitBounds.h, size.width, size.height, limits.minScale, limits.maxScale, limits.alignTop, fitPad, fitBottom],
   );
   const fitRef = React.useRef(fit);
   fitRef.current = fit;
@@ -557,8 +618,8 @@ export const GraphView = React.forwardRef<GraphViewHandle, GraphViewProps>(funct
     : selection.find((id) => model.byId.has(id)) ?? order[0]?.id ?? null;
 
   React.useEffect(() => {
-    if (props.focusId && model.byId.has(props.focusId)) setFocusedId(props.focusId);
-  }, [props.focusId, model]);
+    if (props.focusId && modelRef.current.byId.has(props.focusId)) setFocusedId(props.focusId);
+  }, [props.focusId]);
 
   // Live: particles, landing flashes, memory arcs, boosts and count badges.
   const [flashes, addFlash] = useExpiring<Record<string, never>>();
@@ -643,7 +704,8 @@ export const GraphView = React.forwardRef<GraphViewHandle, GraphViewProps>(funct
   // The one animation loop: particles (and the canvas pulse); paused off screen.
   const liveIds = React.useMemo(() => new Set(model.nodes.filter((node) => node.live || node.tone === "live").map((node) => node.id)), [model.nodes]);
   const canvasPulse = useCanvas && !reduced && liveIds.size > 0;
-  const [pulsePhase, setPulsePhase] = React.useState<number | null>(null);
+  /** Repaints the canvas with a pulse phase, without a React render (set by the canvas effect). */
+  const repaintRef = React.useRef<((phase: number | null) => void) | null>(null);
   React.useEffect(() => {
     if (!onScreen || typeof requestAnimationFrame !== "function") return undefined;
     if (flightsRef.current.length === 0 && !canvasPulse) return undefined;
@@ -692,7 +754,7 @@ export const GraphView = React.forwardRef<GraphViewHandle, GraphViewProps>(funct
         }
       }
       for (const id of landed) addFlash(id, {}, PARTICLES.flashMs);
-      if (canvasPulse) setPulsePhase((at % 1600) / 1600);
+      if (canvasPulse) repaintRef.current?.((at % 1600) / 1600);
       if (flights.length > 0 || canvasPulse) frame = requestAnimationFrame(tick);
     };
     frame = requestAnimationFrame(tick);
@@ -700,14 +762,22 @@ export const GraphView = React.forwardRef<GraphViewHandle, GraphViewProps>(funct
   }, [loopToken, onScreen, canvasPulse, addFlash]);
 
   // Labels: the A3.9 level of detail, then collision placement at the settled scale.
-  const labelPlacements = React.useMemo(() => {
-    const placements = new Map<string, LabelPlacement>();
+  const sidesFor = React.useCallback((node: VizNode): LabelSide[] | undefined => {
+    const angle = layout.angles.get(node.id);
+    if (angle !== undefined) return outwardSides(angle);
+    if (kind === "layered" || (node.kind === "coordinator" && kind === "clusters")) return ["right", "below", "left", "above"];
+    return undefined;
+  }, [layout, kind]);
+  const labelRadius = React.useCallback((node: VizNode, scale: number) => {
+    const dot = dots.get(node.id);
+    return (dot !== undefined ? dot * scale : markGeometry(node.kind, node.size).outer) + (node.memory && node.memory !== "none" ? 2 : 0);
+  }, [dots]);
+
+  // The labels that stand at this zoom: the level of detail, then collision
+  // placement. Hover does not reflow them (see hoverLabels).
+  const baseLabels = React.useMemo(() => {
     const count = model.nodes.length;
     const always = new Set<string>(selection);
-    if (hover?.node) {
-      always.add(hover.node);
-      if (count <= 600 && highlight) for (const id of highlight.nodes) always.add(id);
-    }
     if (focusedId) always.add(focusedId);
     const candidates: VizNode[] = [];
     for (const node of model.nodes) {
@@ -723,35 +793,45 @@ export const GraphView = React.forwardRef<GraphViewHandle, GraphViewProps>(funct
       else show = always.has(node.id);
       if (show) candidates.push(node);
     }
-    if (candidates.length === 0) return placements;
+    if (candidates.length === 0) return new Map<string, LabelPlacement>();
     const inputs: LabelInput[] = candidates.map((node) => {
       const box = layout.nodes.get(node.id);
-      const geometry = markGeometry(node.kind, node.size);
-      let sides: LabelSide[] | undefined;
-      const angle = layout.angles.get(node.id);
-      if (angle !== undefined) sides = outwardSides(angle);
-      else if (kind === "layered") sides = ["right", "below", "left", "above"];
-      else if (node.kind === "coordinator" && kind === "clusters") sides = ["right", "below", "left", "above"];
-      const forced = always.has(node.id) || model.hubs.has(node.id);
       return {
         id: node.id,
         width: measures.label(node.label),
         x: (box?.x ?? 0) * labelScale,
         y: (box?.y ?? 0) * labelScale,
-        r: (dots.get(node.id) !== undefined ? dots.get(node.id)! * labelScale : geometry.outer) + (node.memory && node.memory !== "none" ? 2 : 0),
-        priority: (selectedSet.has(node.id) ? 1e6 : 0) + (node.id === focusedId ? 5e5 : 0) + (node.id === hover?.node ? 4e5 : 0) + (model.hubs.has(node.id) ? 1e4 : 0) + (node.live ? 1e3 : 0) + (model.degree.get(node.id) ?? 0),
-        force: forced,
-        sides,
+        r: labelRadius(node, labelScale),
+        priority: (selectedSet.has(node.id) ? 1e6 : 0) + (node.id === focusedId ? 5e5 : 0) + (model.hubs.has(node.id) ? 1e4 : 0) + (node.live ? 1e3 : 0) + (model.degree.get(node.id) ?? 0),
+        force: always.has(node.id) || model.hubs.has(node.id),
+        sides: sidesFor(node),
       };
     });
     const obstacles = model.nodes.map((node) => {
       const box = layout.nodes.get(node.id);
       const dot = dots.get(node.id);
-      const outer = isCardKind(node.kind) ? Math.max(box?.w ?? 0, box?.h ?? 0) / 2 * labelScale : dot !== undefined ? dot * labelScale : markGeometry(node.kind, node.size).outer;
+      const outer = isCardKind(node.kind) ? (Math.max(box?.w ?? 0, box?.h ?? 0) / 2) * labelScale : dot !== undefined ? dot * labelScale : markGeometry(node.kind, node.size).outer;
       return { id: node.id, x: (box?.x ?? 0) * labelScale, y: (box?.y ?? 0) * labelScale, r: outer };
     });
     return placeLabels(inputs, obstacles);
-  }, [model, layout, dots, labels, labelScale, selection, selectedSet, hover, highlight, focusedId, measures.label, kind]);
+  }, [model, layout, dots, labels, labelScale, selection, selectedSet, focusedId, measures.label, sidesFor, labelRadius]);
+
+  // A hover shows the dropped labels of the hovered node and its
+  // neighbours, on their first side (the rest dims, so overlap is fine).
+  const labelPlacements = React.useMemo(() => {
+    if (!hover?.node) return baseLabels;
+    const ids = model.nodes.length <= 600 && highlight ? [...highlight.nodes] : [hover.node];
+    const missing = ids.filter((id) => !baseLabels.has(id));
+    if (missing.length === 0) return baseLabels;
+    const merged = new Map(baseLabels);
+    for (const id of missing) {
+      const node = model.byId.get(id);
+      if (!node || isCardKind(node.kind)) continue;
+      const side = sidesFor(node)?.[0] ?? "below";
+      merged.set(id, labelAt(side, { width: measures.label(node.label), r: labelRadius(node, viewport.scale) }).placement);
+    }
+    return merged;
+  }, [baseLabels, hover, highlight, model, sidesFor, labelRadius, measures.label, viewport.scale]);
 
   // Edge geometry for the current positions.
   const edgeGeometry = React.useMemo(() => {
@@ -824,13 +904,39 @@ export const GraphView = React.forwardRef<GraphViewHandle, GraphViewProps>(funct
     else if (typeof requestAnimationFrame === "function") requestAnimationFrame(() => svgRef.current?.querySelector<SVGGElement>(".cc-viz-proxy")?.focus({ preventScroll: true }));
   }, [model, reveal, announce, nodeElement, useCanvas]);
 
+  const fitTo = React.useCallback((ids: readonly string[]) => {
+    let x0 = Infinity;
+    let y0 = Infinity;
+    let x1 = -Infinity;
+    let y1 = -Infinity;
+    for (const id of ids) {
+      const frame = layoutRef.current.frames.find((candidate) => candidate.id === id);
+      const box = boxesRef.current.get(id);
+      if (frame) {
+        x0 = Math.min(x0, frame.x);
+        y0 = Math.min(y0, frame.y);
+        x1 = Math.max(x1, frame.x + frame.w);
+        y1 = Math.max(y1, frame.y + frame.h);
+      } else if (box) {
+        x0 = Math.min(x0, box.x - Math.max(box.w / 2, 40));
+        y0 = Math.min(y0, box.y - box.h / 2 - 8);
+        x1 = Math.max(x1, box.x + Math.max(box.w / 2, 40));
+        y1 = Math.max(y1, box.y + box.h / 2 + 24);
+      }
+    }
+    if (!Number.isFinite(x0) || size.width <= 0) return;
+    const target = fitViewport({ x: x0, y: y0, w: x1 - x0, h: y1 - y0 }, size.width, size.height, { minScale: ZOOM.min, maxScale: 1.6 }, { top: ZOOM.pad, right: ZOOM.pad, bottom: fitBottom, left: ZOOM.pad });
+    setViewport(target, true);
+  }, [setViewport, size.width, size.height, fitBottom]);
+
   React.useImperativeHandle(ref, () => ({
     fit: doFit,
+    fitTo,
     zoomBy,
     reveal,
     focusNode,
     viewport: () => viewportRef.current,
-  }), [doFit, zoomBy, reveal, focusNode]);
+  }), [doFit, fitTo, zoomBy, reveal, focusNode]);
 
   const onZoom = (action: VizZoomAction) => {
     if (action === "in") zoomBy(ZOOM.buttonStep);
@@ -925,22 +1031,39 @@ export const GraphView = React.forwardRef<GraphViewHandle, GraphViewProps>(funct
     if (target.node) props.onOpen?.(target.node);
     else if (!target.edge) doFit();
   };
+  const hoverClearRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+  const cancelHoverClear = () => {
+    if (hoverClearRef.current === null) return;
+    clearTimeout(hoverClearRef.current);
+    hoverClearRef.current = null;
+  };
+  React.useEffect(() => () => {
+    if (hoverClearRef.current !== null) clearTimeout(hoverClearRef.current);
+  }, []);
   const onPointerOver = (event: React.PointerEvent<HTMLDivElement>) => {
     if (useCanvas || pressRef.current?.pan) return;
     const target = targetOf(event);
     if (target.chrome) return;
     if (target.node) {
+      cancelHoverClear();
       setHover((current) => (current?.node === target.node ? current : { node: target.node }));
     } else if (target.edge) {
+      cancelHoverClear();
       const rect = rootRect();
       const x = event.clientX - rect.left;
       const y = event.clientY - rect.top;
       setHover((current) => (current?.edge === target.edge ? current : { edge: target.edge, x, y }));
-    } else {
-      setHover((current) => (current ? null : current));
+    } else if (hoverClearRef.current === null) {
+      // Between marks the highlight lingers a moment: moving from one node
+      // to the next does not flash (and restyle) the whole picture.
+      hoverClearRef.current = setTimeout(() => {
+        hoverClearRef.current = null;
+        setHover((current) => (current ? null : current));
+      }, HOVER_CLEAR_MS);
     }
   };
   const onPointerLeave = () => {
+    cancelHoverClear();
     setHover(null);
   };
 
@@ -955,15 +1078,20 @@ export const GraphView = React.forwardRef<GraphViewHandle, GraphViewProps>(funct
     onFocusChangeRef.current?.(focusedId);
   }, [focusedId]);
 
-  // Wheel: zoom at the pointer; Shift pans sideways. A native, non-passive listener.
+  // Wheel: zoom at the pointer; Shift pans sideways. A native, non-passive
+  // listener; `wheelZoom` leaves plain scrolling (or all of it) to the page.
+  const wheelZoomRef = React.useRef(wheelZoom);
+  wheelZoomRef.current = wheelZoom;
   React.useEffect(() => {
     const element = rootRef.current;
     if (!element) return undefined;
     const handler = (event: WheelEvent) => {
       if (event.target instanceof Element && event.target.closest(".cc-viz-chrome")) return;
+      const mode = wheelZoomRef.current;
+      if (mode === "off" || (mode === "pinch" && !event.ctrlKey && !event.metaKey)) return;
       event.preventDefault();
       const rect = element.getBoundingClientRect();
-      if (event.shiftKey) {
+      if (event.shiftKey && mode === "always") {
         const { dx, dy } = wheelPixels(event);
         const delta = Math.abs(dx) > Math.abs(dy) ? dx : dy;
         setViewport((current) => ({ ...current, tx: current.tx - delta }), true);
@@ -1072,7 +1200,7 @@ export const GraphView = React.forwardRef<GraphViewHandle, GraphViewProps>(funct
     if (canvas.height !== height) canvas.height = height;
     const context = canvas.getContext("2d");
     if (!context) return;
-    drawCanvasScene(context, {
+    const scene = {
       width: size.width,
       height: size.height,
       dpr,
@@ -1089,9 +1217,12 @@ export const GraphView = React.forwardRef<GraphViewHandle, GraphViewProps>(funct
       live: liveIds,
       accentNodes,
       accentEdges,
-      phase: reduced ? null : pulsePhase ?? 0,
-    });
-  }, [useCanvas, size.width, size.height, viewport, model, boxes, layout, dots, kind, tokens, highlight, selectedSet, flashes, liveIds, accentNodes, accentEdges, reduced, pulsePhase]);
+      phase: reduced ? null : 0,
+    };
+    const repaint = (phase: number | null) => drawCanvasScene(context, { ...scene, phase: reduced ? null : phase });
+    repaintRef.current = repaint;
+    repaint(reduced ? null : (now() % 1600) / 1600);
+  }, [useCanvas, size.width, size.height, viewport, model, boxes, layout, dots, kind, tokens, highlight, selectedSet, flashes, liveIds, accentNodes, accentEdges, reduced]);
 
   // Chrome visibility.
   const showLegend = legend === "on" || legend === "collapsed" || (legend === "auto" && (model.relations.size >= 2 || model.kinds.size >= 2 || Boolean(props.legendNote)));
@@ -1104,16 +1235,6 @@ export const GraphView = React.forwardRef<GraphViewHandle, GraphViewProps>(funct
   const goalNodes = React.useMemo(() => new Set(model.nodes.filter((node) => node.kind === "goal").map((node) => node.id)), [model.nodes]);
   const laneById = React.useMemo(() => new Map((lanes ?? []).map((lane) => [lane.id, lane])), [lanes]);
 
-  const glyphFor = (node: VizNode) => {
-    const lit = memoryLit.get(node.id);
-    const badge = node.badge !== undefined ? node.badge : node.tone === "crit" ? "crit" : node.tone === "warn" ? "warn" : null;
-    return {
-      live: Boolean(node.live || node.tone === "live"),
-      memory: node.memory ?? "none",
-      memoryLit: lit ? lit.op : null,
-      badge,
-    } as const;
-  };
 
   const renderNode = (node: VizNode, box: VizNodeBox, exitingNode: boolean) => {
     const card = isCardKind(node.kind);
@@ -1138,7 +1259,6 @@ export const GraphView = React.forwardRef<GraphViewHandle, GraphViewProps>(funct
         { title: measures.card, meta: measures.meta },
       );
     }
-    const glyph = glyphFor(node);
     return (
       <NodeView
         key={exitingNode ? `exit:${node.id}` : node.id}
@@ -1154,7 +1274,10 @@ export const GraphView = React.forwardRef<GraphViewHandle, GraphViewProps>(funct
         accent={accentNodes.has(node.id)}
         exiting={exitingNode}
         entering={entering.has(node.id)}
-        glyph={glyph}
+        live={Boolean(node.live || node.tone === "live")}
+        memory={node.memory ?? "none"}
+        memoryLit={memoryLit.get(node.id)?.op ?? null}
+        badge={node.badge !== undefined ? node.badge : node.tone === "crit" ? "crit" : node.tone === "warn" ? "warn" : null}
         dot={dots.get(node.id) ?? 0}
         classNames={classNames}
         title={card ? title : node.label}
@@ -1250,7 +1373,7 @@ export const GraphView = React.forwardRef<GraphViewHandle, GraphViewProps>(funct
       {useCanvas ? <canvas ref={canvasRef} className="cc-viz-graph__canvas" aria-hidden="true" /> : null}
       <svg ref={svgRef} className="cc-viz-graph__svg" data-testid={testIds.svg} width="100%" height="100%">
         {/* The drawing waits for the frame's first measure (one layout, not two). */}
-        {size.measured ? (
+        {drawable ? (
         <>
         {kind === "lanes" ? (
           <LanesLayer
@@ -1404,7 +1527,7 @@ export const GraphView = React.forwardRef<GraphViewHandle, GraphViewProps>(funct
       <div className="cc-viz-chrome">
         {tooltip}
         {showLegend || controls ? (
-          <div className="cc-viz-chrome__left" ref={chromeRef}>
+          <div className={cx("cc-viz-chrome__left", !showMinimap && "is-wide")} ref={chromeRef}>
             {showLegend ? (
               <Legend
                 relations={model.relations}
@@ -1416,7 +1539,8 @@ export const GraphView = React.forwardRef<GraphViewHandle, GraphViewProps>(funct
                   props.onHiddenRelationsChange?.(next);
                 }}
                 collapsed={legendCollapsed}
-                onCollapsedChange={setLegendCollapsed}
+                onCollapsedChange={setLegendChoice}
+                stacked={narrowFrame}
                 testId={testIds.legend ?? prefixed("legend")}
                 itemTestId={legendItemTestId}
                 headingClassName={classNames?.legendHeading}

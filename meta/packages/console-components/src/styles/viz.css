@@ -517,6 +517,34 @@
   opacity: 0.6;
 }
 
+/* A halo in the strip's colour keeps the header legible where an edge crosses it. */
+.cc-viz-goal__title,
+.cc-viz-goal__meta,
+.cc-viz-goal__trailing > text {
+  stroke: var(--_cc-surface-card);
+  stroke-width: 3px;
+  stroke-linejoin: round;
+  paint-order: stroke;
+}
+
+.cc-viz-node--goal.is-collapsed .cc-viz-goal__title,
+.cc-viz-node--goal.is-collapsed .cc-viz-goal__meta,
+.cc-viz-node--goal.is-collapsed .cc-viz-goal__trailing > text {
+  stroke: var(--_cc-surface-raised);
+}
+
+.cc-viz-node--goal:hover .cc-viz-goal__title,
+.cc-viz-node--goal:hover .cc-viz-goal__meta,
+.cc-viz-node--goal:hover .cc-viz-goal__trailing > text {
+  stroke: color-mix(in srgb, var(--_cc-viz-ink) 4%, var(--_cc-surface-card));
+}
+
+.cc-viz-node--goal.is-collapsed:hover .cc-viz-goal__title,
+.cc-viz-node--goal.is-collapsed:hover .cc-viz-goal__meta,
+.cc-viz-node--goal.is-collapsed:hover .cc-viz-goal__trailing > text {
+  stroke: color-mix(in srgb, var(--_cc-viz-ink) 4%, var(--_cc-surface-raised));
+}
+
 /* The A3.8 progress ring: a faint track, done ink, in progress accent, blocked warning. */
 .cc-viz-ring-progress circle {
   fill: none;
@@ -866,6 +894,11 @@
   pointer-events: none;
 }
 
+.cc-viz-cluster__plate {
+  fill: var(--_cc-surface-raised);
+  stroke: none;
+}
+
 .cc-viz-cluster__label,
 .cc-viz-cluster__count {
   fill: var(--_cc-foreground-meta);
@@ -895,6 +928,9 @@
   cursor: default;
 }
 
+/* The column's width is bounded by the graph's (it leaves the minimap's
+   corner free); the legend inside it takes a fixed cap, never a percentage
+   of this shrink-to-fit column. */
 .cc-viz-chrome__left {
   position: absolute;
   left: 12px;
@@ -903,7 +939,13 @@
   flex-direction: column;
   align-items: flex-start;
   gap: 8px;
+  max-width: calc(100% - 210px);
   max-height: calc(100% - 24px);
+}
+
+/* Without the minimap the corner is free: the column may take the width. */
+.cc-viz-chrome__left.is-wide {
+  max-width: calc(100% - 24px);
 }
 
 .cc-viz-controls,
@@ -995,7 +1037,7 @@
   flex-wrap: wrap;
   align-items: flex-start;
   gap: 0 10px;
-  max-width: min(600px, calc(100% - 210px));
+  max-width: 600px;
   max-height: 96px;
   overflow: auto;
   padding: 5px 6px 5px 10px;
@@ -1008,6 +1050,8 @@
 }
 
 .cc-viz-legend.is-collapsed {
+  max-height: none;
+  overflow: visible;
   padding: 0;
   border: 0;
   background: none;
@@ -1152,6 +1196,22 @@
   margin: 2px 6px 1px;
   color: var(--_cc-foreground-meta);
   font-size: 11px;
+}
+
+/* A narrow frame: the micro-label and the fold button share the first line,
+   the rows wrap under them at the column's full width. */
+.cc-viz-legend.is-stacked {
+  max-height: 176px;
+}
+
+.cc-viz-legend.is-stacked .cc-viz-legend__collapse {
+  order: 1;
+  margin-left: auto;
+}
+
+.cc-viz-legend.is-stacked .cc-viz-legend__list {
+  order: 2;
+  flex-basis: 100%;
 }
 
 /* Node kinds start a row of their own under the relations. */

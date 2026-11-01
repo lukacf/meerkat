@@ -15,6 +15,7 @@ import {
   orderRanks,
   rankItems,
   ringSlots,
+  routeBundle,
   runForce,
   seedForce,
   toLayoutNodes,
@@ -170,6 +171,19 @@ describe("layered layout", () => {
     expect(frame("g1").w).toBe(frame("g2").w);
   });
 
+  it("fills the view's width with frames, and bounds the picture without padding", () => {
+    const nodes: LayoutNode[] = [card("g", { kind: "goal", h: 34 }), card("a", { frame: "g" }), card("b", { frame: "g" })];
+    const layout = layoutLayered(nodes, [blocks("a", "b")], [{ id: "g", label: "Goal" }], options);
+    const frame = layout.frames[0];
+    expect(frame.w).toBe(options.width);
+    expect(layout.bounds).toEqual({ x: frame.x, y: frame.y, w: frame.w, h: frame.h });
+    // Items stay left-aligned in a wide frame.
+    expect(layout.nodes.get("a")!.x - layout.nodes.get("a")!.w / 2).toBe(frame.x + LAYERED.padX);
+    // Without frames the block keeps its own width.
+    const loose = layoutLayered([card("a"), card("b")], [blocks("a", "b")], [], options);
+    expect(loose.bounds.w).toBeLessThan(options.width);
+  });
+
   it("collapses a frame to its header and routes edges into it to the header", () => {
     const nodes: LayoutNode[] = [card("done", { kind: "goal", h: 34 }), card("x", { frame: "done" }), card("y")];
     const layout = layoutLayered(nodes, [blocks("x", "y")], [{ id: "done", label: "Done goal", collapsed: true }], options);
@@ -293,6 +307,41 @@ describe("clusters layout", () => {
     expect(layout.bundles).toHaveLength(1);
     expect(layout.bundles[0].count).toBe(2);
     expect(layout.bundles[0].relations.sort()).toEqual(["traffic", "wired"]);
+  });
+
+  it("bows a bundle around a group on its way, away from the picture's middle, and keeps the rest straight", () => {
+    const cluster = (id: string, cx: number, cy: number) => ({ id, label: id, cx, cy, r: 48, rings: [19, 48], count: 30 });
+    const top = [cluster("a", 100, 100), cluster("b", 270, 100), cluster("c", 440, 100)];
+    const bottom = [cluster("d", 100, 300), cluster("e", 270, 300), cluster("f", 440, 300)];
+    const all = [...top, ...bottom];
+    const centre = { x: 270, y: 200 };
+    // Neighbours: a straight line from ring to ring.
+    const near = routeBundle(top[0], top[1], all, centre);
+    expect(near.bowed).toBe(false);
+    expect(near.x0).toBeCloseTo(100 + 48 + CLUSTERS.bundleGap, 6);
+    // Across a group in the top row: up, clear of its rings.
+    const over = routeBundle(top[0], top[2], all, centre);
+    expect(over.bowed).toBe(true);
+    const peak = (route: typeof over) => 0.25 * route.y0 + 0.5 * route.cy + 0.25 * route.y1;
+    expect(peak(over)).toBeLessThanOrEqual(100 - 48 - CLUSTERS.bundleClear + 1e-6);
+    // In the bottom row: down, past the label under the ring.
+    const under = routeBundle(bottom[0], bottom[2], all, centre);
+    expect(peak(under)).toBeGreaterThanOrEqual(300 + 48 + CLUSTERS.labelRoom);
+    // A diagonal threading between two groups stays straight.
+    expect(routeBundle(top[0], bottom[2], all, centre).bowed).toBe(false);
+  });
+
+  it("keeps a bowed bundle inside the layout's bounds", () => {
+    const nodes = Array.from({ length: 24 }, (_, i) => mark(`n${i}`, { lane: `g${i % 3}` }));
+    const edges: LayoutEdge[] = [{ id: "x", from: "n0", to: "n2", relation: "wired" }];
+    const layout = layoutClusters(nodes, edges, [], { width: 1200, height: 300, density: "comfortable" });
+    const [bundle] = layout.bundles;
+    expect(bundle.route.bowed).toBe(true);
+    const ys = [bundle.route.y0, 0.25 * bundle.route.y0 + 0.5 * bundle.route.cy + 0.25 * bundle.route.y1, bundle.route.y1];
+    for (const y of ys) {
+      expect(y).toBeGreaterThanOrEqual(layout.bounds.y);
+      expect(y).toBeLessThanOrEqual(layout.bounds.y + layout.bounds.h);
+    }
   });
 
   it("packs 300 nodes in 8 groups without overlap between clusters", () => {

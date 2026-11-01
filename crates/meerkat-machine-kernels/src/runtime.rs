@@ -4517,6 +4517,7 @@ mod tests {
                             KernelValue::Bool(false),
                         ),
                         (field_id("entry_custody"), KernelValue::Bool(false)),
+                        (field_id("created_custody"), KernelValue::Bool(false)),
                     ]),
                 },
             )

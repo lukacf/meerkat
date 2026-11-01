@@ -246,6 +246,7 @@ fn begin_spawn_multi_host_fields() -> Vec<(FieldId, KernelValue)> {
             KernelValue::Bool(false),
         ),
         (field("entry_custody"), KernelValue::Bool(false)),
+        (field("created_custody"), KernelValue::Bool(false)),
     ])
     .collect()
 }

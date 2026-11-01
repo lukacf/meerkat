@@ -95,8 +95,10 @@ them.
   rotation, the replay of a rotation, the scoped release and the refusal of a
   fresh-life respawn of an identity entry (see Added).
   `MobMachineState` (meerkat-machine-schema and meerkat-mob) and the kernel
-  `generated::mob` `State` gain the public field `member_rotation_targets`, so
-  code that builds either struct literally must set it. The `MobMachineInput`
+  `generated::mob` `State` gain the public fields `member_rotation_targets`
+  and `member_rotation_profile_names` (the role a same-session rotation
+  started with, which its terminal seats), so
+  code that builds either struct literally must set them. The `MobMachineInput`
   variant `BeginMemberRotation` (meerkat-machine-schema and meerkat-mob) and
   the kernel `generated::mob::inputs` struct `BeginMemberRotation` gain the
   public fields `target` (the new enum `RotationTarget`: `FreshSession` keeps
@@ -770,7 +772,9 @@ them.
   comms name: its endpoint is the member's key under the new name, its
   retirement unwires the member's peers' trust as a plain retirement does,
   the member's edges end, and it is wired to the edges the definition
-  declares for its role. The member's running turn is cancelled. When
+  declares for its role. MobMachine records the profile the respawn started
+  with, and every attempt of it seats that profile. The member's running
+  turn is cancelled. When
   its session commits each round, its queued inputs that may cross a stop
   (durable prompts not bound to an objective) stay queued for the next
   incarnation, which the handover wakes to run each of them once, and their
@@ -1447,18 +1451,17 @@ them.
   the host wakes first. A recorded rotation whose next incarnation cannot be
   planned again (its profile left the definition) stays recorded and stuck
   until a call plans the same next session: `rotate_member` with a spec the
-  definition plans, for a FreshSession rotation, and
-  `MobHandle::respawn_member` naming a profile the definition has, for a
-  same-session one, which `rotate_member` cannot end (it plans a fresh
-  session, refused while that rotation stands). A same-session rotation
-  whose successor took another profile recorded the member's key under that
-  role's comms name, so only a call naming that profile re-drives it. Either
-  is finished by restoring its profile: `MobStorage::update_definition`
-  while the mob's process is down (a pending rotation does not hold the
-  definition's epoch back), then a resume, whose start re-drives a
-  same-session rotation from its record; `MobHandle::redrive_retirement`,
-  or the call above, re-drives either. The mob's destroy, which ends
-  either, is the last resort.
+  definition plans, for a FreshSession rotation. A same-session one seats
+  the profile it started with, for which its retirement prepared the
+  member's topology: only `MobHandle::respawn_member` naming that profile
+  re-drives it, a call naming any other profile is refused retryable, and
+  `rotate_member` cannot end it (it plans a fresh session, refused while
+  that rotation stands). Either is finished by restoring its profile:
+  `MobStorage::update_definition` while the mob's process is down (a
+  pending rotation does not hold the definition's epoch back), then a
+  resume, whose start re-drives a same-session rotation from its record;
+  `MobHandle::redrive_retirement`, or the call above, re-drives either. The
+  mob's destroy, which ends either, is the last resort.
 - `meerkat-mob`, `meerkat-machine-schema`: the mob's reset commits only on an
   empty roster. MobMachine's `ResetToRunning` requires that no member holds
   an identity (`roster_empty`), so no member before a reset is a member after

@@ -14562,20 +14562,18 @@ impl MobHandle {
     /// continuity or (for a role migration) last role cannot be read. A
     /// member whose retirement is in flight is refused retryable
     /// ([`MobError::LifecycleOperationPending`]); a call that finds this
-    /// rotation itself stuck re-drives it. A stuck one whose successor cannot
-    /// be planned again (its profile left the definition) is finished by
+    /// rotation itself stuck re-drives it. The rotation seats the profile it
+    /// started with, for which its retirement prepared the member's topology:
+    /// while it stands, a call naming that profile ([`super::MemberRespawn`]'s
+    /// profile; none names the member's own), or
+    /// [`Self::redrive_retirement`], re-drives it, and a call naming any other
+    /// profile is refused retryable. A stuck one whose successor cannot be
+    /// planned again (its profile left the definition) is finished by
     /// restoring that profile: update the mob's definition while its process
     /// is down ([`crate::MobStorage::update_definition`], which a pending
     /// rotation does not hold back) and resume the mob, whose start re-drives
-    /// the rotation from its record. While it stands, a call naming that
-    /// profile, or [`Self::redrive_retirement`], re-drives it too. A rotation
-    /// that recorded no endpoint (a successor under the member's own profile,
-    /// or a member on network comms) is also ended by a call naming another
-    /// profile the definition has ([`super::MemberRespawn`]'s profile). One
-    /// whose successor took another profile and recorded the member's key
-    /// under that role's comms name is re-driven only under that profile: a
-    /// call naming any other is refused retryable. [`Self::rotate_member`]
-    /// ends neither; the mob's destroy is the last resort.
+    /// the rotation from its record. [`Self::rotate_member`] does not end it;
+    /// the mob's destroy is the last resort.
     ///
     /// A host-pending member ([`super::MobBuilder::with_host_pending_members`])
     /// keeps its mark through its respawn, whoever finishes it: the successor

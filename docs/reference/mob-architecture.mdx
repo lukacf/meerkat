@@ -374,7 +374,8 @@ name, so it keeps neither its descriptor nor its topology: its endpoint is
 the member's key under the new name, the retirement unwires the member's
 peers' trust as a plain retirement does, the member's edges end, and the
 next incarnation is wired to the edges the definition declares for its role,
-as a rotation's next incarnation is.
+as a rotation's next incarnation is. MobMachine records the profile the
+rotation started with, and every attempt of it seats that profile.
 When the member's session
 commits each round, its queued inputs that may cross a stop (durable prompts
 not bound to an objective) stay queued: their waiters are answered
@@ -444,10 +445,15 @@ started, and the call is made again. While a rotation of the member stands,
 member is refused retryable. A recorded rotation whose next incarnation cannot
 be planned again (its profile left the definition) stays recorded and stuck
 until a call plans the same next session: `rotate_member` with a spec the
-definition plans, for a FreshSession rotation, and `respawn_member` naming a
-profile the definition has, for a same-session one, which `rotate_member`
-cannot end (it plans a fresh session, refused while that rotation stands).
-The mob's destroy ends either. A rotation never takes over a retirement of
+definition plans, for a FreshSession rotation. A same-session one seats the
+profile it started with, for which its retirement prepared the member's
+topology: only `respawn_member` naming that profile re-drives it, a call
+naming any other profile is refused retryable, and `rotate_member` cannot end
+it (it plans a fresh session, refused while that rotation stands). Either is
+finished by restoring its profile: `MobStorage::update_definition` while the
+mob's process is down (a pending rotation does not hold the definition's
+epoch back), then a resume, whose start re-drives a same-session rotation
+from its record. The mob's destroy, which ends either, is the last resort. A rotation never takes over a retirement of
 the member that started without it, whose start row records no rotation:
 `rotate_member` is refused retryable while that retirement stands, unless the
 member is host-pending, and a retry alone does not succeed until that

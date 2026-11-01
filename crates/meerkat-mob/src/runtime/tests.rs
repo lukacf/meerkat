@@ -90500,6 +90500,7 @@ fn mob_runtime_parity_field_value(
         | "member_rotation_session_ids"
         | "member_rotation_peer_endpoints"
         | "member_rotation_targets"
+        | "member_rotation_profile_names"
         | "identity_entry_origins"
         | "identity_entry_unseated"
         | "identity_entry_archived_sessions" => Some(MobRuntimeParityExprValue::Map(BTreeMap::new())),

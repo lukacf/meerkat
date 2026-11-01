@@ -51,8 +51,9 @@
 \*     restamp and the rotation verdicts; the host's first-boot preparation
 \*     seeded at build and carried out; every WakeMember cause; the wake,
 \*     release and the same-session rotation that carries out a declared
-\*     migration (its grant under the new role, its start and its terminal);
-\*     the archive-only retirement to its terminal.
+\*     migration (its grant under either role, its start under the new role
+\*     with member 1's key under the new name, no endpoint or another key,
+\*     and its terminal); the archive-only retirement to its terminal.
 \*   hold (HoldSpec): member 1 recovered, made an entry by its row, its
 \*     first-boot preparation owed or not, declared under another role with
 \*     no migration (held; with a first-boot Resume request too), with the
@@ -126,7 +127,12 @@
 \*     explicit resume or drift revival, which are outside the hold);
 \*     AuditHostStepKeepsRoleHold (the host's carry-out never ends a role
 \*     hold); AuditRoleHoldKeepsFirstBootRow (a declaration with no first-boot
-\*     request never replaces a first-boot preparation).
+\*     request never replaces a first-boot preparation);
+\*     AuditSameSessionSeatsTheStartedRole (a same-session terminal seats
+\*     the role its rotation started with, whatever the grant);
+\*     AuditRoleMoveTakesItsEndpoint (a successor under another role takes
+\*     the endpoint its rotation recorded, or owes one; one under the
+\*     member's own role keeps the member's).
 \*   hold: AuditHoldDeclareExactlyOne; AuditRoleMoveKeepsRoleHold (a
 \*     declaration under another role than the member's own keeps a role
 \*     hold); AuditRoleHoldEndsAtNewRole (a rotation terminal ends a role hold
@@ -713,17 +719,22 @@ RSeedFirstBoot == \E hp \in {{}, {Id1}} : SeedMemberResidencyRunning("OnDemand",
 
 \* Member 1's same-session rotation under the new role: it runs under that
 \* role's comms name, so it names member 1's key (peer id 1) under a new
-\* name; an endpoint under another key is refused at the start.
+\* name, or no endpoint (network comms: its first wake registers one); an
+\* endpoint under another key is refused at the start. The start records
+\* the role it starts with, which every terminal of the rotation seats.
 E1InprocMoved == [name |-> "peername_1b", peer_id |-> "peerid_1", address |-> "inproc://peername_1b",
                   signing_key |-> "peersigningkey_1", transport |-> "Inproc"]
 QBeginMoved ==
-    \E ep \in {Some(E1InprocMoved), Some(E3Inproc)} :
+    \E ep \in {None, Some(E1InprocMoved), Some(E3Inproc)} :
         BeginMemberRotationSameSessionRunning(Id1, Rid1, 1, 0, Sess1, ep, FALSE, "SameSession", AuditProfile2)
 
 Endpoint(id) == IF id \in DOMAIN member_peer_endpoints THEN Some(member_peer_endpoints[id]) ELSE None
 EndpointNext(id) == IF id \in DOMAIN member_peer_endpoints' THEN Some(member_peer_endpoints'[id]) ELSE None
 RotationEndpoint(id) ==
     IF id \in DOMAIN member_rotation_peer_endpoints THEN Some(member_rotation_peer_endpoints[id]) ELSE None
+\* The role a same-session rotation started with.
+RotationStartedRole(id) ==
+    IF id \in DOMAIN member_rotation_profile_names THEN Some(member_rotation_profile_names[id]) ELSE None
 RWake == \E cause \in AuditWakeCauses : WakeArm(Id1, cause, FALSE, "Content", FALSE)
 
 RolesNext ==
@@ -774,6 +785,13 @@ AuditRoleMoveTakesItsEndpoint ==
          THEN EndpointNext(Id1) = RotationEndpoint(Id1)
          ELSE EndpointNext(Id1) = Endpoint(Id1)]_vars
 
+\* Every same-session terminal seats the role its rotation started with,
+\* whatever role the grant takes: the start's retirement prepared the
+\* member's topology for that role (unwired its peers' trust for another
+\* role, kept it for its own).
+AuditSameSessionSeatsTheStartedRole ==
+    [][QCommit => ProfileNext(Id1) = RotationStartedRole(Id1)]_vars
+
 \* A declaration with no first-boot request never replaces a first-boot
 \* preparation.
 AuditRoleHoldKeepsFirstBootRow ==
@@ -815,6 +833,14 @@ AuditWitnessRoleMoveTakesNewName ==
     /\ QCommit
     /\ ProfileNext(Id1) = Some(AuditProfile2)
     /\ EndpointNext(Id1) = Some(E1InprocMoved)
+\* One whose rotation recorded no endpoint (network comms) is seated under
+\* the new role and owes its endpoint until its first wake registers one.
+AuditWitnessRoleMoveOwesEndpoint ==
+    /\ Profile(Id1) = Some(AuditProfile)
+    /\ RotationEndpoint(Id1) = None
+    /\ QCommit
+    /\ ProfileNext(Id1) = Some(AuditProfile2)
+    /\ EndpointNext(Id1) = None
 \* The end of a role-held member's retirement drops the hold.
 AuditWitnessRoleHoldDroppedAtArchive ==
     /\ Cause(Id1) = Some("RoleMigrationUndeclared")
@@ -830,6 +856,7 @@ NotAuditWitnessRoleHoldEnded == [][~AuditWitnessRoleHoldEnded]_vars
 NotAuditWitnessFirstBootKeptOverRoleHold == [][~AuditWitnessFirstBootKeptOverRoleHold]_vars
 NotAuditWitnessRoleHoldDroppedAtArchive == [][~AuditWitnessRoleHoldDroppedAtArchive]_vars
 NotAuditWitnessRoleMoveTakesNewName == [][~AuditWitnessRoleMoveTakesNewName]_vars
+NotAuditWitnessRoleMoveOwesEndpoint == [][~AuditWitnessRoleMoveOwesEndpoint]_vars
 
 (***************************************************************************)
 (* The held run.                                                           *)

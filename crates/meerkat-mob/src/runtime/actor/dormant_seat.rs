@@ -1067,9 +1067,11 @@ impl MobActor {
     /// prepared step as its `Retire`, before the retirement's durable start,
     /// so a refused rotation journals nothing. A re-drive of the same
     /// rotation keeps the intent it recorded, and its candidate's profile
-    /// authority replaces the grant an earlier attempt recorded: a role
-    /// changed between attempts is the one the terminal step seats. Returns
-    /// the effects to realize.
+    /// authority replaces the grant an earlier attempt recorded: a
+    /// FreshSession rotation's role changed between attempts is the one the
+    /// terminal step seats, while a same-session rotation seats the role it
+    /// started with (MobMachine's terminal refuses a grant of another).
+    /// Returns the effects to realize.
     pub(super) fn apply_member_rotation_begin(
         authority: &mut mob_dsl::MobMachinePreparedAuthority,
         entry: &RosterEntry,
@@ -1088,8 +1090,10 @@ impl MobActor {
     /// a FreshSession `BeginMemberRotation` records it on the retirement its
     /// `Retire` started, and a SameSession one starts the retirement itself
     /// (its transition journals the retirement's start). A recorded intent
-    /// of the same rotation (a re-drive, or a rotation recovered at a start)
-    /// is kept; any other one refuses this rotation, retryable.
+    /// of the same rotation (a re-drive, or a rotation recovered at a start:
+    /// its session, its target and, for a same-session one, the role it
+    /// started with) is kept; any other one refuses this rotation,
+    /// retryable.
     pub(super) fn apply_member_rotation_transitions(
         authority: &mut mob_dsl::MobMachinePreparedAuthority,
         entry: &RosterEntry,
@@ -1103,7 +1107,13 @@ impl MobActor {
         match state.member_rotation_session_ids.get(&dsl_identity) {
             Some(recorded)
                 if recorded == &next_session
-                    && state.member_rotation_targets.get(&dsl_identity) == Some(&target) => {}
+                    && state.member_rotation_targets.get(&dsl_identity) == Some(&target)
+                    && (target != mob_dsl::RotationTarget::SameSession
+                        || state
+                            .member_rotation_profile_names
+                            .get(&dsl_identity)
+                            .map(String::as_str)
+                            == Some(rotation.candidate.profile_name.as_str())) => {}
             Some(_) => {
                 return Err(MobError::LifecycleOperationPending {
                     intent: format!("rotation of member {}", entry.agent_identity),
@@ -1357,8 +1367,13 @@ impl MobActor {
         // its topology. Its endpoint, which the rotation records (MobMachine
         // checks the key is the member's), is the member's own key under the
         // new name for a member with an inproc endpoint; a member on network
-        // comms has its successor's endpoint registered by its first wake.
-        let endpoint = if role == entry.role {
+        // comms (the mob's seat endpoint source) has its successor's endpoint
+        // registered by its first wake, as a seat of it would.
+        let network_comms = matches!(
+            self.seat_endpoint_source(),
+            Ok(MemberSeatEndpointSource::Network)
+        );
+        let endpoint = if role == entry.role || network_comms {
             None
         } else {
             match self.machine_member_peer_spec_for(

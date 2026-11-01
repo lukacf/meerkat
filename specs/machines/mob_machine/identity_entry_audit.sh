@@ -102,8 +102,10 @@
 #   with its migration, the listing of a marked member unmarking it, the
 #   dormant seat and a role move keeping a role hold, a rotation terminal
 #   ending it exactly when it commits another role, a same-session
-#   successor under another role taking the endpoint its rotation recorded
-#   (the member's key under the new role's comms name), a seated member's
+#   terminal seating the role its rotation started with whatever its grant,
+#   a same-session successor under another role taking the endpoint its
+#   rotation recorded (the member's key under the new role's comms name) or
+#   owing one when none was recorded, a seated member's
 #   first-boot Resume writing the role hold it masked, the replay recording
 #   an archived session only when its row archived it and keeping a hosted
 #   incarnation's entry hosted on its first use, the reset committing only
@@ -677,6 +679,7 @@ write_cfg() {
   AuditHostPreparationNeverWoken
   AuditHostStepKeepsRoleHold
   AuditRoleHoldKeepsFirstBootRow
+  AuditSameSessionSeatsTheStartedRole
   AuditRoleMoveTakesItsEndpoint"
           run_invariants="
   AuditRolesDeclareExactlyOne"
@@ -893,7 +896,7 @@ for witness in \
   "roles:Action property:MigrationRestamped" "roles:Action property:RestampVerdict" \
   "roles:Action property:RotateVerdict" "roles:Action property:RoleHoldEnded" \
   "roles:Action property:FirstBootKeptOverRoleHold" "roles:Action property:RoleHoldDroppedAtArchive" \
-  "roles:Action property:RoleMoveTakesNewName" \
+  "roles:Action property:RoleMoveTakesNewName" "roles:Action property:RoleMoveOwesEndpoint" \
   "held:Invariant:HeldWaiting" "held:Action property:HeldSpawnSeats" \
   "held:Invariant:Hosted" "held:Action property:EverCreatedOwedSeat" \
   "held:Action property:ApplyBusy" \
@@ -1363,13 +1366,34 @@ PY
 drop_guard("BeginMemberRotationSameSessionRunning", "member_peer_ids")
 PY
 
-  # A same-session terminal that keeps the member's endpoint whatever the
-  # role: a successor under another role keeps the old role's comms name,
-  # which its wake under the new role refuses.
+  # A same-session terminal that takes the same-role branch whatever the
+  # role: a successor under another role keeps the member's endpoint and its
+  # peer id (the material stays coherent, and an endpoint is owed only by a
+  # member with none), so it keeps the old role's comms name, which its wake
+  # under the new role refuses. No machine invariant reads an endpoint's
+  # name: only the audit's own property refuses it.
   mutate roles role_move_keeps_old_name "Action property AuditRoleMoveTakesItsEndpoint" <<'PY'
 for arm in ("CommitMemberRotationSameSessionRunning", "CommitMemberRotationSameSessionStopped",
             "CommitMemberRotationSameSessionKickoffRunning", "CommitMemberRotationSameSessionKickoffStopped"):
     keep_var(arm, "member_peer_endpoints")
+    keep_var(arm, "member_peer_ids")
+    replace_update(arm, "member_boot_obligation_owed",
+                   'IF ((agent_identity \\in DOMAIN member_peer_endpoints) = TRUE) '
+                   'THEN MapRemove(member_boot_obligation_owed, agent_identity) '
+                   'ELSE MapSet(member_boot_obligation_owed, agent_identity, "EndpointPending")')
+PY
+
+  # A same-session terminal that takes whatever role the grant names (its
+  # started-role guard dropped): a rotation started under one role seats
+  # another, on a topology its retirement prepared for the first (a grant
+  # back to the member's own role after a start under another, or the
+  # reverse). The started role decides the role change, so the property on
+  # the role is the one that refuses it; the endpoint property is listed
+  # after it and sees the same step.
+  mutate roles grant_of_another_role_seated "Action property AuditSameSessionSeatsTheStartedRole" <<'PY'
+for arm in ("CommitMemberRotationSameSessionRunning", "CommitMemberRotationSameSessionStopped",
+            "CommitMemberRotationSameSessionKickoffRunning", "CommitMemberRotationSameSessionKickoffStopped"):
+    drop_guard(arm, "member_rotation_profile_names")
 PY
 
   # A declared migration ends the role hold before its terminal commits the

@@ -122,6 +122,9 @@ describe("zoom and pan", () => {
     expect(tall.ty).toBe(32);
     const padded = fitViewport({ x: 0, y: 0, w: 200, h: 100 }, 800, 600, limits, { top: 32, right: 32, bottom: 200, left: 32 });
     expect(padded.ty).toBe(32 + (600 - 32 - 200 - 100) / 2);
+    const top = fitViewport({ x: 32, y: 32, w: 200, h: 100 }, 800, 600, { ...limits, alignTop: true }, 24);
+    expect(top.ty).toBe(24 - 32);
+    expect(top.tx).toBe(24 + (800 - 48 - 200) / 2 - 32);
   });
 
   it("reveals a box with the smallest pan, and shows the minimap only when part of the picture is out of view", () => {

@@ -418,7 +418,8 @@ export function layoutLayered(
 
   const rootBlock = layoutBlock(rootItems, edges);
   const measured = roots.map(measureFrame);
-  const width = Math.max(rootBlock.w, ...measured.map((frame) => frame.w));
+  // Frames fill the width the view gives them (items stay left-aligned in them).
+  const width = Math.max(rootBlock.w, ...measured.map((frame) => frame.w), measured.length > 0 && options.width > 0 ? options.width : 0);
   let y = LAYERED.pad;
   const rootById = new Map(rootItems.map((item) => [item.id, item]));
   for (const [id, centre] of rootBlock.centres) {
@@ -461,6 +462,7 @@ export function layoutLayered(
   layout.nodes = boxes;
   layout.frames = placedFrames;
   layout.routes = routes;
-  layout.bounds = { x: 0, y: 0, w: width + 2 * LAYERED.pad, h: y + LAYERED.pad };
+  // The picture itself: the view adds its own padding around it.
+  layout.bounds = { x: LAYERED.pad, y: LAYERED.pad, w: width, h: y - LAYERED.pad };
   return layout;
 }

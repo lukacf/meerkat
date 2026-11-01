@@ -17,7 +17,7 @@ import { GraphTooltip, Legend, Minimap, ZoomControls } from "./controls";
 import { edgeLength, edgeNormal, edgePath, edgeShape, angleAt, pointAt } from "./edge-geometry";
 import type { EdgeShape } from "./edge-geometry";
 import { isNavigationKey, nodeToward, readingOrder } from "./keyboard";
-import { fitText, labelAt, outwardSides, placeLabels } from "./labels";
+import { LABEL_GAP, LABEL_HEIGHT, fitText, labelAt, outwardSides, placeLabels } from "./labels";
 import type { LabelInput, LabelPlacement, LabelSide } from "./labels";
 import { buildGraphModel, highlightFor } from "./model";
 import type { GraphModel, Highlight } from "./model";
@@ -290,6 +290,8 @@ export const GraphView = React.forwardRef<GraphViewHandle, GraphViewProps>(funct
     legend = "auto",
     minimap = "auto",
     controls = true,
+    wheelZoom = "always",
+    fitPadding,
     renderer = "auto",
     labels = "auto",
     edgeLabels = "auto",
@@ -346,7 +348,7 @@ export const GraphView = React.forwardRef<GraphViewHandle, GraphViewProps>(funct
 
   // Layout. Lanes and clusters spread across the frame; force settles in idle chunks.
   // Layered pictures sit closer to the frame's edge (the A3.9 WorkGraph frames, 24 px in).
-  const fitPad = cards ? CARD_FIT_PAD : ZOOM.pad;
+  const fitPad = fitPadding !== undefined && fitPadding >= 0 ? fitPadding : cards ? CARD_FIT_PAD : ZOOM.pad;
   const layoutWidth = size.width > 0 ? Math.max(320, size.width - 2 * fitPad) : 960;
   const layoutHeight = size.height > 0 ? Math.max(200, size.height - 2 * ZOOM.pad) : 560;
   // The bottom-left chrome (legend and zoom controls) stays clear of the fitted picture.
@@ -532,6 +534,16 @@ export const GraphView = React.forwardRef<GraphViewHandle, GraphViewProps>(funct
     for (const node of model.nodes) {
       const box = layout.nodes.get(node.id);
       if (!box || isCardKind(node.kind)) continue;
+      if (kind === "layered") {
+        // Layered marks carry their label on the right.
+        const r = markGeometry(node.kind, node.size).outer;
+        const half = Math.max(r, LABEL_HEIGHT / 2) + 2;
+        x0 = Math.min(x0, box.x - r - 2);
+        x1 = Math.max(x1, box.x + r + LABEL_GAP + measures.label(node.label) + 2);
+        y0 = Math.min(y0, box.y - half);
+        y1 = Math.max(y1, box.y + half);
+        continue;
+      }
       const half = Math.max(box.w / 2, measures.label(node.label) / 2 + 4);
       x0 = Math.min(x0, box.x - half);
       x1 = Math.max(x1, box.x + half);
@@ -539,7 +551,7 @@ export const GraphView = React.forwardRef<GraphViewHandle, GraphViewProps>(funct
       y1 = Math.max(y1, box.y + box.h / 2 + 22);
     }
     return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
-  }, [layout, model.nodes, measures.label]);
+  }, [layout, model.nodes, measures.label, kind]);
   const fit = React.useMemo(
     () => fitViewport(fitBounds, size.width, size.height, limits, { top: fitPad, right: fitPad, bottom: fitBottom, left: fitPad }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1042,15 +1054,20 @@ export const GraphView = React.forwardRef<GraphViewHandle, GraphViewProps>(funct
     onFocusChangeRef.current?.(focusedId);
   }, [focusedId]);
 
-  // Wheel: zoom at the pointer; Shift pans sideways. A native, non-passive listener.
+  // Wheel: zoom at the pointer; Shift pans sideways. A native, non-passive
+  // listener; `wheelZoom` leaves plain scrolling (or all of it) to the page.
+  const wheelZoomRef = React.useRef(wheelZoom);
+  wheelZoomRef.current = wheelZoom;
   React.useEffect(() => {
     const element = rootRef.current;
     if (!element) return undefined;
     const handler = (event: WheelEvent) => {
       if (event.target instanceof Element && event.target.closest(".cc-viz-chrome")) return;
+      const mode = wheelZoomRef.current;
+      if (mode === "off" || (mode === "pinch" && !event.ctrlKey && !event.metaKey)) return;
       event.preventDefault();
       const rect = element.getBoundingClientRect();
-      if (event.shiftKey) {
+      if (event.shiftKey && mode === "always") {
         const { dx, dy } = wheelPixels(event);
         const delta = Math.abs(dx) > Math.abs(dy) ? dx : dy;
         setViewport((current) => ({ ...current, tx: current.tx - delta }), true);

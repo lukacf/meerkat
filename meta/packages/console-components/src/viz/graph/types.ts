@@ -297,6 +297,18 @@ export interface GraphViewProps {
   minimap?: "auto" | "on" | "off";
   /** The zoom controls (bottom left). */
   controls?: boolean;
+  /**
+   * The mouse wheel. `always` (default): zooms at the pointer, Shift pans.
+   * `pinch`: zooms only on a trackpad pinch or Ctrl/Cmd + wheel and leaves
+   * plain scrolling to the page (a small graph inside a scrolling drawer).
+   * `off`: leaves every wheel event to the page.
+   */
+  wheelZoom?: "always" | "pinch" | "off";
+  /**
+   * Room the fit keeps clear on each side, in px: default 24 for layered,
+   * 32 for the others. The bottom also clears the legend and the controls.
+   */
+  fitPadding?: number;
   /** `auto`: SVG up to 300 nodes and 800 edges, canvas above. */
   renderer?: "auto" | "svg" | "canvas";
   /** `auto`: the A3.9 level of detail. */

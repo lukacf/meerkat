@@ -1,0 +1,204 @@
+/* Shell: the app grid, main area, resizers, legacy panel frame, action errors and runtime-scoped panels.
+   Split from console-host.css (imported there, in this order). */
+
+/* ── Shell ──────────────────────────────────────────────────── */
+
+.meta-shell {
+  display: flex; flex-direction: column;
+  height: 100%;
+  background: var(--bg);
+  overflow: hidden;
+}
+
+.shell {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  display: grid;
+  grid-template-columns:
+    var(--cc-workbench-sidebar-width, 260px)
+    1px
+    minmax(0, 1fr)
+    1px
+    var(--cc-workbench-activity-width, 300px);
+  grid-template-areas: "sidebar rs main ra rail";
+  background: var(--bg);
+  position: relative;
+  overflow: hidden;
+}
+
+/* Collapsed sidebars: shrink the column to a thin rail and hide the
+   adjacent resizer. The sidebar/rail components render only their
+   expand chevron when `data-collapsed="true"`. */
+.shell[data-sidebar-collapsed="true"] {
+  grid-template-columns:
+    var(--cc-workbench-collapsed-rail-width, 28px)
+    0
+    minmax(0, 1fr)
+    1px
+    var(--cc-workbench-activity-width, 300px);
+}
+.shell[data-rail-collapsed="true"] {
+  grid-template-columns:
+    var(--cc-workbench-sidebar-width, 260px)
+    1px
+    minmax(0, 1fr)
+    0
+    var(--cc-workbench-collapsed-rail-width, 28px);
+}
+.shell[data-sidebar-collapsed="true"][data-rail-collapsed="true"] {
+  grid-template-columns:
+    var(--cc-workbench-collapsed-rail-width, 28px)
+    0
+    minmax(0, 1fr)
+    0
+    var(--cc-workbench-collapsed-rail-width, 28px);
+}
+.shell[data-sidebar-collapsed="true"] .pane-resizer:not(.pane-resizer--activity) { display: none; }
+.shell[data-rail-collapsed="true"] .pane-resizer--activity { display: none; }
+
+.shell > .sidebar { grid-area: sidebar; }
+.shell > .main { grid-area: main; }
+.shell > .rail { grid-area: rail; }
+.shell > .pane-resizer {
+  position: relative;
+  left: auto;
+  top: auto;
+  bottom: auto;
+  transform: none;
+  width: 1px;
+  grid-area: rs;
+  background: var(--line);
+  z-index: 5;
+}
+.shell > .pane-resizer--activity { grid-area: ra; right: auto; }
+.shell > .pane-resizer::before {
+  background: var(--accent);
+  width: 3px;
+  left: -1px;
+}
+
+/* Main area inside the shell */
+.main {
+  display: flex; flex-direction: column;
+  min-width: 0; min-height: 0;
+  background: var(--bg);
+  overflow: hidden;
+}
+.main > * { flex: 1; min-height: 0; }
+
+@media (max-width: 700px) {
+  .cc-theme-scope {
+    --cc-workbench-sidebar-width: min(220px, 42vw);
+    --cc-workbench-activity-width: 0px;
+  }
+
+  .shell,
+  .shell[data-sidebar-collapsed="true"],
+  .shell[data-rail-collapsed="true"],
+  .shell[data-sidebar-collapsed="true"][data-rail-collapsed="true"] {
+    grid-template-columns:
+      var(--cc-workbench-sidebar-width, 180px)
+      1px
+      minmax(0, 1fr)
+      0
+      0;
+  }
+
+  .shell[data-sidebar-collapsed="true"],
+  .shell[data-sidebar-collapsed="true"][data-rail-collapsed="true"] {
+    grid-template-columns:
+      var(--cc-workbench-collapsed-rail-width, 28px)
+      0
+      minmax(0, 1fr)
+      0
+      0;
+  }
+
+  .shell > .rail,
+  .shell > .pane-resizer--activity {
+    display: none;
+  }
+}
+
+/* ── Workbench tune-ups ───────────────────────────────────────── */
+
+.cc-workbench { transition: none; }
+
+.cc-workbench__launcher {
+  background: var(--bg-sunken);
+  border-right: 1px solid var(--line);
+}
+.cc-workbench__main-body { padding: 0; }
+.cc-workbench__activity {
+  padding: 0;
+  background: var(--bg-sunken);
+  border-left: 1px solid var(--line);
+}
+
+/* ── Pane resizer ────────────────────────────────────────────── */
+
+.pane-resizer {
+  position: absolute;
+  top: 0; bottom: 0;
+  left: var(--cc-workbench-sidebar-width, 260px);
+  width: 14px; z-index: 50;
+  cursor: col-resize;
+  transform: translateX(-50%);
+  touch-action: none;
+  background: transparent;
+}
+.pane-resizer::before {
+  content: "";
+  position: absolute;
+  top: 0; bottom: 0; left: 50%;
+  width: 1px;
+  opacity: 0;
+  background: var(--line-strong);
+  transition: opacity 120ms ease;
+}
+.pane-resizer--activity {
+  left: auto;
+  right: var(--cc-workbench-activity-width, 300px);
+}
+.pane-resizer:hover::before,
+[data-cc-resizing="true"] .pane-resizer::before { opacity: 1; }
+
+/* ── Fallback / legacy console-panel style ──────────────────── */
+
+.console-panel {
+  display: flex; flex-direction: column;
+  gap: 16px;
+  height: 100%;
+  padding: 20px 24px;
+  overflow: auto;
+  font-family: var(--sans);
+  color: var(--ink);
+}
+
+/* === Recoverable action errors (e.g. access-denied send) === */
+.meta-action-error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 14px;
+  background: var(--bg-elev-1);
+  color: var(--crit-ink);
+  border-bottom: 1px solid var(--line);
+  font-size: 12px;
+}
+.meta-action-error button {
+  background: none;
+  border: none;
+  color: inherit;
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  padding: 2px 6px;
+}
+
+
+.runtime-scoped-panel { display:flex; flex-direction:column; height:100%; min-height:0; }
+.runtime-scoped-panel > :last-child { flex:1; min-height:0; }
+.runtime-panel-control .cc-select__control { max-width: 220px; }

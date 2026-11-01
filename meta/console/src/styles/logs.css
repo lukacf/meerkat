@@ -1,0 +1,149 @@
+/* Logs panel. .logs__body and .logline--warn stay in console-host.css (component-boundary.test.ts reads them).
+   Split from console-host.css (imported there, in this order). */
+
+/* ── Logs ─────────────────────────────────────────────────────── */
+/* Kit classes in the panel's own markup (its node test bundle cannot load
+   the kit's components). A dense mono viewer: every cell ends in an
+   ellipsis, so a long name never runs into the next column. */
+.logs__follow .cc-dot { margin-right: 2px; }
+.logs__toolbar { border-bottom: 1px solid var(--line); }
+.logs__stream {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  margin: 0;
+  padding: 6px 0 16px;
+  overflow-y: auto;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--ink);
+}
+.logline {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.logline--error { background: color-mix(in oklch, var(--crit) 7%, transparent); }
+.logline.is-open { background: var(--bg-elev-1); }
+.logline__row {
+  display: grid;
+  grid-template-columns: 10px 88px 40px minmax(0, 150px) minmax(0, 170px) minmax(0, 110px) minmax(0, 1fr) auto;
+  column-gap: 10px;
+  align-items: baseline;
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  min-height: 24px;
+  padding: 3px var(--_cc-panel-pad-x);
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.logline__row > * {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.logline__row:hover,
+.logline.is-open .logline__row { background: var(--bg-elev-2); }
+.logline__row:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: -2px;
+}
+.logline__chevron {
+  align-self: center;
+  width: 0;
+  height: 0;
+  border-top: 3.5px solid transparent;
+  border-bottom: 3.5px solid transparent;
+  border-left: 5px solid var(--ink-meta);
+  transition: transform 120ms ease;
+}
+.logline.is-open .logline__chevron { transform: rotate(90deg); }
+.logline__t {
+  color: var(--ink-meta);
+  font-variant-numeric: tabular-nums;
+}
+.logline__lvl {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+.logline__lvl--info { color: var(--ink-meta); }
+.logline__lvl--warn { color: var(--warn-ink); }
+.logline__lvl--error { color: var(--crit-ink); }
+.logline__src {
+  font-family: var(--sans);
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--ink);
+}
+.logline__evt { color: var(--ink-muted); }
+.logline__ctx {
+  font-size: 10.5px;
+  color: var(--ink-meta);
+}
+.logline__msg { color: var(--ink); }
+.logline__badge {
+  padding: 0 6px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-pill);
+  font-family: var(--sans);
+  font-size: 10.5px;
+  color: var(--ink-muted);
+}
+.logline__detail {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+  margin: 2px var(--_cc-panel-pad-x) 10px calc(var(--_cc-panel-pad-x) + 20px);
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--bg-elev-1);
+  font-family: var(--sans);
+}
+.logline__facts dd { font-size: 12px; }
+.logline__key {
+  margin-left: 8px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--ink-meta);
+}
+.logline__code {
+  font-family: var(--mono);
+  font-size: 11.5px;
+}
+.logline__data {
+  max-height: 320px;
+  margin: 0;
+  padding: 8px 10px;
+  overflow: auto;
+  border-radius: var(--r-sm);
+  background: var(--bg-sunken);
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--ink);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+/* The interaction column goes first, then the event (both stay in the
+   expanded detail). */
+@container cc-panel (max-width: 899px) {
+  .logline__row { grid-template-columns: 10px 88px 40px minmax(0, 140px) minmax(0, 160px) minmax(0, 1fr) auto; }
+  .logline__ctx { display: none; }
+}
+@container cc-panel (max-width: 559px) {
+  .logline__row { grid-template-columns: 10px 86px 36px minmax(0, 110px) minmax(0, 1fr); }
+  .logline__evt,
+  .logline__badge { display: none; }
+  .logline__detail { margin-left: var(--_cc-panel-pad-x); }
+}
+

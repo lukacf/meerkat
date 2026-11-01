@@ -277,11 +277,13 @@ async function runBrowserChecks(page, baseUrl, seeded) {
     "the blocks edge carries its label",
   );
 
-  // The glance strip answers the first question with the seeded numbers.
-  // A tile reads label, figure, then its foot: its first number is the figure.
+  // The glance strip answers the first question with the seeded numbers:
+  // each tile's figure is its value element (the foot holds other numbers).
   const figure = async (key) => {
-    const text = ((await page.locator(`[data-testid="workgraph-glance:${key}"]`).textContent()) ?? "").replace(/\s+/g, " ");
-    return { text, value: Number((text.match(/\d+/) || ["NaN"])[0]) };
+    const tile = page.locator(`[data-testid="workgraph-glance:${key}"]`);
+    const text = ((await tile.textContent()) ?? "").replace(/\s+/g, " ");
+    const value = Number(((await tile.locator(".cc-figure__value").first().textContent()) ?? "").trim());
+    return { text, value };
   };
   const done = await figure("done");
   assert.equal(done.value, 1, `one item is done: ${done.text}`);

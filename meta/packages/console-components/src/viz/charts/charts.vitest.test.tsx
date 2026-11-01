@@ -45,6 +45,13 @@ describe("time axis", () => {
     expect(ticks[3].major).toBe(true);
   });
 
+  it("names the day at midnight on an automatic clock axis", () => {
+    const ticks = timeTicks(DAY_START + 13 * HOUR, DAY_START + 37 * HOUR, { step: 6 * HOUR });
+    expect(ticks.map((tick) => tick.label)).toEqual(["18:00", "Sat 31", "06:00", "12:00"]);
+    const literal = timeTicks(DAY_START + 13 * HOUR, DAY_START + 37 * HOUR, { step: 6 * HOUR, format: "clock" });
+    expect(literal[1].label).toBe("00:00");
+  });
+
   it("counts times into bins and orders a brushed range", () => {
     expect(binCounts([0, 1, 9, 10, 25, 31], 0, 30, 3)).toEqual([3, 1, 1]);
     expect(binIndex(30, 0, 30, 3)).toBe(2);

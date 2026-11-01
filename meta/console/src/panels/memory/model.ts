@@ -495,8 +495,10 @@ export const LATTICE_WALK_PAGE_LIMIT = 200;
 /// Pages the walk may read beyond the ones the cap needs, for short pages.
 export const LATTICE_WALK_EXTRA_PAGES = 10;
 /// Empty pages that still carry a cursor that one "Load more" (or one
-/// filter) follows before it stops and shows what it has: a restricted
-/// caller can read empty pages while the store holds more rows past them.
+/// filter) follows before it stops and shows what it has. The record listing
+/// cuts each page from the rows the caller may read and gives a cursor only
+/// when more of them follow, so it sends no such page; an older server,
+/// which paged before it filtered, could.
 export const EMPTY_PAGE_HOPS = 4;
 
 /// Follow the cursor past empty pages, up to EMPTY_PAGE_HOPS more reads.
@@ -642,9 +644,12 @@ export async function runLatticeWalk(
     options.realms.length > 1 ? options.realms : [undefined];
   const all: MemoryPanelRecord[] = [];
   let exhaustedEverywhere = true;
-  // Pages a restricted caller reads can come back short or empty while
-  // still carrying a cursor (the server pages before it filters rows), so
-  // the walk also stops after a bounded number of pages, as incomplete.
+  // The record listing fills each page from the rows the caller may read and
+  // gives a cursor only when more of them follow, so a page comes back short
+  // only when nothing follows it. An older server paged before it filtered,
+  // so a restricted caller's pages could come back short or empty with a
+  // cursor; for that the walk also stops after a bounded number of pages, as
+  // incomplete.
   const maxPages = Math.ceil(max / LATTICE_WALK_PAGE_LIMIT) + LATTICE_WALK_EXTRA_PAGES;
   let pages = 0;
   for (const realm of realmParams) {

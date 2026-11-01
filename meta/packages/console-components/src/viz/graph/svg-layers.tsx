@@ -11,7 +11,7 @@ import { bundleWidth } from "./edge-geometry";
 import type { LabelPlacement } from "./labels";
 import { FlagGlyph, MarkGlyph, ProgressRingShape, StatusSquareShape, chevronPath, itemStatusOf } from "./marks";
 import type { GlyphState } from "./marks";
-import type { GraphClassNames, VizAttributes, VizEdge, VizNode, VizNodeBox, VizProgress, VizViewport } from "./types";
+import type { GraphClassNames, VizAttributes, VizEdge, VizMemoryState, VizNode, VizNodeBox, VizProgress, VizViewport } from "./types";
 
 function cx(...parts: Array<string | false | null | undefined>): string {
   return parts.filter(Boolean).join(" ");
@@ -40,7 +40,11 @@ export interface NodeViewProps {
   accent: boolean;
   exiting: boolean;
   entering: boolean;
-  glyph: GlyphState;
+  /** Glyph state as primitives, so a hover re-renders only the nodes it changes. */
+  live: boolean;
+  memory: VizMemoryState;
+  memoryLit: GlyphState["memoryLit"];
+  badge: GlyphState["badge"];
   /** Clusters: draw the member as a dot of this radius (geometric). */
   dot: number;
   classNames?: GraphClassNames;
@@ -72,8 +76,8 @@ function nodeClass(props: NodeViewProps): string {
     props.selected && "is-selected",
     props.lit && "is-lit",
     props.downstream && "is-downstream",
-    (props.flash || props.glyph.live) && node.kind !== "item" && node.kind !== "goal" && "is-hot",
-    props.glyph.live && "is-live",
+    (props.flash || props.live) && node.kind !== "item" && node.kind !== "goal" && "is-hot",
+    props.live && "is-live",
     props.flash && "is-flash",
     props.accent && "is-accent",
     node.retired && "is-retired",
@@ -125,7 +129,7 @@ function ItemCardBody({ props }: { props: NodeViewProps }): React.JSX.Element {
       <rect className="cc-viz-card" x={left} y={top} width={w} height={h} rx={4} />
       {props.accent ? <rect className="cc-viz-card__rule" x={left} y={top} width={2} height={h} /> : null}
       <g transform={`translate(${square.x} ${square.y})`}>
-        <StatusSquareShape status={status} live={props.glyph.live} />
+        <StatusSquareShape status={status} live={props.live} />
       </g>
       <text className={cx("cc-viz-card__title", props.classNames?.itemTitle)} x={left + 28} y={titleY}>
         {props.title}
@@ -205,7 +209,7 @@ export const NodeView = React.memo(function NodeView(props: NodeViewProps): Reac
       data-node-id={node.id}
       data-kind={node.kind}
       data-tone={node.live ? "live" : node.tone}
-      data-live={props.glyph.live ? "true" : undefined}
+      data-live={props.live ? "true" : undefined}
       data-selected={props.selected ? "true" : undefined}
       data-testid={props.testId}
       role={interactive ? "button" : undefined}
@@ -222,7 +226,7 @@ export const NodeView = React.memo(function NodeView(props: NodeViewProps): Reac
         </g>
       ) : (
         <g className={props.dot > 0 ? "cc-viz-glyph" : "cc-viz-glyph cc-viz-k"}>
-          <MarkGlyph node={node} state={props.glyph} dot={props.dot || undefined} />
+          <MarkGlyph node={node} state={{ live: props.live, memory: props.memory, memoryLit: props.memoryLit, badge: props.badge }} dot={props.dot || undefined} />
           {props.decor}
         </g>
       )}

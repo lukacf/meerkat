@@ -1,5 +1,6 @@
 import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import React from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 
 import { GraphView } from "./graph-view";
@@ -192,6 +193,32 @@ describe("GraphView", () => {
     expect(items.find((element) => element.getAttribute("data-item-id") === "b")).toHaveClass("is-accent");
   });
 
+  it("draws in a server render, where no layout effect measures the frame", () => {
+    const nodes: VizNode[] = [
+      { id: "goal", kind: "goal", label: "Ship the 2.4 release", status: "in_progress" },
+      { id: "a", kind: "item", label: "Freeze the branch", frame: "goal", status: "completed", attributes: { "data-goal-id": "goal" }, className: "is-completed" },
+      { id: "b", kind: "item", label: "Run the suite", frame: "goal", status: "blocked", className: "is-blocked" },
+    ];
+    const edges: VizEdge[] = [{ id: "ab", from: "a", to: "b", relation: "blocks", attributes: { "data-kind": "blocks" } }];
+    const html = renderToStaticMarkup(
+      <GraphView
+        nodes={nodes}
+        edges={edges}
+        layout="layered"
+        ariaLabel="Work item dependency graph"
+        testIdPrefix="workgraph-graph"
+        testIds={{ root: "workgraph-graph-frame", node: "workgraph-graph-node", edge: "workgraph-graph-edge" }}
+        classNames={{ itemTitle: "workgraph-graph__node-title" }}
+      />,
+    );
+    expect(html.match(/data-testid="workgraph-graph-node"/g)).toHaveLength(3);
+    expect(html).toContain('data-testid="workgraph-graph-frame:goal"');
+    expect(html).toContain('data-goal-id="goal"');
+    expect(html).toMatch(/class="[^"]*\bis-blocked\b/);
+    expect(html).toMatch(/data-testid="workgraph-graph-edge"[^>]*data-kind="blocks"|data-kind="blocks"[^>]*data-testid="workgraph-graph-edge"/);
+    expect(html).toContain("workgraph-graph__node-title");
+  });
+
   it("brings focusId into the tab order and returns focus through the handle", () => {
     const { nodes, edges } = team();
     const ref = React.createRef<GraphViewHandle>();
@@ -201,6 +228,33 @@ describe("GraphView", () => {
     act(() => ref.current!.focusNode("billing"));
     expect(document.activeElement).toBe(screen.getByTestId("t-node:billing"));
     expect(ref.current!.viewport()).toEqual(expect.objectContaining({ scale: expect.any(Number) }));
+  });
+
+  it("zooms to a node or to a goal's whole frame through the handle", () => {
+    // The graph's frame is 800 x 600; its chrome takes no room.
+    const rect = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      const [width, height] = this.classList.contains("cc-viz-graph") ? [800, 600] : [0, 0];
+      return { x: 0, y: 0, left: 0, top: 0, right: width, bottom: height, width, height, toJSON: () => ({}) } as DOMRect;
+    });
+    try {
+      const nodes: VizNode[] = [
+        { id: "goal", kind: "goal", label: "Ship the 2.4 release" },
+        ...Array.from({ length: 6 }, (_, index): VizNode => ({ id: `i${index}`, kind: "item", label: `Item ${index}`, frame: "goal", status: "open" })),
+      ];
+      const edges: VizEdge[] = Array.from({ length: 5 }, (_, index) => ({ id: `e${index}`, from: `i${index}`, to: `i${index + 1}`, relation: "blocks" }));
+      const ref = React.createRef<GraphViewHandle>();
+      render(<GraphView ref={ref} nodes={nodes} edges={edges} layout="layered" ariaLabel="g" testIdPrefix="t" legend="off" />);
+      act(() => ref.current!.fitTo(["i0"]));
+      const one = ref.current!.viewport();
+      expect(one.scale).toBe(1.6);
+      act(() => ref.current!.fitTo(["goal"]));
+      const frame = ref.current!.viewport();
+      expect(frame.scale).toBeLessThan(one.scale);
+      act(() => ref.current!.fitTo(["nobody"]));
+      expect(ref.current!.viewport()).toEqual(frame);
+    } finally {
+      rect.mockRestore();
+    }
   });
 
   it("draws above 300 nodes on a canvas with one focus proxy, and switches force to clusters above 150", () => {

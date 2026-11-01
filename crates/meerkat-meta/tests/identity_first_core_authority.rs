@@ -305,6 +305,9 @@ impl CaptureClient {
         self.requests.lock().unwrap().last().cloned()
     }
 
+    /// Wait (bounded) until at least `at_least` requests reached the LLM. A
+    /// request reaching the LLM is not the end of its turn: callers then wait
+    /// for the turn to settle in Core's runtime ([`Boot::wait_settled`]).
     async fn wait_for_requests(&self, at_least: usize, what: &str) {
         let deadline = Instant::now() + Duration::from_secs(30);
         while self.count() < at_least {
@@ -314,8 +317,6 @@ impl CaptureClient {
             );
             sleep(Duration::from_millis(50)).await;
         }
-        // Let the turn's answer commit before the next step reads or restarts.
-        sleep(Duration::from_millis(500)).await;
     }
 }
 
@@ -739,9 +740,57 @@ impl Boot {
             sent.is_ok(),
             "send to {identity} must be admitted: {sent:?}"
         );
-        self.capture
-            .wait_for_requests(before + 1, &format!("the turn sent to {identity}"))
-            .await;
+        let what = format!("the turn sent to {identity}");
+        self.capture.wait_for_requests(before + 1, &what).await;
+        self.wait_settled(identity, &what).await;
+    }
+
+    /// Wait (bounded) until Core's runtime holds no work for the session
+    /// Core binds `identity` to: no accepted input queued, held or running,
+    /// and no run it records as current. Core releases a member (Meta's
+    /// retire) only then and refuses retryably before. The runtime records a
+    /// run's end after the turn's request reached the model and after its
+    /// answer committed, so neither of those is the end of the turn.
+    async fn wait_settled(&self, identity: &AgentIdentity, what: &str) {
+        let session = self
+            .core_last_binding(identity)
+            .await
+            .session
+            .unwrap_or_else(|| panic!("Core binds {identity} to a session after {what}"));
+        let machine = self
+            .unified
+            .mob_runtime()
+            .session_service()
+            .expect("the persistent runtime has a session service")
+            .acquire_runtime_adapter(None)
+            .expect("acquire the runtime adapter")
+            .expect("the persistent runtime has a runtime adapter");
+        let started = Instant::now();
+        let deadline = started + Duration::from_secs(30);
+        let mut first_busy = None;
+        loop {
+            let active_inputs = machine.session_has_active_inputs(&session).await;
+            let current_run = machine.current_run(&session).await;
+            if !active_inputs && current_run.is_none() {
+                break;
+            }
+            if first_busy.is_none() {
+                first_busy = Some((active_inputs, current_run.clone()));
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for {what} to settle in Core's runtime; last read of \
+                 session {session}: active inputs {active_inputs}, current run {current_run:?}"
+            );
+            sleep(Duration::from_millis(50)).await;
+        }
+        if let Some((active_inputs, current_run)) = first_busy {
+            eprintln!(
+                "{what} settled in Core's runtime after {:?}; first read of session {session}: \
+                 active inputs {active_inputs}, current run {current_run:?}",
+                started.elapsed()
+            );
+        }
     }
 
     /// Core's own answer: the member MobMachine holds for `identity` now,
@@ -889,9 +938,9 @@ impl Boot {
             )
             .await
             .unwrap_or_else(|error| panic!("Core spawns {identity}'s unmarked member: {error}"));
-        self.capture
-            .wait_for_requests(before + 1, &format!("{identity}'s first turn"))
-            .await;
+        let what = format!("{identity}'s first turn");
+        self.capture.wait_for_requests(before + 1, &what).await;
+        self.wait_settled(identity, &what).await;
         let binding = self.core_last_binding(identity).await;
         assert!(
             !binding.marked,

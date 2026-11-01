@@ -4866,6 +4866,33 @@ fn memory_panel_scope_action(scope: &crate::memory::records::MemoryScope) -> &'s
     }
 }
 
+/// Who reads the memory panel, and through which console: the caller's
+/// access view and the identity namespace of the runtime that serves the
+/// read. A runtime's own console names identities bare (an empty
+/// namespace); a shared Console names them `<namespace>/<identity>` and
+/// records their access attributes under that name, so the identity a store
+/// row names is judged under the name the console gives it.
+#[derive(Clone, Copy)]
+struct MemoryPanelCaller<'a> {
+    view: Option<&'a AccessView>,
+    namespace: &'a str,
+}
+
+impl<'a> MemoryPanelCaller<'a> {
+    /// A read on a runtime's own console.
+    fn own(view: Option<&'a AccessView>) -> Self {
+        Self {
+            view,
+            namespace: "",
+        }
+    }
+
+    /// The caller's view, when it enforces anything.
+    fn enforced(self) -> Option<&'a AccessView> {
+        self.view.filter(|view| view.enforced())
+    }
+}
+
 /// Per-row visibility for panel reads. Identity-scope rows require the
 /// per-scope read action AND `agent.view` on the identity (§10.3: the
 /// console keeps view as a prerequisite); mob rows require
@@ -4877,17 +4904,17 @@ fn memory_panel_scope_action(scope: &crate::memory::records::MemoryScope) -> &'s
 /// exists for), including after a review or forget tombstones it. The scope
 /// half is [`memory_panel_scope_visible`].
 fn memory_panel_record_visible(
-    view: Option<&AccessView>,
+    caller: MemoryPanelCaller<'_>,
     record: &crate::memory::records::MemoryRecord,
 ) -> bool {
-    let Some(view) = view.filter(|view| view.enforced()) else {
+    if caller.enforced().is_none() {
         return true;
-    };
-    if !memory_panel_scope_visible(Some(view), &record.scope) {
+    }
+    if !memory_panel_scope_visible(caller, &record.scope) {
         return false;
     }
     if memory_panel_record_is_quarantine_evidence(record) {
-        return memory_panel_quarantine_evidence_visible(Some(view));
+        return memory_panel_quarantine_evidence_visible(caller.view);
     }
     true
 }
@@ -4911,15 +4938,15 @@ fn memory_panel_quarantine_evidence_visible(view: Option<&AccessView>) -> bool {
 /// [`memory_panel_record_visible`] on the record it names, before it leaves
 /// the server.
 fn memory_panel_scope_visible(
-    view: Option<&AccessView>,
+    caller: MemoryPanelCaller<'_>,
     scope: &crate::memory::records::MemoryScope,
 ) -> bool {
-    let Some(view) = view.filter(|view| view.enforced()) else {
+    let Some(view) = caller.enforced() else {
         return true;
     };
     match scope {
         crate::memory::records::MemoryScope::Identity { identity, .. } => {
-            memory_panel_identity_visible(Some(view), identity)
+            memory_panel_identity_visible(caller, identity)
         }
         crate::memory::records::MemoryScope::Mob { .. } => view.allows(ACTION_MOB_MEMORY_READ),
         crate::memory::records::MemoryScope::Operator { .. } => {
@@ -4930,15 +4957,29 @@ fn memory_panel_scope_visible(
 }
 
 /// Whether the caller may read an identity's memory scope: the per-scope
-/// read action AND `agent.view` on the identity. Rows that name an identity
-/// instead of carrying a scope (a pending harvest, the identity an injection
-/// went into) are kept by this rule.
-fn memory_panel_identity_visible(view: Option<&AccessView>, identity: &str) -> bool {
-    let Some(view) = view.filter(|view| view.enforced()) else {
+/// read action AND `agent.view` on the identity, named as the console names
+/// it ([`MemoryPanelCaller`]). Rows that name an identity instead of
+/// carrying a scope (a pending harvest, the identity an injection went into)
+/// are kept by this rule. An identity the access cache does not know is
+/// decided by its bare name, which a deny scoped by a role, a label or a
+/// lineage ancestor cannot match, so such an identity is withheld while a
+/// deny of that kind applies to either action (fails closed).
+fn memory_panel_identity_visible(caller: MemoryPanelCaller<'_>, identity: &str) -> bool {
+    let Some(view) = caller.enforced() else {
         return true;
     };
-    view.allows_agent(ACTION_AGENT_MEMORY_READ, identity)
-        && view.allows_agent(ACTION_AGENT_VIEW, identity)
+    let identity = namespace_console_identity(identity, caller.namespace);
+    let actions = [ACTION_AGENT_MEMORY_READ, ACTION_AGENT_VIEW];
+    if !view.knows_agent(&identity)
+        && actions
+            .iter()
+            .any(|action| view.has_deny_undecidable_by_identity(action, &identity))
+    {
+        return false;
+    }
+    actions
+        .iter()
+        .all(|action| view.allows_agent(action, &identity))
 }
 
 /// Keep the rows whose record the caller may read
@@ -4948,12 +4989,12 @@ fn memory_panel_identity_visible(view: Option<&AccessView>, identity: &str) -> b
 /// whose record the store does not hold is withheld: its scope is unknown.
 async fn memory_panel_retain_readable_records<T>(
     store: &dyn crate::memory::capabilities::MemoryPanelStore,
-    view: Option<&AccessView>,
+    caller: MemoryPanelCaller<'_>,
     realm: &str,
     rows: &mut Vec<T>,
     record_id: impl Fn(&T) -> &str,
 ) -> Result<(), crate::identity_first::agent_memory::AgentMemoryError> {
-    if !view.is_some_and(AccessView::enforced) || rows.is_empty() {
+    if caller.enforced().is_none() || rows.is_empty() {
         return Ok(());
     }
     let mut ids: Vec<String> = rows.iter().map(|row| record_id(row).to_string()).collect();
@@ -4963,7 +5004,7 @@ async fn memory_panel_retain_readable_records<T>(
         .records_by_ids(realm, &ids)
         .await?
         .into_iter()
-        .filter(|record| memory_panel_record_visible(view, record))
+        .filter(|record| memory_panel_record_visible(caller, record))
         .map(|record| record.id)
         .collect();
     rows.retain(|row| readable.contains(record_id(row)));
@@ -4982,21 +5023,21 @@ async fn memory_panel_retain_readable_records<T>(
 /// touched is then among the realm's scopes, and quarantine evidence stays.
 async fn memory_panel_realm_fully_readable(
     store: &dyn crate::memory::capabilities::MemoryPanelStore,
-    view: Option<&AccessView>,
+    caller: MemoryPanelCaller<'_>,
     realm: &str,
 ) -> Result<bool, crate::identity_first::agent_memory::AgentMemoryError> {
-    if !view.is_some_and(AccessView::enforced) {
+    if caller.enforced().is_none() {
         return Ok(true);
     }
     let every_scope = store
         .scope_overview(realm)
         .await?
         .iter()
-        .all(|row| memory_panel_scope_visible(view, &row.scope));
+        .all(|row| memory_panel_scope_visible(caller, &row.scope));
     if !every_scope {
         return Ok(false);
     }
-    Ok(memory_panel_quarantine_evidence_visible(view)
+    Ok(memory_panel_quarantine_evidence_visible(caller.view)
         || !store.holds_quarantine_evidence(realm).await?)
 }
 
@@ -5022,15 +5063,15 @@ fn memory_panel_record_is_quarantine_evidence(
 /// the queue's entry gate but is deliberately not sufficient per row.
 /// Unknown scope kinds are denied.
 fn memory_panel_promotion_visible(
-    view: Option<&AccessView>,
+    caller: MemoryPanelCaller<'_>,
     scope_kind: &str,
     scope_key: &str,
 ) -> bool {
-    let Some(view) = view.filter(|view| view.enforced()) else {
+    let Some(view) = caller.enforced() else {
         return true;
     };
     match scope_kind {
-        "identity" => memory_panel_identity_visible(Some(view), scope_key),
+        "identity" => memory_panel_identity_visible(caller, scope_key),
         "mob" => view.allows(ACTION_MOB_MEMORY_READ),
         "operator" => view.allows(ACTION_OPERATOR_MEMORY_READ),
         "realm" => view.allows(ACTION_AGENT_MEMORY_READ),
@@ -5077,7 +5118,7 @@ async fn memory_panel_realms(
 
 async fn handle_memory_panel_records(
     store: Option<&dyn crate::memory::capabilities::MemoryPanelStore>,
-    view: Option<&AccessView>,
+    caller: MemoryPanelCaller<'_>,
     params: &Value,
     response_id: Value,
 ) -> Value {
@@ -5153,7 +5194,7 @@ async fn handle_memory_panel_records(
         }
         records.extend(page.records);
     }
-    records.retain(|record| memory_panel_record_visible(view, record));
+    records.retain(|record| memory_panel_record_visible(caller, record));
     records.sort_by(|a, b| {
         b.updated_at_ms
             .cmp(&a.updated_at_ms)
@@ -5177,7 +5218,7 @@ async fn handle_memory_panel_records(
 
 async fn handle_memory_panel_record(
     store: Option<&dyn crate::memory::capabilities::MemoryPanelStore>,
-    view: Option<&AccessView>,
+    caller: MemoryPanelCaller<'_>,
     params: &Value,
     response_id: Value,
 ) -> Value {
@@ -5220,9 +5261,9 @@ async fn handle_memory_panel_record(
     };
     // Scope is only known post-load, so the entry gate lives here rather
     // than in the requirements table.
-    if !memory_panel_record_visible(view, &record) {
+    if !memory_panel_record_visible(caller, &record) {
         let action = if memory_panel_record_is_quarantine_evidence(&record)
-            && view.is_some_and(|view| {
+            && caller.view.is_some_and(|view| {
                 view.enforced() && !view.allows(ACTION_MEMORY_QUARANTINE_REVIEW)
             }) {
             ACTION_MEMORY_QUARANTINE_REVIEW
@@ -5252,7 +5293,7 @@ async fn handle_memory_panel_record(
     };
     let chain_rows: Vec<Value> = chain
         .iter()
-        .filter(|link| memory_panel_record_visible(view, link))
+        .filter(|link| memory_panel_record_visible(caller, link))
         .map(|link| memory_panel_record_json(link, false))
         .collect();
     let injections = match store
@@ -5262,7 +5303,7 @@ async fn handle_memory_panel_record(
         // The record is readable; each usage row is also a moment of the
         // context of the identity it went into, kept by that identity's rule.
         Ok(mut entries) => {
-            entries.retain(|entry| memory_panel_identity_visible(view, &entry.identity));
+            entries.retain(|entry| memory_panel_identity_visible(caller, &entry.identity));
             entries
         }
         Err(err) => return memory_panel_store_error(response_id, err),
@@ -5281,7 +5322,7 @@ async fn handle_memory_panel_record(
 
 async fn handle_memory_panel_quarantine(
     store: Option<&dyn crate::memory::capabilities::MemoryPanelStore>,
-    view: Option<&AccessView>,
+    caller: MemoryPanelCaller<'_>,
     params: &Value,
     response_id: Value,
 ) -> Value {
@@ -5306,7 +5347,7 @@ async fn handle_memory_panel_quarantine(
                 rows.into_iter()
                     .filter(|promotion| {
                         memory_panel_promotion_visible(
-                            view,
+                            caller,
                             &promotion.scope_kind,
                             &promotion.scope_key,
                         )
@@ -5331,7 +5372,7 @@ async fn handle_memory_panel_quarantine(
     // The reviewer entry gate is necessary but not sufficient: each queue row
     // still needs the caller's per-scope read grant, and hidden rows must not
     // consume the page budget.
-    records.retain(|record| memory_panel_record_visible(view, record));
+    records.retain(|record| memory_panel_record_visible(caller, record));
     records.sort_by_key(|record| std::cmp::Reverse(record.created_at_ms));
     records.truncate(limit);
     // Queue rows stay body-free even for reviewers: verdicts are decided on
@@ -5535,7 +5576,7 @@ fn memory_quarantine_refusal_error(
 /// can tell withheld history from none.
 async fn handle_memory_panel_dreams(
     store: Option<&dyn crate::memory::capabilities::MemoryPanelStore>,
-    view: Option<&AccessView>,
+    caller: MemoryPanelCaller<'_>,
     params: &Value,
     response_id: Value,
 ) -> Value {
@@ -5555,7 +5596,7 @@ async fn handle_memory_panel_dreams(
             Ok(history) => history,
             Err(err) => return memory_panel_store_error(response_id, err),
         };
-        match memory_panel_realm_fully_readable(store, view, realm).await {
+        match memory_panel_realm_fully_readable(store, caller, realm).await {
             Ok(true) => runs.extend(history.into_iter().map(|run| (realm.clone(), run))),
             Ok(false) => withheld_by_access = true,
             Err(err) => return memory_panel_store_error(response_id, err),
@@ -5596,7 +5637,7 @@ async fn handle_memory_panel_dreams(
 /// as `panel/dreams` lists its runs, with the same `withheld_by_access`.
 async fn handle_memory_panel_dream_runs(
     store: Option<&dyn crate::memory::capabilities::MemoryPanelStore>,
-    view: Option<&AccessView>,
+    caller: MemoryPanelCaller<'_>,
     params: &Value,
     response_id: Value,
 ) -> Value {
@@ -5616,7 +5657,7 @@ async fn handle_memory_panel_dream_runs(
             Ok(sheets) => sheets,
             Err(err) => return memory_panel_store_error(response_id, err),
         };
-        match memory_panel_realm_fully_readable(store, view, realm).await {
+        match memory_panel_realm_fully_readable(store, caller, realm).await {
             Ok(true) => runs.extend(sheets.into_iter().map(|run| (realm.clone(), run))),
             Ok(false) => withheld_by_access = true,
             Err(err) => return memory_panel_store_error(response_id, err),
@@ -5657,7 +5698,7 @@ async fn handle_memory_panel_dream_runs(
 /// may read that record ([`memory_panel_retain_readable_records`]).
 async fn handle_memory_panel_audit_verdicts(
     store: Option<&dyn crate::memory::capabilities::MemoryPanelStore>,
-    view: Option<&AccessView>,
+    caller: MemoryPanelCaller<'_>,
     params: &Value,
     response_id: Value,
 ) -> Value {
@@ -5676,9 +5717,10 @@ async fn handle_memory_panel_audit_verdicts(
             Ok(rows) => rows,
             Err(err) => return memory_panel_store_error(response_id, err),
         };
-        let readable = memory_panel_retain_readable_records(store, view, realm, &mut rows, |row| {
-            row.record_id.as_str()
-        });
+        let readable =
+            memory_panel_retain_readable_records(store, caller, realm, &mut rows, |row| {
+                row.record_id.as_str()
+            });
         if let Err(err) = readable.await {
             return memory_panel_store_error(response_id, err);
         }
@@ -5714,7 +5756,7 @@ async fn handle_memory_panel_audit_verdicts(
 /// scopes, so every figure counts only scopes the caller may read.
 async fn handle_memory_panel_overview(
     store: Option<&dyn crate::memory::capabilities::MemoryPanelStore>,
-    view: Option<&AccessView>,
+    caller: MemoryPanelCaller<'_>,
     params: &Value,
     response_id: Value,
 ) -> Value {
@@ -5731,7 +5773,7 @@ async fn handle_memory_panel_overview(
         match store.scope_overview(realm).await {
             Ok(rows) => scopes.extend(
                 rows.into_iter()
-                    .filter(|row| memory_panel_scope_visible(view, &row.scope))
+                    .filter(|row| memory_panel_scope_visible(caller, &row.scope))
                     .map(|row| {
                         json!({
                             "realm": realm,
@@ -5768,7 +5810,7 @@ async fn handle_memory_panel_overview(
 /// ([`memory_panel_scope_visible`]).
 async fn handle_memory_panel_proposals(
     store: Option<&dyn crate::memory::capabilities::MemoryPanelStore>,
-    view: Option<&AccessView>,
+    caller: MemoryPanelCaller<'_>,
     params: &Value,
     response_id: Value,
 ) -> Value {
@@ -5786,7 +5828,7 @@ async fn handle_memory_panel_proposals(
         match store.pending_proposals(realm, limit).await {
             Ok(rows) => proposals.extend(
                 rows.into_iter()
-                    .filter(|row| memory_panel_scope_visible(view, &row.scope))
+                    .filter(|row| memory_panel_scope_visible(caller, &row.scope))
                     .map(|row| {
                         json!({
                             "realm": realm,
@@ -5821,7 +5863,7 @@ async fn handle_memory_panel_proposals(
 /// ([`memory_panel_identity_visible`]).
 async fn handle_memory_panel_injections(
     store: Option<&dyn crate::memory::capabilities::MemoryPanelStore>,
-    view: Option<&AccessView>,
+    caller: MemoryPanelCaller<'_>,
     params: &Value,
     response_id: Value,
 ) -> Value {
@@ -5840,10 +5882,11 @@ async fn handle_memory_panel_injections(
             Ok(rows) => rows,
             Err(err) => return memory_panel_store_error(response_id, err),
         };
-        rows.retain(|row| memory_panel_identity_visible(view, &row.identity));
-        let readable = memory_panel_retain_readable_records(store, view, realm, &mut rows, |row| {
-            row.record_id.as_str()
-        });
+        rows.retain(|row| memory_panel_identity_visible(caller, &row.identity));
+        let readable =
+            memory_panel_retain_readable_records(store, caller, realm, &mut rows, |row| {
+                row.record_id.as_str()
+            });
         if let Err(err) = readable.await {
             return memory_panel_store_error(response_id, err);
         }
@@ -5872,7 +5915,7 @@ async fn handle_memory_panel_injections(
 /// [`memory_panel_identity_visible`].
 async fn handle_memory_panel_harvests(
     store: Option<&dyn crate::memory::capabilities::MemoryPanelStore>,
-    view: Option<&AccessView>,
+    caller: MemoryPanelCaller<'_>,
     params: &Value,
     response_id: Value,
 ) -> Value {
@@ -5890,7 +5933,7 @@ async fn handle_memory_panel_harvests(
         match store.pending_harvests(realm, limit).await {
             Ok(rows) => harvests.extend(
                 rows.into_iter()
-                    .filter(|row| memory_panel_identity_visible(view, &row.identity))
+                    .filter(|row| memory_panel_identity_visible(caller, &row.identity))
                     .map(|row| {
                         json!({
                             "realm": realm,
@@ -8870,6 +8913,14 @@ async fn handle_console_aggregator_rpc(
             let Some(aggregator) = &console_aggregator else {
                 return console_aggregator_unavailable(response_id);
             };
+            // The memory reads judge each row's identity by the attributes
+            // recorded under the name this Console gives it, so they are
+            // recorded first, as the send gate records them.
+            if shared_panels::MEMORY_READ_METHODS.contains(&method)
+                && let Some(controller) = access.filter(|controller| controller.enabled())
+            {
+                Box::pin(prime_access_cache_from_aggregator(aggregator, controller)).await;
+            }
             Box::pin(shared_panels::dispatch(aggregator, request, access_view)).await
         }
         "meta/capabilities" => {
@@ -9884,34 +9935,59 @@ async fn handle_console_runtime_rpc_with_visibility(
         // `console_rpc_access_requirements` plus per-row scope filtering in
         // the handlers.
         "meta/memory/panel/records" => meerkat_runtime::stack_relief::box_in_own_frame(move || async move {
-            handle_memory_panel_records(memory_panel, access_view, &request.params, response_id)
-                .await
+            handle_memory_panel_records(
+                memory_panel,
+                MemoryPanelCaller::own(access_view),
+                &request.params,
+                response_id,
+            )
+            .await
         })
         .await,
         "meta/memory/panel/record" => meerkat_runtime::stack_relief::box_in_own_frame(move || async move {
-            handle_memory_panel_record(memory_panel, access_view, &request.params, response_id)
-                .await
+            handle_memory_panel_record(
+                memory_panel,
+                MemoryPanelCaller::own(access_view),
+                &request.params,
+                response_id,
+            )
+            .await
         })
         .await,
         "meta/memory/panel/quarantine" => meerkat_runtime::stack_relief::box_in_own_frame(move || async move {
-            handle_memory_panel_quarantine(memory_panel, access_view, &request.params, response_id)
-                .await
+            handle_memory_panel_quarantine(
+                memory_panel,
+                MemoryPanelCaller::own(access_view),
+                &request.params,
+                response_id,
+            )
+            .await
         })
         .await,
         "meta/memory/panel/dreams" => meerkat_runtime::stack_relief::box_in_own_frame(move || async move {
-            handle_memory_panel_dreams(memory_panel, access_view, &request.params, response_id)
-                .await
+            handle_memory_panel_dreams(
+                memory_panel,
+                MemoryPanelCaller::own(access_view),
+                &request.params,
+                response_id,
+            )
+            .await
         })
         .await,
         "meta/memory/panel/dream_runs" => meerkat_runtime::stack_relief::box_in_own_frame(move || async move {
-            handle_memory_panel_dream_runs(memory_panel, access_view, &request.params, response_id)
-                .await
+            handle_memory_panel_dream_runs(
+                memory_panel,
+                MemoryPanelCaller::own(access_view),
+                &request.params,
+                response_id,
+            )
+            .await
         })
         .await,
         "meta/memory/panel/audit_verdicts" => meerkat_runtime::stack_relief::box_in_own_frame(move || async move {
             handle_memory_panel_audit_verdicts(
                 memory_panel,
-                access_view,
+                MemoryPanelCaller::own(access_view),
                 &request.params,
                 response_id,
             )
@@ -9919,23 +9995,43 @@ async fn handle_console_runtime_rpc_with_visibility(
         })
         .await,
         "meta/memory/panel/overview" => meerkat_runtime::stack_relief::box_in_own_frame(move || async move {
-            handle_memory_panel_overview(memory_panel, access_view, &request.params, response_id)
-                .await
+            handle_memory_panel_overview(
+                memory_panel,
+                MemoryPanelCaller::own(access_view),
+                &request.params,
+                response_id,
+            )
+            .await
         })
         .await,
         "meta/memory/panel/proposals" => meerkat_runtime::stack_relief::box_in_own_frame(move || async move {
-            handle_memory_panel_proposals(memory_panel, access_view, &request.params, response_id)
-                .await
+            handle_memory_panel_proposals(
+                memory_panel,
+                MemoryPanelCaller::own(access_view),
+                &request.params,
+                response_id,
+            )
+            .await
         })
         .await,
         "meta/memory/panel/injections" => meerkat_runtime::stack_relief::box_in_own_frame(move || async move {
-            handle_memory_panel_injections(memory_panel, access_view, &request.params, response_id)
-                .await
+            handle_memory_panel_injections(
+                memory_panel,
+                MemoryPanelCaller::own(access_view),
+                &request.params,
+                response_id,
+            )
+            .await
         })
         .await,
         "meta/memory/panel/harvests" => meerkat_runtime::stack_relief::box_in_own_frame(move || async move {
-            handle_memory_panel_harvests(memory_panel, access_view, &request.params, response_id)
-                .await
+            handle_memory_panel_harvests(
+                memory_panel,
+                MemoryPanelCaller::own(access_view),
+                &request.params,
+                response_id,
+            )
+            .await
         })
         .await,
         // The operator half of quarantine review: a mutation, so a read-only

@@ -79,37 +79,39 @@ pub(super) async fn dispatch(
         );
     };
     let store = selected.memory.as_deref();
+    // The rows name the runtime's identities bare; this Console names them
+    // in the runtime's namespace, which is how their access is judged.
+    let caller = MemoryPanelCaller {
+        view: access_view,
+        namespace: &selected.namespace,
+    };
     let stale_id = id.clone();
     let response = match request.method.as_str() {
         "meta/memory/panel/records" => {
-            handle_memory_panel_records(store, access_view, &params, id).await
+            handle_memory_panel_records(store, caller, &params, id).await
         }
-        "meta/memory/panel/record" => {
-            handle_memory_panel_record(store, access_view, &params, id).await
-        }
+        "meta/memory/panel/record" => handle_memory_panel_record(store, caller, &params, id).await,
         "meta/memory/panel/quarantine" => {
-            handle_memory_panel_quarantine(store, access_view, &params, id).await
+            handle_memory_panel_quarantine(store, caller, &params, id).await
         }
-        "meta/memory/panel/dreams" => {
-            handle_memory_panel_dreams(store, access_view, &params, id).await
-        }
+        "meta/memory/panel/dreams" => handle_memory_panel_dreams(store, caller, &params, id).await,
         "meta/memory/panel/dream_runs" => {
-            handle_memory_panel_dream_runs(store, access_view, &params, id).await
+            handle_memory_panel_dream_runs(store, caller, &params, id).await
         }
         "meta/memory/panel/audit_verdicts" => {
-            handle_memory_panel_audit_verdicts(store, access_view, &params, id).await
+            handle_memory_panel_audit_verdicts(store, caller, &params, id).await
         }
         "meta/memory/panel/overview" => {
-            handle_memory_panel_overview(store, access_view, &params, id).await
+            handle_memory_panel_overview(store, caller, &params, id).await
         }
         "meta/memory/panel/proposals" => {
-            handle_memory_panel_proposals(store, access_view, &params, id).await
+            handle_memory_panel_proposals(store, caller, &params, id).await
         }
         "meta/memory/panel/injections" => {
-            handle_memory_panel_injections(store, access_view, &params, id).await
+            handle_memory_panel_injections(store, caller, &params, id).await
         }
         "meta/memory/panel/harvests" => {
-            handle_memory_panel_harvests(store, access_view, &params, id).await
+            handle_memory_panel_harvests(store, caller, &params, id).await
         }
         method => {
             let admission = selected.runtime.workgraph_admission();

@@ -486,14 +486,18 @@ async function graphEventPolls() {
     assert(first.events.every(event => event.item_id === item.id && Number.isSafeInteger(event.seq)));
     assert.equal(new Set(first.events.map(event => event.seq)).size, first.events.length);
     assert.deepEqual(repeated, first, "overlapping polls retain the exact owner events");
-    assert.deepEqual(empty, { events: [] });
+    const lastSeq = Math.max(...first.events.map(event => event.seq));
+    // An events page: no event after the watermark, not cut, and the
+    // ledger's high-water mark, which is at least the last event seen.
+    assert.deepEqual(empty, { events: [], truncated: false, event_high_water_mark: empty.event_high_water_mark });
+    assert(Number.isSafeInteger(empty.event_high_water_mark) && empty.event_high_water_mark >= lastSeq,
+      "the empty poll names the ledger high-water mark");
     for (const step of ["events-first", "events-repeat", "events-empty"]) {
       const call = calls.find(call => call.id === `fixture-${runId}-${step}`);
       assert.equal(call.name, "workgraph_events");
       const ownerResult = await ownerRpc(fixture, "meta/workgraph/events", call.args);
       assert.deepEqual(ownerResult, results.get(step), "host RPC and agent tool read the same canonical event ledger");
     }
-    const lastSeq = Math.max(...first.events.map(event => event.seq));
     assert.equal(calls.at(-1).args.after_seq, lastSeq, "the empty query starts after the actual observed watermark");
     evidence.ownerItem = await ownerRpc(fixture, "meta/workgraph/get", { id: item.id });
     assert.deepEqual(evidence.ownerItem.item, item, "event polling does not mutate the item");

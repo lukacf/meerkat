@@ -600,6 +600,58 @@ async fn workgraph_sqlite_shared_realm_observability_roundtrip()
     let cli_snapshot: Value = serde_json::from_str(&cli_stdout)?;
     assert_workgraph_snapshot(&cli_snapshot, realm_id, &seeded)?;
 
+    // `list --json` and `ready --json` print the page: the rows, then
+    // total_items and truncated. The completed blocker was updated last, so
+    // a one-item list keeps it.
+    let cli_list_args = [
+        "--state-root",
+        state_root.to_str().unwrap(),
+        "--realm",
+        realm_id,
+        "workgraph",
+        "list",
+        "--include-terminal",
+        "--limit",
+        "1",
+        "--json",
+    ];
+    let cli_list_output = run_binary(&rkat, &project_dir, &cli_list_args).await?;
+    let cli_list_stdout =
+        output_ok_or_err(cli_list_output, "rkat", &cli_list_args).map_err(std::io::Error::other)?;
+    let cli_list: Value = serde_json::from_str(&cli_list_stdout)?;
+    assert_eq!(
+        cli_list["items"].as_array().map(Vec::len),
+        Some(1),
+        "{cli_list}"
+    );
+    assert_eq!(
+        cli_list["items"][0]["id"].as_str(),
+        Some(seeded.completed_id.as_str()),
+        "{cli_list}"
+    );
+    assert_eq!(cli_list["total_items"], json!(2), "{cli_list}");
+    assert_eq!(cli_list["truncated"], json!(true), "{cli_list}");
+    let cli_ready_args = [
+        "--state-root",
+        state_root.to_str().unwrap(),
+        "--realm",
+        realm_id,
+        "workgraph",
+        "ready",
+        "--json",
+    ];
+    let cli_ready_output = run_binary(&rkat, &project_dir, &cli_ready_args).await?;
+    let cli_ready_stdout = output_ok_or_err(cli_ready_output, "rkat", &cli_ready_args)
+        .map_err(std::io::Error::other)?;
+    let cli_ready: Value = serde_json::from_str(&cli_ready_stdout)?;
+    assert_eq!(
+        cli_ready["items"][0]["id"].as_str(),
+        Some(seeded.ready_id.as_str()),
+        "{cli_ready}"
+    );
+    assert_eq!(cli_ready["total_items"], json!(1), "{cli_ready}");
+    assert_eq!(cli_ready["truncated"], json!(false), "{cli_ready}");
+
     let mut rpc = spawn_rpc(
         &rkat_rpc,
         &project_dir,

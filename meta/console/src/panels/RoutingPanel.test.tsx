@@ -10,7 +10,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { RoutingSectionView } from "@console-core";
 import { RoutingPanel } from "./RoutingPanel";
-import { NavigationFocusProvider } from "../lib/console-navigation";
+import { NavigationFocusProvider } from "../lib/navigation-focus";
 import { AgentDirectoryProvider, createAgentDirectory } from "../../../packages/console-components/src/panel-kit";
 
 // DOM assertions compare booleans and strings, never elements.

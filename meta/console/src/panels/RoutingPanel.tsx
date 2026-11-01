@@ -32,7 +32,7 @@ import {
   type DotStripItem,
   type SummaryFact,
 } from "../../../packages/console-components/src/panel-kit";
-import { useNavigationFocus } from "../lib/console-navigation";
+import { useNavigationFocus } from "../lib/navigation-focus";
 import {
   STRIP_DELIVERIES,
   buildRoutingModel,

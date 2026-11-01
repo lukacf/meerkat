@@ -3,12 +3,14 @@ import React from "react";
 /**
  * The inline width of an element, kept current with a ResizeObserver
  * (0 until it is measured, and where layout is not available, as in jsdom).
- * Measured before paint, so a layout that depends on it does not flash.
+ * Returns a callback ref to put on the element, so an element that mounts
+ * after the component (behind a loading state) is measured too, and the
+ * width, read before paint so a layout that depends on it does not flash.
  */
-export function useElementWidth<T extends HTMLElement>(ref: React.RefObject<T | null>): number {
+export function useMeasuredWidth<T extends HTMLElement>(): [(element: T | null) => void, number] {
+  const [element, setElement] = React.useState<T | null>(null);
   const [width, setWidth] = React.useState(0);
   React.useLayoutEffect(() => {
-    const element = ref.current;
     if (!element) return undefined;
     const read = () => {
       const next = Math.round(element.getBoundingClientRect().width);
@@ -19,6 +21,6 @@ export function useElementWidth<T extends HTMLElement>(ref: React.RefObject<T | 
     const observer = new ResizeObserver(() => read());
     observer.observe(element);
     return () => observer.disconnect();
-  }, [ref]);
-  return width;
+  }, [element]);
+  return [setElement, width];
 }

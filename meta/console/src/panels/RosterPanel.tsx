@@ -20,7 +20,7 @@ import {
   type AgentActivity,
   type AgentNowLine,
 } from "../lib/agent-activity";
-import { useElementWidth } from "../lib/use-element-width";
+import { useMeasuredWidth } from "../lib/use-element-width";
 import { LifecycleConfirm, type ConfirmedLifecycleAction } from "./LifecycleConfirm";
 import {
   ActivityBars,
@@ -282,8 +282,7 @@ export function RosterPanel({
   const [density, setDensity] = usePanelDensity("roster");
   const [showIds, setShowIds] = useShowTechnicalIds("roster");
   const [viewChoice, setViewChoice] = usePanelPreference<RosterViewChoice>("meta-console-roster-view", "auto", ROSTER_VIEW_CHOICES);
-  const measureRef = React.useRef<HTMLDivElement | null>(null);
-  const width = useElementWidth(measureRef);
+  const [measureRef, width] = useMeasuredWidth<HTMLDivElement>();
   const view: RosterView = viewChoice === "auto" ? (width >= ROSTER_CARDS_MIN_WIDTH ? "cards" : "list") : viewChoice;
   const [query, setQuery] = React.useState("");
   const [filter, setFilter] = React.useState<Filter>("all");

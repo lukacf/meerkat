@@ -15,7 +15,7 @@ import {
   shortSpan,
 } from "../lib/agent-activity";
 import { LifecycleConfirm, type ConfirmedLifecycleAction } from "./LifecycleConfirm";
-import { useElementWidth } from "../lib/use-element-width";
+import { useMeasuredWidth } from "../lib/use-element-width";
 import { CopyButton } from "../../../packages/console-components/src/copy-button";
 import {
   ActivityBars,
@@ -295,8 +295,7 @@ export function AgentDetailsPanel({
 
   const confirmAction = confirming ? actions[confirming] : undefined;
   // The day's bars take the part's width (200 to 640 px), so they fit a narrow pane.
-  const barsRef = React.useRef<HTMLDivElement | null>(null);
-  const barsMeasured = useElementWidth(barsRef);
+  const [barsRef, barsMeasured] = useMeasuredWidth<HTMLDivElement>();
   const barsWidth = barsMeasured > 0 ? Math.max(200, Math.min(640, barsMeasured)) : 480;
 
   return (

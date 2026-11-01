@@ -29,7 +29,7 @@ import type { ConsoleAgent } from "../types";
 import { agentHealth, type AgentHealth, type AgentHealthKind } from "../lib/agent-status";
 import { useActivityLedger } from "../lib/activity-ledger";
 import { HOUR_MS, agentActivity, healthReason, hourCeiling, hourLabel, seriesWords, type AgentActivity } from "../lib/agent-activity";
-import { useElementWidth } from "../lib/use-element-width";
+import { useMeasuredWidth } from "../lib/use-element-width";
 
 /** The team facts Health reads besides its agents (`health_overview.live_snapshot`). */
 export interface HealthTeamSnapshot {
@@ -235,8 +235,7 @@ export function HealthPanel({
   const fineShown = showAllHealthy || filter ? fine : fine.slice(0, HEALTHY_TILES_SHOWN);
   const tiles = [...problems, ...fineShown];
 
-  const heatRef = React.useRef<HTMLDivElement | null>(null);
-  const heatWidth = useElementWidth(heatRef);
+  const [heatRef, heatWidth] = useMeasuredWidth<HTMLDivElement>();
   // Cells grow with the pane, 8 to 16 px, so the grid reads at every width.
   const heatCell = heatWidth > 0
     ? Math.max(8, Math.min(16, Math.floor((heatWidth - HEAT_LABEL_WIDTH) / 24) - 3))

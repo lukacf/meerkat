@@ -336,6 +336,8 @@ export function createDemoLedger(now: number, aliases: Readonly<Record<string, s
     reset: () => {},
     subscribe: () => () => {},
     getVersion: () => 1,
+    getPeersVersion: () => 1,
+    peerIds: () => new Map(),
   };
   return ledger;
 }

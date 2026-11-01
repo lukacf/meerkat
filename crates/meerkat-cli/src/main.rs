@@ -10544,6 +10544,7 @@ async fn handle_workgraph_command(
                     labels,
                     include_terminal,
                     limit,
+                    cursor: None,
                 })
                 .await?;
             print_workgraph_items(page, json)
@@ -10579,6 +10580,7 @@ async fn handle_workgraph_command(
                     namespace: parse_work_namespace(namespace)?,
                     labels,
                     limit,
+                    cursor: None,
                 })
                 .await?;
             print_workgraph_items(page, json)
@@ -10601,6 +10603,7 @@ async fn handle_workgraph_command(
                     labels,
                     include_terminal,
                     limit,
+                    cursor: None,
                 })
                 .await?;
             if json {

@@ -20,6 +20,7 @@ mod execution_machine;
 mod generated;
 mod machine;
 pub(crate) mod machines;
+mod read_page;
 mod rest_contract;
 mod service;
 mod store;

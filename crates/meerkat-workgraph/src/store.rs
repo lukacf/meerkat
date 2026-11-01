@@ -211,9 +211,9 @@ pub trait WorkGraphStore: Send + Sync {
     ) -> Result<Option<WorkItem>, WorkGraphError>;
 
     /// Every item matching `filter`; with `filter.limit`, the `limit` most
-    /// recently updated (`updated_at`, then id, descending).
-    /// `WorkGraphService::list_page` passes no limit and orders and cuts
-    /// itself.
+    /// recently updated (`updated_at`, then id, descending). A store ignores
+    /// `filter.cursor`: `WorkGraphService::list_page` passes no limit and no
+    /// cursor, and orders, places the cursor and cuts itself.
     async fn list_items(&self, filter: WorkItemFilter) -> Result<Vec<WorkItem>, WorkGraphError>;
 
     /// Read one namespace's items, edges, and observation time from one store

@@ -370,6 +370,9 @@ mod tests {
             items: page.items,
             total_items: None,
             truncated: None,
+            next_cursor: None,
+            anchor_event_seq: None,
+            changed_since_anchor: None,
         };
         let result = result_json(&work_items_response(Some(RpcId::Num(2)), &bare));
         let keys = result.as_object().expect("result object");

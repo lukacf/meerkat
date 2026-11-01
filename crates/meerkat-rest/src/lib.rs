@@ -5574,6 +5574,7 @@ impl From<WorkGraphItemsQuery> for meerkat::WorkItemFilter {
             labels: value.labels,
             include_terminal: value.include_terminal,
             limit: value.limit,
+            cursor: None,
         }
     }
 }
@@ -5588,6 +5589,7 @@ impl From<WorkGraphItemsQuery> for meerkat::WorkGraphSnapshotFilter {
             labels: value.labels,
             include_terminal: value.include_terminal,
             limit: value.limit,
+            cursor: None,
         }
     }
 }
@@ -5599,6 +5601,7 @@ impl From<WorkGraphReadyQuery> for meerkat::ReadyWorkFilter {
             namespace: value.namespace,
             labels: value.labels,
             limit: value.limit,
+            cursor: None,
         }
     }
 }
@@ -6410,9 +6413,9 @@ async fn workgraph_events(
 ) -> Result<Json<meerkat::WorkGraphEventsResponse>, ApiError> {
     state
         .workgraph_service
-        .events(query.into())
+        .events_page(query.into())
         .await
-        .map(|events| Json(meerkat::WorkGraphEventsResponse { events }))
+        .map(Json)
         .map_err(workgraph_error_to_api)
 }
 

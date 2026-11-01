@@ -10,6 +10,7 @@ use serde_json::json;
 use crate::machine::{WorkAttentionMachine, WorkGraphMachine, completion_policy_name};
 use crate::machines::work_item_admission as admission_dsl;
 use crate::machines::workgraph_lifecycle as wg_dsl;
+use crate::read_page::{self, PageRead, ReadyKey, UpdatedKey};
 use crate::store::{
     WorkGraphAdmissionFence, WorkGraphEventFilter, WorkGraphStore, WorkItemAdmissionInsert,
 };
@@ -29,8 +30,8 @@ use crate::types::{
     WorkCompletionPolicy, WorkEdge, WorkEdgeKind, WorkEvidenceKind, WorkEvidenceRef,
     WorkExecutionBinding, WorkExecutionBindingFilter, WorkExecutionBindingId,
     WorkExecutionEvidenceKind, WorkExecutionEvidenceProjection, WorkGraphEvent, WorkGraphEventKind,
-    WorkGraphItemsResponse, WorkGraphSnapshot, WorkGraphSnapshotFilter, WorkItem, WorkItemFilter,
-    WorkItemId, WorkItemRef, WorkNamespace, WorkOwnerKey, WorkStatus,
+    WorkGraphEventsResponse, WorkGraphItemsResponse, WorkGraphSnapshot, WorkGraphSnapshotFilter,
+    WorkItem, WorkItemFilter, WorkItemId, WorkItemRef, WorkNamespace, WorkOwnerKey, WorkStatus,
 };
 use crate::{
     ChildJoinDisposition, WorkExecutionLifecycleEffect, WorkExecutionMachine,
@@ -86,31 +87,50 @@ fn is_terminal_item(item: &WorkItem) -> bool {
     WorkGraphMachine::classify_terminality(item).unwrap_or(false)
 }
 
-/// The `list` and `snapshot` order: `updated_at` descending, then `id`
-/// descending, so a cut keeps the most recently updated items. It compares the
-/// decoded timestamps, never the order a store returned its rows in.
-fn most_recently_updated_first(left: &WorkItem, right: &WorkItem) -> std::cmp::Ordering {
-    right
-        .updated_at
-        .cmp(&left.updated_at)
-        .then_with(|| right.id.cmp(&left.id))
+/// One page of a read whose rows are sorted in the read's order: the rows
+/// after the cursor's position (from the first row on a first page), cut at
+/// `limit`.
+#[derive(Debug, Clone, Copy)]
+struct PageBounds {
+    /// The page's first row.
+    start: usize,
+    /// One past the page's last row.
+    end: usize,
+    /// Every row of the read, before the cursor and the cut.
+    total: usize,
 }
 
-/// Cut `items`, already in the read's order, to `limit`, reporting how many
-/// matched before the cut. `into_item` turns only the page into owned rows,
-/// so a read that holds references clones the page and nothing else.
-fn work_items_page<T>(
-    mut items: Vec<T>,
-    limit: usize,
-    into_item: impl FnMut(T) -> WorkItem,
-) -> WorkGraphItemsResponse {
-    let total_items = items.len();
-    items.truncate(limit);
-    let truncated = total_items > items.len();
-    WorkGraphItemsResponse {
-        items: items.into_iter().map(into_item).collect(),
-        total_items: Some(total_items),
-        truncated: Some(truncated),
+impl PageBounds {
+    /// `after_cursor` is false for every row at or before the cursor's
+    /// position and true for every row after it (always true on a first
+    /// page).
+    fn new<T>(rows: &[T], after_cursor: impl Fn(&T) -> bool, limit: usize) -> Self {
+        let start = read_page::page_start(rows, after_cursor);
+        Self {
+            start,
+            end: start.saturating_add(limit).min(rows.len()),
+            total: rows.len(),
+        }
+    }
+
+    /// Rows remain after the page.
+    const fn truncated(self) -> bool {
+        self.end < self.total
+    }
+
+    fn page<T>(self, rows: &[T]) -> &[T] {
+        rows.get(self.start..self.end).unwrap_or_default()
+    }
+
+    /// The row the continuation starts after: the page's last row, when rows
+    /// remain. A page that took no row (`limit: 0`) has none, so it hands out
+    /// no cursor.
+    fn continue_after<T>(self, rows: &[T]) -> Option<&T> {
+        if self.truncated() && self.end > self.start {
+            rows.get(self.end - 1)
+        } else {
+            None
+        }
     }
 }
 
@@ -1068,35 +1088,77 @@ impl WorkGraphService {
     }
 
     /// The items `filter` selects, most recently updated first, cut at its
-    /// `limit`. See [`Self::list_page`] for the page totals.
+    /// `limit`. See [`Self::list_page`] for the page totals and the cursor.
     pub async fn list(&self, filter: WorkItemFilter) -> Result<Vec<WorkItem>, WorkGraphError> {
         self.list_page(filter).await.map(|page| page.items)
     }
 
-    /// One page of [`Self::list`] with `total_items` and `truncated`. The
-    /// store returns every matching item; the service orders them most
-    /// recently updated first and cuts at the filter's `limit`.
+    /// One page of [`Self::list`]: the items after the filter's `cursor` (from
+    /// the most recently updated on a first page), cut at its `limit`, with
+    /// `total_items`, `truncated`, the `next_cursor` that continues the walk,
+    /// and its anchor. The store returns every matching item; the service
+    /// orders them, places the cursor and cuts.
     pub async fn list_page(
         &self,
         filter: WorkItemFilter,
     ) -> Result<WorkGraphItemsResponse, WorkGraphError> {
         let mut filter = self.normalize_item_filter(filter)?;
+        let (realm_id, namespace) =
+            self.scope(filter.realm_id.clone(), filter.namespace.clone())?;
         let limit = filter.limit.take().unwrap_or(DEFAULT_COLLECTION_LIMIT);
+        let cursor = filter
+            .cursor
+            .take()
+            .map(|cursor| read_page::decode_cursor::<UpdatedKey>(&cursor, PageRead::List))
+            .transpose()?;
+        // A first page anchors the walk before it reads a row, so a change
+        // its rows miss is past the anchor.
+        let anchor = match &cursor {
+            Some(cursor) => cursor.anchor,
+            None => self.ledger_high_water_mark(&realm_id, &namespace).await?,
+        };
         let mut items = self.store.list_items(filter).await?;
-        items.sort_by(most_recently_updated_first);
-        Ok(work_items_page(items, limit, std::convert::identity))
+        items.sort_by(read_page::updated_order);
+        let bounds = PageBounds::new(
+            &items,
+            |item| {
+                cursor
+                    .as_ref()
+                    .is_none_or(|cursor| read_page::after_updated_key(item, &cursor.key))
+            },
+            limit,
+        );
+        let next_cursor = bounds
+            .continue_after(&items)
+            .map(|item| {
+                read_page::encode_cursor(PageRead::List, &read_page::updated_key(item), anchor)
+            })
+            .transpose()?;
+        let changed_since_anchor =
+            self.ledger_high_water_mark(&realm_id, &namespace).await? > anchor;
+        items.truncate(bounds.end);
+        Ok(WorkGraphItemsResponse {
+            items: items.split_off(bounds.start),
+            total_items: Some(bounds.total),
+            truncated: Some(bounds.truncated()),
+            next_cursor,
+            anchor_event_seq: anchor,
+            changed_since_anchor: Some(changed_since_anchor),
+        })
     }
 
     /// The ready items, by priority (high first), then creation time, then
     /// id, cut at the filter's `limit`. See [`Self::ready_page`] for the page
-    /// totals.
+    /// totals and the cursor.
     pub async fn ready(&self, filter: ReadyWorkFilter) -> Result<Vec<WorkItem>, WorkGraphError> {
         self.ready_page(filter).await.map(|page| page.items)
     }
 
-    /// One page of [`Self::ready`] with `total_items` (the ready items before
-    /// the cut) and `truncated`. Readiness is classified for every live item
-    /// of one namespace observation, however many the namespace holds.
+    /// One page of [`Self::ready`]: the ready items after the filter's
+    /// `cursor`, cut at its `limit`, with `total_items` (every ready item),
+    /// `truncated`, the `next_cursor` and the walk's anchor. Readiness is
+    /// classified for every live item of one namespace observation, however
+    /// many the namespace holds.
     pub async fn ready_page(
         &self,
         filter: ReadyWorkFilter,
@@ -1104,6 +1166,15 @@ impl WorkGraphService {
         let output_limit = bounded_collection_limit(filter.limit)?;
         let (realm_id, namespace) =
             self.scope(filter.realm_id.clone(), filter.namespace.clone())?;
+        let cursor = filter
+            .cursor
+            .as_deref()
+            .map(|cursor| read_page::decode_cursor::<ReadyKey>(cursor, PageRead::Ready))
+            .transpose()?;
+        let anchor = match &cursor {
+            Some(cursor) => cursor.anchor,
+            None => self.ledger_high_water_mark(&realm_id, &namespace).await?,
+        };
         let (now, all_items, edges) = self
             .store
             .read_namespace_graph(&realm_id, &namespace)
@@ -1121,27 +1192,59 @@ impl WorkGraphService {
                 ready.push(item);
             }
         }
-        ready.sort_by(|left, right| {
-            left.priority
-                .cmp(&right.priority)
-                .reverse()
-                .then_with(|| left.created_at.cmp(&right.created_at))
-                .then_with(|| left.id.cmp(&right.id))
-        });
-        Ok(work_items_page(ready, output_limit, WorkItem::clone))
+        ready.sort_by(|left, right| read_page::ready_order(left, right));
+        let bounds = PageBounds::new(
+            &ready,
+            |item| {
+                cursor
+                    .as_ref()
+                    .is_none_or(|cursor| read_page::after_ready_key(item, &cursor.key))
+            },
+            output_limit,
+        );
+        let next_cursor = bounds
+            .continue_after(&ready)
+            .map(|item| {
+                read_page::encode_cursor(PageRead::Ready, &read_page::ready_key(item), anchor)
+            })
+            .transpose()?;
+        let changed_since_anchor =
+            self.ledger_high_water_mark(&realm_id, &namespace).await? > anchor;
+        Ok(WorkGraphItemsResponse {
+            items: bounds
+                .page(&ready)
+                .iter()
+                .map(|item| (*item).clone())
+                .collect(),
+            total_items: Some(bounds.total),
+            truncated: Some(bounds.truncated()),
+            next_cursor,
+            anchor_event_seq: anchor,
+            changed_since_anchor: Some(changed_since_anchor),
+        })
     }
 
     /// One observation of the namespace: the items `filter` selects, most
-    /// recently updated first and cut at its `limit`, with `total_items` and
-    /// `truncated`, the edges between returned items, their attention
-    /// bindings, and the returned items that are ready. Readiness is
-    /// classified against the whole namespace, so a blocker outside the page
-    /// still blocks.
+    /// recently updated first, after its `cursor` and cut at its `limit`,
+    /// with `total_items`, `truncated`, the `next_cursor` and the walk's
+    /// anchor; the edges, attention bindings and ready ids of the page.
+    /// Readiness is classified against the whole namespace, so a blocker
+    /// outside the page still blocks.
+    ///
+    /// A first page holds the edges between its own items. A continuation
+    /// adds the edges from its items to the items at or before the cursor,
+    /// so a walk reports every edge between the items it returned once, on
+    /// the page of the edge's later end.
     pub async fn snapshot(
         &self,
         filter: WorkGraphSnapshotFilter,
     ) -> Result<WorkGraphSnapshot, WorkGraphError> {
         let filter = self.normalize_snapshot_filter(filter)?;
+        let cursor = filter
+            .cursor
+            .as_deref()
+            .map(|cursor| read_page::decode_cursor::<UpdatedKey>(cursor, PageRead::Snapshot))
+            .transpose()?;
         let realm_id = filter
             .realm_id
             .clone()
@@ -1154,6 +1257,11 @@ impl WorkGraphService {
             .store
             .read_namespace_snapshot(&realm_id, &namespace)
             .await?;
+        // The observation's own high-water mark is atomic with its rows, so
+        // a first page anchors the walk on it.
+        let anchor = cursor
+            .as_ref()
+            .map_or(read.event_high_water_mark, |cursor| cursor.anchor);
         let mut matching = read
             .items
             .iter()
@@ -1167,10 +1275,26 @@ impl WorkGraphService {
                         || !WorkGraphMachine::classify_terminality(item).unwrap_or(true))
             })
             .collect::<Vec<_>>();
-        matching.sort_by(|left, right| most_recently_updated_first(left, right));
-        let total_items = matching.len();
-        matching.truncate(filter.limit.unwrap_or(DEFAULT_COLLECTION_LIMIT));
-        let included_item_refs = matching
+        matching.sort_by(|left, right| read_page::updated_order(left, right));
+        let bounds = PageBounds::new(
+            &matching,
+            |item| {
+                cursor
+                    .as_ref()
+                    .is_none_or(|cursor| read_page::after_updated_key(item, &cursor.key))
+            },
+            filter.limit.unwrap_or(DEFAULT_COLLECTION_LIMIT),
+        );
+        let page = bounds.page(&matching);
+        let page_item_refs = page
+            .iter()
+            .map(|item| (&item.namespace, &item.id))
+            .collect::<BTreeSet<_>>();
+        // The items the walk has reached: those at or before the cursor, and
+        // this page.
+        let walked_item_refs = matching
+            .get(..bounds.end)
+            .unwrap_or_default()
             .iter()
             .map(|item| (&item.namespace, &item.id))
             .collect::<BTreeSet<_>>();
@@ -1178,8 +1302,11 @@ impl WorkGraphService {
             .edges
             .iter()
             .filter(|edge| {
-                included_item_refs.contains(&(&edge.namespace, &edge.from_id))
-                    && included_item_refs.contains(&(&edge.namespace, &edge.to_id))
+                let from = (&edge.namespace, &edge.from_id);
+                let to = (&edge.namespace, &edge.to_id);
+                walked_item_refs.contains(&from)
+                    && walked_item_refs.contains(&to)
+                    && (page_item_refs.contains(&from) || page_item_refs.contains(&to))
             })
             .cloned()
             .collect::<Vec<_>>();
@@ -1187,20 +1314,24 @@ impl WorkGraphService {
             .attention
             .iter()
             .filter(|binding| {
-                included_item_refs
-                    .contains(&(&binding.work_ref.namespace, &binding.work_ref.item_id))
+                page_item_refs.contains(&(&binding.work_ref.namespace, &binding.work_ref.item_id))
             })
             .cloned()
             .collect::<Vec<_>>();
         let graph = NamespaceGraphIndex::new(&read.items, &read.edges);
         let mut ready_item_ids = Vec::new();
-        for item in &matching {
+        for item in page {
             if graph.is_ready(item, read.captured_at)? {
                 ready_item_ids.push(item.id.clone());
             }
         }
-        let items = matching.into_iter().cloned().collect::<Vec<_>>();
-        let truncated = total_items > items.len();
+        let next_cursor = bounds
+            .continue_after(&matching)
+            .map(|item| {
+                read_page::encode_cursor(PageRead::Snapshot, &read_page::updated_key(item), anchor)
+            })
+            .transpose()?;
+        let items = page.iter().map(|item| (*item).clone()).collect::<Vec<_>>();
 
         Ok(WorkGraphSnapshot {
             realm_id,
@@ -1212,8 +1343,11 @@ impl WorkGraphService {
             edges,
             attention,
             ready_item_ids,
-            total_items: Some(total_items),
-            truncated: Some(truncated),
+            total_items: Some(bounds.total),
+            truncated: Some(bounds.truncated()),
+            next_cursor,
+            anchor_event_seq: anchor,
+            changed_since_anchor: Some(read.event_high_water_mark > anchor),
         })
     }
 
@@ -1841,25 +1975,63 @@ impl WorkGraphService {
             .await
     }
 
+    /// The public events after the filter's `after_seq`, in sequence order,
+    /// cut at its `limit`. See [`Self::events_page`] for the continuation.
     pub async fn events(
         &self,
-        mut filter: WorkGraphEventFilter,
+        filter: WorkGraphEventFilter,
     ) -> Result<Vec<WorkGraphEvent>, WorkGraphError> {
-        if filter.all_namespaces {
-            return Err(WorkGraphError::InvalidInput(
-                "all_namespaces requires a separate host capability; a namespace grant authorizes exactly one immutable namespace"
-                    .to_string(),
-            ));
-        }
-        if filter.realm_id.is_none() {
-            filter.realm_id = Some(self.default_realm_id.to_string());
-        }
-        if !filter.all_namespaces && filter.namespace.is_none() {
-            filter.namespace = Some(self.default_namespace.clone());
-        }
-        filter.limit = Some(bounded_collection_limit(filter.limit)?);
-        self.scope(filter.realm_id.clone(), filter.namespace.clone())?;
+        let filter = self.normalize_event_filter(filter)?;
         self.store.list_public_events(filter).await
+    }
+
+    /// One page of [`Self::events`] with `truncated`, the `next_after_seq`
+    /// that continues it (the last returned `seq`) and the ledger's
+    /// `event_high_water_mark`. It reads one event past the page to tell
+    /// whether the page ended early.
+    pub async fn events_page(
+        &self,
+        filter: WorkGraphEventFilter,
+    ) -> Result<WorkGraphEventsResponse, WorkGraphError> {
+        let mut filter = self.normalize_event_filter(filter)?;
+        let (realm_id, namespace) =
+            self.scope(filter.realm_id.clone(), filter.namespace.clone())?;
+        let limit = filter.limit.unwrap_or(DEFAULT_COLLECTION_LIMIT);
+        filter.limit = Some(limit.saturating_add(1));
+        let mut events = self.store.list_public_events(filter).await?;
+        let truncated = events.len() > limit;
+        events.truncate(limit);
+        let next_after_seq = if truncated {
+            events.last().and_then(|event| event.seq)
+        } else {
+            None
+        };
+        let event_high_water_mark = self.ledger_high_water_mark(&realm_id, &namespace).await?;
+        Ok(WorkGraphEventsResponse {
+            events,
+            truncated: Some(truncated),
+            next_after_seq,
+            event_high_water_mark,
+        })
+    }
+
+    /// The event ledger's highest sequence in one realm and namespace,
+    /// internal execution events included. A list or ready walk anchors on
+    /// it, and a page reports whether the ledger has moved past the anchor.
+    async fn ledger_high_water_mark(
+        &self,
+        realm_id: &str,
+        namespace: &WorkNamespace,
+    ) -> Result<Option<i64>, WorkGraphError> {
+        self.store
+            .latest_event_seq(WorkGraphEventFilter {
+                realm_id: Some(realm_id.to_string()),
+                namespace: Some(namespace.clone()),
+                all_namespaces: false,
+                after_seq: None,
+                limit: None,
+            })
+            .await
     }
 
     fn scope(
@@ -1884,6 +2056,27 @@ impl WorkGraphService {
         &self,
         mut filter: WorkItemFilter,
     ) -> Result<WorkItemFilter, WorkGraphError> {
+        if filter.all_namespaces {
+            return Err(WorkGraphError::InvalidInput(
+                "all_namespaces requires a separate host capability; a namespace grant authorizes exactly one immutable namespace"
+                    .to_string(),
+            ));
+        }
+        if filter.realm_id.is_none() {
+            filter.realm_id = Some(self.default_realm_id.to_string());
+        }
+        if !filter.all_namespaces && filter.namespace.is_none() {
+            filter.namespace = Some(self.default_namespace.clone());
+        }
+        filter.limit = Some(bounded_collection_limit(filter.limit)?);
+        self.scope(filter.realm_id.clone(), filter.namespace.clone())?;
+        Ok(filter)
+    }
+
+    fn normalize_event_filter(
+        &self,
+        mut filter: WorkGraphEventFilter,
+    ) -> Result<WorkGraphEventFilter, WorkGraphError> {
         if filter.all_namespaces {
             return Err(WorkGraphError::InvalidInput(
                 "all_namespaces requires a separate host capability; a namespace grant authorizes exactly one immutable namespace"

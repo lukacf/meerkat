@@ -318,10 +318,10 @@ MAX_REVIEW_BYTES = 64 * 1024
 
 
 def candidate_review():
-    """Forge's candidate review projection for publication: the decoded bytes match the separately
-    given SHA-256 before they are parsed, and the projection is strict at every level. This
-    proves only that the dispatch carried accepted projection bytes naming this candidate. The
-    original join records behind joins and outcomes are read and checked by the dispatcher
+    """Forge's candidate review projection for publication, from the two publish-only inputs:
+    the projection's exact bytes (base64) and their separately given SHA-256. This proves only
+    that the dispatch carried accepted projection bytes naming this candidate. The original join
+    records behind joins and outcomes are read and checked by the dispatcher
     (scripts/forge-publish-dispatch.py); a dispatch made by hand carries only what its caller
     supplied."""
     expected = rc.digest(os.environ.get("CANDIDATE_REVIEW_SHA256", ""), "candidate review SHA-256")
@@ -331,6 +331,13 @@ def candidate_review():
         data = base64.b64decode(encoded, validate=True)
     except ValueError:
         raise ProtocolError("the candidate review is not base64") from None
+    return parse_candidate_review(data, expected), expected
+
+
+def parse_candidate_review(data, expected):
+    """The projection's bytes match their expected SHA-256 before they are parsed; the parsed
+    projection is strict at every level: exact keys, no duplicate keys, positive integer run
+    identities, lowercase hex digests, and every outcome and the verdict "accepted"."""
     require(0 < len(data) <= MAX_REVIEW_BYTES, "the candidate review exceeds 64 KiB")
     require(rc.hash_bytes(data) == expected, "the candidate review bytes differ from their SHA-256")
     try:
@@ -355,7 +362,12 @@ def candidate_review():
         rc.digest(review["joins"][name], f"candidate review {name} SHA-256")
         require(review["outcomes"][name] == "accepted", f"the candidate review's {name} outcome is not accepted")
     require(review["verdict"] == "accepted", "the candidate review verdict is not accepted")
-    return review, expected
+    return review
+
+
+def manifest_packages(manifest):
+    """The candidate manifest's package map: target to package SHA-256."""
+    return {item["target"]: item["sha256"] for item in manifest["packages"]}
 
 
 def review_names_selection(review, selection):
@@ -1043,7 +1055,7 @@ def publish(_args):
         manifest = validate_manifest(rc.read_json(manifest_path))
         require(manifest["source_sha"] == sha and manifest["run_id"] == run_id and manifest["run_attempt"] == attempt
                 and manifest["workflow"]["ref"] == MAIN, "only a main candidate can be published")
-        require(review["candidate"]["packages"] == {item["target"]: item["sha256"] for item in manifest["packages"]},
+        require(review["candidate"]["packages"] == manifest_packages(manifest),
                 "the candidate review accepts other package digests than the candidate manifest's")
         print(f"candidate acceptance gate passed: review {review_sha}")
         rc.verify_provenance(manifest_path, folder / MANIFEST_PROVENANCE, sha, run_id, attempt)

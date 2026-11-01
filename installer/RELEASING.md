@@ -92,7 +92,11 @@ and let it pass, then run the candidate again.
    the remote:
    `git tag -a forge-v<version> <source_sha> -m "Meta Forge <version>"`, then
    `git push origin forge-v<version>`.
-5. Publish:
+5. Publish with `scripts/forge-publish-dispatch.py`. It reads Forge's candidate
+   review projection and Connect's A5, application and Guide join records, each
+   checked against the SHA-256 its owner reported. It checks every join against
+   the candidate and its release inputs, and builds the request from those
+   checked bytes only. While main's head is the merged commit, it runs
    `gh workflow run forge-release.yml --ref main -f release_mode=publish -f artifact_selection='<selection JSON>' -f candidate_review=<base64> -f candidate_review_sha256=<sha256>`.
    `candidate_review` carries the exact bytes of Forge's candidate review
    projection (`forge-candidate-review-v1`), whose SHA-256 is given

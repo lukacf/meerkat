@@ -83,10 +83,22 @@ describe("figures", () => {
     );
     expect(view.getByRole("group", { name: "Topology at a glance" }) !== null).toBe(true);
     const tile = view.getByTestId("tile");
-    expect(tile.textContent?.startsWith("Active now2of 7")).toBe(true);
+    expect(tile.textContent?.startsWith("Active now 2 of 7")).toBe(true);
     expect(tile.querySelector('.cc-mark[data-tone="live"]') !== null).toBe(true);
     expect(tile.querySelector('svg[role="img"]')?.getAttribute("aria-label")).toBe("Active now trend");
     expect(view.getByTestId("problems").querySelector(".cc-figure__delta")?.getAttribute("data-tone")).toBe("crit");
+  });
+
+  it("keeps a figure apart from its unit and its foot in the tile's text", () => {
+    // "1" and "1 agent on them" once read "11" to anything reading the text.
+    const view = render(
+      <GlanceStrip>
+        <FigureTile label="In progress" value={1} foot="1 agent on them" testId="live" />
+        <FigureTile label="To finish" value={3} unit="steps" delta={{ value: 1, period: "1h ago" }} foot="Critical path" testId="steps" />
+      </GlanceStrip>,
+    );
+    expect(view.getByTestId("live").textContent).toBe("In progress 1 1 agent on them");
+    expect(view.getByTestId("steps").textContent).toBe("To finish 3 steps +1 vs 1h ago Critical path");
   });
 
   it("makes a filtering figure a pressed button, and holds a skeleton while loading", () => {

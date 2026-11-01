@@ -971,4 +971,34 @@ describe("kit stylesheet", () => {
     // comes after it: the divider must outrank the reset outright.
     expect(outranks(specificity(divider!.selector), specificity(reset!.selector))).toBe(true);
   });
+
+  it("wraps four or more figures to two rows between 480 and 719 px, rules kept", async () => {
+    const fs = await import("node:fs");
+    const path = await import("node:path");
+    const css = fs.readFileSync(path.join(__dirname, "../styles/panel-kit.css"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+    const start = css.indexOf("@container cc-panel (min-width: 480px) and (max-width: 719px)");
+    expect(start >= 0).toBe(true);
+    let depth = 0;
+    let end = start;
+    for (let index = css.indexOf("{", start); index < css.length; index += 1) {
+      if (css[index] === "{") depth += 1;
+      else if (css[index] === "}" && --depth === 0) {
+        end = index;
+        break;
+      }
+    }
+    const rules = [...css.slice(css.indexOf("{", start) + 1, end).matchAll(/([^{}]+)\{([^{}]*)\}/g)].map((match) => ({ selector: match[1].trim(), body: match[2] }));
+    const body = (selector: string) => rules.find((rule) => rule.selector === selector)?.body ?? "";
+    const four = ".cc-glance:has(> :nth-child(4))";
+    const five = ".cc-glance:has(> :nth-child(5))";
+    const onlyFour = `${four}:not(:has(> :nth-child(5)))`;
+    expect(body(four)).toMatch(/grid-template-columns:\s*repeat\(2,/);
+    expect(body(five)).toMatch(/grid-template-columns:\s*repeat\(3,/);
+    expect(body(`${onlyFour} > :nth-child(2n + 1)`)).toMatch(/border-left:\s*0/);
+    expect(body(`${onlyFour} > :nth-child(n + 3)`)).toMatch(/border-top:\s*1px solid/);
+    expect(body(`${five} > :nth-child(3n + 1)`)).toMatch(/border-left:\s*0/);
+    expect(body(`${five} > :nth-child(n + 4)`)).toMatch(/border-top:\s*1px solid/);
+    // A row's first figure drops the divider: the reset outranks it.
+    expect(outranks(specificity(`${five} > :nth-child(3n + 1)`), specificity(".cc-glance > :nth-child(n + 2)"))).toBe(true);
+  });
 });

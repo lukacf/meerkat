@@ -10,6 +10,7 @@ import {
   DrawerLayout,
   DrawerSection,
   EmptyState,
+  IconButton,
   KeyValueList,
   KitGlyph,
   ListRow,
@@ -29,8 +30,8 @@ import {
   useNow,
 } from "../../../packages/console-components/src/panel-kit";
 import type { AgentAvatarSize, TechnicalDetail } from "../../../packages/console-components/src/panel-kit";
-import { GraphView, StatusSquare, itemCardGeometry } from "../../../packages/console-components/src/viz";
-import type { GraphViewHandle, VizNode, VizNodeBox } from "../../../packages/console-components/src/viz";
+import { GraphView, StatusSquare, ZOOM, itemCardGeometry } from "../../../packages/console-components/src/viz";
+import type { GraphViewHandle, VizNode, VizNodeBox, VizRelation, VizViewport } from "../../../packages/console-components/src/viz";
 
 import type { WorkGraphWireBinding, WorkGraphWireEdge, WorkGraphWireEvent, WorkGraphWireItem } from "../types";
 import {
@@ -633,10 +634,76 @@ export interface WorkGraphGraphViewProps {
   /// Bring this item into view once it is drawn (a link from another panel
   /// opened it). A new object asks again, even for the same item.
   revealRequest?: { id: string } | null;
+  /// Link kinds the person hid from the header menu ("blocks", "related",
+  /// "parent").
+  hiddenRelations?: readonly VizRelation[];
 }
 
 const NO_EVENTS: WorkGraphWireEvent[] = [];
 const NO_HANDLERS: WorkGraphActionHandlers = {};
+const NO_RELATIONS: readonly VizRelation[] = [];
+
+/// The graph's zoom controls, in a bar of their own under the canvas: no
+/// control sits on the picture. The level follows the view as it moves
+/// (one update a frame, outside the view's own render).
+function WorkGraphZoomBar({
+  graphRef,
+  listen,
+  notDrawn,
+}: {
+  graphRef: React.RefObject<GraphViewHandle | null>;
+  listen: (onScale: (scale: number) => void) => () => void;
+  notDrawn: number;
+}): React.JSX.Element {
+  const [scale, setScale] = React.useState(() => graphRef.current?.viewport().scale ?? 1);
+  React.useEffect(() => listen(setScale), [listen]);
+  const percent = `${Math.round(scale * 100)}%`;
+  return (
+    <div className="workgraph-graph__bar">
+      <div className="workgraph-graph__zoom" role="toolbar" aria-label="Zoom">
+        <IconButton
+          label="Zoom out"
+          title="Zoom out (-)"
+          glyph="zoom-out"
+          size="sm"
+          data-testid="workgraph-graph-zoom:out"
+          onClick={() => graphRef.current?.zoomBy(1 / ZOOM.buttonStep)}
+        />
+        <button
+          type="button"
+          className="workgraph-graph__zoom-level"
+          aria-label={`Zoom ${percent}, reset to 100%`}
+          title="Reset to 100%"
+          data-testid="workgraph-graph-zoom:reset"
+          onClick={() => graphRef.current?.zoomBy(1 / scale)}
+        >
+          {percent}
+        </button>
+        <IconButton
+          label="Zoom in"
+          title="Zoom in (+)"
+          glyph="zoom-in"
+          size="sm"
+          data-testid="workgraph-graph-zoom:in"
+          onClick={() => graphRef.current?.zoomBy(ZOOM.buttonStep)}
+        />
+        <IconButton
+          label="Fit to view"
+          title="Fit (0)"
+          glyph="fit"
+          size="sm"
+          data-testid="workgraph-graph-fit"
+          onClick={() => graphRef.current?.fit()}
+        />
+      </div>
+      {notDrawn > 0 ? (
+        <span className="workgraph-graph__overflow" data-testid="workgraph-graph-overflow">
+          {`+${notDrawn} more ${notDrawn === 1 ? "item" : "items"} not drawn`}
+        </span>
+      ) : null}
+    </div>
+  );
+}
 
 /// Goal ring around an attention-bound node's mark: the item's status
 /// square, or the goal header's flag.
@@ -670,6 +737,7 @@ export function WorkGraphGraphView({
   aside,
   cacheKey,
   revealRequest = null,
+  hiddenRelations = NO_RELATIONS,
 }: WorkGraphGraphViewProps): React.JSX.Element {
   const directory = useAgentDirectory();
   const now = useNow();
@@ -696,6 +764,34 @@ export function WorkGraphGraphView({
   );
   const graphRef = React.useRef<GraphViewHandle | null>(null);
   const canvasRef = React.useRef<HTMLDivElement | null>(null);
+  // The zoom bar's level: the view reports every move from inside its own
+  // state update, so the bar hears of it on the next frame instead.
+  const scaleListener = React.useRef<((scale: number) => void) | null>(null);
+  const scaleFrame = React.useRef(0);
+  const latestScale = React.useRef<number | null>(null);
+  const listenToScale = React.useCallback((onScale: (scale: number) => void) => {
+    scaleListener.current = onScale;
+    if (latestScale.current !== null) onScale(latestScale.current);
+    return () => {
+      if (scaleListener.current === onScale) scaleListener.current = null;
+    };
+  }, []);
+  const onViewportChange = React.useCallback((viewport: VizViewport) => {
+    latestScale.current = viewport.scale;
+    if (scaleFrame.current) return;
+    const deliver = () => {
+      scaleFrame.current = 0;
+      if (latestScale.current !== null) scaleListener.current?.(latestScale.current);
+    };
+    if (typeof requestAnimationFrame === "function") scaleFrame.current = requestAnimationFrame(deliver);
+    else {
+      scaleFrame.current = 1;
+      queueMicrotask(deliver);
+    }
+  }, []);
+  React.useEffect(() => () => {
+    if (scaleFrame.current && typeof cancelAnimationFrame === "function") cancelAnimationFrame(scaleFrame.current);
+  }, []);
   const selection = React.useMemo(() => (selectedId ? [selectedId] : []), [selectedId]);
 
   // A link from elsewhere asked for an item: once its card is drawn, pan it
@@ -775,11 +871,6 @@ export function WorkGraphGraphView({
   const main = (
     <div className="workgraph-graph__main">
       <div className="workgraph-graph__canvas" ref={canvasRef}>
-        {graph.notDrawn > 0 ? (
-          <span className="workgraph-graph__overflow" data-testid="workgraph-graph-overflow">
-            {`+${graph.notDrawn} more ${graph.notDrawn === 1 ? "item" : "items"} not drawn`}
-          </span>
-        ) : null}
         <GraphView
           ref={graphRef}
           nodes={graph.nodes}
@@ -797,8 +888,14 @@ export function WorkGraphGraphView({
           hoverHighlight="chain"
           accentPath={graph.accentPath}
           edgeLabels={graph.edgeLabels}
-          legend="collapsed"
-          minimap="auto"
+          // Nothing floats on the picture: the edges carry their words (the
+          // legend's link toggles are in the header menu), the zoom controls
+          // sit in the bar below, and the minimap stays off.
+          legend="off"
+          controls={false}
+          minimap="off"
+          hiddenRelations={hiddenRelations}
+          onViewportChange={onViewportChange}
           renderer="svg"
           labels="all"
           ariaLabel={ariaLabel}
@@ -810,7 +907,6 @@ export function WorkGraphGraphView({
             node: "workgraph-graph-node",
             edge: "workgraph-graph-edge",
             edgeLabel: "workgraph-graph-edge-label",
-            zoom: (action) => (action === "fit" ? "workgraph-graph-fit" : `workgraph-graph-zoom:${action}`),
           }}
           classNames={{
             node: "workgraph-graph__node",
@@ -825,6 +921,7 @@ export function WorkGraphGraphView({
           className="workgraph-graph__view"
         />
       </div>
+      <WorkGraphZoomBar graphRef={graphRef} listen={listenToScale} notDrawn={graph.notDrawn} />
       {footer}
     </div>
   );

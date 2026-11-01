@@ -1,4 +1,6 @@
 import React from "react";
+import { StatusMark, type Tone } from "../../../packages/console-components/src/panel-kit";
+import { useVizTokens } from "../../../packages/console-components/src/viz/tokens";
 import { Icon } from "../icon";
 import type { VoiceSessionSnapshot } from "../lib/voice-session";
 import { voiceContextFailureMessage } from "../lib/voice-context";
@@ -65,6 +67,11 @@ export function VoiceButton({
   );
 }
 
+/// A channel counts as speaking above this level and stops below the lower
+/// one (RMS of the sampled waveform), so the colour does not flicker.
+const SPEAKING_ON = 0.04;
+const SPEAKING_OFF = 0.02;
+
 function AudioWaveform({
   source,
   sampleWaveform,
@@ -75,6 +82,12 @@ function AudioWaveform({
   active: boolean;
 }): React.JSX.Element {
   const canvasRef = React.useRef<HTMLCanvasElement>(null);
+  // Canvas colours come from the visualisation tokens (spec A2.3): the
+  // waveform in viz-mid, the one speaking now in viz-live. Resolved again
+  // when the theme or the variant changes.
+  const tokens = useVizTokens(canvasRef);
+  const colours = React.useRef({ quiet: tokens.mid, speaking: tokens.live });
+  colours.current = { quiet: tokens.mid, speaking: tokens.live };
   React.useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -86,6 +99,7 @@ function AudioWaveform({
     let lastDraw = -Infinity;
     let width = 0;
     let height = 0;
+    let speaking = false;
 
     const resize = () => {
       const rect = canvas.getBoundingClientRect();
@@ -103,19 +117,30 @@ function AudioWaveform({
       if (!width || !height) return;
       samples.fill(0);
       if (active) sampleWaveform(source, samples);
-      const color = getComputedStyle(canvas).color;
+      let energy = 0;
+      for (let index = 0; index < samples.length; index += 1) energy += samples[index] * samples[index];
+      const level = Math.sqrt(energy / samples.length);
+      const nextSpeaking = active && (speaking ? level > SPEAKING_OFF : level > SPEAKING_ON);
+      if (nextSpeaking !== speaking) {
+        speaking = nextSpeaking;
+        // Read by CSS for the channel's live mark; React never renders it.
+        if (speaking) canvas.setAttribute("data-speaking", "true");
+        else canvas.removeAttribute("data-speaking");
+      }
+      const colour = speaking ? colours.current.speaking : colours.current.quiet;
       context.clearRect(0, 0, width, height);
       const middle = height / 2;
-      context.strokeStyle = color;
-      context.globalAlpha = 0.18;
+      context.strokeStyle = colour;
+      context.globalAlpha = 0.35;
       context.lineWidth = 1;
       context.beginPath();
       context.moveTo(0, middle);
       context.lineTo(width, middle);
       context.stroke();
       context.globalAlpha = 1;
-      context.lineWidth = 1.7;
+      context.lineWidth = 1.5;
       context.lineJoin = "round";
+      context.lineCap = "round";
       context.beginPath();
       for (let index = 0; index < samples.length; index += 1) {
         const x = index * width / (samples.length - 1);
@@ -133,6 +158,7 @@ function AudioWaveform({
     return () => {
       window.cancelAnimationFrame(frame);
       observer.disconnect();
+      canvas.removeAttribute("data-speaking");
     };
   }, [active, sampleWaveform, source]);
 
@@ -171,6 +197,12 @@ export const VoiceBar = React.memo(function VoiceBar({
   // The microphone is open as soon as the phase is active; context
   // preparation is a secondary hint that never gates talking.
   const talkReady = active && !state.reconnecting && !state.microphoneMuted;
+  const reconnecting = (active && state.reconnecting) || (state.phase === "connecting" && state.connectionStage === "recovery");
+  const statusTone: Tone = state.phase === "error" ? "crit"
+    : reconnecting ? "warn"
+      : talkReady ? "live"
+        : state.phase === "requesting" || state.phase === "connecting" ? "info"
+          : "neutral";
   const preparation = state.contextPreparation;
   const contextState = !active || preparation === undefined ? null
     : state.contextStatusError ? "status_unavailable"
@@ -203,13 +235,15 @@ export const VoiceBar = React.memo(function VoiceBar({
     >
       <div className="voice-bar__header">
         <div className="voice-bar__heading">
-          <span className="voice-bar__indicator" aria-hidden="true" />
+          <span className="voice-bar__icon" aria-hidden="true"><Icon name="i-voice" /></span>
           <div className="voice-bar__titles">
             <span className="voice-bar__name" title={state.target?.label}>
               {state.target ? <>Voice with <strong>{state.target.label}</strong></> : "Voice"}
             </span>
-            <span className="voice-bar__status" role="status" data-testid="voice-status" data-talk-ready={talkReady || undefined}>
-              <span>{status}</span>
+            <span className="voice-bar__status" role="status" data-testid="voice-status" data-tone={statusTone} data-talk-ready={talkReady || undefined}>
+              <StatusMark tone={statusTone} className="voice-bar__mark" />
+              <span className="voice-bar__status-text">{status}</span>
+              {contextLabel && <span className="voice-bar__sep" aria-hidden="true">·</span>}
               {contextLabel && (
                 <span
                   className="voice-bar__context"
@@ -260,11 +294,17 @@ export const VoiceBar = React.memo(function VoiceBar({
       {(active || transitioning) && (
         <div className="voice-bar__channels">
           <div className="voice-bar__channel">
-            <div className="voice-bar__channel-label"><span>You</span><span>{state.microphoneMuted ? "Muted" : "Microphone"}</span></div>
+            <div className="voice-bar__channel-label">
+              <span className="voice-bar__channel-who"><StatusMark tone="live" className="voice-bar__speaking" />You</span>
+              <span>{state.microphoneMuted ? "Muted" : "Microphone"}</span>
+            </div>
             <AudioWaveform source="microphone" sampleWaveform={sampleWaveform} active={active && !state.microphoneMuted} />
           </div>
           <div className="voice-bar__channel">
-            <div className="voice-bar__channel-label"><span>Agent</span><span>{state.speakerMuted ? "Speakers muted" : "Live audio"}</span></div>
+            <div className="voice-bar__channel-label">
+              <span className="voice-bar__channel-who"><StatusMark tone="live" className="voice-bar__speaking" />Agent</span>
+              <span>{state.speakerMuted ? "Speakers muted" : "Live audio"}</span>
+            </div>
             <AudioWaveform source="speaker" sampleWaveform={sampleWaveform} active={active} />
           </div>
         </div>

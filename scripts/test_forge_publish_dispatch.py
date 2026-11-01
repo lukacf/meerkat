@@ -15,6 +15,7 @@ import os
 from pathlib import Path, PurePosixPath
 import shutil
 import sys
+import tomllib
 import unittest
 from unittest import mock
 import uuid
@@ -35,7 +36,8 @@ forge = tool.forge
 REPO = "lukacf/meerkat-meta"
 SHA, MERGED = "a" * 40, "c" * 40
 RUN, ATTEMPT = 501, 1
-VERSION = forge.forge_version()
+# The checkout's Forge version, read from the file so the tests run from any working directory.
+VERSION = tomllib.loads((ROOT / forge.PYPROJECT).read_text())["project"]["version"]
 TARGET = "linux-x86_64"
 INPUTS_BYTES = (ROOT / forge.INPUTS).read_bytes()
 INPUTS = json.loads(INPUTS_BYTES)

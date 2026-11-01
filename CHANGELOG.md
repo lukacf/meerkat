@@ -269,7 +269,7 @@ them.
   `RecoveredPresence` (`Present`, `PresentUnseated`, `Tombstone`,
   `Unreadable`) is new, and the machine enums new in this release gain
   variants: `IdentityEntryOrigin` gains `Created`, `UnseatedEntryCause`
-  `TemplatePreparation`, and `IdentityEntryVerdict`
+  `PreparationPending`, and `IdentityEntryVerdict`
   `RefusedNameOwnedByCreated`, `RefusedNameTombstoned` and
   `RefusedNameUnreadable`. The kernel
   `generated::mob::TransitionId` gains, appended last,
@@ -1230,9 +1230,10 @@ them.
   from its presence and the replayed facts: a seated member's row records it
   a created entry; a row whose member a build that predates created entries
   retired records the entry owed its seat, and once the mob runs Core seats it
-  again, Dormant, on the session its member was last bound to and with no
-  roster labels; a pending row records the entry unseated
-  (`UnseatedEntryCause::TemplatePreparation`); a removed entry's row reserves
+  again, Dormant, on the session its member was last bound to and with the
+  roster labels of that member's last spawn row, as any revive keeps its
+  member's spec; a pending row records the entry unseated
+  (`UnseatedEntryCause::PreparationPending`); a removed entry's row reserves
   its name as removed; and a row this build cannot read, or one the journal
   contradicts, reserves the name as unreadable. A member row whose stored
   origin this build does not know reserves its name as unreadable too. No
@@ -1246,7 +1247,7 @@ them.
   `NotAdoptable`; and the agent lane refuses an unreadable member as an
   identity member. The reads: `IdentityEntryRead::Unreadable { member }` and
   `Removed`, `IdentityEntryPage::unreadable`,
-  `UnseatedEntryCounts::template_preparation`, and `IdentityCensus::created`,
+  `UnseatedEntryCounts::preparation_pending`, and `IdentityCensus::created`,
   `tombstoned`, `unreadable` and `is_complete`. The member binding history
   answers `MemberIdentityManagement::CreatedEntry` for a created entry's
   identity. A mob that holds no created entry row behaves as before.

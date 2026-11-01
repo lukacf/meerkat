@@ -3281,7 +3281,8 @@ impl MobActor {
             || self.runtime_retire_archive_only(&continuation.entry.agent_runtime_id);
         // A seat's unborn session was never created (MobMachine keeps the
         // fact until this step): an archive that finds no session has
-        // nothing to archive.
+        // nothing to archive, and neither has one whose walk takes that
+        // session for another host's.
         let session_unborn = crate::runtime::boot_plan::domain_member_seat_session_unborn(
             self.dsl_authority.state(),
             &identity,
@@ -3327,6 +3328,20 @@ impl MobActor {
                         ))
                     );
                     if not_found && session_unborn {
+                        return Ok(mob_dsl::MemberSessionDisposal::Archived);
+                    }
+                    // A runtime-backed walk takes a session its archive
+                    // authority never saw for another host's, and only
+                    // releases its runtime. A seat's unborn session is this
+                    // mob's own, and no build created it: its disposal is an
+                    // archive with nothing to archive, so the end of the
+                    // retirement records it as it records an archived one.
+                    if session_unborn
+                        && matches!(
+                            result,
+                            Ok(mob_dsl::MemberSessionDisposal::RuntimeReleasedOnlyHostOwned)
+                        )
+                    {
                         return Ok(mob_dsl::MemberSessionDisposal::Archived);
                     }
                     if not_found

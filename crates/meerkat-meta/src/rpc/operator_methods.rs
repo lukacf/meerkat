@@ -1701,6 +1701,49 @@ mod tests {
                 .expect("identity session");
             settled_transcript_len(&service, &session_id).await
         }
+
+        /// Wait (bounded) until the runtime holds no work for the identity's
+        /// session: no accepted input queued, held or running, and no run it
+        /// records as current. A retire is Core's release, which goes ahead
+        /// only then and refuses retryably before. The runtime records a
+        /// run's end after the identity's completion cursor moves (what
+        /// `run_turn` waits for) and after the run's input reaches its
+        /// terminal, so neither of those is the end of the run.
+        async fn wait_for_runtime_settled(&self, what: &str) {
+            let session_id = self
+                .identity_runtime
+                .status(&self.identity)
+                .await
+                .expect("identity status")
+                .session_id
+                .expect("identity session");
+            let started = std::time::Instant::now();
+            let deadline = started + Duration::from_secs(30);
+            let mut first_busy = None;
+            loop {
+                let active_inputs = self.adapter.session_has_active_inputs(&session_id).await;
+                let current_run = self.adapter.current_run(&session_id).await;
+                if !active_inputs && current_run.is_none() {
+                    break;
+                }
+                if first_busy.is_none() {
+                    first_busy = Some((active_inputs, current_run.clone()));
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "timed out waiting for the runtime to settle {what}; last read of session \
+                     {session_id}: active inputs {active_inputs}, current run {current_run:?}"
+                );
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            if let Some((active_inputs, current_run)) = first_busy {
+                eprintln!(
+                    "the runtime settled {what} after {:?}; first read of session \
+                     {session_id}: active inputs {active_inputs}, current run {current_run:?}",
+                    started.elapsed()
+                );
+            }
+        }
     }
 
     /// Message count on the DURABLE session surface - the one the operator
@@ -2310,6 +2353,9 @@ comms = true
             &harness.identity,
             NonZeroU64::new(256).expect("positive floor"),
         );
+        harness
+            .wait_for_runtime_settled("the seed turns before the floor install's retire")
+            .await;
         let session_id =
             rebuild_member_for_fresh_build(&ctx, &harness.identity, None, spec.clone())
                 .await
@@ -2408,6 +2454,9 @@ comms = true
             other => panic!("expected exact successful terminal, got {other:?}"),
         }
         harness.floors.clear(&harness.identity);
+        harness
+            .wait_for_runtime_settled("the exact input's run before the restore's retire")
+            .await;
         let restored = rebuild_member_for_fresh_build(&ctx, &harness.identity, None, spec)
             .await
             .expect("restore only after rich exact input completion");

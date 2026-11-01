@@ -6,6 +6,7 @@ import { describe, expect, it, vi } from "vitest";
 import { GraphView } from "./graph-view";
 import { GraphList, connectionsSummary, graphListRows } from "./list-twin";
 import { StatusSquare } from "./status-square";
+import { estimateLabelWidth, markGeometry } from "../layout/geometry";
 import { graphSummary, nodeAccessibleName, vizRelationWord } from "./words";
 import type { GraphViewHandle, VizEdge, VizNode } from "./types";
 
@@ -255,6 +256,93 @@ describe("GraphView", () => {
     } finally {
       rect.mockRestore();
     }
+  });
+
+  it("fits a small layered graph by its right-hand labels, inside the given padding", () => {
+    const rect = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      const [width, height] = this.classList.contains("cc-viz-graph") ? [420, 64] : [0, 0];
+      return { x: 0, y: 0, left: 0, top: 0, right: width, bottom: height, width, height, toJSON: () => ({}) } as DOMRect;
+    });
+    try {
+      const first = "Version one, the first of them";
+      const nodes: VizNode[] = [
+        { id: "v1", kind: "agent", label: first },
+        { id: "v2", kind: "agent", label: "v2" },
+        { id: "v3", kind: "agent", label: "v3" },
+      ];
+      const edges: VizEdge[] = [
+        { id: "a", from: "v1", to: "v2", relation: "blocks" },
+        { id: "b", from: "v2", to: "v3", relation: "blocks" },
+      ];
+      const ref = React.createRef<GraphViewHandle>();
+      render(<GraphView ref={ref} nodes={nodes} edges={edges} layout="layered" ariaLabel="g" testIdPrefix="t" legend="off" controls={false} minimap="off" fitPadding={8} />);
+      const view = ref.current!.viewport();
+      const at = (id: string) => screen.getByTestId(`t-node:${id}`).getAttribute("transform")!.match(/translate\(([-\d.]+) ([-\d.]+)\)/)!.slice(1).map(Number);
+      const r = markGeometry("agent").outer;
+      const [x1, y1] = at("v1");
+      const [x3] = at("v3");
+      expect(view.scale).toBe(1);
+      // The labels sit on the right: nothing is reserved left of the first mark
+      // (the picture is centred across any slack the width leaves).
+      const left = (x1 - r) * view.scale + view.tx;
+      expect(left).toBeGreaterThanOrEqual(8);
+      expect(left).toBeLessThanOrEqual(8 + 8);
+      expect((x3 + r + 5 + estimateLabelWidth("v3")) * view.scale + view.tx).toBeLessThanOrEqual(420 - 8);
+      // Pinned to the top: the first row (24 px) starts 8 px in.
+      expect(y1 * view.scale + view.ty).toBeLessThanOrEqual(8 + 12 + 1);
+    } finally {
+      rect.mockRestore();
+    }
+  });
+
+  it("folds the legend in a narrow frame until it is unfolded, then stacks its rows", () => {
+    let frameWidth = 500;
+    const rect = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      const [width, height] = this.classList.contains("cc-viz-graph") ? [frameWidth, 600] : [0, 0];
+      return { x: 0, y: 0, left: 0, top: 0, right: width, bottom: height, width, height, toJSON: () => ({}) } as DOMRect;
+    });
+    try {
+      const { nodes, edges } = team();
+      const { unmount } = render(<GraphView nodes={nodes} edges={edges} lanes={lanes} layout="lanes" ariaLabel="g" testIdPrefix="t" />);
+      const legend = () => screen.getByTestId("t-legend");
+      expect(legend()).toHaveClass("is-collapsed");
+      fireEvent.click(within(legend()).getByRole("button", { name: "Legend" }));
+      expect(legend()).not.toHaveClass("is-collapsed");
+      expect(legend()).toHaveClass("is-stacked");
+      expect(screen.getByTestId("t-legend:wired")).toBeInTheDocument();
+      unmount();
+      frameWidth = 900;
+      render(<GraphView nodes={nodes} edges={edges} lanes={lanes} layout="lanes" ariaLabel="g" testIdPrefix="t" />);
+      expect(legend()).not.toHaveClass("is-collapsed");
+      expect(legend()).not.toHaveClass("is-stacked");
+    } finally {
+      rect.mockRestore();
+    }
+  });
+
+  it("leaves plain wheel scrolling to the page unless asked to zoom with it", () => {
+    const { nodes, edges } = team();
+    const wheel = (target: Element, init: WheelEventInit) => {
+      const event = new WheelEvent("wheel", { deltaY: -100, bubbles: true, cancelable: true, ...init });
+      act(() => {
+        target.dispatchEvent(event);
+      });
+      return event.defaultPrevented;
+    };
+    const ref = React.createRef<GraphViewHandle>();
+    const { rerender } = render(<GraphView ref={ref} nodes={nodes} edges={edges} lanes={lanes} layout="lanes" ariaLabel="g" testIdPrefix="t" />);
+    const root = screen.getByTestId("t-graph");
+    const start = ref.current!.viewport().scale;
+    expect(wheel(root, {})).toBe(true);
+    const zoomed = ref.current!.viewport().scale;
+    expect(zoomed).toBeGreaterThan(start);
+    rerender(<GraphView ref={ref} nodes={nodes} edges={edges} lanes={lanes} layout="lanes" ariaLabel="g" testIdPrefix="t" wheelZoom="pinch" />);
+    expect(wheel(root, {})).toBe(false);
+    expect(ref.current!.viewport().scale).toBe(zoomed);
+    expect(wheel(root, { ctrlKey: true })).toBe(true);
+    expect(ref.current!.viewport().scale).toBeGreaterThan(zoomed);
+    rerender(<GraphView ref={ref} nodes={nodes} edges={edges} lanes={lanes} layout="lanes" ariaLabel="g" testIdPrefix="t" wheelZoom="off" />);
+    expect(wheel(root, { ctrlKey: true })).toBe(false);
   });
 
   it("draws above 300 nodes on a canvas with one focus proxy, and switches force to clusters above 150", () => {

@@ -17,7 +17,7 @@ import { GraphTooltip, Legend, Minimap, ZoomControls } from "./controls";
 import { edgeLength, edgeNormal, edgePath, edgeShape, angleAt, pointAt } from "./edge-geometry";
 import type { EdgeShape } from "./edge-geometry";
 import { isNavigationKey, nodeToward, readingOrder } from "./keyboard";
-import { fitText, labelAt, outwardSides, placeLabels } from "./labels";
+import { LABEL_GAP, LABEL_HEIGHT, fitText, labelAt, outwardSides, placeLabels } from "./labels";
 import type { LabelInput, LabelPlacement, LabelSide } from "./labels";
 import { buildGraphModel, highlightFor } from "./model";
 import type { GraphModel, Highlight } from "./model";
@@ -61,6 +61,12 @@ export const SVG_LIMITS = { nodes: 300, edges: 800 } as const;
 const MOVE_MS = 320;
 /** Lanes never fit below this: further out the marks would crowd their labels. */
 const LANE_MIN_SCALE = 0.6;
+/** Below this frame width the legend starts folded and stacks its rows under its title. */
+const LEGEND_NARROW = 560;
+/** Layered frames sit this far in from the view's edges (px). */
+const CARD_FIT_PAD = 24;
+/** Item cards never fit below this: their titles stay at 10 px or more. */
+const CARD_MIN_SCALE = 0.85;
 const EXIT_MS = 200;
 const LABEL_SETTLE_MS = 120;
 
@@ -286,6 +292,8 @@ export const GraphView = React.forwardRef<GraphViewHandle, GraphViewProps>(funct
     legend = "auto",
     minimap = "auto",
     controls = true,
+    wheelZoom = "always",
+    fitPadding,
     renderer = "auto",
     labels = "auto",
     edgeLabels = "auto",
@@ -325,7 +333,10 @@ export const GraphView = React.forwardRef<GraphViewHandle, GraphViewProps>(funct
   const hiddenSet = React.useMemo(() => new Set(hiddenList), [hiddenList]);
   const [focusMode, setFocusMode] = React.useState(false);
   const focusTarget = focusMode ? selection[0] ?? null : null;
-  const [legendCollapsed, setLegendCollapsed] = React.useState(legend === "collapsed");
+  // The legend starts folded where asked, and in a narrow frame (until the user unfolds it).
+  const [legendChoice, setLegendChoice] = React.useState<boolean | null>(null);
+  const narrowFrame = size.width > 0 && size.width < LEGEND_NARROW;
+  const legendCollapsed = legendChoice ?? (legend === "collapsed" || narrowFrame);
   const panel = panelOfKey(cacheKey) || testIdPrefix || "";
   const [minimapHidden, setMinimapHidden] = React.useState(() => readMinimapHidden(panel));
 
@@ -341,7 +352,9 @@ export const GraphView = React.forwardRef<GraphViewHandle, GraphViewProps>(funct
   const tokens = useVizTokens(rootRef, useCanvas);
 
   // Layout. Lanes and clusters spread across the frame; force settles in idle chunks.
-  const layoutWidth = size.width > 0 ? Math.max(320, size.width - 2 * ZOOM.pad) : 960;
+  // Layered pictures sit closer to the frame's edge (the A3.9 WorkGraph frames, 24 px in).
+  const fitPad = fitPadding !== undefined && fitPadding >= 0 ? fitPadding : cards ? CARD_FIT_PAD : ZOOM.pad;
+  const layoutWidth = size.width > 0 ? Math.max(320, size.width - 2 * fitPad) : 960;
   const layoutHeight = size.height > 0 ? Math.max(200, size.height - 2 * ZOOM.pad) : 560;
   // The bottom-left chrome (legend and zoom controls) stays clear of the fitted picture.
   const chromeRef = React.useRef<HTMLDivElement | null>(null);
@@ -361,7 +374,7 @@ export const GraphView = React.forwardRef<GraphViewHandle, GraphViewProps>(funct
     observer.observe(element);
     return () => observer.disconnect();
   }, [chromeKey]);
-  const fitBottom = chromeHeight > 0 ? Math.max(ZOOM.pad, chromeHeight + 20) : ZOOM.pad;
+  const fitBottom = chromeHeight > 0 ? Math.max(fitPad, chromeHeight + 20) : fitPad;
   const cachedRef = React.useRef<Map<string, LayoutPoint> | null>(null);
   if (cachedRef.current === null) cachedRef.current = cacheKey ? readPositionCache(cacheKey) : new Map();
   const [settled, setSettled] = React.useState<Map<string, LayoutPoint> | null>(null);
@@ -394,8 +407,13 @@ export const GraphView = React.forwardRef<GraphViewHandle, GraphViewProps>(funct
       const fitScale = Math.max(LANE_MIN_SCALE, Math.min(1, (size.height - ZOOM.pad - fitBottom) / first.bounds.h));
       if (fitScale < 0.98) return computeGraphLayout({ ...input, width: layoutWidth / fitScale });
     }
+    // Frames, likewise, fill the width at the scale that fits their height.
+    if (kind === "layered" && first.frames.length > 0 && first.bounds.h > 0 && size.height > 0) {
+      const fitScale = Math.max(CARD_MIN_SCALE, Math.min(1, (size.height - fitPad - fitBottom) / first.bounds.h));
+      if (fitScale < 0.98) return computeGraphLayout({ ...input, width: layoutWidth / fitScale });
+    }
     return first;
-  }, [kind, model, lanes, frames, center, density, layoutWidth, layoutHeight, measures.label, settled, size.height, fitBottom]);
+  }, [kind, model, lanes, frames, center, density, layoutWidth, layoutHeight, measures.label, settled, size.height, fitPad, fitBottom]);
   const layoutRef = React.useRef(layout);
   layoutRef.current = layout;
 
@@ -507,7 +525,7 @@ export const GraphView = React.forwardRef<GraphViewHandle, GraphViewProps>(funct
     });
   }, []);
   const limits: FitLimits = cards
-    ? { minScale: 0.85, maxScale: 1 }
+    ? { minScale: CARD_MIN_SCALE, maxScale: 1, alignTop: true }
     : kind === "lanes"
       ? { minScale: LANE_MIN_SCALE, maxScale: 1 }
       : kind === "clusters"
@@ -521,6 +539,16 @@ export const GraphView = React.forwardRef<GraphViewHandle, GraphViewProps>(funct
     for (const node of model.nodes) {
       const box = layout.nodes.get(node.id);
       if (!box || isCardKind(node.kind)) continue;
+      if (kind === "layered") {
+        // Layered marks carry their label on the right.
+        const r = markGeometry(node.kind, node.size).outer;
+        const half = Math.max(r, LABEL_HEIGHT / 2) + 2;
+        x0 = Math.min(x0, box.x - r - 2);
+        x1 = Math.max(x1, box.x + r + LABEL_GAP + measures.label(node.label) + 2);
+        y0 = Math.min(y0, box.y - half);
+        y1 = Math.max(y1, box.y + half);
+        continue;
+      }
       const half = Math.max(box.w / 2, measures.label(node.label) / 2 + 4);
       x0 = Math.min(x0, box.x - half);
       x1 = Math.max(x1, box.x + half);
@@ -528,11 +556,11 @@ export const GraphView = React.forwardRef<GraphViewHandle, GraphViewProps>(funct
       y1 = Math.max(y1, box.y + box.h / 2 + 22);
     }
     return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
-  }, [layout, model.nodes, measures.label]);
+  }, [layout, model.nodes, measures.label, kind]);
   const fit = React.useMemo(
-    () => fitViewport(fitBounds, size.width, size.height, limits, { top: ZOOM.pad, right: ZOOM.pad, bottom: fitBottom, left: ZOOM.pad }),
+    () => fitViewport(fitBounds, size.width, size.height, limits, { top: fitPad, right: fitPad, bottom: fitBottom, left: fitPad }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [fitBounds.x, fitBounds.y, fitBounds.w, fitBounds.h, size.width, size.height, limits.minScale, limits.maxScale, fitBottom],
+    [fitBounds.x, fitBounds.y, fitBounds.w, fitBounds.h, size.width, size.height, limits.minScale, limits.maxScale, limits.alignTop, fitPad, fitBottom],
   );
   const fitRef = React.useRef(fit);
   fitRef.current = fit;
@@ -1031,15 +1059,20 @@ export const GraphView = React.forwardRef<GraphViewHandle, GraphViewProps>(funct
     onFocusChangeRef.current?.(focusedId);
   }, [focusedId]);
 
-  // Wheel: zoom at the pointer; Shift pans sideways. A native, non-passive listener.
+  // Wheel: zoom at the pointer; Shift pans sideways. A native, non-passive
+  // listener; `wheelZoom` leaves plain scrolling (or all of it) to the page.
+  const wheelZoomRef = React.useRef(wheelZoom);
+  wheelZoomRef.current = wheelZoom;
   React.useEffect(() => {
     const element = rootRef.current;
     if (!element) return undefined;
     const handler = (event: WheelEvent) => {
       if (event.target instanceof Element && event.target.closest(".cc-viz-chrome")) return;
+      const mode = wheelZoomRef.current;
+      if (mode === "off" || (mode === "pinch" && !event.ctrlKey && !event.metaKey)) return;
       event.preventDefault();
       const rect = element.getBoundingClientRect();
-      if (event.shiftKey) {
+      if (event.shiftKey && mode === "always") {
         const { dx, dy } = wheelPixels(event);
         const delta = Math.abs(dx) > Math.abs(dy) ? dx : dy;
         setViewport((current) => ({ ...current, tx: current.tx - delta }), true);
@@ -1475,7 +1508,7 @@ export const GraphView = React.forwardRef<GraphViewHandle, GraphViewProps>(funct
       <div className="cc-viz-chrome">
         {tooltip}
         {showLegend || controls ? (
-          <div className="cc-viz-chrome__left" ref={chromeRef}>
+          <div className={cx("cc-viz-chrome__left", !showMinimap && "is-wide")} ref={chromeRef}>
             {showLegend ? (
               <Legend
                 relations={model.relations}
@@ -1487,7 +1520,8 @@ export const GraphView = React.forwardRef<GraphViewHandle, GraphViewProps>(funct
                   props.onHiddenRelationsChange?.(next);
                 }}
                 collapsed={legendCollapsed}
-                onCollapsedChange={setLegendCollapsed}
+                onCollapsedChange={setLegendChoice}
+                stacked={narrowFrame}
                 testId={testIds.legend ?? prefixed("legend")}
                 itemTestId={legendItemTestId}
                 headingClassName={classNames?.legendHeading}

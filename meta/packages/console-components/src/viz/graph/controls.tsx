@@ -132,6 +132,8 @@ export interface LegendProps {
   dots?: boolean;
   /** One meta line under the rows. */
   note?: React.ReactNode;
+  /** A narrow frame: the title and the fold button on a line of their own, the rows under them. */
+  stacked?: boolean;
 }
 
 const RELATION_DISPLAY_ORDER: readonly VizRelation[] = ["wired", "traffic", "route", "lineage", "cross", "blocks", "parent", "related"];
@@ -150,7 +152,7 @@ export function Legend(props: LegendProps): React.JSX.Element {
     );
   }
   return (
-    <div className="cc-viz-legend" data-testid={props.testId} role="group" aria-label="Legend">
+    <div className={cx("cc-viz-legend", props.stacked && "is-stacked")} data-testid={props.testId} role="group" aria-label="Legend">
       <span className={cx("cc-viz-legend__title", props.headingClassName)}>Legend</span>
       <ul className="cc-viz-legend__list">
         {relations.map((relation) => {

@@ -73108,7 +73108,6 @@ function RecordsTab(props) {
       )
     ] }),
     sortMode === "utility" ? /* @__PURE__ */ (0, import_jsx_runtime103.jsx)(Notice, { testId: "memory-utility-note", children: "Least useful first: records given to agents at least ".concat(DEAD_INJECTION_THRESHOLD, " times and never judged useful lead, marked Never useful. Space spent is estimated from how often each was given and its size.") }) : null,
-    multiRealm && !filter.realm?.trim() ? /* @__PURE__ */ (0, import_jsx_runtime103.jsx)(Notice, { testId: "memory-multi-realm-note", children: "This page combines records from several spaces. Pick a space to page through its records." }) : null,
     !loaded2 || pageLoading ? /* @__PURE__ */ (0, import_jsx_runtime103.jsx)(LoadingState, { label: "Loading records", rows: 4 }) : null,
     empty3 ? recordsDenied || listView.denied ? /* @__PURE__ */ (0, import_jsx_runtime103.jsx)(
       EmptyState,

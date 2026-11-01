@@ -14623,19 +14623,51 @@ mod tests {
             build.override_web_search = ToolCategoryOverride::Disable;
             build
         };
-        let mut after_conversation = Session::new();
-        after_conversation.push(meerkat_core::Message::User(
-            meerkat_core::UserMessage::text("Hello"),
-        ));
-        after_conversation
-            .append_operator_instruction_activation_for_test(
-                "app.example",
-                "tone",
-                1,
-                "Answer formally.",
-            )
-            .expect("an entry after the conversation row");
-        let mut beside_the_prompt = Session::new();
+        // A session the factory built and persisted on `model` through the
+        // realm's binding: its durable session metadata names that identity,
+        // so the resume reaches the operator-instruction check.
+        let resumable = |model: &str| {
+            let mut session = Session::new();
+            session
+                .set_session_metadata(meerkat_core::SessionMetadata {
+                    model_fallback: None,
+                    schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
+                    model: model.to_string(),
+                    max_tokens: 8_192,
+                    structured_output_retries: 2,
+                    provider: Provider::OpenAI,
+                    self_hosted_server_id: None,
+                    provider_params: None,
+                    tooling: SessionTooling::default(),
+                    keep_alive: false,
+                    comms_name: None,
+                    peer_meta: None,
+                    realm_id: Some(RealmId::parse(REALM).expect("test realm")),
+                    instance_id: None,
+                    backend: None,
+                    config_generation: None,
+                    auth_binding: Some(configured_auth_binding(REALM, "default_openai")),
+                    mob_member_binding: None,
+                })
+                .expect("durable session metadata");
+            session
+        };
+        let after_conversation = |model: &str| {
+            let mut session = resumable(model);
+            session.push(meerkat_core::Message::User(
+                meerkat_core::UserMessage::text("Hello"),
+            ));
+            session
+                .append_operator_instruction_activation_for_test(
+                    "app.example",
+                    "tone",
+                    1,
+                    "Answer formally.",
+                )
+                .expect("an entry after the conversation row");
+            session
+        };
+        let mut beside_the_prompt = resumable("gpt-5.5");
         beside_the_prompt.push(meerkat_core::Message::System(
             meerkat_core::SystemMessage::new("You are a careful assistant."),
         ));
@@ -14651,7 +14683,10 @@ mod tests {
         for (target, build, config) in [
             (
                 "a leading-prefix-only model",
-                resume("custom-prefix-model", after_conversation.clone()),
+                resume(
+                    "custom-prefix-model",
+                    after_conversation("custom-prefix-model"),
+                ),
                 &api_config,
             ),
             (
@@ -14674,7 +14709,10 @@ mod tests {
         }
 
         factory
-            .build_agent(resume("gpt-5.5", after_conversation), &api_config)
+            .build_agent(
+                resume("gpt-5.5", after_conversation("gpt-5.5")),
+                &api_config,
+            )
             .await
             .expect("a model that lowers entries anywhere resumes the session");
     }

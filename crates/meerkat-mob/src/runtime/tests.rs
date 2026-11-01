@@ -98464,8 +98464,8 @@ async fn test_head_canonical_same_member_queue_admissions_serialize_committed_bo
     );
     assert_eq!(
         u32::try_from(session_revision).expect("canonical session version fits u32"),
-        durable.version(),
-        "materialized durable session must retain the canonical head schema version"
+        durable.persisted_envelope_version(),
+        "the canonical head carries the envelope the materialized durable session persists with"
     );
     assert_eq!(
         usize::try_from(message_count).expect("non-negative canonical message count"),

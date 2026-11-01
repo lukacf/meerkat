@@ -3108,7 +3108,32 @@ mod tests {
         );
         builder.default_llm_client = Some(Arc::new(MockLlmClient::default()));
         let service = EphemeralSessionService::new(builder, 10);
+        // A session the factory built and persisted on `gpt-5.5`: its durable
+        // session metadata names that identity, so the resumed build accepts
+        // it.
         let mut durable_session = Session::new();
+        durable_session
+            .set_session_metadata(meerkat_core::SessionMetadata {
+                model_fallback: None,
+                schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
+                model: "gpt-5.5".to_string(),
+                max_tokens: 8_192,
+                structured_output_retries: 2,
+                provider: Provider::OpenAI,
+                self_hosted_server_id: None,
+                provider_params: None,
+                tooling: meerkat_core::SessionTooling::default(),
+                keep_alive: false,
+                comms_name: None,
+                peer_meta: None,
+                realm_id: None,
+                instance_id: None,
+                backend: None,
+                config_generation: None,
+                auth_binding: None,
+                mob_member_binding: None,
+            })
+            .map_err(|err| format!("durable session metadata: {err}"))?;
         durable_session.push(meerkat_core::Message::User(
             meerkat_core::UserMessage::text("Hello"),
         ));

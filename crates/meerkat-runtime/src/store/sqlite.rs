@@ -28375,8 +28375,14 @@ ORDER BY runtime_id";
                     source.physical_head_cas_token(),
                     committed.committed_head_token()
                 );
-                assert_eq!(source.committed_session().version(), 4);
-                assert_eq!(source.physical_session().version(), 4);
+                assert_eq!(
+                    source.committed_session().version(),
+                    meerkat_core::SESSION_VERSION
+                );
+                assert_eq!(
+                    source.physical_session().version(),
+                    meerkat_core::SESSION_VERSION
+                );
                 assert_eq!(source.provisional_authority(), Some(&provisional));
                 assert!(!source.provisional_target_applied());
             }
@@ -28397,8 +28403,14 @@ ORDER BY runtime_id";
                     source.runtime_authority().head_canonical(),
                     Some(&committed)
                 );
-                assert_eq!(source.committed_session().version(), 4);
-                assert_eq!(source.physical_session().version(), 4);
+                assert_eq!(
+                    source.committed_session().version(),
+                    meerkat_core::SESSION_VERSION
+                );
+                assert_eq!(
+                    source.physical_session().version(),
+                    meerkat_core::SESSION_VERSION
+                );
                 assert_eq!(source.physical_head().version, 3);
                 assert!(
                     source.physical_head().message_count > committed.boundary_head().message_count

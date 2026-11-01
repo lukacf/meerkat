@@ -1623,11 +1623,34 @@ async fn head_canonical_concurrent_next_admissions_realize_once_in_order() {
 // A target that cannot carry the session's own operator-instruction entries
 // ---------------------------------------------------------------------------
 
-/// A session that had a conversation before the harness built it, so the
-/// operator-instruction entry its next fresh run start applies stands after
-/// conversation rows.
-fn conversed_seed() -> Session {
+/// A session the factory built and persisted on `route`'s A, which had a
+/// conversation before the harness attaches it: its durable session metadata
+/// names A, as every resumed document carries it, and the operator-instruction
+/// entry its next fresh run start applies stands after conversation rows.
+fn conversed_seed(route: RouteSpec) -> Session {
     let mut session = Session::new();
+    session
+        .set_session_metadata(meerkat_core::SessionMetadata {
+            model_fallback: None,
+            schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
+            model: route.model_a.to_string(),
+            max_tokens: 8_192,
+            structured_output_retries: 2,
+            provider: route.provider_a,
+            self_hosted_server_id: None,
+            provider_params: None,
+            tooling: meerkat_core::SessionTooling::default(),
+            keep_alive: false,
+            comms_name: None,
+            peer_meta: None,
+            realm_id: Some(RealmId::parse(TEST_REALM).expect("valid test realm")),
+            instance_id: None,
+            backend: None,
+            config_generation: None,
+            auth_binding: Some(expected_auth_binding_named(route.binding_a)),
+            mob_member_binding: None,
+        })
+        .expect("durable session metadata");
     session.push(meerkat_core::Message::User(
         meerkat_core::UserMessage::text("an earlier question"),
     ));
@@ -1654,8 +1677,12 @@ async fn harness_with_an_entry_b_cannot_carry(
 ) -> (AbHarness, CommittedHandoffProof) {
     use meerkat_core::service::SessionServiceInstructionExt as _;
 
-    let harness =
-        build_harness_seeded(profile, TO_LEADING_PREFIX_ONLY_ROUTE, conversed_seed()).await;
+    let harness = build_harness_seeded(
+        profile,
+        TO_LEADING_PREFIX_ONLY_ROUTE,
+        conversed_seed(TO_LEADING_PREFIX_ONLY_ROUTE),
+    )
+    .await;
     Arc::clone(&harness.service)
         .set_session_instruction(
             &harness.session_id,

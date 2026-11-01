@@ -9398,8 +9398,8 @@ mod tests {
         let verified = compact
             .clone()
             .verify_materialized_session(session.clone())
-            .expect("supported v3 head must verify its normalized v4 Session");
-        assert_eq!(verified.session().version(), 4);
+            .expect("supported v3 head must verify its normalized Session");
+        assert_eq!(verified.session().version(), crate::SESSION_VERSION);
         assert_eq!(verified.session().messages(), session.messages());
         assert_eq!(verified.session().metadata(), session.metadata());
         assert_eq!(
@@ -9417,7 +9417,7 @@ mod tests {
             compact.clone().verify_materialized_session(changed),
             Err(SessionStoreError::TranscriptRevisionConflict { .. })
         ));
-        for unsupported in [0, 2, 5, u32::MAX] {
+        for unsupported in [0, 2, crate::SESSION_VERSION + 1, u32::MAX] {
             let mut invalid = compact.clone();
             invalid.version = unsupported;
             assert!(

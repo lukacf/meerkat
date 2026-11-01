@@ -826,6 +826,40 @@ fn generated_meerkat_transition_tail_missing_name_is_a_structured_error() {
     ));
 }
 
+/// MeerkatMachine's transcript-unsupported routing arms (0.9.9) are declared
+/// ahead of their siblings in the catalog, for first-match dispatch, and are
+/// emitted on the late tail after every variant 0.9.8 published, so no
+/// published `TransitionId` discriminant moves:
+/// `RequestFiniteSwitchTurnApprovalUnavailableIdle` keeps 0.9.8's index 107
+/// and `ClaimCompositionResidencyStopped`, the variant 0.9.8 published last,
+/// keeps index 2707.
+#[test]
+fn meerkat_transcript_unsupported_arms_follow_every_published_variant() {
+    let rendered = render_machine_kernel_module(&meerkat_machine());
+    let variants = transition_id_variants(&rendered);
+    let index = |name: &str| {
+        variants
+            .iter()
+            .position(|variant| variant == name)
+            .expect("the named variant is a rendered TransitionId variant")
+    };
+    assert_eq!(index("RequestFiniteSwitchTurnApprovalUnavailableIdle"), 107);
+    assert_eq!(index("ClaimCompositionResidencyStopped"), 2707);
+    for arm in [
+        "RequestFiniteSwitchTurnTranscriptUnsupportedIdle",
+        "RequestFiniteSwitchTurnTranscriptUnsupportedAttached",
+        "RequestFiniteSwitchTurnTranscriptUnsupportedRunning",
+        "RequestUntilChangedSwitchTurnTranscriptUnsupportedIdle",
+        "RequestUntilChangedSwitchTurnTranscriptUnsupportedAttached",
+        "RequestUntilChangedSwitchTurnTranscriptUnsupportedRunning",
+    ] {
+        assert!(
+            index(arm) > 2707,
+            "`{arm}` must follow every variant 0.9.8 published"
+        );
+    }
+}
+
 #[test]
 fn generated_meerkat_operation_status_is_closed_enum() {
     let rendered = render_machine_kernel_module(&meerkat_machine());

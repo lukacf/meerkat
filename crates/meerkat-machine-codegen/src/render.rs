@@ -530,6 +530,16 @@ const MEERKAT_TRANSITION_ENUM_LATE_TAIL: &[&str] = &[
     "ResolveMobOperatorIdentityCreationAdmitted",
     "ResolveMobOperatorIdentityCreationUnbound",
     "ResolveMobOperatorIdentityCreationTemplateNotInScope",
+    // The routing denial of a switch onto a target that cannot carry the
+    // session's transcript (0.9.9): declared ahead of its siblings in the
+    // catalog for first-match dispatch, emitted here after every published
+    // variant.
+    "RequestFiniteSwitchTurnTranscriptUnsupportedIdle",
+    "RequestFiniteSwitchTurnTranscriptUnsupportedAttached",
+    "RequestFiniteSwitchTurnTranscriptUnsupportedRunning",
+    "RequestUntilChangedSwitchTurnTranscriptUnsupportedIdle",
+    "RequestUntilChangedSwitchTurnTranscriptUnsupportedAttached",
+    "RequestUntilChangedSwitchTurnTranscriptUnsupportedRunning",
 ];
 
 // Append-only emission tails for the other machines, whose public

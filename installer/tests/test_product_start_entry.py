@@ -25,6 +25,11 @@ from pathlib import Path
 args = sys.argv[1:]
 with Path(os.environ["ENTRY_LOG"]).open("a") as log:
     log.write(json.dumps(args) + "\\n")
+probe = Path(os.environ["ENTRY_LOG"] + ".modes")
+with probe.open("a") as stream:
+    current = os.umask(0o077)
+    os.umask(current)
+    stream.write(str(current) + "\\n")
 failure = os.environ.get("ENTRY_FAILURE")
 if args[:3] == ["-B", "-m", "launchkit.distribution"]:
     if failure == "verification":
@@ -55,7 +60,7 @@ sys.exit(91)
     before = {path: path.read_bytes() for path in retained}
     log = tmp_path / "entry.jsonl"
 
-    def run(*, prepare_only=False, failure="", gateway=False):
+    def run(*, prepare_only=False, failure="", gateway=False, inherited_umask=0o022):
         env = {"PATH": "/usr/bin:/bin", "HOME": str(tmp_path), "ENTRY_LOG": str(log),
             "ENTRY_FAILURE": failure, "META_FORGE_PORT": "8791"}
         if gateway:
@@ -63,10 +68,11 @@ sys.exit(91)
             stub.write_text("#!/bin/sh\nexit 97\n"); stub.chmod(0o755)
             env["MOBKIT_GATEWAY_BIN"] = str(stub)
         result = subprocess.run(["/bin/bash", "start.sh", *(["--prepare-only"] if prepare_only else [])],
-            cwd=root, env=env, capture_output=True, text=True, timeout=10)
+            cwd=root, env=env, capture_output=True, text=True, timeout=10, umask=inherited_umask)
         assert all(path.read_bytes() == value for path, value in before.items())
         calls = [json.loads(line) for line in log.read_text().splitlines()]
         return result, calls
+    run.mode_log = Path(str(log) + ".modes")
     return run
 
 
@@ -100,3 +106,12 @@ def test_product_bundle_refuses_an_unrelated_gateway_before_dependency_preparati
     assert result.returncode != 0
     assert "Remove MOBKIT_GATEWAY_BIN" in result.stderr
     assert not any(args[:2] in (["-m", "pip"], ["-m", "uvicorn"]) for args in calls)
+
+
+@pytest.mark.parametrize("inherited_umask", [0o002, 0o022, 0o077])
+@pytest.mark.parametrize("prepare_only", [False, True])
+def test_all_package_processes_receive_private_umask(product_entry, inherited_umask, prepare_only):
+    result, calls = product_entry(prepare_only=prepare_only, inherited_umask=inherited_umask)
+    assert result.returncode == 0, result.stderr
+    observed = [int(line) for line in product_entry.mode_log.read_text().splitlines()]
+    assert observed and set(observed) == {0o077}, observed

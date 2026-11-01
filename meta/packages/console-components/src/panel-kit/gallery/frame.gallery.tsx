@@ -160,7 +160,7 @@ function TopologyFrame({ narrow }: { narrow?: boolean }) {
           hero
           label="Agents"
           value={8}
-          meter={<BarcodeMeter filled={7} live={1} outlined={1} segments={24} width={150} label="8 agents: 7 long-lived, 1 helper, 1 working now" />}
+          meter={({ width }) => <BarcodeMeter filled={7} live={1} outlined={1} segments={24} width={Math.min(150, width)} label="8 agents: 7 long-lived, 1 helper, 1 working now" />}
           foot={<BarcodeLegend filled={7} outlined={1} live={1} labels={{ live: "working" }} />}
         />
         <FigureTile label="Connections" value={11} foot="7 wired · 3 routes · 1 helper" />

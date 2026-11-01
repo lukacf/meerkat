@@ -198,6 +198,60 @@ describe("figures", () => {
     expect(view.getByTestId("steps").textContent).toBe("To finish 3 steps +1 vs 1h ago Critical path");
   });
 
+  it("draws a responsive meter at the room beside the figure, below it when short, never wider", () => {
+    // jsdom lays nothing out: these boxes stand in for a tile's figure row
+    // and its figure group (a hero "17" in a 166 px tile has 142 px of row).
+    const layout = (row: number, group: number, run: () => void) => {
+      const original = HTMLElement.prototype.getBoundingClientRect;
+      HTMLElement.prototype.getBoundingClientRect = function boxes(this: HTMLElement) {
+        const rect = (right: number) => ({ left: 0, right, width: right, top: 0, bottom: 20, height: 20, x: 0, y: 0, toJSON: () => ({}) }) as DOMRect;
+        if (this.classList.contains("cc-figure__fig")) return rect(row);
+        if (this.classList.contains("cc-figure__group")) return rect(group);
+        return rect(0);
+      };
+      try {
+        run();
+      } finally {
+        HTMLElement.prototype.getBoundingClientRect = original;
+      }
+    };
+    const meter = ({ width }: { width: number }) => <span data-testid="meter" data-width={width} />;
+    layout(142, 34, () => {
+      const view = render(<FigureTile hero label="Agents" value={17} meter={meter} testId="tile" />);
+      const slot = view.getByTestId("meter");
+      expect(slot.getAttribute("data-width")).toBe(String(142 - 34 - 12));
+      expect(slot.closest(".cc-figure__fig") !== null).toBe(true);
+      view.unmount();
+    });
+    layout(142, 120, () => {
+      const view = render(<FigureTile hero label="Records" value={1284} unit="active" meter={meter} testId="tile" />);
+      const slot = view.getByTestId("meter");
+      expect(slot.getAttribute("data-width")).toBe("142");
+      expect(slot.closest(".cc-figure__fig") === null).toBe(true);
+      expect(slot.parentElement?.classList.contains("is-below")).toBe(true);
+      view.unmount();
+    });
+    layout(40, 30, () => {
+      const view = render(<FigureTile hero label="Agents" value={17} meter={meter} testId="tile" />);
+      expect(view.queryByTestId("meter") === null).toBe(true);
+      view.unmount();
+    });
+    // The trend shrinks to the room, and hides under 32 px.
+    layout(142, 80, () => {
+      const view = render(<FigureTile label="Given" value={12} trend={[1, 2, 3]} testId="tile" />);
+      expect(view.getByTestId("tile").querySelector(".cc-figure__trend svg")?.getAttribute("width")).toBe(String(142 - 80 - 12));
+      view.unmount();
+    });
+    layout(142, 110, () => {
+      const view = render(<FigureTile label="Given" value={12} trend={[1, 2, 3]} testId="tile" />);
+      expect(view.getByTestId("tile").querySelector(".cc-figure__trend") === null).toBe(true);
+      view.unmount();
+    });
+    // Unmeasured (no layout at all): the meter is drawn at 96 px.
+    const plain = render(<FigureTile hero label="Agents" value={17} meter={meter} testId="tile" />);
+    expect(plain.getByTestId("meter").getAttribute("data-width")).toBe("96");
+  });
+
   it("makes a filtering figure a pressed button, and holds a skeleton while loading", () => {
     const onActivate = vi.fn();
     const view = render(<FigureTile label="Blocked" value={1} onActivate={onActivate} pressed testId="tile" />);

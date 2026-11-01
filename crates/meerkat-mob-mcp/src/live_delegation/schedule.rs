@@ -10,8 +10,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use meerkat::{
     AddEvidenceRequest, ClaimWorkItemRequest, CloseWorkItemRequest, CreateWorkItemRequest,
-    WorkEdgeKind, WorkEvidenceRef, WorkGraphService, WorkGraphSnapshot, WorkGraphSnapshotFilter,
-    WorkItem, WorkItemId, WorkOwner, WorkOwnerKey, WorkStatus,
+    WorkEdge, WorkEdgeKind, WorkEvidenceRef, WorkGraphService, WorkGraphSnapshotFilter, WorkItem,
+    WorkItemId, WorkOwner, WorkOwnerKey, WorkStatus,
 };
 use meerkat_core::LiveChannelId;
 use meerkat_runtime::live_execution::LiveDelegationNarrationKind;
@@ -26,9 +26,10 @@ pub(super) const LIVE_DELEGATION_CHANNEL_WORKER_CAP: usize =
 /// Label every voice delegation item carries.
 pub(super) const VOICE_WORK_LABEL: &str = "voice";
 
-/// Voice items one scheduling snapshot reads: the most recently updated ones
-/// (the WorkGraph maximum). A snapshot that cut older voice items warns.
-const VOICE_SNAPSHOT_LIMIT: usize = 1000;
+/// Voice items one page of a scheduling walk reads (the WorkGraph maximum).
+/// A scheduling decision pages through every voice item with the snapshot
+/// cursor.
+const VOICE_SNAPSHOT_PAGE: usize = 1000;
 
 const WORK_TITLE_CHARS: usize = 200;
 const NARRATION_TITLE_CHARS: usize = 120;
@@ -365,25 +366,34 @@ impl std::fmt::Display for WorkItemCloseFailure {
     }
 }
 
-/// The voice items a scheduling decision reads, terminal ones included
-/// (blockers may have finished, and may belong to another channel), most
-/// recently updated first.
-fn voice_snapshot_filter() -> WorkGraphSnapshotFilter {
+/// One page of the voice items a scheduling decision reads, terminal ones
+/// included (blockers may have finished, and may belong to another channel),
+/// most recently updated first, after `cursor`.
+fn voice_snapshot_filter(cursor: Option<String>) -> WorkGraphSnapshotFilter {
     WorkGraphSnapshotFilter {
         labels: vec![VOICE_WORK_LABEL.to_string()],
         include_terminal: true,
-        limit: Some(VOICE_SNAPSHOT_LIMIT),
+        limit: Some(VOICE_SNAPSHOT_PAGE),
+        cursor,
         ..WorkGraphSnapshotFilter::default()
     }
+}
+
+/// Every voice item of every channel, read page by page with the snapshot
+/// cursor: the items by id, the edges between them (each on the page of its
+/// later end, so each once), and the ready ones. Each page classifies its
+/// items' readiness against the whole namespace.
+#[derive(Default)]
+struct VoiceSnapshot {
+    items: BTreeMap<WorkItemId, WorkItem>,
+    edges: Vec<WorkEdge>,
+    ready_item_ids: BTreeSet<WorkItemId>,
 }
 
 /// WorkGraph access scoped the way the mob's members see it.
 #[derive(Clone)]
 pub(super) struct VoiceWorkGraph {
     service: WorkGraphService,
-    /// Set once a cut voice snapshot has been warned about for this voice
-    /// request; its clones share it.
-    snapshot_cut_warned: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Namespace snapshots taken to classify a worker's item (test count).
     #[cfg(test)]
     classification_snapshots: std::sync::Arc<std::sync::atomic::AtomicUsize>,
@@ -396,7 +406,6 @@ impl VoiceWorkGraph {
     pub(super) fn new(service: WorkGraphService) -> Self {
         Self {
             service,
-            snapshot_cut_warned: std::sync::Arc::default(),
             #[cfg(test)]
             classification_snapshots: std::sync::Arc::default(),
             #[cfg(test)]
@@ -514,26 +523,40 @@ impl VoiceWorkGraph {
             .expect("conflicting evidence");
     }
 
-    /// Warn at most once per voice request when a scheduling snapshot cut
-    /// voice items: each admitted request builds its own voice graph, which
-    /// its pending operation, the schedule pump and its worker share as
-    /// clones. The snapshot read only the most recently updated voice items,
-    /// so an older open item is not offered and an older blocker is not
-    /// named. Closed voice items count too, so past the limit every
-    /// scheduling pass would warn again.
-    fn warn_once_when_snapshot_cut(&self, snapshot: &WorkGraphSnapshot, read: &'static str) {
-        if snapshot.truncated == Some(true)
-            && let Some(total_items) = snapshot.total_items
-            && !self
-                .snapshot_cut_warned
-                .swap(true, std::sync::atomic::Ordering::Relaxed)
-        {
-            tracing::warn!(
-                read,
-                total_items,
-                limit = VOICE_SNAPSHOT_LIMIT,
-                "voice work snapshot read the {VOICE_SNAPSHOT_LIMIT} most recently updated of {total_items} voice items; an older open item is not offered and an older blocker is not named (warned once per voice request)"
-            );
+    /// Walk every voice item with the snapshot cursor. Each page starts
+    /// strictly after the last item of the one before, so the walk ends: an
+    /// item a write moves comes before the cursor (it is newer), and a page
+    /// that names a next cursor holds at least one item. A walk returns an
+    /// item twice only when a write moved it back past the cursor; the newer
+    /// revision is kept.
+    async fn voice_snapshot(&self) -> Result<VoiceSnapshot, String> {
+        let mut walked = VoiceSnapshot::default();
+        let mut cursor = None;
+        loop {
+            let page = self
+                .service
+                .snapshot(voice_snapshot_filter(cursor))
+                .await
+                .map_err(|error| error.to_string())?;
+            let advanced = !page.items.is_empty();
+            for item in page.items {
+                if walked
+                    .items
+                    .get(&item.id)
+                    .is_none_or(|seen| seen.revision < item.revision)
+                {
+                    walked.items.insert(item.id.clone(), item);
+                }
+            }
+            walked.edges.extend(page.edges);
+            walked.ready_item_ids.extend(page.ready_item_ids);
+            cursor = match page.next_cursor {
+                None => return Ok(walked),
+                Some(next) if advanced => Some(next),
+                Some(_) => {
+                    return Err("a voice snapshot page named a next cursor but held no item".into());
+                }
+            };
         }
     }
 
@@ -544,25 +567,19 @@ impl VoiceWorkGraph {
             .map_err(|error| format!("voice work item {id} read failed: {error}"))
     }
 
-    /// Scheduling facts for one channel's queue, read from one snapshot of
-    /// the voice items of every channel (blockers may belong to another
+    /// Scheduling facts for one channel's queue, read from a walk of the
+    /// voice items of every channel (blockers may belong to another
     /// channel).
     pub(super) async fn channel_readiness(
         &self,
         channel_id: &LiveChannelId,
     ) -> Result<ChannelReadiness, String> {
         let snapshot = self
-            .service
-            .snapshot(voice_snapshot_filter())
+            .voice_snapshot()
             .await
             .map_err(|error| format!("voice work readiness snapshot failed: {error}"))?;
-        self.warn_once_when_snapshot_cut(&snapshot, "readiness");
         let channel_label = channel_work_label(channel_id);
-        let items_by_id = snapshot
-            .items
-            .iter()
-            .map(|item| (item.id.clone(), item))
-            .collect::<BTreeMap<_, _>>();
+        let items_by_id = &snapshot.items;
         let ready = snapshot
             .ready_item_ids
             .iter()
@@ -574,16 +591,15 @@ impl VoiceWorkGraph {
             .cloned()
             .collect::<HashSet<_>>();
         let mut blockers_failed = HashMap::new();
-        for item in snapshot
-            .items
-            .iter()
+        for item in items_by_id
+            .values()
             .filter(|item| item.labels.contains(&channel_label) && item.status == WorkStatus::Open)
         {
             let unresolved = snapshot
                 .edges
                 .iter()
                 .filter(|edge| edge.kind == WorkEdgeKind::Blocks && edge.to_id == item.id)
-                .filter_map(|edge| items_by_id.get(&edge.from_id).copied())
+                .filter_map(|edge| items_by_id.get(&edge.from_id))
                 .filter(|blocker| blocker.status != WorkStatus::Completed)
                 .collect::<Vec<_>>();
             if !unresolved.is_empty()
@@ -635,8 +651,9 @@ impl VoiceWorkGraph {
 
     /// Classify the item after its worker's bounded turn ended. The four
     /// simple statuses come from the item alone; only Open and Blocked need
-    /// the namespace snapshot, whose readiness (child joins, time windows,
-    /// blockers) is one coherent observation of the item and its graph.
+    /// the walk of the voice items, whose page holding the item classifies
+    /// its readiness (child joins, time windows, blockers) in one coherent
+    /// observation of the item and its namespace.
     pub(super) async fn disposition_after_worker_turn(
         &self,
         item: &WorkItemId,
@@ -652,19 +669,12 @@ impl VoiceWorkGraph {
         self.classification_snapshots
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let snapshot = self
-            .service
-            .snapshot(voice_snapshot_filter())
+            .voice_snapshot()
             .await
             .map_err(|error| format!("voice work snapshot failed: {error}"))?;
-        self.warn_once_when_snapshot_cut(&snapshot, "classification");
-        let items_by_id = snapshot
-            .items
-            .iter()
-            .map(|item| (item.id.clone(), item))
-            .collect::<BTreeMap<_, _>>();
+        let items_by_id = &snapshot.items;
         let current = items_by_id
             .get(item)
-            .copied()
             .ok_or_else(|| format!("voice work item {item} is missing from its namespace"))?;
         Ok(match current.status {
             WorkStatus::Completed => WorkItemDisposition::Completed,
@@ -676,7 +686,7 @@ impl VoiceWorkGraph {
                     .edges
                     .iter()
                     .filter(|edge| edge.kind == WorkEdgeKind::Blocks && &edge.to_id == item)
-                    .filter_map(|edge| items_by_id.get(&edge.from_id).copied())
+                    .filter_map(|edge| items_by_id.get(&edge.from_id))
                     .filter(|blocker| blocker.status != WorkStatus::Completed)
                     .map(|blocker| (blocker.id.clone(), blocker.title.clone()))
                     .collect::<Vec<_>>();

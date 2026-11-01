@@ -6,11 +6,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU32;
 
+use meerkat_mob::ProfileName;
 use serde_json::{Value, json};
 
 use super::escape::{escaped_line, is_hidden, is_markup, quoted, unescape_line, unquote};
 use super::template::profile_digest;
 use super::*;
+use crate::identity_first::{AgentAddressability, AgentIdentity, DisplayName, DurableAgentSpec};
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -149,6 +151,71 @@ fn spec(slug: &str) -> CreateIdentitySpec {
         instructions: "Read the notes.\nReport daily.".to_owned(),
         ..CreateIdentitySpec::default()
     }
+}
+
+/// The declared spec of an identity of `profile`, as the request fixtures
+/// ask for it.
+fn declared(identity: &str, profile: &str) -> DurableAgentSpec {
+    DurableAgentSpec {
+        identity: AgentIdentity::parse(identity).expect("an identity"),
+        profile: ProfileName::from(profile),
+        addressability: AgentAddressability::Addressable,
+        display_name: Some(DisplayName::parse("Helper").expect("a display name")),
+        labels: BTreeMap::new(),
+        context: None,
+        additional_instructions: vec!["Read the notes.\nReport daily.".to_owned()],
+        initial_message: None,
+        runtime_mode_override: None,
+        backend: None,
+        binding: None,
+        placement: None,
+    }
+}
+
+/// Ask for the profile `profile`.
+fn set_profile(request: &mut CreateIdentitySpec, profile: &str) {
+    request.profile = Some(profile.to_owned());
+}
+
+/// Ask for the labels `entries`.
+fn set_labels(request: &mut CreateIdentitySpec, entries: &[(&str, &str)]) {
+    request.descriptive_labels = entries
+        .iter()
+        .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+        .collect();
+}
+
+/// Ask for the context `context`.
+fn set_context(request: &mut CreateIdentitySpec, context: Value) {
+    request.supplied_context = context.as_object().map(|map| {
+        map.iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect()
+    });
+}
+
+/// Ask for the runtime binding `binding`. This request has no runtime
+/// binding, so it asks for nothing.
+fn set_binding(_request: &mut CreateIdentitySpec, _binding: Value) {}
+
+/// The one identity a create request creates.
+fn only_created(request: &IdentityRequest) -> &CreatedSpec {
+    match &request.action {
+        RequestAction::Create { identities } => {
+            identities.values().next().expect("one created identity")
+        }
+        RequestAction::Update(_) | RequestAction::Remove { .. } => panic!("a create request"),
+    }
+}
+
+/// What the fixture's peer rules give the fixture peer `peer`.
+fn peer_verdict(peer: &str) -> PeerVerdict {
+    evaluate_peer(policy().peers(), peer, &peers()[peer], &BTreeSet::new())
+}
+
+/// An agent requester with no authority label.
+fn agent(identity: &str) -> RequesterFacts {
+    RequesterFacts::agent(identity, None, BTreeMap::new(), BTreeSet::new())
 }
 
 fn create(
@@ -1629,19 +1696,15 @@ fn the_preamble_composes_creator_peers_display_name_and_purpose() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn a_request_normalizes_with_its_binding_tools_and_plan() {
-    let normalized = create(&policy(), &lead(), &[spec("helper")]).expect("normalized");
-    let created = created_spec(&normalized.request, "team:helper");
-    assert_eq!(created.profile, "assistant");
-    assert_eq!(created.model, "claude-opus-5-5");
+fn a_request_normalizes_to_its_declared_spec_and_plan() {
+    let mut request = spec("helper");
+    set_profile(&mut request, "analyst");
+    let normalized = create(&policy(), &lead(), &[request]).expect("normalized");
     assert_eq!(
-        created.tools,
-        strings(["notes_read", "search"]),
-        "an agent's default tools are the ceiling it holds, and the floor"
-    );
-    assert_eq!(
-        created.binding_digest,
-        normalized.bindings["team:helper"].digest()
+        normalized.request.to_json().expect("the request body")["action"]["identities"],
+        json!([{"spec": declared("helper", "analyst"), "peers": {}}]),
+        "the request holds the declared spec as asked: its own name and the requested \
+         profile, and no namespace, template binding, model or tool list"
     );
     assert_eq!(
         normalized.plan.outcome,
@@ -1649,8 +1712,10 @@ fn a_request_normalizes_with_its_binding_tools_and_plan() {
             approver_id: "owner".to_owned()
         }
     );
+    assert_eq!(normalized.plan.change, ChangeClass::Create);
     assert_eq!(normalized.plan.timeout_ms, 86_400_000);
     assert!(!normalized.plan.raised);
+    assert!(normalized.request.consequences.is_empty());
     assert_eq!(normalized.request.decision_kind(), "identity.create");
     let host = create(
         &policy(),
@@ -1658,191 +1723,125 @@ fn a_request_normalizes_with_its_binding_tools_and_plan() {
         &[spec("helper")],
     )
     .expect("normalized");
-    assert_eq!(
-        created_spec(&host.request, "team:helper").tools,
-        strings(["notes_read", "notes_write", "search"]),
-        "the host's default tools are the ceiling"
-    );
     assert_eq!(host.plan.outcome, PlannedOutcome::Allow);
 }
 
 type SpecChange = fn(&mut CreateIdentitySpec);
 
-fn spec_case(
-    change: SpecChange,
-    kind: IdentityRefusalKind,
-    field: &'static str,
-) -> (SpecChange, IdentityRefusalKind, &'static str) {
-    (change, kind, field)
+fn spec_case(change: SpecChange, refusal: Value) -> (SpecChange, Value) {
+    (change, refusal)
 }
 
 #[test]
 fn normalization_refuses_typed() {
+    // A request may ask for any profile of the mob: no template narrows it.
+    let mut lead_profile = spec("helper");
+    set_profile(&mut lead_profile, "lead");
+    assert!(
+        create(&policy(), &lead(), &[lead_profile]).is_ok(),
+        "any mob profile is allowed"
+    );
+
     let cases = [
         spec_case(
-            |spec| spec.slug = "Bad".to_owned(),
-            IdentityRefusalKind::InvalidName,
-            "identities[0].slug",
+            |spec| set_profile(spec, "ghost"),
+            json!({"kind": "profile_not_allowed", "profile": "ghost",
+                   "field": "identities[0].spec.profile"}),
         ),
         spec_case(
-            |spec| spec.slug = "x".to_owned(),
-            IdentityRefusalKind::InvalidName,
-            "identities[0].slug",
+            |spec| set_labels(spec, &[("team", "x")]),
+            json!({"kind": "reserved_key", "key": "team", "field": "identities[0].spec.labels"}),
         ),
         spec_case(
-            |spec| spec.slug = "admin".to_owned(),
-            IdentityRefusalKind::ReservedName,
-            "identities[0].slug",
+            |spec| set_labels(spec, &[("role", "x")]),
+            json!({"kind": "reserved_key", "key": "role", "field": "identities[0].spec.labels"}),
         ),
         spec_case(
-            |spec| spec.template = "nope".to_owned(),
-            IdentityRefusalKind::TemplateNotAllowed {
-                template: "nope".to_owned(),
-            },
-            "identities[0].template",
+            |spec| set_labels(spec, &[("project", "x")]),
+            json!({"kind": "reserved_key", "key": "project",
+                   "field": "identities[0].spec.labels"}),
         ),
         spec_case(
-            |spec| spec.profile = Some("lead".to_owned()),
-            IdentityRefusalKind::ProfileNotAllowed {
-                profile: Some("lead".to_owned()),
-            },
-            "identities[0].profile",
+            |spec| set_labels(spec, &[("bad key", "x")]),
+            json!({"kind": "invalid_request", "problem": "malformed",
+                   "field": "identities[0].spec.labels"}),
         ),
         spec_case(
-            |spec| spec.model = Some("gpt-5.5".to_owned()),
-            IdentityRefusalKind::ModelNotAllowed {
-                model: "gpt-5.5".to_owned(),
-            },
-            "identities[0].model",
+            |spec| set_labels(spec, &[("", "x")]),
+            json!({"kind": "invalid_request", "problem": "malformed",
+                   "field": "identities[0].spec.labels"}),
         ),
         spec_case(
-            |spec| {
-                spec.descriptive_labels = BTreeMap::from([("team".to_owned(), "x".to_owned())]);
-            },
-            IdentityRefusalKind::ReservedKey {
-                key: "team".to_owned(),
-            },
-            "identities[0].descriptive_labels",
+            |spec| set_labels(spec, &[("note\u{202E}", "x")]),
+            json!({"kind": "invalid_request", "problem": "malformed",
+                   "field": "identities[0].spec.labels"}),
         ),
         spec_case(
-            |spec| {
-                spec.descriptive_labels = BTreeMap::from([("role".to_owned(), "x".to_owned())]);
-            },
-            IdentityRefusalKind::ReservedKey {
-                key: "role".to_owned(),
-            },
-            "identities[0].descriptive_labels",
+            |spec| set_labels(spec, &[("note", "a\nb")]),
+            json!({"kind": "invalid_request", "problem": "malformed",
+                   "field": "identities[0].spec.labels.note"}),
         ),
         spec_case(
-            |spec| {
-                spec.descriptive_labels = BTreeMap::from([("bad key".to_owned(), "x".to_owned())]);
-            },
-            IdentityRefusalKind::InvalidRequest {
-                problem: RequestProblem::Malformed,
-            },
-            "identities[0].descriptive_labels",
+            |spec| set_labels(spec, &[("note", "x".repeat(257).as_str())]),
+            json!({"kind": "text_too_large", "limit": 256,
+                   "field": "identities[0].spec.labels.note"}),
+        ),
+        spec_case(
+            |spec| set_labels(spec, &[("clearance", "top")]),
+            json!({"kind": "authority_field_invalid", "key": "clearance",
+                   "field": "identities[0].spec.labels"}),
+        ),
+        spec_case(
+            |spec| set_context(spec, json!({"project": "x"})),
+            json!({"kind": "reserved_key", "key": "project",
+                   "field": "identities[0].spec.context"}),
+        ),
+        spec_case(
+            |spec| set_context(spec, json!({"team": "x"})),
+            json!({"kind": "reserved_key", "key": "team", "field": "identities[0].spec.context"}),
         ),
         spec_case(
             |spec| {
-                spec.descriptive_labels = BTreeMap::from([(String::new(), "x".to_owned())]);
+                set_binding(
+                    spec,
+                    json!({"kind": "external", "address": "tcp://127.0.0.1:7000",
+                           "bootstrap_token": "secret-token",
+                           "identity": {"kind": "ed25519_public_key",
+                                        "public_key": "ed25519:AAAA"}}),
+                );
             },
-            IdentityRefusalKind::InvalidRequest {
-                problem: RequestProblem::Malformed,
-            },
-            "identities[0].descriptive_labels",
-        ),
-        spec_case(
-            |spec| {
-                spec.descriptive_labels = BTreeMap::from([("note".to_owned(), "a\nb".to_owned())]);
-            },
-            IdentityRefusalKind::InvalidRequest {
-                problem: RequestProblem::Malformed,
-            },
-            "identities[0].descriptive_labels.note",
-        ),
-        spec_case(
-            |spec| {
-                spec.descriptive_labels = BTreeMap::from([("note".to_owned(), "x".repeat(257))]);
-            },
-            IdentityRefusalKind::TextTooLarge { limit: 256 },
-            "identities[0].descriptive_labels.note",
-        ),
-        spec_case(
-            |spec| {
-                spec.supplied_context = Some(BTreeMap::from([("project".to_owned(), json!("x"))]));
-            },
-            IdentityRefusalKind::ReservedKey {
-                key: "project".to_owned(),
-            },
-            "identities[0].supplied_context",
-        ),
-        spec_case(
-            |spec| spec.display_name = "x".repeat(65),
-            IdentityRefusalKind::TextTooLarge { limit: 64 },
-            "identities[0].display_name",
-        ),
-        spec_case(
-            |spec| spec.kickoff = Some("k".repeat(501)),
-            IdentityRefusalKind::TextTooLarge { limit: 500 },
-            "identities[0].kickoff",
-        ),
-        spec_case(
-            |spec| {
-                spec.authority_fields =
-                    BTreeMap::from([("clearance".to_owned(), "top".to_owned())]);
-            },
-            IdentityRefusalKind::AuthorityFieldInvalid {
-                key: "clearance".to_owned(),
-            },
-            "identities[0].authority_fields",
-        ),
-        spec_case(
-            |spec| {
-                spec.authority_fields = BTreeMap::from([("team".to_owned(), "core".to_owned())]);
-            },
-            IdentityRefusalKind::AuthorityFieldInvalid {
-                key: "team".to_owned(),
-            },
-            "identities[0].authority_fields",
+            json!({"kind": "unsupported", "feature": "a bootstrap token in an identity request",
+                   "field": "identities[0].spec.binding"}),
         ),
         spec_case(
             |spec| spec.peers = vec!["ghost".to_owned()],
-            IdentityRefusalKind::PeerUnknown,
-            "identities[0].peers[0]",
+            json!({"kind": "peer_unknown", "field": "identities[0].peers[0]"}),
         ),
         spec_case(
             |spec| spec.peers = vec!["stranger".to_owned()],
-            IdentityRefusalKind::PeerNotAllowed {
-                identity: "stranger".to_owned(),
-            },
-            "identities[0].peers[0]",
+            json!({"kind": "peer_not_allowed", "identity": "stranger",
+                   "field": "identities[0].peers[0]"}),
         ),
         spec_case(
-            |spec| spec.peers = vec!["team:helper".to_owned()],
-            IdentityRefusalKind::PeerNotAllowed {
-                identity: "team:helper".to_owned(),
-            },
-            "identities[0].peers[0]",
+            |spec| spec.peers = vec!["helper".to_owned()],
+            json!({"kind": "peer_not_allowed", "identity": "helper",
+                   "field": "identities[0].peers[0]"}),
         ),
     ];
-    for (change, kind, field) in cases {
+    for (change, expected) in cases {
         let mut request = spec("helper");
         change(&mut request);
         let refusal = create(&policy(), &lead(), &[request]).expect_err("refused");
-        assert_eq!(refusal.kind, kind, "{refusal}");
-        assert_eq!(refusal.field.as_deref(), Some(field), "{refusal}");
+        assert_eq!(refusal.to_data(), expected, "{refusal}");
         assert!(!refusal.is_retryable());
     }
 
     let refusal =
         create(&policy(), &lead(), &[spec("helper"), spec("helper")]).expect_err("a duplicate");
     assert_eq!(
-        refusal.kind,
-        IdentityRefusalKind::NameTaken {
-            by: NameTakenBy::Created
-        }
+        refusal.to_data(),
+        json!({"kind": "name_taken", "by": "created", "field": "identities[1].spec.identity"})
     );
-    assert_eq!(refusal.field.as_deref(), Some("identities[1].slug"));
 
     let refusal = create(&policy(), &lead(), &[]).expect_err("nothing to create");
     assert_eq!(
@@ -2085,36 +2084,42 @@ fn peer_consequence_lines_say_why_a_peer_needs_approval() {
         "lead-1".to_owned(),
     ];
     let normalized = create(&policy(), &lead(), &[request]).expect("normalized");
-    let created = created_spec(&normalized.request, "team:helper");
+    let rule = |id: &str| EdgeBasis::Rule { id: id.to_owned() };
     assert_eq!(
-        created.peers,
+        only_created(&normalized.request).peers,
         BTreeMap::from([
-            ("analyst-1".to_owned(), EdgeBasis::CreatorPeer),
-            (
-                "core-1".to_owned(),
-                EdgeBasis::Rule {
-                    id: "sensitive".to_owned()
-                }
-            ),
-            ("lead-1".to_owned(), EdgeBasis::Creator),
-        ])
+            ("analyst-1".to_owned(), rule("analysts")),
+            ("core-1".to_owned(), rule("sensitive")),
+            ("lead-1".to_owned(), rule("leads")),
+        ]),
+        "every edge has the basis of the rule that allowed it: the requester is no basis, \
+         and neither is a peer of the requester"
     );
+    // The peer that needs approval raises the request to a human decision,
+    // and the deciding rule's approver decides it.
     assert!(normalized.plan.raised);
-    assert_eq!(normalized.plan.kind(), ApprovalKind::RequireApproval);
+    assert_eq!(
+        normalized.plan.outcome,
+        PlannedOutcome::RequireApproval {
+            approver_id: "owner".to_owned()
+        }
+    );
     let rendering = render(&normalized.request);
     assert!(rendering.as_str().contains(
-        "- \"team:helper\" peer \"core-1\" needs approval under rule \"sensitive\" because \
+        "- \"helper\" peer \"core-1\" needs approval under rule \"sensitive\" because \
          \"a core team member\"\n"
     ));
 
-    let verdict = evaluate_peer(
-        policy().peers(),
-        "stranger",
-        &peers()["stranger"],
-        &BTreeSet::new(),
-    );
+    // A raised request whose deciding rule names no approver has nobody to
+    // decide, and is refused before anything is held.
+    let mut core_peer = spec("helper");
+    core_peer.peers = vec!["core-1".to_owned()];
+    let refusal = create(&policy(), &RequesterFacts::host("gateway"), &[core_peer])
+        .expect_err("nobody can decide");
+    assert_eq!(refusal.kind, IdentityRefusalKind::ApprovalUnavailable);
+
     assert_eq!(
-        verdict,
+        peer_verdict("stranger"),
         PeerVerdict::Denied {
             rule: None,
             reason: None
@@ -2253,6 +2258,59 @@ fn update_spec(set: UpdateSetSpec) -> UpdateIdentitySpec {
     }
 }
 
+/// The fixture identity an update or a removal names.
+fn entry() -> CreatedEntryFacts {
+    entry_facts(current_binding())
+}
+
+/// The fixture identity, of `profile` and with the authority labels
+/// `_authority`, which this entry does not carry.
+fn entry_with(profile: &str, _authority: &[(&str, &str)]) -> CreatedEntryFacts {
+    CreatedEntryFacts {
+        profile: profile.to_owned(),
+        ..entry()
+    }
+}
+
+/// An identity of a template the console does not create from.
+fn any_entry() -> CreatedEntryFacts {
+    CreatedEntryFacts {
+        template: "open".to_owned(),
+        ..entry()
+    }
+}
+
+/// An update of `entry` at its revision, changing `set`.
+fn update_of(entry: &CreatedEntryFacts, set: Value) -> UpdateIdentitySpec {
+    serde_json::from_value(json!({
+        "identity": entry.identity,
+        "expected_revision": entry.revision,
+        "set": set,
+    }))
+    .expect("an update request")
+}
+
+/// A removal of `entry` at its revision by `requester`, under `policy`.
+fn remove_identity_with(
+    policy: &IdentityCreationPolicy,
+    requester: &RequesterFacts,
+    entry: &CreatedEntryFacts,
+) -> Result<NormalizedRequest, IdentityRefusal> {
+    let spec = RemoveIdentitySpec {
+        identity: entry.identity.clone(),
+        expected_revision: entry.revision,
+    };
+    normalize_remove(policy, requester, RequestEnvelope::default(), entry, &spec)
+}
+
+/// A removal of `entry` at its revision by `requester`.
+fn remove_identity(
+    requester: &RequesterFacts,
+    entry: &CreatedEntryFacts,
+) -> Result<NormalizedRequest, IdentityRefusal> {
+    remove_identity_with(&policy(), requester, entry)
+}
+
 #[test]
 fn a_host_update_checks_tools_against_the_creators_live_tools() {
     let entry = entry_facts(current_binding());
@@ -2292,74 +2350,77 @@ fn a_host_update_checks_tools_against_the_creators_live_tools() {
 }
 
 #[test]
-fn the_console_updates_and_removes_only_identities_of_its_templates() {
+fn the_console_updates_and_removes_any_identity_under_the_approval_rules() {
     let console = RequesterFacts::console();
-    let entry = entry_facts(current_binding());
-    let purpose = update_spec(UpdateSetSpec {
-        purpose: Some("Find better sources.".to_owned()),
-        ..UpdateSetSpec::default()
-    });
-    let remove = RemoveIdentitySpec {
-        identity: "team:helper".to_owned(),
-        expected_revision: 3,
-    };
-    let removal = |requester: &RequesterFacts, entry: &CreatedEntryFacts| {
-        normalize_remove(
-            &policy(),
-            requester,
-            RequestEnvelope::default(),
-            entry,
-            &remove,
-        )
-    };
-    assert!(update(&console, &entry, &purpose).is_ok());
-    assert!(removal(&console, &entry).is_ok());
+    // Any identity, whatever its profile or how it came to be: the console
+    // has no templates of its own, and only the approval rules decide.
+    let entry = any_entry();
+    let rename = update_of(&entry, json!({"display_name": "Helper two"}));
+    let updated = update(&console, &entry, &rename).expect("the console updates any identity");
+    assert_eq!(updated.plan.kind(), ApprovalKind::Notify);
+    let removed = remove_identity(&console, &entry).expect("the console removes any identity");
+    assert_eq!(removed.plan.kind(), ApprovalKind::Notify);
 
-    // An identity of a template the console does not create from: the
-    // console can neither update nor remove it.
-    let open = CreatedEntryFacts {
-        template: "open".to_owned(),
-        ..entry
-    };
-    let not_allowed = IdentityRefusalKind::TemplateNotAllowed {
-        template: "open".to_owned(),
-    };
-    for refusal in [
-        update(&console, &open, &purpose).unwrap_err(),
-        removal(&console, &open).unwrap_err(),
-    ] {
-        assert_eq!(refusal.kind, not_allowed);
-        assert_eq!(refusal.field.as_deref(), Some("template"));
+    // The rules select by the target's profile and authority labels,
+    // whoever asks.
+    let mut value = policy_json();
+    value["approval"]["rules"]
+        .as_array_mut()
+        .expect("the rules")
+        .extend([
+            json!({"change": ["descriptive"], "target": {"labels": {"clearance": "elevated"}},
+                   "outcome": {"kind": "require_approval", "approver": {"id": "security"}}}),
+            json!({"change": ["remove"], "target": {"profile": ["lead"]},
+                   "outcome": {"kind": "deny"}}),
+        ]);
+    let targeted = parse(&value);
+    let elevated = entry_with("assistant", &[("clearance", "elevated")]);
+    let rename_elevated = update_of(&elevated, json!({"display_name": "Helper two"}));
+    let host = RequesterFacts::host("gateway");
+    let lead_agent = lead();
+    for requester in [&console, &host, &lead_agent] {
+        let planned = update_with(&targeted, requester, &elevated, &rename_elevated)
+            .expect("the update is planned");
+        assert_eq!(
+            planned.plan.outcome,
+            PlannedOutcome::RequireApproval {
+                approver_id: "security".to_owned()
+            }
+        );
     }
-    // The host itself acts on any created identity.
-    assert!(removal(&RequesterFacts::host("gateway"), &open).is_ok());
+    let refusal = remove_identity_with(&targeted, &console, &entry_with("lead", &[]))
+        .expect_err("removing a lead is denied");
+    assert_eq!(
+        refusal.to_data(),
+        json!({"kind": "creation_denied", "change": "remove"})
+    );
+    let removed = remove_identity_with(&targeted, &console, &entry_with("assistant", &[]))
+        .expect("removing another profile's identity is planned");
+    assert_eq!(removed.plan.kind(), ApprovalKind::Notify);
 }
 
 #[test]
-fn update_and_remove_check_custody_revision_and_binding() {
-    let entry = entry_facts(current_binding());
-    let purpose = update_spec(UpdateSetSpec {
-        purpose: Some("Find better sources.".to_owned()),
-        ..UpdateSetSpec::default()
-    });
-    let normalized = update(&lead(), &entry, &purpose).expect("the creator updates");
-    assert_eq!(normalized.plan.change, ChangeClass::Descriptive);
+fn update_and_remove_check_self_change_revision_and_change_classes() {
+    let entry = entry();
+    let rename = update_of(&entry, json!({"display_name": "Helper two"}));
+    // Any agent's update goes to the rules of its change classes: who
+    // created the identity is provenance, and grants or refuses nothing.
+    let other =
+        update(&agent("other-1"), &entry, &rename).expect("another agent's update is planned");
+    assert_eq!(other.plan.change, ChangeClass::Descriptive);
+    assert_eq!(other.plan.kind(), ApprovalKind::Notify);
+    let normalized = update(&lead(), &entry, &rename).expect("an update");
     assert_eq!(normalized.plan.kind(), ApprovalKind::Notify);
     assert_eq!(normalized.request.decision_kind(), "identity.update");
 
-    let other = RequesterFacts::agent("other-1", None, BTreeMap::new(), BTreeSet::new());
+    // An agent never changes its own identity.
     assert_eq!(
-        update(&other, &entry, &purpose).unwrap_err().kind,
-        IdentityRefusalKind::NotCreatorCustody
-    );
-    let itself = RequesterFacts::agent("team:helper", None, BTreeMap::new(), BTreeSet::new());
-    assert_eq!(
-        update(&itself, &entry, &purpose).unwrap_err().kind,
+        update(&agent("helper"), &entry, &rename).unwrap_err().kind,
         IdentityRefusalKind::SelfChangeRefused
     );
     let stale = UpdateIdentitySpec {
         expected_revision: 2,
-        ..purpose.clone()
+        ..rename.clone()
     };
     let refusal = update(&lead(), &entry, &stale).unwrap_err();
     assert_eq!(
@@ -2368,18 +2429,17 @@ fn update_and_remove_check_custody_revision_and_binding() {
     );
     assert_eq!(refusal.to_data()["current"], 3);
     assert_eq!(
-        update(&lead(), &entry, &update_spec(UpdateSetSpec::default()))
+        update(&lead(), &entry, &update_of(&entry, json!({})))
             .unwrap_err()
             .kind,
         IdentityRefusalKind::InvalidRequest {
             problem: RequestProblem::Empty
         }
     );
-    let conflicting = update_spec(UpdateSetSpec {
-        peers_add: vec!["core-1".to_owned()],
-        peers_remove: vec!["core-1".to_owned()],
-        ..UpdateSetSpec::default()
-    });
+    let conflicting = update_of(
+        &entry,
+        json!({"peers_add": ["core-1"], "peers_remove": ["core-1"]}),
+    );
     assert_eq!(
         update(&lead(), &entry, &conflicting).unwrap_err().kind,
         IdentityRefusalKind::InvalidRequest {
@@ -2387,12 +2447,12 @@ fn update_and_remove_check_custody_revision_and_binding() {
         }
     );
 
-    let tools = update_spec(UpdateSetSpec {
-        tools: Some(vec!["search".to_owned()]),
-        peers_add: vec!["analyst-1".to_owned()],
-        ..UpdateSetSpec::default()
-    });
-    let normalized = update(&lead(), &entry, &tools).expect("capability and peers");
+    // Capability: how the identity runs and who reaches it.
+    let capability = update_of(
+        &entry,
+        json!({"addressability": "internal_only", "peers_add": ["analyst-1"]}),
+    );
+    let normalized = update(&lead(), &entry, &capability).expect("capability and peers");
     assert_eq!(normalized.plan.kind(), ApprovalKind::RequireApproval);
     let RequestAction::Update(updated) = &normalized.request.action else {
         panic!("an update");
@@ -2401,78 +2461,50 @@ fn update_and_remove_check_custody_revision_and_binding() {
         updated.change_classes(),
         BTreeSet::from([ChangeClass::Capability, ChangeClass::Peers])
     );
-    assert_eq!(updated.peers_add["analyst-1"], EdgeBasis::CreatorPeer);
-    let excess = update_spec(UpdateSetSpec {
-        tools: Some(vec!["notes_write".to_owned()]),
-        ..UpdateSetSpec::default()
-    });
     assert_eq!(
-        update(&lead(), &entry, &excess).unwrap_err().kind,
-        IdentityRefusalKind::ExceedsCreator {
-            tools: vec!["notes_write".to_owned()]
+        updated.peers_add["analyst-1"],
+        EdgeBasis::Rule {
+            id: "analysts".to_owned()
         }
     );
 
-    let rebind = UpdateIdentitySpec {
-        rebind: true,
-        ..purpose.clone()
-    };
+    // A profile change is the role migration: a change class of its own,
+    // which records the profile it migrates from.
+    let migration = update_of(&entry, json!({"profile": "analyst"}));
     assert_eq!(
-        update(&lead(), &entry, &rebind).unwrap_err().kind,
-        IdentityRefusalKind::CreationDenied {
-            change: ChangeClass::Rebind
-        }
+        update(&lead(), &entry, &migration).unwrap_err().to_data(),
+        json!({"kind": "creation_denied", "change": "profile"}),
+        "no rule lets an agent migrate a role, and the default denies"
     );
-    let moved = entry_facts(Sha256Digest::of(b"an older binding"));
+    let host = RequesterFacts::host("gateway");
+    let migrated = update(&host, &entry, &migration).expect("the host migrates a role");
+    assert_eq!(migrated.plan.kind(), ApprovalKind::Allow);
     assert_eq!(
-        update(&lead(), &moved, &purpose).unwrap_err().kind,
-        IdentityRefusalKind::TemplateBindingChanged
+        migrated.request.to_json().expect("the request body")["action"]["profile"],
+        json!({"from": "assistant", "to": "analyst"})
     );
-    let host_rebind = UpdateIdentitySpec {
-        rebind: true,
-        ..update_spec(UpdateSetSpec::default())
-    };
-    let normalized =
-        update(&RequesterFacts::host("gateway"), &moved, &host_rebind).expect("the host rebinds");
-    let RequestAction::Update(updated) = &normalized.request.action else {
-        panic!("an update");
-    };
-    assert_eq!(updated.rebind, Some(current_binding()));
-    assert_eq!(normalized.plan.kind(), ApprovalKind::Allow);
+    let ghost = update_of(&entry, json!({"profile": "ghost"}));
     assert_eq!(
-        update(&RequesterFacts::host("gateway"), &entry, &host_rebind)
-            .unwrap_err()
-            .kind,
+        update(&host, &entry, &ghost).unwrap_err().to_data(),
+        json!({"kind": "profile_not_allowed", "profile": "ghost", "field": "set.profile"})
+    );
+    let current = update_of(&entry, json!({"profile": "assistant"}));
+    assert_eq!(
+        update(&host, &entry, &current).unwrap_err().kind,
         IdentityRefusalKind::InvalidRequest {
             problem: RequestProblem::Empty
         },
-        "a rebind to the same binding changes nothing"
+        "the current profile changes nothing"
     );
 
-    let remove = RemoveIdentitySpec {
-        identity: "team:helper".to_owned(),
-        expected_revision: 3,
-    };
-    let removed = normalize_remove(
-        &policy(),
-        &lead(),
-        RequestEnvelope::default(),
-        &entry,
-        &remove,
-    )
-    .expect("the creator removes");
-    assert_eq!(removed.plan.kind(), ApprovalKind::Notify);
-    assert_eq!(removed.request.decision_kind(), "identity.remove");
+    // Any agent but the identity itself may ask for its removal.
+    for requester in [lead(), agent("other-1")] {
+        let removed = remove_identity(&requester, &entry).expect("the removal is planned");
+        assert_eq!(removed.plan.kind(), ApprovalKind::Notify);
+        assert_eq!(removed.request.decision_kind(), "identity.remove");
+    }
     assert_eq!(
-        normalize_remove(
-            &policy(),
-            &itself,
-            RequestEnvelope::default(),
-            &entry,
-            &remove
-        )
-        .unwrap_err()
-        .kind,
+        remove_identity(&agent("helper"), &entry).unwrap_err().kind,
         IdentityRefusalKind::SelfChangeRefused
     );
 }
@@ -3763,37 +3795,27 @@ fn every_refusal_token_is_the_closed_vocabulary() {
     assert_eq!(
         tokens,
         [
-            // Template.
-            "template_not_allowed",
-            "profile_not_allowed",
-            "model_not_allowed",
-            "template_binding_changed",
-            "exceeds_template",
-            "exceeds_creator",
             // Request data.
+            "profile_not_allowed",
             "reserved_key",
             "authority_field_needs_approval",
             "authority_field_invalid",
             "text_too_large",
-            "kickoff_refused",
             "consequences_unavailable",
             // Name.
             "invalid_name",
-            "reserved_name",
             "name_taken",
             // Peers.
             "peer_not_allowed",
             "peer_unknown",
-            // Limits and policy.
-            "limit_reached",
+            // Policy.
             "batch_too_large",
             "validation_refused",
             "creation_denied",
             "invalid_request",
             "unsupported",
-            // Custody and operations.
+            // Identities and operations.
             "identity_unknown",
-            "not_creator_custody",
             "self_change_refused",
             "stale_revision",
             "operation_reused",
@@ -3831,12 +3853,11 @@ fn every_refusal_token_is_the_closed_vocabulary() {
             "identity_member",
             "storage_unsupported",
             "construction_refused",
-            // Per call.
-            "creator_unresolved",
-        ]
+        ],
+        "one vocabulary for every identity: no template, creator or limit kind"
     );
     let distinct: BTreeSet<&str> = tokens.iter().copied().collect();
-    assert_eq!(distinct.len(), 60);
+    assert_eq!(distinct.len(), 50);
     let retryable: BTreeSet<&str> = kinds
         .iter()
         .filter(|kind| kind.is_retryable())
@@ -3847,7 +3868,6 @@ fn every_refusal_token_is_the_closed_vocabulary() {
         BTreeSet::from([
             "consequences_unavailable",
             "creation_held",
-            "creator_unresolved",
             "host_preparation_pending",
         ])
     );
@@ -3873,26 +3893,6 @@ fn every_refusal_token_is_the_closed_vocabulary() {
     assert_eq!(
         takers,
         ["declared", "created", "removed", "worker", "unreadable"]
-    );
-    let limits: Vec<&str> = [
-        LimitKind::Total,
-        LimitKind::PerCreator,
-        LimitKind::PeersPerIdentity,
-        LimitKind::Batch,
-        LimitKind::OpenDecisionsPerCreator,
-    ]
-    .into_iter()
-    .map(LimitKind::token)
-    .collect();
-    assert_eq!(
-        limits,
-        [
-            "total",
-            "per_creator",
-            "peers_per_identity",
-            "batch",
-            "open_decisions_per_creator"
-        ]
     );
 }
 

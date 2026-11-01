@@ -3877,7 +3877,8 @@ async fn dream_history_reads(app: &axum::Router) -> Vec<(&'static str, Value)> {
 /// read every memory scope the realm holds. A caller with the unscoped read
 /// grant that misses one of them (one identity's memory, the mob scope, or
 /// the operator scope while operator records exist) gets the usual answer
-/// with no runs and `withheld_by_access: true`.
+/// with no runs and `withheld_by_access: true`. Every caller here holds the
+/// review grant, so the realm's quarantined record is not what withholds it.
 #[tokio::test]
 async fn memory_panel_dream_history_is_withheld_without_every_scope() {
     let (_temp_dir, mut runtime) = build_access_runtime_fixture().await;
@@ -3896,6 +3897,7 @@ async fn memory_panel_dream_history_is_withheld_without_every_scope() {
         "agent.memory.read",
         "mob.memory.read",
         "operator.memory.read",
+        "memory.quarantine.review",
     ];
     for (missing, rules) in [
         (
@@ -3915,14 +3917,24 @@ async fn memory_panel_dream_history_is_withheld_without_every_scope() {
             "the mob scope",
             vec![reads(
                 "read-all-but-mob",
-                &["agent.view", "agent.memory.read", "operator.memory.read"],
+                &[
+                    "agent.view",
+                    "agent.memory.read",
+                    "operator.memory.read",
+                    "memory.quarantine.review",
+                ],
             )],
         ),
         (
             "the operator scope",
             vec![reads(
                 "read-all-but-operator",
-                &["agent.view", "agent.memory.read", "mob.memory.read"],
+                &[
+                    "agent.view",
+                    "agent.memory.read",
+                    "mob.memory.read",
+                    "memory.quarantine.review",
+                ],
             )],
         ),
     ] {
@@ -4187,10 +4199,14 @@ async fn memory_panel_dream_history_needs_the_review_grant_after_a_quarantined_t
         matches!(quarantined.status, RecordStatus::Quarantined { .. }),
         "the write must land quarantined: {quarantined:?}"
     );
-    store
+    let forgotten = store
         .forget_authored(&router, &quarantined.memory_id, MemoryAuthor::Operator)
         .await
         .expect("forget the quarantined write");
+    assert!(
+        forgotten.deleted,
+        "the forget must tombstone the quarantined write: {forgotten:?}"
+    );
     runtime.set_memory_panel_store(Arc::new(store.clone()));
     runtime.set_access_controller(unscoped_reader(&["agent.view", "agent.memory.read"]));
     let app = runtime.build_reference_app_router(decision_state(false));
@@ -4225,6 +4241,223 @@ async fn memory_panel_dream_history_needs_no_review_grant_where_nothing_was_quar
         "every scope, no review grant, nothing quarantined",
     )
     .await;
+
+    let _ = runtime.mob_handle().stop().await;
+}
+
+/// A deny written for a label reaches the memory rows of every member that
+/// carries the label on a runtime's own console, whose access cache knows
+/// the roster: here `keeper` (label tier=secret). An identity the cache does
+/// not know (`ghost`, memory written under a name no member holds) can only
+/// be decided by its bare name, which no label can match, so its rows are
+/// withheld while such a deny applies instead of being shown.
+#[tokio::test]
+async fn memory_panel_reads_honour_a_label_deny_and_fail_closed_on_unknown_identities() {
+    use meerkat_meta::memory::records::{
+        InjectionLogEntry, InjectionSurface, MemoryAuthor, MemoryKind,
+    };
+    use meerkat_meta::{AgentMemoryProvider, MemoryScope, NewMemoryRecord};
+
+    let (_temp_dir, mut runtime) = build_access_runtime_fixture().await;
+    runtime
+        .spawn(
+            SpawnMemberSpec::from_wire(
+                "lead".to_string(),
+                MeerkatId::from("keeper").to_string(),
+                Some("You are keeper.".into()),
+                None,
+                None,
+            )
+            .with_labels(BTreeMap::from([("tier".to_string(), "secret".to_string())])),
+        )
+        .await
+        .expect("spawn labelled member");
+    let memory_dir = tempfile::tempdir().expect("memory dir");
+    let store = plain_dream_store(memory_dir.path()).await;
+    for identity in ["router", "keeper", "ghost"] {
+        let receipt = store
+            .remember_authored(
+                &MemoryScope::Identity {
+                    realm: "default".to_string(),
+                    identity: identity.to_string(),
+                },
+                NewMemoryRecord {
+                    kind: MemoryKind::Fact,
+                    title: format!("{identity} note"),
+                    description: format!("{identity} note description"),
+                    body: format!("{identity} note body"),
+                    tags: Vec::new(),
+                    evidence: Vec::new(),
+                    verification: None,
+                },
+                MemoryAuthor::Operator,
+            )
+            .await
+            .expect("identity record");
+        store
+            .log_injections(
+                "default",
+                &[InjectionLogEntry {
+                    record_id: receipt.memory_id,
+                    identity: identity.to_string(),
+                    session_key: None,
+                    surface: InjectionSurface::Build,
+                    at_ms: 5,
+                }],
+            )
+            .await
+            .expect("injection row");
+        store
+            .record_pending_harvest("default", identity, None, "retired")
+            .await
+            .expect("pending harvest");
+    }
+    runtime.set_memory_panel_store(Arc::new(store.clone()));
+    runtime.set_access_controller(
+        AccessController::new(AccessControlConfig {
+            enabled: true,
+            admins: vec!["root@example.test".to_string()],
+            rules: vec![
+                AccessRule {
+                    id: "read-every-scope".to_string(),
+                    actions: vec![
+                        "agent.view".to_string(),
+                        "agent.memory.read".to_string(),
+                        "memory.quarantine.review".to_string(),
+                    ],
+                    ..AccessRule::default()
+                },
+                AccessRule {
+                    id: "deny-secret-memory".to_string(),
+                    effect: meerkat_meta::AccessEffect::Deny,
+                    actions: vec!["agent.memory.read".to_string()],
+                    match_labels: BTreeMap::from([("tier".to_string(), "secret".to_string())]),
+                    ..AccessRule::default()
+                },
+            ],
+            ..AccessControlConfig::default()
+        })
+        .expect("controller"),
+    );
+    let app = runtime.build_reference_app_router(decision_state(false));
+
+    for (method, rows_key, identity_at) in [
+        ("records", "records", "/scope/identity"),
+        ("overview", "scopes", "/scope_key"),
+        ("injections", "injections", "/identity"),
+        ("harvests", "harvests", "/identity"),
+    ] {
+        let response = rpc(&app, &format!("meta/memory/panel/{method}"), json!({})).await;
+        assert_eq!(response["error"], Value::Null, "{method}: {response:#?}");
+        let identities: Vec<&str> = response["result"][rows_key]
+            .as_array()
+            .unwrap_or_else(|| panic!("{method} rows: {response:#?}"))
+            .iter()
+            .filter_map(|row| row.pointer(identity_at).and_then(Value::as_str))
+            .collect();
+        assert!(
+            identities.contains(&"router"),
+            "{method} keeps router's rows: {identities:?}"
+        );
+        for withheld in ["keeper", "ghost"] {
+            assert!(
+                !identities.contains(&withheld),
+                "{method} must withhold {withheld}'s rows under the label deny: {identities:?}"
+            );
+        }
+    }
+
+    let _ = runtime.mob_handle().stop().await;
+}
+
+/// A realm's dream history can name more than the scopes of its records: a
+/// `dream_runs` phase names the identity of a harvest, and a skip names a
+/// proposal. Those scopes count too. The history of a realm whose only trace
+/// of `retiree` is a pending harvest is withheld from a caller denied
+/// `retiree`'s memory, and the history of a realm whose only operator-scope
+/// trace is a proposal is withheld from a caller without
+/// `operator.memory.read`; with every grant it is listed.
+#[tokio::test]
+async fn memory_panel_dream_history_judges_every_scope_the_realm_names() {
+    use meerkat_meta::memory::records::{MemoryAuthor, MemoryKind};
+    use meerkat_meta::{AgentMemoryProvider, MemoryScope, NewMemoryRecord};
+
+    let (_temp_dir, mut runtime) = build_access_runtime_fixture().await;
+    let memory_dir = tempfile::tempdir().expect("memory dir");
+    let store = plain_dream_store(memory_dir.path()).await;
+    store
+        .record_pending_harvest("default", "retiree", None, "retired")
+        .await
+        .expect("pending harvest");
+    store
+        .propose(
+            &MemoryScope::Operator {
+                realm: "default".to_string(),
+                operator: "op-owner".to_string(),
+            },
+            NewMemoryRecord {
+                kind: MemoryKind::Fact,
+                title: "Operator proposal".to_string(),
+                description: "Operator proposal description".to_string(),
+                body: "Operator proposal body".to_string(),
+                tags: Vec::new(),
+                evidence: Vec::new(),
+                verification: None,
+            },
+            MemoryAuthor::Operator,
+        )
+        .await
+        .expect("operator proposal");
+    runtime.set_memory_panel_store(Arc::new(store.clone()));
+    let every_grant = [
+        "agent.view",
+        "agent.memory.read",
+        "operator.memory.read",
+        "memory.quarantine.review",
+    ];
+
+    runtime.set_access_controller(
+        AccessController::new(AccessControlConfig {
+            enabled: true,
+            admins: vec!["root@example.test".to_string()],
+            rules: vec![
+                AccessRule {
+                    id: "read-every-scope".to_string(),
+                    actions: every_grant.iter().copied().map(String::from).collect(),
+                    ..AccessRule::default()
+                },
+                AccessRule {
+                    id: "deny-retiree-memory".to_string(),
+                    effect: meerkat_meta::AccessEffect::Deny,
+                    actions: vec!["agent.memory.read".to_string()],
+                    agents: vec!["retiree".to_string()],
+                    ..AccessRule::default()
+                },
+            ],
+            ..AccessControlConfig::default()
+        })
+        .expect("controller"),
+    );
+    let app = runtime.build_reference_app_router(decision_state(false));
+    assert_dream_history(
+        &app,
+        "run-plain-1",
+        true,
+        "a deny on the harvested identity",
+    )
+    .await;
+
+    runtime.set_access_controller(unscoped_reader(&[
+        "agent.view",
+        "agent.memory.read",
+        "memory.quarantine.review",
+    ]));
+    let app = runtime.build_reference_app_router(decision_state(false));
+    assert_dream_history(&app, "run-plain-1", true, "no operator read grant").await;
+
+    runtime.set_access_controller(unscoped_reader(&every_grant));
+    let app = runtime.build_reference_app_router(decision_state(false));
+    assert_dream_history(&app, "run-plain-1", false, "every grant").await;
 
     let _ = runtime.mob_handle().stop().await;
 }

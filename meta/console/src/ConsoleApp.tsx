@@ -134,6 +134,7 @@ import {
   TOPOLOGY_BACKFILL_WINDOW_MS,
   topologyAgentStatus,
   topologyGrouping,
+  topologyWiringRoles,
   type ConsoleTopologyRelationsState,
 } from "./lib/topology-relations";
 import { findPaneResizeRoot } from "./lib/pane-resize";
@@ -5811,6 +5812,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           memoryScopes={topologyRelations.memoryScopes}
           stores={topologyRelations.stores}
           grouping={topologyGrouping(experience?.console_config?.agent_list)}
+          wiringRoles={topologyWiringRoles(experience?.runtime_capabilities?.profile_capabilities)}
           statusOf={topologyAgentStatus}
           management={normalizedTopology?.management || null}
           connectionSourceId={topologyConnectionSourceId}

@@ -15,7 +15,7 @@ import type {
   ConsoleTopologyRoutesAccess,
   ConsoleTopologyStore,
 } from "../../../packages/console-components/src/topology/types";
-import type { ConsoleAgent, ConsoleAgentListConfig, ConsoleFrame } from "../types";
+import type { ConsoleAgent, ConsoleAgentListConfig, ConsoleFrame, ProfileCapabilities } from "../types";
 import { AGENT_BUCKET_ORDER, bucketOf } from "./agent-buckets";
 import { agentHealth, isAgentWorking } from "./agent-status";
 import { CONSOLE_COMMAND_NAMES, type ConsoleCommandName } from "./headless";
@@ -382,4 +382,23 @@ export async function backfillTopologyLedger(options: {
   }
   if (frames.length > 0) options.ingest(frames);
   return frames.length;
+}
+
+const WIRING_ROLES = new WeakMap<object, ReadonlySet<string>>();
+
+/**
+ * The roles whose profile wires its members (`profile_capabilities.<role>.has_wiring`):
+ * the map draws a lead or coordinator role as a coordinator only then. Null when
+ * the runtime does not say. One set per capabilities object, so the map's
+ * memo stays put across renders.
+ */
+export function topologyWiringRoles(
+  capabilities: Record<string, ProfileCapabilities> | null | undefined,
+): ReadonlySet<string> | null {
+  if (!capabilities || typeof capabilities !== "object") return null;
+  const cached = WIRING_ROLES.get(capabilities);
+  if (cached) return cached;
+  const roles = new Set(Object.entries(capabilities).filter(([, entry]) => entry?.has_wiring === true).map(([role]) => role));
+  WIRING_ROLES.set(capabilities, roles);
+  return roles;
 }

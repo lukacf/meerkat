@@ -181,6 +181,12 @@ export interface TopologyViewOptions {
   showChannels?: boolean;
   window?: TopologyWindowId;
   memoryScopes?: ReadonlyMap<string, ConsoleTopologyMemoryScope>;
+  /**
+   * The roles whose profile wires its members (`profile_capabilities.<role>.has_wiring`).
+   * A lead or coordinator role draws as a coordinator only when its profile wires;
+   * unknown (null) keeps the role words alone.
+   */
+  wiringRoles?: ReadonlySet<string> | null;
   /** Draw only the edges that touch these nodes (the Focus edge mode). */
   focus?: ReadonlySet<string> | null;
   /**
@@ -218,15 +224,18 @@ export function topologyLineageWord(kind: ConsoleTopologyLineageKind | undefined
   return kind ? LINEAGE_WORDS[kind] : "helper";
 }
 
-/** A node's mark: coordinators by section or role, helpers, other teams, unobserved. */
-function vizKind(agent: TopoAgent, section: string): VizNodeKind {
+/**
+ * A node's mark: coordinators by section, or by a lead or coordinator role
+ * whose profile wires its members; helpers, other teams, unobserved.
+ */
+function vizKind(agent: TopoAgent, section: string, wiringRoles?: ReadonlySet<string> | null): VizNodeKind {
   if (agent.kind === "external") return "external";
   if (agent.kind === "helper") return "helper";
   if (agent.kind === "unknown") return "unknown";
+  if (/coordinat/i.test(section)) return "coordinator";
   const role = agent.role.toLowerCase();
-  if (/coordinat/i.test(section) || role.includes("coordinator") || role === "lead" || role.includes("orchestrator")) {
-    return "coordinator";
-  }
+  const leads = role.includes("coordinator") || role === "lead" || role.includes("orchestrator");
+  if (leads && (!wiringRoles || wiringRoles.has(agent.role))) return "coordinator";
   return "agent";
 }
 
@@ -335,7 +344,7 @@ export function buildTopologyView(graph: TopoGraph, options: TopologyViewOptions
     const lane = agent.kind === "external" ? TOPOLOGY_LANE_OTHER_TEAMS : section || "Other";
     if (agent.kind === "external") hasExternal = true;
     else sections.add(lane);
-    const kind = vizKind(agent, section || "");
+    const kind = vizKind(agent, section || "", options.wiringRoles);
     const degree = graph.degree[agent.id] || 0;
     nodes.push({
       id: agent.id,

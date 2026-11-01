@@ -130,6 +130,8 @@ export interface TopologyPanelProps {
   stores?: readonly ConsoleTopologyStore[] | null;
   /** The host's sections (the sidebar's), so lanes read the sidebar's words. */
   grouping?: ConsoleTopologyGrouping | null;
+  /** Roles whose profile wires its members (`profile_capabilities.<role>.has_wiring`): a lead role is a coordinator only then. */
+  wiringRoles?: ReadonlySet<string> | null;
   /**
    * The host's one status rule for an agent; `openRun` says the console saw
    * a run of the agent start that has not ended.
@@ -307,6 +309,7 @@ export function TopologyPanel({
   memoryScopes,
   stores,
   grouping,
+  wiringRoles,
   statusOf,
   updatedAtMs,
   refreshing = false,
@@ -434,8 +437,9 @@ export function TopologyPanel({
     showChannels: showChannelsNow,
     window: windowId,
     memoryScopes: memoryById,
+    wiringRoles,
     now,
-  }), [graph, grouping?.order, memoryById, now, sectionOf, showChannelsNow, show.helpers, show.retired, statusFor, windowId]);
+  }), [graph, grouping?.order, memoryById, now, sectionOf, showChannelsNow, show.helpers, show.retired, statusFor, windowId, wiringRoles]);
   // Edges: a hover reveals a roster channel's routes and, in Focus mode,
   // picks the edges drawn.
   const edges = React.useMemo(() => topologyVizEdges(graph, {

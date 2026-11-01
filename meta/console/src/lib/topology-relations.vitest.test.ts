@@ -12,6 +12,7 @@ import {
   topologyAgentStatus,
   topologyGrouping,
   topologyRoutesAccessFromError,
+  topologyWiringRoles,
 } from "./topology-relations";
 
 test("routes keep their channel and recipient, mark roster routes, and count matched deliveries", () => {
@@ -276,4 +277,18 @@ describe("ledger backfill", () => {
     await backfillTopologyLedger({ query: async () => ({ frames: [] }), ingest: () => { batches.push(-1); }, sinceMs: 0 });
     assert.deepEqual(batches, [1, 3]);
   });
+});
+
+test("wiring roles are the profiles that wire their members, one set per capabilities object", () => {
+  const capabilities = {
+    lead: { has_wiring: false, instance_count: 7 },
+    coordinator: { has_wiring: true },
+    specialist: { has_wiring: true, addressable: true },
+    scribe: {},
+  };
+  const roles = topologyWiringRoles(capabilities);
+  assert.deepEqual([...(roles ?? [])].sort(), ["coordinator", "specialist"]);
+  assert.equal(topologyWiringRoles(capabilities), roles);
+  assert.equal(topologyWiringRoles(undefined), null);
+  assert.equal(topologyWiringRoles(null), null);
 });

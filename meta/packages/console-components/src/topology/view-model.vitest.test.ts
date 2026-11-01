@@ -118,6 +118,26 @@ describe("topology view model", () => {
     assert.equal(byId.get("store:team")?.lane, "shared");
   });
 
+  test("a lead role is a coordinator only when its profile wires; the Coordinators section always is", () => {
+    const graph = buildGraph(
+      [node("router", { role: "lead" }), node("billing", { role: "lead" }), node("support")],
+      [],
+      { links: [] },
+    );
+    const kinds = (wiringRoles?: ReadonlySet<string> | null) => {
+      const view = buildTopologyView(graph, options({
+        sectionOf: (entry) => (entry.id === "router" ? "Coordinators" : "Domains"),
+        wiringRoles,
+      }));
+      return Object.fromEntries(view.nodes.map((entry) => [entry.id, entry.kind]));
+    };
+    // The runtime says lead does not wire (the plain reference team).
+    assert.deepEqual(kinds(new Set()), { router: "coordinator", billing: "agent", support: "agent" });
+    assert.deepEqual(kinds(new Set(["lead"])), { router: "coordinator", billing: "coordinator", support: "agent" });
+    // Unknown: the role words alone.
+    assert.deepEqual(kinds(null), { router: "coordinator", billing: "coordinator", support: "agent" });
+  });
+
   test("live, health and the status words come from the status rule", () => {
     const view = buildTopologyView(team(), options());
     const byId = new Map(view.nodes.map((entry) => [entry.id, entry]));

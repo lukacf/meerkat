@@ -1940,7 +1940,7 @@ describe("checked access saves", () => {
     expect(state.config).toEqual(originalConfig);
   });
 
-  it("keeps an owner-rejected invalid rule draft editable on its own token, then saves the correction", async () => {
+  it("keeps an owner-rejected invalid rule draft editable on its own token, says why, then saves the correction", async () => {
     const { fake, state, writes } = await fixture("checked_v1");
     const originalFetch = globalThis.fetch;
     vi.stubGlobal("fetch", vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
@@ -1952,9 +1952,12 @@ describe("checked access saves", () => {
       if (Object.keys(body.params).length !== 1 || checked?.owner_instance !== state.ownerInstance || checked.expected_revision !== state.revision) {
         return reply({ error: { code: -32602, message: "PRIVATE_RULE_PAYLOAD_ERROR" } });
       }
-      // Like the real owner: the rule names a group the configuration lacks.
+      // Like the real owner: the rule names a group the configuration lacks,
+      // and the refusal says so with its reason token and detail.
       if (checked.rule?.groups?.length) {
-        return reply({ error: { code: -32602, message: "Invalid access configuration.", data: { kind: "invalid_access_config" } } });
+        return reply({ error: { code: -32602, message: "Invalid access configuration.", data: {
+          kind: "invalid_access_config", reason: "unknown_group", detail: 'access rule ops-rule: unknown group "missing-group"',
+        } } });
       }
       state.config = { ...state.config, rules: [...(state.config.rules ?? []), checked.rule as NonNullable<ConsoleAccessConfig["rules"]>[number]] };
       state.applied += 1; state.revision += 1;
@@ -1966,7 +1969,8 @@ describe("checked access saves", () => {
     fireEvent.change(screen.getByTestId("access-rule-id"), { target: { value: "ops-rule" } });
     fireEvent.change(screen.getByTestId("access-rule-groups"), { target: { value: "missing-group" } });
     await act(async () => { fireEvent.click(screen.getByTestId("access-rule-save")); });
-    expect(await screen.findByTestId("access-error")).toHaveTextContent("Changes were not saved. The resulting access configuration is not valid; your draft is retained for correction.");
+    expect(await screen.findByTestId("access-error")).toHaveTextContent(
+      'Changes were not saved. A rule names a group that does not exist (access rule ops-rule: unknown group "missing-group"); your draft is retained for correction.');
     expect(screen.queryByRole("button", { name: "Review and reapply", exact: true })).toBeNull();
     expect(screen.getByTestId("access-rule-groups")).toHaveValue("missing-group");
     expect(state.applied).toBe(0);

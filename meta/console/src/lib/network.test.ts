@@ -1021,6 +1021,68 @@ test("access RPC preserves structured owner evidence and requires exact code and
   } finally { globalThis.fetch = originalFetch; }
 });
 
+test("an invalid access save names the owner's reason in the Console's words, with the detail that names the entry at fault", async () => {
+  const originalFetch = globalThis.fetch;
+  const notice = (words: string) => `Changes were not saved. ${words}; your draft is retained for correction.`;
+  const generic = "Changes were not saved. The resulting access configuration is not valid; your draft is retained for correction.";
+  // Every reason docs/concepts/access-control.mdx lists, with the detail the
+  // owner sends for it. The notice shows the detail when it names the rule,
+  // group or approver at fault; the other details only restate the words.
+  const reasons: Array<[reason: string, words: string, detail: string, detailShown: boolean]> = [
+    ["enabled_without_admins", "Enforcement needs at least one admin", "access control cannot be enabled without at least one admin subject", false],
+    ["empty_rule_id", "A rule needs an ID", "access rule id must not be empty", false],
+    ["duplicate_rule_id", "Two rules have the same ID", "duplicate access rule id: ops", true],
+    ["empty_actions", "A rule needs at least one permission", "access rule ops: actions must not be empty", true],
+    ["unknown_action", "A rule names a permission this runtime does not list", 'access rule ops: unknown action "agent.fly"', true],
+    ["unknown_group", "A rule names a group that does not exist", 'access rule ops: unknown group "ghosts"', true],
+    ["empty_approver_id", "An approver needs an ID", "approver id must not be empty", false],
+    ["padded_approver_id", "An approver ID starts or ends with a space", 'approver " lead": id must not have leading or trailing whitespace', true],
+    ["approver_without_holders", "An approver needs a person, service or group to hold it", "approver lead: at least one subject or group must hold it", true],
+    ["unknown_approver_group", "An approver names a group that does not exist", 'approver lead: unknown group "ghosts"', true],
+    ["unknown_rule", "The rule to delete does not exist", "unknown access rule id: ops", true],
+    ["invalid_toml", "The access configuration file cannot hold this configuration", "access configuration could not be written as TOML", false],
+  ];
+  const futureDetail = "access rule ops: a check this Console does not know";
+  const cases: Array<{ data: Record<string, unknown>; expected: string }> = [
+    ...reasons.flatMap(([reason, words, detail, detailShown]) => [
+      { data: { reason, detail }, expected: notice(detailShown ? `${words} (${detail})` : words) },
+      { data: { reason }, expected: notice(words) },
+    ]),
+    { data: { reason: "unknown_group", detail: 'access rule ops: unknown group "ghosts"' },
+      expected: 'Changes were not saved. A rule names a group that does not exist (access rule ops: unknown group "ghosts"); your draft is retained for correction.' },
+    // A reason this Console does not know: the owner's detail says what is wrong.
+    { data: { reason: "a_later_reason", detail: futureDetail },
+      expected: `Changes were not saved. The resulting access configuration is not valid (${futureDetail}); your draft is retained for correction.` },
+    { data: { detail: futureDetail },
+      expected: `Changes were not saved. The resulting access configuration is not valid (${futureDetail}); your draft is retained for correction.` },
+    // Without a detail it has nothing more to say than the generic text.
+    { data: { reason: "a_later_reason" }, expected: generic },
+    { data: {}, expected: generic },
+    // Only text counts, and a name an object inherits is no reason.
+    { data: { reason: { kind: "unknown_group" }, detail: 42 }, expected: generic },
+    { data: { reason: "", detail: "  " }, expected: generic },
+    { data: { reason: "constructor" }, expected: generic },
+  ];
+  try {
+    for (const row of cases) {
+      const error = { code: -32602, message: "PRIVATE_MESSAGE_CANARY", data: { kind: "invalid_access_config", ...row.data } };
+      globalThis.fetch = (async () => new Response(JSON.stringify({ jsonrpc: "2.0", id: "access-test", error }), { status: 200 })) as typeof fetch;
+      await assert.rejects(callConsoleRpc("http://console.test", "meta/access/rules/upsert", { checked_v1: {} }), (thrown: unknown) => {
+        const failure = accessSaveFailure(thrown);
+        assert.equal(failure.kind, "invalid", JSON.stringify(row.data));
+        assert.equal(accessSaveNotice(failure), row.expected, JSON.stringify(row.data));
+        assert.doesNotMatch(accessSaveNotice(failure), /PRIVATE_MESSAGE_CANARY/, "the error's message text is never shown");
+        return true;
+      });
+    }
+  } finally { globalThis.fetch = originalFetch; }
+  // The failure keeps the owner's reason and detail as text, and only those.
+  const refusal = (data: Record<string, unknown>) => ({ rpcError: { code: -32602, message: "Invalid access configuration.", data: { kind: "invalid_access_config", ...data } } });
+  assert.deepEqual(accessSaveFailure(refusal({ reason: "unknown_group", detail: 'access rule ops: unknown group "ghosts"', extra: "ignored" })),
+    { kind: "invalid", reason: "unknown_group", detail: 'access rule ops: unknown group "ghosts"' });
+  assert.deepEqual(accessSaveFailure(refusal({ reason: { kind: "unknown_group" }, detail: null })), { kind: "invalid" });
+});
+
 test("ordinary console interaction code -32004 retains its existing send disposition", async () => {
   const originalFetch = globalThis.fetch;
   const body = { code: -32004, message: "ordinary interaction unavailable" };

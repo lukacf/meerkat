@@ -14777,6 +14777,76 @@ requirement = { baseline = "command_runtime_v1", read = { kind = "paths", paths 
         assert_eq!(payload["details"], json!({"timeout_ms": 5_000}));
     }
 
+    /// `GET /workgraph/items` continues a walk from the `next_cursor` its
+    /// previous page returned.
+    #[tokio::test]
+    async fn rest_workgraph_items_cursor_round_trip() {
+        use axum::body::Body;
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        async fn get(app: &axum::Router, uri: &str) -> serde_json::Value {
+            let response = app
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method("GET")
+                        .uri(uri)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let status = response.status();
+            let bytes = response.into_body().collect().await.unwrap().to_bytes();
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "GET {uri}: {}",
+                String::from_utf8_lossy(&bytes)
+            );
+            serde_json::from_slice(&bytes).unwrap()
+        }
+
+        let temp = TempDir::new().unwrap();
+        let state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        let mut created = Vec::new();
+        for title in ["first", "second", "third"] {
+            let item = state
+                .workgraph_service
+                .create(meerkat::CreateWorkItemRequest {
+                    title: title.to_string(),
+                    ..Default::default()
+                })
+                .await
+                .expect("seed WorkGraph item");
+            created.push(item.id.to_string());
+        }
+        created.sort();
+        let app = router(state);
+
+        let first = get(&app, "/workgraph/items?limit=2").await;
+        assert_eq!(first["truncated"], json!(true), "{first}");
+        let cursor = first["next_cursor"]
+            .as_str()
+            .expect("a truncated page names its next cursor")
+            .to_string();
+        let second = get(&app, &format!("/workgraph/items?limit=2&cursor={cursor}")).await;
+        assert_eq!(second["truncated"], json!(false), "{second}");
+        assert!(second.get("next_cursor").is_none(), "{second}");
+        let mut walked = first["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .chain(second["items"].as_array().unwrap())
+            .map(|item| item["id"].as_str().unwrap().to_string())
+            .collect::<Vec<_>>();
+        walked.sort();
+        assert_eq!(walked, created);
+    }
+
     #[tokio::test]
     async fn test_workgraph_rest_routes_are_read_only() {
         use axum::body::Body;

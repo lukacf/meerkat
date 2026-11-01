@@ -1031,14 +1031,18 @@ async fn same_session_successor_ends_queued_inputs_when_its_session_does_not_com
         .await
         .expect("roster read")
         .expect("the member is seated");
+    // An autonomous member's tracked work takes the exact runtime-input
+    // lane: its inbox delivery tracks no completion.
     let queued = mob
         .handle
-        .start_work_with_mode(
+        .start_runtime_work_with_delivery_identity_bounded(
             entry.agent_runtime_id.clone(),
             entry.fence_token,
-            WorkRef::new(),
             WorkSpec::new(QUEUED, WorkOrigin::Internal),
-            HandlingMode::Queue,
+            MobDeliveryIdentity::new("stop-branch-queued", Uuid::new_v4().to_string())
+                .expect("a stable delivery identity"),
+            BoundedResultSpec::new("queued", 1024).expect("bound"),
+            crate::mob_machine::WorkContentAttribution::Conversational,
         )
         .await
         .expect("the queued input is admitted");

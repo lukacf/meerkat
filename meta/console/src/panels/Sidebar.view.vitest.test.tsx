@@ -227,6 +227,7 @@ describe("Workbench nav (B14)", () => {
     expect(first.queryByTestId("nav:topology") === null).toBe(true);
     expect(toggle.querySelector(".sidebar__navbadge")?.textContent).toBe("5");
     expect(toggle.querySelector(".sidebar__navbadge")?.getAttribute("data-tone")).toBe("crit");
+    expect(describedBy(toggle)).toBe("5 things need attention");
     first.unmount();
 
     const second = render(<Sidebar {...withAttention} visibleControls={[...withAttention.visibleControls]} />);

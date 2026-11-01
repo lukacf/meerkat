@@ -686,20 +686,26 @@
 .agent__detail-separator { flex: none; white-space: pre; }
 .agent__detail-status { flex: none; }
 /* Manual order: a grip on hover or focus, and a line where the row lands. */
+/* The 6-dot grip (A5): two columns of three dots in the row's left gutter,
+   on a 12 x 24 hit area. */
 .agent__grip {
   position: absolute;
-  left: 1px;
+  left: 0;
   top: 50%;
-  width: 8px;
-  height: 18px;
+  box-sizing: border-box;
+  width: 12px;
+  height: 24px;
+  padding: 6px 2px;
   transform: translateY(-50%);
   cursor: grab;
   touch-action: none;
   opacity: 0;
-  color: var(--_cc-foreground-subtle);
+  color: var(--_cc-foreground-meta);
   background-image: radial-gradient(currentColor 1px, transparent 1.4px);
   background-size: 4px 4px;
-  transition: opacity 120ms ease;
+  background-origin: content-box;
+  background-clip: content-box;
+  transition: opacity var(--_cc-dur-fast) ease;
 }
 .agent-row:hover .agent__grip,
 .agent:focus-visible .agent__grip { opacity: 1; }

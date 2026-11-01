@@ -2985,6 +2985,7 @@ export const Sidebar = React.memo(function Sidebar({
             type="button"
             className="sidebar__sec-head sidebar__sec-head--button sidebar__nav-head cc-reveal-host"
             aria-expanded={!workbenchCollapsed}
+            aria-describedby={workbenchCollapsed && workbenchAttention ? `${navDescriptionId}-workbench` : undefined}
             data-testid="sidebar-workbench-toggle"
             onClick={toggleWorkbench}
           >
@@ -3000,6 +3001,11 @@ export const Sidebar = React.memo(function Sidebar({
               <Icon name="i-chevron" />
             </span>
           </button>
+          {workbenchCollapsed && workbenchAttention ? (
+            <span id={`${navDescriptionId}-workbench`} hidden>
+              {workbenchAttention.count} {workbenchAttention.count === 1 ? "thing needs" : "things need"} attention
+            </span>
+          ) : null}
           {workbenchCollapsed ? null : (
             <div className="sidebar__navlist">
               {navKinds.map((kind) => {

@@ -7,24 +7,24 @@
         },
         "admission": {
           "deduplicated": false,
-          "input_id": "01a1943b-592d-70f3-a3c4-096c0892ad42",
-          "session_id": "01a1943b-4dd0-71b6-8911-1638ff052c95",
+          "input_id": "01a1970f-aae1-745f-9efd-2688212780ba",
+          "session_id": "01a1970f-9f9e-7339-bdb3-d053ef2cd3ab",
           "source_settlement": "fresh_acceptance_promoted",
           "state": "admitted",
-          "turn_ticket": "e5093672-a61e-4d27-89e9-4dc299f7e4ab"
+          "turn_ticket": "dbfb3f7d-4381-41d2-b070-6aec14f2bdeb"
         },
         "authenticated_event": {
           "path": "/mnt/connect-release/a1/out/verification/installed-product-success/authenticated-fixture-event.json",
-          "sha256": "174a750d4fd12637b36121829cfa588899ec493b9aa1893ea9c318de5f8268ad"
+          "sha256": "73195062767b0c8ac865eb45388ee925e2507863eb597003dcede59d5ad22d32"
         },
         "business": {
           "a_input_history_index": 1,
-          "actual_tool_result": "[{\"by\": \"karpathy\", \"descendants\": 175, \"id\": 50319510, \"kids\": [50321152, 50321118, 50320462, 50321113, 50320482, 50320675, 50321002, 50319961, 50320887, 50319936, 50319987, 50320230, 50320994, 50320964, 50321097, 50320309, 50321076, 50319765, 50320899, 50320117, 50320429, 50320827, 50319845, 50320738, 50319962, 50321084, 50320490, 50320222, 50321044, 50320064, 50320852, 50320783, 50320853, 50320632, 50319949, 50319736, 50319965, 50319874, 50320384, 50320885, 50319997, 50320102, 50319756, 50319890, 50320717, 50319967, 50320370, 50319784, 50320435, 50320413, 50320986, 50319953, 50320066, 50320848, 50320604, 50320426, 50319922, 50319996, 50319856, 50319947, 50319994, 50320037, 50320059, 50320562, 50320427, 50320998, 50320198, 50320980, 50320237, 50320193, 50319893, 50320394, 50320056, 50319833, 50319843, 50320920, 50320460, 50320424, 50320396, 50319511, 50320041, 50320741, 50319903, 50319753, 50320187], \"score\": 448, \"text\": \"YouTube-style UI over 6,454 videos sourced from 39,834 HN comments since 2007.<p><a href=\\\"https:&#x2F;&#x2F;hackertube.org&#x2F;\\\" rel=\\\"nofollow\\\">https:&#x2F;&#x2F;hackertube.org&#x2F;</a>\", \"time\": 1793476613, \"title\": \"HackerTube: YouTube built from videos recommended by HN\", \"type\": \"story\", \"url\": \"https://karpathy.bearblog.dev/hacker-tube/\", \"username\": \"karpathy\"}]\n{\"value\":\"[{\\\"by\\\": \\\"karpathy\\\", \\\"descendants\\\": 175, \\\"id\\\": 50319510, \\\"kids\\\": [50321152, 50321118, 50320462, 50321113, 50320482, 50320675, 50321002, 50319961, 50320887, 50319936, 50319987, 50320230, 50320994, 50320964, 50321097, 50320309, 50321076, 50319765, 50320899, 50320117, 50320429, 50320827, 50319845, 50320738, 50319962, 50321084, 50320490, 50320222, 50321044, 50320064, 50320852, 50320783, 50320853, 50320632, 50319949, 50319736, 50319965, 50319874, 50320384, 50320885, 50319997, 50320102, 50319756, 50319890, 50320717, 50319967, 50320370, 50319784, 50320435, 50320413, 50320986, 50319953, 50320066, 50320848, 50320604, 50320426, 50319922, 50319996, 50319856, 50319947, 50319994, 50320037, 50320059, 50320562, 50320427, 50320998, 50320198, 50320980, 50320237, 50320193, 50319893, 50320394, 50320056, 50319833, 50319843, 50320920, 50320460, 50320424, 50320396, 50319511, 50320041, 50320741, 50319903, 50319753, 50320187], \\\"score\\\": 448, \\\"text\\\": \\\"YouTube-style UI over 6,454 videos sourced from 39,834 HN comments since 2007.<p><a href=\\\\\\\"https:&#x2F;&#x2F;hackertube.org&#x2F;\\\\\\\" rel=\\\\\\\"nofollow\\\\\\\">https:&#x2F;&#x2F;hackertube.org&#x2F;</a>\\\", \\\"time\\\": 1793476613, \\\"title\\\": \\\"HackerTube: YouTube built from videos recommended by HN\\\", \\\"type\\\": \\\"story\\\", \\\"url\\\": \\\"https://karpathy.bearblog.dev/hacker-tube/\\\", \\\"username\\\": \\\"karpathy\\\"}]\"}",
-          "answer": "Hacker News story 50319510: HackerTube: YouTube built from videos recommended by HN",
+          "actual_tool_result": "[{\"by\": \"giuliomagnifico\", \"descendants\": 76, \"id\": 50324388, \"kids\": [50324769, 50324699, 50324525, 50324655, 50324588, 50324772, 50324636, 50324732, 50324822, 50324520, 50324670, 50324832, 50324522, 50324793, 50324615, 50324717, 50324647, 50324552, 50324741, 50324842, 50324658, 50324516, 50324641], \"score\": 191, \"time\": 1793530078, \"title\": \"Norway makes shithouses great again\", \"type\": \"story\", \"url\": \"https://www.visitnorway.com/plan-your-trip/travel-tips-a-z/norwegian-scenic-routes/worlds-best-toilets/\", \"username\": \"giuliomagnifico\"}]\n{\"value\":\"[{\\\"by\\\": \\\"giuliomagnifico\\\", \\\"descendants\\\": 76, \\\"id\\\": 50324388, \\\"kids\\\": [50324769, 50324699, 50324525, 50324655, 50324588, 50324772, 50324636, 50324732, 50324822, 50324520, 50324670, 50324832, 50324522, 50324793, 50324615, 50324717, 50324647, 50324552, 50324741, 50324842, 50324658, 50324516, 50324641], \\\"score\\\": 191, \\\"time\\\": 1793530078, \\\"title\\\": \\\"Norway makes shithouses great again\\\", \\\"type\\\": \\\"story\\\", \\\"url\\\": \\\"https://www.visitnorway.com/plan-your-trip/travel-tips-a-z/norwegian-scenic-routes/worlds-best-toilets/\\\", \\\"username\\\": \\\"giuliomagnifico\\\"}]\"}",
+          "answer": "Hacker News story 50324388: Norway makes shithouses great again",
           "b_input_history_index": 6,
           "matching_result_history_index": 16,
-          "model_request_index": 32,
-          "model_request_sha256": "d857f550b986acbaa38e16faf163880917f4ac1eb089cd6d1143d57fda3aff38",
+          "model_request_index": 31,
+          "model_request_sha256": "dce7343f4ee8cfcc54f220d99b0d0775df799bc350e8204cdadd82b7bfcb3827",
           "native_b_admission": "not_observed",
           "native_b_terminal": "not_observed",
           "original_catalog": {
@@ -61,8 +61,8 @@
             "search_result_history_index": 10
           },
           "story": {
-            "id": 50319510,
-            "title": "HackerTube: YouTube built from videos recommended by HN"
+            "id": 50324388,
+            "title": "Norway makes shithouses great again"
           }
         },
         "custody": {
@@ -73,63 +73,63 @@
           "operation_observation": {
             "child": {
               "grant": {
-                "decision": "service-input-f5e2b08cad9b96c8a6a86a68be84f0dab4233da4c06c9c202c7410df084e629f",
-                "decision_sha256": "f1e3ede59e4b7870326fe2230692ad58a6af3fc0d120a882bbd1123e6d4e4165",
+                "decision": "service-input-ef8e5799dda11699f241534e6568d6830b605b1b4d12d0c9456315694eabf1ab",
+                "decision_sha256": "b0d30015cde7f15bfd32dae8258032478076cb6407b577bba4f76f3d15194f6e",
                 "route": "fixture-original-route"
               },
               "state": "grant_issued"
             },
             "custody": "joined",
             "outcome": "succeeded",
-            "parent_issuance_id": "operator-service-parent-2510796693f0a5832ada3cf657c5d54658274eb532a7ac25ed9c6dc702d1c3e9",
+            "parent_issuance_id": "operator-service-parent-2d38b4c7369174754b644f2129e5b4ecf6e637ca7d9006b7813094f85a107dc8",
             "parent_issued": true,
             "reason": null,
             "source": {
-              "event_sha256": "c836a38b5df33cb4df5474940165b4922036b7a5edbd3f06fa7919bfdbb679a1",
-              "original": "service-input-f5e2b08cad9b96c8a6a86a68be84f0dab4233da4c06c9c202c7410df084e629f",
+              "event_sha256": "bb91c2dda9c833389b9de6580d9a34536ee965549ee2a51ddaf379bce855262b",
+              "original": "service-input-ef8e5799dda11699f241534e6568d6830b605b1b4d12d0c9456315694eabf1ab",
               "route": "fixture-original-route"
             },
             "tool_policy": {
               "candidate": {
-                "digest": "sha256:3a7f4a38b5b223fb1e8cec40a68a2f1185a806b900d2f7b70082e72a2e40fb57",
+                "digest": "sha256:4e57683cb3e53eb0ff297ed3da5b8b3379982b175e6fcdc5770d30f167b865c1",
                 "revision": 2
               },
               "native": "accepted",
-              "proposal_sha256": "18c82fe06e3597f57c988c7330451213df937cfeb75886af979af450e3b52f87",
+              "proposal_sha256": "bf526f40f2a6bd562b95f371f4058b0f3d37c2e5414ce5031596dd8561b9dc14",
               "retained_as_current": true
             }
           },
           "proposal": {
             "path": "/mnt/connect-release/a1/out/verification/installed-product-success/service-parent-proposal.json",
-            "sha256": "e1e41b0e4873c6112cffc1a737b1d90c883c8f1d4b2df2e47baa0ee8c082c2a5"
+            "sha256": "3b920a1233b200548cbbc6374e3ff4678f558a23dfb681c3759a371fc70525da"
           },
           "retirement": "joined",
           "retirement_observation": {
             "child": {
               "grant": {
-                "decision": "service-input-f5e2b08cad9b96c8a6a86a68be84f0dab4233da4c06c9c202c7410df084e629f",
-                "decision_sha256": "f1e3ede59e4b7870326fe2230692ad58a6af3fc0d120a882bbd1123e6d4e4165",
+                "decision": "service-input-ef8e5799dda11699f241534e6568d6830b605b1b4d12d0c9456315694eabf1ab",
+                "decision_sha256": "b0d30015cde7f15bfd32dae8258032478076cb6407b577bba4f76f3d15194f6e",
                 "route": "fixture-original-route"
               },
               "state": "grant_issued"
             },
             "custody": "joined",
             "outcome": "succeeded",
-            "parent_issuance_id": "operator-service-parent-2510796693f0a5832ada3cf657c5d54658274eb532a7ac25ed9c6dc702d1c3e9",
+            "parent_issuance_id": "operator-service-parent-2d38b4c7369174754b644f2129e5b4ecf6e637ca7d9006b7813094f85a107dc8",
             "parent_issued": true,
             "reason": null,
             "source": {
-              "event_sha256": "c836a38b5df33cb4df5474940165b4922036b7a5edbd3f06fa7919bfdbb679a1",
-              "original": "service-input-f5e2b08cad9b96c8a6a86a68be84f0dab4233da4c06c9c202c7410df084e629f",
+              "event_sha256": "bb91c2dda9c833389b9de6580d9a34536ee965549ee2a51ddaf379bce855262b",
+              "original": "service-input-ef8e5799dda11699f241534e6568d6830b605b1b4d12d0c9456315694eabf1ab",
               "route": "fixture-original-route"
             },
             "tool_policy": {
               "candidate": {
-                "digest": "sha256:3a7f4a38b5b223fb1e8cec40a68a2f1185a806b900d2f7b70082e72a2e40fb57",
+                "digest": "sha256:4e57683cb3e53eb0ff297ed3da5b8b3379982b175e6fcdc5770d30f167b865c1",
                 "revision": 2
               },
               "native": "accepted",
-              "proposal_sha256": "18c82fe06e3597f57c988c7330451213df937cfeb75886af979af450e3b52f87",
+              "proposal_sha256": "bf526f40f2a6bd562b95f371f4058b0f3d37c2e5414ce5031596dd8561b9dc14",
               "retained_as_current": true
             }
           },
@@ -139,8 +139,8 @@
           "transfer": "sdk_owned"
         },
         "fresh_original": {
-          "event_sha256": "c836a38b5df33cb4df5474940165b4922036b7a5edbd3f06fa7919bfdbb679a1",
-          "original": "service-input-f5e2b08cad9b96c8a6a86a68be84f0dab4233da4c06c9c202c7410df084e629f",
+          "event_sha256": "bb91c2dda9c833389b9de6580d9a34536ee965549ee2a51ddaf379bce855262b",
+          "original": "service-input-ef8e5799dda11699f241534e6568d6830b605b1b4d12d0c9456315694eabf1ab",
           "route": "fixture-original-route"
         },
         "helper_result": {
@@ -150,11 +150,11 @@
           "state": "authorized"
         },
         "native_b": {
-          "input_id": "01a1943c-156a-7678-8190-44527d037d6d",
+          "input_id": "01a19710-5aab-747f-86f9-86dd126594af",
           "receipt": {
             "report": {
               "attempt_count": 1,
-              "input_id": "01a1943c-156a-7678-8190-44527d037d6d",
+              "input_id": "01a19710-5aab-747f-86f9-86dd126594af",
               "outcome": {
                 "completion_type": "completed",
                 "run_usage": {
@@ -163,7 +163,7 @@
                   "input_tokens": 0,
                   "output_tokens": 0
                 },
-                "session_id": "01a1943b-4dd0-71b6-8911-1638ff052c95",
+                "session_id": "01a1970f-9f9e-7339-bdb3-d053ef2cd3ab",
                 "skill_diagnostics": {
                   "quarantined": [],
                   "source_health": {
@@ -175,7 +175,7 @@
                     "total_count": 14
                   }
                 },
-                "text": "Hacker News story 50319510: HackerTube: YouTube built from videos recommended by HN",
+                "text": "Hacker News story 50324388: Norway makes shithouses great again",
                 "tool_calls": 3,
                 "turns": 4,
                 "usage": {
@@ -185,14 +185,14 @@
                   "output_tokens": 0
                 }
               },
-              "owner_input_id": "01a1943c-156a-7678-8190-44527d037d6d",
+              "owner_input_id": "01a19710-5aab-747f-86f9-86dd126594af",
               "recipient_input_ids": [
-                "01a1943c-156a-7678-8190-44527d037d6d"
+                "01a19710-5aab-747f-86f9-86dd126594af"
               ],
-              "run_id": "01a1943c-1611-771a-abb4-47f2eb7e5a2b",
+              "run_id": "01a19710-5b47-7009-888a-f84d5b8eacdf",
               "scope": {
                 "kind": "run",
-                "run_id": "01a1943c-1611-771a-abb4-47f2eb7e5a2b"
+                "run_id": "01a19710-5b47-7009-888a-f84d5b8eacdf"
               },
               "status": "finalized",
               "terminal": {
@@ -201,48 +201,48 @@
             },
             "source": "durable_store"
           },
-          "session_id": "01a1943b-4dd0-71b6-8911-1638ff052c95",
+          "session_id": "01a1970f-9f9e-7339-bdb3-d053ef2cd3ab",
           "state": "admitted"
         },
         "native_receipt_reads": 2,
         "observation": {
           "child": {
             "grant": {
-              "decision": "service-input-f5e2b08cad9b96c8a6a86a68be84f0dab4233da4c06c9c202c7410df084e629f",
-              "decision_sha256": "f1e3ede59e4b7870326fe2230692ad58a6af3fc0d120a882bbd1123e6d4e4165",
+              "decision": "service-input-ef8e5799dda11699f241534e6568d6830b605b1b4d12d0c9456315694eabf1ab",
+              "decision_sha256": "b0d30015cde7f15bfd32dae8258032478076cb6407b577bba4f76f3d15194f6e",
               "route": "fixture-original-route"
             },
             "state": "grant_issued"
           },
           "custody": "joined",
           "outcome": "succeeded",
-          "parent_issuance_id": "operator-service-parent-2510796693f0a5832ada3cf657c5d54658274eb532a7ac25ed9c6dc702d1c3e9",
+          "parent_issuance_id": "operator-service-parent-2d38b4c7369174754b644f2129e5b4ecf6e637ca7d9006b7813094f85a107dc8",
           "parent_issued": true,
           "reason": null,
           "source": {
-            "event_sha256": "c836a38b5df33cb4df5474940165b4922036b7a5edbd3f06fa7919bfdbb679a1",
-            "original": "service-input-f5e2b08cad9b96c8a6a86a68be84f0dab4233da4c06c9c202c7410df084e629f",
+            "event_sha256": "bb91c2dda9c833389b9de6580d9a34536ee965549ee2a51ddaf379bce855262b",
+            "original": "service-input-ef8e5799dda11699f241534e6568d6830b605b1b4d12d0c9456315694eabf1ab",
             "route": "fixture-original-route"
           },
           "tool_policy": {
             "candidate": {
-              "digest": "sha256:3a7f4a38b5b223fb1e8cec40a68a2f1185a806b900d2f7b70082e72a2e40fb57",
+              "digest": "sha256:4e57683cb3e53eb0ff297ed3da5b8b3379982b175e6fcdc5770d30f167b865c1",
               "revision": 2
             },
             "native": "accepted",
-            "proposal_sha256": "18c82fe06e3597f57c988c7330451213df937cfeb75886af979af450e3b52f87",
+            "proposal_sha256": "bf526f40f2a6bd562b95f371f4058b0f3d37c2e5414ce5031596dd8561b9dc14",
             "retained_as_current": true
           }
         },
         "original": {
-          "event_sha256": "1a17a57932ef92079d13be696235a344f6b27e7cd7a7396646cfea367d56412f",
-          "original": "fixture-event-5ad6da39bb3141988815197f4aa25366",
+          "event_sha256": "88bf1ecb023506b891e42cae18695bfb529eda33ee0b45b19145b578dc96bd6a",
+          "original": "fixture-event-fd27e8494db142d1a50d9c86f9ecd886",
           "route": "fixture-original-route"
         },
         "original_task_completion": "native_finalized_completed_for_exact_b_input",
         "proposal": {
           "path": "/mnt/connect-release/a1/out/verification/installed-product-success/service-parent-proposal.json",
-          "sha256": "e1e41b0e4873c6112cffc1a737b1d90c883c8f1d4b2df2e47baa0ee8c082c2a5"
+          "sha256": "3b920a1233b200548cbbc6374e3ff4678f558a23dfb681c3759a371fc70525da"
         },
         "rule_releases_after_joined": 1,
         "schema_evidence": {
@@ -262,16 +262,16 @@
       "application_selection": {
         "activation": {
           "path": "/mnt/connect-release/a1/out/verification/installed-product-success/deployment/activation.json",
-          "sha256": "dcd10eaa6fc6ca1d08292c2c61aa461dc0ab151c293bea6a7ff3de81e2ce016b"
+          "sha256": "92dc61383ed542c64a97ffc43029f2b292b1d1f9977668d3cf714b03f08e3698"
         },
         "deployment_root": "/mnt/connect-release/a1/out/verification/installed-product-success/deployment",
         "local_policy": {
           "path": "/mnt/connect-release/a1/out/verification/installed-product-success/deployment/policy-bundle/toolkit-local-policy.json",
-          "sha256": "b580e350742b98da1615e65e4470da7db36f00db312b1526aedf131e6237f60c"
+          "sha256": "3570b2cc3a8ad8f2d10c5f7d225414ddb336309d746b2bddb0300fcda59dae56"
         },
         "policy_manifest": {
           "path": "/mnt/connect-release/a1/out/verification/installed-product-success/deployment/policy-bundle/manifest.json",
-          "sha256": "0b4509d7825f5f8cb657fa0cc889494e5f9745302e88f1b3344bccc5ef7e6465"
+          "sha256": "13ac18fb3a30e435d190dc0619e7492ed175d1b0380059b29204af91a20d134b"
         }
       },
       "callbacks": [
@@ -411,14 +411,14 @@
                           "-i",
                           "PATH=/usr/bin:/bin",
                           "PYTHONDONTWRITEBYTECODE=1",
-                          "/mnt/connect-release/a1/out/verification/installed-product-success/state/.meerkat-connect/mob.fixture/setup-Xqa3iF/prepared/client/runtime/bin/python",
+                          "/mnt/connect-release/a1/out/verification/installed-product-success/state/.meerkat-connect/mob.fixture/setup-qWAjam/prepared/client/runtime/bin/python",
                           "-I",
                           "-B",
-                          "/mnt/connect-release/a1/out/verification/installed-product-success/state/.meerkat-connect/mob.fixture/setup-Xqa3iF/prepared/distribution/toolkit-library-20261031-application-4d519f-linux-inputs-linux-x86_64/setup/local_session.py",
+                          "/mnt/connect-release/a1/out/verification/installed-product-success/state/.meerkat-connect/mob.fixture/setup-qWAjam/prepared/distribution/toolkit-library-20261031-application-4d519f-linux-inputs-linux-x86_64/setup/local_session.py",
                           "--configuration",
-                          "/mnt/connect-release/a1/out/verification/installed-product-success/state/.meerkat-connect/mob.fixture/setup-Xqa3iF/prepared/config/mcp.json",
+                          "/mnt/connect-release/a1/out/verification/installed-product-success/state/.meerkat-connect/mob.fixture/setup-qWAjam/prepared/config/mcp.json",
                           "--configuration-sha256",
-                          "1cf52444804b9669eada1555c1d8c30c849737ea0f2ffa8424ccfc202e09b27c",
+                          "f749d86e1e6018580bf8a953006af423f951873335dfdffc3ddf31ffceece0aa",
                           "--helper-sha256",
                           "8f61bc92fa88ce529319b667c221d2575fabe181e24a0b03776b4280de83c1aa",
                           "--adapter-sha256",
@@ -426,7 +426,7 @@
                           "--backend-sha256",
                           "072b69e77a1955db95865346f7dc0a248cc3c491a0aacd680ea37c3f5c556611",
                           "--state-root",
-                          "/mnt/connect-release/a1/out/verification/installed-product-success/state/.meerkat-connect/mob.fixture/setup-Xqa3iF/prepared/local-session"
+                          "/mnt/connect-release/a1/out/verification/installed-product-success/state/.meerkat-connect/mob.fixture/setup-qWAjam/prepared/local-session"
                         ],
                         "command": "/usr/bin/env",
                         "env": {},
@@ -595,14 +595,14 @@
                           "-i",
                           "PATH=/usr/bin:/bin",
                           "PYTHONDONTWRITEBYTECODE=1",
-                          "/mnt/connect-release/a1/out/verification/installed-product-success/state/.meerkat-connect/mob.fixture/setup-Xqa3iF/prepared/client/runtime/bin/python",
+                          "/mnt/connect-release/a1/out/verification/installed-product-success/state/.meerkat-connect/mob.fixture/setup-qWAjam/prepared/client/runtime/bin/python",
                           "-I",
                           "-B",
-                          "/mnt/connect-release/a1/out/verification/installed-product-success/state/.meerkat-connect/mob.fixture/setup-Xqa3iF/prepared/distribution/toolkit-library-20261031-application-4d519f-linux-inputs-linux-x86_64/setup/local_session.py",
+                          "/mnt/connect-release/a1/out/verification/installed-product-success/state/.meerkat-connect/mob.fixture/setup-qWAjam/prepared/distribution/toolkit-library-20261031-application-4d519f-linux-inputs-linux-x86_64/setup/local_session.py",
                           "--configuration",
-                          "/mnt/connect-release/a1/out/verification/installed-product-success/state/.meerkat-connect/mob.fixture/setup-Xqa3iF/prepared/config/mcp.json",
+                          "/mnt/connect-release/a1/out/verification/installed-product-success/state/.meerkat-connect/mob.fixture/setup-qWAjam/prepared/config/mcp.json",
                           "--configuration-sha256",
-                          "1cf52444804b9669eada1555c1d8c30c849737ea0f2ffa8424ccfc202e09b27c",
+                          "f749d86e1e6018580bf8a953006af423f951873335dfdffc3ddf31ffceece0aa",
                           "--helper-sha256",
                           "8f61bc92fa88ce529319b667c221d2575fabe181e24a0b03776b4280de83c1aa",
                           "--adapter-sha256",
@@ -610,7 +610,7 @@
                           "--backend-sha256",
                           "072b69e77a1955db95865346f7dc0a248cc3c491a0aacd680ea37c3f5c556611",
                           "--state-root",
-                          "/mnt/connect-release/a1/out/verification/installed-product-success/state/.meerkat-connect/mob.fixture/setup-Xqa3iF/prepared/local-session"
+                          "/mnt/connect-release/a1/out/verification/installed-product-success/state/.meerkat-connect/mob.fixture/setup-qWAjam/prepared/local-session"
                         ],
                         "command": "/usr/bin/env",
                         "env": {},
@@ -653,7 +653,7 @@
       ],
       "candidate": {
         "binary": {
-          "sha256": "b9b2205afb95c1c9aebb20e2bdf0ccd8040de1f54b737f3acfa13cf8f574d13b",
+          "sha256": "1bf67a1966621cad906a899793179b3e0f9c2d894574a1ae8860b34540af7453",
           "size": 898696272
         },
         "binary_kind": "toolkit_gateway",
@@ -677,8 +677,8 @@
       "descendant_shutdown_checks": [
         {
           "alive": false,
-          "monotonic_ns": 4102185844274371,
-          "pid": 2536922,
+          "monotonic_ns": 4149651608405303,
+          "pid": 3862768,
           "process_stat": {
             "reason": "not_found",
             "status": "unavailable"
@@ -686,8 +686,8 @@
         },
         {
           "alive": false,
-          "monotonic_ns": 4102185844283595,
-          "pid": 2564461,
+          "monotonic_ns": 4149651608414046,
+          "pid": 3868667,
           "process_stat": {
             "reason": "not_found",
             "status": "unavailable"
@@ -698,83 +698,83 @@
         {
           "children": [
             {
-              "pgid": 2536922,
-              "pid": 2536922,
-              "ppid": 2522444,
+              "pgid": 3862768,
+              "pid": 3862768,
+              "ppid": 3844157,
               "process_stat": {
-                "pgid": 2536922,
-                "ppid": 2522444,
-                "session_id": 2522406,
-                "start_ticks": 410213304,
+                "pgid": 3862768,
+                "ppid": 3844157,
+                "session_id": 3843031,
+                "start_ticks": 414960204,
                 "state": "S",
                 "status": "observed"
               }
             }
           ],
-          "main_pid": 2522444,
-          "monotonic_ns": 4102134889697336
+          "main_pid": 3844157,
+          "monotonic_ns": 4149603886886545
         },
         {
           "children": [
             {
-              "pgid": 2536922,
-              "pid": 2536922,
-              "ppid": 2522444,
+              "pgid": 3862768,
+              "pid": 3862768,
+              "ppid": 3844157,
               "process_stat": {
-                "pgid": 2536922,
-                "ppid": 2522444,
-                "session_id": 2522406,
-                "start_ticks": 410213304,
+                "pgid": 3862768,
+                "ppid": 3844157,
+                "session_id": 3843031,
+                "start_ticks": 414960204,
                 "state": "S",
                 "status": "observed"
               }
             }
           ],
-          "main_pid": 2522444,
-          "monotonic_ns": 4102135097428403
+          "main_pid": 3844157,
+          "monotonic_ns": 4149604081645474
         },
         {
           "children": [
             {
-              "pgid": 2536922,
-              "pid": 2536922,
-              "ppid": 2522444,
+              "pgid": 3862768,
+              "pid": 3862768,
+              "ppid": 3844157,
               "process_stat": {
-                "pgid": 2536922,
-                "ppid": 2522444,
-                "session_id": 2522406,
-                "start_ticks": 410213304,
+                "pgid": 3862768,
+                "ppid": 3844157,
+                "session_id": 3843031,
+                "start_ticks": 414960204,
                 "state": "S",
                 "status": "observed"
               }
             },
             {
-              "pgid": 2564461,
-              "pid": 2564461,
-              "ppid": 2522444,
+              "pgid": 3868667,
+              "pid": 3868667,
+              "ppid": 3844157,
               "process_stat": {
-                "pgid": 2564461,
-                "ppid": 2522444,
-                "session_id": 2522406,
-                "start_ticks": 410218203,
+                "pgid": 3868667,
+                "ppid": 3844157,
+                "session_id": 3843031,
+                "start_ticks": 414964787,
                 "state": "S",
                 "status": "observed"
               }
             }
           ],
-          "main_pid": 2522444,
-          "monotonic_ns": 4102184412771235
+          "main_pid": 3844157,
+          "monotonic_ns": 4149650184169934
         }
       ],
       "events": {
-        "bytes": 165602,
+        "bytes": 163700,
         "path": "/mnt/connect-release/a1/out/verification/installed-product-success/events.json",
-        "sha256": "bf27d858cca2f32a7c5695f2c12a596b37c5fa82663669bbfbc09ffc9bc303c2"
+        "sha256": "d8476f0b67d403db684c5651199c1e5f645d0f681ec2e4422dae8f2601c1272f"
       },
       "finalization": {
         "completed_manifest": {
           "path": "/mnt/connect-release/a1/out/verification/installed-product-success/application-preparation/manifest.json",
-          "sha256": "3e798627e3dfe71649460012a7715189ece253ff4526ce8c739d1e058841b631"
+          "sha256": "c7c96a82c552ee8851dfaa7dcdf7227d82fc9d22f37b8529d7115776c6f3f67f"
         },
         "completed_server": {
           "access": {
@@ -814,14 +814,14 @@
             "-i",
             "PATH=/usr/bin:/bin",
             "PYTHONDONTWRITEBYTECODE=1",
-            "/mnt/connect-release/a1/out/verification/installed-product-success/state/.meerkat-connect/mob.fixture/setup-Xqa3iF/prepared/client/runtime/bin/python",
+            "/mnt/connect-release/a1/out/verification/installed-product-success/state/.meerkat-connect/mob.fixture/setup-qWAjam/prepared/client/runtime/bin/python",
             "-I",
             "-B",
-            "/mnt/connect-release/a1/out/verification/installed-product-success/state/.meerkat-connect/mob.fixture/setup-Xqa3iF/prepared/distribution/toolkit-library-20261031-application-4d519f-linux-inputs-linux-x86_64/setup/local_session.py",
+            "/mnt/connect-release/a1/out/verification/installed-product-success/state/.meerkat-connect/mob.fixture/setup-qWAjam/prepared/distribution/toolkit-library-20261031-application-4d519f-linux-inputs-linux-x86_64/setup/local_session.py",
             "--configuration",
-            "/mnt/connect-release/a1/out/verification/installed-product-success/state/.meerkat-connect/mob.fixture/setup-Xqa3iF/prepared/config/mcp.json",
+            "/mnt/connect-release/a1/out/verification/installed-product-success/state/.meerkat-connect/mob.fixture/setup-qWAjam/prepared/config/mcp.json",
             "--configuration-sha256",
-            "1cf52444804b9669eada1555c1d8c30c849737ea0f2ffa8424ccfc202e09b27c",
+            "f749d86e1e6018580bf8a953006af423f951873335dfdffc3ddf31ffceece0aa",
             "--helper-sha256",
             "8f61bc92fa88ce529319b667c221d2575fabe181e24a0b03776b4280de83c1aa",
             "--adapter-sha256",
@@ -829,7 +829,7 @@
             "--backend-sha256",
             "072b69e77a1955db95865346f7dc0a248cc3c491a0aacd680ea37c3f5c556611",
             "--state-root",
-            "/mnt/connect-release/a1/out/verification/installed-product-success/state/.meerkat-connect/mob.fixture/setup-Xqa3iF/prepared/local-session"
+            "/mnt/connect-release/a1/out/verification/installed-product-success/state/.meerkat-connect/mob.fixture/setup-qWAjam/prepared/local-session"
           ],
           "command": "/usr/bin/env",
           "env": {},
@@ -837,14 +837,14 @@
         },
         "completed_setup": {
           "path": "/mnt/connect-release/a1/out/verification/installed-product-success/application-preparation/application-setup.json",
-          "sha256": "de712f9d4e0b2c60d3f31628d7f9c27a4aa593598bdeef3c87ff954f8fe2af17"
+          "sha256": "67743868076e3a4ef8b5042d78c0d8dca572b2330e7af82a0521a6182b1fdbc6"
         },
         "controller_authority": {
           "basis": "packaged Driver joins the actual held controller report before issuing this parent",
           "parent": [
             {
               "authority_generation": 1,
-              "authority_incarnation": "c7e214aa-12b2-4e31-9469-ee92ef59227b",
+              "authority_incarnation": "8871365e-b479-4539-9767-b58fa44f46da",
               "authority_namespace": "installed-fixture",
               "grant_id": "helper-controller-parent",
               "issued_revision": 1,
@@ -883,7 +883,7 @@
             "/mnt/connect-release/a1/out/verification/installed-product-success/deployment/activation.json"
           ],
           "exit_code": 0,
-          "pid": 2536951,
+          "pid": 3863090,
           "stderr": {
             "bytes": 0,
             "path": "/mnt/connect-release/a1/out/verification/installed-product-success/finalization/prepare-policy.stderr",
@@ -892,26 +892,26 @@
           "stdout": {
             "bytes": 776,
             "path": "/mnt/connect-release/a1/out/verification/installed-product-success/finalization/prepare-policy.stdout",
-            "sha256": "c96e00e68bfb6ca64e535b4c8a9fd29ad5c45f5cff67c24863aa30235aa9b52c"
+            "sha256": "8bde1554f7dbc4eb446fa646d3648a09081d0148cb65f75753841fe60a74036f"
           }
         },
         "preparer_handoff": {
-          "path": "/mnt/connect-release/a1/out/verification/installed-product-success/state/.meerkat-connect/mob.fixture/setup-Xqa3iF/prepare.stdout",
-          "sha256": "05c900a98004fc3f6f6de19e7c6a99d606c17fed726f68f329e62be2cfd0751f"
+          "path": "/mnt/connect-release/a1/out/verification/installed-product-success/state/.meerkat-connect/mob.fixture/setup-qWAjam/prepare.stdout",
+          "sha256": "26d8d468a0483c45598be501843b0397d5cb7e3cae111dca4ab8d72813e841f4"
         },
         "selection": {
           "activation": {
             "path": "/mnt/connect-release/a1/out/verification/installed-product-success/deployment/activation.json",
-            "sha256": "dcd10eaa6fc6ca1d08292c2c61aa461dc0ab151c293bea6a7ff3de81e2ce016b"
+            "sha256": "92dc61383ed542c64a97ffc43029f2b292b1d1f9977668d3cf714b03f08e3698"
           },
           "deployment_root": "/mnt/connect-release/a1/out/verification/installed-product-success/deployment",
           "local_policy": {
             "path": "/mnt/connect-release/a1/out/verification/installed-product-success/deployment/policy-bundle/toolkit-local-policy.json",
-            "sha256": "b580e350742b98da1615e65e4470da7db36f00db312b1526aedf131e6237f60c"
+            "sha256": "3570b2cc3a8ad8f2d10c5f7d225414ddb336309d746b2bddb0300fcda59dae56"
           },
           "policy_manifest": {
             "path": "/mnt/connect-release/a1/out/verification/installed-product-success/deployment/policy-bundle/manifest.json",
-            "sha256": "0b4509d7825f5f8cb657fa0cc889494e5f9745302e88f1b3344bccc5ef7e6465"
+            "sha256": "13ac18fb3a30e435d190dc0619e7492ed175d1b0380059b29204af91a20d134b"
           }
         },
         "validate-policy": {
@@ -922,7 +922,7 @@
             "/mnt/connect-release/a1/out/verification/installed-product-success/finalization/selection.json"
           ],
           "exit_code": 0,
-          "pid": 2536953,
+          "pid": 3863092,
           "stderr": {
             "bytes": 0,
             "path": "/mnt/connect-release/a1/out/verification/installed-product-success/finalization/validate-policy.stderr",
@@ -931,37 +931,37 @@
           "stdout": {
             "bytes": 777,
             "path": "/mnt/connect-release/a1/out/verification/installed-product-success/finalization/validate-policy.stdout",
-            "sha256": "13ae5d57645f423545a110c29f3065e442ff196b8dc9be4e51cdfef9e93fa45a"
+            "sha256": "824e2a4d447ab3af18593a70c68f404d5105517d77ed54ce24556e22875bd905"
           }
         }
       },
       "forced_cleanup": false,
       "gateway_stderr": {
-        "bytes": 38008,
+        "bytes": 37622,
         "path": "/mnt/connect-release/a1/out/verification/installed-product-success/gateway.stderr",
-        "sha256": "9b98f5761804668ded9b9d259ffe96d802d01c26f28700981021f221ac3d5009"
+        "sha256": "fe85d2a5469bdd355cc8f6cc0fc268ee1630bd3e54b734dbf7841690f462abc2"
       },
       "http_listener_closed": true,
-      "main_gateway_pid": 2522444,
+      "main_gateway_pid": 3844157,
       "model_catalog": {
         "path": "/mnt/connect-release/a1/out/verification/installed-product-success/model-catalog.json",
         "sha256": "c3bf3eb2f2000367921e2314672ef616d9e9baa7028cc0a037ff4463b9fceb00"
       },
       "model_configuration": {
         "path": "/mnt/connect-release/a1/out/verification/installed-product-success/meerkat.toml",
-        "sha256": "d03963373864ad739a65d1ef35e1717b7e48ebcae626ba669893e77ca6b9751c"
+        "sha256": "6ae5c8589b6d518f1e70ee8ba9e8e73c4db1317c2657dd3cdd85c75bc25276ee"
       },
-      "model_request_count": 33,
+      "model_request_count": 32,
       "model_requests": {
-        "bytes": 3467836,
+        "bytes": 3331874,
         "path": "/mnt/connect-release/a1/out/verification/installed-product-success/model-requests.json",
-        "sha256": "c67e9d83857ebb63ec2f2b9f830119e256dc64c98634eeef76b3301ad0ff571c"
+        "sha256": "c36d74e2f5113bd4907280c34409d66a556abe1066dbe53187755e67edf5fb89"
       },
       "model_schedule_errors": [],
       "native_ready": {
         "contract_version": "0.5.0",
         "control_listen_address": null,
-        "http_base_url": "http://127.0.0.1:34421",
+        "http_base_url": "http://127.0.0.1:35549",
         "http_public_base_url": null,
         "identity_bootstrap": {
           "complete": true,
@@ -990,7 +990,7 @@
           },
           "ready": true
         },
-        "init_id": "init-3abf345b-cf8f-4ad2-bd25-e60874276183",
+        "init_id": "init-31055131-e86c-4afe-8e57-22fd634826ad",
         "loaded_modules": [],
         "member_restore": {
           "boot_set": "observed"
@@ -1004,27 +1004,27 @@
       "natural_gateway_reap": true,
       "observed_children": [
         {
-          "pgid": 2536922,
-          "pid": 2536922,
-          "ppid": 2522444,
+          "pgid": 3862768,
+          "pid": 3862768,
+          "ppid": 3844157,
           "process_stat": {
-            "pgid": 2536922,
-            "ppid": 2522444,
-            "session_id": 2522406,
-            "start_ticks": 410213304,
+            "pgid": 3862768,
+            "ppid": 3844157,
+            "session_id": 3843031,
+            "start_ticks": 414960204,
             "state": "S",
             "status": "observed"
           }
         },
         {
-          "pgid": 2564461,
-          "pid": 2564461,
-          "ppid": 2522444,
+          "pgid": 3868667,
+          "pid": 3868667,
+          "ppid": 3844157,
           "process_stat": {
-            "pgid": 2564461,
-            "ppid": 2522444,
-            "session_id": 2522406,
-            "start_ticks": 410218203,
+            "pgid": 3868667,
+            "ppid": 3844157,
+            "session_id": 3843031,
+            "start_ticks": 414964787,
             "state": "S",
             "status": "observed"
           }
@@ -1032,9 +1032,9 @@
       ],
       "observed_children_gone": true,
       "original_business_observation": {
-        "bytes": 9453,
+        "bytes": 7807,
         "path": "/mnt/connect-release/a1/out/verification/installed-product-success/original-business-observation.json",
-        "sha256": "22c54092924c84f7a2a0a095ff345e25df34babef458f2c0bdb9b20fe95993ba"
+        "sha256": "b2b40016662aad5a9e5710d5873cb1f04201bb9b2a5e67b16a07ec5b3fa5acb0"
       },
       "preparation_plan": {
         "path": "/mnt/connect-release/a1/out/verification/installed-product-success/application-plan.json",
@@ -1047,10 +1047,10 @@
       "service_parent_custody": {
         "bytes": 2269,
         "path": "/mnt/connect-release/a1/out/verification/installed-product-success/service-parent-custody.json",
-        "sha256": "77b984818c2729a0a1b995e7413bef0eaf22bb6325299a46c06a5dfafb659753"
+        "sha256": "3b38e85a9482d03d52982b611a68c5efb74d61f308ebac7935e0993f4a073202"
       },
       "shutdown_response": {
-        "id": "meta-shutdown-05f99cd2-7ebb-4061-931c-e341c1fc8a2e",
+        "id": "meta-shutdown-c853e35b-6753-4e72-86fc-d0827f725913",
         "jsonrpc": "2.0",
         "result": {
           "host_cleanup_completed": true,
@@ -1070,7 +1070,7 @@
     {
       "candidate": {
         "binary": {
-          "sha256": "b9b2205afb95c1c9aebb20e2bdf0ccd8040de1f54b737f3acfa13cf8f574d13b",
+          "sha256": "1bf67a1966621cad906a899793179b3e0f9c2d894574a1ae8860b34540af7453",
           "size": 898696272
         },
         "binary_kind": "toolkit_gateway",
@@ -1097,9 +1097,9 @@
       },
       "descendant_shutdown_checks": [],
       "events": {
-        "bytes": 6899,
+        "bytes": 6900,
         "path": "/mnt/connect-release/a1/out/verification/installed-product-resource-corruption/events.json",
-        "sha256": "5c01bf67743f9477bca0c6195ea040e569e382c564673a9c65706fa7716489d7"
+        "sha256": "b5aa88e756ea3ca370e44592396bdb55360f8be953d6e556553c9560d594d0fa"
       },
       "finalization": {},
       "forced_cleanup": false,
@@ -1110,7 +1110,7 @@
       },
       "model_configuration": {
         "path": "/mnt/connect-release/a1/out/verification/installed-product-resource-corruption/meerkat.toml",
-        "sha256": "e5e691d97639be959aaead860887dbbd92a1e2d955d346c0c3595399dd480f1a"
+        "sha256": "da5da667414bf0136576919f836ab9f3df7842a053b01d26a4e61e2a4cc8933f"
       },
       "natural_gateway_reap": true,
       "observed_children": [],
@@ -1151,7 +1151,7 @@
   "execution_claim": "installed SDK acquisition and one public read; success requires exact native input completion; no live authentication or general service support claim",
   "installed_candidate": {
     "binary": {
-      "sha256": "b9b2205afb95c1c9aebb20e2bdf0ccd8040de1f54b737f3acfa13cf8f574d13b",
+      "sha256": "1bf67a1966621cad906a899793179b3e0f9c2d894574a1ae8860b34540af7453",
       "size": 898696272
     },
     "binary_kind": "toolkit_gateway",
@@ -1164,12 +1164,12 @@
     "derived_binary": {
       "bytes": 1362,
       "path": "/mnt/connect-release/a1/out/stage/derived-binary-record.json",
-      "sha256": "abfbde9df2c7f2cdb964b327bc8609f2e3b86a32216b15c4c068fe159eab686f"
+      "sha256": "bce8c2f2ce30d7c3361419484c55cd0a7c5a281b42637af012c614796933a8d3"
     },
     "native_build": {
       "bytes": 2045,
       "path": "/mnt/connect-release/a1/out/stage/build-record.json",
-      "sha256": "2a4ed564c343be175ccfa32e92319e5cecc7c2f1259e51213d19dae40dba72b8"
+      "sha256": "3c9bd3c09bb2d123fb947d999869dd15046e4a9b419ebc9493f4f358b357887a"
     },
     "resource_build": {
       "bytes": 4671,
@@ -1189,7 +1189,7 @@
     "staging": {
       "bytes": 4970,
       "path": "/mnt/connect-release/a1/out/stage/staging.json",
-      "sha256": "dd40e9377ca5a1b7cc22c509fa59a4ffefb541b5e75e0e62ccfc30cbf70dfdfa"
+      "sha256": "d2f06239b54d2a6d2013382f9d34948bf6fc6b51034646fdc4467ec22d38a184"
     }
   },
   "platform": "Linux-7.0.0-1011-gcp-x86_64-with-glibc2.39",
@@ -1242,5 +1242,5 @@
   ],
   "status": "passed",
   "toolkit_gateway": "/mnt/connect-release/a1/out/stage/meerkat-connect-linux-x86_64/bin/toolkit_gateway",
-  "toolkit_gateway_sha256": "b9b2205afb95c1c9aebb20e2bdf0ccd8040de1f54b737f3acfa13cf8f574d13b"
+  "toolkit_gateway_sha256": "1bf67a1966621cad906a899793179b3e0f9c2d894574a1ae8860b34540af7453"
 }

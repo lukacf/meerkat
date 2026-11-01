@@ -2,20 +2,20 @@
   "argv": [
     "/usr/bin/x86_64-linux-gnu-objcopy",
     "--strip-debug",
-    "/mnt/connect-release/a1/parent/20261031T215548Z/binary/toolkit_gateway",
+    "/mnt/connect-release/a1/parent/20261101T113908Z/binary/toolkit_gateway",
     "/mnt/connect-release/a1/out/derived-gateway/toolkit_gateway"
   ],
   "binary_kind": "toolkit_gateway",
   "derivation": "strip_debug",
   "derived": {
     "path": "/mnt/connect-release/a1/out/derived-gateway/toolkit_gateway",
-    "sha256": "b9b2205afb95c1c9aebb20e2bdf0ccd8040de1f54b737f3acfa13cf8f574d13b",
+    "sha256": "1bf67a1966621cad906a899793179b3e0f9c2d894574a1ae8860b34540af7453",
     "size": 898696272
   },
   "kind": "meerkat_connect_derived_gateway",
   "original": {
-    "path": "/mnt/connect-release/a1/parent/20261031T215548Z/binary/toolkit_gateway",
-    "sha256": "938c232480c0b1f3dbd13f07ccf511dd0b339f15193927e275ae2a222cb9cb8a",
+    "path": "/mnt/connect-release/a1/parent/20261101T113908Z/binary/toolkit_gateway",
+    "sha256": "102598814924ba043ade5d772e6dc44b684c54cd2bd7707a74ca4f553ed645c8",
     "size": 2544390736
   },
   "schema_version": 1,
@@ -27,11 +27,11 @@
   "transformation": {
     "result": {
       "path": "/mnt/connect-release/a1/out/derived-gateway/RESULT.json",
-      "sha256": "22df464f70793379cfb2630cf1a2fe7477de68685564babd4ddb1068020c07d7"
+      "sha256": "02c85ae5b30ac19ea731c9f7311760752101bb6f6df12566e09cd488db90bf5a"
     },
     "start": {
       "path": "/mnt/connect-release/a1/out/derived-gateway/START.json",
-      "sha256": "d7c2449ea4abe3d13ba2ed450a99ffd685a773690b269625c0a89c26a989a4ec"
+      "sha256": "88a4e37570af5576f6a1222327206cdfc00b312332bb56f6694d6661d1df28d7"
     }
   }
 }

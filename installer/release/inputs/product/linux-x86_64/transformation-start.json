@@ -2,7 +2,7 @@
   "argv": [
     "/usr/bin/x86_64-linux-gnu-objcopy",
     "--strip-debug",
-    "/mnt/connect-release/a1/parent/20261031T215548Z/binary/toolkit_gateway",
+    "/mnt/connect-release/a1/parent/20261101T113908Z/binary/toolkit_gateway",
     "/mnt/connect-release/a1/out/derived-gateway/toolkit_gateway"
   ],
   "binary_kind": "toolkit_gateway",
@@ -12,8 +12,8 @@
     "PATH": "/usr/bin:/bin"
   },
   "input": {
-    "path": "/mnt/connect-release/a1/parent/20261031T215548Z/binary/toolkit_gateway",
-    "sha256": "938c232480c0b1f3dbd13f07ccf511dd0b339f15193927e275ae2a222cb9cb8a",
+    "path": "/mnt/connect-release/a1/parent/20261101T113908Z/binary/toolkit_gateway",
+    "sha256": "102598814924ba043ade5d772e6dc44b684c54cd2bd7707a74ca4f553ed645c8",
     "size": 2544390736
   },
   "kind": "meerkat_connect_strip_debug_start",
@@ -25,7 +25,7 @@
     "sha256": "c5aed01ca0b8d304b262ecef92bc4d952125eab25c2336f1ffdd4e1cf583d373"
   },
   "schema_version": 1,
-  "started_at": "2026-10-31T22:56:57.891308Z",
+  "started_at": "2026-11-01T12:02:01.408355Z",
   "term_grace_seconds": 15.0,
   "timeout_seconds": 900,
   "tool": {

@@ -13,12 +13,12 @@
         "product/linux-x86_64/assembly.json": {
           "path": "installer/release/inputs/product/linux-x86_64/assembly.json",
           "size": 6252,
-          "sha256": "268d9aa1e1c0c08014c1a079b23ce0a5f15d623bd89e28b42e853dc834463e11"
+          "sha256": "23d19b035d512a033c439f608072f04e536f342d4b541592c9d9f8d769efcd87"
         },
         "product/linux-x86_64/build-record.json": {
           "path": "installer/release/inputs/product/linux-x86_64/build-record.json",
           "size": 2045,
-          "sha256": "2a4ed564c343be175ccfa32e92319e5cecc7c2f1259e51213d19dae40dba72b8"
+          "sha256": "3c9bd3c09bb2d123fb947d999869dd15046e4a9b419ebc9493f4f358b357887a"
         },
         "product/linux-x86_64/dependency-requirements.txt": {
           "path": "installer/release/inputs/product/linux-x86_64/dependency-requirements.txt",
@@ -28,17 +28,17 @@
         "product/linux-x86_64/derived-binary-record.json": {
           "path": "installer/release/inputs/product/linux-x86_64/derived-binary-record.json",
           "size": 1362,
-          "sha256": "abfbde9df2c7f2cdb964b327bc8609f2e3b86a32216b15c4c068fe159eab686f"
+          "sha256": "bce8c2f2ce30d7c3361419484c55cd0a7c5a281b42637af012c614796933a8d3"
         },
         "product/linux-x86_64/gateway-verification.json": {
           "path": "installer/release/inputs/product/linux-x86_64/gateway-verification.json",
-          "size": 55835,
-          "sha256": "7c190f5495516f3b81e7d2653c52878f75f6659d80d11d06990a7555cca00362"
+          "size": 54189,
+          "sha256": "c10449e6171e8ffc1bbc7a0906e1712fcc99eb1b7a1c2198efe92825e8ba0f91"
         },
         "product/linux-x86_64/meerkat-connect-gateway-0.9.5-linux-x86_64.tar.gz.sha256": {
           "path": "installer/release/inputs/product/linux-x86_64/meerkat-connect-gateway-0.9.5-linux-x86_64.tar.gz.sha256",
           "size": 116,
-          "sha256": "5c6ffca299e06c10b135ac7fd13ddb198363d90df43bbd060a17ceecaeaa0124"
+          "sha256": "b99abbb3da6171d26eff324a5a08b68da747ec861c8e6032351621ae4bc5ded0"
         },
         "product/linux-x86_64/model-catalog.json": {
           "path": "installer/release/inputs/product/linux-x86_64/model-catalog.json",
@@ -57,13 +57,13 @@
         },
         "product/linux-x86_64/transformation-result.json": {
           "path": "installer/release/inputs/product/linux-x86_64/transformation-result.json",
-          "size": 1206,
-          "sha256": "22df464f70793379cfb2630cf1a2fe7477de68685564babd4ddb1068020c07d7"
+          "size": 1207,
+          "sha256": "02c85ae5b30ac19ea731c9f7311760752101bb6f6df12566e09cd488db90bf5a"
         },
         "product/linux-x86_64/transformation-start.json": {
           "path": "installer/release/inputs/product/linux-x86_64/transformation-start.json",
           "size": 1199,
-          "sha256": "d7c2449ea4abe3d13ba2ed450a99ffd685a773690b269625c0a89c26a989a4ec"
+          "sha256": "88a4e37570af5576f6a1222327206cdfc00b312332bb56f6694d6661d1df28d7"
         },
         "product/linux-x86_64/meerkat_meta-0.9.7-py3-none-any.whl": {
           "path": "installer/release/inputs/product/linux-x86_64/meerkat_meta-0.9.7-py3-none-any.whl",
@@ -246,9 +246,9 @@
           "sha256": "a0af1213f3c2226497a97e2b3aa01a7e4bee4f403f95be16fc9acd2947514a78"
         },
         "product/linux-x86_64/meerkat-connect-gateway-0.9.5-linux-x86_64.tar.gz": {
-          "url": "https://github.com/lukacf/meerkat-connect/releases/download/v0.9.5/meerkat-connect-gateway-0.9.5-linux-x86_64.tar.gz",
-          "size": 482238167,
-          "sha256": "147414661aa56ad5f7d4dca818c23b09e8f71fac5a40feee48861cd0ca6a86ba"
+          "url": "https://github.com/lukacf/meerkat-connect/releases/download/v0.9.6/meerkat-connect-gateway-0.9.5-linux-x86_64.tar.gz",
+          "size": 482238079,
+          "sha256": "86f6bc883b38de5c06520a928ff2c64aa8170e2fe1fd9ab594cc532a9ad2d816"
         },
         "guide/rpc_gateway": {
           "url": "https://github.com/lukacf/meerkat-meta/releases/download/v0.9.3/meta-rpc-gateway-0.9.3-x86_64-unknown-linux-gnu.tar.gz",
@@ -297,7 +297,7 @@
         "artifact_root": "/home/runner/work/_temp/forge-inputs/product/linux-x86_64",
         "assembly": {
           "path": "/home/runner/work/_temp/forge-inputs/product/linux-x86_64/assembly.json",
-          "sha256": "268d9aa1e1c0c08014c1a079b23ce0a5f15d623bd89e28b42e853dc834463e11",
+          "sha256": "23d19b035d512a033c439f608072f04e536f342d4b541592c9d9f8d769efcd87",
           "size": 6252
         },
         "dependency_requirements": {

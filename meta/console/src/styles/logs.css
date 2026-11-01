@@ -1,40 +1,62 @@
 /* Logs panel. .logs__body and .logline--warn stay in console-host.css (component-boundary.test.ts reads them).
    Split from console-host.css (imported there, in this order). */
 
-/* ── Logs ─────────────────────────────────────────────────────── */
-/* Kit classes in the panel's own markup (its node test bundle cannot load
-   the kit's components). A dense mono viewer: every cell ends in an
-   ellipsis, so a long name never runs into the next column. */
-.logs__follow .cc-dot { margin-right: 2px; }
-.logs__toolbar { border-bottom: 1px solid var(--line); }
+/* ── Logs (spec B5) ───────────────────────────────────────────────
+   The expert view: a dense table under a severity strip. Every cell ends
+   in an ellipsis, so a long name never runs into the next column. */
+.logs__follow .cc-mark { margin-right: 2px; }
+.logs__strip {
+  flex: none;
+  padding: 10px var(--_cc-panel-pad-x) 8px;
+  border-bottom: 1px solid var(--_cc-border-soft);
+}
+.logs__toolbar .cc-filterbar__chips { flex: 0 1 auto; }
+.logs__range {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+.logs__agent { margin-left: auto; }
+.logs__agent .cc-select select { max-width: 200px; }
 .logs__stream {
+  position: relative;
   flex: 1 1 auto;
   display: flex;
   flex-direction: column;
   min-width: 0;
   margin: 0;
-  padding: 6px 0 16px;
+  padding: 4px 0 16px;
   overflow-y: auto;
-  font-family: var(--mono);
-  font-size: 11.5px;
-  color: var(--ink);
+  font-family: var(--_cc-font-display);
+  font-size: 12px;
+  color: var(--_cc-foreground);
 }
+.logs__stream > .cc-new-pill { margin-top: 6px; margin-bottom: 4px; }
+.logs__stream > .cc-panel-empty { margin-top: 32px; }
+.logs__item { min-width: 0; }
+.logs__pad { flex: none; }
 .logline {
   display: flex;
   flex-direction: column;
   min-width: 0;
 }
-.logline--error { background: color-mix(in oklch, var(--crit) 7%, transparent); }
-.logline.is-open { background: var(--bg-elev-1); }
-.logline__row {
+.logline--error { background: color-mix(in srgb, var(--_cc-negative) 6%, transparent); }
+.logline.is-open { background: var(--_cc-surface-card); }
+.logline.is-target { animation: logs-target 1.6s ease-out; }
+@keyframes logs-target {
+  from { box-shadow: inset 2px 0 0 var(--_cc-member-accent); background: var(--_cc-viz-live-soft); }
+  to   { box-shadow: inset 2px 0 0 transparent; }
+}
+.logline__row,
+.logs__group-row {
   display: grid;
-  grid-template-columns: 10px 88px 40px minmax(0, 150px) minmax(0, 170px) minmax(0, 110px) minmax(0, 1fr) auto;
+  grid-template-columns: 10px 86px 78px minmax(0, 150px) minmax(0, 80px) minmax(0, 1fr) auto;
   column-gap: 10px;
-  align-items: baseline;
+  align-items: center;
   box-sizing: border-box;
   width: 100%;
   min-width: 0;
-  min-height: 24px;
+  min-height: 30px;
   padding: 3px var(--_cc-panel-pad-x);
   border: 0;
   background: transparent;
@@ -43,16 +65,22 @@
   text-align: left;
   cursor: pointer;
 }
-.logline__row > * {
+.cc-panel[data-density="compact"] .logline__row,
+.cc-panel[data-density="compact"] .logs__group-row { min-height: 24px; padding-top: 1px; padding-bottom: 1px; }
+.logs__group-row { grid-template-columns: 10px 86px 78px minmax(0, 150px) minmax(0, 1fr) auto; }
+.logline__row > *,
+.logs__group-row > * {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 .logline__row:hover,
-.logline.is-open .logline__row { background: var(--bg-elev-2); }
-.logline__row:focus-visible {
-  outline: 2px solid var(--focus-ring);
+.logs__group-row:hover,
+.logline.is-open .logline__row { background: var(--_cc-surface-hover); }
+.logline__row:focus-visible,
+.logs__group-row:focus-visible {
+  outline: 2px solid var(--_cc-focus-ring);
   outline-offset: -2px;
 }
 .logline__chevron {
@@ -61,41 +89,56 @@
   height: 0;
   border-top: 3.5px solid transparent;
   border-bottom: 3.5px solid transparent;
-  border-left: 5px solid var(--ink-meta);
-  transition: transform 120ms ease;
+  border-left: 5px solid var(--_cc-foreground-meta);
+  transition: transform var(--_cc-dur-fast, 120ms) ease;
 }
-.logline.is-open .logline__chevron { transform: rotate(90deg); }
+.logline.is-open .logline__chevron,
+.logs__group.is-open .logline__chevron { transform: rotate(90deg); }
 .logline__t {
-  color: var(--ink-meta);
+  font-family: var(--_cc-font-mono);
+  font-size: 11px;
+  color: var(--_cc-foreground-meta);
   font-variant-numeric: tabular-nums;
 }
 .logline__lvl {
-  font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 0.04em;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+  font-weight: 500;
 }
-.logline__lvl--info { color: var(--ink-meta); }
-.logline__lvl--warn { color: var(--warn-ink); }
-.logline__lvl--error { color: var(--crit-ink); }
+.logline__lvl--info { color: var(--_cc-foreground-meta); }
+.logline__lvl--warn { color: var(--_cc-warning-ink); }
+.logline__lvl--error { color: var(--_cc-negative-ink); }
 .logline__src {
-  font-family: var(--sans);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   font-size: 12px;
   font-weight: 500;
-  color: var(--ink);
+  color: var(--_cc-foreground);
 }
-.logline__evt { color: var(--ink-muted); }
-.logline__ctx {
-  font-size: 10.5px;
-  color: var(--ink-meta);
+.logline__src .cc-agent__name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.logline__fam {
+  font-size: 11.5px;
+  color: var(--_cc-foreground-meta);
 }
-.logline__msg { color: var(--ink); }
+.logline__msg { color: var(--_cc-foreground); font-size: 12.5px; }
+.logline__snippet { color: var(--_cc-foreground-muted); }
+.logline__dur {
+  font-family: var(--_cc-font-mono);
+  font-size: 11px;
+  color: var(--_cc-foreground-meta);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
 .logline__badge {
+  margin-left: 6px;
   padding: 0 6px;
-  border: 1px solid var(--line);
-  border-radius: var(--r-pill);
-  font-family: var(--sans);
+  border: 1px solid var(--_cc-border-soft);
+  border-radius: var(--_cc-radius-pill);
   font-size: 10.5px;
-  color: var(--ink-muted);
+  color: var(--_cc-foreground-muted);
 }
 .logline__detail {
   display: flex;
@@ -103,47 +146,95 @@
   gap: 10px;
   min-width: 0;
   margin: 2px var(--_cc-panel-pad-x) 10px calc(var(--_cc-panel-pad-x) + 20px);
-  padding: 10px 12px;
-  border: 1px solid var(--line);
-  border-radius: var(--r-md);
-  background: var(--bg-elev-1);
-  font-family: var(--sans);
+  padding: 12px 14px;
+  border: 1px solid var(--_cc-border-soft);
+  border-radius: var(--_cc-radius-md);
+  background: var(--_cc-surface-card);
 }
-.logline__facts dd { font-size: 12px; }
-.logline__key {
-  margin-left: 8px;
-  font-family: var(--mono);
-  font-size: 11px;
-  color: var(--ink-meta);
+.logline__facts {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 18px;
+  font-size: 12px;
+}
+.logline__fact {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.logline__fact-label {
+  font-size: var(--_cc-panel-fs-label, 10.5px);
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--_cc-foreground-meta);
 }
 .logline__code {
-  font-family: var(--mono);
+  font-family: var(--_cc-font-mono);
   font-size: 11.5px;
+}
+.logline__words {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.logline__summary {
+  display: block;
+  font-family: var(--_cc-font-mono);
+  font-size: 11px;
+  color: var(--_cc-foreground-muted);
+  overflow-wrap: anywhere;
 }
 .logline__data {
   max-height: 320px;
   margin: 0;
   padding: 8px 10px;
   overflow: auto;
-  border-radius: var(--r-sm);
-  background: var(--bg-sunken);
-  font-family: var(--mono);
+  border-radius: var(--_cc-radius-sm);
+  background: var(--_cc-surface-soft);
+  font-family: var(--_cc-font-mono);
   font-size: 11px;
   line-height: 1.5;
-  color: var(--ink);
+  color: var(--_cc-foreground);
   white-space: pre-wrap;
   word-break: break-word;
 }
-/* The interaction column goes first, then the event (both stay in the
-   expanded detail). */
+.logline__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 10px;
+}
+.logline__actions .logline__tech { flex: 1 1 auto; min-width: 0; }
+.logs__group--error { background: color-mix(in srgb, var(--_cc-negative) 6%, transparent); }
+.logs__group-words { color: var(--_cc-foreground); font-size: 12.5px; }
+.logs__group-meta {
+  font-size: 11.5px;
+  color: var(--_cc-foreground-meta);
+  font-variant-numeric: tabular-nums;
+}
+.logline--in-group .logline__row { padding-left: calc(var(--_cc-panel-pad-x) + 16px); }
+
+/* Narrower panes drop the family, then the agent's avatar and the
+   duration; everything stays in the expanded detail. */
 @container cc-panel (max-width: 899px) {
-  .logline__row { grid-template-columns: 10px 88px 40px minmax(0, 140px) minmax(0, 160px) minmax(0, 1fr) auto; }
-  .logline__ctx { display: none; }
+  .logline__row { grid-template-columns: 10px 86px 74px minmax(0, 130px) minmax(0, 1fr) auto; }
+  .logline__fam { display: none; }
 }
 @container cc-panel (max-width: 559px) {
-  .logline__row { grid-template-columns: 10px 86px 36px minmax(0, 110px) minmax(0, 1fr); }
-  .logline__evt,
-  .logline__badge { display: none; }
+  .logline__row,
+  .logs__group-row { grid-template-columns: 10px 76px 22px minmax(0, 1fr); }
+  .logline__lvl { font-size: 0; gap: 0; }
+  .logline__src,
+  .logline__dur,
+  .logs__group-meta { display: none; }
   .logline__detail { margin-left: var(--_cc-panel-pad-x); }
+  .logs__agent { margin-left: 0; }
 }
-
+@media (prefers-reduced-motion: reduce) {
+  .logline.is-target { animation: none; box-shadow: inset 2px 0 0 var(--_cc-member-accent); }
+}
+.reduced-motion .logline.is-target { animation: none; box-shadow: inset 2px 0 0 var(--_cc-member-accent); }

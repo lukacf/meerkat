@@ -259,7 +259,7 @@ impl InstructionMob {
     }
 
     async fn spawn(&mut self, name: &str, role: &str) -> (AgentIdentity, SessionId) {
-        let identity = AgentIdentity::from(*name);
+        let identity = AgentIdentity::from(name);
         self.handle
             .spawn_spec(turn_driven(role, &identity))
             .await

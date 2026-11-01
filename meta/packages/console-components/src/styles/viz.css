@@ -517,6 +517,34 @@
   opacity: 0.6;
 }
 
+/* A halo in the strip's colour keeps the header legible where an edge crosses it. */
+.cc-viz-goal__title,
+.cc-viz-goal__meta,
+.cc-viz-goal__trailing > text {
+  stroke: var(--_cc-surface-card);
+  stroke-width: 3px;
+  stroke-linejoin: round;
+  paint-order: stroke;
+}
+
+.cc-viz-node--goal.is-collapsed .cc-viz-goal__title,
+.cc-viz-node--goal.is-collapsed .cc-viz-goal__meta,
+.cc-viz-node--goal.is-collapsed .cc-viz-goal__trailing > text {
+  stroke: var(--_cc-surface-raised);
+}
+
+.cc-viz-node--goal:hover .cc-viz-goal__title,
+.cc-viz-node--goal:hover .cc-viz-goal__meta,
+.cc-viz-node--goal:hover .cc-viz-goal__trailing > text {
+  stroke: color-mix(in srgb, var(--_cc-viz-ink) 4%, var(--_cc-surface-card));
+}
+
+.cc-viz-node--goal.is-collapsed:hover .cc-viz-goal__title,
+.cc-viz-node--goal.is-collapsed:hover .cc-viz-goal__meta,
+.cc-viz-node--goal.is-collapsed:hover .cc-viz-goal__trailing > text {
+  stroke: color-mix(in srgb, var(--_cc-viz-ink) 4%, var(--_cc-surface-raised));
+}
+
 /* The A3.8 progress ring: a faint track, done ink, in progress accent, blocked warning. */
 .cc-viz-ring-progress circle {
   fill: none;
@@ -864,6 +892,11 @@
 
 .cc-viz-cluster {
   pointer-events: none;
+}
+
+.cc-viz-cluster__plate {
+  fill: var(--_cc-surface-raised);
+  stroke: none;
 }
 
 .cc-viz-cluster__label,

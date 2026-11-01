@@ -102,20 +102,33 @@ export function FigureTile({
 }) {
   const markTone = live ? "live" : tone;
   const changeTone = delta ? deltaTone(delta) : undefined;
+  // The spaces between the parts lay out as nothing (every container here is
+  // a flex box) but keep the words apart in the tile's text and name: the
+  // figure never runs into its foot ("1" and "1 agent on them" read "11").
   const content = (
     <>
       <span className="cc-figure__label">
         {markTone ? <StatusMark tone={markTone} /> : null}
         <span className="cc-figure__label-text">{label}</span>
-      </span>
+      </span>{" "}
       <span className="cc-figure__fig">
         {loading ? (
           <span className="cc-figure__skeleton" aria-hidden="true" />
         ) : (
           <>
             <span className="cc-figure__value">{formatFigure(value)}</span>
-            {of !== undefined && of !== null && of !== "" ? <span className="cc-figure__of">of {formatFigure(of)}</span> : null}
-            {unit ? <span className="cc-figure__of">{unit}</span> : null}
+            {of !== undefined && of !== null && of !== "" ? (
+              <>
+                {" "}
+                <span className="cc-figure__of">of {formatFigure(of)}</span>
+              </>
+            ) : null}
+            {unit ? (
+              <>
+                {" "}
+                <span className="cc-figure__of">{unit}</span>
+              </>
+            ) : null}
           </>
         )}
         {hero && meter ? <span className="cc-figure__meter">{meter}</span> : null}
@@ -133,15 +146,19 @@ export function FigureTile({
         {!hero && meter ? <span className="cc-figure__meter">{meter}</span> : null}
       </span>
       {delta || foot ? (
-        <span className="cc-figure__foot">
-          {delta ? (
-            <span className="cc-figure__delta" data-tone={changeTone}>
-              <KitGlyph name="arrow-right" className={cx("cc-figure__arrow", delta.value > 0 ? "is-up" : delta.value < 0 ? "is-down" : "is-flat")} />
-              {formatDelta(delta)}
-            </span>
-          ) : null}
-          {foot ? <span className="cc-figure__foot-text">{foot}</span> : null}
-        </span>
+        <>
+          {" "}
+          <span className="cc-figure__foot">
+            {delta ? (
+              <span className="cc-figure__delta" data-tone={changeTone}>
+                <KitGlyph name="arrow-right" className={cx("cc-figure__arrow", delta.value > 0 ? "is-up" : delta.value < 0 ? "is-down" : "is-flat")} />
+                {formatDelta(delta)}
+              </span>
+            ) : null}
+            {delta && foot ? " " : null}
+            {foot ? <span className="cc-figure__foot-text">{foot}</span> : null}
+          </span>
+        </>
       ) : null}
     </>
   );

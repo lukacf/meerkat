@@ -16,7 +16,7 @@ import {
 import { humanizeEnum } from "../../../../packages/console-components/src/panel-kit/format";
 import { stripPeerTransportScaffold } from "../../lib/adapters";
 import { describeFailure } from "../../lib/failure-summary";
-import { classifyFrame, frameSentence } from "../../lib/frame-classifier";
+import { classifyFrame, failureWords, frameSentence, plainSnippetText } from "../../lib/frame-classifier";
 import { describeMemoryEventForPeople, isOpenLoopNudge } from "../../lib/memory-event-words";
 import { turnSenderLine } from "../../lib/turn-origin";
 import type { ConsoleFrame, ConsoleRailFilterPresetConfig } from "../../types";
@@ -141,7 +141,8 @@ function textFromValue(value: unknown): string {
 }
 
 function truncate(value: string, max = 110): string {
-  const normalized = value
+  // Model markdown reads as plain words (the classifier's own rule).
+  const normalized = plainSnippetText(value)
     .replace(/\*\*([^*]+)\*\*/g, "$1")
     .replace(/`([^`]+)`/g, "$1")
     .replace(/\s+/g, " ")
@@ -314,7 +315,7 @@ function signalFromFrame(
       ...base,
       label: frame.event === "interaction_failed" ? "Agent turn failed" : classified.title || humanizeEnum(frame.event),
       detail: truncate(
-        describeFailure(data, "")
+        failureWords(describeFailure(data, ""))
           || textFromValue(data.error ?? data.reason ?? data.message)
           || classified.snippet
           || "Needs attention",

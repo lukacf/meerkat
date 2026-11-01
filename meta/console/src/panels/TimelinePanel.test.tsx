@@ -1,4 +1,4 @@
-import { render } from "@testing-library/react";
+import { fireEvent, render } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import { TimelinePanel, describeTodayFrame } from "./TimelinePanel";
@@ -6,6 +6,7 @@ import { __chatPaneTest } from "./ChatPane";
 import { formatClockTime } from "../../../packages/console-components/src/panel-kit/format";
 import { rememberOwnSend } from "../lib/turn-origin";
 import { insertConsoleFrame } from "../../../packages/console-core/src/timeline-recovery";
+import { ActivityLedgerProvider, createActivityLedger } from "../lib/activity-ledger";
 import type { ConsoleFrame } from "../types";
 
 // The sentence with each agent segment shown as its key.
@@ -98,5 +99,62 @@ describe("Today rows", () => {
     expect(shown).toEqual(["14:52", "09:05"]);
     expect(shown).toEqual(instants.map(chatTime));
     expect(shown).toEqual(instants.map((timestampMs) => formatClockTime(timestampMs)));
+  });
+});
+
+describe("Today v2", () => {
+  const NOW = Date.now();
+  const at = (minutesAgo: number) => NOW - minutesAgo * 60_000;
+  const frames: ConsoleFrame[] = [
+    { id: "ask", event: "user_input", identity: "identity:billing", interactionId: "turn-a", timestampMs: at(20), data: { content: "Refund order 77310.", origin: "console:pane-1", origin_kind: "operator" } },
+    { id: "start", event: "run_started", identity: "identity:billing", interactionId: "turn-a", runId: "run-a", timestampMs: at(20), data: { run_id: "run-a" } },
+    { id: "done", event: "interaction_complete", identity: "identity:billing", interactionId: "turn-a", runId: "run-a", timestampMs: at(18), data: { result: "Refunded." } },
+    { id: "start-b", event: "run_started", identity: "identity:shipping", interactionId: "turn-b", runId: "run-b", timestampMs: at(12), data: { run_id: "run-b" } },
+    { id: "failed", event: "interaction_failed", identity: "identity:shipping", interactionId: "turn-b", runId: "run-b", timestampMs: at(11), data: { error_report: { class: "llm", message: "The provider timed out." } } },
+    { id: "ready", event: "member_ready", identity: "identity:returns", timestampMs: at(5), data: {} },
+  ];
+  function renderToday() {
+    const ledger = createActivityLedger({ notifyMs: 0 });
+    ledger.ingestMany(frames);
+    return render(
+      <ActivityLedgerProvider ledger={ledger}>
+        <TimelinePanel frames={[...frames].reverse()} />
+      </ActivityLedgerProvider>,
+    );
+  }
+
+  it("draws the day's lanes: an agent per lane, its turns as spans the ledger paired", () => {
+    const view = renderToday();
+    expect(view.getByTestId("timeline-swimlanes")).toBeTruthy();
+    expect(view.getByTestId("timeline-lane:identity:billing")).toBeTruthy();
+    expect(view.getByTestId("timeline-span:run-a").getAttribute("data-state")).toBe("done");
+    expect(view.getByTestId("timeline-span:run-b").getAttribute("data-state")).toBe("failed");
+    // The failure lines up on the problems lane.
+    expect(view.getByTestId("timeline-lane:problems")).toBeTruthy();
+  });
+
+  it("tells the day as rows, a turn as one, and filters to problems", () => {
+    const view = renderToday();
+    const rows = () => Array.from(view.container.querySelectorAll<HTMLElement>('[data-testid^="timeline-story-row:"]'));
+    expect(rows().length).toBe(3);
+    const turn = view.getByTestId("timeline-story-row:turn:identity:billing:turn-a");
+    expect(turn.textContent).toContain("An operator asked Billing");
+    expect(turn.textContent).toContain("replied");
+    fireEvent.click(view.getByTestId("timeline-filter:problems"));
+    expect(rows().length).toBe(1);
+    expect(rows()[0].getAttribute("data-severity")).toBe("crit");
+    expect(rows()[0].textContent).toContain("turn failed");
+    // A row opens its detail in the drawer.
+    fireEvent.click(view.getByTestId(`timeline-story-open:${rows()[0].getAttribute("data-testid")!.slice("timeline-story-row:".length)}`));
+    expect(view.getByTestId("timeline-drawer").textContent).toContain("Failed");
+  });
+
+  it("names the figures of the day in the glance strip", () => {
+    const view = renderToday();
+    expect(view.getByTestId("timeline-glance:turns").textContent).toContain("2");
+    const problems = view.getByTestId("timeline-glance:problems");
+    expect(problems.textContent).toContain("1");
+    fireEvent.click(problems);
+    expect(view.getByTestId("timeline-filter:problems").getAttribute("aria-pressed")).toBe("true");
   });
 });

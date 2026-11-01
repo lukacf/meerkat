@@ -5536,6 +5536,9 @@ struct WorkGraphItemsQuery {
     include_terminal: bool,
     #[serde(default)]
     limit: Option<usize>,
+    /// The `next_cursor` of the previous page.
+    #[serde(default)]
+    cursor: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -5548,6 +5551,9 @@ struct WorkGraphReadyQuery {
     labels: Vec<String>,
     #[serde(default)]
     limit: Option<usize>,
+    /// The `next_cursor` of the previous page (`GET /workgraph/ready`).
+    #[serde(default)]
+    cursor: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -5574,7 +5580,7 @@ impl From<WorkGraphItemsQuery> for meerkat::WorkItemFilter {
             labels: value.labels,
             include_terminal: value.include_terminal,
             limit: value.limit,
-            cursor: None,
+            cursor: value.cursor,
         }
     }
 }
@@ -5589,7 +5595,7 @@ impl From<WorkGraphItemsQuery> for meerkat::WorkGraphSnapshotFilter {
             labels: value.labels,
             include_terminal: value.include_terminal,
             limit: value.limit,
-            cursor: None,
+            cursor: value.cursor,
         }
     }
 }
@@ -5601,7 +5607,7 @@ impl From<WorkGraphReadyQuery> for meerkat::ReadyWorkFilter {
             namespace: value.namespace,
             labels: value.labels,
             limit: value.limit,
-            cursor: None,
+            cursor: value.cursor,
         }
     }
 }

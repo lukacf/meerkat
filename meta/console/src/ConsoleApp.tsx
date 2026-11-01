@@ -6381,7 +6381,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
             visibleControls={visibleControls}
             onSelectTab={(id) => dock.selectTab(id)}
             onCloseTab={(id) => dock.closeTab(id)}
-            onCreateTab={() => dock.createTab()}
+            onCreateTab={() => dock.createTab({ blank: true })}
             onFocusPanel={(id) => dock.focusPanel(id)}
             onSplitPanel={(id, dir) => dock.splitPanel(id, dir)}
             onClosePanel={(id) => dock.closePanel(id)}

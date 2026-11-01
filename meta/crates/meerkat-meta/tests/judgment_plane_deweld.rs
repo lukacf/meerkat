@@ -31,8 +31,8 @@ use meerkat_meta::memory::{
 };
 use meerkat_meta::memory_wiring::{MemoryEnginesConfig, MemoryStackSeams, attach_memory_engines};
 use meerkat_meta::{
-    AgentMemoryConfig, AgentMemoryError, AgentMemoryProvider, AgentMemoryRecallRequest,
-    AgentMemoryRecord, UnifiedRuntime,
+    AccessControlConfig, AccessController, AccessRule, AgentMemoryConfig, AgentMemoryError,
+    AgentMemoryProvider, AgentMemoryRecallRequest, AgentMemoryRecord, UnifiedRuntime,
 };
 use meerkat_mob::MobDefinition;
 use serde_json::{Value, json};
@@ -78,6 +78,8 @@ struct FakeState {
     /// When set, `records_page` breaks the keyset contract: its cursor never
     /// moves past the cursor it was given.
     stuck_cursor: AtomicBool,
+    /// The row count each `records_page` call asked for, in call order.
+    records_page_reads: Mutex<Vec<usize>>,
     gate: Mutex<Option<Arc<dyn LlmWriteGate>>>,
     gate_installs: AtomicUsize,
     sink: Mutex<Option<Arc<dyn MemoryEventSink>>>,
@@ -453,18 +455,39 @@ impl MemoryPanelStore for FakeJudgmentStore {
         limit: usize,
         cursor: Option<(u64, String)>,
     ) -> Result<PanelRecordsPage, AgentMemoryError> {
+        self.state.records_page_reads.lock().unwrap().push(limit);
         let records = self.state.records.lock().unwrap();
-        let next_cursor = if self.state.stuck_cursor.load(Ordering::SeqCst) {
-            cursor.or_else(|| {
+        if self.state.stuck_cursor.load(Ordering::SeqCst) {
+            let next_cursor = cursor.or_else(|| {
                 records
                     .last()
                     .map(|record| (record.updated_at_ms, record.id.clone()))
+            });
+            return Ok(PanelRecordsPage {
+                records: records.iter().take(limit).cloned().collect(),
+                next_cursor,
+            });
+        }
+        // Keyset paging as the bundled store pages: newest updated first, the
+        // rows strictly past the cursor, and a cursor on the last row when
+        // more follow.
+        let mut rows: Vec<&MemoryRecord> = records
+            .iter()
+            .filter(|record| {
+                cursor.as_ref().is_none_or(|(updated_at_ms, id)| {
+                    (record.updated_at_ms, record.id.as_str()) < (*updated_at_ms, id.as_str())
+                })
             })
-        } else {
-            None
-        };
+            .collect();
+        rows.sort_by(|a, b| (b.updated_at_ms, &b.id).cmp(&(a.updated_at_ms, &a.id)));
+        let more = rows.len() > limit;
+        rows.truncate(limit);
+        let next_cursor = rows
+            .last()
+            .filter(|_| more)
+            .map(|record| (record.updated_at_ms, record.id.clone()));
         Ok(PanelRecordsPage {
-            records: records.iter().take(limit).cloned().collect(),
+            records: rows.into_iter().cloned().collect(),
             next_cursor,
         })
     }
@@ -825,6 +848,126 @@ async fn a_records_page_whose_cursor_does_not_advance_is_refused() {
     );
 
     runtime.mob_handle().stop().await.expect("stop");
+}
+
+/// A fact of `identity` in the fake's realm, its title its id.
+fn fake_fact(id: String, identity: &str, updated_at_ms: u64, body: String) -> MemoryRecord {
+    MemoryRecord {
+        title: id.clone(),
+        id,
+        scope: MemoryScope::Identity {
+            realm: REALM.to_string(),
+            identity: identity.to_string(),
+        },
+        kind: MemoryKind::Fact,
+        description: String::new(),
+        body,
+        tags: vec![],
+        provenance: MemoryProvenance {
+            evidence: vec![],
+            author: MemoryAuthor::Operator,
+            profile: None,
+            verification: None,
+        },
+        trust: TrustTier::Operator,
+        status: RecordStatus::Active,
+        supersedes: None,
+        derived_from: vec![],
+        working_set_rank: None,
+        created_at_ms: updated_at_ms,
+        updated_at_ms,
+        usage: UsageStats::default(),
+        ever_quarantined: false,
+    }
+}
+
+/// One unscoped record listing at `limit` by the anonymous console caller,
+/// under access rules that let it view router and read router's memory
+/// only, over a fake that holds `delivery` facts of delivery's (bodies of
+/// `body_bytes` bytes, each newer than any of router's) and three of
+/// router's. Returns the listed record ids and the row count each store read
+/// of the listing asked for.
+async fn restricted_listing_reads(
+    delivery: u64,
+    body_bytes: usize,
+    limit: usize,
+) -> (Vec<String>, Vec<usize>) {
+    let fake = FakeJudgmentStore::default();
+    {
+        let mut records = fake.state.records.lock().unwrap();
+        for index in 0..delivery {
+            records.push(fake_fact(
+                format!("mem-delivery-{index:05}"),
+                "delivery",
+                1_000 + index,
+                "x".repeat(body_bytes),
+            ));
+        }
+        for index in 0..3 {
+            records.push(fake_fact(
+                format!("mem-router-{index}"),
+                "router",
+                10 + index,
+                "router body".to_string(),
+            ));
+        }
+    }
+    let controller = AccessController::new(AccessControlConfig {
+        enabled: true,
+        admins: vec!["root@example.test".to_string()],
+        rules: vec![AccessRule {
+            id: "read-router".to_string(),
+            actions: vec!["agent.view".to_string(), "agent.memory.read".to_string()],
+            agents: vec!["router".to_string()],
+            ..AccessRule::default()
+        }],
+        ..AccessControlConfig::default()
+    })
+    .expect("access rules");
+    let runtime = Box::pin(
+        UnifiedRuntime::builder()
+            .definition(test_definition())
+            .agent_memory(Arc::new(fake.clone()), AgentMemoryConfig::default())
+            .access_controller(controller)
+            .default_llm_client(Arc::new(StubClient))
+            .build(),
+    )
+    .await
+    .expect("classic runtime over the fake provider must build");
+    let app = runtime.build_reference_app_router(decision_state());
+
+    fake.state.records_page_reads.lock().unwrap().clear();
+    let records = rpc(&app, "meta/memory/panel/records", json!({ "limit": limit })).await;
+    let reads = fake.state.records_page_reads.lock().unwrap().clone();
+    runtime.mob_handle().stop().await.expect("stop");
+    let ids = records["result"]["records"]
+        .as_array()
+        .unwrap_or_else(|| panic!("a page of records: {records:#?}"))
+        .iter()
+        .map(|row| row["id"].as_str().expect("record id").to_string())
+        .collect();
+    (ids, reads)
+}
+
+/// Past rows the caller may not read, each store read of a realm asks for
+/// twice the rows of the one before, from `limit + 1` up to the 4,096-row
+/// cap.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_restricted_records_page_doubles_its_store_reads_up_to_the_row_cap() {
+    let (ids, reads) = restricted_listing_reads(10_500, 64, 200).await;
+    assert_eq!(ids, ["mem-router-2", "mem-router-1", "mem-router-0"]);
+    assert_eq!(reads, [201, 402, 804, 1_608, 3_216, 4_096, 4_096]);
+}
+
+/// A read holds every row it returns, body included, so a read asks for no
+/// more rows than about 16 MiB holds at the size of the rows the read before
+/// it returned: past records with 64 KiB bodies, 255 rows instead of
+/// doubling to 402.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_restricted_records_page_of_large_bodies_reads_within_the_byte_budget() {
+    let (ids, reads) = restricted_listing_reads(500, 64 * 1024, 200).await;
+    assert_eq!(ids, ["mem-router-2", "mem-router-1", "mem-router-0"]);
+    assert_eq!(reads, [201, 255, 255]);
 }
 
 // ---------------------------------------------------------------------------

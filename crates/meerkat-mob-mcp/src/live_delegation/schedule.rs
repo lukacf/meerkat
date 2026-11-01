@@ -377,23 +377,12 @@ fn voice_snapshot_filter() -> WorkGraphSnapshotFilter {
     }
 }
 
-/// A voice snapshot that cut voice items read only the most recently updated
-/// ones: an older open item is not offered, and an older blocker is not named.
-fn warn_when_voice_snapshot_cut(snapshot: &WorkGraphSnapshot, read: &'static str) {
-    if snapshot.truncated == Some(true) {
-        tracing::warn!(
-            read,
-            total_items = ?snapshot.total_items,
-            limit = VOICE_SNAPSHOT_LIMIT,
-            "voice work snapshot holds more voice items than one read covers; only the most recently updated were read"
-        );
-    }
-}
-
 /// WorkGraph access scoped the way the mob's members see it.
 #[derive(Clone)]
 pub(super) struct VoiceWorkGraph {
     service: WorkGraphService,
+    /// Set once a cut voice snapshot has been warned about; clones share it.
+    snapshot_cut_warned: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Namespace snapshots taken to classify a worker's item (test count).
     #[cfg(test)]
     classification_snapshots: std::sync::Arc<std::sync::atomic::AtomicUsize>,
@@ -406,6 +395,7 @@ impl VoiceWorkGraph {
     pub(super) fn new(service: WorkGraphService) -> Self {
         Self {
             service,
+            snapshot_cut_warned: std::sync::Arc::default(),
             #[cfg(test)]
             classification_snapshots: std::sync::Arc::default(),
             #[cfg(test)]
@@ -523,6 +513,27 @@ impl VoiceWorkGraph {
             .expect("conflicting evidence");
     }
 
+    /// Warn, once for this voice graph and its clones, when a scheduling
+    /// snapshot cut voice items: it read only the most recently updated ones,
+    /// so an older open item is not offered and an older blocker is not
+    /// named. Closed voice items count too, so past the limit every
+    /// scheduling pass would warn again.
+    fn warn_once_when_snapshot_cut(&self, snapshot: &WorkGraphSnapshot, read: &'static str) {
+        if snapshot.truncated == Some(true)
+            && let Some(total_items) = snapshot.total_items
+            && !self
+                .snapshot_cut_warned
+                .swap(true, std::sync::atomic::Ordering::Relaxed)
+        {
+            tracing::warn!(
+                read,
+                total_items,
+                limit = VOICE_SNAPSHOT_LIMIT,
+                "voice work snapshot read the {VOICE_SNAPSHOT_LIMIT} most recently updated of {total_items} voice items; an older open item is not offered and an older blocker is not named (warned once)"
+            );
+        }
+    }
+
     async fn get(&self, id: &WorkItemId) -> Result<WorkItem, String> {
         self.service
             .get(None, None, id.clone())
@@ -542,7 +553,7 @@ impl VoiceWorkGraph {
             .snapshot(voice_snapshot_filter())
             .await
             .map_err(|error| format!("voice work readiness snapshot failed: {error}"))?;
-        warn_when_voice_snapshot_cut(&snapshot, "readiness");
+        self.warn_once_when_snapshot_cut(&snapshot, "readiness");
         let channel_label = channel_work_label(channel_id);
         let items_by_id = snapshot
             .items
@@ -642,7 +653,7 @@ impl VoiceWorkGraph {
             .snapshot(voice_snapshot_filter())
             .await
             .map_err(|error| format!("voice work snapshot failed: {error}"))?;
-        warn_when_voice_snapshot_cut(&snapshot, "classification");
+        self.warn_once_when_snapshot_cut(&snapshot, "classification");
         let items_by_id = snapshot
             .items
             .iter()

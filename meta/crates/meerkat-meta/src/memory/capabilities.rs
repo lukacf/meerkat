@@ -387,7 +387,10 @@ pub trait StewardStore: StagedMemoryStore + TombstoneSource {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PanelRecordsPage {
     pub records: Vec<MemoryRecord>,
-    /// Pass back as `cursor` to continue; `None` when exhausted.
+    /// Pass back as `cursor` to continue; `None` when exhausted. It names the
+    /// page's last row, so it lies strictly past the cursor the page was read
+    /// with, in the descending `(updated_at_ms, memory_id)` order. The
+    /// console's record listing refuses a page whose cursor does not.
     pub next_cursor: Option<(u64, String)>,
 }
 
@@ -431,6 +434,12 @@ pub trait MemoryPanelStore: StewardStore {
     /// Panel record listing: optional scope/status filters, newest-updated
     /// first, keyset cursor. Any status is visible here — the panel is an
     /// inspection surface and renders status explicitly.
+    ///
+    /// The page holds at most `limit` rows, each strictly past `cursor` in the
+    /// descending `(updated_at_ms, memory_id)` order, and a `next_cursor` that
+    /// names the last of them when more follow, so it too lies strictly past
+    /// `cursor`. The console's record listing reads on from `next_cursor` and
+    /// refuses a page whose cursor does not move past the one it gave.
     async fn records_page(
         &self,
         realm: &str,

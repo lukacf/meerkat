@@ -243,6 +243,31 @@ pub enum AccessConfigError {
     Parse(String),
     Io(String),
     RevisionExhausted,
+    PaddedApproverId(String),
+}
+
+impl AccessConfigError {
+    /// A stable name for the failure. The Console's refusal of an invalid
+    /// configuration reports it as `data.reason.kind`, next to the error's
+    /// text.
+    pub(crate) fn kind(&self) -> &'static str {
+        match self {
+            Self::EnabledWithoutAdmins => "enabled_without_admins",
+            Self::EmptyRuleId => "empty_rule_id",
+            Self::DuplicateRuleId(_) => "duplicate_rule_id",
+            Self::EmptyActions(_) => "empty_actions",
+            Self::UnknownAction { .. } => "unknown_action",
+            Self::UnknownGroup { .. } => "unknown_group",
+            Self::EmptyApproverId => "empty_approver_id",
+            Self::PaddedApproverId(_) => "padded_approver_id",
+            Self::ApproverWithoutHolders(_) => "approver_without_holders",
+            Self::UnknownApproverGroup { .. } => "unknown_approver_group",
+            Self::UnknownRule(_) => "unknown_rule",
+            Self::Parse(_) => "invalid_toml",
+            Self::Io(_) => "io",
+            Self::RevisionExhausted => "revision_exhausted",
+        }
+    }
 }
 
 impl std::fmt::Display for AccessConfigError {
@@ -254,6 +279,10 @@ impl std::fmt::Display for AccessConfigError {
             ),
             Self::EmptyRuleId => write!(f, "access rule id must not be empty"),
             Self::EmptyApproverId => write!(f, "approver id must not be empty"),
+            Self::PaddedApproverId(id) => write!(
+                f,
+                "approver {id:?}: id must not have leading or trailing whitespace"
+            ),
             Self::ApproverWithoutHolders(id) => {
                 write!(
                     f,
@@ -411,8 +440,11 @@ pub fn validate_access_config(config: &AccessControlConfig) -> Result<(), Access
         }
     }
     for (approver, holders) in &config.approvers {
-        if approver.trim().is_empty() || approver.trim() != approver {
+        if approver.trim().is_empty() {
             return Err(AccessConfigError::EmptyApproverId);
+        }
+        if approver.trim() != approver {
+            return Err(AccessConfigError::PaddedApproverId(approver.clone()));
         }
         if holders
             .subjects
@@ -655,7 +687,9 @@ mod tests {
         );
         assert_eq!(
             validate_access_config(&with(" person:alice", subject("alice@x"))),
-            Err(AccessConfigError::EmptyApproverId)
+            Err(AccessConfigError::PaddedApproverId(
+                " person:alice".to_string()
+            ))
         );
         assert_eq!(
             validate_access_config(&with("person:alice", AccessApprover::default())),

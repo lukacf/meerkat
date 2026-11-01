@@ -15,6 +15,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   required method with no default: forward it to the service or builder it
   wraps, since the mob seats dormant members under the root it reports (see
   Changed). A wrapper without it no longer compiles.
+- `AccessConfigError` gains `PaddedApproverId`, for an approver id with
+  leading or trailing whitespace, which validation reported as
+  `EmptyApproverId` (see Fixed). A `match` over every variant adds an arm
+  for it.
 - `ConsoleUiConfig` has a new public field, `attention`
   (`console_config::ConsoleAttentionUiConfig`): the console's host attention
   sources (see Added). Code that builds the struct with a literal adds
@@ -868,6 +872,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   (`meta/memory/panel/record`) likewise lists only the injections into
   identities the caller may read. Before, the Console hid some of these rows
   in the browser after they had arrived.
+- The Console Memory panel's record listing (`meta/memory/panel/records`)
+  cuts each page from the rows the caller may read and returns
+  `next_cursor` exactly when more of them follow. Before, it cut the page
+  and took the cursor before it dropped the rows the caller may not read,
+  so a restricted caller received short or empty pages that still carried
+  a cursor, and "Load more" could step through empty pages. That cursor
+  could also name a row the caller may not read, by its memory id and
+  update time; it now names the page's last row. A read that names no
+  `realm` lists every realm as one listing, newest updated first, and a
+  page cut from it now carries a cursor that resumes every realm; before,
+  such a page was cut with no cursor, so the rows past it could not be
+  listed. A page holds at most `limit` rows, more only to keep together the
+  rows two realms hold under one memory id and update time. A
+  `MemoryPanelStore` whose `records_page` cursor does not move past the
+  cursor it was given is refused as a store failure.
+- An invalid access configuration is refused with what is wrong with it:
+  the `-32602` `invalid_access_config` refusal of a `meta/access/*` write,
+  checked or not, carries `data.reason`, a stable token (for example
+  `unknown_action`, `unknown_group` or `duplicate_rule_id`), and
+  `data.detail`, the text that names the rule, action, group or approver at
+  fault. A configuration the owner cannot write as TOML is described
+  without the writer's text. The code and the fixed message are unchanged,
+  and the list of tokens can grow. Before, the refusal carried its kind
+  alone, so a client such as the Console's Access editor could not say what
+  was wrong with a save. An approver id with leading or trailing whitespace
+  is now refused as `padded_approver_id`, with a text that names the id;
+  before, it was refused as an empty id (see Breaking).
 - On a shared Console the memory panel reads judge each identity under the
   name the Console gives it, `<namespace>/<identity>`, after recording the
   access attributes of its runtimes, as its send route does. Before, every

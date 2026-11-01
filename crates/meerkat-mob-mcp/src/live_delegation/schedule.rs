@@ -10,8 +10,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use meerkat::{
     AddEvidenceRequest, ClaimWorkItemRequest, CloseWorkItemRequest, CreateWorkItemRequest,
-    WorkEdge, WorkEdgeKind, WorkEvidenceRef, WorkGraphService, WorkGraphSnapshotFilter, WorkItem,
-    WorkItemId, WorkOwner, WorkOwnerKey, WorkStatus,
+    WorkEdgeKind, WorkEvidenceRef, WorkGraphService, WorkGraphSnapshot, WorkGraphSnapshotFilter,
+    WorkItem, WorkItemId, WorkOwner, WorkOwnerKey, WorkStatus,
 };
 use meerkat_core::LiveChannelId;
 use meerkat_runtime::live_execution::LiveDelegationNarrationKind;
@@ -25,11 +25,6 @@ pub(super) const LIVE_DELEGATION_CHANNEL_WORKER_CAP: usize =
 
 /// Label every voice delegation item carries.
 pub(super) const VOICE_WORK_LABEL: &str = "voice";
-
-/// Voice items one page of a scheduling walk reads (the WorkGraph maximum).
-/// A scheduling decision pages through every voice item with the snapshot
-/// cursor.
-const VOICE_SNAPSHOT_PAGE: usize = 1000;
 
 const WORK_TITLE_CHARS: usize = 200;
 const NARRATION_TITLE_CHARS: usize = 120;
@@ -366,28 +361,15 @@ impl std::fmt::Display for WorkItemCloseFailure {
     }
 }
 
-/// One page of the voice items a scheduling decision reads, terminal ones
-/// included (blockers may have finished, and may belong to another channel),
-/// most recently updated first, after `cursor`.
-fn voice_snapshot_filter(cursor: Option<String>) -> WorkGraphSnapshotFilter {
+/// The voice items a scheduling decision reads: every voice item of every
+/// channel, terminal ones included (blockers may have finished, and may
+/// belong to another channel).
+fn voice_snapshot_filter() -> WorkGraphSnapshotFilter {
     WorkGraphSnapshotFilter {
         labels: vec![VOICE_WORK_LABEL.to_string()],
         include_terminal: true,
-        limit: Some(VOICE_SNAPSHOT_PAGE),
-        cursor,
         ..WorkGraphSnapshotFilter::default()
     }
-}
-
-/// Every voice item of every channel, read page by page with the snapshot
-/// cursor: the items by id, the edges between them (each on the page of its
-/// later end, so each once), and the ready ones. Each page classifies its
-/// items' readiness against the whole namespace.
-#[derive(Default)]
-struct VoiceSnapshot {
-    items: BTreeMap<WorkItemId, WorkItem>,
-    edges: Vec<WorkEdge>,
-    ready_item_ids: BTreeSet<WorkItemId>,
 }
 
 /// WorkGraph access scoped the way the mob's members see it.
@@ -523,41 +505,14 @@ impl VoiceWorkGraph {
             .expect("conflicting evidence");
     }
 
-    /// Walk every voice item with the snapshot cursor. Each page starts
-    /// strictly after the last item of the one before, so the walk ends: an
-    /// item a write moves comes before the cursor (it is newer), and a page
-    /// that names a next cursor holds at least one item. A walk returns an
-    /// item twice only when a write moved it back past the cursor; the newer
-    /// revision is kept.
-    async fn voice_snapshot(&self) -> Result<VoiceSnapshot, String> {
-        let mut walked = VoiceSnapshot::default();
-        let mut cursor = None;
-        loop {
-            let page = self
-                .service
-                .snapshot(voice_snapshot_filter(cursor))
-                .await
-                .map_err(|error| error.to_string())?;
-            let advanced = !page.items.is_empty();
-            for item in page.items {
-                if walked
-                    .items
-                    .get(&item.id)
-                    .is_none_or(|seen| seen.revision < item.revision)
-                {
-                    walked.items.insert(item.id.clone(), item);
-                }
-            }
-            walked.edges.extend(page.edges);
-            walked.ready_item_ids.extend(page.ready_item_ids);
-            cursor = match page.next_cursor {
-                None => return Ok(walked),
-                Some(next) if advanced => Some(next),
-                Some(_) => {
-                    return Err("a voice snapshot page named a next cursor but held no item".into());
-                }
-            };
-        }
+    /// Every voice item in one uncut namespace observation, however many the
+    /// mob holds: each scheduling decision reads one consistent snapshot of
+    /// the items, their edges and their readiness.
+    async fn voice_snapshot(&self) -> Result<WorkGraphSnapshot, String> {
+        self.service
+            .snapshot_uncut(voice_snapshot_filter())
+            .await
+            .map_err(|error| error.to_string())
     }
 
     async fn get(&self, id: &WorkItemId) -> Result<WorkItem, String> {
@@ -567,8 +522,8 @@ impl VoiceWorkGraph {
             .map_err(|error| format!("voice work item {id} read failed: {error}"))
     }
 
-    /// Scheduling facts for one channel's queue, read from a walk of the
-    /// voice items of every channel (blockers may belong to another
+    /// Scheduling facts for one channel's queue, read from one snapshot of
+    /// the voice items of every channel (blockers may belong to another
     /// channel).
     pub(super) async fn channel_readiness(
         &self,
@@ -579,7 +534,11 @@ impl VoiceWorkGraph {
             .await
             .map_err(|error| format!("voice work readiness snapshot failed: {error}"))?;
         let channel_label = channel_work_label(channel_id);
-        let items_by_id = &snapshot.items;
+        let items_by_id = snapshot
+            .items
+            .iter()
+            .map(|item| (item.id.clone(), item))
+            .collect::<BTreeMap<_, _>>();
         let ready = snapshot
             .ready_item_ids
             .iter()
@@ -591,15 +550,16 @@ impl VoiceWorkGraph {
             .cloned()
             .collect::<HashSet<_>>();
         let mut blockers_failed = HashMap::new();
-        for item in items_by_id
-            .values()
+        for item in snapshot
+            .items
+            .iter()
             .filter(|item| item.labels.contains(&channel_label) && item.status == WorkStatus::Open)
         {
             let unresolved = snapshot
                 .edges
                 .iter()
                 .filter(|edge| edge.kind == WorkEdgeKind::Blocks && edge.to_id == item.id)
-                .filter_map(|edge| items_by_id.get(&edge.from_id))
+                .filter_map(|edge| items_by_id.get(&edge.from_id).copied())
                 .filter(|blocker| blocker.status != WorkStatus::Completed)
                 .collect::<Vec<_>>();
             if !unresolved.is_empty()
@@ -651,9 +611,8 @@ impl VoiceWorkGraph {
 
     /// Classify the item after its worker's bounded turn ended. The four
     /// simple statuses come from the item alone; only Open and Blocked need
-    /// the walk of the voice items, whose page holding the item classifies
-    /// its readiness (child joins, time windows, blockers) in one coherent
-    /// observation of the item and its namespace.
+    /// the namespace snapshot, whose readiness (child joins, time windows,
+    /// blockers) is one coherent observation of the item and its graph.
     pub(super) async fn disposition_after_worker_turn(
         &self,
         item: &WorkItemId,
@@ -672,9 +631,14 @@ impl VoiceWorkGraph {
             .voice_snapshot()
             .await
             .map_err(|error| format!("voice work snapshot failed: {error}"))?;
-        let items_by_id = &snapshot.items;
+        let items_by_id = snapshot
+            .items
+            .iter()
+            .map(|item| (item.id.clone(), item))
+            .collect::<BTreeMap<_, _>>();
         let current = items_by_id
             .get(item)
+            .copied()
             .ok_or_else(|| format!("voice work item {item} is missing from its namespace"))?;
         Ok(match current.status {
             WorkStatus::Completed => WorkItemDisposition::Completed,
@@ -686,7 +650,7 @@ impl VoiceWorkGraph {
                     .edges
                     .iter()
                     .filter(|edge| edge.kind == WorkEdgeKind::Blocks && &edge.to_id == item)
-                    .filter_map(|edge| items_by_id.get(&edge.from_id))
+                    .filter_map(|edge| items_by_id.get(&edge.from_id).copied())
                     .filter(|blocker| blocker.status != WorkStatus::Completed)
                     .map(|blocker| (blocker.id.clone(), blocker.title.clone()))
                     .collect::<Vec<_>>();
@@ -864,15 +828,15 @@ mod tests {
         );
     }
 
-    /// The scheduling reads walk every voice item: an open voice item and a
-    /// blocker with a full page of newer voice items in front of them are
-    /// both seen.
+    /// The scheduling reads see every voice item: an open voice item and a
+    /// blocker with more newer voice items in front of them than a WorkGraph
+    /// page holds are both seen.
     #[tokio::test]
     async fn an_open_voice_item_and_a_blocker_past_the_first_page_are_both_seen() {
         let workgraph = voice_workgraph().await;
         let old_open = voice_item(&workgraph, "the old request").await;
         let blocker = voice_item(&workgraph, "the old blocker").await;
-        // A full page of newer voice items (the WorkGraph maximum, 1000).
+        // As many newer voice items as the largest WorkGraph page (1000).
         for index in 0..1000 {
             voice_item(&workgraph, &format!("newer request {index}")).await;
         }

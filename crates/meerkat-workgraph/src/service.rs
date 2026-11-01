@@ -10,7 +10,7 @@ use serde_json::json;
 use crate::machine::{WorkAttentionMachine, WorkGraphMachine, completion_policy_name};
 use crate::machines::work_item_admission as admission_dsl;
 use crate::machines::workgraph_lifecycle as wg_dsl;
-use crate::read_page::{self, PageRead, ReadyKey, UpdatedKey};
+use crate::read_page::{self, PageCursor, PageRead, ReadyKey, UpdatedKey};
 use crate::store::{
     WorkGraphAdmissionFence, WorkGraphEventFilter, WorkGraphStore, WorkItemAdmissionInsert,
 };
@@ -1245,6 +1245,38 @@ impl WorkGraphService {
             .as_deref()
             .map(|cursor| read_page::decode_cursor::<UpdatedKey>(cursor, PageRead::Snapshot))
             .transpose()?;
+        let limit = filter.limit.unwrap_or(DEFAULT_COLLECTION_LIMIT);
+        self.observe_snapshot(&filter, cursor.as_ref(), limit).await
+    }
+
+    /// One observation of the namespace with every item `filter` selects:
+    /// [`Self::snapshot`] without the `limit` cut and without a cursor, so
+    /// `items` holds every selected item, `truncated` is false and there is
+    /// no `next_cursor`. The filter's `limit` and `cursor` are ignored.
+    ///
+    /// For trusted in-process callers that need the whole selection in one
+    /// consistent read, such as live delegation scheduling. Its result grows
+    /// with the namespace, so no tool, RPC method, REST route, CLI command or
+    /// Meta method offers it: those keep the bounded pages and the cursor.
+    pub async fn snapshot_uncut(
+        &self,
+        mut filter: WorkGraphSnapshotFilter,
+    ) -> Result<WorkGraphSnapshot, WorkGraphError> {
+        filter.limit = None;
+        filter.cursor = None;
+        let filter = self.normalize_snapshot_filter(filter)?;
+        self.observe_snapshot(&filter, None, usize::MAX).await
+    }
+
+    /// The snapshot body: one observation of the namespace, the items
+    /// `filter` selects most recently updated first, after `cursor` and cut
+    /// at `limit`, with their edges, attention bindings and ready ids.
+    async fn observe_snapshot(
+        &self,
+        filter: &WorkGraphSnapshotFilter,
+        cursor: Option<&PageCursor<UpdatedKey>>,
+        limit: usize,
+    ) -> Result<WorkGraphSnapshot, WorkGraphError> {
         let realm_id = filter
             .realm_id
             .clone()
@@ -1259,9 +1291,7 @@ impl WorkGraphService {
             .await?;
         // The observation's own high-water mark is atomic with its rows, so
         // a first page anchors the walk on it.
-        let anchor = cursor
-            .as_ref()
-            .map_or(read.event_high_water_mark, |cursor| cursor.anchor);
+        let anchor = cursor.map_or(read.event_high_water_mark, |cursor| cursor.anchor);
         let mut matching = read
             .items
             .iter()
@@ -1278,12 +1308,8 @@ impl WorkGraphService {
         matching.sort_by(|left, right| read_page::updated_order(left, right));
         let bounds = PageBounds::new(
             &matching,
-            |item| {
-                cursor
-                    .as_ref()
-                    .is_none_or(|cursor| read_page::after_updated_key(item, &cursor.key))
-            },
-            filter.limit.unwrap_or(DEFAULT_COLLECTION_LIMIT),
+            |item| cursor.is_none_or(|cursor| read_page::after_updated_key(item, &cursor.key)),
+            limit,
         );
         let page = bounds.page(&matching);
         let page_item_refs = page
@@ -3825,6 +3851,64 @@ mod tests {
         assert_eq!(snapshot.total_items, Some(3), "{snapshot:?}");
         assert_eq!(snapshot.truncated, Some(true), "{snapshot:?}");
         assert_eq!(snapshot.next_cursor, None, "{snapshot:?}");
+    }
+
+    /// `snapshot_uncut` holds every item the filter selects in one
+    /// observation, past the 1000 a page holds, and ignores `limit` and
+    /// `cursor`.
+    #[tokio::test]
+    async fn snapshot_uncut_holds_every_selected_item_in_one_observation() {
+        let service = WorkGraphService::with_scope(
+            Arc::new(MemoryWorkGraphStore::new()),
+            "realm",
+            WorkNamespace::default(),
+        );
+        let mut created = Vec::new();
+        for index in 0..1001 {
+            created.push(
+                service
+                    .create(create_req(&format!("item {index}")))
+                    .await
+                    .expect("create")
+                    .id,
+            );
+        }
+        // The oldest item blocks the newest one.
+        service
+            .link(LinkWorkItemsRequest {
+                realm_id: None,
+                namespace: None,
+                kind: WorkEdgeKind::Blocks,
+                from_id: created[0].clone(),
+                to_id: created[1000].clone(),
+            })
+            .await
+            .expect("link");
+
+        let snapshot = service
+            .snapshot_uncut(crate::WorkGraphSnapshotFilter {
+                limit: Some(1),
+                cursor: Some("not a cursor".to_string()),
+                ..crate::WorkGraphSnapshotFilter::default()
+            })
+            .await
+            .expect("uncut snapshot");
+        assert_eq!(snapshot.items.len(), 1001);
+        assert_eq!(snapshot.total_items, Some(1001));
+        assert_eq!(snapshot.truncated, Some(false));
+        assert_eq!(snapshot.next_cursor, None);
+        assert_eq!(snapshot.anchor_event_seq, snapshot.event_high_water_mark);
+        assert_eq!(snapshot.changed_since_anchor, Some(false));
+        assert_eq!(
+            snapshot.edges.len(),
+            1,
+            "the edge between the oldest and the newest"
+        );
+        assert_eq!(snapshot.ready_item_ids.len(), 1000);
+        assert!(
+            !snapshot.ready_item_ids.contains(&created[1000]),
+            "the blocked item is not ready"
+        );
     }
 
     /// A store that serves its event ledger through `list_events` alone and

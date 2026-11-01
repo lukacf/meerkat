@@ -1217,6 +1217,106 @@ async fn a_creation_only_creator_is_admitted_through_the_runtime_receiver() {
     );
 }
 
+/// Turn the WorkGraph family on in a member's build: its tools over a fresh
+/// in-memory store, granted in the member's mob realm.
+fn enable_workgraph(config: &mut meerkat::AgentBuildConfig) {
+    let realm = config
+        .realm_id
+        .as_ref()
+        .expect("a member builds in its mob realm");
+    let grant = meerkat::WorkGraphNamespaceGrant::new(realm.as_str(), "default")
+        .expect("a WorkGraph grant in the member's realm");
+    let service = meerkat::WorkGraphService::with_namespace_grant(
+        Arc::new(meerkat::MemoryWorkGraphStore::new()),
+        grant.clone(),
+    )
+    .expect("a WorkGraph service for the grant");
+    config.override_workgraph = ToolCategoryOverride::Enable;
+    config.workgraph_namespace_grant = Some(grant);
+    config.workgraph_tools = Some(Arc::new(meerkat::WorkGraphToolSurface::new(service)));
+}
+
+/// The names a built member shows the model, sorted.
+fn visible_tool_names(agent: &meerkat::DynAgent) -> Vec<String> {
+    let mut names = agent
+        .tool_scope()
+        .visible_tools()
+        .iter()
+        .map(|tool| tool.name.to_string())
+        .collect::<Vec<_>>();
+    names.sort();
+    names
+}
+
+/// Row (RED): the runtime's receiver changes nothing in the surface of a
+/// member build that has no external tools of its own. A worker with comms
+/// and the WorkGraph family, and no built-in or other external tools,
+/// carries a receiver that wraps none. Built through the real agent factory,
+/// its tool catalog projects exactly as the same build without external
+/// tools: the same catalog exactness and mode, and every entry, WorkGraph's
+/// deferred-eligible attention tools included, as visible as there.
+///
+/// RED on the old tree: the receiver wrapped an empty composite, which
+/// reports an exact catalog where a build without built-in or external tools
+/// composes a non-exact one. With WorkGraph's two deferred-eligible
+/// attention tools the member's catalog then selected the deferred mode: it
+/// hid `workgraph_attention_reassign` and `workgraph_policy_escalate` behind
+/// the catalog control plane it composed.
+#[tokio::test]
+async fn a_receiver_that_wraps_no_tools_leaves_the_member_surface_unchanged() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    handle
+        .spawn(
+            ProfileName::from("worker"),
+            AgentIdentity::from(MEMBER),
+            None,
+        )
+        .await
+        .expect("spawn the worker");
+    let session_id = member_session(&handle, MEMBER).await;
+    let receiver = recorded_member_tools(&service, &session_id).await;
+    assert!(
+        tool_names(&receiver).is_empty(),
+        "the runtime's receiver lists no tool"
+    );
+
+    let mut config = worker_build_config(&handle, MEMBER, Arc::clone(&receiver)).await;
+    enable_workgraph(&mut config);
+    let (_dir, member) = build_through_factory(config, None).await;
+    // The same build without external tools, for another member of the
+    // profile, so the two sessions do not share a comms name.
+    let mut reference_config =
+        worker_build_config(&handle, "w-reference", Arc::clone(&receiver)).await;
+    reference_config.external_tools = None;
+    enable_workgraph(&mut reference_config);
+    let (_reference_dir, reference) = build_through_factory(reference_config, None).await;
+
+    let expected = reference
+        .tool_catalog_view()
+        .expect("the reference build's catalog view");
+    for name in ["workgraph_attention_reassign", "workgraph_policy_escalate"] {
+        assert!(
+            expected
+                .entries
+                .iter()
+                .any(|entry| entry.name.as_str() == name),
+            "the build composes {name}: {expected:?}"
+        );
+    }
+    assert_eq!(
+        member
+            .tool_catalog_view()
+            .expect("the member's catalog view"),
+        expected,
+        "the receiver changes nothing in the member's tool catalog"
+    );
+    assert_eq!(
+        visible_tool_names(&member),
+        visible_tool_names(&reference),
+        "the member shows the model the tools a build without the receiver shows"
+    );
+}
+
 /// Row (RED): the creator check reads only the creator session's own live
 /// authority. Two creators of one mob hold different creation scopes, each
 /// minted authority only by the host's member build hook. The second

@@ -7726,6 +7726,18 @@ impl AgentFactory {
             };
             external_tools.bind_session_mob_tool_authority(bound);
         }
+        // External tools that only observe that binding (a mob runtime's
+        // receiver for a member whose build has no external tools of its
+        // own) compose as no external tools: they change nothing in the
+        // build's surface, its catalog exactness included. The session's
+        // agent holds the authority handle bound to them.
+        if build_config
+            .external_tools
+            .as_ref()
+            .is_some_and(|external_tools| external_tools.observes_bindings_only())
+        {
+            build_config.external_tools = None;
+        }
 
         if let Some(value) = build_config.max_inline_peer_notifications
             && value < -1

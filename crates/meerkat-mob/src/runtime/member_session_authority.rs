@@ -10,16 +10,19 @@
 //! receiver gets it, the authority-only binding of a creator whose mob tools
 //! are disabled included, and this runtime holds the live authority of each
 //! of its member sessions. [`MemberSessionAuthorities`] keeps them by
-//! session.
+//! session. A receiver that wraps no tools (its build has none of its own)
+//! only observes that binding (`AgentToolDispatcher::observes_bindings_only`):
+//! the agent factory binds it, then composes the build as one with no
+//! external tools, so the receiver changes nothing in the session's surface.
 //!
 //! An agent creator's commit check reads only this record
 //! ([`MemberSessionAuthorities::admit_identity_creation`], reached through
 //! `MobHandle::admit_member_identity_creation`): it takes no authority from
 //! its caller, so a caller holding another session's sealed authority, a
 //! wider one included, cannot lend it. A session this runtime did not build,
-//! one whose build bound no authority, and one whose tools are gone hold
-//! none, and are refused. A host that edits a member build's external tools
-//! wraps them, as for the runtime's own member tools; tools it replaces
+//! one whose build bound no authority, and one whose tools and agent are gone
+//! hold none, and are refused. A host that edits a member build's external
+//! tools wraps them, as for the runtime's own member tools; tools it replaces
 //! outright leave the session with no recorded authority.
 
 use std::collections::HashMap;
@@ -42,8 +45,9 @@ type SessionAuthorityHandle = Arc<RwLock<MobToolAuthorityContext>>;
 
 /// The live mob operator authority of every local member session this mob
 /// runtime built, keyed by session. Process-local and never persisted. It
-/// holds each session's handle weakly: an entry answers only while that
-/// session's own tools, which hold its receiver, are alive.
+/// holds each session's handle weakly: an entry answers only while the
+/// session holds that handle, through its tools, which hold its receiver, or
+/// its agent, which holds the same handle.
 #[derive(Default)]
 pub struct MemberSessionAuthorities {
     sessions: Mutex<HashMap<SessionId, Weak<RwLock<MobToolAuthorityContext>>>>,
@@ -51,17 +55,20 @@ pub struct MemberSessionAuthorities {
 
 impl MemberSessionAuthorities {
     /// The receiver one member build of `session_id` carries: it wraps the
-    /// build's external tools (`inner`, none when the build has none).
+    /// build's external tools (`inner`, none when the build has none, and
+    /// then the receiver only observes the build's binding).
     pub(crate) fn receiver(
         self: &Arc<Self>,
         session_id: SessionId,
         inner: Option<Arc<dyn AgentToolDispatcher>>,
     ) -> MemberSessionAuthorityReceiver {
+        let wraps_tools = inner.is_some();
         MemberSessionAuthorityReceiver {
             inner: inner.unwrap_or_else(|| {
                 Arc::new(meerkat_core::DynamicToolComposite::new(Vec::new()))
                     as Arc<dyn AgentToolDispatcher>
             }),
+            wraps_tools,
             authorities: Arc::clone(self),
             session_id,
             bound: Mutex::new(None),
@@ -132,9 +139,13 @@ impl MemberSessionAuthorities {
 /// own: the receiver only records the authority the agent factory binds to
 /// the session's external tools in its runtime's
 /// [`MemberSessionAuthorities`], and keeps that handle alive for as long as
-/// the session's tools hold it.
+/// the session's tools hold it. A receiver that wraps no tools only observes
+/// that binding: the agent factory composes its build as one with no
+/// external tools, and the session's agent keeps the handle alive.
 pub(crate) struct MemberSessionAuthorityReceiver {
     inner: Arc<dyn AgentToolDispatcher>,
+    /// Whether the build had external tools for this receiver to wrap.
+    wraps_tools: bool,
     authorities: Arc<MemberSessionAuthorities>,
     session_id: SessionId,
     bound: Mutex<Option<SessionAuthorityHandle>>,
@@ -267,6 +278,7 @@ impl AgentToolDispatcher for MemberSessionAuthorityReceiver {
     ) -> Result<BindOutcome, OpsLifecycleBindError> {
         let Self {
             inner,
+            wraps_tools,
             authorities,
             session_id,
             bound,
@@ -275,6 +287,7 @@ impl AgentToolDispatcher for MemberSessionAuthorityReceiver {
         let was_bound = outcome.was_bound();
         let receiver = Arc::new(Self {
             inner: outcome.into_dispatcher(),
+            wraps_tools,
             authorities,
             session_id,
             bound,
@@ -312,5 +325,11 @@ impl AgentToolDispatcher for MemberSessionAuthorityReceiver {
         self.inner
             .bind_session_mob_tool_authority(authority.clone());
         *self.bound.lock().unwrap_or_else(PoisonError::into_inner) = authority;
+    }
+
+    /// A receiver that wraps no tools only observes the binding above, so the
+    /// agent factory composes its build as one with no external tools.
+    fn observes_bindings_only(&self) -> bool {
+        !self.wraps_tools || self.inner.observes_bindings_only()
     }
 }

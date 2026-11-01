@@ -404,7 +404,7 @@ trap 'rm -rf "$tlc_env_tmp"' EXIT
 # action property violated.
 # identity_entry_audit.sh (mob_machine) requires a final distinct-state count
 # at or above each of its nine runs' floors, a coverage block in which each
-# covered action of every run generated a state, its seventy-five step
+# covered action of every run generated a state, its seventy-seven step
 # witnesses and six state witnesses violated, and with --mutants its
 # reconcile mutant's generated invariant, its probe mutant's invariant, its
 # adoption mutant's invariant or property, its replay, archive and destroy

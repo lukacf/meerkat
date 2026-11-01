@@ -293,7 +293,6 @@ impl ApprovalPolicy {
 pub struct IdentityCreationPolicy {
     revision: Sha256Digest,
     reserved_labels: BTreeSet<String>,
-    reserved_context: BTreeSet<String>,
     authority_fields: BTreeMap<String, AuthorityFieldRule>,
     preparation: PreparationMode,
     construction_deadline_ms: Option<u64>,
@@ -319,7 +318,6 @@ impl IdentityCreationPolicy {
     pub fn from_config(config: IdentityCreationConfig) -> Result<Option<Self>, PolicyRefusal> {
         let revision = policy_revision(&config)?;
         let reserved_labels = keys(&config.reserved_keys.labels, "reserved_keys.labels")?;
-        let reserved_context = keys(&config.reserved_keys.context, "reserved_keys.context")?;
         let authority_fields = authority_fields(&config.authority_fields, &reserved_labels)?;
         let construction_deadline_ms =
             construction_deadline(config.preparation, config.construction_deadline_ms)?;
@@ -331,7 +329,6 @@ impl IdentityCreationPolicy {
         Ok(Some(Self {
             revision,
             reserved_labels,
-            reserved_context,
             authority_fields,
             preparation: config.preparation,
             construction_deadline_ms,
@@ -354,11 +351,6 @@ impl IdentityCreationPolicy {
     /// Whether the host declared `key` a reserved label key.
     pub fn is_host_reserved_label(&self, key: &str) -> bool {
         self.reserved_labels.contains(key)
-    }
-
-    /// Whether `key` is a reserved context key.
-    pub fn is_reserved_context(&self, key: &str) -> bool {
-        self.reserved_context.contains(key)
     }
 
     /// The authority fields a request may set on any identity, by reserved
@@ -561,8 +553,7 @@ fn is_id(value: &str) -> bool {
     })
 }
 
-/// `[A-Za-z0-9][A-Za-z0-9_.:/-]*`, at most 128 bytes: label and context
-/// keys.
+/// `[A-Za-z0-9][A-Za-z0-9_.:/-]*`, at most 128 bytes: label keys.
 pub(crate) fn is_key(value: &str) -> bool {
     is_ascii_word(value, KEY_MAX_BYTES, |byte| {
         byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b':' | b'/' | b'-')

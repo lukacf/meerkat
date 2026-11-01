@@ -700,23 +700,9 @@ fn mob_profile(
 }
 
 /// A context in canonical form: object keys in byte order at every depth,
-/// numbers as canonical JSON writes them. A top-level key that is a
-/// reserved label or context key is refused.
-fn normalized_context(
-    policy: &IdentityCreationPolicy,
-    context: &Value,
-    field: &str,
-) -> Result<Value, IdentityRefusal> {
-    if let Value::Object(map) = context
-        && let Some(key) = map
-            .keys()
-            .find(|key| policy.is_reserved_label(key) || policy.is_reserved_context(key))
-    {
-        return Err(refused(
-            IdentityRefusalKind::ReservedKey { key: key.clone() },
-            field,
-        ));
-    }
+/// numbers as canonical JSON writes them. Context is no authority input,
+/// so any key may name it.
+fn normalized_context(context: &Value, field: &str) -> Result<Value, IdentityRefusal> {
     serde_json::from_str(&canonical_json(context)).map_err(|_| {
         refused(
             IdentityRefusalKind::InvalidRequest {
@@ -729,14 +715,10 @@ fn normalized_context(
 
 /// A context a request gives, in canonical form; a null context is none,
 /// as its JSON reads.
-fn given_context(
-    policy: &IdentityCreationPolicy,
-    context: Option<&Value>,
-    field: &str,
-) -> Result<Option<Value>, IdentityRefusal> {
+fn given_context(context: Option<&Value>, field: &str) -> Result<Option<Value>, IdentityRefusal> {
     context
         .filter(|value| !value.is_null())
-        .map(|value| normalized_context(policy, value, field))
+        .map(|value| normalized_context(value, field))
         .transpose()
 }
 
@@ -755,7 +737,7 @@ fn descriptive_label(
     if !is_key(key) {
         return Err(refused(malformed, field));
     }
-    if policy.is_reserved_label(key) || policy.is_reserved_context(key) {
+    if policy.is_reserved_label(key) {
         return Err(refused(
             IdentityRefusalKind::ReservedKey {
                 key: key.to_owned(),
@@ -806,7 +788,6 @@ fn declared_authority(
 /// A create's declared spec, checked: no bootstrap token, and its context
 /// in canonical form. Every other field is the spec's as declared.
 fn normalized_spec(
-    policy: &IdentityCreationPolicy,
     spec: &DurableAgentSpec,
     path: &str,
 ) -> Result<DurableAgentSpec, IdentityRefusal> {
@@ -836,7 +817,7 @@ fn normalized_spec(
             format!("{path}.binding"),
         ));
     }
-    let context = given_context(policy, context.as_ref(), &format!("{path}.context"))?;
+    let context = given_context(context.as_ref(), &format!("{path}.context"))?;
     Ok(DurableAgentSpec {
         identity: identity.clone(),
         profile: profile.clone(),
@@ -988,7 +969,7 @@ pub fn normalize_create(
     let mut identities = Vec::with_capacity(checked.len());
     for (identity, entry) in &checked {
         let path = format!("identities[{}]", entry.index);
-        let spec = normalized_spec(policy, &entry.request.spec, &format!("{path}.spec"))?;
+        let spec = normalized_spec(&entry.request.spec, &format!("{path}.spec"))?;
         for (key, value) in &entry.authority {
             consequences.insert(Consequence::new(
                 identity,
@@ -1065,7 +1046,7 @@ fn check_entry(
     }
     if expected_revision != entry.revision {
         return Err(refused(
-            IdentityRefusalKind::StaleRevision {
+            IdentityRefusalKind::StaleSpec {
                 current: entry.revision,
             },
             "expected_revision",
@@ -1121,7 +1102,7 @@ pub fn normalize_update(
         }
         None => None,
     };
-    let new_context = given_context(policy, new_context.as_ref(), "set.context")?;
+    let new_context = given_context(new_context.as_ref(), "set.context")?;
     if let Some(labels) = descriptive_labels {
         for (key, value) in labels {
             descriptive_label(policy, key, value, "set.descriptive_labels")?;

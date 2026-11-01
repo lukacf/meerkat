@@ -151,7 +151,7 @@ pub fn plan_approval(
         }));
     };
     if rule.kind() == ApprovalKind::Deny {
-        return Err(IdentityRefusal::new(IdentityRefusalKind::CreationDenied {
+        return Err(IdentityRefusal::new(IdentityRefusalKind::ChangeDenied {
             change,
         }));
     }
@@ -193,7 +193,7 @@ pub fn plan_approval(
             approver_id: approver_id(rule.approver(), labels)?,
         },
         ApprovalKind::Deny => {
-            return Err(IdentityRefusal::new(IdentityRefusalKind::CreationDenied {
+            return Err(IdentityRefusal::new(IdentityRefusalKind::ChangeDenied {
                 change,
             }));
         }

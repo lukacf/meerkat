@@ -45,9 +45,9 @@ impl IdentityRefusal {
         self.kind.token()
     }
 
-    /// Whether the same request may succeed later unchanged: the creation
-    /// hold, pending host preparation, or consequence lines the host could
-    /// not produce. Every other kind is permanent.
+    /// Whether the same request may succeed later unchanged: changes held,
+    /// host preparation pending, or consequence lines the host could not
+    /// produce. Every other kind is permanent.
     pub fn is_retryable(&self) -> bool {
         self.kind.is_retryable()
     }
@@ -187,7 +187,7 @@ pub enum IdentityRefusalKind {
     // Request data.
     /// The profile is not one of the mob definition's profiles.
     ProfileNotAllowed { profile: String },
-    /// The request names a reserved label or context key.
+    /// The request names a reserved label key.
     ReservedKey { key: String },
     /// An authority field under an outcome other than a human decision.
     AuthorityFieldNeedsApproval { key: String },
@@ -219,7 +219,7 @@ pub enum IdentityRefusalKind {
     /// host's, quoted.
     ValidationRefused { reason: String },
     /// An approval rule denies this change.
-    CreationDenied { change: ChangeClass },
+    ChangeDenied { change: ChangeClass },
     /// The request needs a form this release does not support.
     Unsupported { feature: String },
     // Identities and operations.
@@ -227,8 +227,9 @@ pub enum IdentityRefusalKind {
     IdentityUnknown,
     /// An agent asked to change its own identity.
     SelfChangeRefused,
-    /// The expected revision is not the current one.
-    StaleRevision { current: u64 },
+    /// The spec revision the requester read is not the current one, which
+    /// `current` names.
+    StaleSpec { current: u64 },
     /// The operation id was used with another request.
     OperationReused,
     /// A spawn or held spawn of the name is not settled.
@@ -287,8 +288,8 @@ pub enum IdentityRefusalKind {
     /// The decide was observed before the decision was first presented.
     DecidedBeforePresentation,
     // Admission.
-    /// Creation is held (retryable).
-    CreationHeld,
+    /// Changes are held (retryable).
+    ChangesHeld,
     /// Host preparation is pending (retryable).
     HostPreparationPending,
     /// A candidate launch creates, presents, decides and executes nothing.
@@ -319,11 +320,11 @@ impl IdentityRefusalKind {
             Self::PeerUnknown => "peer_unknown",
             Self::BatchTooLarge { .. } => "batch_too_large",
             Self::ValidationRefused { .. } => "validation_refused",
-            Self::CreationDenied { .. } => "creation_denied",
+            Self::ChangeDenied { .. } => "change_denied",
             Self::Unsupported { .. } => "unsupported",
             Self::IdentityUnknown => "identity_unknown",
             Self::SelfChangeRefused => "self_change_refused",
-            Self::StaleRevision { .. } => "stale_revision",
+            Self::StaleSpec { .. } => "stale_spec",
             Self::OperationReused => "operation_reused",
             Self::AdmissionUnsettled { .. } => "admission_unsettled",
             Self::NotTransferring => "not_transferring",
@@ -350,7 +351,7 @@ impl IdentityRefusalKind {
             Self::RequesterCannotDecide => "requester_cannot_decide",
             Self::ApproverNotEligible => "approver_not_eligible",
             Self::DecidedBeforePresentation => "decided_before_presentation",
-            Self::CreationHeld => "creation_held",
+            Self::ChangesHeld => "changes_held",
             Self::HostPreparationPending => "host_preparation_pending",
             Self::CandidateLaunch => "candidate_launch",
             Self::IdentityMember => "identity_member",
@@ -363,7 +364,7 @@ impl IdentityRefusalKind {
     pub fn is_retryable(&self) -> bool {
         matches!(
             self,
-            Self::CreationHeld | Self::HostPreparationPending | Self::ConsequencesUnavailable
+            Self::ChangesHeld | Self::HostPreparationPending | Self::ConsequencesUnavailable
         )
     }
 
@@ -381,9 +382,9 @@ impl IdentityRefusalKind {
             Self::PeerNotAllowed { identity } => json!({ "identity": identity }),
             Self::BatchTooLarge { max } => json!({ "max": max }),
             Self::ValidationRefused { reason } => json!({ "reason": reason }),
-            Self::CreationDenied { change } => json!({ "change": change.token() }),
+            Self::ChangeDenied { change } => json!({ "change": change.token() }),
             Self::Unsupported { feature } => json!({ "feature": feature }),
-            Self::StaleRevision { current } => json!({ "current": current }),
+            Self::StaleSpec { current } => json!({ "current": current }),
             Self::AdmissionUnsettled { correlation } => json!({ "correlation": correlation }),
             Self::DecisionOpen { decision_id } => json!({ "decision_id": decision_id }),
             Self::DecisionClosed { state } => json!({ "state": state }),
@@ -419,7 +420,7 @@ impl IdentityRefusalKind {
             | Self::RequesterCannotDecide
             | Self::ApproverNotEligible
             | Self::DecidedBeforePresentation
-            | Self::CreationHeld
+            | Self::ChangesHeld
             | Self::HostPreparationPending
             | Self::CandidateLaunch
             | Self::IdentityMember

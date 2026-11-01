@@ -10,12 +10,13 @@
 //! and the rules govern the changes of any identity, however it came to
 //! be. Who asks is recorded and grants nothing: an approval rule selects by
 //! the change, the requester's kind, and the target's profile and authority
-//! labels.
+//! labels. Context is no authority input: no selector reads it, and a host
+//! must not key policy on it.
 //!
 //! ```json
 //! {
 //!   "enabled": true,
-//!   "reserved_keys": {"labels": ["team", "clearance"], "context": ["project"]},
+//!   "reserved_keys": {"labels": ["team", "clearance"]},
 //!   "authority_fields": {"clearance": {"values": ["basic", "elevated"]}},
 //!   "preparation": "none",
 //!   "peers": {"rules": [{"id": "core", "target": {"labels": {"team": "core"}},
@@ -44,8 +45,7 @@ pub struct IdentityCreationConfig {
     /// disabled policy is still validated.
     #[serde(default)]
     pub enabled: bool,
-    /// The label and context keys only the host and approved authority
-    /// fields may set.
+    /// The label keys only the host and approved authority fields may set.
     #[serde(default)]
     pub reserved_keys: ReservedKeysConfig,
     /// The authority fields a request may set on any identity, by reserved
@@ -67,7 +67,8 @@ pub struct IdentityCreationConfig {
     pub approval: ApprovalConfig,
 }
 
-/// `reserved_keys`: label and context keys a request may never set.
+/// `reserved_keys`: label keys a request sets only as an authority field.
+/// Context has no reserved keys: it is no authority input.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
@@ -75,9 +76,6 @@ pub struct ReservedKeysConfig {
     /// Reserved label keys, beside Meta's own.
     #[serde(default)]
     pub labels: Vec<String>,
-    /// Reserved context keys.
-    #[serde(default)]
-    pub context: Vec<String>,
 }
 
 /// One authority field the policy declares: `{"values": [..]}`. A schema

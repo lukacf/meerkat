@@ -2584,7 +2584,7 @@ fn every_refusal_kind() -> Vec<IdentityRefusalKind> {
         IdentityRefusalKind::ValidationRefused {
             reason: "r".to_owned(),
         },
-        IdentityRefusalKind::CreationDenied {
+        IdentityRefusalKind::ChangeDenied {
             change: ChangeClass::Create,
         },
         IdentityRefusalKind::InvalidRequest {
@@ -2595,7 +2595,7 @@ fn every_refusal_kind() -> Vec<IdentityRefusalKind> {
         },
         IdentityRefusalKind::IdentityUnknown,
         IdentityRefusalKind::SelfChangeRefused,
-        IdentityRefusalKind::StaleRevision { current: 1 },
+        IdentityRefusalKind::StaleSpec { current: 1 },
         IdentityRefusalKind::OperationReused,
         IdentityRefusalKind::AdmissionUnsettled {
             correlation: "c".to_owned(),
@@ -2628,7 +2628,7 @@ fn every_refusal_kind() -> Vec<IdentityRefusalKind> {
         IdentityRefusalKind::RequesterCannotDecide,
         IdentityRefusalKind::ApproverNotEligible,
         IdentityRefusalKind::DecidedBeforePresentation,
-        IdentityRefusalKind::CreationHeld,
+        IdentityRefusalKind::ChangesHeld,
         IdentityRefusalKind::HostPreparationPending,
         IdentityRefusalKind::CandidateLaunch,
         IdentityRefusalKind::IdentityMember,
@@ -2651,12 +2651,12 @@ fn every_refusal_kind() -> Vec<IdentityRefusalKind> {
             | IdentityRefusalKind::PeerUnknown
             | IdentityRefusalKind::BatchTooLarge { .. }
             | IdentityRefusalKind::ValidationRefused { .. }
-            | IdentityRefusalKind::CreationDenied { .. }
+            | IdentityRefusalKind::ChangeDenied { .. }
             | IdentityRefusalKind::InvalidRequest { .. }
             | IdentityRefusalKind::Unsupported { .. }
             | IdentityRefusalKind::IdentityUnknown
             | IdentityRefusalKind::SelfChangeRefused
-            | IdentityRefusalKind::StaleRevision { .. }
+            | IdentityRefusalKind::StaleSpec { .. }
             | IdentityRefusalKind::OperationReused
             | IdentityRefusalKind::AdmissionUnsettled { .. }
             | IdentityRefusalKind::NotTransferring
@@ -2683,7 +2683,7 @@ fn every_refusal_kind() -> Vec<IdentityRefusalKind> {
             | IdentityRefusalKind::RequesterCannotDecide
             | IdentityRefusalKind::ApproverNotEligible
             | IdentityRefusalKind::DecidedBeforePresentation
-            | IdentityRefusalKind::CreationHeld
+            | IdentityRefusalKind::ChangesHeld
             | IdentityRefusalKind::HostPreparationPending
             | IdentityRefusalKind::CandidateLaunch
             | IdentityRefusalKind::IdentityMember

@@ -6360,9 +6360,9 @@ async fn workgraph_list_items(
 ) -> Result<Json<meerkat::WorkGraphItemsResponse>, ApiError> {
     state
         .workgraph_service
-        .list(query.into())
+        .list_page(query.into())
         .await
-        .map(|items| Json(meerkat::WorkGraphItemsResponse { items }))
+        .map(Json)
         .map_err(workgraph_error_to_api)
 }
 
@@ -6386,9 +6386,9 @@ async fn workgraph_ready(
 ) -> Result<Json<meerkat::WorkGraphItemsResponse>, ApiError> {
     state
         .workgraph_service
-        .ready(query.into())
+        .ready_page(query.into())
         .await
-        .map(|items| Json(meerkat::WorkGraphItemsResponse { items }))
+        .map(Json)
         .map_err(workgraph_error_to_api)
 }
 

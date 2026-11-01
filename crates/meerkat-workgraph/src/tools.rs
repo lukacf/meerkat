@@ -308,17 +308,29 @@ pub(crate) async fn handle_workgraph_tools_call(
         WorkGraphToolContract::List => {
             let filter: WorkItemFilter = parse(arguments)?;
             service
-                .list(filter)
+                .list_page(filter)
                 .await
-                .map(|items| json!({ "items": items }))
+                .map(|page| {
+                    json!({
+                        "items": page.items,
+                        "total_items": page.total_items,
+                        "truncated": page.truncated,
+                    })
+                })
                 .map_err(map_error)
         }
         WorkGraphToolContract::Ready => {
             let filter: ReadyWorkFilter = parse(arguments)?;
             service
-                .ready(filter)
+                .ready_page(filter)
                 .await
-                .map(|items| json!({ "items": items }))
+                .map(|page| {
+                    json!({
+                        "items": page.items,
+                        "total_items": page.total_items,
+                        "truncated": page.truncated,
+                    })
+                })
                 .map_err(map_error)
         }
         WorkGraphToolContract::Snapshot => {

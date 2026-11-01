@@ -29,8 +29,8 @@ use crate::types::{
     WorkCompletionPolicy, WorkEdge, WorkEdgeKind, WorkEvidenceKind, WorkEvidenceRef,
     WorkExecutionBinding, WorkExecutionBindingFilter, WorkExecutionBindingId,
     WorkExecutionEvidenceKind, WorkExecutionEvidenceProjection, WorkGraphEvent, WorkGraphEventKind,
-    WorkGraphSnapshot, WorkGraphSnapshotFilter, WorkItem, WorkItemFilter, WorkItemId, WorkItemRef,
-    WorkNamespace, WorkOwnerKey, WorkStatus,
+    WorkGraphItemsResponse, WorkGraphSnapshot, WorkGraphSnapshotFilter, WorkItem, WorkItemFilter,
+    WorkItemId, WorkItemRef, WorkNamespace, WorkOwnerKey, WorkStatus,
 };
 use crate::{
     ChildJoinDisposition, WorkExecutionLifecycleEffect, WorkExecutionMachine,
@@ -76,38 +76,37 @@ const EXECUTION_PROJECTION_CAS_ATTEMPTS: usize = 8;
 const MAX_REVIEWER_QUORUM_THRESHOLD: u16 = 64;
 const DEFAULT_COLLECTION_LIMIT: usize = 100;
 const MAX_COLLECTION_LIMIT: usize = 1000;
-const MAX_ATOMIC_SNAPSHOT_EDGES: usize = 1000;
-const MAX_ATOMIC_SNAPSHOT_ATTENTION: usize = 1000;
-const MAX_ATOMIC_READY_ITEMS: usize = 1000;
 
 /// Whether `item` is terminal (`completed`, `cancelled`, `failed`). A terminal
 /// item has no transition back to `open`, so it is never ready again; it still
 /// resolves blockers and child joins for the live items that reference it. An
-/// item whose terminality cannot be classified counts as live, so the atomic
-/// ceilings below never shrink on a malformed row.
+/// item whose terminality cannot be classified counts as live, so `ready`
+/// still hands it to the readiness classifier.
 fn is_terminal_item(item: &WorkItem) -> bool {
     WorkGraphMachine::classify_terminality(item).unwrap_or(false)
 }
 
-/// Items that count against the atomic ready/snapshot ceiling: the live
-/// (non-terminal) working set. Closed history does not consume the ceiling.
-fn live_item_count(items: &[WorkItem]) -> usize {
-    items.iter().filter(|item| !is_terminal_item(item)).count()
+/// The `list` and `snapshot` order: `updated_at` descending, then `id`
+/// descending, so a cut keeps the most recently updated items. It compares the
+/// decoded timestamps, never the order a store returned its rows in.
+fn most_recently_updated_first(left: &WorkItem, right: &WorkItem) -> std::cmp::Ordering {
+    right
+        .updated_at
+        .cmp(&left.updated_at)
+        .then_with(|| right.id.cmp(&left.id))
 }
 
-/// Edges that count against the atomic snapshot edge ceiling: those touching at
-/// least one live item. An edge between two terminal items can no longer change
-/// any item's readiness.
-fn live_edge_count(items: &[WorkItem], edges: &[WorkEdge]) -> usize {
-    let terminal = items
-        .iter()
-        .filter(|item| is_terminal_item(item))
-        .map(|item| &item.id)
-        .collect::<BTreeSet<_>>();
-    edges
-        .iter()
-        .filter(|edge| !(terminal.contains(&edge.from_id) && terminal.contains(&edge.to_id)))
-        .count()
+/// Cut `items`, already in the read's order, to `limit`, reporting how many
+/// matched before the cut.
+fn work_items_page(mut items: Vec<WorkItem>, limit: usize) -> WorkGraphItemsResponse {
+    let total_items = items.len();
+    items.truncate(limit);
+    let truncated = total_items > items.len();
+    WorkGraphItemsResponse {
+        items,
+        total_items: Some(total_items),
+        truncated: Some(truncated),
+    }
 }
 
 fn bounded_collection_limit(limit: Option<usize>) -> Result<usize, WorkGraphError> {
@@ -1063,13 +1062,40 @@ impl WorkGraphService {
             .ok_or_else(|| WorkGraphError::not_found(realm_id, namespace, id))
     }
 
+    /// The items `filter` selects, most recently updated first, cut at its
+    /// `limit`. See [`Self::list_page`] for the page totals.
     pub async fn list(&self, filter: WorkItemFilter) -> Result<Vec<WorkItem>, WorkGraphError> {
-        self.store
-            .list_items(self.normalize_item_filter(filter)?)
-            .await
+        self.list_page(filter).await.map(|page| page.items)
     }
 
+    /// One page of [`Self::list`] with `total_items` and `truncated`. The
+    /// store returns every matching item; the service orders them most
+    /// recently updated first and cuts at the filter's `limit`.
+    pub async fn list_page(
+        &self,
+        filter: WorkItemFilter,
+    ) -> Result<WorkGraphItemsResponse, WorkGraphError> {
+        let mut filter = self.normalize_item_filter(filter)?;
+        let limit = filter.limit.take().unwrap_or(DEFAULT_COLLECTION_LIMIT);
+        let mut items = self.store.list_items(filter).await?;
+        items.sort_by(most_recently_updated_first);
+        Ok(work_items_page(items, limit))
+    }
+
+    /// The ready items, by priority (high first), then creation time, then
+    /// id, cut at the filter's `limit`. See [`Self::ready_page`] for the page
+    /// totals.
     pub async fn ready(&self, filter: ReadyWorkFilter) -> Result<Vec<WorkItem>, WorkGraphError> {
+        self.ready_page(filter).await.map(|page| page.items)
+    }
+
+    /// One page of [`Self::ready`] with `total_items` (the ready items before
+    /// the cut) and `truncated`. Readiness is classified for every live item
+    /// of one namespace observation, however many the namespace holds.
+    pub async fn ready_page(
+        &self,
+        filter: ReadyWorkFilter,
+    ) -> Result<WorkGraphItemsResponse, WorkGraphError> {
         let output_limit = bounded_collection_limit(filter.limit)?;
         let (realm_id, namespace) =
             self.scope(filter.realm_id.clone(), filter.namespace.clone())?;
@@ -1077,34 +1103,14 @@ impl WorkGraphService {
             .store
             .read_namespace_graph(&realm_id, &namespace)
             .await?;
-        if live_item_count(&all_items) > MAX_ATOMIC_READY_ITEMS {
-            return Err(WorkGraphError::InvalidInput(format!(
-                "ready-set evaluation exceeds the atomic {MAX_ATOMIC_READY_ITEMS}-live-item limit; narrow the scope"
-            )));
-        }
-        let labels = filter.labels.clone();
-        let items_by_id = all_items
-            .iter()
-            .cloned()
-            .map(|item| (item.id.clone(), item))
-            .collect::<BTreeMap<_, _>>();
+        let graph = NamespaceGraphIndex::new(&all_items, &edges);
+        let labels = filter.labels;
         let mut ready = Vec::new();
-        // Terminal items are never ready: only the live set is evaluated, so the
-        // evaluation stays within the ceiling however much history the
-        // namespace holds.
+        // Terminal items are never ready: only the live set is classified.
         for item in all_items.iter().filter(|item| {
             !is_terminal_item(item) && labels.iter().all(|label| item.labels.contains(label))
         }) {
-            let joined = matches!(
-                child_join_disposition(item, &all_items, &edges)?,
-                ChildJoinDisposition::Satisfied
-            );
-            if WorkGraphMachine::classify_readiness_from_observation(
-                item,
-                now,
-                unresolved_blocker_count(item, &items_by_id, &edges)?,
-                joined,
-            )? {
+            if graph.is_ready(item, now)? {
                 ready.push(item.clone());
             }
         }
@@ -1115,10 +1121,15 @@ impl WorkGraphService {
                 .then_with(|| left.created_at.cmp(&right.created_at))
                 .then_with(|| left.id.cmp(&right.id))
         });
-        ready.truncate(output_limit);
-        Ok(ready)
+        Ok(work_items_page(ready, output_limit))
     }
 
+    /// One observation of the namespace: the items `filter` selects, most
+    /// recently updated first and cut at its `limit`, with `total_items` and
+    /// `truncated`, the edges between returned items, their attention
+    /// bindings, and the returned items that are ready. Readiness is
+    /// classified against the whole namespace, so a blocker outside the page
+    /// still blocks.
     pub async fn snapshot(
         &self,
         filter: WorkGraphSnapshotFilter,
@@ -1136,22 +1147,7 @@ impl WorkGraphService {
             .store
             .read_namespace_snapshot(&realm_id, &namespace)
             .await?;
-        if live_item_count(&read.items) > MAX_ATOMIC_READY_ITEMS {
-            return Err(WorkGraphError::InvalidInput(format!(
-                "snapshot ready-set evaluation exceeds the atomic {MAX_ATOMIC_READY_ITEMS}-live-item limit; narrow the scope"
-            )));
-        }
-        if live_edge_count(&read.items, &read.edges) > MAX_ATOMIC_SNAPSHOT_EDGES {
-            return Err(WorkGraphError::InvalidInput(format!(
-                "snapshot exceeds the atomic {MAX_ATOMIC_SNAPSHOT_EDGES}-edge scan limit; narrow the namespace/item scope"
-            )));
-        }
-        if read.attention.len() > MAX_ATOMIC_SNAPSHOT_ATTENTION {
-            return Err(WorkGraphError::InvalidInput(format!(
-                "snapshot exceeds the atomic {MAX_ATOMIC_SNAPSHOT_ATTENTION}-attention scan limit; narrow the namespace/item scope"
-            )));
-        }
-        let mut items = read
+        let mut matching = read
             .items
             .iter()
             .filter(|item| {
@@ -1163,24 +1159,20 @@ impl WorkGraphService {
                     && (filter.include_terminal
                         || !WorkGraphMachine::classify_terminality(item).unwrap_or(true))
             })
-            .cloned()
             .collect::<Vec<_>>();
-        items.sort_by(|left, right| {
-            left.updated_at
-                .cmp(&right.updated_at)
-                .then_with(|| left.id.cmp(&right.id))
-        });
-        items.truncate(filter.limit.unwrap_or(DEFAULT_COLLECTION_LIMIT));
-        let included_item_refs = items
+        matching.sort_by(|left, right| most_recently_updated_first(left, right));
+        let total_items = matching.len();
+        matching.truncate(filter.limit.unwrap_or(DEFAULT_COLLECTION_LIMIT));
+        let included_item_refs = matching
             .iter()
-            .map(|item| (item.namespace.clone(), item.id.clone()))
+            .map(|item| (&item.namespace, &item.id))
             .collect::<BTreeSet<_>>();
         let edges = read
             .edges
             .iter()
             .filter(|edge| {
-                included_item_refs.contains(&(edge.namespace.clone(), edge.from_id.clone()))
-                    && included_item_refs.contains(&(edge.namespace.clone(), edge.to_id.clone()))
+                included_item_refs.contains(&(&edge.namespace, &edge.from_id))
+                    && included_item_refs.contains(&(&edge.namespace, &edge.to_id))
             })
             .cloned()
             .collect::<Vec<_>>();
@@ -1188,34 +1180,20 @@ impl WorkGraphService {
             .attention
             .iter()
             .filter(|binding| {
-                included_item_refs.contains(&(
-                    binding.work_ref.namespace.clone(),
-                    binding.work_ref.item_id.clone(),
-                ))
+                included_item_refs
+                    .contains(&(&binding.work_ref.namespace, &binding.work_ref.item_id))
             })
             .cloned()
             .collect::<Vec<_>>();
-        let all_items_by_id = read
-            .items
-            .iter()
-            .cloned()
-            .map(|item| (item.id.clone(), item))
-            .collect::<BTreeMap<_, _>>();
+        let graph = NamespaceGraphIndex::new(&read.items, &read.edges);
         let mut ready_item_ids = Vec::new();
-        for item in &items {
-            let joined = matches!(
-                child_join_disposition(item, &read.items, &read.edges)?,
-                ChildJoinDisposition::Satisfied
-            );
-            if WorkGraphMachine::classify_readiness_from_observation(
-                item,
-                read.captured_at,
-                unresolved_blocker_count(item, &all_items_by_id, &read.edges)?,
-                joined,
-            )? {
+        for item in &matching {
+            if graph.is_ready(item, read.captured_at)? {
                 ready_item_ids.push(item.id.clone());
             }
         }
+        let items = matching.into_iter().cloned().collect::<Vec<_>>();
+        let truncated = total_items > items.len();
 
         Ok(WorkGraphSnapshot {
             realm_id,
@@ -1227,6 +1205,8 @@ impl WorkGraphService {
             edges,
             attention,
             ready_item_ids,
+            total_items: Some(total_items),
+            truncated: Some(truncated),
         })
     }
 
@@ -1949,27 +1929,107 @@ impl WorkGraphService {
     }
 }
 
-fn child_join_disposition(
-    item: &WorkItem,
-    items: &[WorkItem],
-    edges: &[WorkEdge],
-) -> Result<ChildJoinDisposition, WorkGraphError> {
-    let children = edges
-        .iter()
-        .filter(|edge| edge.kind == WorkEdgeKind::Parent && edge.to_id == item.id)
-        .filter_map(|edge| items.iter().find(|candidate| candidate.id == edge.from_id));
-    let mut active = 0u64;
-    let mut failed = 0u64;
-    let mut cancelled = 0u64;
-    for child in children {
-        match child.status {
-            WorkStatus::Completed => {}
-            WorkStatus::Failed => failed = failed.saturating_add(1),
-            WorkStatus::Cancelled => cancelled = cancelled.saturating_add(1),
-            _ => active = active.saturating_add(1),
+/// Per-call indexes over one namespace observation, built once by `ready` and
+/// `snapshot`: items by id, the children of each parent (`parent` edges point
+/// from the child to the parent) and the blockers of each blocked item
+/// (`blocks` edges), both in edge order. The readiness inputs are counted
+/// from them instead of scanning every item or edge for each item, so a read
+/// costs about the items plus the edges it observes. The counts the machine
+/// receives do not change.
+struct NamespaceGraphIndex<'a> {
+    items_by_id: BTreeMap<&'a WorkItemId, &'a WorkItem>,
+    children_by_parent: BTreeMap<&'a WorkItemId, Vec<&'a WorkItemId>>,
+    blockers_by_blocked: BTreeMap<&'a WorkItemId, Vec<&'a WorkItemId>>,
+}
+
+impl<'a> NamespaceGraphIndex<'a> {
+    fn new(items: &'a [WorkItem], edges: &'a [WorkEdge]) -> Self {
+        let mut children_by_parent = BTreeMap::<_, Vec<_>>::new();
+        let mut blockers_by_blocked = BTreeMap::<_, Vec<_>>::new();
+        for edge in edges {
+            match edge.kind {
+                WorkEdgeKind::Parent => children_by_parent
+                    .entry(&edge.to_id)
+                    .or_default()
+                    .push(&edge.from_id),
+                WorkEdgeKind::Blocks => blockers_by_blocked
+                    .entry(&edge.to_id)
+                    .or_default()
+                    .push(&edge.from_id),
+                WorkEdgeKind::Related | WorkEdgeKind::Supersedes | WorkEdgeKind::DerivedFrom => {}
+            }
+        }
+        Self {
+            items_by_id: items.iter().map(|item| (&item.id, item)).collect(),
+            children_by_parent,
+            blockers_by_blocked,
         }
     }
-    WorkGraphMachine::classify_child_join(item, active, failed, cancelled)
+
+    /// Whether the machine classifies `item` ready at `observed_at`, given
+    /// its child join and its unresolved blockers in this observation.
+    fn is_ready(
+        &self,
+        item: &WorkItem,
+        observed_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool, WorkGraphError> {
+        let joined = matches!(
+            self.child_join_disposition(item)?,
+            ChildJoinDisposition::Satisfied
+        );
+        WorkGraphMachine::classify_readiness_from_observation(
+            item,
+            observed_at,
+            self.unresolved_blocker_count(item)?,
+            joined,
+        )
+    }
+
+    fn child_join_disposition(
+        &self,
+        item: &WorkItem,
+    ) -> Result<ChildJoinDisposition, WorkGraphError> {
+        let children = self
+            .children_by_parent
+            .get(&item.id)
+            .into_iter()
+            .flatten()
+            .filter_map(|child_id| self.items_by_id.get(child_id));
+        let mut active = 0u64;
+        let mut failed = 0u64;
+        let mut cancelled = 0u64;
+        for child in children {
+            match child.status {
+                WorkStatus::Completed => {}
+                WorkStatus::Failed => failed = failed.saturating_add(1),
+                WorkStatus::Cancelled => cancelled = cancelled.saturating_add(1),
+                _ => active = active.saturating_add(1),
+            }
+        }
+        WorkGraphMachine::classify_child_join(item, active, failed, cancelled)
+    }
+
+    /// Count the unresolved blocking edges for `item`.
+    ///
+    /// The per-blocking-edge SATISFACTION verdict ("is this blocker resolved?")
+    /// is a machine fact: the shell extracts only the raw blocker lifecycle
+    /// phase and drives the canonical `WorkGraphLifecycleMachine`'s
+    /// `ClassifyBlockerSatisfied` input, mirroring the emitted verdict. This
+    /// function performs only the mechanical fan-in (counting the unsatisfied
+    /// edges); it decides no satisfaction class itself. The resulting count is
+    /// fed to `RefreshEligibility` / `Claim`, which the machine revalidates via
+    /// its `dependencies_satisfied` guard. Fails closed on any classification
+    /// refusal.
+    fn unresolved_blocker_count(&self, item: &WorkItem) -> Result<u64, WorkGraphError> {
+        let mut unresolved: u64 = 0;
+        for blocker_id in self.blockers_by_blocked.get(&item.id).into_iter().flatten() {
+            let blocker = self.items_by_id.get(blocker_id).copied();
+            if !WorkGraphMachine::classify_blocker_satisfied(item, blocker)? {
+                unresolved = unresolved.saturating_add(1);
+            }
+        }
+        Ok(unresolved)
+    }
 }
 
 fn attention_updated_event(
@@ -2350,34 +2410,6 @@ fn validate_completion_policy(policy: &WorkCompletionPolicy) -> Result<(), WorkG
         )));
     }
     Ok(())
-}
-
-/// Count the unresolved blocking edges for `item`.
-///
-/// The per-blocking-edge SATISFACTION verdict ("is this blocker resolved?") is a
-/// machine fact: the shell extracts only the raw blocker lifecycle phase and
-/// drives the canonical `WorkGraphLifecycleMachine`'s `ClassifyBlockerSatisfied`
-/// input, mirroring the emitted verdict. This function performs only the
-/// mechanical fan-in (counting the unsatisfied edges); it decides no satisfaction
-/// class itself. The resulting count is fed to `RefreshEligibility` / `Claim`,
-/// which the machine revalidates via its `dependencies_satisfied` guard. Fails
-/// closed on any classification refusal.
-fn unresolved_blocker_count(
-    item: &WorkItem,
-    all_items: &BTreeMap<WorkItemId, WorkItem>,
-    edges: &[WorkEdge],
-) -> Result<u64, WorkGraphError> {
-    let mut unresolved: u64 = 0;
-    for edge in edges
-        .iter()
-        .filter(|edge| edge.kind == WorkEdgeKind::Blocks && edge.to_id == item.id)
-    {
-        let blocker = all_items.get(&edge.from_id);
-        if !WorkGraphMachine::classify_blocker_satisfied(item, blocker)? {
-            unresolved = unresolved.saturating_add(1);
-        }
-    }
-    Ok(unresolved)
 }
 
 impl WorkExecutionBridge {
@@ -3921,7 +3953,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_applies_owner_default_before_cloning_results() {
+    async fn list_applies_the_default_limit() {
         let service = WorkGraphService::new(Arc::new(MemoryWorkGraphStore::new()));
         for index in 0..=super::DEFAULT_COLLECTION_LIMIT {
             service

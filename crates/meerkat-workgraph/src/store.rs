@@ -5174,11 +5174,37 @@ fn list_sqlite_items(
     conn: &Connection,
     filter: &WorkItemFilter,
 ) -> Result<Vec<WorkItem>, WorkGraphError> {
+    // Scope pushdown over the realm/namespace index, so a read decodes only
+    // the rows of its own scope. The Rust-side filter remains the final
+    // authority over every returned row.
+    let mut clauses: Vec<String> = Vec::new();
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+    if let Some(realm_id) = &filter.realm_id {
+        params.push(Box::new(realm_id.clone()));
+        clauses.push(format!("realm_id = ?{}", params.len()));
+    }
+    if !filter.all_namespaces
+        && let Some(namespace) = &filter.namespace
+    {
+        params.push(Box::new(namespace.as_str().to_string()));
+        clauses.push(format!("namespace = ?{}", params.len()));
+    }
+    let where_clause = if clauses.is_empty() {
+        String::new()
+    } else {
+        format!(" WHERE {}", clauses.join(" AND "))
+    };
+    let sql = format!(
+        "SELECT item_json FROM workgraph_items{where_clause}
+         ORDER BY updated_at_utc ASC, item_id ASC"
+    );
     let mut stmt = conn
-        .prepare("SELECT item_json FROM workgraph_items ORDER BY updated_at_utc ASC, item_id ASC")
+        .prepare(&sql)
         .map_err(|err| WorkGraphError::Store(err.to_string()))?;
     let rows = stmt
-        .query_map([], |row| row_json::<WorkItem>(row, 0))
+        .query_map(rusqlite::params_from_iter(params.iter()), |row| {
+            row_json::<WorkItem>(row, 0)
+        })
         .map_err(|err| WorkGraphError::Store(err.to_string()))?;
     let mut items = Vec::new();
     for row in rows {

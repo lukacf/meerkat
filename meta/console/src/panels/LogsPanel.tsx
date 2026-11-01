@@ -18,6 +18,7 @@ import {
   TechnicalId,
   agentDisplayName,
   formatAbsoluteTime,
+  formatShortDate,
   formatTimeRange,
   plural,
   standardPanelMenu,
@@ -115,7 +116,9 @@ function DetailFacts({ entry, directory }: { entry: ActivityEntry; directory: Ag
       {entry.atMs ? (
         <span className="logline__fact">
           <span className="logline__fact-label">Time</span>
-          <time dateTime={new Date(entry.atMs).toISOString()}>{formatAbsoluteTime(entry.atMs)}</time>
+          <time dateTime={new Date(entry.atMs).toISOString()} title={formatAbsoluteTime(entry.atMs)}>
+            {`${formatShortDate(entry.atMs)} ${formatLogTime(entry.atMs)}`}
+          </time>
         </span>
       ) : null}
     </div>

@@ -2252,6 +2252,13 @@ button.cc-figure:focus-visible { outline: 2px solid var(--_cc-focus-ring); outli
   min-height: 24px;
 }
 .cc-drawer__titles { flex: 1 1 auto; min-width: 0; }
+.cc-drawer__title-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  min-width: 0;
+}
 .cc-drawer__title {
   margin: 0;
   font-family: var(--_cc-font-display);
@@ -2273,7 +2280,7 @@ button.cc-figure:focus-visible { outline: 2px solid var(--_cc-focus-ring); outli
   font-size: var(--_cc-panel-fs-meta);
   color: var(--_cc-foreground-meta);
 }
-.cc-drawer__status { flex: none; margin-top: 3px; }
+.cc-drawer__status { display: inline-flex; flex: none; }
 .cc-drawer__tools {
   display: inline-flex;
   flex: none;

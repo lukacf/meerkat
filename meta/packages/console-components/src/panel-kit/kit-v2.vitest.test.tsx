@@ -826,6 +826,26 @@ describe("filter bar", () => {
     fireEvent.keyDown(view.getByTestId("elsewhere"), { key: "/" });
     expect(document.activeElement === view.getByTestId("filter-search")).toBe(true);
   });
+
+  it("takes each chip's key as its React key, never spread into the chip", () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const view = render(
+        <FilterBar
+          ariaLabel="Memory filters"
+          chips={[
+            { key: "facts", label: "Facts", count: 12, pressed: false, onToggle: () => {} },
+            { key: "gotchas", label: "Gotchas", count: 3, pressed: true, onToggle: () => {} },
+          ]}
+        />,
+      );
+      expect(view.getAllByRole("button", { pressed: true }).map((chip) => chip.textContent)).toEqual(["Gotchas3"]);
+      const spread = error.mock.calls.filter((call) => String(call[0]).includes('"key" prop is being spread'));
+      expect(spread.length).toBe(0);
+    } finally {
+      error.mockRestore();
+    }
+  });
 });
 
 describe("navigation", () => {

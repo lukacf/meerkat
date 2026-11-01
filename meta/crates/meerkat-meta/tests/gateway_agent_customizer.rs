@@ -84,7 +84,12 @@ fn append(record: &Path, line: &str) {
         .append(true)
         .open(record)
         .expect("record");
-    writeln!(file, "{line}").expect("append");
+    // The host process and the driver append to the same record. One write
+    // per line: `writeln!` may write the line and its newline separately, so
+    // another writer's line could land between them, while a single append
+    // write stays whole.
+    file.write_all(format!("{line}\n").as_bytes())
+        .expect("append");
 }
 
 /// A host wrapper around the gateway's composed customizer. It records each

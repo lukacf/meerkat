@@ -155,6 +155,7 @@ export const CONSOLE_COMMAND_NAMES = {
   topologyApply: "topologyApply",
   topologyOperationGet: "topologyOperationGet",
   topologyAuditQuery: "topologyAuditQuery",
+  topologyMobEvents: "topologyMobEvents",
 } as const;
 
 export type ConsoleCommandName = typeof CONSOLE_COMMAND_NAMES[keyof typeof CONSOLE_COMMAND_NAMES];
@@ -423,6 +424,12 @@ const CONSOLE_COMMAND_SPECS: Record<ConsoleCommandName, ConsoleCommandSpec> = {
   },
   [CONSOLE_COMMAND_NAMES.topologyAuditQuery]: {
     method: CONSOLE_RPC_METHODS.topologyAuditQuery,
+    targetKinds: new Set<MetaWorkbenchTarget["kind"]>(["meta/topology"]),
+  },
+  // The topology's typed lineage (member_spawned with its source member),
+  // read only.
+  [CONSOLE_COMMAND_NAMES.topologyMobEvents]: {
+    method: CONSOLE_RPC_METHODS.mobEventsQuery,
     targetKinds: new Set<MetaWorkbenchTarget["kind"]>(["meta/topology"]),
   },
 };

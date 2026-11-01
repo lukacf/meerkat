@@ -3304,11 +3304,15 @@ async function runTopologyUnavailableBrowserProof() {
     await gotoConsole(page, `${server.baseUrl}/console`);
     await page.getByTestId("nav:topology").click();
     await page.getByTestId("topology-panel").waitFor({ timeout: 10_000 });
+    // Edit connections lives in the panel's overflow menu.
+    await page.getByTestId("topology-menu").click();
+    await page.getByRole("menu").waitFor({ timeout: 10_000 });
     assert.equal(
       await page.getByTestId("topology-view:connections").count(),
       0,
       "a topology-unaware runtime must retain the passive graph without mutation controls",
     );
+    await page.keyboard.press("Escape");
     assert.equal(await page.getByText(/connect all/i).count(), 0);
     assert.equal(
       rpcMethodsFromRequests(server.requests).includes("meta/topology/query"),
@@ -3417,6 +3421,8 @@ async function runTopologyDeniedPairBrowserProof() {
     const page = await browser.newPage();
     await gotoConsole(page, `${server.baseUrl}/console`);
     await page.getByTestId("nav:topology").click();
+    // Edit connections lives in the panel's overflow menu.
+    await page.getByTestId("topology-menu").click();
     await page.getByTestId("topology-view:connections").waitFor({ timeout: 10_000 });
     await page.getByTestId("topology-view:connections").click();
     const sourceId = stockTopologyEndpointId("mock-mob", "identity:luka");
@@ -3567,6 +3573,7 @@ async function runTopologyAmbiguousCommitBrowserProof() {
     const page = await browser.newPage();
     await gotoConsole(page, `${server.baseUrl}/console`);
     await page.getByTestId("nav:topology").click();
+    await page.getByTestId("topology-menu").click();
     await page.getByTestId("topology-view:connections").click();
     const sourceId = stockTopologyEndpointId("mock-mob", "identity:luka");
     const targetId = stockTopologyEndpointId("mock-mob", "legacy-router");

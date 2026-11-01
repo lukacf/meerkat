@@ -2404,6 +2404,43 @@
               ]
             }
           ]
+        },
+        "meta/mob_events/query": {
+          "policy_error_refs": [
+            "#/surfaces/rpc/policy_errors/access_denied"
+          ],
+          "request": {
+            "optional_fields": [
+              "since_ms",
+              "until_ms",
+              "member_id",
+              "identity",
+              "mob_id",
+              "run_id",
+              "step_id",
+              "event_types",
+              "limit",
+              "after_seq"
+            ],
+            "note": "Read only. Structural mob events (member_spawned, members_wired, members_unwired and the rest) in cursor order; -32010 here is a stale after_seq cursor (data.error event_query_stale), not the read-only refusal."
+          },
+          "success": {
+            "required_fields": [
+              "events",
+              "next_after_seq"
+            ]
+          },
+          "errors": [
+            {
+              "codes": [
+                -32030,
+                -32010,
+                -32602,
+                -32000,
+                -32601
+              ]
+            }
+          ]
         }
       }
     },

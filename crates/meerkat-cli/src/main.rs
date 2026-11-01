@@ -10535,8 +10535,8 @@ async fn handle_workgraph_command(
             limit,
             json,
         } => {
-            let items = service
-                .list(meerkat::WorkItemFilter {
+            let page = service
+                .list_page(meerkat::WorkItemFilter {
                     realm_id: None,
                     namespace: parse_work_namespace(namespace)?,
                     all_namespaces,
@@ -10546,7 +10546,7 @@ async fn handle_workgraph_command(
                     limit,
                 })
                 .await?;
-            print_workgraph_items(items, json)
+            print_workgraph_items(page, json)
         }
         WorkGraphCommands::Show {
             id,
@@ -10573,15 +10573,15 @@ async fn handle_workgraph_command(
             limit,
             json,
         } => {
-            let items = service
-                .ready(meerkat::ReadyWorkFilter {
+            let page = service
+                .ready_page(meerkat::ReadyWorkFilter {
                     realm_id: None,
                     namespace: parse_work_namespace(namespace)?,
                     labels,
                     limit,
                 })
                 .await?;
-            print_workgraph_items(items, json)
+            print_workgraph_items(page, json)
         }
         WorkGraphCommands::Snapshot {
             namespace,
@@ -10857,14 +10857,14 @@ fn parse_work_namespace(
         .map_err(Into::into)
 }
 
-fn print_workgraph_items(items: Vec<meerkat::WorkItem>, json: bool) -> anyhow::Result<()> {
+/// `--json` prints the page as the service returns it: the rows, then
+/// `total_items` and `truncated`.
+fn print_workgraph_items(page: meerkat::WorkGraphItemsResponse, json: bool) -> anyhow::Result<()> {
     if json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&serde_json::json!({ "items": items }))?
-        );
+        println!("{}", serde_json::to_string_pretty(&page)?);
         return Ok(());
     }
+    let items = page.items;
     if items.is_empty() {
         println!("No WorkGraph items found.");
         return Ok(());

@@ -317,11 +317,6 @@ export function RecordsTab(props: RecordsTabProps): React.JSX.Element {
           {`Least useful first: records given to agents at least ${DEAD_INJECTION_THRESHOLD} times and never judged useful lead, marked Never useful. Space spent is estimated from how often each was given and its size.`}
         </Notice>
       ) : null}
-      {multiRealm && !filter.realm?.trim() ? (
-        <Notice testId="memory-multi-realm-note">
-          This page combines records from several spaces. Pick a space to page through its records.
-        </Notice>
-      ) : null}
       {!loaded || pageLoading ? <LoadingState label="Loading records" rows={4} /> : null}
       {empty ? (
         recordsDenied || listView.denied ? (

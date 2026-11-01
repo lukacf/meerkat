@@ -77,6 +77,7 @@ export type MetaDockTarget =
   | AccessPanelTarget
   | MemoryPanelTarget
   | WorkGraphPanelTarget
+  | SchedulesPanelTarget
   | OperatorPanelTarget
   | import("@console-core").ConsoleCustomPanelTarget;
 
@@ -168,6 +169,11 @@ export interface WorkGraphPanelTarget extends ConsoleDockTarget {
   kind: "workgraph";
 }
 
+/** The Schedules workbench panel: what runs automatically, and when. */
+export interface SchedulesPanelTarget extends ConsoleDockTarget {
+  kind: "schedules";
+}
+
 export function buildPanelConversationKey(
   panelId: string,
   target: Pick<ConsoleDockTarget, "kind" | "id"> & Partial<Pick<AgentChatTarget, "identity" | "memberId" | "addressingMode">> | null,
@@ -236,7 +242,7 @@ export function buildInspectTarget(agent: ConsoleAgent): IdentityInspectTarget {
 
 export type ControlTargetKind =
   | "routing" | "gating" | "topology" | "health"
-  | "timeline" | "roster" | "gates" | "logs" | "access" | "memory" | "workgraph";
+  | "timeline" | "roster" | "gates" | "logs" | "access" | "memory" | "workgraph" | "schedules";
 
 export function buildControlTarget(kind: ControlTargetKind): MetaDockTarget {
   switch (kind) {
@@ -262,6 +268,8 @@ export function buildControlTarget(kind: ControlTargetKind): MetaDockTarget {
       return { id: "memory", kind, title: "Memory", subtitle: "Records, quarantine, dreams", iconName: "i-archive" };
     case "workgraph":
       return { id: "workgraph", kind, title: "WorkGraph", subtitle: "Goals, work items, and attention", iconName: "i-cube" };
+    case "schedules":
+      return { id: "schedules", kind, title: "Schedules", subtitle: "What runs automatically, and when", iconName: "i-clock" };
     default:
       return { id: "health", kind: "health", title: "Health" };
   }
@@ -4426,6 +4434,13 @@ export function systemNoticeClearsBusyState(frame: ConsoleFrame): boolean {
   return legacyPeerNoticeTextCandidates(record).some(isLegacyPeerNoticeText);
 }
 
+/** A typed comms notice without a request id: named by the frame it came
+ * in (its id, else its cursor) and the block's place in it, so every plain
+ * message from one peer gets its own id. */
+function typedCommsFallbackId(peerLabel: string, kind: string, frameKey: string | undefined, index: number): string {
+  return `typed-comms:${peerLabel}:${kind}:${frameKey || "frame"}:${index}`;
+}
+
 function typedSystemNoticeBlocksToRich(
   blocks: unknown,
   body: unknown,
@@ -4433,6 +4448,7 @@ function typedSystemNoticeBlocksToRich(
   sourceKind?: string,
   consumeDuplicateCommsBlock?: (key: string) => boolean,
   textMode: ConversationTextMode = "legacy",
+  frameKey?: string,
 ): ConversationRichBlock[] {
   const rich: ConversationRichBlock[] = [];
   const bodyText = textFromUnknown(body);
@@ -4479,7 +4495,7 @@ function typedSystemNoticeBlocksToRich(
       const kind = textFromUnknown(record.kind) || "message";
       const direction = textFromUnknown(record.direction);
       const intent = textFromUnknown(record.intent);
-      const requestId = textFromUnknown(record.request_id) || `typed-comms:${peerLabel}:${kind}`;
+      const requestId = textFromUnknown(record.request_id) || typedCommsFallbackId(peerLabel, kind, frameKey, index);
       const contentBlocks = typedNoticeContentBlocks(record.content, blobBaseUrl);
       const contentText = contentBlocks
         .map((item) => item.type === "paragraph" ? item.text : "")
@@ -4599,6 +4615,8 @@ function historyMessageText(
   sourceKind?: string,
   consumeDuplicateCommsBlock?: (key: string) => boolean,
   textMode: ConversationTextMode = "markdown",
+  /** The frame's id (else its cursor): names typed comms notices without a request id. */
+  frameKey?: string,
 ): { role: "user" | "assistant" | "system" | "meta" | null; text: string; blocks?: ConversationRichBlock[] } {
   if (!message || typeof message !== "object") {
     return { role: null, text: "" };
@@ -4618,6 +4636,7 @@ function historyMessageText(
         sourceKind,
         consumeDuplicateCommsBlock,
         textMode,
+        frameKey,
       );
       const duplicateCommsConsumed = Boolean(
         consumeDuplicateCommsBlock
@@ -4710,6 +4729,7 @@ function renderSessionHistoryTextCompleteEntry(
     frame.sourceKind,
     options.consumeDuplicateCommsBlock,
     options.textMode,
+    frame.id || frame.cursor,
   );
   const textMode = options.textMode ?? "markdown";
   const realtimeOrigin = realtimeMessageOrigin(frame);
@@ -4802,6 +4822,7 @@ function renderSystemNoticeEntry(
     frame.sourceKind,
     options.consumeDuplicateCommsBlock,
     options.textMode ?? "legacy",
+    frame.id || frame.cursor,
   );
   if (parsed.role !== "meta") return null;
   const parsedBlocks = Array.isArray(parsed.blocks) ? parsed.blocks : [];

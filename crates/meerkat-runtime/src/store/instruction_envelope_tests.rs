@@ -10,11 +10,11 @@
 
 use std::sync::Arc;
 
-use meerkat_core::Session;
 use meerkat_core::lifecycle::core_executor::BoundSessionCommit;
 use meerkat_core::lifecycle::{RunApplyBoundary, RunBoundaryReceipt, RunId};
 use meerkat_core::session_store::{IncrementalSessionStore, SessionStore};
 use meerkat_core::types::{Message, UserMessage};
+use meerkat_core::{Session, TranscriptRewriteCommit};
 
 use crate::LogicalRuntimeId;
 use crate::store::spi::test_host::TestHost;
@@ -142,6 +142,38 @@ async fn sqlite_head(session: &Session) -> (u32, Session) {
     (head.version, loaded)
 }
 
+/// [`sqlite_head`] for a compacted document. The store takes it the way a
+/// compaction reaches a store: a plain first save of the uncompacted
+/// document, then the compaction through the store's rewrite/audit path,
+/// which checks the compacted document against the stored predecessor and
+/// the compaction's own rewrite commit. A plain first save of a compacted
+/// document is refused: it would seed transcript history state outside
+/// that path.
+async fn sqlite_head_after_compaction(
+    uncompacted: &Session,
+    compacted: &Session,
+    commit: &TranscriptRewriteCommit,
+) -> (u32, Session) {
+    let dir = tempfile::TempDir::new().unwrap();
+    let store = meerkat_store::SqliteSessionStore::open(dir.path().join("sessions.sqlite3"))
+        .expect("head-canonical session store");
+    SessionStore::save(&store, uncompacted)
+        .await
+        .expect("the uncompacted document saves");
+    SessionStore::save_transcript_rewrite(&store, compacted, commit)
+        .await
+        .expect("the compaction saves through the rewrite path");
+    let head = IncrementalSessionStore::load_head(&store, compacted.id())
+        .await
+        .unwrap()
+        .expect("the head row");
+    let loaded = SessionStore::load(&store, compacted.id())
+        .await
+        .unwrap()
+        .expect("the session loads");
+    (head.version, loaded)
+}
+
 #[tokio::test]
 async fn documents_without_instruction_facts_stay_byte_identical_on_every_store_kind() {
     let session = plain_session();
@@ -202,8 +234,9 @@ async fn a_compaction_that_retires_nothing_keeps_the_document_byte_identical_on_
         .expect("an activation row");
     session.push(Message::User(UserMessage::text("and after that?")));
     // [prompt, user, user, activation, user] -> [prompt, summary, activation, user]
+    let uncompacted = session.clone();
     let rows = session.messages().to_vec();
-    session
+    let (commit, _) = session
         .stage_validated_compaction_for_test(
             vec![
                 rows[0].clone(),
@@ -228,7 +261,8 @@ async fn a_compaction_that_retires_nothing_keeps_the_document_byte_identical_on_
         written,
         "a host store realm keeps the exact bytes"
     );
-    let (head_version, loaded) = sqlite_head(&session).await;
+    let (head_version, loaded) =
+        sqlite_head_after_compaction(&uncompacted, &session, &commit).await;
     assert_eq!(head_version, 4, "a SQLite realm's head stays at envelope 4");
     assert_eq!(loaded.messages(), session.messages());
 }
@@ -236,8 +270,9 @@ async fn a_compaction_that_retires_nothing_keeps_the_document_byte_identical_on_
 /// `[prompt, user, activation, user, activation, user]`, the second
 /// activation superseding the first, after a compaction that retired the
 /// superseded body: `[prompt, summary, retired activation, activation,
-/// user]`.
-fn session_with_a_retiring_compaction() -> Session {
+/// user]`. Returned with the document before the compaction and the
+/// compaction's rewrite commit.
+fn session_with_a_retiring_compaction() -> (Session, Session, TranscriptRewriteCommit) {
     let activation = |id: &str, supersedes: Option<&str>, body: &str| {
         meerkat_core::InstructionActivationRequest {
             revision: meerkat_core::types::InstructionRevisionRef {
@@ -275,8 +310,9 @@ fn session_with_a_retiring_compaction() -> Session {
         ))
         .expect("the superseding activation row");
     session.push(Message::User(UserMessage::text("and after that?")));
+    let uncompacted = session.clone();
     let rows = session.messages().to_vec();
-    session
+    let (commit, _) = session
         .stage_retiring_compaction_for_test(
             vec![
                 rows[0].clone(),
@@ -288,7 +324,7 @@ fn session_with_a_retiring_compaction() -> Session {
             1,
         )
         .expect("the retiring compaction commits");
-    session
+    (uncompacted, session, commit)
 }
 
 /// A compaction that retires a superseded instruction activation body
@@ -298,7 +334,7 @@ fn session_with_a_retiring_compaction() -> Session {
 /// which reload to the same document and write back the same bytes.
 #[tokio::test]
 async fn a_retiring_compaction_round_trips_on_every_store_kind() {
-    let session = session_with_a_retiring_compaction();
+    let (uncompacted, session, commit) = session_with_a_retiring_compaction();
     assert!(
         matches!(
             &session.messages()[2],
@@ -330,7 +366,8 @@ async fn a_retiring_compaction_round_trips_on_every_store_kind() {
         );
     }
 
-    let (head_version, loaded) = sqlite_head(&session).await;
+    let (head_version, loaded) =
+        sqlite_head_after_compaction(&uncompacted, &session, &commit).await;
     assert_eq!(head_version, 5, "a SQLite realm's head is at envelope 5");
     assert_eq!(
         loaded.messages(),

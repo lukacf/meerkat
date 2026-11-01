@@ -15,6 +15,7 @@ use meerkat_machine_schema::catalog::dsl::{
     dsl_auth_machine as auth_machine, dsl_meerkat_machine as meerkat_machine,
     dsl_mob_machine as mob_machine, dsl_occurrence_lifecycle_machine as occurrence_lifecycle,
     dsl_schedule_lifecycle_machine as schedule_lifecycle,
+    dsl_session_document_machine as session_document_machine,
     dsl_workgraph_lifecycle_machine as workgraph_lifecycle,
 };
 use meerkat_machine_schema::catalog::{
@@ -606,6 +607,165 @@ fn generated_meerkat_transition_enum_order_is_decoupled_from_dispatch_order() {
     assert!(
         old_final < appended,
         "new TransitionId variants must be emitted after every pre-0.8.24 variant"
+    );
+}
+
+/// SessionDocumentMachine's `TransitionId` variants as 0.9.8 published them,
+/// in order (`ClassifyDurableTailContinuable` last, at index 116).
+const SESSION_DOCUMENT_TRANSITIONS_0_9_8: [&str; 117] = [
+    "MarkSessionInitialTurnPendingInactiveOrPending",
+    "MarkSessionInitialTurnPendingConsumed",
+    "StartSessionInitialTurnPending",
+    "StartSessionInitialTurnInactive",
+    "StartSessionInitialTurnConsumed",
+    "ResolveSessionFirstTurnOverridesAllowed",
+    "ResolveSessionFirstTurnOverridesDenied",
+    "StageSessionInitialPromptStore",
+    "StageSessionInitialPromptClear",
+    "StageSessionToolResults",
+    "ConsumeSessionDeferredInputsPending",
+    "ConsumeSessionDeferredInputsInactive",
+    "ConsumeSessionDeferredInputsConsumed",
+    "RestoreSessionConsumedInputs",
+    "RestoreSessionConsumedInputsNoPhaseRollback",
+    "RecoverSessionFirstTurnPhase",
+    "ResolveRealtimeItemObservedDiscardedAssistant",
+    "ResolveRealtimeItemObservedPresent",
+    "ResolveRealtimeItemSkipped",
+    "ResolveRealtimeUserTranscriptFinalEmpty",
+    "ResolveRealtimeUserTranscriptFinalStore",
+    "ResolveRealtimeUserTranscriptFinalReplayOrConflict",
+    "ResolveRealtimeUserContentIdentityInvalid",
+    "ResolveRealtimeUserContentIdentityUnmaterializedPredecessor",
+    "ResolveRealtimeUserContentIdentityConflict",
+    "ResolveRealtimeUserContentIdentityReplay",
+    "ResolveRealtimeUserContentIdentityCommitNew",
+    "ResolveRealtimeUserContentBlobStageNew",
+    "ResolveRealtimeUserContentBlobStageReuseExact",
+    "ResolveRealtimeUserContentBlobStageRejectOccupied",
+    "ResolveRealtimeUserContentBlobRecoveryNone",
+    "ResolveRealtimeUserContentBlobRecoveryExact",
+    "ResolveRealtimeUserContentBlobRecoveryCommitVerified",
+    "ResolveRealtimeUserContentBlobRecoveryClearInvalid",
+    "ResolveRealtimeUserContentBlobFinalizeNone",
+    "ResolveRealtimeUserContentBlobFinalizeClearCommitted",
+    "ResolveRealtimeUserContentBlobFinalizeRejectMismatch",
+    "ResolveRealtimeUserContentFinalEmpty",
+    "ResolveRealtimeUserContentFinalStore",
+    "ResolveRealtimeUserContentFinalReplayOrConflict",
+    "ResolveRealtimeAssistantDeltaInvalidOrDuplicate",
+    "ResolveRealtimeAssistantDeltaDiscarded",
+    "ResolveRealtimeAssistantDeltaLaneConflict",
+    "ResolveRealtimeAssistantDeltaAccepted",
+    "ResolveRealtimeAssistantReplacementInvalid",
+    "ResolveRealtimeAssistantReplacementDiscarded",
+    "ResolveRealtimeAssistantReplacementLocked",
+    "ResolveRealtimeAssistantReplacementLaneConflict",
+    "ResolveRealtimeAssistantReplacementAccepted",
+    "ResolveRealtimeAssistantTurnCompletedInvalid",
+    "ResolveRealtimeAssistantTurnCompletedDiscard",
+    "ResolveRealtimeAssistantTurnCompletedToolUse",
+    "ResolveRealtimeAssistantTurnCompletedRecord",
+    "ResolveRealtimeAssistantPlaybackSnapshot",
+    "ResolveRealtimeAssistantTurnInterruptedInvalid",
+    "ResolveRealtimeAssistantTurnInterruptedValid",
+    "ResolveRealtimeMaterializeAlreadyDone",
+    "ResolveRealtimeMaterializeWaitForPredecessor",
+    "ResolveRealtimeMaterializeSkipped",
+    "ResolveRealtimeMaterializeWaitForReadyText",
+    "ResolveRealtimeMaterializeUser",
+    "ResolveRealtimeMaterializeAssistant",
+    "ResolveRealtimeMaterializeAssistantMissingCompletion",
+    "AuthorizeRestoreRealtimeTranscriptState",
+    "AdmitLiveInteractionTranscript",
+    "StageLiveProvisionalUserTranscript",
+    "ReconcileLiveFinalUserTranscript",
+    "CompleteLiveInteractionTranscript",
+    "AdmitLiveAssistantPlaybackTarget",
+    "RecoverLiveAssistantPlaybackTarget",
+    "ResolveLiveAssistantPlaybackOnChannelClose",
+    "ObserveLiveAssistantPlaybackSnapshot",
+    "ObserveLiveAssistantPlaybackFinalPendingTerminal",
+    "RecoverLiveAssistantPlaybackFinal",
+    "ObserveLiveAssistantPlaybackTerminalPendingFinal",
+    "RecoverLiveAssistantPlaybackTerminal",
+    "ObserveLiveAssistantPlaybackFinalJoinsComplete",
+    "ObserveLiveAssistantPlaybackFinalJoinsPrefix",
+    "ObserveLiveAssistantPlaybackTerminalJoinsComplete",
+    "ObserveLiveAssistantPlaybackTerminalJoinsPrefix",
+    "ObserveLiveAssistantPlaybackUnmeasured",
+    "ClassifyLiveContextCommittedRow",
+    "AuthorizeSessionMetadataPersist",
+    "AuthorizeSessionBuildStatePersist",
+    "RestoreSessionBuildState",
+    "ResolvePendingContinuationWithBoundary",
+    "ResolvePendingContinuationWithoutBoundary",
+    "AuthorizeSessionResumeOverridesRejectProviderRequiresModel",
+    "AuthorizeSessionResumeOverridesRejectBuildOnlyAfterFirstTurn",
+    "AuthorizeSessionResumeOverridesAcceptRecomputeProvider",
+    "AuthorizeSessionResumeOverridesAcceptRecomputeProviderWithSelfHostedOverride",
+    "AuthorizeSessionResumeOverridesAcceptUseOverride",
+    "AuthorizeSessionResumeOverridesAcceptUseOverrideWithSelfHostedOverride",
+    "AuthorizeSessionResumeOverridesAcceptRetainStored",
+    "AuthorizeSessionResumeOverridesAcceptRetainStoredWithSelfHostedOverride",
+    "ClassifyLiveSessionAuthorityLive",
+    "ClassifyLiveSessionAuthorityDurableArchived",
+    "ClassifyLiveSessionAuthorityDurableUncommitted",
+    "ClassifyLiveSessionAuthorityDurableRevision",
+    "RecoverSessionFromStoreAuthorized",
+    "RecoverSessionFromStoreUnrecoverable",
+    "ClassifyDurableTailCompleted",
+    "ClassifyDurableTailRepairable",
+    "ClassifyDurableTailAmbiguous",
+    "ResolveRuntimeCheckpointProjectionActive",
+    "ResolveRuntimeCheckpointProjectionArchived",
+    "ResolveSessionDocumentLifecycleMergeArchivedAbsorbing",
+    "ResolveSessionDocumentLifecycleMergeAuthority",
+    "ApplyPendingToolResults",
+    "TranscriptEditFork",
+    "TranscriptEditRewrite",
+    "RecoverSessionLifecycleTerminal",
+    "ReviveArchivedSessionDocument",
+    "ArchiveSessionDocumentActive",
+    "ArchiveSessionDocumentAlreadyArchived",
+    "ArchiveSessionDocumentCompleteRetire",
+    "ClassifyDurableTailContinuable",
+];
+
+/// The variants of a rendered kernel's `pub enum TransitionId`, in order.
+fn transition_id_variants(rendered: &str) -> Vec<String> {
+    let head = "pub enum TransitionId {";
+    let start = rendered
+        .find(head)
+        .expect("the kernel renders its TransitionId enum")
+        + head.len();
+    let body = &rendered[start..];
+    let end = body.find("\n}").expect("the TransitionId enum closes");
+    body[..end]
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#') && !line.starts_with("//"))
+        .map(|line| line.trim_end_matches(',').to_owned())
+        .collect()
+}
+
+/// SessionDocumentMachine's public `TransitionId` order keeps 0.9.8's as its
+/// prefix: the operator-instruction arms sit on the machine's late tail after
+/// `ClassifyDurableTailContinuable`, the variant 0.9.8 published last, so no
+/// published variant moves when an arm is added beside its siblings.
+#[test]
+fn session_document_transition_enum_keeps_the_published_order() {
+    let rendered = render_machine_kernel_module(&session_document_machine());
+    let variants = transition_id_variants(&rendered);
+    let published = variants
+        .iter()
+        .take(SESSION_DOCUMENT_TRANSITIONS_0_9_8.len())
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        published,
+        SESSION_DOCUMENT_TRANSITIONS_0_9_8.to_vec(),
+        "0.9.8's TransitionId order must stay a prefix of the rendered order"
     );
 }
 

@@ -4810,6 +4810,9 @@ const MEMORY_PANEL_MAX_LIMIT: usize = 200;
 /// The most rows one store read of the record listing asks a realm for
 /// (`handle_memory_panel_records`).
 const MEMORY_PANEL_RECORDS_BATCH_MAX: usize = 4096;
+/// About how many bytes of records one store read of the record listing
+/// asks a realm for, past its first read (`handle_memory_panel_records`).
+const MEMORY_PANEL_RECORDS_READ_BYTES: usize = 16 * 1024 * 1024;
 const MEMORY_PANEL_CHAIN_MAX: usize = 32;
 const MEMORY_PANEL_INJECTIONS_MAX: usize = 50;
 const MEMORY_PANEL_DREAMS_DEFAULT: usize = 20;
@@ -4860,6 +4863,12 @@ fn parse_memory_panel_cursor(raw: &str) -> Option<(u64, String)> {
 /// names: its update time, then its memory id.
 fn memory_panel_record_position(record: &crate::memory::records::MemoryRecord) -> (u64, &str) {
     (record.updated_at_ms, record.id.as_str())
+}
+
+/// The bytes of a record's text (title, description and body), by which the
+/// record listing sizes its store reads.
+fn memory_panel_record_bytes(record: &crate::memory::records::MemoryRecord) -> usize {
+    record.title.len() + record.description.len() + record.body.len()
 }
 
 /// The read action guarding a record of this scope on the panel (§10.3).
@@ -5334,6 +5343,8 @@ async fn handle_memory_panel_records(
                 Ok(page) => page,
                 Err(err) => return memory_panel_store_error(response_id, err),
             };
+            let read_rows = page.records.len();
+            let read_bytes: usize = page.records.iter().map(memory_panel_record_bytes).sum();
             readable.extend(
                 page.records
                     .into_iter()
@@ -5368,8 +5379,20 @@ async fn handle_memory_panel_records(
             // MEMORY_PANEL_RECORDS_BATCH_MAX: a page that passes n such rows
             // takes about log2(n / wanted) reads below the cap and one more
             // for each cap's worth of rows above it, where reads of a fixed
-            // size would take one for every batch.
-            batch = (batch * 2).min(MEMORY_PANEL_RECORDS_BATCH_MAX);
+            // size would take one for every batch. A read also holds every
+            // row it returns, body included, until it is filtered: so it asks
+            // for no more rows than MEMORY_PANEL_RECORDS_READ_BYTES holds at
+            // the size of the rows the read before it returned, and never
+            // fewer than `wanted`. Records near the 64 KiB body cap are then
+            // read about 255 at a time, about 16 MiB, instead of 4,096 at
+            // about 256 MiB, at the cost of more reads.
+            let within_bytes = MEMORY_PANEL_RECORDS_READ_BYTES
+                .saturating_mul(read_rows)
+                .checked_div(read_bytes)
+                .unwrap_or(MEMORY_PANEL_RECORDS_BATCH_MAX);
+            batch = (batch * 2)
+                .min(within_bytes)
+                .clamp(wanted, MEMORY_PANEL_RECORDS_BATCH_MAX);
         }
         readable.truncate(wanted);
         records.extend(readable);

@@ -244,6 +244,11 @@ import { MetaDock } from "./panels/MetaDock";
 import { PendingStack, type PendingCheckView, type PendingDeliveredNotice, type PendingItem } from "./panels/PendingStack";
 import { beginConsoleSendAttempt, classifyConsoleSendFailure, consoleCheckDelivered, consoleCheckNotFound, createConsoleSendAttempt, describeConsoleCheckFailure, finishConsoleSendAttempt, reconcileConsoleSendReceipt, recoverConsoleSendAttempt, type ConsoleFrozenSendEnvelope, type ConsoleSendAttempt, type ConsoleSendFailure } from "../../packages/console-core/src/send-attempt";
 import { createConsoleContextRecord, validateConsoleContexts, type ConsoleContextRecord } from "../../packages/console-core/src/context-record";
+import { createConsoleTimelineDedupe, insertConsoleFrame, type ConsoleTimelineDedupe, type ConsoleTimelineRecoveryInput } from "../../packages/console-core/src/timeline-recovery";
+import { ActivityLedgerProvider, createActivityLedger, createAgentResolver, type ActivityLedger } from "./lib/activity-ledger";
+import { consoleNavControls } from "./lib/nav-controls";
+import { ConsoleNavigationProvider, PanelPreferencesProvider } from "@console-components";
+import { NavigationFocusProvider, buildConsoleNavigation, useNavigationFocusSource, type ConsoleNavigationHost } from "./lib/console-navigation";
 import { QuoteContextChips } from "../../packages/console-components/src/conversation/context-chips";
 import { HostDecideSourcesProvider } from "../../packages/console-components/src/conversation/approval-card";
 import { editConsoleContextQuote } from "../../packages/console-core/src/context-edit";
@@ -941,10 +946,6 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
   const [memoryDataRuntimeKey, setMemoryDataRuntimeKey] = React.useState("");
   const [workGraphDataRuntimeKey, setWorkGraphDataRuntimeKey] = React.useState("");
   const [agents, setAgents] = React.useState<ConsoleAgent[]>([]);
-  // Display names for every key an agent is known by (identity, member,
-  // agent and session ids): panels show names, with the key in a tooltip.
-  // Panels name agents the way the sidebar does.
-  const agentDirectory = React.useMemo(() => createAgentDirectory(agents.map(agentDirectoryEntry)), [agents]);
   // Roster labels keyed by public alias (durable identity and member id), so
   // transcript rows can name a peer the way the sidebar does.
   const peerLabels = React.useMemo(() => {
@@ -2867,60 +2868,26 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       topologyQueryResult,
     ],
   );
-  const visibleControls = React.useMemo<NavKind[]>(() => {
-    const runtimeControls: NavKind[] = hasMobControlSurface
-      ? [
-          "topology",
-          "timeline",
-          "gating",
-          "roster",
-          "routing",
-          "logs",
-          "health",
-        ]
-      : ["topology", "timeline", "roster", "logs", "health"];
-    const sidebarConfig = experience?.console_config?.sidebar;
-    const allowedByRuntime = new Set(runtimeControls);
-    const configuredVisible = (sidebarConfig?.visible_controls || [])
-      .map(normalizeNavKind)
-      .filter(
-        (kind): kind is NavKind => Boolean(kind) && allowedByRuntime.has(kind),
-      );
-    if (configuredVisible.length > 0) {
-      const extra: NavKind[] = [];
-      if (experience?.access?.can_administer === true) extra.push("access");
-      // An empty shared registry offers a setup explanation only. Configured
-      // services still require the server-projected read/view grants.
-      if (emptyPanelRegistry || experience?.memory?.can_read === true) extra.push("memory");
-      if (emptyPanelRegistry || (experience?.workgraph?.available === true && experience?.workgraph?.can_view === true)) {
-        extra.push("workgraph");
-      }
-      return extra.length > 0 ? [...configuredVisible, ...extra] : configuredVisible;
-    }
-    const hidden = new Set(
-      (sidebarConfig?.hidden_controls || [])
-        .map(normalizeNavKind)
-        .filter((kind): kind is NavKind => Boolean(kind)),
-    );
-    const controls = runtimeControls.filter((kind) => !hidden.has(kind));
-    // The Access admin surface is gated server-side per principal, never by
-    // view config: administrators always get it, nobody else ever does.
-    if (experience?.access?.can_administer === true) controls.push("access");
-    // Empty shared registries keep these destinations discoverable without
-    // making store requests or replacing configured-service access checks.
-    if (emptyPanelRegistry || experience?.memory?.can_read === true) controls.push("memory");
-    if (emptyPanelRegistry || (experience?.workgraph?.available === true && experience?.workgraph?.can_view === true)) {
-      controls.push("workgraph");
-    }
-    return controls;
-  }, [
+  // The views the console offers (lib/nav-controls.ts): Access for
+  // administrators only, Memory when readable and, on a team runtime with
+  // no memory store, as a "not set up" entry, WorkGraph when viewable, and
+  // Schedules when the gateway lists them.
+  const visibleControls = React.useMemo<NavKind[]>(() => consoleNavControls({
+    hasMobControlSurface,
+    sidebar: experience?.console_config?.sidebar,
+    access: experience?.access,
+    memory: experience?.memory,
+    workgraph: experience?.workgraph,
+    emptyPanelRegistry,
+    schedulesListed: scheduleOffer.list,
+  }), [
     experience?.console_config?.sidebar,
-    experience?.access?.can_administer,
-    experience?.memory?.can_read,
-    experience?.workgraph?.available,
-    experience?.workgraph?.can_view,
+    experience?.access,
+    experience?.memory,
+    experience?.workgraph,
     emptyPanelRegistry,
     hasMobControlSurface,
+    scheduleOffer.list,
   ]);
 
   // =========================================================================
@@ -3820,8 +3787,52 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
   const workGraphPanelDockedRef = React.useRef(false);
   workGraphPanelDockedRef.current = visiblePanelTargets.some((target) => target.kind === "workgraph");
   const workGraphRefreshTimerRef = React.useRef<number | null>(null);
+  // One timeline scope per console controller: the frame keys this console
+  // has accepted and the activity ledger its frames feed. The keys outlive
+  // the subscription, which starts again whenever the storage namespace
+  // changes (the experience names its runtime once it loads) or the
+  // operator reconnects: the new subscription's recent page then delivers
+  // only frames this console has not accepted, never the buffered ones a
+  // second time.
+  const timelineScopeRef = React.useRef<{ owner: object; dedupe: ConsoleTimelineDedupe; ledger: ActivityLedger } | null>(null);
+  if (timelineScopeRef.current?.owner !== consoleController) {
+    timelineScopeRef.current = { owner: consoleController, dedupe: createConsoleTimelineDedupe(), ledger: createActivityLedger() };
+  }
+  const timelineScope = timelineScopeRef.current;
+  const bufferScopeRef = React.useRef(timelineScope);
+  // The ledger names peers the way the roster does, and links open the agent a name resolves to.
+  const agentResolver = React.useMemo(() => createAgentResolver(agents), [agents]);
+  React.useEffect(() => {
+    timelineScope.ledger.setResolver(agentResolver);
+  }, [agentResolver, timelineScope]);
+  // Display names for every key an agent is known by (identity, member,
+  // agent and session ids, and the comms peer ids the ledger has seen: a
+  // send names its recipient by peer id only): panels show names, with the
+  // key in a tooltip. Panels name agents the way the sidebar does.
+  const ledgerPeersVersion = React.useSyncExternalStore(
+    timelineScope.ledger.subscribe,
+    timelineScope.ledger.getPeersVersion,
+    timelineScope.ledger.getPeersVersion,
+  );
+  const agentDirectory = React.useMemo(() => {
+    const peerIds = timelineScope.ledger.peerIds();
+    return createAgentDirectory(agents.map((agent) => {
+      const entry = agentDirectoryEntry(agent);
+      const ids = peerIds.get(agent.identity || agent.member_id || agent.agent_id) ?? [];
+      return ids.length ? { ...entry, aliases: [...entry.aliases, ...ids] } : entry;
+    }));
+    // Read again whenever the ledger learns a peer id.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [agents, timelineScope, ledgerPeersVersion]);
 
   React.useEffect(() => {
+    const scope = timelineScope;
+    if (bufferScopeRef.current !== scope) {
+      // Another controller is another scope: its buffers start empty.
+      bufferScopeRef.current = scope;
+      activityRef.current = [];
+      commitLiveFrames([]);
+    }
     // Seed activity with recent history (only on mount) — apply same
     // filter as SSE. The activity rail is its own concern; it doesn't
     // share state with the per-identity logs.
@@ -3842,17 +3853,22 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       const cause: RenderCause = frame.event === "text_delta" ? "text"
         : frame.event === "text_complete" || HISTORY_REFRESH_EVENTS.has(frame.event) || isTerminalTurnCompletedFrame(frame) ? "now"
         : "frame";
-      // Activity rail (independent buffer)
+      // The activity ledger counts every frame, before any buffer filters it.
+      scope.ledger.ingest(frame);
+      // Activity rail (independent buffer). Both buffers hold one copy of
+      // a frame: a copy delivered again replaces an older version of it in
+      // place, and is ignored otherwise.
       if (!ACTIVITY_SKIP_EVENTS.has(frame.event)) {
-        activityRef.current = [frame, ...activityRef.current].slice(0, 200);
+        activityRef.current = insertConsoleFrame(activityRef.current, frame, 200) ?? activityRef.current;
       }
 
       // Topology-class buffer keeps tool events (peer-comms etc.) which
       // the activity rail filters out. Capped at 300; older frames roll
       // off naturally as live pulses age past their lifetime.
       if (PANEL_ROUTABLE_EVENTS.has(frame.event)) {
+        const liveFrames = insertConsoleFrame(liveFramesRef.current, frame, 300);
         // A completion renders once, from forceRender below.
-        commitLiveFrames([frame, ...liveFramesRef.current].slice(0, 300), cause === "now" ? "frame" : cause);
+        if (liveFrames) commitLiveFrames(liveFrames, cause === "now" ? "frame" : cause);
       }
 
       // Identity log (single canonical store)
@@ -3907,13 +3923,17 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     let stopped = false;
     let unsubscribe: (() => void) | null = null;
     const subscriptionLifetime = new AbortController();
+    // The controller hands this input to subscribeTimelineWithRecovery as
+    // is, so the scope's dedupe reaches it; the transport never sees it.
+    const subscription: ConsoleTimelineRecoveryInput = {
+      limit: 200,
+      signal: subscriptionLifetime.signal,
+      onTransportState: (state) => { if (!stopped) setTransportState(state); },
+      dedupe: scope.dedupe,
+    };
 
     void consoleController.timeline.subscribeWithBackfill(
-      {
-        limit: 200,
-        signal: subscriptionLifetime.signal,
-        onTransportState: (state) => { if (!stopped) setTransportState(state); },
-      },
+      subscription,
       (frame) => {
         if (!stopped) handleLiveFrame(frame.value);
       },
@@ -5150,6 +5170,42 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     const pivot = memoryFramePivot(frame);
     if (pivot) void loadMemoryRecordDetailRef.current(pivot.realm, pivot.recordId);
   }, []);
+  // Cross-panel navigation (spec A4.7): an entity's name in any panel opens
+  // the entity. The openers read the console through a ref, so they stay one
+  // object until the offered views change.
+  const navigationFocus = useNavigationFocusSource();
+  const navigationHostRef = React.useRef<ConsoleNavigationHost<MetaDockTarget> | null>(null);
+  navigationHostRef.current = {
+    dockState: () => dockRef.current.state,
+    dispatch: (action) => dockRef.current.dispatch(action),
+    findAgent: (reference) => {
+      const identity = agentResolver(reference);
+      return identity
+        ? agents.find((agent) => (agent.identity || agent.member_id || agent.agent_id) === identity) ?? null
+        : null;
+    },
+    chatTarget: buildDockTarget,
+    detailsTarget: buildInspectTarget,
+    viewTarget: (kind) => buildControlTarget(kind),
+    onAgentDetails: (agent) => {
+      setSelectedRosterMemberId(agent.member_id);
+      void refreshInspectIdentity(buildInspectTarget(agent).identity).catch(() => {});
+    },
+    onAgentChat: (agent) => {
+      const target = buildDockTarget(agent);
+      void refreshIdentityTimelineNow(target.identity || target.memberId).catch(() => {});
+    },
+    selectApproval: (id) => {
+      setSelectedApprovalId(id);
+      setApprovalOpens((count) => count + 1);
+    },
+    loadMemoryRecord: (realm, id) => void loadMemoryRecordDetailRef.current(realm, id),
+    focus: navigationFocus.focus,
+  };
+  const consoleNavigation = React.useMemo(
+    () => buildConsoleNavigation(() => navigationHostRef.current!, visibleControls),
+    [visibleControls],
+  );
   const watchedIdentities = React.useMemo(
     () =>
       new Set(
@@ -5929,6 +5985,10 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     <ConsoleMcpAppsProvider value={effectiveMcpAppsHost ? { host: effectiveMcpAppsHost, authority: sendScope, readOnly: consoleReadOnly } : null}>
     <ConsolePanelsProvider value={panelProvider}>
     <AgentDirectoryProvider directory={agentDirectory}>
+    <ActivityLedgerProvider ledger={timelineScope.ledger}>
+    <ConsoleNavigationProvider value={consoleNavigation}>
+    <NavigationFocusProvider value={navigationFocus.value}>
+    <PanelPreferencesProvider scope={sidebarPreferenceScope}>
     <HostDecideSourcesProvider value={hostAttentionSources}>
     <div
       className="cc-theme-scope meta-shell"
@@ -6054,6 +6114,10 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       </div>
     </div>
     </HostDecideSourcesProvider>
+    </PanelPreferencesProvider>
+    </NavigationFocusProvider>
+    </ConsoleNavigationProvider>
+    </ActivityLedgerProvider>
     </AgentDirectoryProvider>
     </ConsolePanelsProvider>
     </ConsoleMcpAppsProvider>

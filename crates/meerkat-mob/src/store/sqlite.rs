@@ -5998,6 +5998,21 @@ impl MobIdentityStore for SqliteMobIdentityStore {
             let fetch_limit = i64::try_from(limit.saturating_add(1)).map_err(|_| {
                 MobStoreError::Internal("created identity scan limit overflow".to_string())
             })?;
+            // The prefilter leaves out in SQL only rows the classifier below
+            // never reads as created: a blob row of canonical JSON whose
+            // every top-level `schema_version` member (there may be none) is
+            // an integer below the created schema version, a host-adopted
+            // intent's row. The classifier reads the last such member of a
+            // JSON object as an unsigned integer, so it answers nothing for
+            // those rows. Every other row reaches it as before: a row of
+            // another storage class, a row SQLite does not accept as
+            // canonical JSON, and a row with a `schema_version` member of
+            // any other type or value. A resume then reads the created rows
+            // without reading every intent row of the mob. The CASE runs
+            // `json_each` only over text `json_valid` accepted, so a
+            // malformed row never fails the scan.
+            let created_schema_version =
+                i64::from(crate::identity::CREATED_IDENTITY_SCHEMA_VERSION);
             let mut stmt = conn
                 .prepare(
                     "SELECT typeof(agent_identity), CAST(agent_identity AS BLOB),
@@ -6012,6 +6027,17 @@ impl MobIdentityStore for SqliteMobIdentityStore {
                                AND CAST(agent_identity AS BLOB) > ?3
                            )
                        )
+                       AND CASE
+                           WHEN typeof(record_json) <> 'blob' THEN 1
+                           WHEN NOT json_valid(CAST(record_json AS TEXT)) THEN 1
+                           ELSE EXISTS (
+                               SELECT 1
+                               FROM json_each(CAST(mob_identity_intents.record_json AS TEXT))
+                                   AS member
+                               WHERE member.key = 'schema_version'
+                                 AND NOT (member.type = 'integer' AND member.value < ?5)
+                           )
+                       END
                      ORDER BY typeof(agent_identity), CAST(agent_identity AS BLOB)
                      LIMIT ?4",
                 )
@@ -6022,7 +6048,8 @@ impl MobIdentityStore for SqliteMobIdentityStore {
                         mob_id.as_str(),
                         after_storage_class,
                         after_identity,
-                        fetch_limit
+                        fetch_limit,
+                        created_schema_version
                     ],
                     |row| {
                         Ok((

@@ -205,6 +205,8 @@ export function healthReason(
     progress?: ConsoleAgent["progress"];
     unobserved?: ConsoleAgent["unobserved"];
     lastActivityMs?: number | null;
+    /** When the work in progress started (the open tool or run), if the console saw it. */
+    workingSinceMs?: number | null;
     nowMs: number;
   },
 ): string {
@@ -227,9 +229,11 @@ export function healthReason(
     case "degraded":
       parts.push(age ? `idle ${age}` : "degraded");
       break;
-    case "working":
-      parts.push(age ? `working · ${age}` : "working");
+    case "working": {
+      const since = input.workingSinceMs ?? null;
+      parts.push(since ? `working · ${shortSpan(nowMs - since)}` : "working");
       break;
+    }
     case "unobserved": {
       const reason = input.unobserved?.reason;
       parts.push(reason ? `not observed: ${String(reason).replace(/_/g, " ")}` : "not observed");

@@ -15,6 +15,7 @@ import {
   countWords,
   hourCeiling,
   hourLabel,
+  localDayStart,
   seriesWords,
   type AgentActivity,
   type AgentNowLine,
@@ -332,6 +333,11 @@ export function RosterPanel({
   const longLived = members.length - helpers;
   const workingLongLived = working.filter((entry) => !entry.helper).length;
   const teamEnd = hourCeiling(nowMs);
+  const teamTurnsToday = React.useMemo(
+    () => ledger.totals(null, { sinceMs: localDayStart(nowMs), untilMs: nowMs }).turnsStarted,
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [ledger.version, Math.floor(nowMs / 60_000)],
+  );
   const teamTurns = React.useMemo(
     () => ledger.series(null, "turnsStarted", { bins: 24, binMs: HOUR_MS, endMs: teamEnd }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -541,12 +547,10 @@ export function RosterPanel({
             value={working.length}
             of={members.length}
             live={working.length > 0}
-            trend={teamTurns}
-            trendLabel={seriesWords(teamTurns, teamEnd, "turn")}
-            trendLive={working.length > 0}
+            foot={`${countWords(teamTurnsToday, "turn")} today`}
+            title={`Show only the agents working now. ${seriesWords(teamTurns, teamEnd, "turn")}.`}
             onActivate={() => toggleState("working")}
             pressed={stateFilter === "working"}
-            title="Show only the agents working now"
             testId="roster-glance:working"
           />
           <FigureTile

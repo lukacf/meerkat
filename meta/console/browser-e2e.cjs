@@ -3244,8 +3244,14 @@ async function runHeadlessControlSurfaceBrowserProof() {
     await page.getByTestId("conv-action:retire").click();
     await waitForRpcMethod(server, "meta/retire");
     await page.getByTestId("conv-action:details").click();
+    // Agent details keep the lifecycle actions in the overflow menu, and a
+    // reset asks for confirmation first.
+    await page.getByTestId("inspect-menu:identity:luka").waitFor({ timeout: 10_000 });
+    await page.getByTestId("inspect-menu:identity:luka").click();
     await page.getByTestId("inspect-action:identity:luka:reset").waitFor({ timeout: 10_000 });
     await page.getByTestId("inspect-action:identity:luka:reset").click();
+    await page.getByTestId("inspect-confirm-yes:identity:luka:reset").waitFor({ timeout: 10_000 });
+    await page.getByTestId("inspect-confirm-yes:identity:luka:reset").click();
     await waitForRpcMethod(server, "meta/reset");
 
     process.stdout.write("browser headless control surface ok\n");

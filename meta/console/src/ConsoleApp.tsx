@@ -212,6 +212,7 @@ import {
 import { RosterPanel } from "./panels/RosterPanel";
 import { AgentDetailsPanel } from "./panels/AgentDetailsPanel";
 import { HealthPanel } from "./panels/HealthPanel";
+import type { ConsoleHealthSnapshot } from "./types";
 import { SchedulesSection } from "./panels/SchedulesSection";
 import {
   WorkGraphPanel,
@@ -431,14 +432,24 @@ function normalizeConsoleInspectResult(
       ? (record.identity as Record<string, unknown>)
       : null;
   if (!identityRecord) return null;
-  return normalizeIdentityInspectViewState({
+  // The newer inspect answer (`identity{health, visibility, runtime_key,
+  // runtime_member_id, ...}`, `peers`): its `health` is the record's
+  // availability ("ready", "hidden_by_policy", "retired"), not a member
+  // state, so it never becomes the state the status words read ("Ready"):
+  // a retired record reads retired, any other is a live member whose health
+  // words come from its progress. The runtime key and visibility stay for
+  // Technical details.
+  const text = (value: unknown) => (typeof value === "string" && value.trim() ? value.trim() : undefined);
+  const availability = text(identityRecord.health);
+  const normalized = normalizeIdentityInspectViewState({
     identity: identityRecord.identity,
     display_name: identityRecord.display_name,
     role:
       identityRecord.labels && typeof identityRecord.labels === "object"
         ? (identityRecord.labels as Record<string, unknown>).role
         : undefined,
-    state: identityRecord.health,
+    state: availability === "retired" ? "retired" : text(identityRecord.state) ?? "active",
+    progress: identityRecord.progress,
     addressability:
       identityRecord.addressable === true ? "addressable" : "internal_only",
     session_id: identityRecord.session_id,
@@ -449,6 +460,14 @@ function normalizeConsoleInspectResult(
     },
     topology_peers: Array.isArray(record.peers) ? record.peers : [],
   });
+  if (!normalized) return null;
+  const runtimeKey = text(identityRecord.runtime_key);
+  const visibility = text(identityRecord.visibility);
+  return {
+    ...normalized,
+    ...(runtimeKey ? { runtime_key: runtimeKey } : {}),
+    ...(visibility ? { visibility } : {}),
+  } as IdentityInspectViewState;
 }
 
 const DEFAULT_APPROVER_ID = "console-ops-lead";
@@ -5585,7 +5604,15 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
         identity={target.identity}
         inspect={inspect}
         agent={agent}
+        agents={agents}
         stateLabel={inspect ? identityStateLabel(inspect) : null}
+        onOpenChat={
+          configuredActionVisibility.chat !== false && agent
+            ? () => consoleNavigation.openAgent?.(target.identity, "chat")
+            : undefined
+        }
+        openChatLabel={configuredActionLabels.chat}
+        onRefresh={() => void refreshInspectIdentity(target.identity).catch(() => {})}
         actions={{
           respawn: canRespawn ? { label: configuredActionLabels.respawn, onClick: () => void onLifecycleAction(target.identity, "meta/respawn") } : undefined,
           reset: canReset ? { label: configuredActionLabels.reset, onClick: () => void onLifecycleAction(target.identity, "meta/reset") } : undefined,
@@ -5610,15 +5637,22 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     );
   }
 
-  function renderHealthPanel(identities: IdentityStatusRow[]) {
+  function renderHealthPanel(snapshot: ConsoleHealthSnapshot | null | undefined) {
     return (
       <HealthPanel
-        identities={identities}
+        identities={snapshot?.identities || []}
         stateLabel={identityStateLabel}
+        agents={agents}
+        team={snapshot ? {
+          running: snapshot.running,
+          loadedModules: snapshot.loaded_modules,
+          loadedModuleCount: snapshot.loaded_module_count,
+          unobserved: snapshot.unobserved,
+        } : null}
         canOpen={(identity) => agents.some((candidate) => candidate.identity === identity || candidate.member_id === identity)}
         onOpen={(identity) => {
-          const agent = agents.find((candidate) => candidate.identity === identity || candidate.member_id === identity);
-          if (agent) handleShowRosterDetails(agent);
+          // Beside Health, not in its place (spec B11).
+          consoleNavigation.openAgent?.(identity, "details");
         }}
       />
     );
@@ -5759,9 +5793,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       );
     }
     if (target.kind === "health")
-      return renderHealthPanel(
-        experience?.health_overview?.live_snapshot?.identities || [],
-      );
+      return renderHealthPanel(experience?.health_overview?.live_snapshot);
     if (target.kind === "timeline")
       return <TimelinePanel frames={activityRef.current} />;
     if (target.kind === "roster")

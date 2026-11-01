@@ -2,6 +2,7 @@ import { fireEvent, render } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  ActivityBars,
   BarcodeLegend,
   BarcodeMeter,
   DotStrip,
@@ -11,6 +12,8 @@ import {
   Meter,
   MiniBar,
   ProgressRing,
+  placeAxisLabel,
+  placeTickLabels,
   Sparkline,
   barcodeUnitsPerSegment,
   binCounts,
@@ -44,6 +47,100 @@ describe("time axis", () => {
     expect(ticks.map((tick) => tick.label)).toEqual(["06", "12", "18", "00"]);
     expect(ticks.every((tick) => new Date(tick.t).getMinutes() === 0 && new Date(tick.t).getHours() % 6 === 0)).toBe(true);
     expect(ticks[3].major).toBe(true);
+  });
+
+  it("keeps tick labels inside the chart, sliding the edge ones inward", () => {
+    const tick = (x: number, label: string) => ({ t: x, label, major: false, x });
+    // "Sat 3" is about 30 px wide at 9.5 px: centred at x 4 it would start at -11.
+    const placed = placeTickLabels([tick(4, "Sat 3"), tick(80, "Sat 10"), tick(156, "Sat 17"), tick(318, "Sat 31")], 320, { endReserve: 24 });
+    expect(placed.map((label) => label.label)).toEqual(["Sat 3", "Sat 10", "Sat 17", "Sat 31"]);
+    for (const label of placed) {
+      const half = (label.label.length * 9.5 * 0.66) / 2;
+      expect([label.label, label.labelX - half >= 0, label.labelX + half <= 320 - 24]).toEqual([label.label, true, true]);
+    }
+    expect(placed[1].labelX).toBe(80);
+    // A label that would meet the one before it is left out.
+    expect(placeTickLabels([tick(10, "06:00"), tick(20, "12:00")], 200).map((label) => label.label)).toEqual(["06:00"]);
+  });
+
+  it("draws a DotStrip's first and last tick labels inside the strip", () => {
+    // The first midnight tick lands about 10 px in, where a centred
+    // "Fri 30" (about 34 px wide) would lose its start to the edge.
+    const start = DAY_START - 14 * HOUR;
+    const end = start + 30 * 24 * HOUR;
+    const view = render(<DotStrip items={[{ id: "a", t: start + HOUR, label: "First" }]} start={start} end={end} width={320} height={18} axis now={end} label="1 record" testId="strip" />);
+    const labels = Array.from(view.getByTestId("strip").querySelectorAll("text.cc-viz-tick"));
+    expect(labels.length > 2).toBe(true);
+    for (const label of labels) {
+      const text = label.textContent ?? "";
+      const x = Number(label.getAttribute("x"));
+      const anchor = label.getAttribute("text-anchor");
+      const half = (text.length * 9.5 * 0.66) / 2;
+      const left = anchor === "end" ? x - 2 * half : anchor === "middle" ? x - half : x;
+      const right = anchor === "end" ? x : anchor === "middle" ? x + half : x + 2 * half;
+      expect([text, left >= 0, right <= 320]).toEqual([text, true, true]);
+    }
+  });
+
+  it("puts the now label at its marker, inside the strip, with no tick label on it", () => {
+    const start = DAY_START + 9 * HOUR;
+    const spans = (view: ReturnType<typeof render>) =>
+      Array.from(view.getByTestId("strip").querySelectorAll("text.cc-viz-tick")).map((text) => {
+        const label = text.textContent ?? "";
+        const x = Number(text.getAttribute("x"));
+        const half = (label.length * 9.5 * 0.66) / 2;
+        return { label, left: x - half, right: x + half, now: text.classList.contains("cc-dots__now-label") };
+      });
+    const check = (now: number, expectNear: (x: number) => boolean) => {
+      const view = render(<DotStrip items={[]} start={start} end={start + 24 * HOUR} width={320} height={18} axis now={now} label="no records" testId="strip" />);
+      const labels = spans(view);
+      const nowLabel = labels.find((label) => label.now);
+      expect(Boolean(nowLabel && expectNear((nowLabel.left + nowLabel.right) / 2))).toBe(true);
+      for (const label of labels) {
+        expect([label.label, label.left >= 0, label.right <= 320]).toEqual([label.label, true, true]);
+        if (!label.now && nowLabel) expect([label.label, label.right <= nowLabel.left || label.left >= nowLabel.right]).toEqual([label.label, true]);
+      }
+      view.unmount();
+    };
+    // A window that starts at now: the label sits at the left end, not the right.
+    check(start, (x) => x < 20);
+    // Now in the middle: the label centres on the marker.
+    check(start + 12 * HOUR, (x) => Math.abs(x - 160) < 2);
+    // A window that ends at now: the right end, as before.
+    check(start + 24 * HOUR, (x) => x > 300);
+    expect(placeAxisLabel(2, "now", 320).labelX > 2).toBe(true);
+    expect(placeAxisLabel(160, "now", 320).labelX).toBe(160);
+  });
+
+  it("says now at the end of the activity bars only when the window ends now", () => {
+    const nowText = (view: ReturnType<typeof render>) =>
+      Array.from(view.container.querySelectorAll("text.cc-viz-tick")).some((text) => text.textContent === "now");
+    const current = render(<ActivityBars values={[1, 2, 3, 4]} label="10 turns" />);
+    expect(nowText(current)).toBe(true);
+    const past = render(<ActivityBars values={[1, 2, 3, 4]} end={Date.now() - 3 * 24 * HOUR} label="10 turns three days ago" />);
+    expect(nowText(past)).toBe(false);
+    // An hour label next to the end never runs into "now": at 01:36 the 00
+    // tick falls 20 px from the right end of a 300 px chart, under "now".
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(DAY_START + 1.6 * HOUR);
+      const late = render(<ActivityBars values={Array.from({ length: 24 }, () => 1)} width={300} label="24 turns" testId="late" />);
+      const labels = Array.from(late.getByTestId("late").querySelectorAll("text.cc-viz-tick"))
+        .map((text) => {
+          const label = text.textContent ?? "";
+          const x = Number(text.getAttribute("x"));
+          const half = (label.length * 9.5 * 0.66) / 2;
+          return { label, left: x - half, right: x + half };
+        })
+        .sort((a, b) => a.left - b.left);
+      expect(labels.map((label) => label.label)).toEqual(["06", "12", "18", "now"]);
+      for (const label of labels) expect([label.label, label.left >= 0, label.right <= 300]).toEqual([label.label, true, true]);
+      for (let index = 1; index < labels.length; index += 1) {
+        expect([labels[index].label, labels[index].left >= labels[index - 1].right]).toEqual([labels[index].label, true]);
+      }
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("names the day at midnight on an automatic clock axis", () => {

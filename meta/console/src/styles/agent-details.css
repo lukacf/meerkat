@@ -1,0 +1,41 @@
+/* Agent details (Inspect).
+   Split from console-host.css (imported there, in this order). */
+
+/* ── Agent details (Inspect) ────────────────────────────────── */
+.agent-details__repair { padding: 10px var(--_cc-panel-pad-x) 0; }
+.agent-details__repair p { margin: 0 0 8px; }
+.agent-details__command {
+  display: flex; align-items: center; gap: 6px;
+  margin-top: 6px; padding: 6px 8px;
+  border: 1px solid var(--line); border-radius: var(--r-sm);
+  background: var(--bg-elev-1);
+  min-width: 0;
+}
+.agent-details__command code {
+  flex: 1 1 auto; min-width: 0;
+  font-family: var(--mono); font-size: 11.5px; color: var(--ink);
+  overflow-wrap: anywhere;
+}
+.cc-theme-scope .agent-details__command .cc-copy-btn {
+  flex: none; width: 22px; height: 22px;
+  background: transparent; box-shadow: none; border-radius: var(--r-sm);
+  color: var(--ink-meta);
+}
+.cc-theme-scope .agent-details__command .cc-copy-btn:hover { background: var(--bg-elev-2); color: var(--ink); }
+.agent-details__peer {
+  display: inline-flex; align-items: center; max-width: 100%;
+  height: 24px; padding: 0 8px 0 3px;
+  border: 1px solid var(--line); border-radius: var(--r-pill);
+  font-size: 12px;
+}
+.agent-details__preview {
+  margin: 0; padding: 10px 12px;
+  border-left: 2px solid var(--line-strong);
+  background: var(--bg-sunken);
+  border-radius: 0 var(--r-sm) var(--r-sm) 0;
+  font-size: 12.5px; line-height: 1.5; color: var(--ink);
+  white-space: pre-wrap; overflow-wrap: anywhere;
+  max-height: 240px; overflow-y: auto;
+}
+.agent-details__tech { padding: 4px var(--_cc-panel-pad-x) 0; }
+

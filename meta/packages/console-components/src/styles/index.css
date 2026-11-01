@@ -13,6 +13,9 @@
 @import "../conversation/approvals.css";
 @import "./transport.css";
 
+/* Graph and chart styles, right before the panel kit. */
+@import "./viz.css";
+
 /* Last among the shared sheets: the panel kit wins ties with the component
    sheets above (its copy button and empty state refinements). */
 @import "./panel-kit.css";

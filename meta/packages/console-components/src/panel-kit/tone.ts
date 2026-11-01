@@ -1,21 +1,27 @@
-// The one status-to-tone map for every panel (design brief 3.3). Tones pick
-// the fill, dot and text tokens in panel-kit.css; the member accent is never
-// a status colour (it marks selection and live activity only).
+// The one status-to-tone map for every panel (design brief 3.3, console v2
+// spec A2.4). Tones pick the fill, mark and text tokens in panel-kit.css.
+// Every tone has a shape too (StatusMark), so colour never carries meaning
+// alone. `live` is the accent's own meaning, "happening now": it is told
+// apart from ok and info by its pulse ring, never by hue alone (in the
+// terminal variant the accent is the ok green, in graphite the link blue).
 
-export type Tone = "neutral" | "info" | "ok" | "warn" | "crit" | "locked";
+export type Tone = "neutral" | "info" | "ok" | "warn" | "crit" | "locked" | "live";
 
 const TONE_WORDS: Record<Exclude<Tone, "neutral">, readonly string[]> = {
-  info: [
+  live: [
     "in_progress",
     "running",
     "working",
-    "retrying",
     "busy",
     "streaming",
     "thinking",
     "starting",
     "processing",
+    "claimed",
+    "replying",
+    "delivering",
   ],
+  info: ["retrying", "queued", "scheduled", "updating"],
   ok: [
     "healthy",
     "active",
@@ -23,6 +29,7 @@ const TONE_WORDS: Record<Exclude<Tone, "neutral">, readonly string[]> = {
     "complete",
     "done",
     "delivered",
+    "sent",
     "approved",
     "approve",
     "allowed",
@@ -100,6 +107,23 @@ export function normalizeStatusWord(value: string | null | undefined): string {
  * (open, idle, pending, superseded, retired, cancelled), are neutral. */
 export function statusTone(value: string | null | undefined): Tone {
   return TONE_BY_WORD.get(normalizeStatusWord(value)) ?? "neutral";
+}
+
+const TONE_WORD: Record<Tone, string> = {
+  live: "Happening now",
+  info: "Informational",
+  ok: "Good",
+  warn: "Needs attention",
+  crit: "Failed",
+  neutral: "Quiet",
+  locked: "Not visible",
+};
+
+/** The plain word for a tone, for a mark that stands alone (a graph node's
+ * tooltip, an accessible name). Prefer the status word itself when there is
+ * one. */
+export function toneWord(tone: Tone): string {
+  return TONE_WORD[tone];
 }
 
 /** Priority shows only when it matters: high is a critical outline chip, low

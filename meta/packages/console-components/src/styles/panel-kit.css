@@ -5,8 +5,10 @@
    for machine values only.
 
    Tone rule: status colour comes from data-tone (neutral, info, ok, warn,
-   crit, locked). The member accent is never a status colour; it marks
-   selection, the active tab, primary actions and live activity.
+   crit, locked, live). Every tone also has a shape (the StatusMark), so
+   colour never carries meaning alone. The member accent is never an
+   outcome; it means "now": live activity, the selection, the active tab
+   and the primary action (the live tone is the accent's own meaning).
    =================================================================== */
 
 .cc-theme-scope {
@@ -17,47 +19,68 @@
   --_cc-panel-fs-label: 10.5px;
   --_cc-panel-fs-mono: 11px;
   --_cc-panel-pad-x: 20px;
-  --_cc-panel-row-h: 36px;
   --_cc-panel-control-h: 28px;
+  /* Density (spec A4.3): comfortable here, compact on a PanelShell with
+     data-density="compact" and in every pane under 480 px. */
+  --_cc-panel-row-h: 40px;
+  /* Two-line rows: 48 px comfortable, 38 px compact. */
+  --_cc-row-pad-y: 6px;
+  --_cc-card-pad: 12px 14px;
+  --_cc-figure-size: var(--_cc-fs-figure);
+  --_cc-lane-min-h: 88px;
+}
+.cc-panel[data-density="compact"] {
+  --_cc-panel-row-h: var(--_cc-density-row);
+  --_cc-row-pad-y: 3px;
+  --_cc-card-pad: 8px 10px;
+  --_cc-figure-size: 16px;
+  --_cc-lane-min-h: 64px;
 }
 
 /* ── Tones ─────────────────────────────────────────────────────── */
 
-:where(.cc-chip, .cc-dot, .cc-notice, .cc-tile, .cc-meter__seg, .cc-row) {
+:where(.cc-chip, .cc-dot, .cc-mark, .cc-notice, .cc-tile, .cc-meter__seg, .cc-row, .cc-figure, .cc-entity, .cc-panel-head__fact, .cc-countdown, .cc-filter-chip, .cc-minibar) {
   --_cc-tone: var(--_cc-foreground-subtle);
   --_cc-tone-ink: var(--_cc-foreground-muted);
   --_cc-tone-fill: var(--_cc-surface-soft);
   --_cc-tone-line: var(--_cc-border-soft);
 }
-:where(.cc-chip, .cc-dot, .cc-notice, .cc-tile, .cc-meter__seg, .cc-row)[data-tone="info"] {
+:where(.cc-chip, .cc-dot, .cc-mark, .cc-notice, .cc-tile, .cc-meter__seg, .cc-row, .cc-figure, .cc-entity, .cc-panel-head__fact, .cc-countdown, .cc-filter-chip, .cc-minibar)[data-tone="info"] {
   --_cc-tone: var(--_cc-link);
   --_cc-tone-ink: var(--_cc-link-ink);
   --_cc-tone-fill: color-mix(in oklch, var(--_cc-link) 12%, transparent);
   --_cc-tone-line: color-mix(in oklch, var(--_cc-link) 32%, transparent);
 }
-:where(.cc-chip, .cc-dot, .cc-notice, .cc-tile, .cc-meter__seg, .cc-row)[data-tone="ok"] {
+:where(.cc-chip, .cc-dot, .cc-mark, .cc-notice, .cc-tile, .cc-meter__seg, .cc-row, .cc-figure, .cc-entity, .cc-panel-head__fact, .cc-countdown, .cc-filter-chip, .cc-minibar)[data-tone="ok"] {
   --_cc-tone: var(--_cc-positive);
   --_cc-tone-ink: var(--_cc-positive-ink);
   --_cc-tone-fill: color-mix(in oklch, var(--_cc-positive) 12%, transparent);
   --_cc-tone-line: color-mix(in oklch, var(--_cc-positive) 32%, transparent);
 }
-:where(.cc-chip, .cc-dot, .cc-notice, .cc-tile, .cc-meter__seg, .cc-row)[data-tone="warn"] {
+:where(.cc-chip, .cc-dot, .cc-mark, .cc-notice, .cc-tile, .cc-meter__seg, .cc-row, .cc-figure, .cc-entity, .cc-panel-head__fact, .cc-countdown, .cc-filter-chip, .cc-minibar)[data-tone="warn"] {
   --_cc-tone: var(--_cc-warning);
   --_cc-tone-ink: var(--_cc-warning-ink);
   --_cc-tone-fill: color-mix(in oklch, var(--_cc-warning) 14%, transparent);
   --_cc-tone-line: color-mix(in oklch, var(--_cc-warning) 36%, transparent);
 }
-:where(.cc-chip, .cc-dot, .cc-notice, .cc-tile, .cc-meter__seg, .cc-row)[data-tone="crit"] {
+:where(.cc-chip, .cc-dot, .cc-mark, .cc-notice, .cc-tile, .cc-meter__seg, .cc-row, .cc-figure, .cc-entity, .cc-panel-head__fact, .cc-countdown, .cc-filter-chip, .cc-minibar)[data-tone="crit"] {
   --_cc-tone: var(--_cc-negative);
   --_cc-tone-ink: var(--_cc-negative-ink);
   --_cc-tone-fill: color-mix(in oklch, var(--_cc-negative) 12%, transparent);
   --_cc-tone-line: color-mix(in oklch, var(--_cc-negative) 32%, transparent);
 }
-:where(.cc-chip, .cc-dot, .cc-notice, .cc-tile, .cc-meter__seg, .cc-row)[data-tone="locked"] {
+:where(.cc-chip, .cc-dot, .cc-mark, .cc-notice, .cc-tile, .cc-meter__seg, .cc-row, .cc-figure, .cc-entity, .cc-panel-head__fact, .cc-countdown, .cc-filter-chip, .cc-minibar)[data-tone="locked"] {
   --_cc-tone: var(--_cc-foreground-subtle);
   --_cc-tone-ink: var(--_cc-foreground-muted);
   --_cc-tone-fill: var(--_cc-surface-soft);
   --_cc-tone-line: var(--_cc-border-soft);
+}
+/* Live ("happening now"): the accent, with the foreground as its ink. */
+:where(.cc-chip, .cc-dot, .cc-mark, .cc-notice, .cc-tile, .cc-meter__seg, .cc-row, .cc-figure, .cc-entity, .cc-panel-head__fact, .cc-countdown, .cc-filter-chip, .cc-minibar)[data-tone="live"] {
+  --_cc-tone: var(--_cc-viz-live);
+  --_cc-tone-ink: var(--_cc-foreground);
+  --_cc-tone-fill: var(--_cc-viz-live-soft);
+  --_cc-tone-line: color-mix(in oklch, var(--_cc-member-accent) 32%, transparent);
 }
 
 /* ── Utilities ─────────────────────────────────────────────────── */
@@ -167,6 +190,115 @@
   min-width: 0;
 }
 
+/* Header v2 (spec A3.1): the title with its scope chip, the live summary
+   line (facts with their marks, ending with the freshness), and on the
+   right the one view switch, hover-revealed tools and the quiet overflow
+   trigger. A refresh runs a 1 px accent hairline along the bottom rule. */
+.cc-panel-head--v2 {
+  position: relative;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 8px 12px;
+}
+/* The actions wrap to a row of their own when they do not fit beside 240 px
+   of title and summary, instead of squeezing the title or running past the
+   pane's edge. */
+.cc-panel-head--v2 .cc-panel-head__text { flex: 1 1 240px; }
+.cc-panel-head__title-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  min-width: 0;
+}
+.cc-panel-head__title-row > .cc-panel-head__title { flex: 0 1 auto; min-width: 0; }
+.cc-panel-head__scope {
+  display: inline-flex;
+  flex: none;
+  min-width: 0;
+  max-width: 100%;
+}
+.cc-panel-head__scope .cc-field { max-width: 100%; }
+.cc-panel-head--v2 .cc-panel-head__sub { margin-top: 3px; }
+/* The facts sit in one flex line that starts one separator's width left of
+   the summary's edge: every fact after the first leads with its separator,
+   so the separator that starts a wrapped line falls in the clipped margin
+   and no line ends on a dangling dot. */
+.cc-panel-head__summary {
+  --_cc-summary-sep: 1.1em;
+  text-overflow: clip;
+}
+.cc-panel-head__facts {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: baseline;
+  min-width: 0;
+  margin-left: calc(-1 * var(--_cc-summary-sep));
+}
+.cc-panel-head__part {
+  flex: none;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cc-panel-head__part:first-child { padding-left: var(--_cc-summary-sep); }
+.cc-panel-head__part:last-child { flex: 0 1 auto; }
+.cc-panel-head__sep {
+  display: inline-block;
+  width: var(--_cc-summary-sep);
+  text-align: center;
+}
+.cc-panel-head__fact {
+  color: var(--_cc-foreground-meta);
+  font-variant-numeric: tabular-nums;
+}
+.cc-panel-head__fact[data-tone] { color: var(--_cc-tone-ink); }
+.cc-panel-head__fact[data-tone="neutral"],
+.cc-panel-head__fact[data-tone="locked"] { color: var(--_cc-foreground-muted); }
+.cc-panel-head__fact > .cc-mark {
+  margin-right: 6px;
+  vertical-align: 0;
+}
+.cc-panel-head__fact > .cc-mark[data-tone="warn"] { vertical-align: 0.5px; }
+.cc-panel-head__sep { color: var(--_cc-foreground-meta); }
+.cc-panel-head--v2 .cc-panel-head__actions {
+  flex-wrap: nowrap;
+  gap: 4px;
+  margin-top: -1px;
+}
+.cc-panel-head__view { margin-right: 6px; }
+.cc-panel-head__tools {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+.cc-panel-head__progress {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -1px;
+  height: 1px;
+  overflow: hidden;
+  pointer-events: none;
+}
+.cc-panel-head--flush .cc-panel-head__progress { bottom: 0; }
+.cc-panel-head__progress::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 40%;
+  background: var(--_cc-member-accent);
+  animation: cc-hairline 1.2s var(--_cc-ease-travel) infinite;
+}
+@keyframes cc-hairline {
+  from { transform: translateX(-100%); }
+  to   { transform: translateX(250%); }
+}
+
 /* ── Tabs ──────────────────────────────────────────────────────── */
 
 .cc-tabs {
@@ -227,6 +359,45 @@
   white-space: nowrap;
 }
 .cc-status-row__error { color: var(--_cc-negative-ink); }
+
+/* The status toast (spec A3.1): a refresh error over the top of the body.
+   The anchor takes no space, so nothing moves when it comes or goes. */
+.cc-status-toast-anchor {
+  position: relative;
+  z-index: 30;
+  flex: none;
+  height: 0;
+}
+.cc-status-toast {
+  position: absolute;
+  top: 8px;
+  left: var(--_cc-panel-pad-x);
+  right: var(--_cc-panel-pad-x);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  box-sizing: border-box;
+  min-height: 34px;
+  padding: 5px 6px 5px 12px;
+  border: 1px solid color-mix(in oklch, var(--_cc-negative) 34%, transparent);
+  border-radius: var(--_cc-radius-md);
+  background: color-mix(in srgb, var(--_cc-negative) 7%, var(--_cc-surface-card));
+  box-shadow: var(--_cc-shadow-md);
+  color: var(--_cc-foreground);
+  font-size: 12.5px;
+  line-height: 1.4;
+  animation: cc-pop-in var(--_cc-dur-enter) var(--_cc-ease-out);
+}
+.cc-status-toast__text {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cc-status-toast__error { color: var(--_cc-foreground); }
+.cc-status-toast__stale { color: var(--_cc-foreground-muted); }
+.cc-status-toast__retry { flex: none; }
 
 /* ── Toolbar and fields ────────────────────────────────────────── */
 
@@ -304,6 +475,25 @@ textarea.cc-input {
   padding-left: 28px;
 }
 .cc-search__input::-webkit-search-cancel-button { cursor: pointer; }
+/* The key that focuses the search ("/"), shown while it is empty. */
+.cc-search--shortcut .cc-search__input { padding-right: 28px; }
+.cc-search__key {
+  position: absolute;
+  right: 7px;
+  display: inline-grid;
+  place-items: center;
+  box-sizing: border-box;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border: 1px solid var(--_cc-border-soft);
+  border-radius: var(--_cc-radius-xs);
+  font-family: var(--_cc-font-mono);
+  font-size: 10px;
+  line-height: 1;
+  color: var(--_cc-foreground-meta);
+  pointer-events: none;
+}
 .cc-select {
   position: relative;
   display: inline-flex;
@@ -325,6 +515,27 @@ textarea.cc-input {
   height: 12px;
   color: var(--_cc-foreground-meta);
   pointer-events: none;
+}
+/* The scope chip next to a panel title (spec A3.1): a quiet pill that is
+   still the native select with its accessible name. */
+.cc-field--chip .cc-select__control {
+  height: 22px;
+  padding: 0 22px 0 9px;
+  border-color: var(--_cc-border-soft);
+  border-radius: var(--_cc-radius-pill);
+  background: transparent;
+  color: var(--_cc-foreground-muted);
+  font-size: 11.5px;
+  font-weight: 500;
+}
+.cc-field--chip .cc-select__control:hover {
+  border-color: var(--_cc-border-strong);
+  color: var(--_cc-foreground);
+}
+.cc-field--chip .cc-select__chevron {
+  right: 8px;
+  width: 10px;
+  height: 10px;
 }
 
 /* Segmented control: mutually exclusive views or filters. */
@@ -360,6 +571,14 @@ textarea.cc-input {
 .cc-seg__btn:focus-visible {
   outline: 2px solid var(--_cc-focus-ring);
   outline-offset: -2px;
+}
+.cc-seg__btn:disabled { opacity: 0.45; cursor: default; }
+.cc-seg__glyph {
+  width: 13px;
+  height: 13px;
+  margin-right: 6px;
+  vertical-align: -2px;
+  stroke-width: 1.75;
 }
 
 /* ── Buttons ───────────────────────────────────────────────────── */
@@ -455,6 +674,42 @@ textarea.cc-input {
   border-color: transparent;
   background: var(--_cc-surface-hover);
 }
+/* Pressed or expanded (a toggle, an open menu): the soft fill. */
+.cc-btn[aria-pressed="true"],
+.cc-btn[aria-expanded="true"] {
+  color: var(--_cc-foreground);
+  background: var(--_cc-surface-soft);
+}
+.cc-btn:active:not(:disabled) { transition-duration: var(--_cc-dur-press); }
+/* Icon buttons (spec A3.2): the glyph at 16 px (14 px small). */
+.cc-btn--icon .cc-btn__icon svg,
+.cc-btn--icon > svg {
+  width: 16px;
+  height: 16px;
+}
+.cc-btn--icon.cc-btn--sm .cc-btn__icon svg,
+.cc-btn--icon.cc-btn--sm > svg {
+  width: 14px;
+  height: 14px;
+}
+.cc-btn--icon { position: relative; }
+.cc-btn--icon .cc-glyph { stroke-width: 1.75; }
+/* Quiet: the meta ink until hovered or open (the overflow trigger). */
+.cc-btn--quiet { color: var(--_cc-foreground-meta); }
+.cc-btn--quiet:hover:not(:disabled),
+.cc-btn--quiet[aria-expanded="true"] { color: var(--_cc-foreground); }
+/* A non-default state behind the button: a 5 px accent dot. */
+.cc-btn__badge {
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  width: 5px;
+  height: 5px;
+  border-radius: var(--_cc-radius-round);
+  background: var(--_cc-member-accent);
+  box-shadow: 0 0 0 1.5px var(--_cc-surface-card);
+  pointer-events: none;
+}
 .cc-btn-row {
   display: flex;
   flex-wrap: wrap;
@@ -500,6 +755,22 @@ textarea.cc-input {
   font-family: var(--_cc-font-mono);
   font-size: 10.5px;
 }
+/* A status pill: the tone's mark 5 px before the word (spec A3.3). */
+.cc-chip--mark { padding-left: 7px; }
+.cc-chip > .cc-mark {
+  margin-right: 5px;
+  vertical-align: -0.5px;
+}
+.cc-chip > .cc-mark[data-tone="crit"] { margin-right: 5.8px; }
+/* Quiet: no fill and no border, the mark and the word in muted ink (dense
+   rows where a pill per row is too loud). */
+.cc-chip--quiet,
+.cc-chip.cc-chip--quiet:not([data-tone="neutral"]):not([data-tone="locked"]) {
+  padding: 0;
+  border-color: transparent;
+  background: transparent;
+  color: var(--_cc-foreground-muted);
+}
 .cc-chip__dot {
   display: inline-block;
   width: 6px;
@@ -543,6 +814,68 @@ textarea.cc-input {
 @keyframes cc-live-pulse {
   0%, 100% { box-shadow: 0 0 0 2px color-mix(in oklch, var(--_cc-member-accent) 45%, transparent); }
   50%      { box-shadow: 0 0 0 4px color-mix(in oklch, var(--_cc-member-accent) 10%, transparent); }
+}
+/* Every dot speaks shape too (spec A3.3): warn a triangle, crit a diamond. */
+.cc-dot[data-tone="warn"] {
+  width: 8px;
+  height: 7px;
+  border-radius: 0;
+  clip-path: polygon(50% 0, 100% 100%, 0 100%);
+}
+.cc-dot[data-tone="crit"] {
+  width: 5.5px;
+  height: 5.5px;
+  margin: 0.75px;
+  border-radius: 0;
+  transform: rotate(45deg);
+}
+.cc-dot[data-tone="live"]:not(.is-live) {
+  box-shadow: 0 0 0 1.5px var(--_cc-surface-card), 0 0 0 2.5px color-mix(in oklch, var(--_cc-member-accent) 55%, transparent);
+}
+
+/* ── Status marks (spec A2.4) ──────────────────────────────────────
+   One shape per tone in an 8 px box (10 px for size md): ok and info a
+   filled circle, warn a triangle (9 x 8), crit a diamond, neutral a
+   hollow circle, locked a hollow square, live the accent circle with a
+   pulse ring. Where the variant squares round corners (terminal), the
+   circles render as squares; the triangle and diamond keep their
+   geometry. */
+.cc-mark {
+  --_cc-mark-size: 8px;
+  display: inline-block;
+  flex: none;
+  box-sizing: border-box;
+  width: var(--_cc-mark-size);
+  height: var(--_cc-mark-size);
+  border-radius: var(--_cc-radius-round);
+  background: var(--_cc-tone);
+  vertical-align: middle;
+}
+.cc-mark[data-size="md"] { --_cc-mark-size: 10px; }
+.cc-mark[data-tone="warn"] {
+  width: calc(var(--_cc-mark-size) + 1px);
+  border-radius: 0;
+  clip-path: polygon(50% 0, 100% 100%, 0 100%);
+}
+.cc-mark[data-tone="crit"] {
+  width: calc(var(--_cc-mark-size) * 0.8);
+  height: calc(var(--_cc-mark-size) * 0.8);
+  margin: calc(var(--_cc-mark-size) * 0.1);
+  border-radius: 0;
+  transform: rotate(45deg);
+}
+.cc-mark[data-tone="neutral"] {
+  background: transparent;
+  box-shadow: inset 0 0 0 1.5px var(--_cc-viz-mid);
+}
+.cc-mark[data-tone="locked"] {
+  background: transparent;
+  border-radius: 0;
+  box-shadow: inset 0 0 0 1.5px var(--_cc-foreground-meta);
+}
+.cc-mark[data-tone="live"] { background: var(--_cc-viz-live); }
+.cc-mark[data-tone="live"]:not(.cc-chip__mark) {
+  animation: cc-live-pulse var(--_cc-dur-pulse) ease-in-out infinite;
 }
 
 .cc-count {
@@ -866,6 +1199,36 @@ textarea.cc-input {
   border-radius: var(--_cc-radius-md);
   background: var(--_cc-surface-soft);
 }
+.cc-tech__count {
+  color: var(--_cc-foreground-meta);
+  font-variant-numeric: tabular-nums;
+}
+.cc-tech__tools {
+  display: flex;
+  justify-content: flex-end;
+  margin: -4px -6px 4px 0;
+}
+.cc-tech__copy-all[data-copied="true"] { color: var(--_cc-positive-ink); }
+/* "Show technical IDs" on: the ids in a row, no disclosure (A3.6). */
+.cc-tech--inline {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px 14px;
+  margin-top: 6px;
+}
+.cc-tech__pair {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  max-width: 100%;
+}
+.cc-tech__key {
+  flex: none;
+  font-size: var(--_cc-panel-fs-meta);
+  color: var(--_cc-foreground-meta);
+}
 
 /* ── Names and times ───────────────────────────────────────────── */
 
@@ -900,6 +1263,17 @@ textarea.cc-input {
 }
 .cc-agent__avatar[data-size="22"] { width: 22px; height: 22px; font-size: 10.5px; }
 .cc-agent__avatar[data-size="28"] { width: 28px; height: 28px; font-size: 12px; }
+.cc-agent__avatar[data-size="36"] { width: 36px; height: 36px; font-size: 14px; }
+/* Working now: the accent ring around the avatar, pulsing (a static ring
+   under reduced motion). */
+.cc-agent__avatar.is-live {
+  box-shadow: 0 0 0 2px var(--_cc-surface-card), 0 0 0 3.5px var(--_cc-member-accent);
+  animation: cc-avatar-pulse var(--_cc-dur-pulse) ease-in-out infinite;
+}
+@keyframes cc-avatar-pulse {
+  0%, 100% { box-shadow: 0 0 0 2px var(--_cc-surface-card), 0 0 0 3.5px var(--_cc-member-accent), 0 0 0 3.5px color-mix(in oklch, var(--_cc-member-accent) 30%, transparent); }
+  50%      { box-shadow: 0 0 0 2px var(--_cc-surface-card), 0 0 0 3.5px var(--_cc-member-accent), 0 0 0 7px color-mix(in oklch, var(--_cc-member-accent) 0%, transparent); }
+}
 
 .cc-time {
   font-variant-numeric: tabular-nums;
@@ -1028,9 +1402,15 @@ button.cc-tile:focus-visible,
   background: var(--_cc-border-soft);
 }
 .cc-meter__seg {
+  flex-shrink: 1;
+  box-sizing: content-box;
+  min-width: 3px;
   height: 100%;
   background: var(--_cc-tone);
 }
+/* Segments sit 2 px apart on the surface (spec A3.8). */
+.cc-meter__seg + .cc-meter__seg { border-left: 2px solid var(--_cc-meter-gap, var(--_cc-surface-card)); }
+.cc-meter__seg[data-rest="true"] { border-right: 2px solid var(--_cc-meter-gap, var(--_cc-surface-card)); }
 .cc-meter__seg[data-tone="neutral"] { background: var(--_cc-foreground-subtle); }
 .cc-meter__label {
   font-size: 11px;
@@ -1064,6 +1444,35 @@ button.cc-tile:focus-visible,
   color: var(--_cc-foreground-muted);
 }
 .cc-panel-empty__mark .cc-glyph { width: 16px; height: 16px; }
+.cc-panel-empty__art { margin-bottom: 6px; }
+.cc-panel-empty--art { gap: 6px; padding-top: 32px; }
+.cc-panel-empty--inline .cc-panel-empty__art { margin-bottom: 4px; }
+.cc-panel-empty__details { align-self: stretch; max-width: 46ch; margin: 6px auto 0; text-align: left; }
+.cc-panel-empty--inline .cc-panel-empty__details { margin-left: 0; }
+
+/* Illustrations (spec A3.7): the brand's graph grammar, 1.25 px. */
+.cc-illus {
+  display: block;
+  flex: none;
+  overflow: visible;
+  fill: none;
+  stroke: none;
+}
+.cc-illus__line {
+  fill: none;
+  stroke: var(--_cc-viz-mid);
+  stroke-width: 1.25;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  vector-effect: non-scaling-stroke;
+}
+.cc-illus__bold { stroke: var(--_cc-viz-ink); stroke-width: 1.75; }
+.cc-illus__dash { stroke-dasharray: 3 3; }
+.cc-illus__plate { fill: var(--_cc-surface-card); }
+.cc-illus__ink { fill: var(--_cc-viz-ink); stroke: none; }
+.cc-illus__mid { fill: var(--_cc-viz-mid); stroke: none; }
+.cc-illus__accent { fill: var(--_cc-viz-live); stroke: none; }
+.cc-illus__crit { fill: var(--_cc-negative); stroke: none; }
 .cc-panel-empty__title {
   margin: 0;
   font-size: 13px;
@@ -1090,6 +1499,14 @@ button.cc-tile:focus-visible,
   color: var(--_cc-foreground-muted);
 }
 
+/* Skeleton ink: the foreground over whatever surface holds it, so a
+   skeleton reads as a faint shape in light and dark alike (never a hole
+   darker than the card). */
+.cc-skeleton,
+.cc-figure__skeleton {
+  --_cc-skeleton: color-mix(in srgb, var(--_cc-foreground) 7%, transparent);
+  --_cc-skeleton-hi: color-mix(in srgb, var(--_cc-foreground) 12%, transparent);
+}
 .cc-skeleton {
   display: flex;
   flex-direction: column;
@@ -1102,9 +1519,9 @@ button.cc-tile:focus-visible,
   border-radius: var(--_cc-radius-sm);
   background: linear-gradient(
     90deg,
-    var(--_cc-surface-soft) 0%,
-    var(--_cc-surface-hover) 50%,
-    var(--_cc-surface-soft) 100%
+    var(--_cc-skeleton) 0%,
+    var(--_cc-skeleton-hi) 50%,
+    var(--_cc-skeleton) 100%
   );
   background-size: 200% 100%;
   animation: cc-shimmer 1.4s ease-in-out infinite;
@@ -1117,6 +1534,41 @@ button.cc-tile:focus-visible,
   height: 64px;
   border-radius: var(--_cc-radius-md);
 }
+/* Shown after 150 ms, so a fast load never flashes (A3.7). */
+.cc-skeleton { animation: cc-skeleton-in 1ms linear 150ms both; }
+@keyframes cc-skeleton-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+.cc-skeleton--tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(128px, 1fr));
+  gap: 12px;
+}
+.cc-skeleton--tiles .cc-skeleton__row {
+  width: 100%;
+  height: 52px;
+  border-radius: var(--_cc-radius-md);
+}
+.cc-skeleton--graph,
+.cc-skeleton--timeline { padding: 24px var(--_cc-panel-pad-x); }
+.cc-skeleton__art {
+  display: block;
+  width: 100%;
+  height: auto;
+  max-height: 260px;
+  fill: none;
+  stroke: none;
+  animation: cc-breathe 1.4s ease-in-out infinite;
+}
+@keyframes cc-breathe {
+  0%, 100% { opacity: 0.5; }
+  50%      { opacity: 0.8; }
+}
+.cc-skeleton__grid { stroke: var(--_cc-viz-grid); stroke-width: 1; }
+.cc-skeleton__edge { stroke: var(--_cc-viz-faint); stroke-width: 1.25; }
+.cc-skeleton__node { fill: var(--_cc-viz-faint); }
+.cc-skeleton__bar { fill: var(--_cc-viz-faint); }
 @keyframes cc-shimmer {
   0%   { background-position: 100% 0; }
   100% { background-position: -100% 0; }
@@ -1140,6 +1592,14 @@ button.cc-tile:focus-visible,
 .cc-notice__icon {
   margin-top: 2px;
   color: var(--_cc-tone-ink);
+}
+.cc-notice__icon--mark {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
 }
 .cc-notice__text {
   flex: 1 1 auto;
@@ -1216,6 +1676,1080 @@ button.cc-tile:focus-visible,
   transform: rotate(45deg);
 }
 
+/* ── Popovers, menus and view options (spec A3.2) ──────────────────
+   Elevation e2: a 1 px rule, the md shadow and the overlay surface. The
+   popover lives in the browser top layer where the Popover API exists
+   (so no pane clips it) and is a fixed layer otherwise; either way it
+   stays inside the theme scope. */
+.cc-popover {
+  position: fixed;
+  inset: auto;
+  z-index: 1000;
+  box-sizing: border-box;
+  max-height: 60vh;
+  margin: 0;
+  padding: 4px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  border: 1px solid var(--_cc-border-soft);
+  border-radius: var(--_cc-radius-md);
+  background: var(--_cc-surface-overlay);
+  color: var(--_cc-foreground);
+  box-shadow: var(--_cc-shadow-md);
+  font-family: var(--_cc-font-display);
+  font-size: var(--_cc-fs-control);
+  line-height: 1.4;
+  text-align: left;
+  outline: none;
+  animation: cc-pop-in var(--_cc-dur-enter) var(--_cc-ease-out);
+}
+.cc-popover[data-side="top"] { animation-name: cc-pop-in-above; }
+.cc-popover[data-state="closing"] {
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--_cc-dur-exit) var(--_cc-ease-in);
+}
+@keyframes cc-pop-in {
+  from { opacity: 0; transform: translateY(-4px); }
+  to   { opacity: 1; transform: none; }
+}
+@keyframes cc-pop-in-above {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: none; }
+}
+@keyframes cc-fade-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+.cc-menu__item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  box-sizing: border-box;
+  width: 100%;
+  height: 28px;
+  margin: 0;
+  padding: 0 12px 0 8px;
+  border: 0;
+  border-radius: var(--_cc-radius-sm);
+  background: transparent;
+  color: var(--_cc-foreground);
+  font-family: var(--_cc-font-display);
+  font-size: var(--_cc-fs-control);
+  font-weight: 500;
+  line-height: 1;
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background var(--_cc-dur-fast) ease;
+}
+.cc-menu__item:hover,
+.cc-menu__item:focus { background: var(--_cc-surface-hover); outline: none; }
+.cc-menu__item:focus-visible { box-shadow: inset 0 0 0 2px var(--_cc-focus-ring); }
+.cc-menu__item[aria-disabled="true"] { opacity: 0.45; cursor: default; }
+.cc-menu__item.is-destructive { color: var(--_cc-negative-ink); }
+.cc-menu__lead {
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  width: 16px;
+  height: 16px;
+  color: var(--_cc-foreground-muted);
+}
+.cc-menu__lead .cc-glyph { width: 14px; height: 14px; stroke-width: 1.75; }
+.cc-menu__item[aria-checked="true"] .cc-menu__lead { color: var(--_cc-foreground); }
+.cc-menu__radio {
+  position: relative;
+  box-sizing: border-box;
+  width: 12px;
+  height: 12px;
+  border-radius: var(--_cc-radius-round);
+  box-shadow: inset 0 0 0 1.5px var(--_cc-border-strong);
+}
+.cc-menu__radio.is-checked { box-shadow: inset 0 0 0 1.5px var(--_cc-member-accent); }
+.cc-menu__radio.is-checked::after {
+  content: "";
+  position: absolute;
+  inset: 3px;
+  border-radius: var(--_cc-radius-round);
+  background: var(--_cc-member-accent);
+}
+.cc-menu__text {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.cc-menu__shortcut {
+  flex: none;
+  margin-left: 12px;
+  font-family: var(--_cc-font-mono);
+  font-size: 10.5px;
+  color: var(--_cc-foreground-meta);
+}
+.cc-menu__sep {
+  height: 1px;
+  margin: 4px -4px;
+  background: var(--_cc-border-soft);
+}
+.cc-menu__group { padding: 2px 0; }
+.cc-menu__label {
+  padding: 6px 8px 4px 32px;
+  font-size: var(--_cc-panel-fs-label);
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--_cc-foreground-meta);
+}
+/* A view switch folded into the menu shows only in a pane under 480 px. */
+.cc-menu__fold { display: none; }
+.cc-panel[data-density="compact"] .cc-menu__item { height: 26px; }
+
+.cc-view-options { padding: 12px 12px 8px; }
+.cc-view-options__body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.cc-view-options__label {
+  margin-bottom: 6px;
+  font-size: var(--_cc-panel-fs-label);
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--_cc-foreground-meta);
+}
+.cc-view-options__seg { display: flex; width: 100%; }
+.cc-view-options__seg .cc-seg__btn { flex: 1 1 auto; min-width: 0; padding: 0 8px; }
+.cc-view-options__hint {
+  margin-top: 6px;
+  font-size: var(--_cc-panel-fs-meta);
+  line-height: 1.4;
+  color: var(--_cc-foreground-meta);
+}
+.cc-view-options__foot {
+  margin: 12px -12px -8px;
+  padding: 4px 6px;
+  border-top: 1px solid var(--_cc-border-soft);
+}
+.cc-view-options__reset {
+  height: 26px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: var(--_cc-radius-sm);
+  background: transparent;
+  color: var(--_cc-foreground-muted);
+  font-family: var(--_cc-font-display);
+  font-size: var(--_cc-fs-control);
+  font-weight: 500;
+  cursor: pointer;
+}
+.cc-view-options__reset:hover:not(:disabled) { color: var(--_cc-foreground); background: var(--_cc-surface-hover); }
+.cc-view-options__reset:focus-visible { outline: 2px solid var(--_cc-focus-ring); outline-offset: -2px; }
+.cc-view-options__reset:disabled { color: var(--_cc-foreground-meta); opacity: 0.6; cursor: default; }
+
+/* ── Figures: glance strip and figure tiles (spec A3.3) ────────────
+   An instrument panel under the header: figure cells in one row, 1 px
+   rules between them, no boxes. Proportional figures; the tone only ever
+   adds a mark. */
+.cc-glance {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(0, 1fr);
+  flex: none;
+  min-width: 0;
+  padding: 0 calc(var(--_cc-panel-pad-x) - 12px);
+  border-bottom: 1px solid var(--_cc-border-soft);
+}
+/* The rule between figures: a pseudo-class keeps it above the figure's own
+   border reset below (".cc-glance > * + *" ties with ".cc-figure" and lost). */
+.cc-glance > :nth-child(n + 2) { border-left: 1px solid var(--_cc-border-soft); }
+.cc-figure {
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+  min-width: 0;
+  margin: 0;
+  padding: 11px 12px 12px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+}
+button.cc-figure { cursor: pointer; transition: background var(--_cc-dur-fast) ease; }
+button.cc-figure:hover { background: var(--_cc-surface-hover); }
+button.cc-figure:focus-visible { outline: 2px solid var(--_cc-focus-ring); outline-offset: -2px; }
+.cc-figure.is-pressed {
+  background: var(--_cc-surface-soft);
+  box-shadow: inset 0 -2px 0 var(--_cc-member-accent);
+}
+.cc-figure__label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-size: var(--_cc-panel-fs-label);
+  font-weight: 600;
+  line-height: 1.4;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--_cc-foreground-meta);
+  white-space: nowrap;
+}
+.cc-figure__label-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.cc-figure__fig {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+  margin-top: 4px;
+}
+.cc-figure__value {
+  font-size: var(--_cc-figure-size);
+  font-weight: 600;
+  line-height: 1.15;
+  letter-spacing: -0.01em;
+  color: var(--_cc-foreground-strong);
+  font-variant-numeric: proportional-nums;
+  white-space: nowrap;
+}
+.cc-figure--hero .cc-figure__value {
+  font-size: var(--_cc-fs-hero);
+  line-height: 1.05;
+  letter-spacing: -0.02em;
+}
+.cc-figure__of {
+  font-size: 12px;
+  color: var(--_cc-foreground-meta);
+  white-space: nowrap;
+}
+.cc-figure__trend,
+.cc-figure__meter {
+  align-self: center;
+  flex: none;
+  margin-left: 6px;
+}
+.cc-figure__meter { display: inline-flex; align-items: center; }
+.cc-figure__foot {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  margin-top: 5px;
+  overflow: hidden;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--_cc-foreground-meta);
+  white-space: nowrap;
+}
+.cc-figure__foot-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.cc-figure__delta {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-variant-numeric: tabular-nums;
+}
+.cc-figure__delta[data-tone="ok"] { color: var(--_cc-positive-ink); }
+.cc-figure__delta[data-tone="crit"] { color: var(--_cc-negative-ink); }
+.cc-figure__arrow { width: 11px; height: 11px; stroke-width: 2.25; }
+.cc-figure__arrow.is-up { transform: rotate(-45deg); }
+.cc-figure__arrow.is-down { transform: rotate(45deg); }
+.cc-figure__skeleton {
+  display: inline-block;
+  width: 40px;
+  height: calc(var(--_cc-figure-size) * 0.95);
+  border-radius: var(--_cc-radius-sm);
+  background: var(--_cc-skeleton);
+}
+.cc-panel[data-density="compact"] .cc-figure__trend { display: none; }
+
+/* ── Micro charts (spec A3.8) ──────────────────────────────────────
+   SVG in the viz tokens; no colour for identity. Every chart svg sets its
+   own fill and stroke (the console resets svg to a 16 px stroked icon). */
+.cc-viz-tick {
+  font-family: var(--_cc-font-mono);
+  font-size: var(--_cc-fs-tick);
+  fill: var(--_cc-foreground-meta);
+  stroke: none;
+  font-variant-numeric: tabular-nums;
+}
+.cc-spark,
+.cc-activity,
+.cc-dots,
+.cc-heat__box,
+.cc-barcode {
+  position: relative;
+  display: inline-block;
+  flex: none;
+  line-height: 0;
+  vertical-align: middle;
+}
+.cc-spark__svg,
+.cc-activity__svg,
+.cc-dots__svg,
+.cc-heat__svg,
+.cc-barcode__svg,
+.cc-ring {
+  display: block;
+  overflow: visible;
+  fill: none;
+  stroke: none;
+}
+.cc-spark__svg:focus-visible,
+.cc-activity__svg:focus-visible,
+.cc-heat__svg:focus-visible {
+  outline: 2px solid var(--_cc-focus-ring);
+  outline-offset: 2px;
+  border-radius: var(--_cc-radius-xs);
+}
+.cc-spark__line {
+  fill: none;
+  stroke: var(--_cc-viz-mid);
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.cc-spark__area { fill: var(--_cc-viz-mid); fill-opacity: 0.1; stroke: none; }
+.cc-spark__ring { fill: var(--_cc-viz-plate); stroke: none; }
+.cc-spark__dot { fill: var(--_cc-viz-ink); stroke: none; }
+.cc-spark__dot.is-live,
+.cc-spark__bar.is-live,
+.cc-activity__bar.is-live { fill: var(--_cc-viz-live); }
+.cc-spark__bar,
+.cc-activity__bar { fill: var(--_cc-viz-mid); stroke: none; transition: fill var(--_cc-dur-fast) ease; }
+.cc-spark__bar.is-hover,
+.cc-activity__bar.is-hover { fill: var(--_cc-viz-edge-strong); }
+.cc-spark__bar.is-live.is-hover,
+.cc-activity__bar.is-live.is-hover { fill: var(--_cc-viz-live); }
+.cc-spark__zero,
+.cc-activity__zero { fill: var(--_cc-viz-faint); stroke: none; }
+.cc-spark__base,
+.cc-activity__base,
+.cc-dots__base { stroke: var(--_cc-viz-grid); stroke-width: 1; }
+.cc-spark__cross { stroke: var(--_cc-viz-edge-strong); stroke-width: 1; }
+
+/* The chart's hover and focus label: e2, inside the chart's box. */
+.cc-chart-tip {
+  position: absolute;
+  z-index: 5;
+  box-sizing: border-box;
+  padding: 3px 7px;
+  border: 1px solid var(--_cc-border-soft);
+  border-radius: var(--_cc-radius-sm);
+  background: var(--_cc-surface-overlay);
+  box-shadow: var(--_cc-shadow-sm);
+  color: var(--_cc-foreground);
+  font-family: var(--_cc-font-display);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.35;
+  white-space: nowrap;
+  pointer-events: none;
+  transform: translate(-50%, calc(-100% - 6px));
+}
+.cc-chart-tip[data-align="start"] { transform: translate(-8px, calc(-100% - 6px)); }
+.cc-chart-tip[data-align="end"] { transform: translate(calc(-100% + 8px), calc(-100% - 6px)); }
+
+.cc-minibar {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  width: 100%;
+}
+.cc-minibar__track {
+  position: relative;
+  display: block;
+  flex: 1 1 auto;
+  min-width: 24px;
+  height: 4px;
+  overflow: hidden;
+  border-radius: var(--_cc-radius-pill);
+  background: var(--_cc-viz-faint);
+}
+.cc-minibar__track[style] { flex: none; }
+.cc-minibar__fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  border-radius: inherit;
+  background: var(--_cc-viz-ink);
+}
+.cc-minibar[data-tone]:not([data-tone="neutral"]) .cc-minibar__fill { background: var(--_cc-tone); }
+.cc-minibar__value {
+  flex: none;
+  font-family: var(--_cc-font-mono);
+  font-size: 11px;
+  color: var(--_cc-foreground-meta);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.cc-barcode { display: inline-flex; flex-direction: column; gap: 4px; line-height: 1; }
+.cc-barcode__seg { stroke: none; }
+.cc-barcode__seg[data-kind="filled"] { fill: var(--_cc-viz-ink); }
+.cc-barcode__seg[data-kind="live"] { fill: var(--_cc-viz-live); }
+.cc-barcode__seg[data-kind="outlined"] { fill: var(--_cc-viz-plate); stroke: var(--_cc-viz-ink); stroke-width: 1; }
+.cc-barcode__seg[data-kind="unlit"] { fill: var(--_cc-viz-faint); fill-opacity: 0.55; }
+.cc-barcode__peak { stroke: var(--_cc-viz-ink); stroke-opacity: 0.55; stroke-width: 1.5; }
+.cc-barcode-legend {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  font-size: 9.5px;
+  line-height: 1.3;
+  color: var(--_cc-foreground-meta);
+  white-space: nowrap;
+}
+.cc-figure__foot .cc-barcode-legend { font-size: 11px; }
+.cc-barcode-legend__item { display: inline-flex; align-items: center; gap: 4px; }
+.cc-barcode-legend__mark {
+  display: inline-block;
+  flex: none;
+  width: 6px;
+  height: 6px;
+  background: var(--_cc-viz-ink);
+}
+.cc-barcode-legend__mark[data-kind="outlined"] { background: transparent; box-shadow: inset 0 0 0 1px var(--_cc-viz-ink); }
+.cc-barcode-legend__mark[data-kind="live"] { background: var(--_cc-viz-live); }
+
+.cc-ring { flex: none; vertical-align: middle; }
+.cc-ring__track { fill: none; stroke: var(--_cc-viz-faint); }
+.cc-ring__arc { fill: none; stroke: var(--_cc-viz-ink); }
+.cc-ring__arc[data-kind="live"] { stroke: var(--_cc-viz-live); }
+.cc-ring__arc[data-kind="blocked"] { stroke: var(--_cc-warning); }
+
+.cc-heat { display: inline-flex; flex-direction: column; gap: 8px; min-width: 0; }
+.cc-heat__label {
+  font-family: var(--_cc-font-display);
+  font-size: 11px;
+  fill: var(--_cc-foreground-meta);
+  stroke: none;
+}
+.cc-heat__cell { stroke: none; fill: var(--_cc-viz-grid); }
+.cc-heat__cell.is-active { stroke: var(--_cc-viz-ink); stroke-width: 1.5; }
+.cc-heat__cell[data-level="1"], .cc-heat__swatch[data-level="1"] { fill: var(--_cc-viz-seq-1); background: var(--_cc-viz-seq-1); }
+.cc-heat__cell[data-level="2"], .cc-heat__swatch[data-level="2"] { fill: var(--_cc-viz-seq-2); background: var(--_cc-viz-seq-2); }
+.cc-heat__cell[data-level="3"], .cc-heat__swatch[data-level="3"] { fill: var(--_cc-viz-seq-3); background: var(--_cc-viz-seq-3); }
+.cc-heat__cell[data-level="4"], .cc-heat__swatch[data-level="4"] { fill: var(--_cc-viz-seq-4); background: var(--_cc-viz-seq-4); }
+.cc-heat__cell[data-level="5"], .cc-heat__swatch[data-level="5"] { fill: var(--_cc-viz-seq-5); background: var(--_cc-viz-seq-5); }
+.cc-heat__cell[data-level="6"], .cc-heat__swatch[data-level="6"] { fill: var(--_cc-viz-seq-6); background: var(--_cc-viz-seq-6); }
+.cc-heat__cell[data-level="7"], .cc-heat__swatch[data-level="7"] { fill: var(--_cc-viz-seq-7); background: var(--_cc-viz-seq-7); }
+.cc-heat__legend {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 9.5px;
+  color: var(--_cc-foreground-meta);
+}
+.cc-heat__swatch {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  background: var(--_cc-viz-grid);
+}
+.cc-heat__swatch:first-of-type { margin-left: 3px; }
+.cc-heat__swatch:last-of-type { margin-right: 3px; }
+
+.cc-dots__mark {
+  --_cc-dot-ink: var(--_cc-viz-ink);
+  fill: var(--_cc-dot-ink);
+  stroke: none;
+  outline: none;
+}
+.cc-dots__mark[data-tone="ok"] { --_cc-dot-ink: var(--_cc-positive); }
+.cc-dots__mark[data-tone="info"] { --_cc-dot-ink: var(--_cc-link); }
+.cc-dots__mark[data-tone="warn"] { --_cc-dot-ink: var(--_cc-warning); }
+.cc-dots__mark[data-tone="crit"] { --_cc-dot-ink: var(--_cc-negative); }
+.cc-dots__mark[data-tone="neutral"],
+.cc-dots__mark[data-tone="locked"] { --_cc-dot-ink: var(--_cc-viz-mid); }
+.cc-dots__mark[data-tone="live"],
+.cc-dots__mark.is-live { --_cc-dot-ink: var(--_cc-viz-live); }
+.cc-dots__mark.is-faint { --_cc-dot-ink: var(--_cc-viz-faint); }
+.cc-dots__mark[data-shape="hollow"] { fill: var(--_cc-viz-plate); stroke: var(--_cc-dot-ink); stroke-width: 1.5; }
+.cc-dots__mark.is-active,
+.cc-dots__mark:focus-visible { stroke: var(--_cc-focus-ring); stroke-width: 2; paint-order: stroke; }
+.cc-dots__mark.is-selected { stroke: var(--_cc-viz-live); stroke-width: 1.5; paint-order: stroke; }
+.cc-dots.is-selectable .cc-dots__svg { cursor: pointer; }
+.cc-dots__now { stroke: var(--_cc-viz-live); stroke-width: 1; }
+
+/* ── Detail drawer (spec A3.10) ────────────────────────────────────
+   Docked from 900 px (pushes the main view, a 6 px resize handle),
+   an overlay from 600 to 900 px (e3), the whole view under 600 px. */
+.cc-drawer-layout {
+  container-type: inline-size;
+  container-name: cc-drawer;
+  position: relative;
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+}
+.cc-drawer-layout__inner {
+  position: relative;
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+}
+.cc-drawer-layout__main {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+}
+.cc-drawer-layout__drawer {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  flex: none;
+  width: var(--_cc-drawer-w, 340px);
+  min-height: 0;
+  border-left: 1px solid var(--_cc-border-soft);
+  background: var(--_cc-surface-card);
+  animation: cc-drawer-in var(--_cc-dur-enter) var(--_cc-ease-out);
+}
+.cc-drawer-layout__handle {
+  position: relative;
+  z-index: 2;
+  flex: none;
+  width: 6px;
+  margin-right: -6px;
+  cursor: col-resize;
+  touch-action: none;
+}
+.cc-drawer-layout__handle::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 2px;
+  width: 2px;
+  background: transparent;
+  transition: background var(--_cc-dur-fast) ease;
+}
+.cc-drawer-layout__handle:hover::before { background: var(--_cc-border-strong); }
+.cc-drawer-layout__handle:focus-visible { outline: none; }
+.cc-drawer-layout__handle:focus-visible::before { background: var(--_cc-focus-ring); }
+.cc-drawer-layout__back {
+  display: none;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  width: 100%;
+  padding: 8px var(--_cc-panel-pad-x);
+  border: 0;
+  border-bottom: 1px solid var(--_cc-border-soft);
+  background: transparent;
+  color: var(--_cc-foreground-muted);
+  font-family: var(--_cc-font-display);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+.cc-drawer-layout__back:hover { color: var(--_cc-foreground); background: var(--_cc-surface-hover); }
+.cc-drawer-layout__back:focus-visible { outline: 2px solid var(--_cc-focus-ring); outline-offset: -2px; }
+@keyframes cc-drawer-in {
+  from { opacity: 0; transform: translateX(12px); }
+  to   { opacity: 1; transform: none; }
+}
+@container cc-drawer (max-width: 899px) {
+  .cc-drawer-layout__handle { display: none; }
+  .cc-drawer-layout__drawer {
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 20;
+    width: min(var(--_cc-drawer-w, 340px), 88%);
+    border-left-color: var(--_cc-border-strong);
+    box-shadow: var(--_cc-shadow-lg);
+  }
+}
+@container cc-drawer (max-width: 599px) {
+  .cc-drawer-layout__drawer {
+    left: 0;
+    width: auto;
+    border-left: 0;
+    box-shadow: none;
+    animation-name: cc-fade-in;
+  }
+  .cc-drawer-layout.has-drawer .cc-drawer-layout__main { visibility: hidden; }
+  .cc-drawer-layout__back { display: flex; }
+}
+
+.cc-drawer {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  background: var(--_cc-surface-card);
+}
+.cc-drawer__head {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  flex: none;
+  padding: 14px 10px 12px 16px;
+  border-bottom: 1px solid var(--_cc-border-soft);
+}
+.cc-drawer__mark {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  min-height: 24px;
+}
+.cc-drawer__titles { flex: 1 1 auto; min-width: 0; }
+.cc-drawer__title-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  min-width: 0;
+}
+.cc-drawer__title {
+  margin: 0;
+  font-family: var(--_cc-font-display);
+  font-size: var(--_cc-fs-entity);
+  font-weight: 600;
+  line-height: 1.25;
+  letter-spacing: -0.01em;
+  color: var(--_cc-foreground);
+  overflow-wrap: anywhere;
+}
+.cc-drawer__title:focus { outline: none; }
+.cc-drawer__title:focus-visible {
+  outline: 2px solid var(--_cc-focus-ring);
+  outline-offset: 2px;
+  border-radius: var(--_cc-radius-xs);
+}
+.cc-drawer__sub {
+  margin-top: 2px;
+  font-size: var(--_cc-panel-fs-meta);
+  color: var(--_cc-foreground-meta);
+}
+.cc-drawer__status { display: inline-flex; flex: none; }
+.cc-drawer__tools {
+  display: inline-flex;
+  flex: none;
+  gap: 2px;
+  margin-top: 1px;
+}
+.cc-drawer__body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0 16px 24px;
+}
+.cc-drawer__section { padding-top: 16px; }
+.cc-drawer__section + .cc-drawer__section { padding-top: 20px; }
+.cc-drawer__section-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.cc-drawer__section-label {
+  font-size: var(--_cc-panel-fs-label);
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--_cc-foreground-meta);
+}
+.cc-drawer__section-label .cc-count { margin-left: 2px; }
+.cc-drawer__section-action {
+  margin-left: auto;
+  font-size: var(--_cc-panel-fs-meta);
+  color: var(--_cc-foreground-meta);
+}
+.cc-drawer__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding-top: 20px;
+}
+.cc-drawer__tech { margin-top: 16px; }
+
+/* ── Entities: cards and rows (spec A3.4) ─────────────────────────── */
+.cc-entity {
+  position: relative;
+  min-width: 0;
+  color: var(--_cc-foreground);
+}
+.cc-entity.is-interactive { cursor: pointer; }
+.cc-entity--card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  box-sizing: border-box;
+  padding: var(--_cc-card-pad);
+  border: 1px solid var(--_cc-border-soft);
+  border-radius: var(--_cc-radius-md);
+  background: var(--_cc-surface-card);
+  transition: border-color var(--_cc-dur-fast) ease;
+}
+.cc-entity--card:hover { border-color: var(--_cc-border-strong); }
+.cc-entity--card.is-selected {
+  outline: 2px solid var(--_cc-member-accent);
+  outline-offset: -1px;
+}
+.cc-entity--card.is-live { box-shadow: inset 2px 0 0 var(--_cc-member-accent); }
+.cc-entity__head {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  min-width: 0;
+}
+.cc-entity__mark {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  min-width: 16px;
+}
+.cc-entity__main {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+.cc-entity__hit {
+  display: block;
+  min-width: 0;
+  max-width: 100%;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.cc-entity__hit:focus-visible {
+  outline: 2px solid var(--_cc-focus-ring);
+  outline-offset: 2px;
+  border-radius: var(--_cc-radius-xs);
+}
+.cc-entity__title {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  font-size: var(--_cc-fs-card);
+  font-weight: 600;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cc-entity__sub {
+  min-width: 0;
+  overflow: hidden;
+  font-size: var(--_cc-panel-fs-meta);
+  color: var(--_cc-foreground-meta);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cc-entity__status { display: inline-flex; flex: none; }
+.cc-entity__actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  flex: none;
+}
+.cc-entity--card .cc-entity__actions {
+  position: absolute;
+  top: 7px;
+  right: 7px;
+  padding: 2px;
+  border-radius: var(--_cc-radius-sm);
+  background: var(--_cc-surface-card);
+  box-shadow: -8px 0 8px -4px var(--_cc-surface-card);
+}
+.cc-entity__now {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  min-width: 0;
+  font-size: 12.5px;
+  line-height: 1.4;
+  color: var(--_cc-foreground);
+}
+.cc-entity__now > .cc-mark { margin-top: 4.5px; }
+.cc-entity__now-text { min-width: 0; overflow-wrap: anywhere; }
+.cc-entity__facts {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  font-size: var(--_cc-panel-fs-meta);
+  color: var(--_cc-foreground-meta);
+}
+.cc-entity__figures {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  min-width: 0;
+  font-variant-numeric: tabular-nums;
+}
+.cc-entity__time {
+  flex: none;
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--_cc-foreground-meta);
+  white-space: nowrap;
+}
+.cc-entity__relations {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 6px;
+  min-width: 0;
+  font-size: var(--_cc-panel-fs-meta);
+  color: var(--_cc-foreground-meta);
+}
+.cc-entity__tech { margin-top: 0; }
+.cc-entity--row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  box-sizing: border-box;
+  min-height: var(--_cc-panel-row-h);
+  padding: var(--_cc-row-pad-y) var(--_cc-panel-pad-x);
+  border-bottom: 1px solid var(--_cc-border-soft);
+}
+.cc-entity--row.is-interactive:hover { background: var(--_cc-surface-hover); }
+.cc-entity--row.is-selected {
+  background: var(--_cc-surface-soft);
+  box-shadow: inset 2px 0 0 var(--_cc-member-accent);
+}
+.cc-entity--row.is-live { box-shadow: inset 2px 0 0 var(--_cc-member-accent); }
+.cc-entity--row .cc-entity__title {
+  font-size: var(--_cc-panel-fs-body);
+  font-weight: 500;
+}
+/* Compact two-line rows tighten their lines too (A4.3). */
+.cc-panel[data-density="compact"] .cc-entity--row .cc-entity__title { line-height: 16px; }
+.cc-panel[data-density="compact"] .cc-entity--row .cc-entity__sub { line-height: 14px; }
+.cc-entity--row .cc-entity__now { font-size: var(--_cc-panel-fs-meta); color: var(--_cc-foreground-muted); }
+.cc-entity--row .cc-entity__now > .cc-mark { margin-top: 3.5px; }
+.cc-entity--row .cc-entity__time { min-width: 48px; margin-left: 0; text-align: right; }
+.cc-entity--row .cc-entity__figures { flex: none; font-size: var(--_cc-panel-fs-meta); color: var(--_cc-foreground-meta); }
+
+.cc-trust {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--_cc-panel-fs-meta);
+  color: var(--_cc-foreground-muted);
+  white-space: nowrap;
+}
+.cc-trust__bars {
+  display: inline-flex;
+  align-items: flex-end;
+  gap: 1.5px;
+  height: 10px;
+}
+.cc-trust__bar {
+  display: block;
+  width: 3px;
+  border-radius: 0.5px;
+  background: var(--_cc-viz-faint);
+}
+.cc-trust__bar:nth-child(1) { height: 4px; }
+.cc-trust__bar:nth-child(2) { height: 5.5px; }
+.cc-trust__bar:nth-child(3) { height: 7px; }
+.cc-trust__bar:nth-child(4) { height: 8.5px; }
+.cc-trust__bar:nth-child(5) { height: 10px; }
+.cc-trust__bar.is-on { background: var(--_cc-viz-ink); }
+
+/* ── Time: chips and countdowns (spec A3.5) ───────────────────────── */
+.cc-time-chip,
+.cc-countdown--chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  box-sizing: border-box;
+  height: 20px;
+  padding: 0 8px 0 6px;
+  border-radius: var(--_cc-radius-pill);
+  background: var(--_cc-surface-soft);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.cc-time-chip { color: var(--_cc-foreground-meta); }
+.cc-time-chip__glyph,
+.cc-countdown__glyph { width: 12px; height: 12px; stroke-width: 2; }
+.cc-countdown {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--_cc-tone-ink);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.cc-countdown[data-tone="neutral"] { color: var(--_cc-foreground-meta); }
+.cc-countdown--chip:not([data-tone="neutral"]) { background: color-mix(in srgb, var(--_cc-tone) 12%, var(--_cc-surface-card)); }
+
+/* ── Filter bar (spec A3.11) ──────────────────────────────────────── */
+.cc-filterbar {
+  position: relative;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+  min-width: 0;
+  padding: 10px var(--_cc-panel-pad-x);
+  border-bottom: 1px solid var(--_cc-border-soft);
+}
+.cc-filterbar__search .cc-search__input { width: 240px; }
+.cc-filterbar__search-toggle { display: none; }
+.cc-filterbar__chips {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.cc-filterbar__clear {
+  height: 26px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: var(--_cc-radius-sm);
+  background: transparent;
+  color: var(--_cc-foreground-muted);
+  font-family: var(--_cc-font-display);
+  font-size: var(--_cc-fs-control);
+  font-weight: 500;
+  cursor: pointer;
+}
+.cc-filterbar__clear:hover { color: var(--_cc-foreground); background: var(--_cc-surface-hover); }
+.cc-filterbar__clear:focus-visible { outline: 2px solid var(--_cc-focus-ring); outline-offset: 1px; }
+.cc-filter-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  box-sizing: border-box;
+  height: 26px;
+  padding: 0 10px;
+  border: 1px solid var(--_cc-border-soft);
+  border-radius: var(--_cc-radius-pill);
+  background: transparent;
+  color: var(--_cc-foreground-muted);
+  font-family: var(--_cc-font-display);
+  font-size: var(--_cc-fs-control);
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: color var(--_cc-dur-fast) ease, border-color var(--_cc-dur-fast) ease, background var(--_cc-dur-fast) ease;
+}
+.cc-filter-chip:hover { color: var(--_cc-foreground); border-color: var(--_cc-border-strong); }
+.cc-filter-chip:focus-visible { outline: 2px solid var(--_cc-focus-ring); outline-offset: 2px; }
+.cc-filter-chip.is-pressed {
+  border-color: color-mix(in oklch, var(--_cc-member-accent) 50%, transparent);
+  background: var(--_cc-member-surface);
+  color: var(--_cc-foreground);
+}
+.cc-filter-chip .cc-count { margin-left: -1px; }
+.cc-filter-chip__glyph { width: 13px; height: 13px; stroke-width: 1.75; color: var(--_cc-foreground-meta); }
+.cc-filter-chip.is-pressed .cc-filter-chip__glyph { color: var(--_cc-foreground); }
+
+/* ── Links between panels (spec A4.7) ─────────────────────────────── */
+.cc-agent--link,
+.cc-link--button {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: var(--_cc-radius-xs);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: inherit;
+  cursor: pointer;
+}
+.cc-agent--link .cc-agent__name,
+.cc-link--button {
+  text-decoration: underline;
+  text-decoration-color: transparent;
+  text-underline-offset: 2px;
+  transition: text-decoration-color var(--_cc-dur-fast) ease;
+}
+/* A link inside prose shows a faint rule at rest, so it reads as a link
+   among words; an agent name carries its avatar instead. */
+.cc-link--button { text-decoration-color: color-mix(in srgb, currentColor 35%, transparent); }
+.cc-agent--link:hover .cc-agent__name,
+.cc-link--button:hover { text-decoration-color: currentColor; }
+.cc-agent--link:focus-visible,
+.cc-link--button:focus-visible { outline: 2px solid var(--_cc-focus-ring); outline-offset: 1px; }
+
+/* ── Live updates (spec A4.6) ─────────────────────────────────────── */
+.cc-new-pill {
+  position: sticky;
+  top: 8px;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: max-content;
+  height: 24px;
+  margin: 0 auto;
+  padding: 0 10px;
+  border: 1px solid var(--_cc-border-soft);
+  border-radius: var(--_cc-radius-pill);
+  background: var(--_cc-surface-overlay);
+  box-shadow: var(--_cc-shadow-md);
+  color: var(--_cc-foreground);
+  font-family: var(--_cc-font-display);
+  font-size: var(--_cc-panel-fs-meta);
+  font-weight: 500;
+  cursor: pointer;
+  animation: cc-pop-in var(--_cc-dur-enter) var(--_cc-ease-out);
+}
+.cc-new-pill[data-placement="bottom"] { top: auto; bottom: 8px; }
+.cc-new-pill:focus-visible { outline: 2px solid var(--_cc-focus-ring); outline-offset: 2px; }
+.cc-new-pill__arrow { width: 12px; height: 12px; transform: rotate(-90deg); }
+.cc-new-pill[data-placement="bottom"] .cc-new-pill__arrow { transform: rotate(90deg); }
+.cc-enter-live { animation: cc-enter-live var(--_cc-dur-enter) var(--_cc-ease-out), cc-live-rule 1.2s ease-out; }
+@keyframes cc-enter-live {
+  from { opacity: 0; transform: translateY(-8px); }
+  to   { opacity: 1; transform: none; }
+}
+@keyframes cc-live-rule {
+  from { box-shadow: inset 2px 0 0 var(--_cc-member-accent); }
+  to   { box-shadow: inset 2px 0 0 transparent; }
+}
+
+/* ── Hover reveal (spec A4.1) ──────────────────────────────────────
+   Secondary controls fade in when their container is hovered or holds
+   focus, is selected, or the control is open; opacity only, so they stay
+   in the accessibility tree and the tab order. Always shown without hover
+   and in panes under 480 px. */
+.cc-reveal {
+  opacity: 0;
+  transition: opacity var(--_cc-dur-fast) ease;
+}
+.cc-reveal-host:hover .cc-reveal,
+.cc-reveal-host:focus-within .cc-reveal,
+.cc-reveal-host.is-selected .cc-reveal,
+.cc-reveal:focus-visible,
+.cc-reveal:focus-within,
+.cc-reveal[aria-expanded="true"],
+.cc-reveal:has([aria-expanded="true"]),
+.cc-reveal.has-badge { opacity: 1; }
+@media (hover: none) {
+  .cc-reveal { opacity: 1; }
+}
+
 /* ── Narrow panes ──────────────────────────────────────────────── */
 
 @container cc-panel (max-width: 719px) {
@@ -1236,6 +2770,57 @@ button.cc-tile:focus-visible,
 }
 
 @container cc-panel (max-width: 479px) {
+  .cc-filterbar__search { display: none; }
+  .cc-filterbar__search-toggle { display: inline-flex; }
+  .cc-filterbar.is-search-open .cc-filterbar__search {
+    position: absolute;
+    inset: 6px var(--_cc-panel-pad-x);
+    z-index: 2;
+    display: flex;
+    background: var(--_cc-surface-card);
+  }
+  .cc-filterbar.is-search-open .cc-search__box,
+  .cc-filterbar.is-search-open .cc-search__input { width: 100%; }
+  .cc-entity--row .cc-entity__trend,
+  .cc-entity--row .cc-entity__figures { display: none; }
+  .cc-glance {
+    grid-auto-flow: row;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .cc-glance > :nth-child(2n + 1) { border-left: 0; }
+  .cc-glance > :nth-child(n + 3) { border-top: 1px solid var(--_cc-border-soft); }
+  .cc-glance > :nth-child(n + 5) { display: none; }
+  .cc-figure__trend { display: none; }
+  .cc-reveal { opacity: 1; }
+  .cc-menu__fold { display: block; }
+  /* The header's actions take a row of their own (the rule below) and wrap
+     inside it. The view switch stays: pinned browser scenarios press it in a
+     180 px pane. Its glyph options show the glyph alone; the words stay
+     their names and tooltips. */
+  .cc-panel-head--v2 .cc-panel-head__actions { flex-wrap: wrap; }
+  .cc-panel-head__view .cc-seg__btn.has-glyph { padding: 0 8px; }
+  .cc-panel-head__view .cc-seg__btn.has-glyph .cc-seg__glyph { margin-right: 0; }
+  .cc-panel-head__view .cc-seg__btn.has-glyph .cc-seg__label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+  /* The summary may wrap to two lines here (A3.1), clamped. */
+  .cc-panel-head--v2 .cc-panel-head__summary {
+    max-height: calc(2 * 1.45em);
+    line-height: 1.45;
+  }
+  .cc-panel-head--v2 .cc-panel-head__facts { flex-wrap: wrap; }
+  .cc-panel > * {
+    --_cc-panel-row-h: var(--_cc-density-row);
+    --_cc-row-pad-y: 3px;
+    --_cc-card-pad: 8px 10px;
+    --_cc-figure-size: 16px;
+    --_cc-lane-min-h: 64px;
+  }
   .cc-panel-head__actions {
     flex-basis: 100%;
     justify-content: flex-start;
@@ -1243,6 +2828,8 @@ button.cc-tile:focus-visible,
   }
   .cc-row__actions { opacity: 1; }
   .cc-row__meta > :not(:first-child):not(.cc-time) { display: none; }
+  .cc-entity--row .cc-entity__title { line-height: 16px; }
+  .cc-entity--row .cc-entity__sub { line-height: 14px; }
   .cc-btn__label { display: none; }
   .cc-search__input { width: 100%; }
   .cc-search,
@@ -1259,6 +2846,30 @@ button.cc-tile:focus-visible,
 @media (prefers-reduced-motion: reduce) {
   .cc-dot.is-live,
   .cc-skeleton__row { animation: none; }
+  .cc-popover,
+  .cc-status-toast { animation: cc-fade-in 120ms linear; }
+  .cc-panel-head__progress::before { animation: none; width: 50%; }
+  .cc-skeleton__art,
+  .cc-agent__avatar.is-live { animation: none; }
+  .cc-drawer-layout__drawer { animation-name: cc-fade-in; }
+  .cc-enter-live { animation: cc-fade-in 120ms linear, cc-live-rule 1.2s ease-out; }
+  .cc-mark[data-tone="live"]:not(.cc-chip__mark),
+  .cc-dot.is-live {
+    animation: none;
+    box-shadow: 0 0 0 1.5px var(--_cc-surface-card), 0 0 0 2.5px var(--_cc-viz-live);
+  }
 }
 .reduced-motion .cc-dot.is-live,
 .reduced-motion .cc-skeleton__row { animation: none; }
+.reduced-motion .cc-popover,
+.reduced-motion .cc-status-toast { animation: cc-fade-in 120ms linear; }
+.reduced-motion .cc-panel-head__progress::before { animation: none; width: 50%; }
+.reduced-motion .cc-skeleton__art,
+.reduced-motion .cc-agent__avatar.is-live { animation: none; }
+.reduced-motion .cc-drawer-layout__drawer { animation-name: cc-fade-in; }
+.reduced-motion .cc-enter-live { animation: cc-fade-in 120ms linear, cc-live-rule 1.2s ease-out; }
+.reduced-motion .cc-mark[data-tone="live"]:not(.cc-chip__mark),
+.reduced-motion .cc-dot.is-live {
+  animation: none;
+  box-shadow: 0 0 0 1.5px var(--_cc-surface-card), 0 0 0 2.5px var(--_cc-viz-live);
+}

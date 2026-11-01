@@ -2584,6 +2584,28 @@ async function runGlobalTimelineRecentSeedProof() {
   }
 }
 
+// A first load with no saved layout opens Today, and Today's backfill fills
+// the most active agents' logs. A scenario about the chat's own first page
+// and paging starts instead from a saved layout whose one pane is empty: the
+// experience gets a storage scope so the layout persists, and the layout is
+// in place before the console loads.
+async function startFromEmptyFirstPane(page, storageScope) {
+  await page.route("**/console/experience", async (route) => {
+    const response = await route.fetch();
+    const value = await response.json();
+    await route.fulfill({ response, json: { ...value, storage_scope: storageScope } });
+  });
+  await page.addInitScript((scope) => {
+    const key = `meta-console-dock-state:${JSON.stringify([window.location.origin, scope])}`;
+    window.localStorage.setItem(key, JSON.stringify({
+      tabs: [{ id: "tab-1", presetId: "single", layout: { kind: "panel", panelId: "panel-1" } }],
+      panels: [{ id: "panel-1", mode: "console", target: null }],
+      activeTabId: "tab-1",
+      focusedPanelId: "panel-1",
+    }));
+  }, storageScope);
+}
+
 async function runChatPaneRecentFirstPageProof() {
   const baseTs = Date.parse("2026-05-23T21:40:00.000Z");
   const frames = Array.from({ length: 1_500 }, (_, index) => ({
@@ -2608,6 +2630,8 @@ async function runChatPaneRecentFirstPageProof() {
   try {
     browser = await launchBrowser();
     const page = await browser.newPage();
+    // Today's backfill pre-fills the agent's log when Today is open, so this starts from an empty first pane.
+    await startFromEmptyFirstPane(page, "chat-pane-recent-first-page");
     await gotoConsole(page, `${server.baseUrl}/console`);
     await page.waitForSelector('.agent[role="button"], .cc-sidebar-row', { timeout: 30_000 });
     await page.locator('.agent[role="button"], .cc-sidebar-row').filter({ hasText: "Person Worker Alpha" }).click();
@@ -2661,6 +2685,8 @@ async function runChatPaneOlderHistoryDemandPagingProof() {
   try {
     browser = await launchBrowser();
     const page = await browser.newPage();
+    // Today's backfill pre-fills the agent's log when Today is open, so this starts from an empty first pane.
+    await startFromEmptyFirstPane(page, "chat-pane-older-history-demand-paging");
     await gotoConsole(page, `${server.baseUrl}/console`);
     await page.waitForSelector('.agent[role="button"], .cc-sidebar-row', { timeout: 30_000 });
     await page.locator('.agent[role="button"], .cc-sidebar-row').filter({ hasText: "Person Worker Alpha" }).click();
@@ -2698,6 +2724,94 @@ async function runChatPaneOlderHistoryDemandPagingProof() {
     );
 
     process.stdout.write("browser chat pane older history demand paging ok\n");
+  } finally {
+    if (browser) {
+      await browser.close();
+    }
+    await server.close();
+  }
+}
+
+// The common path since a first load opens Today: Today's backfill fills the
+// agent's log first, then the chat opens on those frames, and "Load older
+// history" continues from the oldest loaded frame, with no duplicate and no gap.
+async function runChatPaneOlderHistoryAfterTodayPrefillProof() {
+  const { eventually } = require("./acceptance-runtime.cjs");
+  const identity = "person-worker-alpha";
+  const baseTs = Date.parse("2026-05-23T22:50:00.000Z");
+  const frames = Array.from({ length: 1_500 }, (_, index) => ({
+    id: `prefilled-line-${index + 1}`,
+    kind: "interaction_complete",
+    identity,
+    interaction_id: `prefilled-turn-${index + 1}`,
+    timestamp_ms: baseTs + index,
+    cursor: `console:${index + 1}`,
+    payload: {
+      text: `Prefilled worker line ${index + 1}`,
+    },
+  }));
+  const server = await startMockConsoleServer({
+    includeBusyWorker: true,
+    timelineFramesByIdentity: {
+      [identity]: frames,
+    },
+  });
+  const identityRequests = () => server.requests
+    .filter((request) => request.url === "/console/rpc" && request.body)
+    .map((request) => JSON.parse(request.body))
+    .filter((payload) => payload.method === "meta/console/query_timeline" && payload.params?.identity === identity);
+  let browser;
+
+  try {
+    browser = await launchBrowser();
+    const page = await browser.newPage();
+    const backfillAnswered = page.waitForResponse((response) => {
+      const body = response.request().postData() || "";
+      return response.url().endsWith("/console/rpc")
+        && body.includes("meta/console/query_timeline")
+        && body.includes(`"identity":"${identity}"`)
+        && body.includes('"limit":1000');
+    }, { timeout: 30_000 });
+    await gotoConsole(page, `${server.baseUrl}/console`);
+    // A first load with no saved layout opens Today; its backfill loads the agent's newest 1000 frames.
+    await page.locator('[data-testid="timeline-panel"]').first().waitFor({ timeout: 30_000 });
+    await backfillAnswered;
+    await sleep(300);
+
+    await page.locator('.agent[role="button"], .cc-sidebar-row').filter({ hasText: "Person Worker Alpha" }).click();
+    const pane = page.locator(`[data-testid="chat-pane:${identity}"]`);
+    await pane.getByText("Prefilled worker line 1500").waitFor({ timeout: 10_000 });
+    const countLine = (n) => pane.getByText(`Prefilled worker line ${n}`, { exact: true }).count();
+    const revealAll = async () => {
+      for (let step = 0; step < 40; step += 1) {
+        const reveal = pane.locator(`[data-testid="chat-reveal-earlier:${identity}"]`);
+        if (!(await reveal.count())) return;
+        await reveal.first().evaluate((node) => node.click());
+        await sleep(100);
+      }
+    };
+
+    // The chat shows the pre-filled frames: the oldest of them, and nothing older yet.
+    await eventually(async () => { await revealAll(); return (await countLine(501)) === 1; }, "the chat shows the oldest pre-filled frame", 20_000);
+    assert.equal(await countLine(500), 0, "no frame older than the pre-filled ones before Load older history");
+    assert.equal(identityRequests().filter((payload) => payload.params?.before !== undefined).length, 0, "no older page before Load older history");
+
+    await clickLoadOlderHistory(pane);
+    await eventually(async () => { await revealAll(); return (await countLine(500)) === 1; }, "the older page lands next to the pre-filled frames", 20_000);
+    const older = identityRequests().filter((payload) => payload.params?.before !== undefined);
+    assert(older.length >= 1, `expected an older page request; saw ${JSON.stringify(identityRequests())}`);
+    assert.equal(older[0].params.before, "console:501", "Load older history continues from the oldest loaded frame");
+    const pageLimit = Number(older[0].params.limit) || 0;
+    assert(pageLimit > 0, `the older page names its limit; saw ${JSON.stringify(older[0])}`);
+    const oldestExpected = Math.max(1, 501 - pageLimit);
+    for (const n of [oldestExpected, oldestExpected + 1, 499, 500, 501, 502, 1500]) {
+      assert.equal(await countLine(n), 1, `line ${n} shows exactly once (no duplicate, no gap)`);
+    }
+    if (oldestExpected > 1) {
+      assert.equal(await countLine(oldestExpected - 1), 0, "the older page holds exactly its limit");
+    }
+
+    process.stdout.write("browser chat pane older history after Today prefill ok\n");
   } finally {
     if (browser) {
       await browser.close();
@@ -4838,6 +4952,7 @@ const allScenarios = [
     { id: "sidebar-long-roster-order", family: "console", backend: "mock", run: runSidebarLongRosterOrderProof },
     { id: "topology-role-chip-pane-reuse", family: "topology", backend: "mock", run: runTopologyRoleChipPaneReuseBrowserProof },
     { id: "gating-audit-refresh-error", family: "console", backend: "mock", run: runGatingAuditRefreshErrorProof },
+    { id: "chat-pane-older-history-after-today-prefill", family: "presentation", backend: "mock", run: runChatPaneOlderHistoryAfterTodayPrefillProof },
   ];
 
 module.exports = { scenarios: allScenarios };

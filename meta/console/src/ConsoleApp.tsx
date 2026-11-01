@@ -3002,6 +3002,10 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       });
       if (match) target = buildDockTarget(match);
     }
+    // With no saved layout and no first view the config names (or one this
+    // viewer cannot open), the first pane opens Today, so a first load never
+    // starts on an empty pane. A tab the user opens later keeps its picker.
+    if (!target && visibleControls.includes("timeline")) target = buildControlTarget("timeline");
     initialTargetOpened.current = true;
     if (!target) return;
     const preset = normalizeDockPreset(layoutConfig?.initial_preset);

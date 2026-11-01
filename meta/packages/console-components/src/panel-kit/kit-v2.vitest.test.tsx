@@ -883,3 +883,32 @@ describe("navigation", () => {
     expect(onClick).toHaveBeenCalledTimes(1);
   });
 });
+
+/** Selector specificity as [ids, classes and pseudo-classes, types]. */
+function specificity(selector: string): [number, number, number] {
+  const body = selector.replace(/::[\w-]+/g, "");
+  const ids = (body.match(/#[\w-]+/g) ?? []).length;
+  const classes = (body.match(/\.[\w-]+|\[[^\]]*\]|:(?!:)[\w-]+(\([^)]*\))?/g) ?? []).length;
+  const types = (body.replace(/\[[^\]]*\]|\([^)]*\)/g, "").match(/(^|[\s>+~])[a-z][\w-]*/gi) ?? []).length;
+  return [ids, classes, types];
+}
+
+function outranks(a: [number, number, number], b: [number, number, number]): boolean {
+  for (let index = 0; index < 3; index += 1) if (a[index] !== b[index]) return a[index] > b[index];
+  return false;
+}
+
+describe("kit stylesheet", () => {
+  it("draws the glance strip's rules over the figures' border reset", async () => {
+    const fs = await import("node:fs");
+    const path = await import("node:path");
+    const css = fs.readFileSync(path.join(__dirname, "../styles/panel-kit.css"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+    const rules = [...css.matchAll(/([^{}]+)\{([^{}]*)\}/g)].map((match) => ({ selector: match[1].trim(), body: match[2] }));
+    const divider = rules.find((rule) => rule.selector.startsWith(".cc-glance >") && /border-left:\s*1px solid/.test(rule.body));
+    const reset = rules.find((rule) => rule.selector === ".cc-figure" && /border:\s*0/.test(rule.body));
+    expect(Boolean(divider && reset)).toBe(true);
+    // Equal specificity would leave the rule to source order, and the reset
+    // comes after it: the divider must outrank the reset outright.
+    expect(outranks(specificity(divider!.selector), specificity(reset!.selector))).toBe(true);
+  });
+});

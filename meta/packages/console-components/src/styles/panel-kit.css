@@ -1810,7 +1810,9 @@ button.cc-tile:focus-visible,
   padding: 0 calc(var(--_cc-panel-pad-x) - 12px);
   border-bottom: 1px solid var(--_cc-border-soft);
 }
-.cc-glance > * + * { border-left: 1px solid var(--_cc-border-soft); }
+/* The rule between figures: a pseudo-class keeps it above the figure's own
+   border reset below (".cc-glance > * + *" ties with ".cc-figure" and lost). */
+.cc-glance > :nth-child(n + 2) { border-left: 1px solid var(--_cc-border-soft); }
 .cc-figure {
   display: flex;
   flex-direction: column;

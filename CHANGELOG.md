@@ -2436,8 +2436,8 @@ them.
   included, least recently updated first, so past 100 voice items a new item
   was never offered (the channel's queue stalled) and a worker's item failed
   classification as missing from its namespace. They now read the 1,000 most
-  recently updated voice items and log one warning per voice graph, with the
-  voice item count, when a cut left older voice items out.
+  recently updated voice items. Once a cut leaves older voice items out,
+  they log at most one warning per voice request, with the voice item count.
 
 ### Upgrade notes
 

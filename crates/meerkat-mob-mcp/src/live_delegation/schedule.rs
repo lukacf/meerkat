@@ -381,7 +381,8 @@ fn voice_snapshot_filter() -> WorkGraphSnapshotFilter {
 #[derive(Clone)]
 pub(super) struct VoiceWorkGraph {
     service: WorkGraphService,
-    /// Set once a cut voice snapshot has been warned about; clones share it.
+    /// Set once a cut voice snapshot has been warned about for this voice
+    /// request; its clones share it.
     snapshot_cut_warned: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Namespace snapshots taken to classify a worker's item (test count).
     #[cfg(test)]
@@ -513,8 +514,10 @@ impl VoiceWorkGraph {
             .expect("conflicting evidence");
     }
 
-    /// Warn, once for this voice graph and its clones, when a scheduling
-    /// snapshot cut voice items: it read only the most recently updated ones,
+    /// Warn at most once per voice request when a scheduling snapshot cut
+    /// voice items: each admitted request builds its own voice graph, which
+    /// its pending operation, the schedule pump and its worker share as
+    /// clones. The snapshot read only the most recently updated voice items,
     /// so an older open item is not offered and an older blocker is not
     /// named. Closed voice items count too, so past the limit every
     /// scheduling pass would warn again.
@@ -529,7 +532,7 @@ impl VoiceWorkGraph {
                 read,
                 total_items,
                 limit = VOICE_SNAPSHOT_LIMIT,
-                "voice work snapshot read the {VOICE_SNAPSHOT_LIMIT} most recently updated of {total_items} voice items; an older open item is not offered and an older blocker is not named (warned once)"
+                "voice work snapshot read the {VOICE_SNAPSHOT_LIMIT} most recently updated of {total_items} voice items; an older open item is not offered and an older blocker is not named (warned once per voice request)"
             );
         }
     }

@@ -709,8 +709,14 @@ macro_rules! mob_catalog_machine_dsl {
             // one's seal removes). Never journaled: a restart has no apply
             // open.
             declared_apply_open: bool,
-            // Created identity entries (0.9.9). The names of removed created
-            // entries: a tombstoned name is never an entry or a member again
+            // Created identity entries (0.9.9). An entry's origin
+            // (identity_entry_origins) is its provenance and the custody of
+            // its desired record: the host's roster for a Declared entry, the
+            // identity store's created entry row for a Created one. Custody
+            // decides only the recovery source, the name guards and the name
+            // reservations below, never what the entry's member is or may do.
+            // The names of removed created entries: a tombstoned name is
+            // never an entry or a member again
             // (tombstone_is_never_an_entry), and no spawn, declaration or
             // adoption takes it. Recovered at boot from the identity store's
             // created entry rows (RecoverCreatedIdentityEntry); the store
@@ -34926,12 +34932,16 @@ pub enum MemberAdmissionVerdictKind {
     IdentityNameReserved,
 }
 
-/// How an identity became an identity entry (`identity_entry_origins`).
-/// The stored form of an entry's journal row names the origin.
+/// How an identity became an identity entry (`identity_entry_origins`): its
+/// provenance, and the custody of its desired record. Custody decides only
+/// the recovery source, the name guards and the name reservations, never
+/// what the entry's member is or may do. The stored form of an entry's
+/// journal row names the origin.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum IdentityEntryOrigin {
     /// The host declared it: a spawn or a dormant seat that carried entry
-    /// custody, or the adoption of a legacy member.
+    /// custody, or the adoption of a legacy member. Its desired record is
+    /// the host's roster.
     #[default]
     Declared,
     /// Created at runtime: its desired record is its created entry row in

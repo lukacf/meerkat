@@ -2885,8 +2885,7 @@ impl SessionHandle {
 
 /// The runtime a session task runs on: the runtime that created the session,
 /// an embedding host's for a member's or a hosted session's actor. It is kept
-/// to tell, when the task stops taking commands, whether that runtime stopped
-/// and took the task with it (see
+/// to tell whether that runtime has stopped, which ends the task (see
 /// `EphemeralSessionService::session_task_ended_with_its_runtime`).
 #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
 struct SessionTaskRuntime {
@@ -2902,9 +2901,11 @@ impl SessionTaskRuntime {
         }
     }
 
-    /// Whether this runtime has shut down. A runtime that is shutting down
-    /// cancels every task spawned on it before `spawn` returns, so the probe
-    /// answers at once; a live runtime has not run the probe yet, or ran it.
+    /// Whether this runtime has begun to shut down. A runtime's shutdown
+    /// closes its task list before it drops any of the tasks it held, and
+    /// from then on it cancels every task spawned on it before `spawn`
+    /// returns, so the probe answers at once; a live runtime has not run the
+    /// probe yet, or ran it.
     fn has_stopped(&self) -> bool {
         use futures::FutureExt as _;
         self.handle.as_ref().is_some_and(|handle| {
@@ -5306,17 +5307,27 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
 
     /// Whether `id`'s session task ended because the runtime it ran on
     /// stopped: the actor this service still holds for the session (not
-    /// retired or replaced) takes no commands, and its runtime has shut
-    /// down. That runtime is the one that created the session, an embedding
+    /// retired or replaced) runs on a runtime that has begun to shut down.
+    /// That runtime is the one that created the session, an embedding
     /// host's for a member's or a hosted session's actor. A task that
     /// panicked, or that this service retired, ended some other way.
+    ///
+    /// The runtime's stop alone decides it: a runtime that has begun to shut
+    /// down drops every task it holds, the session's included, so the task
+    /// has ended or is ending. Whether its command channel has closed yet is
+    /// not asked. The stopping runtime drops the task's future in pieces,
+    /// and a turn's result sender goes before the task's command receiver,
+    /// so the runtime loop serving the session, which outlives the host's
+    /// runtime, can see the turn's result channel closed while the command
+    /// channel is still open. A check that also required the closed command
+    /// channel would answer `false` there, and the loop would take the failed
+    /// turn's own path (a discarded provisional tail and replayed inputs, or
+    /// an executor stop for a resumed run) after the host's runtime stopped.
     #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
     pub(crate) async fn session_task_ended_with_its_runtime(&self, id: &SessionId) -> bool {
         self.sessions
             .with_handle(id, |handle| {
-                handle.actor_witness.is_live()
-                    && handle.command_tx.is_closed()
-                    && handle.actor_runtime.has_stopped()
+                handle.actor_witness.is_live() && handle.actor_runtime.has_stopped()
             })
             .await
             .unwrap_or(false)

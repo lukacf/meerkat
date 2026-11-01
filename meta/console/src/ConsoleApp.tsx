@@ -214,6 +214,7 @@ import { AgentDetailsPanel } from "./panels/AgentDetailsPanel";
 import { HealthPanel } from "./panels/HealthPanel";
 import type { ConsoleHealthSnapshot } from "./types";
 import { SchedulesSection } from "./panels/SchedulesSection";
+import { SchedulesPanel } from "./panels/SchedulesPanel";
 import {
   WorkGraphPanel,
   createWorkGraphRefreshSequencer,
@@ -5960,6 +5961,19 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
         />
       );
     }
+    if (target.kind === "schedules")
+      return (
+        <SchedulesPanel
+          agents={agents}
+          offer={scheduleOffer}
+          readOnly={consoleReadOnly}
+          accessEnforcing={accessEnforcing}
+          run={runScheduleCommand}
+          // Lists older than 15 s are read again at most once a minute while
+          // the console renders (the panel's Refresh reads them at once).
+          refreshToken={Math.floor(Date.now() / 60_000)}
+        />
+      );
     return (
       <PanelShell>
         <EmptyState kind="unavailable" title="This panel isn't available in this console" />

@@ -404,10 +404,56 @@ describe("panel header v2", () => {
     fireEvent.click(view.getByTestId("workgraph-view-toggle:tree"));
     expect(onChange).toHaveBeenCalledWith("tree");
     expect(view.getByRole("button", { name: "Refresh work items" }).closest(".cc-reveal") !== null).toBe(true);
+    // The switch stays in the header at every width (pinned scenarios press
+    // it in a 180 px pane): no folded copy in the menu. Its words stay the
+    // names and become tooltips, for the narrow pane's glyph-only buttons.
+    expect(graph.getAttribute("title")).toBe("Graph");
+    expect(graph.querySelector(".cc-seg__label")?.textContent).toBe("Graph");
+    expect(view.getByRole("button", { name: "Outline" }).getAttribute("data-testid")).toBe("workgraph-view-toggle:tree");
     fireEvent.click(view.getByTestId("workgraph-menu"));
-    // The folded copy of the view switch never repeats the switch's ids.
-    expect(view.getByTestId("workgraph-view-toggle:graph:menu").getAttribute("aria-checked")).toBe("true");
+    expect(view.getByRole("menu").querySelector('[role="menuitemradio"]') === null).toBe(true);
     expect(view.getAllByTestId("workgraph-view-toggle:graph").length).toBe(1);
+    // A view without a menu adds no overflow trigger.
+    view.rerender(
+      <PanelHeader
+        title="WorkGraph"
+        view={{ ariaLabel: "WorkGraph view", value: "graph", onChange, options: [{ id: "graph", label: "Graph", glyph: "graph" }, { id: "tree", label: "Outline" }] }}
+      />,
+    );
+    expect(view.container.querySelector(".cc-menu-trigger") === null).toBe(true);
+    // An option without a glyph keeps its plain words.
+    expect(view.getByRole("button", { name: "Outline" }).innerHTML).toBe("Outline");
+  });
+
+  it("wraps its actions to their own row instead of folding or overflowing a narrow pane", async () => {
+    const fs = await import("node:fs");
+    const path = await import("node:path");
+    const css = fs.readFileSync(path.join(__dirname, "../styles/panel-kit.css"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+    const block = (start: number) => {
+      let depth = 0;
+      for (let index = css.indexOf("{", start); index < css.length; index += 1) {
+        if (css[index] === "{") depth += 1;
+        else if (css[index] === "}" && --depth === 0) return css.slice(start, index + 1);
+      }
+      return "";
+    };
+    const narrow = block(css.indexOf("@container cc-panel (max-width: 479px)"));
+    const rule = (source: string, selector: string) => {
+      const match = new RegExp(`(^|[{}])\\s*${selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*\\{([^}]*)\\}`).exec(source);
+      return match ? match[2] : "";
+    };
+    // Everywhere: the v2 header wraps, the title keeps 240 px before the actions move down.
+    expect(rule(css, ".cc-panel-head--v2")).toMatch(/flex-wrap:\s*wrap/);
+    expect(rule(css, ".cc-panel-head--v2 .cc-panel-head__text")).toMatch(/flex:\s*1 1 240px/);
+    // Under 480 px: the actions take a full row and wrap inside it; the switch is never hidden.
+    expect(narrow.length > 0).toBe(true);
+    expect(rule(narrow, ".cc-panel-head__actions")).toMatch(/flex-basis:\s*100%/);
+    expect(rule(narrow, ".cc-panel-head--v2 .cc-panel-head__actions")).toMatch(/flex-wrap:\s*wrap/);
+    expect(/\.cc-panel-head__view\s*\{[^}]*display:\s*none/.test(narrow)).toBe(false);
+    // Glyph-only options hide their words visually, never from the name.
+    const label = rule(narrow, ".cc-panel-head__view .cc-seg__btn.has-glyph .cc-seg__label");
+    expect(label).toMatch(/clip-path:\s*inset\(50%\)/);
+    expect(/display:\s*none|visibility:\s*hidden/.test(label)).toBe(false);
   });
 });
 

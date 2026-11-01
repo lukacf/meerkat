@@ -193,15 +193,19 @@
    trigger. A refresh runs a 1 px accent hairline along the bottom rule. */
 .cc-panel-head--v2 {
   position: relative;
-  flex-wrap: nowrap;
+  flex-wrap: wrap;
   align-items: flex-start;
-  gap: 12px;
+  gap: 8px 12px;
 }
-.cc-panel-head--v2 .cc-panel-head__text { flex: 1 1 auto; }
+/* The actions wrap to a row of their own when they do not fit beside 240 px
+   of title and summary, instead of squeezing the title or running past the
+   pane's edge. */
+.cc-panel-head--v2 .cc-panel-head__text { flex: 1 1 240px; }
 .cc-panel-head__title-row {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 10px;
+  gap: 4px 10px;
   min-width: 0;
 }
 .cc-panel-head__title-row > .cc-panel-head__title { flex: 0 1 auto; min-width: 0; }
@@ -209,10 +213,40 @@
   display: inline-flex;
   flex: none;
   min-width: 0;
-  max-width: 50%;
+  max-width: 100%;
 }
 .cc-panel-head__scope .cc-field { max-width: 100%; }
 .cc-panel-head--v2 .cc-panel-head__sub { margin-top: 3px; }
+/* The facts sit in one flex line that starts one separator's width left of
+   the summary's edge: every fact after the first leads with its separator,
+   so the separator that starts a wrapped line falls in the clipped margin
+   and no line ends on a dangling dot. */
+.cc-panel-head__summary {
+  --_cc-summary-sep: 1.1em;
+  text-overflow: clip;
+}
+.cc-panel-head__facts {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: baseline;
+  min-width: 0;
+  margin-left: calc(-1 * var(--_cc-summary-sep));
+}
+.cc-panel-head__part {
+  flex: none;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cc-panel-head__part:first-child { padding-left: var(--_cc-summary-sep); }
+.cc-panel-head__part:last-child { flex: 0 1 auto; }
+.cc-panel-head__sep {
+  display: inline-block;
+  width: var(--_cc-summary-sep);
+  text-align: center;
+}
 .cc-panel-head__fact {
   color: var(--_cc-foreground-meta);
   font-variant-numeric: tabular-nums;
@@ -237,7 +271,6 @@
   align-items: center;
   gap: 2px;
 }
-.cc-panel-head__menu--fold { display: none; }
 .cc-panel-head__progress {
   position: absolute;
   left: 0;
@@ -2735,18 +2768,27 @@ button.cc-figure:focus-visible { outline: 2px solid var(--_cc-focus-ring); outli
   .cc-figure__trend { display: none; }
   .cc-reveal { opacity: 1; }
   .cc-menu__fold { display: block; }
-  .cc-panel-head--v2 .cc-panel-head__actions {
-    flex-basis: auto;
-    margin-left: auto;
+  /* The header's actions take a row of their own (the rule below) and wrap
+     inside it. The view switch stays: pinned browser scenarios press it in a
+     180 px pane. Its glyph options show the glyph alone; the words stay
+     their names and tooltips. */
+  .cc-panel-head--v2 .cc-panel-head__actions { flex-wrap: wrap; }
+  .cc-panel-head__view .cc-seg__btn.has-glyph { padding: 0 8px; }
+  .cc-panel-head__view .cc-seg__btn.has-glyph .cc-seg__glyph { margin-right: 0; }
+  .cc-panel-head__view .cc-seg__btn.has-glyph .cc-seg__label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
   }
-  .cc-panel-head__view { display: none; }
-  .cc-panel-head__menu--fold { display: inline-flex; }
+  /* The summary may wrap to two lines here (A3.1), clamped. */
   .cc-panel-head--v2 .cc-panel-head__summary {
-    display: -webkit-box;
-    -webkit-box-orient: vertical;
-    -webkit-line-clamp: 2;
-    white-space: normal;
+    max-height: calc(2 * 1.45em);
+    line-height: 1.45;
   }
+  .cc-panel-head--v2 .cc-panel-head__facts { flex-wrap: wrap; }
   .cc-panel > * {
     --_cc-panel-row-h: var(--_cc-density-row);
     --_cc-card-pad: 8px 10px;

@@ -400,11 +400,17 @@ fn the_gateway_host_grant_owner_is_installed_before_bootstrap() {
         }
         let _ = child.wait();
         let recorded = std::fs::read_to_string(&record).ok();
+        // The test harness of the host process may print before the init
+        // response on the same line: parse each line from its first `{`.
         let init_response = output
             .join()
             .expect("stdout reader")
             .lines()
-            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .filter_map(|line| {
+                line.find('{').and_then(|start| {
+                    serde_json::from_str::<serde_json::Value>(&line[start..]).ok()
+                })
+            })
             .find(|message| message["id"] == "init");
         match mode {
             "error" => {

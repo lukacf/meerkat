@@ -3,7 +3,7 @@ import { useMemo, useRef, useState, type KeyboardEvent, type PointerEvent } from
 import { ChartTooltip } from "../../panel-kit/chart-tooltip";
 import { cx } from "../../panel-kit/cx";
 import type { Tone } from "../../panel-kit/tone";
-import { createTimeScale, nowMarker, placeTickLabels } from "./time-axis";
+import { createTimeScale, nowMarker, placeAxisLabel, placeTickLabels } from "./time-axis";
 
 export type DotShape = "dot" | "hollow" | "tick" | "triangle" | "diamond" | "square";
 
@@ -77,13 +77,15 @@ export function DotStrip({
   const cy = height / 2;
   const nowValue = now === true ? Date.now() : typeof now === "number" ? now : null;
   const marker = nowValue !== null ? nowMarker(scale, nowValue) : null;
-  // The first and last labels slide inside the strip rather than lose their
-  // ends at its edges; the "now" label keeps the right end.
+  // The "now" label sits at its marker (a window may start at now, or hold it
+  // anywhere); the first and last tick labels slide inside the strip rather
+  // than lose their ends at its edges, and none meets the "now" label.
+  const nowLabel = axis && marker ? placeAxisLabel(marker.x, marker.label, width) : null;
   const ticks = axis
     ? placeTickLabels(
         scale.ticks({ count: Math.max(2, Math.floor(width / 90)) }).filter((tick) => tick.x >= 0 && tick.x <= width),
         width,
-        { endReserve: marker ? 24 : 0 },
+        { avoid: nowLabel ? [nowLabel] : [] },
       )
     : [];
   const nearest = (clientX: number): number | null => {
@@ -192,8 +194,8 @@ export function DotStrip({
             {tick.label}
           </text>
         ))}
-        {axis && marker ? (
-          <text className="cc-viz-tick" x={width} y={totalH - 1} textAnchor="end">
+        {nowLabel ? (
+          <text className="cc-viz-tick cc-dots__now-label" x={nowLabel.labelX} y={totalH - 1} textAnchor="middle">
             now
           </text>
         ) : null}

@@ -53,6 +53,14 @@ const DECISIONS: DotStripItem[] = [
   { id: "d7", t: NOW - 1 * HOUR, shape: "dot", tone: "ok", label: "Approved: publish notes" },
 ];
 
+// A window that starts at now: the "now" label sits at the left end.
+const UPCOMING: DotStripItem[] = [2, 5, 9, 14, 21].map((hours, index) => ({
+  id: `run-${index}`,
+  t: NOW + hours * HOUR,
+  shape: "hollow",
+  label: `Heartbeat check in ${hours} h`,
+}));
+
 const WEEK_ROWS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].map((day, index) => ({
   key: day,
   label: day,
@@ -276,10 +284,11 @@ export const gallerySections: GallerySection[] = [
               formatCell={(row, column, value) => `${row.label} ${String(column).padStart(2, "0")}:00 · ${value} turns`}
             />
           </Specimen>
-          <Specimen title="DotStrip" note="records over 30 days; decisions over 24 h">
+          <Specimen title="DotStrip" note="records over 30 days; decisions over the last 24 h; runs over the next 24 h">
             <div className="kg-stack" style={{ gap: 18 }}>
               <DotStrip items={RECORDS} start={NOW - 30 * DAY} end={NOW} width={320} height={18} now={NOW} axis label="64 records over 30 days, 1 quarantined" onSelect={() => {}} />
               <DotStrip items={DECISIONS} start={NOW - 24 * HOUR} end={NOW} width={320} height={18} axis now={NOW} markSize={8} label="7 decisions in the last 24 hours" />
+              <DotStrip items={UPCOMING} start={NOW} end={NOW + 24 * HOUR} width={320} height={18} axis now={NOW} markSize={8} label="5 runs in the next 24 hours" />
             </div>
           </Specimen>
         </SpecimenRow>

@@ -1163,7 +1163,10 @@ function msgSignature(message: Msg): string {
   const wg = message.workGraphEntry;
   if (wg) {
     parts.push(
-      `wg${wg.id}:${wg.status}:${wg.progress.completed}/${wg.progress.total}:${wg.itemOverflowCount ?? 0}:${wg.recentEvents?.length ?? 0}`,
+      `wg${wg.id}:${wg.status}:${wg.progress.completed}/${wg.progress.total}:${wg.itemOverflowCount ?? 0}:${wg.lastActionFailed ? 1 : 0}`,
+      // The event lines slide at their cap without changing count: mark the
+      // text, so a new line (a failure note among them) re-renders the card.
+      textMark(wg.recentEvents?.join("\n")),
       wg.items.map((item) => `${item.itemId}:${item.status}:${item.revision ?? 0}:${item.priority ?? ""}:${item.ownerLabel ?? ""}`).join(","),
       wg.attention.map((row) => `${row.bindingId}:${row.mode}:${row.statusLabel}:${row.revision ?? 0}`).join(","),
     );

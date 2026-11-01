@@ -7,6 +7,7 @@ import { describe, expect, it } from "vitest";
 import type { ConsoleSchedule, ConsoleScheduleTrigger } from "./schedules";
 import {
   SCHEDULE_RUN_CAP,
+  countRuns,
   countRunsBetween,
   formatRunTime,
   isKnownTimeZone,
@@ -274,22 +275,42 @@ describe("schedule plans", () => {
     expect(countRunsBetween(plans, now, now + DAY)).toBe(2);
   });
 
-  it("counts runs per local hour over the next seven days", () => {
-    const today = new Date(now);
+  it("counts runs per local hour over the next seven days, exactly", () => {
+    const today = new Date(2026, 4, 4, 8, 0, 0);
+    const nowLocal = today.getTime();
     const local = (dayOffset: number, hour: number, minute = 0) =>
-      new Date(today.getFullYear(), today.getMonth(), today.getDate() + dayOffset, hour, minute).getTime();
-    const plan = {
-      ...planScheduleRuns(schedule(null), now),
-      runs: [local(0, 9), local(0, 9, 30), local(1, 14), local(6, 23, 59), local(7, 1)],
-    };
-    const rows = runsPerHour([plan], now);
+      new Date(today.getFullYear(), today.getMonth(), today.getDate() + dayOffset, hour, minute).toISOString();
+    const viewerZone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+    const plans = [
+      schedule({ type: "once", due_at_utc: local(0, 9, 30) }, { scheduleId: "a" }),
+      schedule({ type: "once", due_at_utc: local(1, 14) }, { scheduleId: "b" }),
+      // Every 30 minutes from 10:00 to 12:00 today: 10:00, 10:30, 11:00, 11:30, 12:00.
+      schedule({ type: "interval", start_at_utc: local(0, 10), every_seconds: 1_800, end_at_utc: local(0, 12) }, { scheduleId: "c" }),
+      // 23:59 every day on the viewer's clock.
+      schedule(calendar(viewerZone, 23, 59), { scheduleId: "d" }),
+      // Paused, and beyond the grid: not counted.
+      schedule({ type: "once", due_at_utc: local(2, 9) }, { scheduleId: "e", phase: "paused" }),
+      schedule({ type: "once", due_at_utc: local(7, 1) }, { scheduleId: "f" }),
+    ].map((entry) => planScheduleRuns(entry, nowLocal));
+    const rows = runsPerHour(plans, nowLocal);
     expect(rows.length).toBe(7);
-    expect(rows[0].hours[9]).toBe(2);
-    expect(rows[1].hours[14]).toBe(1);
-    expect(rows[6].hours[23]).toBe(1);
-    // The eighth day is outside the grid.
-    expect(rows.reduce((sum, row) => sum + row.hours.reduce((a, b) => a + b, 0), 0)).toBe(4);
     expect(rows.every((row) => row.hours.length === 24)).toBe(true);
+    expect([rows[0].hours[9], rows[0].hours[10], rows[0].hours[11], rows[0].hours[12], rows[0].hours[23]]).toEqual([1, 2, 2, 1, 1]);
+    expect(rows[1].hours[14]).toBe(1);
+    expect(rows.slice(1).every((row) => row.hours[23] === 1)).toBe(true);
+    expect(rows.reduce((sum, row) => sum + row.hours.reduce((a, b) => a + b, 0), 0)).toBe(14);
+  });
+
+  it("counts a dense repeat beyond the drawing cap", () => {
+    const heartbeat = schedule({ type: "interval", start_at_utc: "2026-05-04T00:00:00Z", every_seconds: 600 });
+    const plan = planScheduleRuns(heartbeat, now);
+    expect(plan.runs.length).toBe(SCHEDULE_RUN_CAP);
+    expect(plan.truncated).toBe(true);
+    // 08:10 to 08:00 the next day: 144 runs.
+    expect(countRunsBetween([plan], now, now + DAY)).toBe(144);
+    expect(countRuns(heartbeat.trigger, now, now + DAY)).toBe(144);
+    expect(countRuns({ type: "once", due_at_utc: "2026-05-04T09:00:00Z" }, now, now + DAY)).toBe(1);
+    expect(countRuns(calendar("UTC", null, 0), now, now + DAY)).toBe(24);
   });
 });
 

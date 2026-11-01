@@ -82,12 +82,15 @@
   stroke: var(--_cc-focus-ring);
   stroke-width: 1.5;
 }
+.cc-agenda__empty,
 .cc-agenda__band-words {
   font-family: var(--_cc-font-mono);
   font-size: var(--_cc-fs-tick, 9.5px);
   fill: var(--_cc-foreground-meta);
   stroke: none;
 }
+
+.cc-agenda__empty { font-family: var(--_cc-font-display); font-size: 11px; }
 
 @container cc-agenda (max-width: 560px) {
   .cc-agenda__row { --_cc-agenda-head-w: 112px; column-gap: var(--_cc-sp-4, 8px); }

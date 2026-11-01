@@ -312,6 +312,36 @@ function calendarRuns(
   return { runs, truncated: false, invalidZone: false };
 }
 
+/**
+ * How many runs `trigger` plans in (from, until], with no cap: a repeat's
+ * runs by arithmetic, a calendar's by a full scan (it fires at most once a
+ * minute, so the window bounds the scan), a once schedule's one run.
+ */
+export function countRuns(trigger: ConsoleScheduleTrigger | null | undefined, from: number, until: number): number {
+  if (!trigger || !(until > from)) return 0;
+  if (trigger.type === "once") {
+    const due = epoch(trigger.due_at_utc);
+    return due !== null && due > from && due <= until ? 1 : 0;
+  }
+  if (trigger.type === "interval") {
+    const start = epoch(trigger.start_at_utc);
+    const step = trigger.every_seconds * 1000;
+    if (start === null || !(step > 0)) return 0;
+    const end = epoch(trigger.end_at_utc ?? null);
+    const top = end === null ? until : Math.min(until, end);
+    if (top < start) return 0;
+    const first = from < start ? 0 : Math.floor((from - start) / step) + 1;
+    const last = Math.floor((top - start) / step);
+    return Math.max(0, last - first + 1);
+  }
+  return calendarRuns(trigger, from, until, Math.ceil((until - from) / MINUTE) + 1).runs.length;
+}
+
+/** Every run of a once or calendar trigger in (from, until], with no cap. */
+function allRuns(trigger: ConsoleScheduleTrigger, from: number, until: number): number[] {
+  return upcomingRuns(trigger, { from, until, max: Math.ceil((until - from) / MINUTE) + 1 }).runs;
+}
+
 // ── Schedules ────────────────────────────────────────────────────────────
 
 /** One schedule's planned runs in a window. */
@@ -368,12 +398,13 @@ export function nextPlannedRun(plans: readonly ScheduleRunPlan[]): { plan: Sched
   return best;
 }
 
-/** How many runs of active schedules fall in [from, until]. */
+/** How many runs active schedules plan in (from, until], counted exactly
+ * (a dense repeat is not cut at the drawing cap). */
 export function countRunsBetween(plans: readonly ScheduleRunPlan[], from: number, until: number): number {
   let count = 0;
   for (const plan of plans) {
     if (plan.schedule.phase !== "active") continue;
-    for (const run of plan.runs) if (run >= from && run <= until) count += 1;
+    count += countRuns(plan.schedule.trigger, from, until);
   }
   return count;
 }
@@ -399,11 +430,13 @@ const WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
 /**
  * The Week grid (spec B10): the next `days` local days from today, each with
- * the count of active schedules' planned runs per local hour.
+ * the count of active schedules' planned runs (after `now`) per local hour,
+ * counted exactly: a dense repeat is not cut at the drawing cap.
  */
 export function runsPerHour(plans: readonly ScheduleRunPlan[], now: number, days = 7): WeekRow[] {
   const rows: WeekRow[] = [];
   const first = new Date(localDayStart(now));
+  const hourStart = (day: Date, hour: number) => new Date(day.getFullYear(), day.getMonth(), day.getDate(), hour).getTime();
   for (let index = 0; index < days; index += 1) {
     const day = new Date(first.getFullYear(), first.getMonth(), first.getDate() + index);
     rows.push({ start: day.getTime(), label: `${WEEKDAYS[day.getDay()]} ${day.getDate()}`, hours: new Array<number>(24).fill(0) });
@@ -411,8 +444,21 @@ export function runsPerHour(plans: readonly ScheduleRunPlan[], now: number, days
   const end = new Date(first.getFullYear(), first.getMonth(), first.getDate() + days).getTime();
   for (const plan of plans) {
     if (plan.schedule.phase !== "active") continue;
-    for (const run of plan.runs) {
-      if (run < rows[0].start || run >= end) continue;
+    const trigger = plan.schedule.trigger;
+    if (!trigger) continue;
+    if (trigger.type === "interval") {
+      // Per local hour by arithmetic: a repeat every few seconds stays cheap.
+      for (const row of rows) {
+        const day = new Date(row.start);
+        for (let hour = 0; hour < 24; hour += 1) {
+          const lo = Math.max(now, hourStart(day, hour) - 1);
+          const hi = Math.min(end - 1, hourStart(day, hour + 1) - 1);
+          if (hi > lo) row.hours[hour] += countRuns(trigger, lo, hi);
+        }
+      }
+      continue;
+    }
+    for (const run of allRuns(trigger, now, end - 1)) {
       const date = new Date(run);
       const dayStart = new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
       const row = rows.find((entry) => entry.start === dayStart);

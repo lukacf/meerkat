@@ -58,8 +58,29 @@ export interface AgendaRow {
 }
 
 type Item =
-  | { kind: "run"; key: string; t: number; x: number; run: AgendaRun }
-  | { kind: "band"; key: string; t: number; x: number; band: AgendaBand };
+  | { kind: "run"; key: string; t: number; x: number; dy: number; run: AgendaRun }
+  | { kind: "band"; key: string; t: number; x: number; dy: number; band: AgendaBand };
+
+/** Marks closer than this (px) on one row stack above and below the line. */
+const STACK_PX = 9;
+
+/** Vertical offsets for runs that would overlap on a row: 0, then -6, +6,
+ * -12 ... within the row's height. */
+function stackRuns(items: Item[], rowHeight: number): Item[] {
+  const reach = Math.max(0, rowHeight / 2 - 7);
+  let clusterX = -Infinity;
+  let index = 0;
+  return items.map((item) => {
+    if (item.kind !== "run") return item;
+    if (item.x - clusterX < STACK_PX) index += 1;
+    else {
+      clusterX = item.x;
+      index = 0;
+    }
+    const step = Math.ceil(index / 2) * 6 * (index % 2 === 1 ? -1 : 1);
+    return { ...item, dy: Math.max(-reach, Math.min(reach, step)) };
+  });
+}
 
 function useLaneWidth(fallback: number): [RefObject<HTMLDivElement | null>, number] {
   const ref = useRef<HTMLDivElement | null>(null);
@@ -118,6 +139,7 @@ export function Agenda({
   testIdPrefix,
   rowTestIdPrefix,
   caption,
+  emptyText,
   className,
   testId,
 }: {
@@ -137,6 +159,8 @@ export function Agenda({
   rowTestIdPrefix?: string;
   /** The table twin's caption; `label` otherwise. */
   caption?: string;
+  /** Words on a row with no run in the window ("Nothing in the next 24 hours"). */
+  emptyText?: string;
   className?: string;
   testId?: string;
 }) {
@@ -148,15 +172,15 @@ export function Agenda({
     () =>
       rows.map((row) => {
         const items: Item[] = [
-          ...row.runs.filter((run) => run.t >= start && run.t <= end).map((run) => ({ kind: "run" as const, key: `${row.key}:${run.id}`, t: run.t, x: scale.x(run.t), run })),
+          ...row.runs.filter((run) => run.t >= start && run.t <= end).map((run) => ({ kind: "run" as const, key: `${row.key}:${run.id}`, t: run.t, x: scale.x(run.t), dy: 0, run })),
           ...(row.bands ?? []).map((band) => {
             const t = Math.max(start, band.from);
-            return { kind: "band" as const, key: `${row.key}:${band.id}`, t, x: scale.x(t), band };
+            return { kind: "band" as const, key: `${row.key}:${band.id}`, t, x: scale.x(t), dy: 0, band };
           }),
         ].sort((a, b) => a.t - b.t);
-        return { row, items };
+        return { row, items: stackRuns(items, rowHeight) };
       }),
-    [rows, scale, start, end],
+    [rows, scale, start, end, rowHeight],
   );
   const firstKey = lanes.find((lane) => lane.items.length)?.items[0]?.key ?? null;
   const [focusKey, setFocusKey] = useState<string | null>(null);
@@ -269,7 +293,7 @@ export function Agenda({
       <div className="cc-agenda__row cc-agenda__row--axis" aria-hidden="true">
         <span className="cc-agenda__head" />
         <div ref={laneRef} className="cc-agenda__lane">
-          <svg className="cc-agenda__svg" width={width} height={18} viewBox={`0 0 ${width} 18`} focusable="false">
+          <svg className="cc-agenda__svg" width={width} height={18} style={{ width, height: 18 }} viewBox={`0 0 ${width} 18`} focusable="false">
             <text className="cc-viz-tick cc-agenda__now-label" x={EDGE_PX} y={12}>
               now
             </text>
@@ -296,6 +320,7 @@ export function Agenda({
               className="cc-agenda__svg"
               width={width}
               height={rowHeight}
+              style={{ width, height: rowHeight }}
               viewBox={`0 0 ${width} ${rowHeight}`}
               role="group"
               aria-label={`${lane.row.labelText}: ${lane.items.filter((item) => item.kind === "run").length} planned runs`}
@@ -321,6 +346,11 @@ export function Agenda({
                 <line key={tick.t} className={cx("cc-agenda__grid", tick.major && "is-major")} x1={scale.x(tick.t)} x2={scale.x(tick.t)} y1={2} y2={rowHeight - 2} />
               ))}
               <line className="cc-dots__now" x1={EDGE_PX} x2={EDGE_PX} y1={2} y2={rowHeight - 2} />
+              {!lane.items.length && emptyText ? (
+                <text className="cc-agenda__empty" x={EDGE_PX + 8} y={cy - 5}>
+                  {emptyText}
+                </text>
+              ) : null}
               {lane.items.map((item) => {
                 const isActive = active === item.key;
                 const common = {
@@ -350,6 +380,7 @@ export function Agenda({
                 }
                 const { run } = item;
                 const x = item.x;
+                const my = cy + item.dy;
                 const props = {
                   ...common,
                   className: cx(
@@ -366,12 +397,12 @@ export function Agenda({
                   "data-testid": testIdPrefix ? `${testIdPrefix}:${run.id}` : undefined,
                 } as const;
                 if (run.shape === "tick") {
-                  return <rect key={item.key} {...props} x={x - 0.75} y={cy - 6} width={1.5} height={12} />;
+                  return <rect key={item.key} {...props} x={x - 0.75} y={my - 6} width={1.5} height={12} />;
                 }
                 if (run.shape === "diamond") {
-                  return <path key={item.key} {...props} d={`M${x} ${cy - 5} L${x + 5} ${cy} L${x} ${cy + 5} L${x - 5} ${cy} Z`} />;
+                  return <path key={item.key} {...props} d={`M${x} ${my - 5} L${x + 5} ${my} L${x} ${my + 5} L${x - 5} ${my} Z`} />;
                 }
-                return <rect key={item.key} {...props} x={x - 4} y={cy - 4} width={8} height={8} />;
+                return <rect key={item.key} {...props} x={x - 4} y={my - 4} width={8} height={8} />;
               })}
               {lane.items
                 .filter((item): item is Extract<Item, { kind: "band" }> => item.kind === "band")

@@ -4807,6 +4807,9 @@ fn access_unavailable_rpc_error(response_id: Value) -> Value {
 
 const MEMORY_PANEL_DEFAULT_LIMIT: usize = 50;
 const MEMORY_PANEL_MAX_LIMIT: usize = 200;
+/// The most rows one store read of the record listing asks a realm for
+/// (`handle_memory_panel_records`).
+const MEMORY_PANEL_RECORDS_BATCH_MAX: usize = 4096;
 const MEMORY_PANEL_CHAIN_MAX: usize = 32;
 const MEMORY_PANEL_INJECTIONS_MAX: usize = 50;
 const MEMORY_PANEL_DREAMS_DEFAULT: usize = 20;
@@ -5196,6 +5199,47 @@ async fn memory_panel_realms(
     }
 }
 
+/// Whether a record listing with these filters can hold a row the caller
+/// may read ([`memory_panel_record_visible`]), as far as its access view
+/// tells without a store read. `false` only when it can hold none: the
+/// caller holds none of the grants that read the scopes the listing names
+/// (none of the memory read grants, for a listing that names no scope), or
+/// it lists quarantined rows without the review grant. The view does not
+/// know which scopes a realm holds, so it cannot tell a realm the caller may
+/// read nothing in from another; that takes a store read.
+fn memory_panel_listing_may_be_readable(
+    caller: MemoryPanelCaller<'_>,
+    scope_kind: Option<&str>,
+    scope_key: Option<&str>,
+    status: Option<&str>,
+) -> bool {
+    let Some(view) = caller.enforced() else {
+        return true;
+    };
+    if status == Some("quarantined") && !memory_panel_quarantine_evidence_visible(caller.view) {
+        return false;
+    }
+    // Identity rows need the read action and `agent.view` on the identity
+    // the listing names, or on some identity when it names none.
+    let identity_rows = match scope_key {
+        Some(identity) => memory_panel_identity_visible(caller, identity),
+        None => {
+            view.may_perform_anywhere(ACTION_AGENT_MEMORY_READ)
+                && view.may_perform_anywhere(ACTION_AGENT_VIEW)
+        }
+    };
+    let mob_rows = view.allows(ACTION_MOB_MEMORY_READ);
+    let operator_rows = view.allows(ACTION_OPERATOR_MEMORY_READ);
+    let realm_rows = view.allows(ACTION_AGENT_MEMORY_READ);
+    match scope_kind {
+        Some("identity") => identity_rows,
+        Some("mob") => mob_rows,
+        Some("operator") => operator_rows,
+        Some("realm") => realm_rows,
+        _ => identity_rows || mob_rows || operator_rows || realm_rows,
+    }
+}
+
 async fn handle_memory_panel_records(
     store: Option<&dyn crate::memory::capabilities::MemoryPanelStore>,
     caller: MemoryPanelCaller<'_>,
@@ -5249,13 +5293,27 @@ async fn handle_memory_panel_records(
         Ok(realms) => realms,
         Err(err) => return memory_panel_store_error(response_id, err),
     };
-    // The cursor is a position in the listing's order (newest updated first,
-    // then by memory id), which every realm shares, so it resumes a read
-    // across realms as it resumes one realm. Each realm gives its first rows
-    // past the cursor that the caller may read: `limit` and one more for
-    // each realm read, enough to cut this page, keep the rows that share its
-    // last position together, and tell whether a readable row follows it.
-    let wanted = limit + realms.len();
+    // A caller who may read no row of this listing reads no realm.
+    if !memory_panel_listing_may_be_readable(
+        caller,
+        scope_kind.as_deref(),
+        scope_key.as_deref(),
+        status.as_deref(),
+    ) {
+        return response_value(
+            response_id,
+            Some(json!({ "records": [], "next_cursor": null, "realms": realms })),
+            None,
+        );
+    }
+    // The cursor is a position in the listing's order (update time, then
+    // memory id, both descending), which every realm shares, so it resumes a
+    // read across realms as it resumes one realm. Each realm gives its first
+    // `limit + 1` rows past the cursor that the caller may read: a realm holds
+    // at most one row at a position, so that is enough to cut this page, keep
+    // the rows that share its last position together, and tell whether a
+    // readable row follows it.
+    let wanted = limit + 1;
     let mut records = Vec::new();
     for realm in &realms {
         let mut realm_cursor = cursor.clone();
@@ -5269,7 +5327,7 @@ async fn handle_memory_panel_records(
                     scope_key.as_deref(),
                     status.as_deref(),
                     batch,
-                    realm_cursor,
+                    realm_cursor.clone(),
                 )
                 .await
             {
@@ -5281,13 +5339,37 @@ async fn handle_memory_panel_records(
                     .into_iter()
                     .filter(|record| memory_panel_record_visible(caller, record)),
             );
-            if readable.len() >= wanted || page.next_cursor.is_none() {
+            if readable.len() >= wanted {
                 break;
             }
-            // The store pages every row, the ones the caller may not read
-            // included: read on past those in the largest panel page.
-            realm_cursor = page.next_cursor;
-            batch = wanted.max(MEMORY_PANEL_MAX_LIMIT);
+            let Some(next) = page.next_cursor else {
+                break;
+            };
+            // The store's cursor names the last row of its page, past the
+            // cursor the read was given. A cursor that does not move would be
+            // read without end, so the listing refuses it, as the timeline
+            // pager does.
+            if realm_cursor
+                .as_ref()
+                .is_some_and(|given| (next.0, next.1.as_str()) >= (given.0, given.1.as_str()))
+            {
+                return memory_panel_store_error(
+                    response_id,
+                    crate::identity_first::agent_memory::AgentMemoryError::Io(format!(
+                        "the records page of realm '{realm}' did not move past its cursor"
+                    )),
+                );
+            }
+            realm_cursor = Some(next);
+            // Each store read scans and sorts every row of the realm past its
+            // cursor, since no index orders the records table by update
+            // time. Past rows the caller may not read, each read therefore
+            // asks for twice the rows of the one before, up to
+            // MEMORY_PANEL_RECORDS_BATCH_MAX: a page that passes n such rows
+            // takes about log2(n / wanted) reads below the cap and one more
+            // for each cap's worth of rows above it, where reads of a fixed
+            // size would take one for every batch.
+            batch = (batch * 2).min(MEMORY_PANEL_RECORDS_BATCH_MAX);
         }
         readable.truncate(wanted);
         records.extend(readable);

@@ -380,12 +380,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `next_cursor` exactly when more of them follow. Before, it cut the page
   and took the cursor before it dropped the rows the caller may not read,
   so a restricted caller received short or empty pages that still carried
-  a cursor, and "Load more" could step through empty pages. A read that
-  names no `realm` lists every realm as one listing, newest updated first,
-  and a page cut from it now carries a cursor that resumes every realm;
-  before, such a page was cut with no cursor, so the rows past it could not
-  be listed. A page holds `limit` rows, or more only to keep together the
-  rows two realms hold under one memory id and update time.
+  a cursor, and "Load more" could step through empty pages. That cursor
+  could also name a row the caller may not read, by its memory id and
+  update time; it now names the page's last row. A read that names no
+  `realm` lists every realm as one listing, newest updated first, and a
+  page cut from it now carries a cursor that resumes every realm; before,
+  such a page was cut with no cursor, so the rows past it could not be
+  listed. A page holds at most `limit` rows, more only to keep together the
+  rows two realms hold under one memory id and update time. A
+  `MemoryPanelStore` whose `records_page` cursor does not move past the
+  cursor it was given is refused as a store failure.
 - An invalid access configuration is refused with what is wrong with it:
   the `-32602` `invalid_access_config` refusal of a `meta/access/*` write,
   checked or not, carries `data.reason`, a stable `kind` (for example

@@ -23496,12 +23496,6 @@ pub enum TransitionId {
     SetModelRoutingBaselineAttached,
     SetModelRoutingBaselineRunning,
     SetModelRoutingBaselineRetired,
-    RequestFiniteSwitchTurnTranscriptUnsupportedIdle,
-    RequestFiniteSwitchTurnTranscriptUnsupportedAttached,
-    RequestFiniteSwitchTurnTranscriptUnsupportedRunning,
-    RequestUntilChangedSwitchTurnTranscriptUnsupportedIdle,
-    RequestUntilChangedSwitchTurnTranscriptUnsupportedAttached,
-    RequestUntilChangedSwitchTurnTranscriptUnsupportedRunning,
     RequestFiniteSwitchTurnApprovalUnavailableIdle,
     RequestFiniteSwitchTurnApprovalUnavailableAttached,
     RequestFiniteSwitchTurnApprovalUnavailableRunning,
@@ -26133,6 +26127,12 @@ pub enum TransitionId {
     ResolveMobOperatorIdentityCreationAdmitted,
     ResolveMobOperatorIdentityCreationUnbound,
     ResolveMobOperatorIdentityCreationTemplateNotInScope,
+    RequestFiniteSwitchTurnTranscriptUnsupportedIdle,
+    RequestFiniteSwitchTurnTranscriptUnsupportedAttached,
+    RequestFiniteSwitchTurnTranscriptUnsupportedRunning,
+    RequestUntilChangedSwitchTurnTranscriptUnsupportedIdle,
+    RequestUntilChangedSwitchTurnTranscriptUnsupportedAttached,
+    RequestUntilChangedSwitchTurnTranscriptUnsupportedRunning,
 }
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

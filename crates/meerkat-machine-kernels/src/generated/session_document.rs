@@ -3752,6 +3752,7 @@ pub enum TransitionId {
     ArchiveSessionDocumentActive,
     ArchiveSessionDocumentAlreadyArchived,
     ArchiveSessionDocumentCompleteRetire,
+    ClassifyDurableTailContinuable,
     RecoverSessionInstructionState,
     RecoverSessionInstructionTarget,
     RecoverSessionInstructionEffective,
@@ -3782,7 +3783,6 @@ pub enum TransitionId {
     ResolveRunStartInstructionsDeferredUnavailable,
     AuthorizeInstructionFoldAtRunStart,
     AuthorizeInstructionFoldEffective,
-    ClassifyDurableTailContinuable,
 }
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

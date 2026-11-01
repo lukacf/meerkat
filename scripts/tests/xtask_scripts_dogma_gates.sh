@@ -401,7 +401,7 @@ trap 'rm -rf "$tlc_env_tmp"' EXIT
 # action property violated.
 # identity_entry_audit.sh (mob_machine) requires a final distinct-state count
 # at or above each of its nine runs' floors, a coverage block in which each
-# covered action of every run generated a state, its seventy-three step
+# covered action of every run generated a state, its seventy-five step
 # witnesses and six state witnesses violated, and with --mutants its
 # reconcile mutant's generated invariant, its probe mutant's invariant, its
 # adoption mutant's invariant or property, its replay, archive and destroy
@@ -769,6 +769,8 @@ printf '%s\n' \
   'echo "Error: Action property NotAuditWitnessRoleHoldEnded is violated."' \
   'echo "Error: Action property NotAuditWitnessFirstBootKeptOverRoleHold is violated."' \
   'echo "Error: Action property NotAuditWitnessRoleHoldDroppedAtArchive is violated."' \
+  'echo "Error: Action property NotAuditWitnessRoleMoveTakesNewName is violated."' \
+  'echo "Error: Action property NotAuditWitnessRoleMoveOwesEndpoint is violated."' \
   'echo "Error: Invariant NotAuditWitnessHeldWaiting is violated."' \
   'echo "Error: Action property NotAuditWitnessHeldSpawnSeats is violated."' \
   'echo "Error: Invariant NotAuditWitnessHosted is violated."' \
@@ -884,6 +886,9 @@ printf '%s\n' \
   'echo "Error: Action property NotAuditWitnessResumeAnswersHeldStopped is violated."' \
   'echo "Error: Invariant AuditRolesDeclareExactlyOne is violated."' \
   'echo "Error: Action property AuditRoleMoveKeepsRoleHold is violated."' \
+  'echo "Error: Action property AuditRoleMoveTakesItsEndpoint is violated."' \
+  'echo "Error: Action property AuditSameSessionSeatsTheStartedRole is violated."' \
+  'echo "Error: Invariant rotation_started_role_is_a_same_session_rotations is violated."' \
   'echo "Error: Action property AuditRoleHoldEndsAtNewRole is violated."' \
   'echo "Error: Action property AuditSeatedResumeWritesRoleHold is violated."' \
   'echo "Error: Invariant AuditHoldDeclareExactlyOne is violated."' \

@@ -128,14 +128,17 @@
   white-space: nowrap;
 }
 .conv__status { flex: none; }
+/* The live line is the kit's "now" line (spec A3.4): 12.5 px in ink, at
+   the face's own tracking. */
 .conv__live {
   display: flex;
   align-items: center;
   gap: 6px;
   min-width: 0;
   min-height: 18px;
-  font-size: 12px;
+  font-size: 12.5px;
   line-height: 18px;
+  letter-spacing: 0;
   color: var(--_cc-foreground-meta);
   font-variant-numeric: tabular-nums;
 }

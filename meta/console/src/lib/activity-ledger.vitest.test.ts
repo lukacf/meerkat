@@ -100,6 +100,32 @@ describe("run spans", () => {
     expect(ledger.hasOpenRun("domain:billing")).toBe(false);
   });
 
+  it("ends only what started before a lifecycle change, whichever arrives first", () => {
+    // A live run, then an old respawn from history: the run stays open.
+    const ledger = ledgerAt();
+    ledger.ingest(frame("run_started", NOW - MIN, { run_id: "run-live" }, { runId: "run-live", interactionId: "turn-live", sourceKind: "console_event" }));
+    ledger.ingest(frame("turn_started", NOW - MIN + 100, { turn_number: 1 }, { runId: "run-live" }));
+    ledger.ingestMany([frame("identity_respawned", NOW - 120 * MIN, {}, { sourceKind: "session_history" })]);
+    ledger.ingestMany([frame("identity_respawned", NOW - 120 * MIN, {}, { sourceKind: "session_history" })]);
+    const [run] = ledger.runSpans("domain:billing");
+    expect([run?.endMs, run?.outcome]).toEqual([undefined, undefined]);
+    expect(ledger.hasOpenRun("domain:billing")).toBe(true);
+    expect(ledger.liveState("domain:billing").callingModel).toBe(true);
+    // A run from history that started before a respawn the ledger already
+    // saw, with no end of its own: the respawn ended it.
+    const later = ledgerAt();
+    later.ingest(frame("identity_respawned", NOW - 30 * MIN));
+    later.ingestMany([
+      frame("run_started", NOW - 40 * MIN, {}, { runId: "run-old" }),
+      frame("turn_started", NOW - 40 * MIN + 100, { turn_number: 1 }, { runId: "run-old" }),
+    ]);
+    expect(later.runSpans("domain:billing").map((span) => [span.runId, span.endMs, span.outcome])).toEqual([["run-old", NOW - 30 * MIN, "cancelled"]]);
+    expect(later.liveState("domain:billing")).toMatchObject({ openRun: null, callingModel: false });
+    // One that started after it stays open.
+    later.ingest(frame("run_started", NOW - 10 * MIN, {}, { runId: "run-new" }));
+    expect(later.liveState("domain:billing").openRun?.runId).toBe("run-new");
+  });
+
   it("keeps tool executions with their duration, and model calls while open", () => {
     const ledger = ledgerAt();
     ledger.ingest(frame("tool_execution_completed", NOW - MIN, { id: "t1", name: "web_search", is_error: false, duration_ms: 4200 }));

@@ -97,13 +97,18 @@ fn most_recently_updated_first(left: &WorkItem, right: &WorkItem) -> std::cmp::O
 }
 
 /// Cut `items`, already in the read's order, to `limit`, reporting how many
-/// matched before the cut.
-fn work_items_page(mut items: Vec<WorkItem>, limit: usize) -> WorkGraphItemsResponse {
+/// matched before the cut. `into_item` turns only the page into owned rows,
+/// so a read that holds references clones the page and nothing else.
+fn work_items_page<T>(
+    mut items: Vec<T>,
+    limit: usize,
+    into_item: impl FnMut(T) -> WorkItem,
+) -> WorkGraphItemsResponse {
     let total_items = items.len();
     items.truncate(limit);
     let truncated = total_items > items.len();
     WorkGraphItemsResponse {
-        items,
+        items: items.into_iter().map(into_item).collect(),
         total_items: Some(total_items),
         truncated: Some(truncated),
     }
@@ -1079,7 +1084,7 @@ impl WorkGraphService {
         let limit = filter.limit.take().unwrap_or(DEFAULT_COLLECTION_LIMIT);
         let mut items = self.store.list_items(filter).await?;
         items.sort_by(most_recently_updated_first);
-        Ok(work_items_page(items, limit))
+        Ok(work_items_page(items, limit, std::convert::identity))
     }
 
     /// The ready items, by priority (high first), then creation time, then
@@ -1107,11 +1112,13 @@ impl WorkGraphService {
         let labels = filter.labels;
         let mut ready = Vec::new();
         // Terminal items are never ready: only the live set is classified.
+        // The ready items stay references into the observation until the
+        // cut, so only the page is cloned.
         for item in all_items.iter().filter(|item| {
             !is_terminal_item(item) && labels.iter().all(|label| item.labels.contains(label))
         }) {
             if graph.is_ready(item, now)? {
-                ready.push(item.clone());
+                ready.push(item);
             }
         }
         ready.sort_by(|left, right| {
@@ -1121,7 +1128,7 @@ impl WorkGraphService {
                 .then_with(|| left.created_at.cmp(&right.created_at))
                 .then_with(|| left.id.cmp(&right.id))
         });
-        Ok(work_items_page(ready, output_limit))
+        Ok(work_items_page(ready, output_limit, WorkItem::clone))
     }
 
     /// One observation of the namespace: the items `filter` selects, most

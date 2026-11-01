@@ -65,6 +65,7 @@ export type {
   SummaryFact,
 } from "./panel";
 export {
+  PanelDensityDefaultProvider,
   PanelPreferencesProvider,
   panelPreferenceKey,
   standardPanelMenu,

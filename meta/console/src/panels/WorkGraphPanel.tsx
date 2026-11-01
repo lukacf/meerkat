@@ -6,56 +6,91 @@ import type {
   WorkGraphWireItem,
 } from "../types";
 import {
-  WORKGRAPH_GRAPH_NODE_CAP,
+  WORKGRAPH_EVENTS_LIMIT,
+  WORKGRAPH_OUTLINE_ROW_CAP,
+  WORKGRAPH_SNAPSHOT_LIMIT,
+  buildWorkGraphModel,
+  isWorkGraphTerminal,
+  workGraphActivityDays,
+  workGraphBindingStateText,
+  workGraphBindingStatusLabel,
+  workGraphBindingTarget,
+  workGraphBindingTargetLabel,
+  workGraphBlockedByText,
+  workGraphBlockedFoot,
+  workGraphBlockerResolved,
+  workGraphDefaultView,
+  workGraphEventLine,
+  workGraphEventSentence,
+  workGraphGoalRevisionOf,
   workGraphItemOwner,
   workGraphItemOwnerLabel,
+  workGraphModeWord,
   workGraphStatusWord,
 } from "../lib/workgraph-layout";
-import type { WorkGraphOwnerView } from "../lib/workgraph-layout";
+import type { WorkGraphActivityDay, WorkGraphModel } from "../lib/workgraph-layout";
 import { formatWorkGraphTimestamp } from "../lib/workgraph-time";
+import { useNavigationFocus } from "../lib/navigation-focus";
 import {
   Button,
   Chip,
   EmptyState,
-  KitGlyph,
+  FigureTile,
+  GlanceStrip,
   ListRow,
   LoadingState,
-  Meter,
+  Notice,
   PanelBody,
   PanelHeader,
   PanelSection,
   PanelShell,
+  ProgressRing,
   RelativeTime,
   RowList,
-  SegmentedControl,
-  StatusDot,
+  StatusPill,
   StatusRow,
   TechnicalDetails,
   TechnicalId,
-  formatClockTime,
-  formatShortDate,
+  IconButton,
+  KitGlyph,
+  cx,
   humanizeEnum,
-  joinMeta,
   plural,
   priorityTone,
+  standardPanelMenu,
   statusTone,
-  agentDisplayName,
-  toEpochMs,
   useAgentDirectory,
   useNow,
+  usePanelDensity,
+  useShowTechnicalIds,
 } from "../../../packages/console-components/src/panel-kit";
 import type {
-  AgentDirectory,
+  MenuEntry,
+  SummaryFact,
   TechnicalDetail,
 } from "../../../packages/console-components/src/panel-kit";
-import { WorkGraphGraphView, WorkGraphPerson } from "./WorkGraphGraphView";
+import { StatusSquare } from "../../../packages/console-components/src/viz";
+import {
+  WorkGraphActivityList,
+  WorkGraphAttentionRow,
+  WorkGraphGraphView,
+  WorkGraphPerson,
+  workGraphItemActions,
+} from "./WorkGraphGraphView";
+import type { WorkGraphActionHandlers, WorkGraphBindingHandlers, WorkGraphItemHandlers } from "./WorkGraphGraphView";
+
+export { WORKGRAPH_EVENTS_LIMIT, WORKGRAPH_SNAPSHOT_LIMIT };
 
 export type WorkGraphViewMode = "tree" | "graph";
 
-// Module-level so the chosen view survives dock remounts (same trick as
-// the conversation card's expansion registries - dock panels are torn
-// down and rebuilt on focus changes).
-let workGraphViewModeMemory: WorkGraphViewMode = "tree";
+// Module-level so view choices survive dock remounts (same trick as the
+// conversation card's expansion registries - dock panels are torn down and
+// rebuilt on focus changes). A null view or critical path follows the
+// default rule until the person chooses.
+let workGraphViewModeMemory: WorkGraphViewMode | null = null;
+let workGraphCriticalPathMemory: boolean | null = null;
+let workGraphShowDoneMemory = false;
+let workGraphShowCancelledMemory = false;
 
 /// Snapshot-backed panel state assembled by ConsoleApp. `denied` is a -32030
 /// access outcome (rendered as "no access", never as an empty store);
@@ -66,30 +101,25 @@ export interface WorkGraphPanelData {
   attention: WorkGraphWireBinding[];
   events: WorkGraphWireEvent[];
   capturedAt: string | null;
+  /// The snapshot's ready_item_ids; null or absent on runtimes that do not
+  /// send them (the panel then derives readiness itself).
+  readyItemIds?: string[] | null;
+  /// The snapshot filled the requested limit: more items may exist.
+  truncated?: boolean;
+  /// Items matching before the limit, when the runtime reports it.
+  total?: number | null;
   unavailable: boolean;
   denied: boolean;
   error: string | null;
 }
 
-// Two CAS classes on the action payloads: goal actions (confirm /
-// request-close) carry the goal WORK ITEM's revision; attention actions
-// (pause / resume / reassign) carry the binding's machine revision.
-interface WorkGraphPanelProps {
+interface WorkGraphPanelProps extends WorkGraphActionHandlers {
   /** The team picker, when the console serves more than one team; shown
-   * among the header actions. */
+   * next to the title. */
   runtimeControl?: React.ReactNode;
   data: WorkGraphPanelData;
   canManage: boolean;
   onRefresh: () => void;
-  // An absent revision means the snapshot never carried one: handlers must
-  // resolve the live revision before mutating (never substitute 0).
-  onClaim?: (input: { itemId: string; revision?: number }) => void;
-  onClose?: (input: { itemId: string; revision?: number }) => void;
-  onGoalConfirm?: (input: { bindingId: string; revision?: number }) => void;
-  onGoalRequestClose?: (input: { bindingId: string; revision?: number }) => void;
-  onAttentionPause?: (input: { bindingId: string; revision?: number }) => void;
-  onAttentionResume?: (input: { bindingId: string; revision?: number }) => void;
-  onAttentionReassign?: (input: { bindingId: string; revision?: number; identity: string }) => void;
 }
 
 export interface WorkGraphPanelTreeRow {
@@ -100,7 +130,8 @@ export interface WorkGraphPanelTreeRow {
 
 /// DFS order over parent edges (WorkEdge kind "parent" runs child→parent).
 /// Roots first (by created_at, then id), children indented under parents;
-/// items with a parent edge to an unknown item render as roots.
+/// items with a parent edge to an unknown item render as roots, and items
+/// caught in a parent cycle are visited from where the cycle is entered.
 export function buildWorkGraphPanelTree(
   items: WorkGraphWireItem[],
   edges: WorkGraphWireEdge[],
@@ -145,65 +176,33 @@ export function buildWorkGraphPanelTree(
   );
   const rows: WorkGraphPanelTreeRow[] = [];
   const visited = new Set<string>();
-  const visit = (id: string, depth: number) => {
-    if (visited.has(id)) return;
-    visited.add(id);
-    const item = byId.get(id);
-    if (!item) return;
-    rows.push({ item, itemId: id, depth });
-    for (const child of sortIds(childrenOf.get(id) || [])) {
-      visit(child, depth + 1);
+  const visit = (start: string, startDepth: number) => {
+    // Iterative, so a deep chain cannot overflow the stack.
+    const stack: Array<[string, number]> = [[start, startDepth]];
+    while (stack.length > 0) {
+      const [id, depth] = stack.pop()!;
+      if (visited.has(id)) continue;
+      visited.add(id);
+      const item = byId.get(id);
+      if (!item) continue;
+      rows.push({ item, itemId: id, depth });
+      const children = sortIds(childrenOf.get(id) || []);
+      for (let index = children.length - 1; index >= 0; index -= 1) stack.push([children[index], depth + 1]);
     }
   };
   for (const root of sortIds(roots)) visit(root, 0);
+  // A parent cycle has no root: enter it at its oldest item.
+  for (const id of sortIds([...byId.keys()])) {
+    if (!visited.has(id)) visit(id, 0);
+  }
   return rows;
 }
 
-export function workGraphBindingStatusLabel(binding: WorkGraphWireBinding): string {
-  const state = binding.status?.state || "active";
-  if (state === "paused") {
-    const until = formatWorkGraphTimestamp(binding.status?.until, { date: true });
-    return until ? `paused until ${until}` : "paused";
-  }
-  return state;
-}
-
-export function workGraphBindingTargetLabel(binding: WorkGraphWireBinding): string {
-  const target = binding.target;
-  if (!target) return "";
-  if (typeof target.session_id === "string" && target.session_id) return target.session_id;
-  const ownerKey = target.owner_key;
-  if (ownerKey) {
-    return [ownerKey.kind, ownerKey.id].filter(Boolean).join(":");
-  }
-  return "";
-}
-
-export function workGraphEventLine(event: WorkGraphWireEvent): string {
-  const kind = typeof event.kind === "string" ? event.kind.replace(/_/g, " ") : "event";
-  const at = formatWorkGraphTimestamp(event.at, { date: true });
-  const item = typeof event.item_id === "string" && event.item_id ? event.item_id : "";
-  return [at, kind, item].filter(Boolean).join(" · ");
-}
-
 /// Kept under the panel's historical export name; the single definition of
-/// the precedence chain lives in workgraph-layout.ts so the tree rows, the
-/// graph nodes, and the graph selection footer cannot drift apart.
+/// the precedence chain lives in workgraph-layout.ts so the outline rows, the
+/// graph cards and the drawer cannot drift apart.
 export function workGraphOwnerLabelOf(item: WorkGraphWireItem): string {
   return workGraphItemOwnerLabel(item);
-}
-
-/// Latest observed revision of the binding's bound goal work item. Goal
-/// confirm / request-close CAS against this (the server checks the ITEM's
-/// revision), never against the binding's machine revision.
-export function workGraphGoalRevisionOf(
-  binding: WorkGraphWireBinding,
-  items: WorkGraphWireItem[],
-): number | undefined {
-  const itemId = binding.work_ref?.item_id;
-  if (!itemId) return undefined;
-  const item = items.find((candidate) => candidate.id === itemId);
-  return typeof item?.revision === "number" ? item.revision : undefined;
 }
 
 /// `meta/workgraph/events` params for the panel's recent-events tail.
@@ -240,94 +239,7 @@ export function createWorkGraphRefreshSequencer(): { begin: () => () => boolean 
   };
 }
 
-// ── Display helpers ──────────────────────────────────────────────────────
-// The helpers above keep the raw wire forms their tests pin; these turn the
-// same data into the words, names and sentences the panel shows.
-
-const TERMINAL_STATUSES = new Set(["completed", "cancelled", "failed"]);
-
-/// What the agent on a goal does with it, in plain words; the attention
-/// mode's own name ("coordinate", "falsify") stays the tooltip.
-const MODE_WORDS: Record<string, string> = {
-  pursue: "Doing the work",
-  coordinate: "Leading the work",
-  review: "Reviewing the work",
-  falsify: "Testing the work",
-  judge: "Judging the work",
-  observe: "Watching the work",
-};
-
-/// What an attention binding does with its goal, in words. A missing mode
-/// is "pursue", as upstream defaults it.
-export function workGraphModeWord(mode: string | null | undefined): string {
-  const key = mode || "pursue";
-  return MODE_WORDS[key] || humanizeEnum(key);
-}
-
-const DAY_MS = 24 * 60 * 60 * 1000;
-
-/// A nearby moment inside a sentence: the clock today, the weekday and clock
-/// within the week, the date and clock beyond it.
-function nearMoment(ms: number, now: number): string {
-  const clock = formatClockTime(ms);
-  const date = new Date(ms);
-  if (date.toDateString() === new Date(now).toDateString()) return clock;
-  if (Math.abs(ms - now) < 6 * DAY_MS) {
-    return `${date.toLocaleDateString(undefined, { weekday: "short" })} ${clock}`;
-  }
-  return `${formatShortDate(ms, now)}, ${clock}`;
-}
-
-/// A binding's state in words: "Active", "Paused until Fri 11:16",
-/// "Replaced" (superseded by a newer binding). workGraphBindingStatusLabel
-/// keeps the raw form.
-export function workGraphBindingStateText(
-  binding: WorkGraphWireBinding,
-  now: number = Date.now(),
-): string {
-  const state = binding.status?.state || "active";
-  if (state === "paused") {
-    const until = toEpochMs(binding.status?.until);
-    return until === null ? "Paused" : `Paused until ${nearMoment(until, now)}`;
-  }
-  if (state === "superseded") return "Replaced";
-  return humanizeEnum(state);
-}
-
-/// Who a binding's attention rests on, by name: the roster name for a known
-/// session or owner key, the bare key for an owner the roster does not know,
-/// and "Agent session" for an unknown session (its ID stays in the
-/// tooltip and the technical details). workGraphBindingTargetLabel keeps the
-/// raw target.
-export function workGraphBindingTarget(
-  binding: WorkGraphWireBinding,
-  directory?: AgentDirectory,
-): WorkGraphOwnerView | null {
-  const target = binding.target;
-  if (!target) return null;
-  const sessionId = typeof target.session_id === "string" ? target.session_id.trim() : "";
-  if (sessionId) {
-    return { name: directory?.lookup(sessionId)?.label.trim() || "Agent session", key: sessionId };
-  }
-  const id = target.owner_key?.id?.trim() || "";
-  if (!id) return null;
-  const kind = target.owner_key?.kind?.trim() || "";
-  const key = kind ? `${kind}:${id}` : id;
-  return { name: directory?.lookup(key)?.label.trim() || agentDisplayName(id), key };
-}
-
-/// The agent a binding rests on, named for a sentence; null for a session
-/// the roster does not know (the row says "Agent session").
-function bindingAgentName(binding: WorkGraphWireBinding | null, directory?: AgentDirectory): string | null {
-  if (!binding) return null;
-  const target = workGraphBindingTarget(binding, directory);
-  if (!target) return null;
-  const sessionId = typeof binding.target?.session_id === "string" ? binding.target.session_id.trim() : "";
-  if (sessionId && !directory?.lookup(sessionId)) return null;
-  return target.name || null;
-}
-
-/// The header summary: "9 items · 3 in progress · 1 blocked".
+/// The header summary in plain text: "9 items · 3 in progress · 1 blocked".
 export function workGraphSummary(items: WorkGraphWireItem[]): string {
   if (items.length === 0) return "No work items";
   let inProgress = 0;
@@ -338,12 +250,12 @@ export function workGraphSummary(items: WorkGraphWireItem[]): string {
     else if (item.status === "blocked") blocked += 1;
     else if (item.status === "failed") failed += 1;
   }
-  return joinMeta(
+  return [
     plural(items.length, "item"),
     inProgress ? `${inProgress} in progress` : null,
     blocked ? `${blocked} blocked` : null,
     failed ? `${failed} failed` : null,
-  );
+  ].filter(Boolean).join(" · ");
 }
 
 export interface WorkGraphGoalProgress {
@@ -392,8 +304,10 @@ export function groupWorkGraphTree(
   return groups;
 }
 
-/// For each item, the titles of the unfinished items that block it. A
-/// "blocks" edge runs from the blocker to the item it blocks.
+/// For each item, the titles of the blockers that still block it. A
+/// "blocks" edge runs from the blocker to the item it blocks; only a present
+/// and completed blocker resolves (an absent, cancelled or failed one still
+/// blocks, as the server's readiness rule says).
 export function workGraphBlockersOf(
   items: WorkGraphWireItem[],
   edges: WorkGraphWireEdge[],
@@ -403,113 +317,23 @@ export function workGraphBlockersOf(
     if (typeof item.id === "string" && item.id) byId.set(item.id, item);
   }
   const blockers = new Map<string, string[]>();
+  const seen = new Set<string>();
   for (const edge of edges) {
     if (edge.kind !== "blocks" || !edge.from_id || !edge.to_id || edge.from_id === edge.to_id) continue;
+    const key = `${edge.from_id}>${edge.to_id}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
     const blocker = byId.get(edge.from_id);
-    if (!blocker || blocker.status === "completed" || blocker.status === "cancelled") continue;
+    if (workGraphBlockerResolved(blocker)) continue;
     const titles = blockers.get(edge.to_id) || [];
-    titles.push(blocker.title || "Untitled work item");
+    titles.push(blocker ? blocker.title || "Untitled work item" : "an item outside this view");
     blockers.set(edge.to_id, titles);
   }
   return blockers;
 }
 
-function blockedByText(titles: string[]): string {
-  return titles.length > 1
-    ? `Blocked by ${titles[0]} and ${plural(titles.length - 1, "other")}`
-    : `Blocked by ${titles[0]}`;
-}
-
 function moreItemsText(count: number, verb: string): string {
   return `+${count} more ${count === 1 ? "item" : "items"} not ${verb}`;
-}
-
-function recordOf(value: unknown): Record<string, unknown> | null {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? value as Record<string, unknown>
-    : null;
-}
-
-function textOf(value: unknown): string {
-  return typeof value === "string" ? value.trim() : "";
-}
-
-/// One activity row as a sentence about the work item, by title ("Freeze
-/// the release branch was completed"). The item ID stays out of the sentence:
-/// it is on the item. workGraphEventLine keeps the compact
-/// "time · kind · id" form.
-export function workGraphEventSentence(
-  event: WorkGraphWireEvent,
-  context: { titleOf: (itemId: string) => string | undefined; directory?: AgentDirectory },
-): string {
-  const payload = recordOf(event.payload);
-  const item = recordOf(payload?.item) as WorkGraphWireItem | null;
-  const attention = recordOf(payload?.attention) as WorkGraphWireBinding | null;
-  const edge = recordOf(payload?.edge) as WorkGraphWireEdge | null;
-  const execution = recordOf(recordOf(payload?.execution_binding)?.work_ref);
-  const itemId = textOf(event.item_id) || textOf(item?.id)
-    || textOf(attention?.work_ref?.item_id) || textOf(execution?.item_id);
-  const titleOf = (id: string) => (id ? context.titleOf(id) || "" : "");
-  const named = titleOf(itemId) || textOf(item?.title);
-  const subject = named || "A work item";
-  const object = named || "a work item";
-  // The agent an attention event is about, by name, when the console knows it.
-  const agentOnGoal = bindingAgentName(attention, context.directory);
-  const kind = textOf(event.kind).toLowerCase().replace(/^item_/, "");
-  switch (kind) {
-    case "created":
-      return `${subject} was created`;
-    case "updated":
-      return `${subject} was updated`;
-    case "ready":
-    case "readiness_observed":
-      return `${subject} is ready to start`;
-    case "claimed": {
-      const owner = item ? workGraphItemOwner(item, context.directory) : null;
-      return owner ? `${owner.name} claimed ${object}` : `${subject} was claimed`;
-    }
-    case "released":
-      return `${subject} was released`;
-    case "blocked":
-      return `${subject} became blocked`;
-    case "closed":
-      if (item?.status === "completed") return `${subject} was completed`;
-      if (item?.status === "failed") return `${subject} failed`;
-      if (item?.status === "cancelled") return `${subject} was cancelled`;
-      return `${subject} was closed`;
-    case "linked": {
-      const from = titleOf(textOf(edge?.from_id)) || "A work item";
-      const to = titleOf(textOf(edge?.to_id)) || "another work item";
-      if (edge?.kind === "parent") return `${from} was placed under ${to}`;
-      if (edge?.kind === "blocks") return `${from} now blocks ${to}`;
-      return `${from} was linked to ${to}`;
-    }
-    case "evidence_added":
-      return `Evidence was added to ${object}`;
-    // Attention events say which agent works toward a goal, never
-    // "attention": the agent is put on it, the goal is paused for it, the
-    // agent is taken off it.
-    case "attention_created":
-      return `${agentOnGoal ?? "An agent"} was put on ${object}`;
-    case "attention_paused":
-      return `${subject} was paused for ${agentOnGoal ?? "its agent"}`;
-    case "attention_updated": {
-      const state = attention?.status?.state;
-      if (state === "paused") return `${subject} was paused for ${agentOnGoal ?? "its agent"}`;
-      if (state === "superseded" || state === "stopped") return `${agentOnGoal ?? "An agent"} was taken off ${object}`;
-      return `${agentOnGoal ? `${agentOnGoal}'s` : "An agent's"} part in ${object} changed`;
-    }
-    case "execution_bound":
-      return `Work on ${object} started`;
-    case "execution_transitioned":
-      return `Work on ${object} was updated`;
-    case "goal_status_reported":
-      return `Progress was reported on ${object}`;
-    default: {
-      const words = humanizeEnum(kind);
-      return words ? `${words}: ${object}` : `Activity on ${object}`;
-    }
-  }
 }
 
 export const __workGraphPanelTest = {
@@ -543,184 +367,6 @@ function PriorityChip({ priority, className }: { priority: string | undefined; c
   );
 }
 
-type ItemHandlers = Pick<WorkGraphPanelProps, "onClaim" | "onClose">;
-type BindingHandlers = Pick<WorkGraphPanelProps,
-  "onGoalConfirm" | "onGoalRequestClose" | "onAttentionPause" | "onAttentionResume" | "onAttentionReassign"
->;
-
-/// Claim and Done for one item, or null when neither applies: Claim for an
-/// open item nobody owns, Done for anything not finished and not blocked.
-function itemActionButtons(
-  item: WorkGraphWireItem,
-  itemId: string,
-  canManage: boolean,
-  { onClaim, onClose }: ItemHandlers,
-): React.ReactNode {
-  const status = item.status || "open";
-  const revision = typeof item.revision === "number" ? item.revision : undefined;
-  const title = item.title || "this work item";
-  const claim = canManage && onClaim && status === "open" && !workGraphOwnerLabelOf(item);
-  const close = canManage && onClose && !TERMINAL_STATUSES.has(status) && status !== "blocked";
-  if (!claim && !close) return null;
-  return (
-    <>
-      {claim ? (
-        <Button
-          size="sm"
-          variant="ghost"
-          title={`Claim ${title}`}
-          data-testid={`workgraph-panel-action:${itemId}:claim`}
-          onClick={() => onClaim?.({ itemId, revision })}
-        >
-          Claim
-        </Button>
-      ) : null}
-      {close ? (
-        <Button
-          size="sm"
-          variant="ghost"
-          title={`Mark ${title} as done`}
-          data-testid={`workgraph-panel-action:${itemId}:close`}
-          onClick={() => onClose?.({ itemId, revision })}
-        >
-          Done
-        </Button>
-      ) : null}
-    </>
-  );
-}
-
-function AttentionRow({
-  binding,
-  goalRevision,
-  canManage,
-  subject,
-  onGoalConfirm,
-  onGoalRequestClose,
-  onAttentionPause,
-  onAttentionResume,
-  onAttentionReassign,
-}: {
-  binding: WorkGraphWireBinding;
-  // Bound goal work item's revision: the CAS token for confirm/request-close.
-  goalRevision?: number;
-  canManage: boolean;
-  /// What the binding is on, when it does not sit inside that item's card.
-  subject?: React.ReactNode;
-} & BindingHandlers) {
-  const directory = useAgentDirectory();
-  const now = useNow();
-  const inputId = React.useId();
-  const [reassignOpen, setReassignOpen] = React.useState(false);
-  const [reassignIdentity, setReassignIdentity] = React.useState("");
-  const bindingId = binding.binding_id || "";
-  const revision = binding.machine_state?.revision;
-  const statusLabel = workGraphBindingStatusLabel(binding);
-  const isActive = statusLabel === "active";
-  const isPaused = statusLabel.startsWith("paused");
-  const live = isActive || isPaused;
-  // Reassign authority is machine-derived from the binding mode upstream:
-  // only coordinate-mode bindings can reassign, so others get no affordance.
-  const canReassign = live && binding.mode === "coordinate";
-  const bindingInput = { bindingId, revision };
-  const goalInput = { bindingId, revision: goalRevision };
-  if (!bindingId) return null;
-  const state = binding.status?.state || "active";
-  const target = workGraphBindingTarget(binding, directory);
-  const pause = canManage && onAttentionPause && isActive;
-  const resume = canManage && onAttentionResume && isPaused;
-  const confirm = canManage && onGoalConfirm && live;
-  const requestClose = canManage && onGoalRequestClose && live;
-  const reassignable = canManage && onAttentionReassign && canReassign;
-  const submitReassign = () => {
-    const identity = reassignIdentity.trim();
-    if (!identity || !onAttentionReassign) return;
-    onAttentionReassign({ ...bindingInput, identity });
-    setReassignOpen(false);
-    setReassignIdentity("");
-  };
-  return (
-    <div className="workgraph-binding" data-testid={`workgraph-panel-binding:${bindingId}`} data-state={state}>
-      <div className="workgraph-binding__line">
-        <span className="workgraph-binding__summary">
-          <StatusDot tone={statusTone(state)} bound />
-          <span className="workgraph-binding__text">
-            <span className="workgraph-binding__mode" title={`Attention mode: ${binding.mode || "pursue"}`}>
-              {workGraphModeWord(binding.mode)}
-            </span>
-            {" · "}
-            {workGraphBindingStateText(binding, now)}
-            {target ? <>{" · "}<WorkGraphPerson person={target} /></> : null}
-            {subject ? <>{" · on "}{subject}</> : null}
-          </span>
-        </span>
-        {pause || resume || confirm || requestClose || reassignable ? (
-          <span className="workgraph-binding__actions">
-            {pause ? (
-              <Button size="sm" title="Pause this goal for its agent" onClick={() => onAttentionPause?.(bindingInput)}>
-                Pause
-              </Button>
-            ) : null}
-            {resume ? (
-              <Button size="sm" title="Resume this goal for its agent" onClick={() => onAttentionResume?.(bindingInput)}>
-                Resume
-              </Button>
-            ) : null}
-            {confirm ? (
-              <Button size="sm" title="Confirm the goal is complete" onClick={() => onGoalConfirm?.(goalInput)}>
-                Confirm
-              </Button>
-            ) : null}
-            {requestClose ? (
-              <Button size="sm" title="Ask to close the goal" onClick={() => onGoalRequestClose?.(goalInput)}>
-                Request close
-              </Button>
-            ) : null}
-            {reassignable ? (
-              <Button
-                size="sm"
-                title="Hand the goal to another agent"
-                aria-expanded={reassignOpen}
-                onClick={() => setReassignOpen((value) => !value)}
-              >
-                Reassign
-              </Button>
-            ) : null}
-          </span>
-        ) : null}
-      </div>
-      {reassignOpen && reassignable ? (
-        <div className="workgraph-binding__reassign">
-          <label className="cc-visually-hidden" htmlFor={inputId}>Agent identity to reassign to</label>
-          <input
-            id={inputId}
-            className="cc-input"
-            placeholder="Agent identity"
-            value={reassignIdentity}
-            onChange={(event) => setReassignIdentity(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === "Enter") {
-                event.preventDefault();
-                submitReassign();
-              }
-            }}
-            data-testid={`workgraph-panel-reassign-input:${bindingId}`}
-          />
-          <Button
-            size="sm"
-            variant="primary"
-            disabled={!reassignIdentity.trim()}
-            data-testid={`workgraph-panel-reassign-submit:${bindingId}`}
-            onClick={submitReassign}
-          >
-            Assign
-          </Button>
-        </div>
-      ) : null}
-    </div>
-  );
-}
-
 /// Tree guides and indentation stop deepening past this depth.
 const MAX_INDENT_DEPTH = 8;
 
@@ -737,25 +383,25 @@ function ItemRow({
   blockers?: string[];
   bindings: WorkGraphWireBinding[];
   canManage: boolean;
-  handlers: ItemHandlers;
-  bindingHandlers: BindingHandlers;
+  handlers: WorkGraphItemHandlers;
+  bindingHandlers: WorkGraphBindingHandlers;
   goalRevisionOf: (binding: WorkGraphWireBinding) => number | undefined;
 }) {
   const directory = useAgentDirectory();
   const { item, itemId, depth } = row;
   const status = item.status || "open";
   const owner = workGraphItemOwner(item, directory);
-  const actions = itemActionButtons(item, itemId, canManage, handlers);
+  const actions = workGraphItemActions(item, itemId, canManage, handlers);
   return (
     <ListRow
       dense
       className="workgraph-row"
       testId={`workgraph-panel-item:${itemId}`}
       dataAttributes={{ "data-status": status, "data-depth": String(Math.min(depth, MAX_INDENT_DEPTH)) }}
-      lead={<StatusDot tone={statusTone(status)} />}
+      lead={<StatusSquare status={status} size={12} />}
       title={item.title || "Untitled work item"}
       titleAttr={item.description || item.title || undefined}
-      subtitle={blockers?.length ? blockedByText(blockers) : undefined}
+      subtitle={blockers?.length && !isWorkGraphTerminal(status) ? workGraphBlockedByText(blockers) : undefined}
       meta={(
         <>
           {/* The status word comes first so a narrow pane, which keeps only
@@ -763,8 +409,8 @@ function ItemRow({
           <span className="workgraph-row__status">{workGraphStatusWord(status)}</span>
           <PriorityChip priority={item.priority} className="workgraph-row__priority" />
           {owner ? (
-            <WorkGraphPerson person={owner} className="workgraph-row__owner" />
-          ) : TERMINAL_STATUSES.has(status) ? null : (
+            <WorkGraphPerson person={owner} avatar={18} className="workgraph-row__owner" />
+          ) : isWorkGraphTerminal(status) ? null : (
             <span className="workgraph-row__owner workgraph-row__unassigned">Unassigned</span>
           )}
         </>
@@ -774,12 +420,12 @@ function ItemRow({
       {bindings.length ? (
         <div className="workgraph-row__bindings">
           {bindings.map((binding, index) => (
-            <AttentionRow
+            <WorkGraphAttentionRow
               key={binding.binding_id || `binding-${index}`}
               binding={binding}
               goalRevision={goalRevisionOf(binding)}
               canManage={canManage}
-              {...bindingHandlers}
+              handlers={bindingHandlers}
             />
           ))}
         </div>
@@ -790,79 +436,90 @@ function ItemRow({
 
 function GoalCard({
   group,
+  model,
   bindings,
   bindingsOf,
   blockers,
   canManage,
+  collapsed,
+  onToggle,
   handlers,
   bindingHandlers,
   goalRevisionOf,
 }: {
   group: WorkGraphGoalGroup;
+  model: WorkGraphModel;
   bindings: WorkGraphWireBinding[];
   bindingsOf: (itemId: string) => WorkGraphWireBinding[];
   blockers: Map<string, string[]>;
   canManage: boolean;
-  handlers: ItemHandlers;
-  bindingHandlers: BindingHandlers;
+  /// A goal whose every item is finished shows its header only.
+  collapsed: boolean;
+  onToggle: () => void;
+  handlers: WorkGraphItemHandlers;
+  bindingHandlers: WorkGraphBindingHandlers;
   goalRevisionOf: (binding: WorkGraphWireBinding) => number | undefined;
 }) {
   const directory = useAgentDirectory();
   const { item, itemId } = group.root;
   const status = item.status || "open";
   const owner = workGraphItemOwner(item, directory);
-  const actions = itemActionButtons(item, itemId, canManage, handlers);
+  const actions = workGraphItemActions(item, itemId, canManage, handlers);
   const goalBlockers = blockers.get(itemId);
-  const { progress } = group;
+  const frame = model.frames.find((candidate) => candidate.id === itemId);
+  // The graph's frame counts the same items (cancelled ones are not part of
+  // the goal's work); the tree's own count is the fallback.
+  const progress = frame?.progress ?? group.progress;
   const technical: TechnicalDetail[] = [{ label: "Work item ID", value: itemId }];
   for (const binding of bindings) {
     if (binding.binding_id) technical.push({ label: "Attention binding ID", value: binding.binding_id });
     if (binding.target?.session_id) technical.push({ label: "Session ID", value: binding.target.session_id });
   }
   return (
-    <article className="workgraph-goal" data-testid={`workgraph-panel-item:${itemId}`} data-status={status}>
+    <article className="workgraph-goal" data-testid={`workgraph-panel-item:${itemId}`} data-status={status} data-state={frame?.state}>
       <div className="workgraph-goal__head">
         <div className="workgraph-goal__name">
-          <StatusDot tone={statusTone(status)} />
+          <KitGlyph name="flag" className="workgraph-goal__flag" />
           <h3 className="workgraph-goal__title" title={item.description || item.title || undefined}>
             {item.title || "Untitled work item"}
           </h3>
         </div>
+        {progress.total > 0 ? (
+          <span className="workgraph-goal__progress">
+            <ProgressRing
+              done={progress.completed}
+              inProgress={progress.inProgress}
+              blocked={progress.blocked}
+              total={progress.total}
+              size={16}
+            />
+            {`${progress.completed} of ${progress.total} done`}
+          </span>
+        ) : null}
         <span className="workgraph-goal__chips">
           <PriorityChip priority={item.priority} />
-          <Chip tone={statusTone(status)}>{workGraphStatusWord(status)}</Chip>
+          <StatusPill tone={statusTone(status)}>{workGraphStatusWord(status)}</StatusPill>
         </span>
         {actions ? <span className="workgraph-goal__actions">{actions}</span> : null}
         {owner ? <WorkGraphPerson person={owner} avatar={18} className="workgraph-goal__owner" /> : null}
       </div>
-      {goalBlockers?.length ? <p className="workgraph-goal__blocked">{blockedByText(goalBlockers)}</p> : null}
-      {progress.total > 0 ? (
-        <Meter
-          className="workgraph-goal__meter"
-          label={`${progress.completed} of ${progress.total} done`}
-          total={progress.total}
-          segments={[
-            { value: progress.completed, tone: "ok", label: `${progress.completed} completed` },
-            { value: progress.inProgress, tone: "info", label: `${progress.inProgress} in progress` },
-            { value: progress.blocked, tone: "warn", label: `${progress.blocked} blocked` },
-            { value: progress.failed, tone: "crit", label: `${progress.failed} failed` },
-          ]}
-        />
+      {goalBlockers?.length && !isWorkGraphTerminal(status) ? (
+        <p className="workgraph-goal__blocked">{workGraphBlockedByText(goalBlockers)}</p>
       ) : null}
       {bindings.length ? (
         <div className="workgraph-goal__bindings">
           {bindings.map((binding, index) => (
-            <AttentionRow
+            <WorkGraphAttentionRow
               key={binding.binding_id || `binding-${index}`}
               binding={binding}
               goalRevision={goalRevisionOf(binding)}
               canManage={canManage}
-              {...bindingHandlers}
+              handlers={bindingHandlers}
             />
           ))}
         </div>
       ) : null}
-      {group.children.length ? (
+      {group.children.length && !collapsed ? (
         <RowList className="workgraph-goal__items">
           {group.children.map((row) => (
             <ItemRow
@@ -878,9 +535,134 @@ function GoalCard({
           ))}
         </RowList>
       ) : null}
+      {group.children.length && (collapsed || frame?.state === "done") ? (
+        <div className="workgraph-goal__fold">
+          <Button size="sm" variant="ghost" aria-expanded={!collapsed} onClick={onToggle}>
+            {collapsed ? `Show ${plural(group.children.length, "finished item")}` : "Fold finished items"}
+          </Button>
+        </div>
+      ) : null}
       <TechnicalDetails className="workgraph-goal__tech" items={technical} />
     </article>
   );
+}
+
+/// Items created and closed per day as paired bars (created in the mid
+/// ink, closed in the full ink), with a zero tick for empty days.
+function ActivityBars({ days }: { days: readonly WorkGraphActivityDay[] }) {
+  const max = Math.max(1, ...days.map((day) => Math.max(day.created, day.closed)));
+  const height = 28;
+  const bar = 6;
+  const slot = 2 * bar + 10;
+  const width = days.length * slot;
+  const label = `Items created and closed per day over the last ${days.length} days: ${days
+    .map((day) => `${new Date(day.start).toLocaleDateString(undefined, { weekday: "short" })} ${day.created} created, ${day.closed} closed`)
+    .join("; ")}`;
+  const heightOf = (value: number) => (value > 0 ? Math.max(2, Math.round((value / max) * height)) : 0);
+  return (
+    <svg
+      className="workgraph-strip__bars"
+      width={width}
+      height={height + 2}
+      // The console's icon reset sizes every svg to 16 px; this one is a chart.
+      style={{ width, height: height + 2 }}
+      viewBox={`0 0 ${width} ${height + 2}`}
+      role="img"
+      aria-label={label}
+    >
+      <line className="workgraph-strip__base" x1={0} x2={width} y1={height + 0.5} y2={height + 0.5} />
+      {days.map((day, index) => {
+        const x = index * slot + 4;
+        const created = heightOf(day.created);
+        const closed = heightOf(day.closed);
+        return (
+          <g key={day.start}>
+            {created ? <rect className="workgraph-strip__created" x={x} y={height - created} width={bar} height={created} rx={1} /> : (
+              <rect className="workgraph-strip__zero" x={x} y={height - 1} width={bar} height={1} />
+            )}
+            {closed ? <rect className="workgraph-strip__closed" x={x + bar + 1} y={height - closed} width={bar} height={closed} rx={1} /> : (
+              <rect className="workgraph-strip__zero" x={x + bar + 1} y={height - 1} width={bar} height={1} />
+            )}
+          </g>
+        );
+      })}
+    </svg>
+  );
+}
+
+/// The strip under the graph: a week of created and closed items, the
+/// latest two events, and the way to the full activity.
+function ActivityStrip({
+  events,
+  titleOf,
+  onShowAll,
+  showingAll,
+}: {
+  events: readonly WorkGraphWireEvent[];
+  titleOf: (itemId: string) => string | undefined;
+  onShowAll: () => void;
+  showingAll: boolean;
+}) {
+  const directory = useAgentDirectory();
+  const now = useNow();
+  const minute = Math.floor(now / 60_000);
+  const days = React.useMemo(() => workGraphActivityDays(events, minute * 60_000, 7), [events, minute]);
+  const latest = events.slice(0, 2);
+  return (
+    <div className="workgraph-strip" data-testid="workgraph-activity-strip">
+      <div className="workgraph-strip__chart">
+        <span className="workgraph-strip__label">Activity · 7 days</span>
+        <ActivityBars days={days} />
+        <span className="workgraph-strip__legend" aria-hidden="true">
+          <span className="workgraph-strip__key is-created" />created
+          <span className="workgraph-strip__key is-closed" />closed
+        </span>
+      </div>
+      <div className="workgraph-strip__latest">
+        {latest.length === 0 ? <span className="workgraph-strip__none">No activity yet</span> : latest.map((event, index) => (
+          <span key={`${event.seq ?? index}`} className="workgraph-strip__event">
+            <span className="workgraph-strip__sentence">{workGraphEventSentence(event, { titleOf, directory })}</span>
+            {" · "}
+            <RelativeTime value={event.at} />
+          </span>
+        ))}
+        {events.length > 0 ? (
+          <Button size="sm" variant="ghost" className="workgraph-strip__all" aria-pressed={showingAll} data-testid="workgraph-activity-all" onClick={onShowAll}>
+            {showingAll ? "Hide activity" : `Show all activity (${events.length})`}
+          </Button>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+/// The panel's measured content width, for the default view rule; null
+/// until measured (server render, jsdom).
+function useMeasuredWidth(ref: React.RefObject<HTMLElement | null>): number | null {
+  const [width, setWidth] = React.useState<number | null>(null);
+  React.useLayoutEffect(() => {
+    const element = ref.current;
+    if (!element) return undefined;
+    const apply = (next: number) => setWidth((current) => {
+      const value = next > 0 ? Math.round(next) : null;
+      return current === value ? current : value;
+    });
+    apply(element.getBoundingClientRect().width);
+    if (typeof ResizeObserver === "undefined") return undefined;
+    const observer = new ResizeObserver((entries) => {
+      const box = entries[entries.length - 1]?.contentRect;
+      if (box) apply(box.width);
+    });
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [ref]);
+  return width;
+}
+
+function startOfToday(now: number): number {
+  const day = new Date(now);
+  day.setHours(0, 0, 0, 0);
+  return day.getTime();
 }
 
 export function WorkGraphPanel({
@@ -890,6 +672,7 @@ export function WorkGraphPanel({
   onRefresh,
   onClaim,
   onClose,
+  onRelease,
   onGoalConfirm,
   onGoalRequestClose,
   onAttentionPause,
@@ -897,41 +680,81 @@ export function WorkGraphPanel({
   onAttentionReassign,
 }: WorkGraphPanelProps): React.JSX.Element {
   const directory = useAgentDirectory();
+  const now = useNow();
+  const [density, setDensity] = usePanelDensity("workgraph");
+  const [showTechnicalIds, setShowTechnicalIds] = useShowTechnicalIds("workgraph");
+  const model = React.useMemo(
+    () => buildWorkGraphModel({ items: data.items, edges: data.edges, attention: data.attention, readyItemIds: data.readyItemIds }),
+    [data.items, data.edges, data.attention, data.readyItemIds],
+  );
   const rows = React.useMemo(
     () => buildWorkGraphPanelTree(data.items, data.edges),
     [data.items, data.edges],
   );
-  // The snapshot includes terminal rows (the panel is the operator
-  // inspection surface), so its size tracks the store's full history. The
-  // tree gets the same rendered-row cap and overflow honesty as the graph.
-  const visibleCount = Math.min(rows.length, WORKGRAPH_GRAPH_NODE_CAP);
-  const treeOverflowCount = rows.length - visibleCount;
-  const groups = React.useMemo(() => groupWorkGraphTree(rows, visibleCount), [rows, visibleCount]);
   const blockers = React.useMemo(
     () => workGraphBlockersOf(data.items, data.edges),
     [data.items, data.edges],
   );
-  const itemById = React.useMemo(() => {
-    const map = new Map<string, WorkGraphWireItem>();
-    for (const item of data.items) {
-      if (typeof item.id === "string" && item.id) map.set(item.id, item);
-    }
-    return map;
-  }, [data.items]);
-  const [viewMode, setViewModeState] = React.useState<WorkGraphViewMode>(workGraphViewModeMemory);
-  const [selectedGraphItem, setSelectedGraphItem] = React.useState<string | null>(null);
+  const measureRef = React.useRef<HTMLDivElement | null>(null);
+  const width = useMeasuredWidth(measureRef);
+  const [viewChoice, setViewChoice] = React.useState<WorkGraphViewMode | null>(workGraphViewModeMemory);
+  const viewMode: WorkGraphViewMode = viewChoice ?? workGraphDefaultView(width, model.items.size);
   const setViewMode = (mode: WorkGraphViewMode) => {
     workGraphViewModeMemory = mode;
-    setViewModeState(mode);
+    setViewChoice(mode);
   };
+  const [criticalChoice, setCriticalChoice] = React.useState<boolean | null>(workGraphCriticalPathMemory);
+  const chainLength = model.criticalPath.itemIds.length;
+  const highlightCriticalPath = criticalChoice ?? chainLength >= 2;
+  const setHighlightCriticalPath = (on: boolean) => {
+    workGraphCriticalPathMemory = on;
+    setCriticalChoice(on);
+  };
+  const [showDone, setShowDoneState] = React.useState(workGraphShowDoneMemory);
+  const setShowDone = (on: boolean) => {
+    workGraphShowDoneMemory = on;
+    setShowDoneState(on);
+  };
+  const [showCancelled, setShowCancelledState] = React.useState(workGraphShowCancelledMemory);
+  const setShowCancelled = (on: boolean) => {
+    workGraphShowCancelledMemory = on;
+    setShowCancelledState(on);
+  };
+  const [selectedId, setSelectedId] = React.useState<string | null>(null);
+  const [activityOpen, setActivityOpen] = React.useState(false);
+  const [unfolded, setUnfolded] = React.useState<ReadonlySet<string>>(() => new Set());
+  const [allRows, setAllRows] = React.useState(false);
+  // A selection that left the snapshot closes its drawer.
+  const selected = selectedId && model.items.has(selectedId) ? selectedId : null;
+  const select = (itemId: string | null) => {
+    setSelectedId(itemId);
+    if (itemId) setActivityOpen(false);
+  };
+  // A link elsewhere opened an item (spec A4.7): the Graph shows it selected,
+  // with its drawer, and pans it into view.
+  const [revealRequest, setRevealRequest] = React.useState<{ id: string } | null>(null);
+  const focusWorkItem = (itemId: string) => {
+    setViewMode("graph");
+    select(itemId);
+    setRevealRequest({ id: itemId });
+  };
+  useNavigationFocus("work-item", focusWorkItem);
+
+  const shellProps = {
+    className: "workgraph",
+    testId: "workgraph-panel",
+    density,
+    showTechnicalIds,
+  } as const;
 
   if (data.unavailable) {
     return (
-      <PanelShell className="workgraph" testId="workgraph-panel">
-        <PanelHeader className="workgraph__head" title="WorkGraph" actions={runtimeControl || undefined} />
+      <PanelShell {...shellProps}>
+        <PanelHeader className="workgraph__head" title="WorkGraph" scope={runtimeControl || undefined} />
         <PanelBody>
           <EmptyState
-            kind="unavailable"
+            kind="not-configured"
+            illustration="not-configured"
             title="WorkGraph isn't set up on this runtime"
             body="Work items appear here once the runtime runs a WorkGraph service."
           />
@@ -940,8 +763,10 @@ export function WorkGraphPanel({
     );
   }
 
-  const handlers: ItemHandlers = { onClaim, onClose };
-  const bindingHandlers: BindingHandlers = {
+  const handlers: WorkGraphActionHandlers = {
+    onClaim,
+    onClose,
+    onRelease,
     onGoalConfirm,
     onGoalRequestClose,
     onAttentionPause,
@@ -949,9 +774,21 @@ export function WorkGraphPanel({
     onAttentionReassign,
   };
   const goalRevisionOf = (binding: WorkGraphWireBinding) => workGraphGoalRevisionOf(binding, data.items);
-  const titleOf = (itemId: string) => itemById.get(itemId)?.title;
-  // A binding renders with its bound item: in the goal's card, under a child
-  // row, or (item not rendered) in "Agents on other goals".
+  const titleOf = (itemId: string) => model.items.get(itemId)?.title;
+
+  // A loaded snapshot always carries its capture time; until one arrives
+  // (and nothing failed) the panel is loading.
+  const loaded = Boolean(data.capturedAt);
+  const loading = !loaded && !data.error && !data.denied
+    && rows.length === 0 && data.attention.length === 0 && data.events.length === 0;
+  const capturedLabel = formatWorkGraphTimestamp(data.capturedAt, { date: true, seconds: true });
+  const counts = model.counts;
+  const showFigures = !data.denied && !loading && model.items.size > 0;
+
+  // ── Outline: goals as cards, plain roots in Other work ────────────────
+  const visibleCount = allRows ? rows.length : Math.min(rows.length, WORKGRAPH_OUTLINE_ROW_CAP);
+  const treeOverflowCount = rows.length - visibleCount;
+  const groups = groupWorkGraphTree(rows, visibleCount);
   const bindingsByItem = new Map<string, WorkGraphWireBinding[]>();
   for (const binding of data.attention) {
     const itemId = binding.work_ref?.item_id;
@@ -970,6 +807,9 @@ export function WorkGraphPanel({
     group.progress.total > 0 || group.children.length > 0 || bindingsByItem.has(group.root.itemId);
   const goals = groups.filter(isGoal);
   const looseItems = groups.filter((group) => !isGoal(group));
+  const goalDone = (group: WorkGraphGoalGroup) =>
+    isWorkGraphTerminal(group.root.item.status || "open")
+    && group.children.every((row) => isWorkGraphTerminal(row.item.status || "open"));
   const bindingSubject = (binding: WorkGraphWireBinding): React.ReactNode => {
     const itemId = binding.work_ref?.item_id;
     if (!itemId) return undefined;
@@ -979,24 +819,26 @@ export function WorkGraphPanel({
   const attentionList = (bindings: WorkGraphWireBinding[]) => (
     <div className="workgraph__attention">
       {bindings.map((binding, index) => (
-        <AttentionRow
+        <WorkGraphAttentionRow
           key={binding.binding_id || `binding-${index}`}
           binding={binding}
           goalRevision={goalRevisionOf(binding)}
           canManage={canManage}
           subject={bindingSubject(binding)}
-          {...bindingHandlers}
+          handlers={handlers}
         />
       ))}
     </div>
   );
 
-  // A loaded snapshot always carries its capture time; until one arrives
-  // (and nothing failed) the panel is loading.
-  const loaded = Boolean(data.capturedAt);
-  const loading = !loaded && !data.error && !data.denied
-    && rows.length === 0 && data.attention.length === 0 && data.events.length === 0;
-  const capturedLabel = formatWorkGraphTimestamp(data.capturedAt, { date: true, seconds: true });
+  const activityList = (
+    <WorkGraphActivityList
+      events={data.events}
+      titleOf={titleOf}
+      onSelectItem={(itemId) => select(itemId)}
+      testId="workgraph-activity"
+    />
+  );
 
   let content: React.ReactNode;
   if (data.denied) {
@@ -1009,155 +851,350 @@ export function WorkGraphPanel({
       />
     );
   } else if (loading) {
-    content = <LoadingState variant="cards" rows={3} label="Loading work items" />;
+    content = viewChoice === "graph"
+      ? <LoadingState variant="graph" label="Loading work items" />
+      : <LoadingState variant="cards" rows={3} label="Loading work items" />;
   } else if (!loaded && data.error && rows.length === 0) {
     content = (
       <EmptyState
-        kind="unavailable"
+        kind="error"
         title="Work items could not be loaded"
         body="Refresh to try again."
+        details={[{ label: "Error", value: data.error, plain: true }]}
+      />
+    );
+  } else if (model.items.size === 0) {
+    content = (
+      <>
+        <EmptyState
+          illustration="work"
+          title="No work items yet"
+          body="Agents add work items here as they plan and track their goals."
+          testId="workgraph-empty"
+        />
+        {data.attention.length ? (
+          <PanelSection label={<span title="Attention bindings">Agents on goals</span>} count={data.attention.length}>
+            {attentionList(data.attention)}
+          </PanelSection>
+        ) : null}
+      </>
+    );
+  } else if (viewMode === "graph") {
+    content = (
+      <WorkGraphGraphView
+        items={data.items}
+        edges={data.edges}
+        attention={data.attention}
+        events={data.events}
+        readyItemIds={data.readyItemIds}
+        model={model}
+        selectedId={selected ?? undefined}
+        onSelect={select}
+        showDone={showDone}
+        showCancelled={showCancelled}
+        highlightCriticalPath={highlightCriticalPath}
+        // Narrow panes draw compact cards (168 x 36) whatever the density.
+        density={density === "compact" || (width !== null && width < 600) ? "compact" : "comfortable"}
+        canManage={canManage}
+        handlers={handlers}
+        cacheKey="panel"
+        // Only while the item asked for is still the one selected.
+        revealRequest={revealRequest && revealRequest.id === selected ? revealRequest : null}
+        footer={(
+          <ActivityStrip
+            events={data.events}
+            titleOf={titleOf}
+            showingAll={activityOpen && !selected}
+            onShowAll={() => {
+              setSelectedId(null);
+              setActivityOpen((open) => !(open && !selected));
+            }}
+          />
+        )}
+        aside={activityOpen ? {
+          title: "Activity",
+          testId: "workgraph-activity-drawer",
+          onClose: () => setActivityOpen(false),
+          content: data.events.length ? activityList : <EmptyState inline title="No activity yet" />,
+        } : null}
       />
     );
   } else {
     content = (
-      <>
-        {viewMode === "graph" ? (
-          <>
-            <PanelSection className="workgraph__graph" padded>
-              <WorkGraphGraphView
-                items={data.items}
-                edges={data.edges}
-                attention={data.attention}
-                selectedId={selectedGraphItem ?? undefined}
-                onSelect={setSelectedGraphItem}
-              />
-            </PanelSection>
-            {data.attention.length ? (
-              <PanelSection label={<span title="Attention bindings">Agents on goals</span>} count={data.attention.length}>
-                {attentionList(data.attention)}
-              </PanelSection>
-            ) : null}
-          </>
-        ) : (
-          <>
-            {rows.length === 0 ? (
-              <EmptyState
-                title="No work items yet"
-                body="Agents add work items here as they plan and track their goals."
-              />
-            ) : null}
-            {goals.length ? (
-              <div className="workgraph__goals">
-                {goals.map((group) => (
-                  <GoalCard
-                    key={group.root.itemId}
-                    group={group}
-                    bindings={bindingsOf(group.root.itemId)}
-                    bindingsOf={bindingsOf}
-                    blockers={blockers}
-                    canManage={canManage}
-                    handlers={handlers}
-                    bindingHandlers={bindingHandlers}
-                    goalRevisionOf={goalRevisionOf}
-                  />
-                ))}
-              </div>
-            ) : null}
-            {looseItems.length ? (
-              <PanelSection label={goals.length ? "Other work items" : "Work items"} count={looseItems.length}>
-                <RowList>
-                  {looseItems.map((group) => (
-                    <ItemRow
-                      key={group.root.itemId}
-                      row={group.root}
-                      blockers={blockers.get(group.root.itemId)}
-                      bindings={[]}
-                      canManage={canManage}
-                      handlers={handlers}
-                      bindingHandlers={bindingHandlers}
-                      goalRevisionOf={goalRevisionOf}
-                    />
-                  ))}
-                </RowList>
-              </PanelSection>
-            ) : null}
-            {treeOverflowCount > 0 ? (
-              <p className="workgraph__overflow" data-testid="workgraph-panel-overflow">
-                {moreItemsText(treeOverflowCount, "shown")}
-              </p>
-            ) : null}
-            {otherAttention.length ? (
-              <PanelSection label={<span title="Attention bindings">Agents on other goals</span>} count={otherAttention.length}>
-                {attentionList(otherAttention)}
-              </PanelSection>
-            ) : null}
-          </>
-        )}
-        <PanelSection label="Activity" count={data.events.length || null} className="workgraph__activity">
-          {data.events.length === 0 ? (
-            <EmptyState inline title="No activity yet" />
-          ) : (
+      <div className="workgraph__outline">
+        {goals.length ? (
+          <div className="workgraph__goals">
+            {goals.map((group) => {
+              const done = goalDone(group);
+              const collapsed = done && !showDone && !unfolded.has(group.root.itemId);
+              return (
+                <GoalCard
+                  key={group.root.itemId}
+                  group={group}
+                  model={model}
+                  bindings={bindingsOf(group.root.itemId)}
+                  bindingsOf={bindingsOf}
+                  blockers={blockers}
+                  canManage={canManage}
+                  collapsed={collapsed}
+                  onToggle={() => setUnfolded((current) => {
+                    const next = new Set(current);
+                    if (next.has(group.root.itemId)) next.delete(group.root.itemId);
+                    else next.add(group.root.itemId);
+                    return next;
+                  })}
+                  handlers={handlers}
+                  bindingHandlers={handlers}
+                  goalRevisionOf={goalRevisionOf}
+                />
+              );
+            })}
+          </div>
+        ) : null}
+        {looseItems.length ? (
+          <PanelSection label={goals.length ? "Other work" : "Work items"} count={looseItems.length}>
             <RowList>
-              {data.events.map((event, index) => {
-                const sentence = workGraphEventSentence(event, { titleOf, directory });
-                return (
-                  <ListRow
-                    key={`${event.seq ?? index}`}
-                    dense
-                    className="workgraph-event"
-                    title={sentence}
-                    titleAttr={sentence}
-                    meta={<RelativeTime value={event.at} />}
-                  />
-                );
-              })}
+              {looseItems.map((group) => (
+                <ItemRow
+                  key={group.root.itemId}
+                  row={group.root}
+                  blockers={blockers.get(group.root.itemId)}
+                  bindings={[]}
+                  canManage={canManage}
+                  handlers={handlers}
+                  bindingHandlers={handlers}
+                  goalRevisionOf={goalRevisionOf}
+                />
+              ))}
             </RowList>
-          )}
+          </PanelSection>
+        ) : null}
+        {treeOverflowCount > 0 ? (
+          <p className="workgraph__overflow" data-testid="workgraph-panel-overflow">
+            {moreItemsText(treeOverflowCount, "shown")}
+            {" "}
+            <Button size="sm" variant="ghost" onClick={() => setAllRows(true)}>Show all</Button>
+          </p>
+        ) : null}
+        {otherAttention.length ? (
+          <PanelSection label={<span title="Attention bindings">Agents on other goals</span>} count={otherAttention.length}>
+            {attentionList(otherAttention)}
+          </PanelSection>
+        ) : null}
+        <PanelSection label="Activity" count={data.events.length || null} className="workgraph__activity">
+          {data.events.length === 0 ? <EmptyState inline title="No activity yet" /> : activityList}
         </PanelSection>
-      </>
+      </div>
     );
   }
 
+  // ── Header and figures ───────────────────────────────────────────────
+  const summary: Array<SummaryFact | null> = data.denied
+    ? []
+    : loading
+      ? [{ key: "loading", text: "Loading work items", announce: false }]
+      : [
+        { key: "items", text: plural(counts.total, "item") },
+        counts.inProgress ? { key: "in-progress", text: `${counts.inProgress} in progress`, tone: "live" } : null,
+        counts.blocked ? { key: "blocked", text: `${counts.blocked} blocked`, tone: "warn" } : null,
+        counts.failed ? { key: "failed", text: `${counts.failed} failed`, tone: "crit" } : null,
+        counts.ready ? { key: "ready", text: `${counts.ready} ready`, tone: "ok" } : null,
+        // Under 480 px the strip folds to four figures: TO FINISH moves here.
+        width !== null && width < 480 && chainLength > 0
+          ? { key: "to-finish", text: `${plural(chainLength, "step")} to finish` }
+          : null,
+      ];
+  const viewOptions: MenuEntry[] = [
+    {
+      kind: "checkbox",
+      id: "show-done",
+      label: "Show done goals",
+      checked: showDone,
+      onChange: setShowDone,
+      testId: "workgraph-menu:show-done",
+    },
+    {
+      kind: "checkbox",
+      id: "show-cancelled",
+      label: "Show cancelled",
+      checked: showCancelled,
+      onChange: setShowCancelled,
+      testId: "workgraph-menu:show-cancelled",
+    },
+    {
+      kind: "checkbox",
+      id: "critical-path",
+      label: "Critical path",
+      checked: highlightCriticalPath,
+      onChange: setHighlightCriticalPath,
+      disabled: chainLength === 0,
+      testId: "workgraph-menu:critical-path",
+    },
+  ];
+  const doneToday = (() => {
+    const start = startOfToday(now);
+    let count = 0;
+    for (const entry of model.items.values()) {
+      if (entry.status !== "completed" || !entry.item.terminal_at) continue;
+      const at = Date.parse(entry.item.terminal_at);
+      if (Number.isFinite(at) && at >= start) count += 1;
+    }
+    return count;
+  })();
+
   return (
-    <PanelShell className="workgraph" testId="workgraph-panel">
+    <PanelShell {...shellProps}>
       <PanelHeader
         className="workgraph__head"
         title="WorkGraph"
-        subtitle={data.denied ? undefined : loading ? "Loading work items" : workGraphSummary(data.items)}
-        actions={(
-          <>
-            {runtimeControl}
-            <SegmentedControl
-              ariaLabel="WorkGraph view mode"
-              value={viewMode}
-              onChange={setViewMode}
-              options={[
-                { id: "tree", label: "Tree", testId: "workgraph-view-toggle:tree" },
-                { id: "graph", label: "Graph", testId: "workgraph-view-toggle:graph" },
-              ]}
-            />
-            <Button
-              icon={<KitGlyph name="refresh" />}
-              collapsible
-              aria-label="Refresh"
-              title="Refresh work items"
-              data-testid="workgraph-panel-refresh"
-              onClick={onRefresh}
-            >
-              Refresh
-            </Button>
-          </>
+        scope={runtimeControl || undefined}
+        summary={summary}
+        summaryTestId="workgraph-summary"
+        freshness={data.denied || !loaded ? undefined : {
+          at: data.capturedAt ?? undefined,
+          title: capturedLabel ? `Snapshot as of ${capturedLabel}` : undefined,
+        }}
+        view={{
+          ariaLabel: "WorkGraph view mode",
+          value: viewMode,
+          onChange: setViewMode,
+          options: [
+            // The kit shows the glyph alone in a narrow header; the words
+            // stay the accessible name and the tooltip.
+            { id: "graph", label: "Graph", glyph: "graph", ariaLabel: "Graph", testId: "workgraph-view-toggle:graph" },
+            { id: "tree", label: "Outline", glyph: "tree", ariaLabel: "Outline", testId: "workgraph-view-toggle:tree" },
+          ],
+        }}
+        tools={(
+          <IconButton
+            label="Refresh work items"
+            glyph="refresh"
+            data-testid="workgraph-panel-refresh"
+            onClick={onRefresh}
+          />
         )}
+        menu={{
+          label: "More actions for WorkGraph",
+          triggerTestId: "workgraph-menu",
+          items: standardPanelMenu({
+            viewOptions,
+            density,
+            onDensityChange: setDensity,
+            showTechnicalIds,
+            onShowTechnicalIdsChange: setShowTechnicalIds,
+            getCopyData: () => ({
+              captured_at: data.capturedAt,
+              items: data.items,
+              edges: data.edges,
+              attention: data.attention,
+              ready_item_ids: data.readyItemIds ?? null,
+              events: data.events,
+            }),
+            onRefresh,
+            testIdPrefix: "workgraph",
+          }),
+        }}
       />
-      {/* A failed refresh keeps the last items on screen. Its error takes the
-          reserved status row below the header, so it never moves the header
-          controls or the items under a click in progress. */}
+      {showFigures ? (
+        <GlanceStrip ariaLabel="Work at a glance" testId="workgraph-glance" className="workgraph__glance">
+          <FigureTile
+            hero
+            label="Done"
+            value={counts.completed}
+            of={counts.total}
+            meter={(
+              <ProgressRing
+                done={counts.completed}
+                inProgress={counts.inProgress}
+                blocked={counts.blocked}
+                total={counts.total}
+                size={24}
+              />
+            )}
+            foot={doneToday ? `+${doneToday} today` : "none today"}
+            testId="workgraph-glance:done"
+          />
+          <FigureTile
+            label="In progress"
+            tone="live"
+            live={counts.inProgress > 0}
+            value={counts.inProgress}
+            foot={counts.inProgressOwners
+              ? `${plural(counts.inProgressOwners, "agent")} on them`
+              : counts.inProgress ? "nobody has claimed them" : "nothing moving"}
+            testId="workgraph-glance:in_progress"
+          />
+          <FigureTile
+            label="Blocked"
+            tone="warn"
+            value={counts.blocked}
+            foot={workGraphBlockedFoot(model)}
+            testId="workgraph-glance:blocked"
+          />
+          <FigureTile
+            label="Ready"
+            tone="ok"
+            value={counts.ready}
+            foot={counts.ready ? "can start now" : "nothing can start yet"}
+            title={model.readySource === "server" ? "Open, unblocked and due, as the runtime reports" : undefined}
+            testId="workgraph-glance:ready"
+          />
+          <FigureTile
+            label="To finish"
+            value={chainLength}
+            unit={chainLength === 1 ? "step" : "steps"}
+            foot={(
+              <Button
+                size="sm"
+                variant="ghost"
+                className="workgraph__critical-toggle"
+                aria-pressed={highlightCriticalPath}
+                disabled={chainLength === 0}
+                title="The longest chain of unfinished items, in order"
+                data-testid="workgraph-critical-path"
+                onClick={() => {
+                  const next = !highlightCriticalPath;
+                  setHighlightCriticalPath(next);
+                  // The path is drawn on the graph: turning it on shows it.
+                  if (next && viewMode !== "graph") setViewMode("graph");
+                }}
+              >
+                {highlightCriticalPath ? <KitGlyph name="check" /> : null}
+                Critical path
+              </Button>
+            )}
+            testId="workgraph-glance:to_finish"
+          />
+        </GlanceStrip>
+      ) : null}
+      {data.truncated && !data.denied ? (
+        <Notice tone="warn" flush testId="workgraph-truncated">
+          {typeof data.total === "number" && data.total > data.items.length
+            ? `Showing ${data.items.length} of ${data.total} items. The figures count the ones shown.`
+            : `Showing the first ${data.items.length} items; the runtime holds more. The figures count the ones shown.`}
+        </Notice>
+      ) : null}
+      {/* A failed refresh keeps the last items on screen; its error is a
+          toast over the body, so it never moves the header controls or the
+          items under a click in progress. */}
       <StatusRow
+        mode="toast"
         error={data.error}
-        updatedAt={data.capturedAt}
+        updatedAt={loaded ? data.capturedAt : undefined}
         updatedTitle={capturedLabel ? `Snapshot as of ${capturedLabel}` : undefined}
+        onRetry={onRefresh}
       />
-      <PanelBody className="workgraph__body">{content}</PanelBody>
+      <PanelBody
+        className={cx(
+          "workgraph__body",
+          viewMode === "graph" && model.items.size > 0 && !data.denied && !loading && "is-graph",
+          // A state on its own (no access, failed, nothing yet) sits mid-pane.
+          (data.denied || (!loading && model.items.size === 0 && data.attention.length === 0)) && "is-state",
+        )}
+      >
+        <div ref={measureRef} className="workgraph__measure" aria-hidden="true" />
+        {content}
+      </PanelBody>
     </PanelShell>
   );
 }

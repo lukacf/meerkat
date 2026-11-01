@@ -5,12 +5,13 @@ import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import { WorkGraphPanel, __workGraphPanelTest } from "./WorkGraphPanel";
-import { WorkGraphGraphView, __workGraphGraphViewTest } from "./WorkGraphGraphView";
+import { WorkGraphGraphView } from "./WorkGraphGraphView";
 import type { WorkGraphPanelData } from "./WorkGraphPanel";
 import type { WorkGraphWireBinding, WorkGraphWireEdge, WorkGraphWireItem } from "../types";
-import { workGraphItemOwner, workGraphStatusWord } from "../lib/workgraph-layout";
+import { WORKGRAPH_LARGE_ITEM_COUNT, workGraphItemOwner, workGraphStatusWord } from "../lib/workgraph-layout";
 import { createAgentDirectory } from "../../../packages/console-components/src/panel-kit/agents";
 import { formatClockTime } from "../../../packages/console-components/src/panel-kit/format";
+import { statusTone } from "../../../packages/console-components/src/panel-kit/tone";
 
 function localDateTime(instant: string): string {
   return new Intl.DateTimeFormat("sv-SE", { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(new Date(instant));
@@ -234,7 +235,7 @@ test("workgraph panel head renders the tree/graph toggle and defaults to the tre
   assert.ok(html.includes('data-testid="workgraph-panel-refresh"'));
 });
 
-test("workgraph graph view draws nodes with status classes and typed edges", () => {
+test("workgraph graph view draws goal frames holding their items, with status classes and typed edges", () => {
   const fixture = graphFixture();
   const html = renderToStaticMarkup(
     React.createElement(WorkGraphGraphView, {
@@ -244,19 +245,27 @@ test("workgraph graph view draws nodes with status classes and typed edges", () 
       selectedId: "child-run",
     }),
   );
+  // The goal's header is a node; its three children sit in its frame.
   assert.equal(count(html, 'data-testid="workgraph-graph-node"'), 4);
-  assert.equal(count(html, 'data-testid="workgraph-graph-edge"'), 4);
+  assert.equal(count(html, 'data-testid="workgraph-graph-frame:root"'), 1);
+  const childNodes = (html.match(/<g [^>]*data-testid="workgraph-graph-node"[^>]*>/g) ?? [])
+    .filter((node) => node.includes('data-goal-id="root"'));
+  assert.equal(childNodes.length, 3, "each child names its goal");
+  // Parent membership is containment: only the blocks edge is drawn.
+  assert.equal(count(html, 'data-testid="workgraph-graph-edge"'), 1);
+  assert.ok(html.includes('data-kind="blocks"'));
+  assert.ok(!html.includes('data-kind="parent"'));
   assert.ok(html.includes("is-in_progress"));
   assert.ok(html.includes("is-completed"));
   assert.ok(html.includes("is-blocked"));
-  assert.ok(html.includes('data-kind="blocks"'));
   assert.ok(html.includes("is-selected"));
   assert.ok(html.includes('data-testid="workgraph-graph-viewport"'));
   assert.ok(html.includes('data-testid="workgraph-graph-fit"'));
   // The attention-bound root carries the goal ring.
   assert.ok(html.includes("workgraph-graph__node-goal-ring"));
-  // Selection detail footer names the selected item.
+  // The drawer names the selected item.
   assert.ok(html.includes('data-testid="workgraph-graph-detail"'));
+  assert.ok(html.includes('data-testid="workgraph-drawer"'));
   assert.ok(html.includes("child-run"));
 });
 
@@ -272,16 +281,21 @@ test("selected work item exposes its full title and description before collapsed
     items: [selected], edges: [], attention: [], selectedId: selected.id,
   }));
   const detail = html.slice(html.indexOf('data-testid="workgraph-graph-detail"'));
-  assert.ok(detail.includes(`<h4 class="workgraph-graph__detail-title">${selected.title}</h4>`), "selection has a full heading, independent of truncated node text");
+  const heading = detail.match(/<h4\b[^>]*class="[^"]*\bworkgraph-graph__detail-title\b[^"]*"[^>]*>([^<]*)<\/h4>/);
+  assert.equal(heading?.[1], selected.title, "selection has a full heading, independent of truncated card text");
+  assert.equal(count(detail, "<h4"), 1, "the drawer has exactly one heading");
+  assert.equal(count(detail, "data-status="), 1, "the drawer has exactly one status");
   assert.ok(detail.includes("Verify the source review and release badge.\nPreserve both reviewers&#x27; evidence before publishing the report."), "description keeps every source line");
   assert.ok(detail.includes("In progress"));
   assert.ok(detail.includes("Release coordinator"));
   const disclosureStart = detail.indexOf("<details");
   assert.ok(disclosureStart > detail.indexOf("workgraph-graph__detail-description"), "identifiers remain secondary to readable description");
+  assert.equal(count(detail, "<details"), 1, "one disclosure");
   const disclosure = detail.slice(disclosureStart);
   assert.match(disclosure, /^<details[^>]*>/);
   assert.doesNotMatch(disclosure.match(/^<details[^>]*>/)![0], /\bopen(?:=|\s|>)/, "metadata starts collapsed");
   assert.ok(disclosure.includes(`<code>${selected.id}</code>`), "exact canonical id remains selectable");
+  assert.equal(count(detail, "<code"), 1, "one code element: the id");
   assert.ok(disclosure.includes('aria-label="Copy work item ID"'), "exact id has a discoverable copy action");
   assert.ok(disclosure.includes("release:2026-09") && disclosure.includes("evidence:required"));
 });
@@ -303,15 +317,20 @@ test("workgraph tree view caps rendered rows with the graph's overflow honesty",
   assert.ok(html.includes("+5 more items not shown"));
 });
 
-test("workgraph graph view reports overflow past the node cap", () => {
-  const items = Array.from({ length: 205 }, (_, index) =>
-    item(`item-${String(index).padStart(3, "0")}`, "2026-07-08T08:00:00Z"));
+test("very large graphs draw the work that decides the finish and say how many items are not drawn", () => {
+  const total = WORKGRAPH_LARGE_ITEM_COUNT + 20;
+  const items = Array.from({ length: total }, (_, index) =>
+    item(`item-${String(index).padStart(3, "0")}`, "2026-07-08T08:00:00Z", {
+      status: index === 7 ? "in_progress" : index === 9 ? "blocked" : "open",
+    }));
   const html = renderToStaticMarkup(
     React.createElement(WorkGraphGraphView, { items, edges: [], attention: [] }),
   );
-  assert.equal(count(html, 'data-testid="workgraph-graph-node"'), 200);
+  // With no blocks edges the critical path is the oldest unfinished item;
+  // the level of detail draws it, the work in progress and the blocked item.
+  assert.equal(count(html, 'data-testid="workgraph-graph-node"'), 3);
   assert.ok(html.includes('data-testid="workgraph-graph-overflow"'));
-  assert.ok(html.includes("+5 more items not drawn"));
+  assert.ok(html.includes(`+${total - 3} more items not drawn`));
 });
 
 test("workgraph owner labels prefer display names, then the key named in words, then claim owners", () => {
@@ -334,42 +353,6 @@ test("workgraph owner labels prefer display names, then the key named in words, 
   );
   assert.equal(workGraphOwnerLabelOf({}), "");
 });
-
-test("workgraph graph fit never enlarges and never shrinks below the legibility floor", () => {
-  const { fitViewport, FIT_MIN_SCALE } = __workGraphGraphViewTest;
-  // Small graph: 1:1, centred in the frame.
-  assert.deepEqual(fitViewport(800, 380, 400, 200), { tx: 200, ty: 90, scale: 1 });
-  // Slightly too big: scaled down to fit, centred on the slack axis.
-  const snug = fitViewport(800, 380, 880, 200);
-  assert.ok(Math.abs(snug.scale - 800 / 880) < 1e-9);
-  assert.equal(snug.tx, 0);
-  assert.ok(snug.ty > 0);
-  // Much too big: floored, pinned top-left so the user pans from the start.
-  const tall = fitViewport(800, 380, 488, 1400);
-  assert.equal(tall.scale, FIT_MIN_SCALE);
-  assert.equal(tall.ty, 0);
-  assert.ok(tall.tx > 0, "narrow axis still centres");
-  // Unmeasured frame falls back to identity.
-  assert.deepEqual(fitViewport(0, 0, 400, 200), { tx: 0, ty: 0, scale: 1 });
-});
-
-test("workgraph graph labels truncate by measured width with a character fallback", () => {
-  const { fitLabel } = __workGraphGraphViewTest;
-  const mono: (text: string) => number = (text) => text.length * 7;
-  assert.equal(fitLabel("Docs", 132, mono, 21), "Docs");
-  const long = "Make the semver readiness gate declare breaking changes";
-  const fitted = fitLabel(long, 132, mono, 21);
-  assert.ok(fitted.endsWith("…"));
-  assert.ok(mono(fitted) <= 132, `fits: ${fitted}`);
-  // No trailing space before the ellipsis.
-  assert.ok(!/\s…$/.test(fitted));
-  // A wider face (the terminal variant's monospace) keeps fewer characters.
-  const wide: (text: string) => number = (text) => text.length * 8;
-  assert.ok(fitLabel(long, 132, wide, 21).length < fitted.length);
-  // Without a measurer (server render) the character cap applies.
-  assert.equal(fitLabel(long, 132, null, 21), `${long.slice(0, 20)}…`);
-});
-
 
 test("workgraph local timestamps retain the local date across midnight", () => {
   const previousTimeZone = process.env.TZ;
@@ -499,11 +482,20 @@ test("workgraph tree groups follow their roots and count progress past the row c
   assert.equal(capped[0].progress.total, 3, "items past the cap still count toward their goal");
 });
 
-test("workgraph blockers name the unfinished items that block an item", () => {
+test("workgraph blockers name the unfinished items that block an item; only a present and completed blocker resolves", () => {
   const fixture = graphFixture();
   assert.deepEqual([...workGraphBlockersOf(fixture.items, fixture.edges)], [["child-stuck", ["child-run"]]]);
   const finished = fixture.items.map((entry) => (entry.id === "child-run" ? { ...entry, status: "completed" } : entry));
   assert.equal(workGraphBlockersOf(finished, fixture.edges).size, 0, "a completed blocker no longer blocks");
+  const dropped = fixture.items.map((entry) => (entry.id === "child-run" ? { ...entry, status: "cancelled" } : entry));
+  assert.deepEqual([...workGraphBlockersOf(dropped, fixture.edges)], [["child-stuck", ["child-run"]]], "a cancelled blocker still blocks");
+  const broken = fixture.items.map((entry) => (entry.id === "child-run" ? { ...entry, status: "failed" } : entry));
+  assert.deepEqual([...workGraphBlockersOf(broken, fixture.edges)], [["child-stuck", ["child-run"]]], "a failed blocker still blocks");
+  assert.deepEqual(
+    [...workGraphBlockersOf(fixture.items, [{ kind: "blocks", from_id: "gone", to_id: "root" }])],
+    [["root", ["an item outside this view"]]],
+    "an absent blocker still blocks",
+  );
 });
 
 test("workgraph activity reads as sentences about item titles, without item ids", () => {
@@ -624,9 +616,10 @@ test("workgraph goals render as cards holding their attention and items; plain i
   assert.ok(!html.includes('data-testid="workgraph-panel-action:child-done:close"'));
   assert.ok(!html.includes('data-testid="workgraph-panel-action:child-stuck:close"'));
   assert.ok(html.includes("Blocked by child-run"));
-  // In progress is the live tone: the accent's own meaning, "happening now".
+  // Rows lead with the work item square, which draws the status (in
+  // progress is the live accent square).
   const running = html.slice(html.indexOf('data-testid="workgraph-panel-item:child-run"'));
-  assert.match(running, /^[^>]*>\s*<span class="cc-row__lead"><span class="cc-dot" data-tone="live"/);
+  assert.match(running, /^[^>]*>\s*<span class="cc-row__lead"><svg class="cc-viz-status-square"[^>]*data-square="in_progress"/);
   // Activity is a sentence about the title, not a kind and an id.
   assert.ok(html.includes("Rotate the API keys was created"));
   assert.ok(!html.includes("item created · loose"));
@@ -665,44 +658,6 @@ test("workgraph denied, unavailable, loading and failed states are designed, wit
   assert.ok(stale.includes('data-testid="workgraph-panel-item:root"'));
 });
 
-test("workgraph graph arrow keys move to the nearest node that way, Home and End to the first and last", () => {
-  const { nodeToward } = __workGraphGraphViewTest;
-  const box = (itemId: string, column: number, row: number) => ({ itemId, x: 24 + column * 220, y: 24 + row * 64, w: 168, h: 44 });
-  // The fixture's shape: a root and three children in the next column.
-  const tree = [box("root", 0, 0), box("child-run", 1, 0), box("child-done", 1, 1), box("child-stuck", 1, 2)];
-  assert.equal(nodeToward(tree, "root", "ArrowRight"), "child-run");
-  assert.equal(nodeToward(tree, "child-stuck", "ArrowLeft"), "root");
-  assert.equal(nodeToward(tree, "child-run", "ArrowDown"), "child-done");
-  assert.equal(nodeToward(tree, "child-stuck", "ArrowUp"), "child-done");
-  assert.equal(nodeToward(tree, "root", "ArrowUp"), null);
-  assert.equal(nodeToward(tree, "child-run", "ArrowRight"), null);
-  assert.equal(nodeToward(tree, "root", "Home"), "root");
-  assert.equal(nodeToward(tree, "root", "End"), "child-stuck");
-  assert.equal(nodeToward(tree, "root", "Enter"), null);
-  assert.equal(nodeToward(tree, "missing", "ArrowDown"), null);
-
-  // Centred dependency columns sit half a row apart: down keeps to its own
-  // column instead of the nearer centre beside it.
-  const centred = [box("a", 0, 0), box("b", 0, 1), box("c", 0, 2), box("d", 1, 0.5), box("e", 1, 1.5)];
-  assert.equal(nodeToward(centred, "a", "ArrowDown"), "b");
-  assert.equal(nodeToward(centred, "c", "ArrowDown"), null);
-  assert.equal(nodeToward(centred, "b", "ArrowRight"), "d");
-  assert.equal(nodeToward(centred, "e", "ArrowLeft"), "b");
-
-  // Thousands of nodes: one pass per key press.
-  const grid: ReturnType<typeof box>[] = [];
-  for (let column = 0; column < 40; column += 1) {
-    for (let row = 0; row < 50; row += 1) grid.push(box(`n${column}:${row}`, column, row));
-  }
-  assert.equal(grid.length, 2000);
-  assert.equal(nodeToward(grid, "n10:20", "ArrowRight"), "n11:20");
-  assert.equal(nodeToward(grid, "n10:20", "ArrowLeft"), "n9:20");
-  assert.equal(nodeToward(grid, "n10:20", "ArrowDown"), "n10:21");
-  assert.equal(nodeToward(grid, "n10:20", "ArrowUp"), "n10:19");
-  assert.equal(nodeToward(grid, "n10:20", "Home"), "n0:0");
-  assert.equal(nodeToward(grid, "n10:20", "End"), "n39:49");
-});
-
 test("workgraph graph nodes are keyboard reachable buttons named by title and status", () => {
   const fixture = graphFixture();
   const html = renderToStaticMarkup(React.createElement(WorkGraphGraphView, {
@@ -711,24 +666,25 @@ test("workgraph graph nodes are keyboard reachable buttons named by title and st
     attention: [],
     selectedId: "child-run",
   }));
-  assert.equal(count(html, 'role="button"'), 4);
+  const nodes = html.match(/<g [^>]*data-testid="workgraph-graph-node"[^>]*>/g) ?? [];
+  assert.equal(nodes.length, 4);
+  assert.ok(nodes.every((node) => node.includes('role="button"')));
   // One tab stop for the whole graph, on the selected node; arrow keys
   // reach the rest.
-  assert.equal(count(html, 'tabindex="0"'), 1);
-  assert.equal(count(html, 'tabindex="-1"'), 3);
-  assert.match(html, /data-item-id="child-run"[^>]*tabindex="0"/);
+  assert.equal(nodes.filter((node) => node.includes('tabindex="0"')).length, 1);
+  assert.equal(nodes.filter((node) => node.includes('tabindex="-1"')).length, 3);
+  assert.ok((nodes.find((node) => node.includes('data-item-id="child-run"')) ?? "").includes('tabindex="0"'));
   const unselected = renderToStaticMarkup(React.createElement(WorkGraphGraphView, {
     items: fixture.items,
     edges: fixture.edges,
     attention: [],
   }));
   assert.equal(count(unselected, 'tabindex="0"'), 1);
-  assert.match(unselected, /data-item-id="root"[^>]*tabindex="0"/, "without a selection the first node is the tab stop");
   assert.ok(html.includes('aria-label="Ship it, Open"'));
   assert.ok(html.includes('aria-label="child-run, In progress"'));
-  assert.ok(html.includes('data-tone="live"'), "in progress nodes take the live tone");
-  assert.ok(html.includes("workgraph-graph__node-ring"), "the selected node carries the selection ring");
-  assert.ok(!html.includes('role="img"'), "the graph is a group people can enter, not an image");
+  assert.ok(html.includes(`data-tone="${statusTone("in_progress")}"`), "in progress nodes take the live tone");
+  const selectedNode = nodes.find((node) => node.includes('data-item-id="child-run"')) ?? "";
+  assert.ok(selectedNode.includes('aria-pressed="true"') && selectedNode.includes("is-selected"), "the selected node says so");
 });
 
 test("workgraph agents on goals and graph links read in plain words", () => {
@@ -760,10 +716,109 @@ test("workgraph agents on goals and graph links read in plain words", () => {
     attention: [],
   }));
   const labels = Array.from(
-    graph.matchAll(/data-testid="workgraph-graph-edge-label"[^>]*>([^<]*)<\/text>/g),
+    graph.matchAll(/data-testid="workgraph-graph-edge-label"[^>]*>(?:<[^>]*>)*([^<]+)<\/text>/g),
     (match) => match[1],
   ).sort();
   assert.deepEqual(labels, ["derived from", "replaces"]);
   // The raw kinds stay on the edges for selectors and styles.
   assert.ok(graph.includes('data-kind="supersedes"') && graph.includes('data-kind="derived_from"'));
+});
+
+// ── Console v2: glance, critical path, truncation, names ────────────────
+
+function chainFixture(): WorkGraphPanelData {
+  return panelData({
+    items: [
+      item("goal", "2026-07-08T08:00:00Z", { title: "Ship the release" }),
+      item("freeze", "2026-07-08T08:01:00Z", { status: "completed", terminal_at: new Date().toISOString() }),
+      item("regression", "2026-07-08T08:02:00Z", { status: "in_progress", claim: { owner: { key: { kind: "agent", id: "research" } } } }),
+      item("publish", "2026-07-08T08:03:00Z", { status: "blocked" }),
+      item("announce", "2026-07-08T08:04:00Z"),
+      item("notes", "2026-07-08T08:05:00Z"),
+    ],
+    edges: [
+      ...["freeze", "regression", "publish", "announce", "notes"].map((id) => ({ kind: "parent", from_id: id, to_id: "goal" })),
+      { kind: "blocks", from_id: "freeze", to_id: "regression" },
+      { kind: "blocks", from_id: "regression", to_id: "publish" },
+      { kind: "blocks", from_id: "publish", to_id: "announce" },
+    ],
+    readyItemIds: ["notes"],
+  });
+}
+
+function figureText(html: string, key: string): string {
+  const start = html.indexOf(`data-testid="workgraph-glance:${key}"`);
+  assert.ok(start >= 0, `figure ${key} renders`);
+  const next = html.indexOf('data-testid="workgraph-glance:', start + 10);
+  return html.slice(start, next > 0 ? next : start + 2000).replace(/<[^>]+>/g, " ").replace(/\s+/g, " ");
+}
+
+test("the glance strip answers what is done, moving, blocked, ready and how far the finish is", () => {
+  const html = renderPanel(chainFixture());
+  assert.ok(html.includes('data-testid="workgraph-glance"'));
+  assert.match(figureText(html, "done"), /\b1\b.*of\s*6/);
+  assert.match(figureText(html, "done"), /\+1 today/);
+  assert.match(figureText(html, "in_progress"), / 1 .*1 agent on them/);
+  assert.match(figureText(html, "blocked"), / 1 .*waiting on regression/);
+  assert.match(figureText(html, "ready"), / 1 .*can start now/);
+  // The chain regression, publish, announce: three steps, highlighted by
+  // default (two or more), with its toggle.
+  assert.match(figureText(html, "to_finish"), / 3 .*steps/);
+  assert.match(html, /data-testid="workgraph-critical-path"[^>]*aria-pressed="true"|aria-pressed="true"[^>]*data-testid="workgraph-critical-path"/);
+  // The summary says the same numbers in words.
+  const summary = html.slice(html.indexOf('data-testid="workgraph-summary"'));
+  assert.match(summary.replace(/<[^>]+>/g, " "), /6 items .*1 in progress .*1 blocked .*1 ready/);
+});
+
+test("a full snapshot says it is truncated: the first N, or N of M when the runtime reports the total", () => {
+  const first = renderPanel({ ...chainFixture(), truncated: true });
+  assert.ok(first.includes('data-testid="workgraph-truncated"'));
+  assert.ok(first.includes("Showing the first 6 items"));
+  const counted = renderPanel({ ...chainFixture(), truncated: true, total: 1250 });
+  assert.ok(counted.includes("Showing 6 of 1250 items"));
+  assert.ok(!renderPanel(chainFixture()).includes('data-testid="workgraph-truncated"'));
+});
+
+test("an empty work graph teaches what will appear", () => {
+  const html = renderPanel(panelData({ items: [], edges: [] }));
+  assert.ok(html.includes('data-testid="workgraph-empty"'));
+  assert.ok(html.includes("No work items yet"));
+  assert.ok(html.includes("Agents add work items here as they plan and track their goals."));
+  assert.ok(!html.includes('data-testid="workgraph-glance"'), "no figures for nothing");
+});
+
+test("owner keys lowered under a mob read as the member's name", () => {
+  const directory = createAgentDirectory([{ id: "identity:dispatch", label: "Dispatch" }]);
+  const lowered = { kind: "agent", id: "mob/customer-ops/agent/dispatch" };
+  assert.deepEqual(
+    workGraphBindingTarget({ target: { kind: "lowered_owner", owner_key: lowered } }, directory),
+    { name: "Dispatch", key: "agent:mob/customer-ops/agent/dispatch" },
+  );
+  assert.equal(
+    workGraphBindingTarget({ target: { kind: "lowered_owner", owner_key: { kind: "agent", id: "mob/customer-ops/agent/support-triage" } } })?.name,
+    "Support triage",
+  );
+  assert.equal(workGraphItemOwner({ owner: { key: lowered } }, directory)?.name, "Dispatch");
+  assert.equal(workGraphItemOwner({ claim: { owner: { key: { kind: "agent", id: "mob/customer-ops/agent/billing" } } } })?.name, "Billing");
+  assert.doesNotMatch(workGraphItemOwner({ owner: { key: lowered } })?.name ?? "", /mob|customer/i);
+});
+
+test("the outline survives a parent cycle and folds a goal whose every item is finished", () => {
+  const rows = buildWorkGraphPanelTree(
+    [item("a", "2026-07-08T08:00:00Z"), item("b", "2026-07-08T08:05:00Z")],
+    [{ kind: "parent", from_id: "a", to_id: "b" }, { kind: "parent", from_id: "b", to_id: "a" }],
+  );
+  assert.deepEqual(rows.map((row) => [row.itemId, row.depth]), [["a", 0], ["b", 1]]);
+
+  const html = renderPanel(panelData({
+    items: [
+      item("done-goal", "2026-07-08T08:00:00Z", { status: "completed", title: "Q3 follow-ups" }),
+      item("done-1", "2026-07-08T08:01:00Z", { status: "completed" }),
+      item("done-2", "2026-07-08T08:02:00Z", { status: "completed" }),
+    ],
+    edges: [{ kind: "parent", from_id: "done-1", to_id: "done-goal" }, { kind: "parent", from_id: "done-2", to_id: "done-goal" }],
+  }));
+  assert.ok(html.includes('data-testid="workgraph-panel-item:done-goal"'));
+  assert.ok(!html.includes('data-testid="workgraph-panel-item:done-1"'), "a finished goal shows its header only");
+  assert.ok(html.includes("Show 2 finished items"));
 });

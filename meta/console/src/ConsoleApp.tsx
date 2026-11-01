@@ -214,6 +214,8 @@ import { AgentDetailsPanel } from "./panels/AgentDetailsPanel";
 import { HealthPanel } from "./panels/HealthPanel";
 import { SchedulesSection } from "./panels/SchedulesSection";
 import {
+  WORKGRAPH_EVENTS_LIMIT,
+  WORKGRAPH_SNAPSHOT_LIMIT,
   WorkGraphPanel,
   createWorkGraphRefreshSequencer,
   workGraphEventsNewestFirst,
@@ -3238,13 +3240,15 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       let denied = false;
       try {
         // The panel is the operator inspection surface: completed/cancelled/
-        // failed items must stay visible (tree status column, graph status
+        // failed items must stay visible (outline rows, graph status
         // classes), so opt into terminal rows - the default snapshot is the
-        // live working set and would drop them on the first refresh.
+        // live working set and would drop them on the first refresh. Ask for
+        // the server's maximum: the default of 100 kept only the 100 least
+        // recently updated items, silently.
         snapshot = (await executeHeadlessCommand(
           CONSOLE_COMMAND_NAMES.workgraphSnapshot,
           workGraphTarget,
-          { include_terminal: true },
+          { include_terminal: true, limit: WORKGRAPH_SNAPSHOT_LIMIT },
         )) as WorkGraphSnapshotResult | null;
       } catch (err) {
         // Access denied renders as "no access", never an empty graph.
@@ -3260,7 +3264,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           const eventsResult = (await executeHeadlessCommand(
             CONSOLE_COMMAND_NAMES.workgraphEvents,
             workGraphTarget,
-            workGraphEventsParams(snapshot?.event_high_water_mark, 50),
+            workGraphEventsParams(snapshot?.event_high_water_mark, WORKGRAPH_EVENTS_LIMIT),
           )) as WorkGraphEventsResult | null;
           events = workGraphEventsNewestFirst(eventsResult?.events || []);
         } catch (err) {
@@ -3270,12 +3274,20 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       }
       if (!isCurrent() || panelRuntimeKeyRef.current !== panelRuntimeKey) return;
       setWorkGraphDataRuntimeKey(panelRuntimeKey);
+      const items = snapshot?.items || [];
       setWorkGraphData({
-        items: snapshot?.items || [],
+        items,
         edges: snapshot?.edges || [],
         attention: snapshot?.attention || [],
         events,
         capturedAt: snapshot?.captured_at || null,
+        // The server's readiness (open, unblocked, children done, time
+        // window open); absent on older runtimes, where the panel derives it.
+        readyItemIds: Array.isArray(snapshot?.ready_item_ids) ? snapshot.ready_item_ids : null,
+        // Today's snapshot carries no total, so a full page may have more
+        // behind it; a runtime that reports the total (S4) says so exactly.
+        truncated: snapshot?.truncated === true || items.length >= WORKGRAPH_SNAPSHOT_LIMIT,
+        total: typeof snapshot?.total_items === "number" ? snapshot.total_items : null,
         unavailable: false,
         denied,
         error: null,
@@ -5935,6 +5947,25 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           onRefresh={() => void refreshWorkGraphData()}
           onClaim={workGraphPanelHandlers.onClaim}
           onClose={workGraphPanelHandlers.onClose}
+          onRelease={({ itemId, revision }) => {
+            // Same CAS rule as the other item actions: an unobserved
+            // revision is resolved live, never guessed.
+            void (async () => {
+              let expectedRevision = revision;
+              if (expectedRevision === undefined) {
+                try {
+                  expectedRevision = await resolveWorkGraphItemRevision(runWorkGraphQuery, itemId);
+                } catch (err) {
+                  setActionError(errorMessage(err));
+                  return;
+                }
+              }
+              await runWorkGraphCommand(CONSOLE_COMMAND_NAMES.workgraphRelease, {
+                id: itemId,
+                expected_revision: expectedRevision,
+              });
+            })();
+          }}
           onGoalConfirm={workGraphPanelHandlers.onGoalConfirm}
           onGoalRequestClose={workGraphPanelHandlers.onGoalRequestClose}
           onAttentionPause={workGraphPanelHandlers.onAttentionPause}

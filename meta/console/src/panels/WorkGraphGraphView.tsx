@@ -5,294 +5,85 @@ import {
   AgentAvatar,
   Button,
   Chip,
+  Countdown,
+  DetailDrawer,
+  DrawerLayout,
+  DrawerSection,
   EmptyState,
   KeyValueList,
+  KitGlyph,
+  ListRow,
+  ProgressRing,
   RelativeTime,
+  RowList,
+  StatusDot,
+  StatusPill,
   TechnicalDetails,
+  formatAbsoluteTime,
   humanizeEnum,
   joinMeta,
   plural,
   priorityTone,
   statusTone,
   useAgentDirectory,
+  useNow,
 } from "../../../packages/console-components/src/panel-kit";
-import type { AgentAvatarSize } from "../../../packages/console-components/src/panel-kit";
+import type { AgentAvatarSize, TechnicalDetail } from "../../../packages/console-components/src/panel-kit";
+import { GraphView, StatusSquare, itemCardGeometry } from "../../../packages/console-components/src/viz";
+import type { GraphViewHandle, VizNode, VizNodeBox } from "../../../packages/console-components/src/viz";
 
-import type { WorkGraphWireBinding, WorkGraphWireEdge, WorkGraphWireItem } from "../types";
+import type { WorkGraphWireBinding, WorkGraphWireEdge, WorkGraphWireEvent, WorkGraphWireItem } from "../types";
 import {
-  WORKGRAPH_GRAPH_NODE_HEIGHT,
-  WORKGRAPH_GRAPH_ROW_HEIGHT,
-  layoutWorkGraph,
-  workGraphEdgeMidpoint,
-  workGraphEdgePath,
-  workGraphEdgeWord,
+  buildWorkGraphGraph,
+  buildWorkGraphModel,
+  isWorkGraphTerminal,
+  workGraphBindingStateText,
+  workGraphBindingStatusLabel,
+  workGraphBindingTarget,
+  workGraphCompletionPolicyText,
+  workGraphDoneBy,
+  workGraphEventItemId,
+  workGraphEventSentence,
+  workGraphGoalRevisionOf,
   workGraphItemOwner,
+  workGraphModeWord,
+  workGraphProgressText,
   workGraphStatusWord,
 } from "../lib/workgraph-layout";
-import type { WorkGraphLayoutEdge, WorkGraphLayoutNode, WorkGraphOwnerView } from "../lib/workgraph-layout";
-import { useZoomPan, viewportTransform } from "./topology/zoom-pan";
-import type { Viewport } from "./topology/zoom-pan";
+import type { WorkGraphModel, WorkGraphModelItem, WorkGraphNodeData, WorkGraphOwnerView } from "../lib/workgraph-layout";
 
-/// Read-only layered-DAG rendering of the workgraph snapshot: nodes carry
-/// the tree panel's status language, parent edges are solid arrows into the
-/// parent, blocks edges dashed amber. Pan by dragging, zoom with the wheel
-/// (non-passive listener inside useZoomPan so the dock scroll container
-/// never eats it), Fit resets to the fitted view. The graph is one tab
-/// stop: arrow keys move focus between nodes by position, Home and End go
-/// to the first and the last, and Enter or Space selects one. Mutations
-/// stay in the tree/attention sections - the graph only selects.
-///
-/// Scale model: the viewBox is the measured frame size, so one SVG user
-/// unit is one CSS pixel and the CSS font sizes on the labels are real
-/// pixel sizes. The layout is fitted by the zoom viewport instead of by
-/// `preserveAspectRatio`, and that fit never shrinks below
-/// FIT_MIN_SCALE, so labels stay legible however large the graph gets (a
-/// big graph opens at a readable scale and is panned, not squeezed into
-/// the frame at unreadable sizes).
-interface WorkGraphGraphViewProps {
-  items: WorkGraphWireItem[];
-  edges: WorkGraphWireEdge[];
-  attention: WorkGraphWireBinding[];
-  selectedId?: string;
-  onSelect?: (itemId: string) => void;
+/// The WorkGraph graph view (console v2 spec B2): goal frames holding their
+/// items as a left-to-right DAG over "blocks" edges, the critical path in the
+/// accent, and a drawer for the selected item or goal. The kit's GraphView
+/// draws and navigates (one tab stop, arrow keys, Enter opens, zoom and pan
+/// that a refresh never resets); this view maps the model onto it and owns
+/// the drawers and their actions.
+
+// ── Action handlers ──────────────────────────────────────────────────────
+
+/// An absent revision means the snapshot never carried one: handlers must
+/// resolve the live revision before mutating (never substitute 0).
+export interface WorkGraphItemHandlers {
+  onClaim?: (input: { itemId: string; revision?: number }) => void;
+  onClose?: (input: { itemId: string; revision?: number }) => void;
+  /// Hands a claimed item back (in progress to open).
+  onRelease?: (input: { itemId: string; revision?: number }) => void;
 }
 
-/// Character caps used when text cannot be measured (server render, jsdom).
-const TITLE_MAX_CHARS = 21;
-const META_MAX_CHARS = 24;
-/// Label x offset inside a node and the right-hand breathing room.
-const LABEL_X = 26;
-const LABEL_RIGHT_PAD = 10;
-/// Must match `.workgraph-graph__node-title` / `__node-meta` in
-/// console-host.css; used to measure labels on a canvas.
-const TITLE_FONT = { size: 12, weight: 500, family: "--sans" } as const;
-const META_FONT = { size: 10.5, weight: 400, family: "--sans" } as const;
-/// Initial fit never shrinks the graph below this, so 12px titles render
-/// at 10px or more. Smaller graphs open at 1:1 and are never enlarged.
-const FIT_MIN_SCALE = 0.85;
-
-function truncate(text: string, max: number): string {
-  return text.length > max ? `${text.slice(0, max - 1)}…` : text;
+/// Two CAS classes on the binding actions: goal actions (confirm /
+/// request-close) carry the goal WORK ITEM's revision; attention actions
+/// (pause / resume / reassign) carry the binding's machine revision.
+export interface WorkGraphBindingHandlers {
+  onGoalConfirm?: (input: { bindingId: string; revision?: number }) => void;
+  onGoalRequestClose?: (input: { bindingId: string; revision?: number }) => void;
+  onAttentionPause?: (input: { bindingId: string; revision?: number }) => void;
+  onAttentionResume?: (input: { bindingId: string; revision?: number }) => void;
+  onAttentionReassign?: (input: { bindingId: string; revision?: number; identity: string }) => void;
 }
 
-type MeasureText = (text: string) => number;
+export type WorkGraphActionHandlers = WorkGraphItemHandlers & WorkGraphBindingHandlers;
 
-/// Longest prefix of `text` (plus an ellipsis) whose measured width fits
-/// `maxWidth`. Without a measurer it falls back to the character cap.
-function fitLabel(
-  text: string,
-  maxWidth: number,
-  measure: MeasureText | null,
-  fallbackChars: number,
-): string {
-  if (!measure) return truncate(text, fallbackChars);
-  if (measure(text) <= maxWidth) return text;
-  let lo = 0;
-  let hi = text.length;
-  while (lo < hi) {
-    const mid = Math.ceil((lo + hi) / 2);
-    if (measure(`${text.slice(0, mid).trimEnd()}…`) <= maxWidth) lo = mid;
-    else hi = mid - 1;
-  }
-  return `${text.slice(0, lo).trimEnd()}…`;
-}
-
-/// Initial/Fit viewport for a layout drawn in a frame of the given CSS
-/// pixel size: scale down to fit (never up), floored at FIT_MIN_SCALE,
-/// centred on any axis that fits and pinned to the top-left otherwise.
-function fitViewport(
-  frameWidth: number,
-  frameHeight: number,
-  layoutWidth: number,
-  layoutHeight: number,
-): Viewport {
-  if (frameWidth <= 0 || frameHeight <= 0 || layoutWidth <= 0 || layoutHeight <= 0) {
-    return { tx: 0, ty: 0, scale: 1 };
-  }
-  const contain = Math.min(1, frameWidth / layoutWidth, frameHeight / layoutHeight);
-  const scale = Math.max(FIT_MIN_SCALE, contain);
-  const slackX = frameWidth - layoutWidth * scale;
-  const slackY = frameHeight - layoutHeight * scale;
-  return {
-    tx: slackX > 0 ? slackX / 2 : 0,
-    ty: slackY > 0 ? slackY / 2 : 0,
-    scale,
-  };
-}
-
-/// Content-box size of the svg frame, tracked with a ResizeObserver.
-/// Zero until measured (and always zero outside a browser).
-function useFrameSize(
-  ref: React.RefObject<SVGSVGElement | null>,
-  mounted: boolean,
-): { width: number; height: number } {
-  const [size, setSize] = React.useState({ width: 0, height: 0 });
-  React.useLayoutEffect(() => {
-    const el = ref.current;
-    if (!mounted || !el) return;
-    const apply = (width: number, height: number) => {
-      const next = { width: Math.round(width), height: Math.round(height) };
-      setSize((prev) => (prev.width === next.width && prev.height === next.height ? prev : next));
-    };
-    apply(el.clientWidth, el.clientHeight);
-    if (typeof ResizeObserver === "undefined") return;
-    const observer = new ResizeObserver((entries) => {
-      const rect = entries[entries.length - 1]?.contentRect;
-      if (rect) apply(rect.width, rect.height);
-    });
-    observer.observe(el);
-    return () => observer.disconnect();
-  }, [ref, mounted]);
-  return size;
-}
-
-/// Canvas text measurers resolved against the svg's own font variables,
-/// so truncation follows the active theme variant (the terminal variant
-/// swaps the display face for a wider monospace). Re-resolved once web
-/// fonts finish loading. Null until mounted in a browser.
-function useLabelMeasurers(
-  ref: React.RefObject<SVGSVGElement | null>,
-  mounted: boolean,
-): { title: MeasureText; meta: MeasureText } | null {
-  const [fontsEpoch, setFontsEpoch] = React.useState(0);
-  const [families, setFamilies] = React.useState<{ sans: string; mono: string } | null>(null);
-  React.useEffect(() => {
-    if (typeof document === "undefined" || !document.fonts?.ready) return;
-    let live = true;
-    void document.fonts.ready.then(() => {
-      if (live) setFontsEpoch((epoch) => epoch + 1);
-    });
-    return () => {
-      live = false;
-    };
-  }, []);
-  React.useLayoutEffect(() => {
-    const el = ref.current;
-    if (!mounted || !el || typeof getComputedStyle !== "function") return;
-    const style = getComputedStyle(el);
-    const sans = style.getPropertyValue("--sans").trim() || style.fontFamily;
-    const mono = style.getPropertyValue("--mono").trim() || "monospace";
-    setFamilies((prev) => (prev && prev.sans === sans && prev.mono === mono ? prev : { sans, mono }));
-  });
-  return React.useMemo(() => {
-    if (!families || typeof document === "undefined") return null;
-    const ctx = document.createElement("canvas").getContext("2d");
-    if (!ctx) return null;
-    const measurer = (font: { size: number; weight: number; family: string }): MeasureText => {
-      const family = font.family === "--mono" ? families.mono : families.sans;
-      const spec = `${font.weight} ${font.size}px ${family}`;
-      const cache = new Map<string, number>();
-      return (text) => {
-        const hit = cache.get(text);
-        if (hit !== undefined) return hit;
-        ctx.font = spec;
-        const width = ctx.measureText(text).width;
-        cache.set(text, width);
-        return width;
-      };
-    };
-    return { title: measurer(TITLE_FONT), meta: measurer(META_FONT) };
-    // fontsEpoch re-creates the measurers (and clears their caches) once
-    // web fonts load, since fallback-face widths are wrong afterwards.
-  }, [families, fontsEpoch]);
-}
-
-/// The second line of a node, in words: priority when it matters, a blocked
-/// marker (status is never colour alone), the owner's name and any extra
-/// parents.
-function nodeMetaText(node: WorkGraphLayoutNode, ownerName = node.ownerLabel): string {
-  const priority = priorityTone(node.priority) ? humanizeEnum(node.priority) : "";
-  return joinMeta(
-    priority,
-    node.blocked ? "Blocked" : "",
-    ownerName,
-    node.alsoUnder.length > 0 ? `Also under ${node.alsoUnder.join(", ")}` : "",
-  );
-}
-
-function nodeMetaLine(node: WorkGraphLayoutNode): string {
-  return truncate(nodeMetaText(node), META_MAX_CHARS);
-}
-
-/// Where an edge's kind label sits: beside a near-vertical edge (which
-/// runs through the short gaps between rows of the same column), and
-/// centred on the curve otherwise. The label's halo keeps it legible
-/// where it crosses the line.
-function edgeLabelPlacement(edge: WorkGraphLayoutEdge): {
-  x: number;
-  y: number;
-  anchor: "start" | "middle";
-} {
-  const [start, , , end] = edge.points;
-  if (Math.abs(end.x - start.x) < 12) {
-    // Centre of the row gap next to the arrowhead: for adjacent rows that
-    // is the edge midpoint, and for longer spans it keeps the label off
-    // the intermediate nodes the midpoint would land on.
-    const toward = Math.sign(start.y - end.y) || 1;
-    const gap = WORKGRAPH_GRAPH_ROW_HEIGHT - WORKGRAPH_GRAPH_NODE_HEIGHT;
-    return { x: end.x + 7, y: end.y + toward * (gap / 2), anchor: "start" };
-  }
-  const mid = workGraphEdgeMidpoint(edge);
-  return { x: mid.x, y: mid.y, anchor: "middle" };
-}
-
-function nodeHoverText(node: WorkGraphLayoutNode, item: WorkGraphWireItem | undefined, ownerName: string): string {
-  const lines = [node.title, `Status: ${workGraphStatusWord(node.status)}`];
-  if (ownerName) lines.push(`Owner: ${ownerName}`);
-  if (node.alsoUnder.length > 0) lines.push(`Also under: ${node.alsoUnder.join(", ")}`);
-  if (item?.description) lines.push(item.description);
-  return lines.join("\n");
-}
-
-function moreItemsNotDrawn(count: number): string {
-  return `+${count} more ${count === 1 ? "item" : "items"} not drawn`;
-}
-
-type NodeBox = Pick<WorkGraphLayoutNode, "itemId" | "x" | "y" | "w" | "h">;
-
-const ARROW_STEPS: ReadonlyMap<string, readonly [number, number]> = new Map([
-  ["ArrowRight", [1, 0]],
-  ["ArrowLeft", [-1, 0]],
-  ["ArrowDown", [0, 1]],
-  ["ArrowUp", [0, -1]],
-]);
-
-/// Where a key moves focus in the graph, by layout position. An arrow goes
-/// to the nearest node ahead of it, weighing distance across the arrow
-/// double so a press keeps to its column or row; Home and End go to the
-/// first and the last node, column by column. One pass over the nodes;
-/// null when no node lies that way.
-function nodeToward(nodes: ReadonlyArray<NodeBox>, fromId: string, key: string): string | null {
-  if (key === "Home" || key === "End") {
-    let best: NodeBox | null = null;
-    for (const node of nodes) {
-      const first = !best || node.x < best.x || (node.x === best.x && node.y < best.y);
-      const last = !best || node.x > best.x || (node.x === best.x && node.y > best.y);
-      if (key === "Home" ? first : last) best = node;
-    }
-    return best ? best.itemId : null;
-  }
-  const step = ARROW_STEPS.get(key);
-  const from = step ? nodes.find((node) => node.itemId === fromId) : undefined;
-  if (!step || !from) return null;
-  const [ux, uy] = step;
-  const fromX = from.x + from.w / 2;
-  const fromY = from.y + from.h / 2;
-  let bestId: string | null = null;
-  let bestScore = Infinity;
-  for (const node of nodes) {
-    const dx = node.x + node.w / 2 - fromX;
-    const dy = node.y + node.h / 2 - fromY;
-    const ahead = dx * ux + dy * uy;
-    if (ahead < 1) continue;
-    const score = ahead + 2 * Math.abs(dx * uy - dy * ux);
-    if (score < bestScore) {
-      bestScore = score;
-      bestId = node.itemId;
-    }
-  }
-  return bestId;
-}
+// ── People ───────────────────────────────────────────────────────────────
 
 /// A person by name with the raw key in the tooltip: the kit's AgentName
 /// markup, for names the work graph resolves itself (a stored display name
@@ -314,339 +105,744 @@ export function WorkGraphPerson({
   );
 }
 
+// ── Item actions ─────────────────────────────────────────────────────────
+
+/// Claim and Done for one item, or null when neither applies: Claim for an
+/// open item nobody owns, Done for anything not finished and not blocked;
+/// with `release`, Release for an item in progress (the drawer).
+export function workGraphItemActions(
+  item: WorkGraphWireItem,
+  itemId: string,
+  canManage: boolean,
+  { onClaim, onClose, onRelease }: WorkGraphItemHandlers,
+  options: { variant?: "ghost" | "default"; release?: boolean } = {},
+): React.ReactNode {
+  const status = item.status || "open";
+  const revision = typeof item.revision === "number" ? item.revision : undefined;
+  const title = item.title || "this work item";
+  const claim = canManage && onClaim && status === "open" && !workGraphItemOwner(item);
+  const close = canManage && onClose && !isWorkGraphTerminal(status) && status !== "blocked";
+  const release = options.release && canManage && onRelease && status === "in_progress";
+  if (!claim && !close && !release) return null;
+  const variant = options.variant ?? "ghost";
+  return (
+    <>
+      {release ? (
+        <Button
+          size="sm"
+          variant={variant}
+          title={`Hand ${title} back so someone else can take it`}
+          data-testid={`workgraph-panel-action:${itemId}:release`}
+          onClick={() => onRelease?.({ itemId, revision })}
+        >
+          Release
+        </Button>
+      ) : null}
+      {claim ? (
+        <Button
+          size="sm"
+          variant={variant}
+          title={`Claim ${title}`}
+          data-testid={`workgraph-panel-action:${itemId}:claim`}
+          onClick={() => onClaim?.({ itemId, revision })}
+        >
+          Claim
+        </Button>
+      ) : null}
+      {close ? (
+        <Button
+          size="sm"
+          variant={variant}
+          title={`Mark ${title} as done`}
+          data-testid={`workgraph-panel-action:${itemId}:close`}
+          onClick={() => onClose?.({ itemId, revision })}
+        >
+          Done
+        </Button>
+      ) : null}
+    </>
+  );
+}
+
+// ── Attention bindings ───────────────────────────────────────────────────
+
+/// One attention binding: what the agent does with the goal, its state and
+/// who it rests on, then the actions (Pause or Resume, Confirm, Request
+/// close, Reassign for a coordinating binding).
+export function WorkGraphAttentionRow({
+  binding,
+  goalRevision,
+  canManage,
+  subject,
+  handlers,
+}: {
+  binding: WorkGraphWireBinding;
+  /// Bound goal work item's revision: the CAS token for confirm/request-close.
+  goalRevision?: number;
+  canManage: boolean;
+  /// What the binding is on, when it does not sit with that item.
+  subject?: React.ReactNode;
+  handlers: WorkGraphBindingHandlers;
+}): React.JSX.Element | null {
+  const directory = useAgentDirectory();
+  const now = useNow();
+  const inputId = React.useId();
+  const [reassignOpen, setReassignOpen] = React.useState(false);
+  const [reassignIdentity, setReassignIdentity] = React.useState("");
+  const bindingId = binding.binding_id || "";
+  const revision = binding.machine_state?.revision;
+  const statusLabel = workGraphBindingStatusLabel(binding);
+  const isActive = statusLabel === "active";
+  const isPaused = statusLabel.startsWith("paused");
+  const live = isActive || isPaused;
+  // Reassign authority is machine-derived from the binding mode upstream:
+  // only coordinate-mode bindings can reassign, so others get no affordance.
+  const canReassign = live && binding.mode === "coordinate";
+  const bindingInput = { bindingId, revision };
+  const goalInput = { bindingId, revision: goalRevision };
+  if (!bindingId) return null;
+  const state = binding.status?.state || "active";
+  const target = workGraphBindingTarget(binding, directory);
+  const { onAttentionPause, onAttentionResume, onGoalConfirm, onGoalRequestClose, onAttentionReassign } = handlers;
+  const pause = canManage && onAttentionPause && isActive;
+  const resume = canManage && onAttentionResume && isPaused;
+  const confirm = canManage && onGoalConfirm && live;
+  const requestClose = canManage && onGoalRequestClose && live;
+  const reassignable = canManage && onAttentionReassign && canReassign;
+  const submitReassign = () => {
+    const identity = reassignIdentity.trim();
+    if (!identity || !onAttentionReassign) return;
+    onAttentionReassign({ ...bindingInput, identity });
+    setReassignOpen(false);
+    setReassignIdentity("");
+  };
+  const pausedUntil = isPaused ? binding.status?.until : undefined;
+  return (
+    <div className="workgraph-binding" data-testid={`workgraph-panel-binding:${bindingId}`} data-state={state}>
+      <div className="workgraph-binding__line">
+        <span className="workgraph-binding__summary">
+          {target ? <AgentAvatar name={target.name} size={18} /> : <StatusDot tone={statusTone(state)} bound />}
+          <span className="workgraph-binding__text">
+            {target ? <><WorkGraphPerson person={target} className="workgraph-binding__agent" />{" · "}</> : null}
+            <span className="workgraph-binding__mode" title={`Attention mode: ${binding.mode || "pursue"}`}>
+              {workGraphModeWord(binding.mode)}
+            </span>
+            {" · "}
+            <span className={`workgraph-binding__state is-${state}`}>{workGraphBindingStateText(binding, now)}</span>
+            {subject ? <>{" · on "}{subject}</> : null}
+          </span>
+          {pausedUntil ? (
+            <span className="workgraph-binding__countdown" title={`Resumes ${formatAbsoluteTime(pausedUntil)}`}>
+              <Countdown to={pausedUntil} chip />
+            </span>
+          ) : null}
+        </span>
+        {pause || resume || confirm || requestClose || reassignable ? (
+          <span className="workgraph-binding__actions">
+            {pause ? (
+              <Button size="sm" title="Pause this goal for its agent" onClick={() => onAttentionPause?.(bindingInput)}>
+                Pause
+              </Button>
+            ) : null}
+            {resume ? (
+              <Button size="sm" title="Resume this goal for its agent" onClick={() => onAttentionResume?.(bindingInput)}>
+                Resume
+              </Button>
+            ) : null}
+            {confirm ? (
+              <Button size="sm" title="Confirm the goal is complete" onClick={() => onGoalConfirm?.(goalInput)}>
+                Confirm
+              </Button>
+            ) : null}
+            {requestClose ? (
+              <Button size="sm" title="Ask to close the goal" onClick={() => onGoalRequestClose?.(goalInput)}>
+                Request close
+              </Button>
+            ) : null}
+            {reassignable ? (
+              <Button
+                size="sm"
+                title="Hand the goal to another agent"
+                aria-expanded={reassignOpen}
+                onClick={() => setReassignOpen((value) => !value)}
+              >
+                Reassign
+              </Button>
+            ) : null}
+          </span>
+        ) : null}
+      </div>
+      {reassignOpen && reassignable ? (
+        <div className="workgraph-binding__reassign">
+          <label className="cc-visually-hidden" htmlFor={inputId}>Agent identity to reassign to</label>
+          <input
+            id={inputId}
+            className="cc-input"
+            placeholder="Agent identity"
+            value={reassignIdentity}
+            onChange={(event) => setReassignIdentity(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                event.preventDefault();
+                submitReassign();
+              }
+            }}
+            data-testid={`workgraph-panel-reassign-input:${bindingId}`}
+          />
+          <Button
+            size="sm"
+            variant="primary"
+            disabled={!reassignIdentity.trim()}
+            data-testid={`workgraph-panel-reassign-submit:${bindingId}`}
+            onClick={submitReassign}
+          >
+            Assign
+          </Button>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+// ── Activity ─────────────────────────────────────────────────────────────
+
+/// Activity rows: a sentence about the item by title, and when.
+export function WorkGraphActivityList({
+  events,
+  titleOf,
+  limit,
+  onSelectItem,
+  testId,
+}: {
+  events: readonly WorkGraphWireEvent[];
+  titleOf: (itemId: string) => string | undefined;
+  limit?: number;
+  onSelectItem?: (itemId: string) => void;
+  testId?: string;
+}): React.JSX.Element {
+  const directory = useAgentDirectory();
+  const shown = typeof limit === "number" ? events.slice(0, limit) : events;
+  return (
+    <RowList className="workgraph-activity" testId={testId}>
+      {shown.map((event, index) => {
+        const sentence = workGraphEventSentence(event, { titleOf, directory });
+        const itemId = workGraphEventItemId(event);
+        return (
+          <ListRow
+            key={`${event.seq ?? index}`}
+            dense
+            className="workgraph-event"
+            title={sentence}
+            titleAttr={sentence}
+            onActivate={onSelectItem && itemId && titleOf(itemId) ? () => onSelectItem(itemId) : undefined}
+            meta={<RelativeTime value={event.at} />}
+          />
+        );
+      })}
+    </RowList>
+  );
+}
+
+// ── The drawer ───────────────────────────────────────────────────────────
+
 function ItemCopyIcon({ name }: { name: string }) {
   return <CopyGlyph state={name === "i-check" ? "copied" : "idle"} />;
 }
 
-function WorkItemDetails({ itemId, item, node, hasAttention }: {
+/// A linked item in the drawer: its square (no data-status: the drawer pins
+/// exactly one), its title as a button that selects it, and a short meta.
+function ItemLinkRow({ entry, meta, onSelect }: {
+  entry: WorkGraphModelItem;
+  meta?: string;
+  onSelect?: (itemId: string) => void;
+}) {
+  return (
+    <li className="workgraph-drawer__link">
+      <StatusSquare status={entry.status} size={12} />
+      {onSelect ? (
+        <button type="button" className="workgraph-drawer__link-title" onClick={() => onSelect(entry.id)} title={entry.title}>
+          {entry.title}
+        </button>
+      ) : (
+        <span className="workgraph-drawer__link-title">{entry.title}</span>
+      )}
+      {meta ? <span className="workgraph-drawer__link-meta">{meta}</span> : null}
+    </li>
+  );
+}
+
+function linkMeta(entry: WorkGraphModelItem, directory: ReturnType<typeof useAgentDirectory>): string {
+  const owner = workGraphItemOwner(entry.item, directory);
+  const priority = entry.item.priority === "high" || entry.item.priority === "low" ? humanizeEnum(entry.item.priority) : "";
+  return joinMeta(owner?.name ?? (isWorkGraphTerminal(entry.status) ? "" : "Unassigned"), priority, workGraphStatusWord(entry.status));
+}
+
+function timing(item: WorkGraphWireItem): Array<{ key: string; label: string; value: React.ReactNode } | null> {
+  const at = (value: string | undefined, label: string, key: string) =>
+    value ? { key, label, value: <RelativeTime value={value} title={formatAbsoluteTime(value)} /> } : null;
+  return [
+    at(item.created_at, "Created", "created"),
+    at(item.claim?.claimed_at, "Claimed", "claimed"),
+    at(item.claim?.lease_expires_at, "Lease ends", "lease"),
+    at(item.due_at, "Becomes due", "due"),
+    at(item.not_before, "Not before", "not-before"),
+    at(item.snoozed_until, "Snoozed until", "snoozed"),
+    at(item.terminal_at, "Done", "done"),
+    at(item.updated_at, "Updated", "updated"),
+  ];
+}
+
+function ItemDetails({ itemId, item, bindings }: {
   itemId: string;
   item: WorkGraphWireItem | undefined;
-  node: WorkGraphLayoutNode | undefined;
-  hasAttention: boolean;
+  bindings: readonly WorkGraphWireBinding[];
 }) {
-  const directory = useAgentDirectory();
-  const owner = item ? workGraphItemOwner(item, directory) : null;
-  const status = item?.status;
-  const priority = priorityTone(item?.priority);
-  return <>
-    <div className="workgraph-graph__detail-heading">
-      <h4 className="workgraph-graph__detail-title">{item?.title || (item ? "Untitled work item" : "Work item unavailable in this snapshot")}</h4>
-      {status ? (
-        <span className="workgraph-graph__detail-status" data-status={status}>
-          <Chip tone={statusTone(status)} dot>{workGraphStatusWord(status)}</Chip>
+  const technical: Array<TechnicalDetail | null> = [
+    {
+      label: "ID",
+      value: (
+        <span className="cc-tech-id workgraph-graph__detail-id">
+          <code>{itemId}</code>
+          <CopyButton text={itemId} label="Copy work item ID" copiedLabel="Work item ID copied" Icon={ItemCopyIcon} />
         </span>
+      ),
+    },
+    item?.labels?.length ? {
+      label: "Labels",
+      value: <span className="cc-chips">{item.labels.map((label) => <Chip key={label} mono>{label}</Chip>)}</span>,
+    } : null,
+    typeof item?.revision === "number" ? { label: "Revision", value: item.revision } : null,
+    ...bindings.flatMap((binding) => (binding.binding_id ? [{ label: "Attention binding ID", value: binding.binding_id }] : [])),
+  ];
+  return <TechnicalDetails className="workgraph-graph__metadata" summary="Item details" items={technical} />;
+}
+
+interface DrawerProps {
+  model: WorkGraphModel;
+  itemId: string;
+  events: readonly WorkGraphWireEvent[];
+  items: readonly WorkGraphWireItem[];
+  doneBy: ReadonlyMap<string, string>;
+  canManage: boolean;
+  handlers: WorkGraphActionHandlers;
+  onSelect?: (itemId: string | null) => void;
+  returnFocus?: () => void;
+}
+
+function ItemActivity({ events, itemId, titleOf }: {
+  events: readonly WorkGraphWireEvent[];
+  itemId: string;
+  titleOf: (itemId: string) => string | undefined;
+}) {
+  const [all, setAll] = React.useState(false);
+  const own = events.filter((event) => workGraphEventItemId(event) === itemId);
+  if (own.length === 0) return <p className="workgraph-drawer__empty">No activity in the recent window.</p>;
+  return (
+    <>
+      <WorkGraphActivityList events={own} titleOf={titleOf} limit={all ? undefined : 5} />
+      {own.length > 5 ? (
+        <Button size="sm" variant="ghost" className="workgraph-drawer__more" onClick={() => setAll((value) => !value)}>
+          {all ? "Show fewer" : `Show all ${own.length}`}
+        </Button>
       ) : null}
-    </div>
-    {item?.description ? <p className="workgraph-graph__detail-description">{item.description}</p> : null}
-    <KeyValueList
-      className="workgraph-graph__detail-facts"
-      items={[
-        owner ? { key: "owner", label: "Owner", value: <WorkGraphPerson person={owner} avatar={18} /> } : null,
-        priority ? { key: "priority", label: "Priority", value: <Chip tone={priority} outline={priority === "crit"}>{humanizeEnum(item?.priority)}</Chip> } : null,
-        node?.alsoUnder.length ? { key: "also-under", label: "Also under", value: node.alsoUnder.join(", ") } : null,
-        item?.updated_at ? { key: "updated", label: "Updated", value: <RelativeTime value={item.updated_at} /> } : null,
-      ]}
-    />
-    <TechnicalDetails
-      className="workgraph-graph__metadata"
-      summary="Item details"
-      items={[
-        {
-          label: "ID",
-          value: (
-            <span className="cc-tech-id workgraph-graph__detail-id">
-              <code>{itemId}</code>
-              <CopyButton text={itemId} label="Copy work item ID" copiedLabel="Work item ID copied" Icon={ItemCopyIcon} />
+    </>
+  );
+}
+
+/// The drawer for a selected item (or a goal: its progress, agents and
+/// items first). Exactly one heading, one [data-status], one <details> and
+/// one <code> (the item id), which the scenarios pin.
+function WorkItemDrawer({ model, itemId, events, items, doneBy, canManage, handlers, onSelect, returnFocus }: DrawerProps) {
+  const directory = useAgentDirectory();
+  const entry = model.items.get(itemId);
+  const item = entry?.item;
+  const status = entry?.status ?? "open";
+  const titleOf = (id: string) => model.items.get(id)?.title;
+  const owner = item ? workGraphItemOwner(item, directory) : null;
+  const priority = priorityTone(item?.priority);
+  const frame = entry?.frameId ? model.frames.find((candidate) => candidate.id === entry.frameId) : undefined;
+  const goal = entry && (entry.isGoal || entry.isNestedGoal) ? model.frames.find((candidate) => candidate.id === entry.id) : undefined;
+  const subtitle = goal
+    ? `Goal · ${workGraphProgressText(goal.progress)}`
+    : frame ? frame.label : entry?.isGoal ? "Goal" : undefined;
+  const select = onSelect ? (id: string) => onSelect(id) : undefined;
+  const actions = item && canManage ? workGraphItemActions(item, itemId, canManage, handlers, { variant: "default", release: true }) : null;
+  const blockers = entry?.blockerIds ?? [];
+  const dependents = entry?.dependentIds.map((id) => model.items.get(id)).filter((value): value is WorkGraphModelItem => Boolean(value)) ?? [];
+  const ownerValue = owner
+    ? <WorkGraphPerson person={owner} avatar={18} />
+    : status === "completed"
+      ? (doneBy.get(itemId) ? `Done by ${doneBy.get(itemId)}` : "Done")
+      : isWorkGraphTerminal(status) ? workGraphStatusWord(status) : "Unassigned";
+  return (
+    <DetailDrawer
+      testId="workgraph-graph-detail"
+      title={item?.title || (item ? "Untitled work item" : "Work item unavailable in this snapshot")}
+      titleClassName="workgraph-graph__detail-title"
+      headingLevel={4}
+      mark={goal ? <KitGlyph name="flag" /> : <StatusSquare status={status} size={16} />}
+      status={item ? (
+        <span className="workgraph-graph__detail-status" data-status={status}>
+          <StatusPill tone={statusTone(status)}>{workGraphStatusWord(status)}</StatusPill>
+        </span>
+      ) : undefined}
+      subtitle={subtitle}
+      onClose={() => onSelect?.(null)}
+      returnFocus={returnFocus}
+    >
+      <div className="workgraph-drawer__facts">
+        {priority ? <Chip tone={priority} variant="outline">{humanizeEnum(item?.priority)}</Chip> : null}
+        {entry?.ready && !isWorkGraphTerminal(status) ? <Chip tone="ok" mark>Ready</Chip> : null}
+        {entry?.critical ? <Chip tone="live" variant="quiet">On the critical path</Chip> : null}
+        {item?.created_at ? (
+          <span className="workgraph-drawer__created">created <RelativeTime value={item.created_at} /></span>
+        ) : null}
+      </div>
+      {item?.description ? <p className="workgraph-graph__detail-description">{item.description}</p> : null}
+      {goal ? (
+        <DrawerSection label="Progress" testId="workgraph-drawer:progress">
+          <div className="workgraph-drawer__progress">
+            <ProgressRing
+              done={goal.progress.completed}
+              inProgress={goal.progress.inProgress}
+              blocked={goal.progress.blocked}
+              total={goal.progress.total}
+              size={24}
+            />
+            <span>
+              {joinMeta(
+                `${goal.progress.completed} done`,
+                goal.progress.inProgress ? `${goal.progress.inProgress} in progress` : "",
+                goal.progress.blocked ? `${goal.progress.blocked} blocked` : "",
+                goal.progress.failed ? `${goal.progress.failed} failed` : "",
+                goal.progress.open ? `${goal.progress.open} open` : "",
+                goal.progress.cancelled ? `${goal.progress.cancelled} cancelled` : "",
+              )}
             </span>
-          ),
-        },
-        item?.labels?.length ? {
-          label: "Labels",
-          value: <span className="cc-chips">{item.labels.map((label) => <Chip key={label} mono>{label}</Chip>)}</span>,
-        } : null,
-        typeof item?.revision === "number" ? { label: "Revision", value: item.revision } : null,
-        hasAttention ? { label: "Attention", value: "Bound to this item", plain: true } : null,
-      ]}
-    />
-  </>;
+          </div>
+          <p className="workgraph-drawer__policy">Completion: {workGraphCompletionPolicyText(item?.completion_policy, directory)}</p>
+        </DrawerSection>
+      ) : null}
+      {entry && entry.bindings.length > 0 ? (
+        <DrawerSection label={goal ? "Agents on this goal" : "Agents on this item"} count={entry.bindings.length}>
+          <div className="workgraph-drawer__bindings">
+            {entry.bindings.map((binding, index) => (
+              <WorkGraphAttentionRow
+                key={binding.binding_id || `binding-${index}`}
+                binding={binding}
+                goalRevision={workGraphGoalRevisionOf(binding, items)}
+                canManage={canManage}
+                handlers={handlers}
+              />
+            ))}
+          </div>
+        </DrawerSection>
+      ) : null}
+      {goal && goal.allItemIds.length > 0 ? (
+        <DrawerSection label="Items" count={goal.allItemIds.length}>
+          <ul className="workgraph-drawer__links">
+            {goal.allItemIds.map((id) => {
+              const child = model.items.get(id);
+              return child ? <ItemLinkRow key={id} entry={child} meta={linkMeta(child, directory)} onSelect={select} /> : null;
+            })}
+          </ul>
+        </DrawerSection>
+      ) : null}
+      {blockers.length > 0 ? (
+        <DrawerSection label="Blocked by" count={blockers.length} testId="workgraph-drawer:blocked-by">
+          <ul className="workgraph-drawer__links">
+            {blockers.map((id) => {
+              const blocker = model.items.get(id);
+              return blocker
+                ? <ItemLinkRow key={id} entry={blocker} meta={linkMeta(blocker, directory)} onSelect={select} />
+                : <li key={id} className="workgraph-drawer__link is-missing">An item outside this view</li>;
+            })}
+          </ul>
+        </DrawerSection>
+      ) : null}
+      {dependents.length > 0 ? (
+        <DrawerSection label="Unblocks" count={dependents.length} testId="workgraph-drawer:unblocks">
+          <ul className="workgraph-drawer__links">
+            {dependents.map((dependent) => (
+              <ItemLinkRow key={dependent.id} entry={dependent} meta={linkMeta(dependent, directory)} onSelect={select} />
+            ))}
+          </ul>
+        </DrawerSection>
+      ) : null}
+      <DrawerSection label="Owner and timing">
+        <KeyValueList
+          className="workgraph-graph__detail-facts"
+          items={[
+            { key: "owner", label: "Owner", value: ownerValue },
+            ...timing(item ?? {}),
+            entry?.extraParentIds.length
+              ? { key: "also-under", label: "Also under", value: entry.extraParentIds.map((id) => titleOf(id) ?? "another item").join(", ") }
+              : null,
+          ]}
+        />
+      </DrawerSection>
+      <DrawerSection label="Evidence" count={item?.evidence_refs?.length || undefined}>
+        {item?.evidence_refs?.length ? (
+          <ul className="workgraph-drawer__evidence">
+            {item.evidence_refs.map((evidence, index) => (
+              <li key={`${evidence.kind ?? ""}:${evidence.id ?? index}`}>
+                <span className="workgraph-drawer__evidence-label">{evidence.label || humanizeEnum(evidence.kind) || "Evidence"}</span>
+                {evidence.summary ? <span className="workgraph-drawer__evidence-summary">{evidence.summary}</span> : null}
+              </li>
+            ))}
+          </ul>
+        ) : <p className="workgraph-drawer__empty">None yet</p>}
+      </DrawerSection>
+      <DrawerSection label="Activity">
+        <ItemActivity events={events} itemId={itemId} titleOf={titleOf} />
+      </DrawerSection>
+      {/* The actions sit after the sections and before the identifiers
+          (spec B2), so they stay in the body rather than the drawer's
+          trailing action row. */}
+      {actions ? <div className="cc-drawer__actions workgraph-drawer__actions">{actions}</div> : null}
+      <ItemDetails itemId={itemId} item={item} bindings={entry?.bindings ?? []} />
+    </DetailDrawer>
+  );
+}
+
+// ── The graph view ───────────────────────────────────────────────────────
+
+export interface WorkGraphGraphViewProps {
+  items: WorkGraphWireItem[];
+  edges: WorkGraphWireEdge[];
+  attention: WorkGraphWireBinding[];
+  events?: WorkGraphWireEvent[];
+  readyItemIds?: string[] | null;
+  /// The panel's model of the same snapshot; built here when absent.
+  model?: WorkGraphModel;
+  selectedId?: string;
+  onSelect?: (itemId: string | null) => void;
+  showDone?: boolean;
+  showCancelled?: boolean;
+  highlightCriticalPath?: boolean;
+  density?: "comfortable" | "compact";
+  canManage?: boolean;
+  handlers?: WorkGraphActionHandlers;
+  /// Drawn under the canvas, inside the drawer layout's main column (the
+  /// panel's activity strip).
+  footer?: React.ReactNode;
+  /// Shown in the drawer column while no item is selected (the activity).
+  aside?: { title: string; content: React.ReactNode; onClose: () => void; testId?: string } | null;
+  /// "<scope>": the view's per-panel caches (minimap toggle) key on it.
+  cacheKey?: string;
+  /// Bring this item into view once it is drawn (a link from another panel
+  /// opened it). A new object asks again, even for the same item.
+  revealRequest?: { id: string } | null;
+}
+
+const NO_EVENTS: WorkGraphWireEvent[] = [];
+const NO_HANDLERS: WorkGraphActionHandlers = {};
+
+/// Goal ring around an attention-bound node's mark: the item's status
+/// square, or the goal header's flag.
+function renderGoalRing(node: VizNode, box: VizNodeBox): React.ReactNode {
+  const data = node.data as WorkGraphNodeData | undefined;
+  if (!data?.bound) return null;
+  if (node.kind === "goal") {
+    return <circle className="workgraph-graph__node-goal-ring" cx={-box.w / 2 + 14} cy={0} r={10} />;
+  }
+  // Around the card's status square, wherever the kit's card puts it.
+  const { square } = itemCardGeometry(box.w, box.h, Boolean(node.sublabel));
+  return <circle className="workgraph-graph__node-goal-ring" cx={square.x} cy={square.y} r={10} />;
 }
 
 export function WorkGraphGraphView({
   items,
   edges,
   attention,
+  events = NO_EVENTS,
+  readyItemIds,
+  model: givenModel,
   selectedId,
   onSelect,
+  showDone = false,
+  showCancelled = false,
+  highlightCriticalPath = false,
+  density = "comfortable",
+  canManage = false,
+  handlers = NO_HANDLERS,
+  footer,
+  aside,
+  cacheKey,
+  revealRequest = null,
 }: WorkGraphGraphViewProps): React.JSX.Element {
-  const layout = React.useMemo(() => layoutWorkGraph(items, edges), [items, edges]);
-  const itemById = React.useMemo(() => {
-    const map = new Map<string, WorkGraphWireItem>();
-    for (const item of items) {
-      if (typeof item.id === "string" && item.id) map.set(item.id, item);
-    }
-    return map;
-  }, [items]);
-  const hasNodes = layout.nodes.length > 0;
-  // useZoomPan owns the svg ref; the frame hooks read it once mounted.
-  const svgRef = React.useRef<SVGSVGElement | null>(null);
-  const frame = useFrameSize(svgRef, hasNodes);
-  const measured = frame.width > 0 && frame.height > 0;
-  const fit = React.useMemo(
-    () => (measured
-      ? fitViewport(frame.width, frame.height, layout.width, layout.height)
-      : { tx: 0, ty: 0, scale: 1 }),
-    [measured, frame.width, frame.height, layout.width, layout.height],
-  );
-  // Until measured (and in server renders) the viewBox falls back to the
-  // layout size with identity fit, i.e. the old preserveAspectRatio fit.
-  const viewBoxWidth = measured ? frame.width : layout.width;
-  const viewBoxHeight = measured ? frame.height : layout.height;
-  const zoom = useZoomPan(viewBoxWidth, viewBoxHeight, fit);
-  const measure = useLabelMeasurers(svgRef, hasNodes);
-  const setSvgRef = React.useCallback((el: SVGSVGElement | null) => {
-    svgRef.current = el;
-    zoom.svgRef.current = el;
-  }, [zoom.svgRef]);
-  const boundItemIds = React.useMemo(() => {
-    const bound = new Set<string>();
-    for (const binding of attention) {
-      const itemId = binding.work_ref?.item_id;
-      if (typeof itemId === "string" && itemId) bound.add(itemId);
-    }
-    return bound;
-  }, [attention]);
   const directory = useAgentDirectory();
-  // One tab stop for the whole graph (a roving tab index): the node focused
-  // last, else the selected node, else the first. Arrow keys move between
-  // nodes, so a graph of any size costs one Tab press to cross.
-  const [focusedId, setFocusedId] = React.useState<string | null>(null);
-  const nodeIds = React.useMemo(() => new Set(layout.nodes.map((node) => node.itemId)), [layout]);
+  const now = useNow();
+  const builtModel = React.useMemo(
+    () => (givenModel ? null : buildWorkGraphModel({ items, edges, attention, readyItemIds })),
+    [givenModel, items, edges, attention, readyItemIds],
+  );
+  const model = givenModel ?? builtModel!;
+  const doneBy = React.useMemo(() => workGraphDoneBy(events, directory), [events, directory]);
+  // Ages and "Done by" move slowly; the graph rebuilds at most once a minute
+  // for the clock, so a refresh that changes nothing redraws nothing.
+  const minute = Math.floor(now / 60_000);
+  const graph = React.useMemo(
+    () => buildWorkGraphGraph(model, {
+      selectedId: selectedId ?? null,
+      showDone,
+      showCancelled,
+      highlightCriticalPath,
+      directory,
+      now: minute * 60_000,
+      doneBy,
+    }),
+    [model, selectedId, showDone, showCancelled, highlightCriticalPath, directory, minute, doneBy],
+  );
+  const graphRef = React.useRef<GraphViewHandle | null>(null);
+  const canvasRef = React.useRef<HTMLDivElement | null>(null);
+  const selection = React.useMemo(() => (selectedId ? [selectedId] : []), [selectedId]);
 
-  if (layout.nodes.length === 0) {
+  // A link from elsewhere asked for an item: once its card is drawn, pan it
+  // into view, and again over the next frames while the drawer docks and
+  // narrows the canvas.
+  const pendingReveal = React.useRef<string | null>(null);
+  React.useEffect(() => {
+    if (revealRequest) pendingReveal.current = revealRequest.id;
+  }, [revealRequest]);
+  React.useEffect(() => {
+    const id = pendingReveal.current;
+    if (!id || !graph.nodes.some((node) => node.id === id)) return undefined;
+    const drawn = () => Array.from(canvasRef.current?.querySelectorAll('[data-testid="workgraph-graph-node"]') ?? [])
+      .some((element) => element.getAttribute("data-item-id") === id);
+    if (typeof requestAnimationFrame !== "function") {
+      if (drawn()) {
+        graphRef.current?.reveal(id);
+        pendingReveal.current = null;
+      }
+      return undefined;
+    }
+    let waited = 0;
+    let settled = 0;
+    let handle = 0;
+    const step = () => {
+      if (drawn()) {
+        graphRef.current?.reveal(id);
+        if (settled++ < 3) handle = requestAnimationFrame(step);
+        else pendingReveal.current = null;
+      } else if (waited++ < 60) {
+        handle = requestAnimationFrame(step);
+      }
+    };
+    step();
+    return () => cancelAnimationFrame(handle);
+  }, [graph.nodes, revealRequest]);
+  const drawnItems = graph.nodes.filter((node) => node.kind === "item").length;
+  const goals = graph.nodes.length - drawnItems;
+  const ariaLabel = joinMeta(
+    plural(drawnItems, "item"),
+    goals ? plural(goals, "goal") : "",
+    plural(graph.edges.length, "link"),
+  ).replace(/ · /g, ", ");
+
+  if (model.items.size === 0) {
     return <EmptyState inline title="No work items yet" />;
   }
 
-  const ownerNameOf = (node: WorkGraphLayoutNode): string => {
-    const item = itemById.get(node.itemId);
-    return (item ? workGraphItemOwner(item, directory)?.name : "") || node.ownerLabel;
-  };
-  const selectedNode = selectedId ? layout.nodes.find((node) => node.itemId === selectedId) : undefined;
-  const tabStopId = focusedId && nodeIds.has(focusedId)
-    ? focusedId
-    : selectedNode ? selectedNode.itemId : nodeToward(layout.nodes, "", "Home");
-  const moveFocus = (event: React.KeyboardEvent<SVGGElement>, fromId: string) => {
-    const targetId = nodeToward(layout.nodes, fromId, event.key);
-    if (!targetId || targetId === fromId) return;
-    const target = Array.from(
-      event.currentTarget.ownerSVGElement?.querySelectorAll<SVGGElement>('[data-testid="workgraph-graph-node"]') ?? [],
-    ).find((element) => element.getAttribute("data-item-id") === targetId);
-    setFocusedId(targetId);
-    // The node's focus handler pans it into the frame; the browser must not
-    // also scroll the panel to it.
-    target?.focus({ preventScroll: true });
-  };
+  const drawer = selectedId ? (
+    <div className="workgraph-drawer" data-testid="workgraph-drawer">
+      <WorkItemDrawer
+        model={model}
+        itemId={selectedId}
+        events={events}
+        items={items}
+        doneBy={doneBy}
+        canManage={canManage}
+        handlers={handlers}
+        onSelect={onSelect}
+        returnFocus={() => graphRef.current?.focusNode(selectedId)}
+      />
+    </div>
+  ) : aside ? (
+    <div className="workgraph-drawer" data-testid="workgraph-drawer">
+      <DetailDrawer
+        testId={aside.testId}
+        title={aside.title}
+        headingLevel={4}
+        mark={<KitGlyph name="clock" />}
+        onClose={aside.onClose}
+      >
+        {aside.content}
+      </DetailDrawer>
+    </div>
+  ) : null;
 
-  return (
-    <div className="workgraph-graph" data-testid="workgraph-graph-frame">
-      <div className="workgraph-graph__toolbar">
-        <Button size="sm" title="Fit the graph to the frame" data-testid="workgraph-graph-fit" onClick={zoom.reset}>
-          Fit
-        </Button>
-        <span className="workgraph-graph__stats">
-          {joinMeta(plural(layout.nodes.length, "item"), plural(layout.edges.length, "link"))}
-        </span>
-        {layout.overflowCount > 0 ? (
+  const main = (
+    <div className="workgraph-graph__main">
+      <div className="workgraph-graph__canvas" ref={canvasRef}>
+        {graph.notDrawn > 0 ? (
           <span className="workgraph-graph__overflow" data-testid="workgraph-graph-overflow">
-            {moreItemsNotDrawn(layout.overflowCount)}
+            {`+${graph.notDrawn} more ${graph.notDrawn === 1 ? "item" : "items"} not drawn`}
           </span>
         ) : null}
-        <span className="workgraph-graph__hint">Drag to pan, scroll to zoom</span>
+        <GraphView
+          ref={graphRef}
+          nodes={graph.nodes}
+          edges={graph.edges}
+          frames={graph.frames}
+          layout="layered"
+          density={density}
+          selection={selection}
+          onSelect={(ids) => onSelect?.(ids.length > 0 ? ids[ids.length - 1] : null)}
+          onOpen={(id) => {
+            onSelect?.(id);
+            // Double-click (or Enter on) a goal's header zooms to that goal.
+            if (model.frames.some((frame) => frame.id === id)) graphRef.current?.fitTo([id]);
+          }}
+          hoverHighlight="chain"
+          accentPath={graph.accentPath}
+          edgeLabels={graph.edgeLabels}
+          legend="collapsed"
+          minimap="auto"
+          renderer="svg"
+          labels="all"
+          ariaLabel={ariaLabel}
+          testIdPrefix="workgraph-graph"
+          testIds={{
+            root: "workgraph-graph-frame",
+            svg: "workgraph-graph",
+            viewport: "workgraph-graph-viewport",
+            node: "workgraph-graph-node",
+            edge: "workgraph-graph-edge",
+            edgeLabel: "workgraph-graph-edge-label",
+            zoom: (action) => (action === "fit" ? "workgraph-graph-fit" : `workgraph-graph-zoom:${action}`),
+          }}
+          classNames={{
+            node: "workgraph-graph__node",
+            itemTitle: "workgraph-graph__node-title",
+            itemMeta: "workgraph-graph__node-meta",
+            edge: "workgraph-graph__edge",
+            edgeLabel: "workgraph-graph__edge-label",
+            frame: "workgraph-graph__frame",
+          }}
+          renderNodeDecor={renderGoalRing}
+          cacheKey={cacheKey ? `workgraph:${cacheKey}` : "workgraph:default"}
+          className="workgraph-graph__view"
+        />
       </div>
-      <svg
-        data-testid="workgraph-graph"
-        className={`workgraph-graph__svg${zoom.isDragging ? " is-dragging" : ""}`}
-        viewBox={`0 0 ${viewBoxWidth} ${viewBoxHeight}`}
-        preserveAspectRatio="xMidYMid meet"
-        data-scale={zoom.viewport.scale.toFixed(3)}
-        // A group, not an image: its nodes are buttons people can reach.
-        role="group"
-        aria-label="Work item dependency graph"
-        ref={setSvgRef}
-        onPointerDown={zoom.onPointerDown}
-        onPointerMove={zoom.onPointerMove}
-        onPointerUp={zoom.onPointerUp}
-        onPointerCancel={zoom.onPointerUp}
-      >
-        <defs>
-          <marker
-            id="workgraph-graph-arrow"
-            className="workgraph-graph__arrow"
-            viewBox="0 0 8 8"
-            refX="7"
-            refY="4"
-            markerWidth="7"
-            markerHeight="7"
-            orient="auto-start-reverse"
-          >
-            <path d="M0,0 L8,4 L0,8 z" />
-          </marker>
-          <marker
-            id="workgraph-graph-arrow-blocks"
-            className="workgraph-graph__arrow is-blocks"
-            viewBox="0 0 8 8"
-            refX="7"
-            refY="4"
-            markerWidth="7"
-            markerHeight="7"
-            orient="auto-start-reverse"
-          >
-            <path d="M0,0 L8,4 L0,8 z" />
-          </marker>
-        </defs>
-        <g data-testid="workgraph-graph-viewport" transform={viewportTransform(zoom.viewport)}>
-          {layout.edges.map((edge, index) => {
-            const marker = edge.kind === "blocks"
-              ? "url(#workgraph-graph-arrow-blocks)"
-              : "url(#workgraph-graph-arrow)";
-            return (
-              <g key={`${edge.kind}:${edge.fromId}:${edge.toId}:${index}`}>
-                <path
-                  data-testid="workgraph-graph-edge"
-                  data-kind={edge.kind}
-                  className={`workgraph-graph__edge is-${edge.kind}`}
-                  d={workGraphEdgePath(edge)}
-                  markerEnd={marker}
-                />
-              </g>
-            );
-          })}
-          {layout.nodes.map((node) => {
-            const labelWidth = node.w - LABEL_X - LABEL_RIGHT_PAD;
-            const ownerName = ownerNameOf(node);
-            const metaText = nodeMetaText(node, ownerName);
-            const meta = metaText
-              ? fitLabel(metaText, labelWidth, measure?.meta ?? null, META_MAX_CHARS)
-              : "";
-            const title = fitLabel(node.title, labelWidth, measure?.title ?? null, TITLE_MAX_CHARS);
-            const selected = node.itemId === selectedId;
-            return (
-              <g
-                key={node.itemId}
-                data-testid="workgraph-graph-node"
-                data-item-id={node.itemId}
-                data-status={node.status}
-                data-tone={statusTone(node.status)}
-                className={`workgraph-graph__node is-${node.status}${selected ? " is-selected" : ""}`}
-                transform={`translate(${node.x} ${node.y})`}
-                role="button"
-                tabIndex={node.itemId === tabStopId ? 0 : -1}
-                aria-label={`${node.title}, ${workGraphStatusWord(node.status)}`}
-                aria-current={selected ? "true" : undefined}
-                // Select on pointerdown, not click: the svg's pan handler
-                // takes pointer capture, which retargets the eventual click
-                // to the svg and would swallow node selection entirely.
-                // stopPropagation keeps a node press from starting a pan.
-                onPointerDown={(event) => {
-                  event.stopPropagation();
-                  onSelect?.(node.itemId);
-                }}
-                onFocus={() => {
-                  setFocusedId(node.itemId);
-                  // A node reached by keyboard comes into view.
-                  zoom.reveal({ x: node.x, y: node.y, w: node.w, h: node.h });
-                }}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter" || event.key === " ") {
-                    event.preventDefault();
-                    onSelect?.(node.itemId);
-                    return;
-                  }
-                  const navigation = ARROW_STEPS.has(event.key) || event.key === "Home" || event.key === "End";
-                  if (!navigation || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
-                  event.preventDefault();
-                  moveFocus(event, node.itemId);
-                }}
-              >
-                <title>
-                  {nodeHoverText(node, itemById.get(node.itemId), ownerName)}
-                </title>
-                {selected ? (
-                  <rect
-                    className="workgraph-graph__node-ring"
-                    x={-4}
-                    y={-4}
-                    width={node.w + 8}
-                    height={node.h + 8}
-                    rx={9}
-                  />
-                ) : null}
-                <rect className="workgraph-graph__node-box" width={node.w} height={node.h} rx={6} />
-                <circle className="workgraph-graph__node-dot" cx={14} cy={meta ? 15 : node.h / 2} r={3.5} />
-                {boundItemIds.has(node.itemId) ? (
-                  <circle
-                    className="workgraph-graph__node-goal-ring"
-                    cx={14}
-                    cy={meta ? 15 : node.h / 2}
-                    r={6.5}
-                  />
-                ) : null}
-                <text
-                  className="workgraph-graph__node-title"
-                  x={LABEL_X}
-                  y={meta ? 19 : node.h / 2 + 4}
-                >
-                  {title}
-                </text>
-                {meta ? (
-                  <text className="workgraph-graph__node-meta" x={LABEL_X} y={34}>
-                    {meta}
-                  </text>
-                ) : null}
-              </g>
-            );
-          })}
-          {/* Edge labels paint above the nodes so a label in the short
-              gap between two rows is never hidden under a node border. */}
-          {layout.edges.map((edge, index) => {
-            if (edge.kind === "parent") return null;
-            const label = edgeLabelPlacement(edge);
-            return (
-              <text
-                key={`label:${edge.kind}:${edge.fromId}:${edge.toId}:${index}`}
-                className="workgraph-graph__edge-label"
-                data-testid="workgraph-graph-edge-label"
-                x={label.x}
-                y={label.y}
-                textAnchor={label.anchor}
-                dominantBaseline="central"
-              >
-                {workGraphEdgeWord(edge.kind)}
-              </text>
-            );
-          })}
-        </g>
-      </svg>
-      <div className="workgraph-graph__detail" data-testid="workgraph-graph-detail">
-        {selectedId
-          ? (
-            <WorkItemDetails
-              key={selectedId}
-              itemId={selectedId}
-              item={itemById.get(selectedId)}
-              node={selectedNode}
-              hasAttention={boundItemIds.has(selectedId)}
-            />
-          )
-          : <p className="workgraph-graph__detail-hint">Select an item to see its details.</p>}
-      </div>
+      {footer}
+    </div>
+  );
+
+  return (
+    <div className="workgraph-graph" data-lod={graph.lod ? "true" : undefined}>
+      <DrawerLayout
+        main={main}
+        drawer={drawer}
+        open={Boolean(drawer)}
+        onClose={() => {
+          if (selectedId) onSelect?.(null);
+          else aside?.onClose();
+        }}
+        persistKey="workgraph"
+        backLabel="Back to the graph"
+        testId="workgraph-graph-layout"
+      />
     </div>
   );
 }
-
-export const __workGraphGraphViewTest = {
-  fitLabel,
-  fitViewport,
-  FIT_MIN_SCALE,
-  nodeMetaLine,
-  nodeToward,
-};

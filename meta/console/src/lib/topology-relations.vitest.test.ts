@@ -236,46 +236,62 @@ describe("the topology's relation reads", () => {
 });
 
 describe("ledger backfill", () => {
-  const frame = (id: string, timestampMs: number) => ({ id, event: "run_started", identity: "billing", timestampMs, data: {} });
+  const frame = (seq: number, timestampMs: number) => ({
+    id: `f${seq}`,
+    event: "run_started",
+    identity: "billing",
+    timestampMs,
+    cursor: `console:${seq}`,
+    data: {},
+  });
 
-  test("pages back until the window is covered and hands the ledger one batch", async () => {
-    const pages: Record<string, { frames: ReturnType<typeof frame>[]; nextCursor?: string }> = {
-      first: { frames: [frame("c", 3_000), frame("b", 2_500)], nextCursor: "p2" },
-      p2: { frames: [frame("a", 2_000), frame("z", 900)], nextCursor: "p3" },
-      p3: { frames: [frame("y", 500)], nextCursor: "p4" },
+  test("pages back from the oldest frame read until the window is covered, and hands the ledger one batch", async () => {
+    // A page lists its frames oldest first; the next page is the one before its oldest cursor.
+    const pages: Record<string, ReturnType<typeof frame>[]> = {
+      newest: [frame(8, 2_500), frame(9, 3_000)],
+      "console:8": [frame(6, 900), frame(7, 2_000)],
+      "console:6": [frame(5, 500)],
     };
     const asked: Array<string | undefined> = [];
     const batches: string[][] = [];
     const read = await backfillTopologyLedger({
-      query: async (before) => { asked.push(before); return pages[before ?? "first"]!; },
+      query: async (before) => { asked.push(before); return { frames: pages[before ?? "newest"]! }; },
       ingest: (frames) => { batches.push(frames.map((entry) => entry.id)); },
       sinceMs: 1_000,
     });
     // The second page reaches past the window's start: no third read.
-    assert.deepEqual(asked, [undefined, "p2"]);
-    assert.deepEqual(batches, [["c", "b", "a", "z"]]);
+    assert.deepEqual(asked, [undefined, "console:8"]);
+    assert.deepEqual(batches, [["f8", "f9", "f6", "f7"]]);
     assert.equal(read, 4);
   });
 
-  test("stops at an exhausted history and at the page cap", async () => {
+  test("stops at an exhausted history, at the page cap, and at a page that reaches no further back", async () => {
     const batches: number[] = [];
     await backfillTopologyLedger({
-      query: async () => ({ frames: [frame("a", 5_000)], exhausted: true, nextCursor: "more" }),
+      query: async () => ({ frames: [frame(1, 5_000)], exhausted: true }),
       ingest: (frames) => { batches.push(frames.length); },
       sinceMs: 0,
     });
     let calls = 0;
     await backfillTopologyLedger({
-      query: async (before) => { calls += 1; return { frames: [frame(`f${calls}`, 5_000)], nextCursor: `${before ?? ""}x` }; },
+      query: async () => { calls += 1; return { frames: [frame(100 - calls, 5_000)] }; },
       ingest: (frames) => { batches.push(frames.length); },
       sinceMs: 0,
       maxPages: 3,
     });
     assert.equal(calls, 3);
-    assert.deepEqual(batches, [1, 3]);
+    // A cursor the timeline ignores (the same page again) ends the backfill.
+    let repeats = 0;
+    await backfillTopologyLedger({
+      query: async () => { repeats += 1; return { frames: [frame(40, 5_000), frame(41, 5_100)] }; },
+      ingest: (frames) => { batches.push(frames.length); },
+      sinceMs: 0,
+    });
+    assert.equal(repeats, 2);
+    assert.deepEqual(batches, [1, 3, 4]);
     // Nothing read, nothing handed over.
     await backfillTopologyLedger({ query: async () => ({ frames: [] }), ingest: () => { batches.push(-1); }, sinceMs: 0 });
-    assert.deepEqual(batches, [1, 3]);
+    assert.deepEqual(batches, [1, 3, 4]);
   });
 });
 

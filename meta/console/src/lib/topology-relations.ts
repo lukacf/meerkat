@@ -341,10 +341,9 @@ export async function readTopologyRelations(
   };
 }
 
-/** One page of the recent timeline, newest first. */
+/** One page of the recent timeline (the newest `limit` frames before a cursor). */
 export interface TopologyTimelinePage {
   frames: readonly ConsoleFrame[];
-  nextCursor?: string;
   exhausted?: boolean;
 }
 
@@ -353,13 +352,20 @@ export const TOPOLOGY_BACKFILL_MAX_PAGES = 10;
 /** How far back a backfill reads: the map's longest window. */
 export const TOPOLOGY_BACKFILL_WINDOW_MS = 24 * 60 * 60 * 1000;
 
+/** A timeline cursor's sequence ("console:1310" is 1310), for ordering cursors. */
+function timelineCursorSeq(cursor: string | undefined): number | null {
+  const match = cursor ? /(\d+)$/.exec(cursor) : null;
+  return match ? Number(match[1]) : null;
+}
+
 /**
  * Reads the recent timeline back to `sinceMs` (or `maxPages` pages) and hands
- * it to the ledger in one batch. A message counts once only when the ledger
- * sees its ends together (the sender's call with its receipt, the
- * recipient's notice), so a backfill of the newest page alone splits the
- * messages at that page's edge and counts them twice. Returns how many
- * frames it read.
+ * it to the ledger in one batch. Each next page is the one before the oldest
+ * frame read so far (a page's `next_cursor` points forward, at its newest
+ * frame). A message counts once only when the ledger sees its ends together
+ * (the sender's call with its receipt, the recipient's notice), so a backfill
+ * of the newest page alone splits the messages at that page's edge and
+ * counts them twice. Returns how many frames it read.
  */
 export async function backfillTopologyLedger(options: {
   query: (before: string | undefined) => Promise<TopologyTimelinePage>;
@@ -370,15 +376,22 @@ export async function backfillTopologyLedger(options: {
   const maxPages = options.maxPages ?? TOPOLOGY_BACKFILL_MAX_PAGES;
   const frames: ConsoleFrame[] = [];
   let before: string | undefined;
+  let previousSeq = Number.POSITIVE_INFINITY;
   for (let page = 0; page < maxPages; page += 1) {
     const result = await options.query(before);
     frames.push(...result.frames);
-    const oldest = result.frames.reduce(
-      (min, frame) => (typeof frame.timestampMs === "number" ? Math.min(min, frame.timestampMs) : min),
-      Number.POSITIVE_INFINITY,
-    );
-    if (result.frames.length === 0 || result.exhausted || !result.nextCursor || oldest < options.sinceMs) break;
-    before = result.nextCursor;
+    let oldest: { seq: number; cursor: string } | null = null;
+    let oldestMs = Number.POSITIVE_INFINITY;
+    for (const frame of result.frames) {
+      const seq = timelineCursorSeq(frame.cursor);
+      if (seq !== null && frame.cursor && (!oldest || seq < oldest.seq)) oldest = { seq, cursor: frame.cursor };
+      if (typeof frame.timestampMs === "number") oldestMs = Math.min(oldestMs, frame.timestampMs);
+    }
+    // Stop at the end of the history, at the window's start, or when a page
+    // reaches no further back than the one before it.
+    if (!oldest || result.exhausted || oldest.seq >= previousSeq || oldestMs < options.sinceMs) break;
+    previousSeq = oldest.seq;
+    before = oldest.cursor;
   }
   if (frames.length > 0) options.ingest(frames);
   return frames.length;

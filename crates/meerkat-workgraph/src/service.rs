@@ -2768,15 +2768,41 @@ mod tests {
             .expect("close")
     }
 
+    /// Update `item`'s title, which makes it the most recently updated item.
+    async fn touch(service: &WorkGraphService, item: &WorkItem) -> WorkItem {
+        service
+            .update(UpdateWorkItemRequest {
+                id: item.id.clone(),
+                realm_id: None,
+                namespace: None,
+                expected_revision: item.revision,
+                title: Some(format!("{} (updated)", item.title)),
+                description: None,
+                priority: None,
+                completion_policy: None,
+                labels: None,
+                due_at: None,
+                not_before: None,
+                snoozed_until: None,
+                external_refs: Vec::new(),
+            })
+            .await
+            .expect("update")
+    }
+
+    fn ids(items: &[WorkItem]) -> Vec<WorkItemId> {
+        items.iter().map(|item| item.id.clone()).collect()
+    }
+
     #[tokio::test]
-    async fn closed_history_does_not_consume_the_atomic_ready_ceiling() {
+    async fn closed_history_does_not_hide_the_live_working_set() {
         let service = WorkGraphService::with_scope(
             Arc::new(MemoryWorkGraphStore::new()),
             "realm",
             WorkNamespace::default(),
         );
-        // More stored items than the ceiling, all but one of them closed.
-        for index in 0..super::MAX_ATOMIC_READY_ITEMS {
+        // A thousand closed items and one live item.
+        for index in 0..1000 {
             let item = service
                 .create(create_req(&format!("done {index}")))
                 .await
@@ -2807,39 +2833,126 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_live_working_set_still_hits_the_atomic_ready_ceiling() {
+    async fn snapshot_cut_keeps_the_most_recently_updated_items() {
         let service = WorkGraphService::with_scope(
             Arc::new(MemoryWorkGraphStore::new()),
             "realm",
             WorkNamespace::default(),
         );
-        for index in 0..=super::MAX_ATOMIC_READY_ITEMS {
+        let a = service.create(create_req("a")).await.expect("a");
+        service.create(create_req("b")).await.expect("b");
+        let c = service.create(create_req("c")).await.expect("c");
+        touch(&service, &a).await;
+
+        let snapshot = service
+            .snapshot(crate::WorkGraphSnapshotFilter {
+                limit: Some(2),
+                ..Default::default()
+            })
+            .await
+            .expect("snapshot");
+        // Most recently updated first: the cut drops `b`, updated longest ago.
+        assert_eq!(ids(&snapshot.items), vec![a.id, c.id]);
+    }
+
+    #[tokio::test]
+    async fn list_cut_keeps_the_most_recently_updated_items() {
+        let service = WorkGraphService::with_scope(
+            Arc::new(MemoryWorkGraphStore::new()),
+            "realm",
+            WorkNamespace::default(),
+        );
+        let a = service.create(create_req("a")).await.expect("a");
+        service.create(create_req("b")).await.expect("b");
+        let c = service.create(create_req("c")).await.expect("c");
+        touch(&service, &a).await;
+
+        let listed = service
+            .list(WorkItemFilter {
+                limit: Some(2),
+                ..Default::default()
+            })
+            .await
+            .expect("list");
+        assert_eq!(ids(&listed), vec![a.id, c.id]);
+    }
+
+    #[tokio::test]
+    async fn snapshot_over_a_thousand_live_items_returns_a_bounded_page() {
+        let service = WorkGraphService::with_scope(
+            Arc::new(MemoryWorkGraphStore::new()),
+            "realm",
+            WorkNamespace::default(),
+        );
+        for index in 0..1001 {
             service
                 .create(create_req(&format!("open {index}")))
                 .await
                 .expect("create");
         }
-        let error = service
-            .ready(Default::default())
+
+        let snapshot = service
+            .snapshot(crate::WorkGraphSnapshotFilter {
+                limit: Some(10),
+                ..Default::default()
+            })
             .await
-            .expect_err("over the live ceiling");
-        assert!(error.to_string().contains("live-item limit"), "{error}");
-        let error = service
-            .snapshot(Default::default())
-            .await
-            .expect_err("over the live ceiling");
-        assert!(error.to_string().contains("live-item limit"), "{error}");
+            .expect("a namespace with 1001 live items is read, not refused");
+        assert_eq!(snapshot.items.len(), 10);
+        assert_eq!(snapshot.ready_item_ids.len(), 10);
+        let page = serde_json::to_value(&snapshot).expect("snapshot json");
+        assert_eq!(page["total_items"], json!(1001));
+        assert_eq!(page["truncated"], json!(true));
     }
 
     #[tokio::test]
-    async fn edges_between_closed_items_do_not_consume_the_snapshot_edge_ceiling() {
+    async fn ready_over_a_thousand_live_items_returns_the_first_ready_page() {
         let service = WorkGraphService::with_scope(
             Arc::new(MemoryWorkGraphStore::new()),
             "realm",
             WorkNamespace::default(),
         );
-        // 50 related items (well under the item ceiling) with one edge more
-        // than the edge ceiling between them.
+        // Five of the 1001 open items are high priority, so they lead the
+        // ready order, in creation order.
+        let mut high = Vec::new();
+        for index in 0..1001 {
+            let mut request = create_req(&format!("open {index}"));
+            if index % 200 == 100 {
+                request.priority = crate::WorkPriority::High;
+            }
+            let item = service.create(request).await.expect("create");
+            if index % 200 == 100 {
+                high.push(item.id.as_str().to_string());
+            }
+        }
+
+        // The tool result carries the page fields.
+        let page = crate::handle_unscoped_workgraph_tools_call(
+            &service,
+            "workgraph_ready",
+            &json!({ "limit": 5 }),
+        )
+        .await
+        .expect("a namespace with 1001 live items is evaluated, not refused");
+        let returned = page["items"]
+            .as_array()
+            .expect("items")
+            .iter()
+            .map(|item| item["id"].as_str().expect("id").to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(returned, high);
+        assert_eq!(page["total_items"], json!(1001));
+        assert_eq!(page["truncated"], json!(true));
+    }
+
+    #[tokio::test]
+    async fn snapshot_over_a_thousand_live_edges_returns_a_bounded_page() {
+        let service = WorkGraphService::with_scope(
+            Arc::new(MemoryWorkGraphStore::new()),
+            "realm",
+            WorkNamespace::default(),
+        );
+        // 50 live items with 1001 `related` edges between them.
         let mut items = Vec::new();
         for index in 0..50 {
             items.push(
@@ -2852,7 +2965,7 @@ mod tests {
         let mut linked = 0;
         'pairs: for from in 0..items.len() {
             for to in (from + 1)..items.len() {
-                if linked > super::MAX_ATOMIC_SNAPSHOT_EDGES {
+                if linked == 1001 {
                     break 'pairs;
                 }
                 service
@@ -2868,24 +2981,120 @@ mod tests {
                 linked += 1;
             }
         }
-        // While the chain is live the edge ceiling applies.
-        let error = service
-            .snapshot(Default::default())
-            .await
-            .expect_err("over the live edge ceiling");
-        assert!(error.to_string().contains("edge scan limit"), "{error}");
-        // Closed, the items and their edges are history and the snapshot reads again.
-        for item in items {
-            let current = service.get(None, None, item.id).await.expect("get");
-            close_completed(&service, current).await;
-        }
-        service.create(create_req("live")).await.expect("live");
+
         let snapshot = service
             .snapshot(Default::default())
             .await
+            .expect("a namespace with 1001 live edges is read, not refused");
+        assert_eq!(snapshot.items.len(), 50);
+        assert_eq!(snapshot.edges.len(), 1001);
+        let page = serde_json::to_value(&snapshot).expect("snapshot json");
+        assert_eq!(page["total_items"], json!(50));
+        assert_eq!(page["truncated"], json!(false));
+    }
+
+    #[tokio::test]
+    async fn snapshot_and_list_report_total_items_and_truncated() {
+        let service = WorkGraphService::with_scope(
+            Arc::new(MemoryWorkGraphStore::new()),
+            "realm",
+            WorkNamespace::default(),
+        );
+        for index in 0..5 {
+            service
+                .create(create_req(&format!("item {index}")))
+                .await
+                .expect("create");
+        }
+
+        for (limit, returned, truncated) in [(2, 2, true), (10, 5, false)] {
+            let snapshot = service
+                .snapshot(crate::WorkGraphSnapshotFilter {
+                    limit: Some(limit),
+                    ..Default::default()
+                })
+                .await
+                .expect("snapshot");
+            assert_eq!(snapshot.items.len(), returned, "snapshot limit {limit}");
+            let snapshot = serde_json::to_value(&snapshot).expect("snapshot json");
+            assert_eq!(snapshot["total_items"], json!(5), "snapshot limit {limit}");
+            assert_eq!(
+                snapshot["truncated"],
+                json!(truncated),
+                "snapshot limit {limit}"
+            );
+
+            // The list totals travel in the tool result.
+            let list = crate::handle_unscoped_workgraph_tools_call(
+                &service,
+                "workgraph_list",
+                &json!({ "limit": limit }),
+            )
+            .await
+            .expect("list");
+            assert_eq!(
+                list["items"].as_array().map(Vec::len),
+                Some(returned),
+                "list limit {limit}"
+            );
+            assert_eq!(list["total_items"], json!(5), "list limit {limit}");
+            assert_eq!(list["truncated"], json!(truncated), "list limit {limit}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_blocker_outside_a_cut_snapshot_still_blocks() {
+        let service = WorkGraphService::with_scope(
+            Arc::new(MemoryWorkGraphStore::new()),
+            "realm",
+            WorkNamespace::default(),
+        );
+        let blocker = service
+            .create(create_req("old blocker"))
+            .await
+            .expect("blocker");
+        let blocked = service
+            .create(create_req("blocked"))
+            .await
+            .expect("blocked");
+        service
+            .link(LinkWorkItemsRequest {
+                realm_id: None,
+                namespace: None,
+                kind: WorkEdgeKind::Blocks,
+                from_id: blocker.id.clone(),
+                to_id: blocked.id.clone(),
+            })
+            .await
+            .expect("link");
+        let mut fillers = Vec::new();
+        for index in 0..3 {
+            fillers.push(
+                service
+                    .create(create_req(&format!("filler {index}")))
+                    .await
+                    .expect("filler"),
+            );
+        }
+        let newest_filler = fillers.pop().expect("filler");
+        // Updated last, the blocked item is the most recently updated one;
+        // the blocker is the least recently updated.
+        touch(&service, &blocked).await;
+
+        let snapshot = service
+            .snapshot(crate::WorkGraphSnapshotFilter {
+                limit: Some(2),
+                ..Default::default()
+            })
+            .await
             .expect("snapshot");
-        assert_eq!(snapshot.items.len(), 1);
-        assert!(snapshot.edges.is_empty());
+        assert_eq!(
+            ids(&snapshot.items),
+            vec![blocked.id.clone(), newest_filler.id.clone()]
+        );
+        // The cut left the blocker out of the page, and readiness is still
+        // classified against the whole namespace: the open blocker blocks.
+        assert_eq!(snapshot.ready_item_ids, vec![newest_filler.id]);
     }
 
     #[tokio::test]

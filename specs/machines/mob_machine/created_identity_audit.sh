@@ -553,6 +553,22 @@ def replace_text(old, new):
     text = open(path).read()
     assert text.count(old) == 1, f"expected one {old[:70]!r}, found {text.count(old)}"
     open(path, "w").write(text.replace(old, new))
+
+def replace_in_loops(arm, fields, old, new):
+    """The one occurrence of `old` in the arm's lowered loop over each of
+    `fields` becomes `new`. The generated model lowers a `for` loop of an
+    arm's update to one recursive operator per field it updates
+    (<arm>_ForEach<n>_<field>(acc, ...), <n> counting every loop of the
+    machine), which holds the loop body's filters; the arm calls them."""
+    text = open(path).read()
+    for field in fields:
+        found = list(re.finditer(
+            r"^" + re.escape(arm) + r"_ForEach[0-9]+_" + re.escape(field) + r"\(acc, .*$", text, re.M))
+        assert len(found) == 1, f"expected one lowered loop of {arm} over {field}, found {len(found)}"
+        line = found[0].group(0)
+        assert line.count(old) == 1, f"expected one {old[:70]!r} in the loop of {arm} over {field}, found {line.count(old)}"
+        text = text[:found[0].start()] + line.replace(old, new) + text[found[0].end():]
+    open(path, "w").write(text)
 PY
 
   # usage: mutate <run> <name> <expected violation regex>; reads a python
@@ -621,9 +637,12 @@ drop_guard("RecoverCreatedIdentityEntrySeatedRunning", "identity_entry_unreadabl
 PY
 
   # A row that says no member while the replay seated one is not reserved.
+  # The generated model lowers the guard's disjunction to a chain of
+  # (IF a THEN TRUE ELSE ...); the mutant makes that one condition FALSE.
   mutate scan member_contradiction_ignored "Invariant AuditRecoverExactlyOne" <<'PY'
 replace_in_arm("RecoverCreatedIdentityEntryUnreadableRunning",
-               ' \\/ ((presence # "Present") /\\ ((agent_identity \\in DOMAIN identity_to_runtime) = TRUE))', "")
+               '(IF ((presence # "Present") /\\ ((agent_identity \\in DOMAIN identity_to_runtime) = TRUE)) THEN TRUE ELSE ',
+               "(IF FALSE THEN TRUE ELSE ")
 PY
 
   # A Present row of an identity without a member records an entry under a
@@ -715,32 +734,33 @@ drop_guard("DeclareIdentityEntryRefusedNameTombstoned", "identity_entry_unreadab
 PY
 
   # The declared apply takes a Created entry's name (the no entry or a
-  # Declared entry guard dropped from every arm that carries it).
+  # Declared entry guard, lowered to (IF <no entry> THEN TRUE ELSE
+  # <Declared entry>), dropped from every arm that carries it).
   mutate names declare_over_created "Invariant AuditNamesDeclareExactlyOne" <<'PY'
 for verdict in ("Kept", "SeatOwed", "HostedOnFirstUse", "AwaitHeldCreation", "RuntimeModeRestamp",
                 "RoleMigrate", "RoleRotate", "RoleMigrationHeld", "LifecycleInFlight",
                 "RefusedNameHeldByWorker", "RefusedHostAdopted", "RefusedNonAuthoritative"):
-    drop_guard("DeclareIdentityEntry" + verdict, "identity_entry_origins) = FALSE) \\/")
+    drop_guard("DeclareIdentityEntry" + verdict, "identity_entry_origins) = FALSE) THEN TRUE ELSE")
 PY
 
-  # The seal acts on Created entries as on Declared ones.
+  # The seal removes an unlisted Created entry with no member as it does a
+  # Declared one (the Declared filter of its removal loops takes a Created
+  # entry too). Its mark loop keeps the filter: TLC checks a successor's
+  # invariants before the step's action properties, so a seal that marks a
+  # Created entry is refused first by retiring_entry_is_a_declared_entry.
   mutate names seal_takes_created "Action property AuditSealNeverTouchesCreated" <<'PY'
-text = open(path).read()
-found = _arm(text, "SealDeclaredRosterSealed")
-body = found.group(0)
-old = '(identity_entry_origins[id] = "Declared")'
-assert body.count(old) >= 2, "expected the seal's Declared filters"
-open(path, "w").write(text[:found.start()] + body.replace(old, '(identity_entry_origins[id] \\in {"Declared", "Created"})') + text[found.end():])
+replace_in_loops("SealDeclaredRosterSealed",
+                 ("identity_entry_origins", "identity_entry_unseated", "member_host_preparation_causes"),
+                 ' = Some("Declared"))', ' \\in {Some("Declared"), Some("Created")})')
 PY
 
-  # The seal acts on an unreadable name's Declared entry.
+  # The seal acts on an unreadable name's Declared entry (the readable
+  # filter dropped from every one of its lowered loops).
   mutate names seal_takes_unreadable "Action property AuditSealNeverTouchesCreated" <<'PY'
-text = open(path).read()
-found = _arm(text, "SealDeclaredRosterSealed")
-body = found.group(0)
-old = " /\\ ~(id \\in identity_entry_unreadable))"
-assert body.count(old) >= 2, "expected the seal's readable filters"
-open(path, "w").write(text[:found.start()] + body.replace(old, ")") + text[found.end():])
+replace_in_loops("SealDeclaredRosterSealed",
+                 ("identity_entry_origins", "identity_entry_unseated", "member_host_preparation_causes",
+                  "identity_entry_retiring"),
+                 " /\\ ((id \\in identity_entry_unreadable) = FALSE))", ")")
 PY
 
   # The legacy adoption adopts a reserved name (its name_not_reserved guard

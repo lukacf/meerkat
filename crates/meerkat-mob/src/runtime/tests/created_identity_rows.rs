@@ -119,21 +119,85 @@ async fn journal_copy(
     copy
 }
 
-/// A running mob over the mock durable session service and in-memory
-/// storage whose identity store the test writes rows into, with
-/// session-scoped member comms identities. A restart resumes the same
-/// storage, or another one, over a cold-restarted session service.
+/// The persistent session service of [`CreatedMob::persistent`]: the real
+/// factory over SQLite session and runtime stores.
+type PersistentService = meerkat_session::PersistentSessionService<meerkat::FactoryAgentBuilder>;
+
+/// A model that answers every request at once. The rows run no turn: the
+/// persistent service's factory builds each member with it.
+struct InstantClient;
+
+#[async_trait]
+impl meerkat_client::LlmClient for InstantClient {
+    fn project_replay_messages(
+        &self,
+        messages: &[Message],
+    ) -> Result<Vec<Message>, meerkat_client::LlmError> {
+        Ok(messages.to_vec())
+    }
+
+    fn stream<'a>(
+        &'a self,
+        request: &'a meerkat_client::LlmRequest,
+    ) -> meerkat_client::types::LlmStream<'a> {
+        Box::pin(async_stream::try_stream! {
+            yield meerkat_client::LlmEvent::TextDelta {
+                delta: "created-identity-answer".to_string(),
+                meta: None,
+            };
+            yield meerkat_client::LlmEvent::UsageUpdate {
+                usage: meerkat_core::TurnUsage::host_declared(
+                    Provider::OpenAI,
+                    &request.model,
+                    Usage::default(),
+                ),
+            };
+            yield meerkat_client::LlmEvent::Done {
+                outcome: meerkat_client::LlmDoneOutcome::success(meerkat_core::StopReason::EndTurn),
+            };
+        })
+    }
+
+    fn provider(&self) -> Provider {
+        Provider::OpenAI
+    }
+
+    async fn health_check(&self) -> Result<(), meerkat_client::LlmError> {
+        Ok(())
+    }
+}
+
+/// The session service a [`CreatedMob`] runs over.
+enum CreatedMobService {
+    /// The mock durable session service, cold-restarted at each restart.
+    /// Nothing durable survives an archive there: a wake never revives an
+    /// archived session.
+    Mock(Arc<MockSessionService>),
+    /// The persistent session service, kept across restarts: an archived
+    /// session stays durable, and its member's first wake revives it.
+    Persistent(Arc<PersistentService>),
+}
+
+/// A running mob over in-memory storage whose identity store the test writes
+/// rows into, with session-scoped member comms identities, over the mock
+/// durable session service ([`Self::new`]) or the persistent session service
+/// ([`Self::persistent`]). A restart resumes the same storage, or another
+/// one.
 struct CreatedMob {
-    keys: tempfile::TempDir,
+    /// The fixture's files: the member comms identity root, and the
+    /// persistent service's stores.
+    _root: tempfile::TempDir,
+    comms_root: PathBuf,
     storage: MobStorage,
     identity: InMemoryMobIdentityStore,
     handle: MobHandle,
-    service: Arc<MockSessionService>,
+    service: CreatedMobService,
 }
 
 impl CreatedMob {
     async fn new(label: &str) -> Self {
-        let keys = tempfile::tempdir().expect("a comms identity root");
+        let root = tempfile::tempdir().expect("a comms identity root");
+        let comms_root = root.path().to_path_buf();
         let service = Arc::new(MockSessionService::new());
         let _adapter = service.enable_runtime_adapter();
         let (storage, identity) =
@@ -143,16 +207,89 @@ impl CreatedMob {
             storage.clone(),
         )
         .with_session_service(service.clone())
-        .with_member_comms_identity_root(keys.path())
+        .with_member_comms_identity_root(comms_root.clone())
         .create()
         .await
         .expect("create the mob");
         Self {
-            keys,
+            _root: root,
+            comms_root,
             storage,
             identity,
             handle,
-            service,
+            service: CreatedMobService::Mock(service),
+        }
+    }
+
+    /// [`Self::new`] over the persistent session service: the real factory
+    /// with in-process comms over SQLite session and runtime stores, as the
+    /// member wake rows run, with the members' comms identities under the
+    /// factory's own root.
+    async fn persistent(label: &str) -> Self {
+        let root = tempfile::Builder::new()
+            .prefix("meerkat-created-identity-")
+            .tempdir()
+            .expect("fixture storage in the system temp dir");
+        let root_path = root.path().canonicalize().expect("absolute fixture root");
+        for directory in ["config", "runtime", "project", "context"] {
+            std::fs::create_dir_all(root_path.join(directory)).expect("fixture root");
+        }
+        let factory = meerkat::AgentFactory::new(root_path.join("factory-store"))
+            .user_config_root(root_path.join("config"))
+            .runtime_root(root_path.join("runtime"))
+            .project_root(root_path.join("project"))
+            .context_root(root_path.join("context"))
+            .builtins(false)
+            .comms(true);
+        let mut config = meerkat::Config::default();
+        config.agent.model = "gpt-5.5".to_string();
+        config.compaction.auto_compact_threshold = 1_000_000;
+        let mut builder = meerkat::FactoryAgentBuilder::new(factory, config);
+        builder.default_llm_client = Some(Arc::new(InstantClient));
+        let db = root_path.join("realm.db");
+        let session_store =
+            Arc::new(meerkat_store::SqliteSessionStore::open(&db).expect("session store"));
+        builder.default_session_store = Some(Arc::new(meerkat_store::StoreAdapter::new(
+            session_store.clone(),
+        )));
+        let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> = Arc::new(
+            meerkat_runtime::SqliteRuntimeStore::new_head_canonical(&db)
+                .expect("head-canonical runtime store"),
+        );
+        let service = Arc::new(PersistentService::new(
+            builder,
+            16,
+            session_store,
+            runtime_store,
+            Arc::new(meerkat_store::MemoryBlobStore::new()),
+        ));
+        let comms_root =
+            meerkat::canonical_session_comms_identity_root(Some(&root_path.join("config")))
+                .expect("the factory's session comms identity root");
+        let mut definition = with_unique_mob_id(sample_definition(), label);
+        let worker = definition
+            .profiles
+            .get_mut(&ProfileName::from("worker"))
+            .and_then(ProfileBinding::as_inline_mut)
+            .expect("inline worker");
+        worker.model = "gpt-5.5".to_string();
+        worker.runtime_mode = crate::MobRuntimeMode::TurnDriven;
+        let (storage, identity) =
+            storage_over(InMemoryMobEventStore::new(), &MobStorage::in_memory());
+        let handle = MobBuilder::new(definition, storage.clone())
+            .with_session_service(service.clone())
+            .with_default_llm_client(Arc::new(InstantClient))
+            .with_member_comms_identity_root(comms_root.clone())
+            .create()
+            .await
+            .expect("create the mob");
+        Self {
+            _root: root,
+            comms_root,
+            storage,
+            identity,
+            handle,
+            service: CreatedMobService::Persistent(service),
         }
     }
 
@@ -167,31 +304,77 @@ impl CreatedMob {
             .with_command_authority(CommandAuthority::agent_lane())
     }
 
-    /// Crash the mob, restart its session service and resume `storage`,
-    /// whose identity store is `identity`.
+    /// Restart the mob and resume `storage`, whose identity store is
+    /// `identity`. Over the mock service the mob crashes and the service
+    /// restarts cold. Over the persistent service the mob shuts down and the
+    /// same service serves the next start with no live session, as after a
+    /// process restart.
     async fn restart_into(&mut self, storage: MobStorage, identity: InMemoryMobIdentityStore) {
-        crash_stop_and_release_routes(self.handle.clone()).await;
-        let restarted = Arc::new(self.service.cold_restart_preserving_durable_state().await);
-        let _ = restarted.enable_runtime_adapter();
-        self.service = restarted;
-        self.handle = tokio::time::timeout(
-            STEP,
-            Box::pin(
-                MobBuilder::for_resume(storage.clone())
-                    .with_session_service(self.service.clone())
-                    .with_member_comms_identity_root(self.keys.path())
-                    .notify_orchestrator_on_resume(false)
-                    .resume(),
-            ),
-        )
-        .await
-        .expect("the restart answers")
-        .expect("the restart succeeds");
+        let service = match &self.service {
+            CreatedMobService::Mock(service) => {
+                crash_stop_and_release_routes(self.handle.clone()).await;
+                let restarted = Arc::new(service.cold_restart_preserving_durable_state().await);
+                let _ = restarted.enable_runtime_adapter();
+                CreatedMobService::Mock(restarted)
+            }
+            CreatedMobService::Persistent(service) => {
+                let service = Arc::clone(service);
+                Box::pin(self.shut_down_leaving_no_live_session(&service)).await;
+                CreatedMobService::Persistent(service)
+            }
+        };
+        self.service = service;
+        let resume = MobBuilder::for_resume(storage.clone())
+            .with_member_comms_identity_root(self.comms_root.clone())
+            .notify_orchestrator_on_resume(false);
+        let resume = match &self.service {
+            CreatedMobService::Mock(service) => resume.with_session_service(service.clone()),
+            CreatedMobService::Persistent(service) => resume
+                .with_session_service(service.clone())
+                .with_default_llm_client(Arc::new(InstantClient)),
+        };
+        self.handle = tokio::time::timeout(STEP, Box::pin(resume.resume()))
+            .await
+            .expect("the restart answers")
+            .expect("the restart succeeds");
         self.storage = storage;
         self.identity = identity;
     }
 
-    /// Crash the mob and resume the same storage.
+    /// Shut the mob down over the persistent `service` and discard the live
+    /// sessions its members' builds left there (the service keeps them past
+    /// the Shutdown; a process restart leaves none), then wait until the
+    /// mob's supervisor route is released.
+    async fn shut_down_leaving_no_live_session(&self, service: &PersistentService) {
+        let mut sessions = Vec::new();
+        for member in self.handle.list_members().await {
+            if let Some(session) = self
+                .handle
+                .resolve_bridge_session_id(&member.agent_identity)
+                .await
+            {
+                sessions.push(session);
+            }
+        }
+        let mob_id = self.mob_id();
+        tokio::time::timeout(STEP, self.handle.shutdown())
+            .await
+            .expect("the shutdown answers")
+            .expect("shut the mob down");
+        for session in &sessions {
+            if MobSessionService::live_session_actor_registered(service, session)
+                .await
+                .unwrap_or(false)
+            {
+                MobSessionService::discard_live_session(service, session)
+                    .await
+                    .expect("discard the live session the shutdown kept");
+            }
+        }
+        await_supervisor_route_release(&mob_id).await;
+    }
+
+    /// Restart the mob and resume the same storage.
     async fn restart(&mut self) {
         let storage = self.storage.clone();
         let identity = self.identity.clone();
@@ -844,6 +1027,141 @@ async fn the_census_reports_incomplete_over_an_unreadable_created_entry() {
     assert_eq!(page.unreadable, vec![id("later")]);
 }
 
+/// A resume of a SQLite mob recovers every created entry row of its identity
+/// store when host-adopted intents' rows sit between them in key order: the
+/// created scan leaves out the intents' rows and no created row. Each created
+/// row reads as it is stored (a created entry, a removed one, one pending its
+/// preparation, a later build's row as unreadable), the census counts them,
+/// and no host-adopted identity reads as an entry.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_sqlite_resume_recovers_every_created_row_among_host_adopted_intents() {
+    let dir = tempfile::tempdir().expect("a mob directory");
+    let path = dir.path().join("mob.sqlite");
+    let service = Arc::new(MockSessionService::new());
+    let _adapter = service.enable_runtime_adapter();
+    let created = MobBuilder::new(
+        with_unique_mob_id(sample_definition(), "created-sqlite-resume"),
+        MobStorage::persistent(&path).expect("open the mob store"),
+    )
+    .with_session_service(service.clone())
+    .allow_ephemeral_sessions(true)
+    .create()
+    .await
+    .expect("create the mob");
+    let mob_id = created.mob_id().clone();
+    created.shutdown().await.expect("stop the mob");
+    drop(created);
+
+    {
+        let stores =
+            crate::store::SqliteMobStores::open(&path).expect("open the mob's identity store");
+        let store = stores.identity_store();
+        for name in ["a-adopted", "c-adopted", "e-adopted", "h-adopted"] {
+            let (request, compiled) = crate::identity::identity_adoption_fixture(
+                mob_id.clone(),
+                id(name),
+                &format!("adopt-{name}"),
+                SessionId::new(),
+            );
+            let outcome = store
+                .adopt_member_identity_declaration(&request, &compiled)
+                .await
+                .expect("the host adopts the identity");
+            assert!(
+                matches!(
+                    outcome,
+                    crate::identity::IdentityAdoptionOutcome::Adopted { .. }
+                ),
+                "{name}: {outcome:?}"
+            );
+        }
+        for (name, presence) in [
+            ("b-created", CreatedIdentityPresence::Present),
+            ("d-removed", CreatedIdentityPresence::Removed),
+            (
+                "f-preparing",
+                CreatedIdentityPresence::PendingPreparation { attempt: 1 },
+            ),
+        ] {
+            store
+                .put_identity_row_for_test(
+                    &mob_id,
+                    &id(name),
+                    serde_json::to_vec(&created_record(&mob_id, name, presence))
+                        .expect("encode the created row"),
+                )
+                .await
+                .expect("store the created row");
+        }
+        store
+            .put_identity_row_for_test(&mob_id, &id("g-later"), later_build_row())
+            .await
+            .expect("store the later build's row");
+    }
+
+    let resumed = tokio::time::timeout(
+        STEP,
+        Box::pin(
+            MobBuilder::for_resume(MobStorage::persistent(&path).expect("reopen the mob store"))
+                .with_session_service(service)
+                .allow_ephemeral_sessions(true)
+                .resume(),
+        ),
+    )
+    .await
+    .expect("the resume answers")
+    .expect("the resume succeeds");
+    let read = |name: &str| {
+        resumed
+            .identity_entry(&id(name))
+            .expect("the entry read answers")
+    };
+    assert!(
+        matches!(
+            read("b-created"),
+            IdentityEntryRead::Entry(view) if view.origin == IdentityEntryOrigin::Created
+        ),
+        "{:?}",
+        read("b-created")
+    );
+    assert_eq!(read("d-removed"), IdentityEntryRead::Removed);
+    assert!(
+        matches!(
+            read("f-preparing"),
+            IdentityEntryRead::Entry(view)
+                if view.origin == IdentityEntryOrigin::Created
+                    && view.standing
+                        == EntryStanding::Unseated(UnseatedEntryCause::TemplatePreparation)
+        ),
+        "{:?}",
+        read("f-preparing")
+    );
+    assert!(
+        matches!(
+            read("g-later"),
+            IdentityEntryRead::Unreadable { member: None }
+        ),
+        "{:?}",
+        read("g-later")
+    );
+    for name in ["a-adopted", "c-adopted", "e-adopted", "h-adopted"] {
+        assert!(
+            matches!(read(name), IdentityEntryRead::NotAnEntry { .. }),
+            "{name}: {:?}",
+            read(name)
+        );
+    }
+    let census = resumed.identity_census().expect("the census");
+    assert_eq!(
+        (census.created, census.tombstoned, census.unreadable),
+        (2, 1, 1)
+    );
+    tokio::time::timeout(STEP, resumed.shutdown())
+        .await
+        .expect("the shutdown answers")
+        .expect("stop the resumed mob");
+}
+
 /// A created entry whose member a build that predates created entries
 /// retired (its worker reconcile with `retire_stale` retires any member it
 /// does not list, and its retirement row records no archived session) is
@@ -859,16 +1177,21 @@ async fn the_census_reports_incomplete_over_an_unreadable_created_entry() {
 /// The seat carries no roster labels, whatever the member's last spawn row
 /// carried, so no label-based authority reaches a created identity.
 ///
+/// The row runs over the persistent session service, where the archived
+/// session stays durable and the wake revives it. The mock durable service
+/// keeps nothing durable past an archive, so a wake there refuses the
+/// archived session.
+///
 /// RED: drop the start's seat of the created entries owed their seat
 /// (`reseat_owed_created_entries`): the entry stays unseated, owed its seat,
 /// and no member holds it. Drop `RecoverCreatedIdentityEntryRetired`: the
 /// start refuses the present row of an identity the journal left without a
 /// member. Copy the last spawn row's labels into the seat (`reseat_spec`):
 /// the seated entry carries the owner's label.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_present_created_entry_whose_member_an_older_binary_retired_is_reseated_on_its_archived_session()
  {
-    let mut mob = CreatedMob::new("created-reseat").await;
+    let mut mob = CreatedMob::persistent("created-reseat").await;
     let mut owner = worker_spec("owner");
     owner.labels = Some(BTreeMap::from([("team".to_string(), "alpha".to_string())]));
     mob.handle
@@ -902,7 +1225,8 @@ async fn a_present_created_entry_whose_member_an_older_binary_retired_is_reseate
 
     // The journal as the predecessor left it: the seat row of the created
     // entry recorded by this build, and a retirement row with no archived
-    // session.
+    // session. The retirement row this build wrote records the archive.
+    let mut retirement_archived = false;
     let journal = journal_copy(&mob.storage.events, |event| match &mut event.kind {
         MobEventKind::MemberSpawned(spawned) if spawned.agent_identity == id("owner") => {
             spawned.identity_entry = Some(IdentityEntryOrigin::Created);
@@ -912,11 +1236,16 @@ async fn a_present_created_entry_whose_member_an_older_binary_retired_is_reseate
             session_archived,
             ..
         } if *agent_identity == id("owner") => {
+            retirement_archived = *session_archived;
             *session_archived = false;
         }
         _ => {}
     })
     .await;
+    assert!(
+        retirement_archived,
+        "the retirement archived the owner's session"
+    );
     // The roll-forward: this build over the predecessor's journal, the
     // created row present as it was all along.
     let (storage, identity) = storage_over(journal, &mob.storage);
@@ -1032,7 +1361,7 @@ async fn write_created_owner_fixture(name: &str, peer: FixturePeer) {
     })
     .await;
     let mob_id = MobId::from(mob_id.as_str());
-    let stores = crate::store::SqliteMobStores::open(&dir.join("mob.sqlite"))
+    let stores = crate::store::SqliteMobStores::open(dir.join("mob.sqlite"))
         .expect("open the fixture store");
     stores
         .identity_store()

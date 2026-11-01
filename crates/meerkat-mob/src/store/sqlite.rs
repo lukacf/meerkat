@@ -5998,6 +5998,21 @@ impl MobIdentityStore for SqliteMobIdentityStore {
             let fetch_limit = i64::try_from(limit.saturating_add(1)).map_err(|_| {
                 MobStoreError::Internal("created identity scan limit overflow".to_string())
             })?;
+            // The prefilter leaves out in SQL only rows the classifier below
+            // never reads as created: a blob row of canonical JSON whose
+            // every top-level `schema_version` member (there may be none) is
+            // an integer below the created schema version, a host-adopted
+            // intent's row. The classifier reads the last such member of a
+            // JSON object as an unsigned integer, so it answers nothing for
+            // those rows. Every other row reaches it as before: a row of
+            // another storage class, a row SQLite does not accept as
+            // canonical JSON, and a row with a `schema_version` member of
+            // any other type or value. A resume then reads the created rows
+            // without reading every intent row of the mob. The CASE runs
+            // `json_each` only over text `json_valid` accepted, so a
+            // malformed row never fails the scan.
+            let created_schema_version =
+                i64::from(crate::identity::CREATED_IDENTITY_SCHEMA_VERSION);
             let mut stmt = conn
                 .prepare(
                     "SELECT typeof(agent_identity), CAST(agent_identity AS BLOB),
@@ -6012,6 +6027,17 @@ impl MobIdentityStore for SqliteMobIdentityStore {
                                AND CAST(agent_identity AS BLOB) > ?3
                            )
                        )
+                       AND CASE
+                           WHEN typeof(record_json) <> 'blob' THEN 1
+                           WHEN NOT json_valid(CAST(record_json AS TEXT)) THEN 1
+                           ELSE EXISTS (
+                               SELECT 1
+                               FROM json_each(CAST(mob_identity_intents.record_json AS TEXT))
+                                   AS member
+                               WHERE member.key = 'schema_version'
+                                 AND NOT (member.type = 'integer' AND member.value < ?5)
+                           )
+                       END
                      ORDER BY typeof(agent_identity), CAST(agent_identity AS BLOB)
                      LIMIT ?4",
                 )
@@ -6022,7 +6048,8 @@ impl MobIdentityStore for SqliteMobIdentityStore {
                         mob_id.as_str(),
                         after_storage_class,
                         after_identity,
-                        fetch_limit
+                        fetch_limit,
+                        created_schema_version
                     ],
                     |row| {
                         Ok((
@@ -13862,6 +13889,167 @@ mod tests {
             ),
             "{:?}",
             page.observations
+        );
+    }
+
+    /// The created identity scan leaves the host-adopted intents' rows out
+    /// in SQL: a page holds only rows that can be created rows, so the first
+    /// page of one row is the first created row although intent rows sort
+    /// before it, and a scan of a mob holding intent rows only answers its
+    /// last page at once. It still hands the classifier every row that can
+    /// count: a row of another storage class whatever it holds, and a row
+    /// with any `schema_version` member at the created version or later (a
+    /// repeated member, a member name written with an escape, an integer
+    /// past `i64::MAX`). A row SQLite does not read as JSON reaches the
+    /// classifier too, which skips it as before.
+    ///
+    /// RED: drop the prefilter (the scan's shape before this fix): the first
+    /// page of one row reads the intent row `a-adopted` and answers no
+    /// created row, and the scan of the intents-only mob pages over every
+    /// intent row.
+    #[tokio::test]
+    async fn sqlite_the_created_scan_skips_intent_rows_in_sql_and_keeps_every_created_row() {
+        let (_dir, path) = temp_db_path();
+        let stores = SqliteMobStores::open(&path).unwrap();
+        let store = stores.identity_store();
+        let mob_id = MobId::from("sqlite-created-prefilter");
+        let sealed = |identity: &str| {
+            crate::identity::CreatedIdentityRecord::sealed(
+                mob_id.clone(),
+                AgentIdentity::from(identity),
+                1,
+                crate::identity::CreatedIdentityPresence::Present,
+                crate::identity::CreatedIdentityProvenance::new(format!("create-{identity}"), 1),
+            )
+            .unwrap()
+        };
+        let created = sealed("b-created");
+        let escaped = sealed("g-escaped-version");
+        // The same created row, its version member's name written with an
+        // escape: JSON reads the same name.
+        let escaped_row = String::from_utf8(serde_json::to_vec(&escaped).unwrap())
+            .unwrap()
+            .replacen("\"schema_version\"", "\"schema\\u005fversion\"", 1)
+            .into_bytes();
+        let intent_row = br#"{"schema_version":1,"future_shape":true}"#.to_vec();
+        for (identity, row) in [
+            ("a-adopted", intent_row.clone()),
+            ("b-created", serde_json::to_vec(&created).unwrap()),
+            ("c-adopted", intent_row.clone()),
+            ("d-no-version", br#"{"future_shape":true}"#.to_vec()),
+            (
+                "f-repeated-version",
+                br#"{"schema_version":1,"schema_version":2}"#.to_vec(),
+            ),
+            ("g-escaped-version", escaped_row),
+            (
+                "h-huge-version",
+                br#"{"schema_version":18446744073709551615}"#.to_vec(),
+            ),
+            ("i-not-json", b"not json".to_vec()),
+            ("j-adopted", intent_row.clone()),
+        ] {
+            store
+                .put_identity_row_for_test(&mob_id, &AgentIdentity::from(identity), row)
+                .await
+                .unwrap();
+        }
+        // A host-adopted intent's row stored as text.
+        Connection::open(&path)
+            .unwrap()
+            .execute(
+                "INSERT INTO mob_identity_intents
+                     (mob_id, agent_identity, declaration_scope, session_id, lineage_id, record_json)
+                 VALUES (?1, ?2, NULL, NULL, NULL, ?3)",
+                params![mob_id.as_str(), "e-text-intent", r#"{"schema_version":1}"#],
+            )
+            .unwrap();
+
+        let mut pages = Vec::new();
+        let mut rows = BTreeMap::new();
+        let mut after = None;
+        loop {
+            let page = store
+                .scan_created_identities_page(&mob_id, after.as_ref(), 1)
+                .await
+                .unwrap();
+            pages.push(
+                page.observations
+                    .keys()
+                    .map(AgentIdentity::as_str)
+                    .collect::<Vec<_>>()
+                    .join(","),
+            );
+            rows.extend(page.observations);
+            match page.next {
+                Some(next) => after = Some(next),
+                None => break,
+            }
+        }
+        assert_eq!(
+            pages,
+            [
+                "b-created",
+                "e-text-intent",
+                "f-repeated-version",
+                "g-escaped-version",
+                "h-huge-version",
+                "",
+            ],
+            "each page of one row holds the next row that can be a created row; the last \
+             one SQLite does not read as JSON, and the classifier skips it"
+        );
+        assert_eq!(
+            rows.keys().map(AgentIdentity::as_str).collect::<Vec<_>>(),
+            [
+                "b-created",
+                "e-text-intent",
+                "f-repeated-version",
+                "g-escaped-version",
+                "h-huge-version",
+            ]
+        );
+        assert_eq!(
+            rows.get(&AgentIdentity::from("b-created")),
+            Some(&crate::identity::CreatedIdentityObservation::Created(
+                created
+            ))
+        );
+        assert_eq!(
+            rows.get(&AgentIdentity::from("g-escaped-version")),
+            Some(&crate::identity::CreatedIdentityObservation::Created(
+                escaped
+            ))
+        );
+        for unreadable in ["e-text-intent", "f-repeated-version", "h-huge-version"] {
+            assert!(
+                matches!(
+                    rows.get(&AgentIdentity::from(unreadable)),
+                    Some(crate::identity::CreatedIdentityObservation::Unreadable { .. })
+                ),
+                "{unreadable}: {rows:?}"
+            );
+        }
+
+        let intents_only = MobId::from("sqlite-created-prefilter-intents-only");
+        for identity in ["member-a", "member-b", "member-c"] {
+            store
+                .put_identity_row_for_test(
+                    &intents_only,
+                    &AgentIdentity::from(identity),
+                    intent_row.clone(),
+                )
+                .await
+                .unwrap();
+        }
+        let page = store
+            .scan_created_identities_page(&intents_only, None, 1)
+            .await
+            .unwrap();
+        assert!(page.observations.is_empty(), "{:?}", page.observations);
+        assert!(
+            page.next.is_none(),
+            "a mob holding intent rows only answers its last created page at once"
         );
     }
 

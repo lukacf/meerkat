@@ -2420,6 +2420,7 @@ fn seam_begin_spawn_exec_input() -> CompositionWitnessInput {
             witness_field("effective_profile_override_present", Expr::Bool(false)),
             witness_field("effective_model_override_present", Expr::Bool(false)),
             witness_field("entry_custody", Expr::Bool(false)),
+            witness_field("created_custody", Expr::Bool(false)),
         ],
     )
 }

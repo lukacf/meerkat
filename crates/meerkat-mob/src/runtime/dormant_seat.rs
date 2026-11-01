@@ -586,8 +586,8 @@ pub(in crate::runtime) enum DormantSeatCommitEntry {
     },
     /// A prepared seat: its session exists, or is unborn (created by the
     /// member's first wake), and `endpoint` is its stored-key endpoint
-    /// (`None` under network comms, and for an archived session the seat
-    /// does not revive, which MobMachine refuses).
+    /// (`None` under network comms, and for a resume seat's archived session
+    /// it does not revive, which MobMachine refuses).
     Seat {
         candidate: Box<DormantSeatCandidate>,
         endpoint: Option<TrustedPeerDescriptor>,
@@ -631,8 +631,8 @@ pub(in crate::runtime) async fn prepare_dormant_seat(
         // (session_not_archived_or_revived) admits only the identity entry's
         // own archived session record, which the seat binds as it is and the
         // member's first wake revives, history kept; any other archived
-        // session is refused there, and answered SessionArchived (its
-        // endpoint is not read, below).
+        // session is refused there, and answered SessionArchived (a resume
+        // seat's endpoint is not read for it, below).
         super::session_service::SessionResumeLifecycle::Archived {
             revivable: true, ..
         } => {
@@ -707,17 +707,21 @@ pub(in crate::runtime) async fn prepare_dormant_seat(
     };
     let endpoint = match endpoint_source {
         MemberSeatEndpointSource::Network => None,
-        // An archived session the seat does not revive is never bound:
-        // MobMachine refuses the seat (session_not_archived_or_revived) and
-        // the commit answers it SessionArchived, as the preparation answered
-        // every archived session before the declared apply's revival. Its
-        // key pair is neither read nor minted. A key pair missing where this
-        // mob recorded the session's endpoint (a store an earlier release
-        // wrote, whose comms identities live outside its state directory)
-        // would otherwise refuse the seat first, and its host, never told the
-        // session is archived, would not revive the identity on it.
+        // A resume seat of an archived session it does not revive is never
+        // bound: MobMachine refuses the seat (session_not_archived_or_revived)
+        // and the commit answers it SessionArchived, as the preparation
+        // answered every archived session before the declared apply's
+        // revival. Its key pair is neither read nor minted. A key pair
+        // missing where this mob recorded the session's endpoint (a store an
+        // earlier release wrote, whose comms identities live outside its
+        // state directory) would otherwise refuse the seat first, and its
+        // host, never told the session is archived, would not revive the
+        // identity on it. A fresh launch (a fresh seat, a rotation) names a
+        // new name-based session and reads its key as before.
         MemberSeatEndpointSource::SessionScopedInproc { .. }
-            if candidate.session_archived && !candidate.revives_archived_session =>
+            if candidate.launch == DormantSeatLaunch::Resume
+                && candidate.session_archived
+                && !candidate.revives_archived_session =>
         {
             None
         }

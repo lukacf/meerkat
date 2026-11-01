@@ -3,10 +3,11 @@
 //! pair is missing and whose endpoint no row of this mob recorded (one
 //! imported without its key pair) gets a fresh key pair, as its first build
 //! would; one whose endpoint this mob recorded is refused, typed, because
-//! its peers trust the key that is gone. A seat of an archived session that
-//! is no identity entry's archived record reads no key pair: MobMachine
-//! refuses it, and it is answered `SessionArchived`. These rows run on the
-//! combined candidate: the machine, the wake path and the boot path together.
+//! its peers trust the key that is gone. A resume seat of an archived
+//! session that is no identity entry's archived record reads no key pair:
+//! MobMachine refuses it, and it is answered `SessionArchived`. These rows
+//! run on the combined candidate: the machine, the wake path and the boot
+//! path together.
 //!
 //! Where the key pair lives: under the root the mob's session service
 //! reports for its agent builds, unless the host declares one, which wins.

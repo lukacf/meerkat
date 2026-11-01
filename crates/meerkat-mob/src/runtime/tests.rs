@@ -88949,6 +88949,19 @@ struct MobRuntimeParitySnapshotSummary {
     spawn_profile_authority_provider_params_digests: BTreeMap<String, String>,
     spawn_profile_authority_output_schema_digests: BTreeMap<String, String>,
     spawn_profile_authority_external_addressable: BTreeMap<String, bool>,
+    // Operator instructions: the mob's records and its members' delivery,
+    // read from the runtime's formal state.
+    operator_instruction_revision: BTreeMap<String, u64>,
+    operator_instruction_effect: BTreeMap<String, String>,
+    operator_instruction_digest: BTreeMap<String, String>,
+    operator_instruction_body_bytes: BTreeMap<String, u64>,
+    operator_instruction_target_kind: BTreeMap<String, String>,
+    operator_instruction_target_profile: BTreeMap<String, String>,
+    operator_instruction_target_member: BTreeMap<String, String>,
+    operator_instruction_generation: u64,
+    member_instruction_owed: BTreeMap<String, u64>,
+    member_instruction_recorded: BTreeMap<String, u64>,
+    member_instruction_blocked: BTreeMap<String, String>,
     // Row #320 / #293 / #314 / #351: machine-owned state folded into MobMachine.
     orphan_budget: u64,
     topology_default_policy: String,
@@ -90514,6 +90527,45 @@ async fn mob_runtime_parity_snapshot_summary(
                 BTreeSet::new(),
             )
         });
+    // Operator instructions, read from the runtime's formal state (the
+    // machine state the actor publishes), as the explicit resume fields are.
+    let formal_state = handle.machine_state_watch_rx.borrow().clone();
+    let operator_instruction_revision = formal_state.operator_instruction_revision.clone();
+    let operator_instruction_effect = formal_state
+        .operator_instruction_effect
+        .iter()
+        .map(|(key, effect)| (key.clone(), format!("{effect:?}")))
+        .collect::<BTreeMap<_, _>>();
+    let operator_instruction_digest = formal_state.operator_instruction_digest.clone();
+    let operator_instruction_body_bytes = formal_state.operator_instruction_body_bytes.clone();
+    let operator_instruction_target_kind = formal_state
+        .operator_instruction_target_kind
+        .iter()
+        .map(|(key, kind)| (key.clone(), format!("{kind:?}")))
+        .collect::<BTreeMap<_, _>>();
+    let operator_instruction_target_profile =
+        formal_state.operator_instruction_target_profile.clone();
+    let operator_instruction_target_member = formal_state
+        .operator_instruction_target_member
+        .iter()
+        .map(|(key, member)| (key.clone(), format!("{member:?}")))
+        .collect::<BTreeMap<_, _>>();
+    let operator_instruction_generation = formal_state.operator_instruction_generation;
+    let member_instruction_owed = formal_state
+        .member_instruction_owed
+        .iter()
+        .map(|(identity, generation)| (format!("{identity:?}"), *generation))
+        .collect::<BTreeMap<_, _>>();
+    let member_instruction_recorded = formal_state
+        .member_instruction_recorded
+        .iter()
+        .map(|(identity, generation)| (format!("{identity:?}"), *generation))
+        .collect::<BTreeMap<_, _>>();
+    let member_instruction_blocked = formal_state
+        .member_instruction_blocked
+        .iter()
+        .map(|(identity, block)| (format!("{identity:?}"), format!("{block:?}")))
+        .collect::<BTreeMap<_, _>>();
 
     Some(MobRuntimeParitySnapshotSummary {
         phase: phase.as_str().to_string(),
@@ -90609,6 +90661,17 @@ async fn mob_runtime_parity_snapshot_summary(
         spawn_profile_authority_provider_params_digests,
         spawn_profile_authority_output_schema_digests,
         spawn_profile_authority_external_addressable,
+        operator_instruction_revision,
+        operator_instruction_effect,
+        operator_instruction_digest,
+        operator_instruction_body_bytes,
+        operator_instruction_target_kind,
+        operator_instruction_target_profile,
+        operator_instruction_target_member,
+        operator_instruction_generation,
+        member_instruction_owed,
+        member_instruction_recorded,
+        member_instruction_blocked,
         orphan_budget,
         topology_default_policy,
         external_member_rebind_capability,
@@ -91114,6 +91177,64 @@ fn mob_runtime_parity_field_value(
                 .spawn_profile_authority_external_addressable
                 .keys()
                 .map(|k| (k.clone(), 0u64))
+                .collect(),
+        )),
+        // Operator instructions, from the runtime's formal state.
+        "operator_instruction_revision" => Some(MobRuntimeParityExprValue::Map(
+            snapshot.operator_instruction_revision.clone(),
+        )),
+        "operator_instruction_effect" => Some(MobRuntimeParityExprValue::Map(
+            snapshot
+                .operator_instruction_effect
+                .keys()
+                .map(|key| (key.clone(), 0))
+                .collect(),
+        )),
+        "operator_instruction_digest" => Some(MobRuntimeParityExprValue::Map(
+            snapshot
+                .operator_instruction_digest
+                .keys()
+                .map(|key| (key.clone(), 0))
+                .collect(),
+        )),
+        "operator_instruction_body_bytes" => Some(MobRuntimeParityExprValue::Map(
+            snapshot.operator_instruction_body_bytes.clone(),
+        )),
+        "operator_instruction_target_kind" => Some(MobRuntimeParityExprValue::Map(
+            snapshot
+                .operator_instruction_target_kind
+                .keys()
+                .map(|key| (key.clone(), 0))
+                .collect(),
+        )),
+        "operator_instruction_target_profile" => Some(MobRuntimeParityExprValue::Map(
+            snapshot
+                .operator_instruction_target_profile
+                .keys()
+                .map(|key| (key.clone(), 0))
+                .collect(),
+        )),
+        "operator_instruction_target_member" => Some(MobRuntimeParityExprValue::Map(
+            snapshot
+                .operator_instruction_target_member
+                .keys()
+                .map(|key| (key.clone(), 0))
+                .collect(),
+        )),
+        "operator_instruction_generation" => Some(MobRuntimeParityExprValue::U64(
+            snapshot.operator_instruction_generation,
+        )),
+        "member_instruction_owed" => Some(MobRuntimeParityExprValue::Map(
+            snapshot.member_instruction_owed.clone(),
+        )),
+        "member_instruction_recorded" => Some(MobRuntimeParityExprValue::Map(
+            snapshot.member_instruction_recorded.clone(),
+        )),
+        "member_instruction_blocked" => Some(MobRuntimeParityExprValue::Map(
+            snapshot
+                .member_instruction_blocked
+                .keys()
+                .map(|key| (key.clone(), 0))
                 .collect(),
         )),
         "externally_addressable_runtime_ids" => Some(MobRuntimeParityExprValue::Set(

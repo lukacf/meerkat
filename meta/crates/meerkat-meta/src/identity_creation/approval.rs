@@ -1,25 +1,30 @@
 //! Which outcome a normalized request gets under the approval rules.
 //!
-//! Every rule that governs a change of the request applies, and the
-//! strictest outcome wins; among equally strict rules the first in
+//! A rule governs a change when the change is of one of its classes, the
+//! requester is of one of its kinds, and its target selector selects the
+//! identity the change is of, by name, profile and authority labels. Who
+//! created that identity is never read. A create is of each identity it
+//! names; an update is of its identity both as it is and as the update
+//! leaves it, so a rule for either governs it; a removal is of its identity
+//! as it is. Every rule that governs a change of the request applies, and
+//! the strictest outcome wins; among equally strict rules the first in
 //! declaration order decides, and among changes the first in change class
 //! order. A request with no governing rule gets the default (deny unless
-//! the host says otherwise). Three facts raise the outcome to a human
-//! decision: an excess in consequence mode, a template open to every
-//! profile, and a peer that needs approval. A raised outcome keeps the
-//! deciding rule's approver; when that rule names none, nobody can decide
-//! and the request is refused `approval_unavailable` before anything is
-//! held. Authority fields need a human decision and are refused under any
-//! other outcome. Only setting one does: an update that removes authority
-//! fields narrows the identity's authority, and gets its change classes'
-//! outcome like any other narrowing.
+//! the host says otherwise). A peer that needs approval raises the outcome
+//! to a human decision. A raised outcome keeps the deciding rule's
+//! approver; when that rule names none, nobody can decide and the request
+//! is refused `approval_unavailable` before anything is held. Authority
+//! fields need a human decision and are refused under any other outcome.
+//! Only setting one does: an update that removes authority fields narrows
+//! the identity's authority, and gets its change classes' outcome like any
+//! other narrowing.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::config::{ApprovalKind, ChangeClass};
 use super::policy::{ApprovalPolicy, ApprovalRule, ApproverRule, OutcomeRule};
 use super::refusal::{IdentityRefusal, IdentityRefusalKind, RequestProblem};
-use super::request::{Requester, RequesterFacts};
+use super::request::RequesterFacts;
 
 const APPROVER_ID_MAX_BYTES: usize = 256;
 
@@ -84,13 +89,25 @@ impl ApprovalPlan {
     }
 }
 
+/// An identity a request changes, as the approval rules select it: its
+/// name, its profile and its authority labels.
+#[derive(Debug, Clone, Copy)]
+pub struct PlanTarget<'a> {
+    /// The identity.
+    pub identity: &'a str,
+    /// Its profile.
+    pub profile: &'a str,
+    /// Its authority labels.
+    pub authority_labels: &'a BTreeMap<String, String>,
+}
+
 /// What the approval rules are asked about a request.
 #[derive(Debug, Clone, Copy)]
 pub struct PlanRequest<'a> {
     /// The change classes the request touches.
     pub classes: &'a BTreeSet<ChangeClass>,
-    /// The templates the request uses.
-    pub templates: &'a BTreeSet<String>,
+    /// The identities the request changes, as the rules select them.
+    pub targets: &'a [PlanTarget<'a>],
     /// Whether the request needs at least a human decision.
     pub raise: bool,
     /// An authority field the request sets, if any. Removing authority
@@ -106,21 +123,21 @@ pub fn plan_approval(
     request: &PlanRequest<'_>,
 ) -> Result<ApprovalPlan, IdentityRefusal> {
     let kind = requester.requester.kind();
-    let identity = requester.requester.agent_identity();
-    let profile = requester.profile.as_deref();
-    let labels = &requester.authority_labels;
-    let templates: Vec<&str> = if request.templates.is_empty() {
-        vec![""]
-    } else {
-        request.templates.iter().map(String::as_str).collect()
-    };
     let mut decisive: Option<(&OutcomeRule, ChangeClass)> = None;
     for change in request.classes {
-        for template in &templates {
+        for target in request.targets {
             let governing = policy
                 .rules()
                 .iter()
-                .filter(|rule| rule.governs(*change, template, kind, identity, profile, labels))
+                .filter(|rule| {
+                    rule.governs(
+                        *change,
+                        kind,
+                        target.identity,
+                        target.profile,
+                        target.authority_labels,
+                    )
+                })
                 .map(ApprovalRule::outcome);
             let outcome = strictest(governing).unwrap_or(policy.default_outcome());
             if decisive.is_none_or(|(current, _)| outcome.kind() > current.kind()) {
@@ -153,16 +170,18 @@ pub fn plan_approval(
             },
         ));
     }
+    let labels = &requester.authority_labels;
     let outcome = match outcome_kind {
         ApprovalKind::Allow => PlannedOutcome::Allow,
         ApprovalKind::Notify => PlannedOutcome::Notify {
-            approver_id: approver_id(rule.approver(), &requester.requester, labels)?,
+            approver_id: approver_id(rule.approver(), labels)?,
         },
         ApprovalKind::Review => {
-            let approver_id = approver_id(rule.approver(), &requester.requester, labels)?;
+            let approver_id = approver_id(rule.approver(), labels)?;
+            let requester_identity = requester.requester.agent_identity();
             let reviewer = rule
                 .reviewer()
-                .filter(|reviewer| Some(*reviewer) != identity)
+                .filter(|reviewer| Some(*reviewer) != requester_identity)
                 .ok_or_else(|| IdentityRefusal::new(IdentityRefusalKind::ApprovalUnavailable))?;
             PlannedOutcome::Review {
                 approver_id,
@@ -171,7 +190,7 @@ pub fn plan_approval(
             }
         }
         ApprovalKind::RequireApproval => PlannedOutcome::RequireApproval {
-            approver_id: approver_id(rule.approver(), &requester.requester, labels)?,
+            approver_id: approver_id(rule.approver(), labels)?,
         },
         ApprovalKind::Deny => {
             return Err(IdentityRefusal::new(IdentityRefusalKind::CreationDenied {
@@ -201,21 +220,16 @@ fn strictest<'a>(outcomes: impl Iterator<Item = &'a OutcomeRule>) -> Option<&'a 
     chosen
 }
 
-/// The approver id an outcome names for this requester, or
-/// `approval_unavailable` when it names none the requester resolves.
+/// The approver id an outcome names, from the requesting agent's authority
+/// `labels` for a label approver, or `approval_unavailable` when it names
+/// none.
 fn approver_id(
     rule: Option<&ApproverRule>,
-    requester: &Requester,
     labels: &BTreeMap<String, String>,
 ) -> Result<String, IdentityRefusal> {
     let id = match rule {
         Some(ApproverRule::Id(id)) => Some(id.clone()),
         Some(ApproverRule::Label(key)) => labels.get(key).cloned(),
-        Some(ApproverRule::CreatorIdentity) => match requester {
-            Requester::Agent { identity } => Some(identity.clone()),
-            Requester::Human { principal } => Some(principal.clone()),
-            Requester::Host { .. } => None,
-        },
         None => None,
     };
     id.filter(|id| is_approver_id(id))

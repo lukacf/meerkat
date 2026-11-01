@@ -1,4 +1,4 @@
-//! The validated creation policy, built from its JSON or Rust form.
+//! The validated identity policy, built from its JSON or Rust form.
 //!
 //! Validation refuses typed: every refusal names where in the policy it is
 //! (`PolicyRefusal::path`) and what is wrong there (`PolicyRefusalKind`).
@@ -12,32 +12,17 @@ use serde_json::{Value, json};
 
 use super::config::{
     ApprovalConfig, ApprovalKind, ApprovalOutcomeConfig, ApprovalRuleConfig, ApproverConfig,
-    AuthorityFieldConfig, ChangeClass, ConsoleConfig, CreatorKind, CreatorRuleConfig,
-    CreatorSelectorConfig, ExcessMode, IdentityCreationConfig, KickoffRule, LimitsConfig,
-    MAX_DECISION_TIMEOUT_MS, MaxBytesConfig, ModelsConfig, NamingConfig, PeerOutcome, PeerRelation,
-    PeerRuleConfig, PeersConfig, PreparationMode, ProfilesConfig, ReservedKeysConfig,
-    SelectorConfig, TemplateConfig, TimeoutsConfig, ToolBoundsConfig,
+    AuthorityFieldConfig, ChangeClass, IdentityCreationConfig, MAX_DECISION_TIMEOUT_MS,
+    PeerOutcome, PeerRuleConfig, PeersConfig, PreparationMode, RequesterKind, ReservedKeysConfig,
+    SelectorConfig, TimeoutsConfig,
 };
 use super::digest::{Sha256Digest, canonical_digest};
 use super::refusal::{PolicyRefusal, PolicyRefusalKind};
-use super::render::RENDERING_MAX_BYTES;
-use super::template::{Preamble, callback_definition_digest};
 
 /// The most identities one create request may name: the most a Core seat
 /// step commits in one store transaction. A larger request is refused
 /// `batch_too_large`, a capacity refusal rather than a policy limit.
 pub const CORE_BATCH_MAX: u64 = 256;
-
-/// The tools that create, change, remove, list and find created
-/// identities. A template's tool bounds name them only when it grants
-/// creation (`may_grant_creation`).
-pub const CREATION_TOOLS: [&str; 5] = [
-    "identity_create",
-    "identity_update",
-    "identity_remove",
-    "identity_list",
-    "identity_directory",
-];
 
 /// The label keys Meta itself sets on members. No request sets them.
 pub const META_RESERVED_LABEL_KEYS: [&str; 7] = [
@@ -57,63 +42,12 @@ const FORMAT_POLICY: &str = "meerkat.identity.policy.v1";
 const ID_MAX_BYTES: usize = 64;
 const KEY_MAX_BYTES: usize = 128;
 const NAME_MAX_BYTES: usize = 256;
-const TOOL_NAME_MAX_BYTES: usize = 128;
-const REFERENCE_MAX_BYTES: usize = 1024;
-const NAMESPACE_MAX_BYTES: usize = 32;
-const SLUG_MAX_BYTES: u64 = 128;
-const TITLE_MAX_BYTES: usize = 256;
-const DESCRIPTION_MAX_BYTES: usize = 4096;
-const PREAMBLE_MAX_BYTES: usize = 16_384;
 const REASON_MAX_BYTES: usize = 512;
 const AUTHORITY_VALUE_MAX_BYTES: usize = 256;
 const CONSTRUCTION_DEADLINE_MIN_MS: u64 = 1_000;
 const CONSTRUCTION_DEADLINE_MAX_MS: u64 = 3_600_000;
 const REVIEW_ROUNDS_DEFAULT: u64 = 3;
 const REVIEW_ROUNDS_MAX: u64 = 16;
-
-/// A creation limit: 0 is unlimited.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Limit(u64);
-
-impl Limit {
-    /// The limit as configured; 0 is unlimited.
-    pub fn value(self) -> u64 {
-        self.0
-    }
-
-    /// Whether the limit is 0, unlimited.
-    pub fn is_unlimited(self) -> bool {
-        self.0 == 0
-    }
-
-    /// Whether `count` already uses the whole limit, so one more is
-    /// refused. Never for an unlimited limit.
-    pub fn is_reached_by(self, count: u64) -> bool {
-        self.0 != 0 && count >= self.0
-    }
-
-    /// Whether `count` is more than the limit. Never for an unlimited
-    /// limit.
-    pub fn is_exceeded_by(self, count: u64) -> bool {
-        self.0 != 0 && count > self.0
-    }
-}
-
-/// The validated creation limits.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct CreationLimits {
-    /// Created identities in the mob.
-    pub total: Limit,
-    /// Created identities of one creator.
-    pub per_creator: Limit,
-    /// Peers of one created identity.
-    pub peers_per_identity: Limit,
-    /// Identities in one create request (at most `CORE_BATCH_MAX`).
-    pub batch: Limit,
-    /// Open decisions of one requester.
-    pub open_decisions_per_creator: Limit,
-}
 
 /// A validated selector over identities: every non-empty field must match.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -145,45 +79,6 @@ impl Selector {
     }
 }
 
-/// A validated `creators` rule.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CreatorRule {
-    id: String,
-    selector: Selector,
-    templates: BTreeSet<String>,
-}
-
-impl CreatorRule {
-    /// The rule's id.
-    pub fn id(&self) -> &str {
-        &self.id
-    }
-
-    /// The templates the agents it selects may create from.
-    pub fn templates(&self) -> &BTreeSet<String> {
-        &self.templates
-    }
-}
-
-/// The profiles a validated template binds.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ProfileChoice {
-    /// Every profile of the mob definition; every create needs a human
-    /// decision.
-    Any,
-    /// These profiles, the first being the default.
-    Listed(Vec<String>),
-}
-
-/// The models a validated template allows.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ModelChoice {
-    /// The bound profile's own model.
-    ProfileModel,
-    /// These models, the first being the default.
-    Listed(Vec<String>),
-}
-
 /// A validated authority field declaration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthorityFieldRule {
@@ -202,153 +97,11 @@ impl AuthorityFieldRule {
     }
 }
 
-/// A validated template's text limits, in bytes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct TextLimits {
-    /// The display name.
-    pub display_name: u64,
-    /// The purpose.
-    pub purpose: u64,
-    /// The creator's instructions.
-    pub instructions: u64,
-    /// The kickoff message.
-    pub kickoff: u64,
-    /// The supplied context, as canonical JSON text.
-    pub supplied_context: u64,
-    /// The descriptive labels, keys and values together.
-    pub descriptive_labels: u64,
-}
-
-/// A validated template.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Template {
-    id: String,
-    title: Option<String>,
-    description: Option<String>,
-    version: Option<String>,
-    profiles: ProfileChoice,
-    models: ModelChoice,
-    accounts: BTreeSet<String>,
-    callbacks: BTreeMap<String, Sha256Digest>,
-    floor: BTreeSet<String>,
-    ceiling: BTreeSet<String>,
-    excess: ExcessMode,
-    authority_fields: BTreeMap<String, AuthorityFieldRule>,
-    preamble: Preamble,
-    preparation: PreparationMode,
-    construction_deadline_ms: Option<u64>,
-    kickoff: KickoffRule,
-    namespace: String,
-    max_bytes: TextLimits,
-    may_grant_creation: bool,
-}
-
-impl Template {
-    /// The template's id.
-    pub fn id(&self) -> &str {
-        &self.id
-    }
-
-    /// The title, for presentation only.
-    pub fn title(&self) -> Option<&str> {
-        self.title.as_deref()
-    }
-
-    /// The description, for presentation only.
-    pub fn description(&self) -> Option<&str> {
-        self.description.as_deref()
-    }
-
-    /// The host's install version.
-    pub fn version(&self) -> Option<&str> {
-        self.version.as_deref()
-    }
-
-    /// The profiles the template binds.
-    pub fn profiles(&self) -> &ProfileChoice {
-        &self.profiles
-    }
-
-    /// The models the template allows.
-    pub fn models(&self) -> &ModelChoice {
-        &self.models
-    }
-
-    /// The account binding references.
-    pub fn accounts(&self) -> &BTreeSet<String> {
-        &self.accounts
-    }
-
-    /// The callback tools the template declares, by name: the digest of
-    /// each one's definition (`callback_definition_digest`), which the
-    /// binding seals.
-    pub fn callbacks(&self) -> &BTreeMap<String, Sha256Digest> {
-        &self.callbacks
-    }
-
-    /// The tool floor: a constant host grant.
-    pub fn floor(&self) -> &BTreeSet<String> {
-        &self.floor
-    }
-
-    /// The tool ceiling.
-    pub fn ceiling(&self) -> &BTreeSet<String> {
-        &self.ceiling
-    }
-
-    /// What a request beyond the ceiling or its creator gets.
-    pub fn excess(&self) -> ExcessMode {
-        self.excess
-    }
-
-    /// The authority fields a request may set, by key.
-    pub fn authority_fields(&self) -> &BTreeMap<String, AuthorityFieldRule> {
-        &self.authority_fields
-    }
-
-    /// The host preamble.
-    pub fn preamble(&self) -> &Preamble {
-        &self.preamble
-    }
-
-    /// Whether the host prepares an identity before its first use.
-    pub fn preparation(&self) -> PreparationMode {
-        self.preparation
-    }
-
-    /// The setup deadline of a held construction, in milliseconds.
-    pub fn construction_deadline_ms(&self) -> Option<u64> {
-        self.construction_deadline_ms
-    }
-
-    /// The kickoff rule.
-    pub fn kickoff(&self) -> KickoffRule {
-        self.kickoff
-    }
-
-    /// The namespace of created names.
-    pub fn namespace(&self) -> &str {
-        &self.namespace
-    }
-
-    /// The text limits.
-    pub fn max_bytes(&self) -> TextLimits {
-        self.max_bytes
-    }
-
-    /// Whether identities of this template may be granted creation.
-    pub fn may_grant_creation(&self) -> bool {
-        self.may_grant_creation
-    }
-}
-
 /// A validated peer rule.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PeerRule {
     id: String,
     target: Selector,
-    relation: Option<PeerRelation>,
     outcome: PeerOutcome,
     reason: Option<String>,
 }
@@ -362,11 +115,6 @@ impl PeerRule {
     /// The peers it selects.
     pub fn target(&self) -> &Selector {
         &self.target
-    }
-
-    /// The relation a peer must have, if any.
-    pub fn relation(&self) -> Option<PeerRelation> {
-        self.relation
     }
 
     /// What it gives.
@@ -399,55 +147,6 @@ impl PeerPolicy {
     }
 }
 
-/// One part of a naming pattern.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum NamePart {
-    Literal(String),
-    Namespace,
-    Slug,
-}
-
-/// The validated naming rule.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NamingPolicy {
-    pattern: Vec<NamePart>,
-    slug_min: u64,
-    slug_max: u64,
-    reserved: BTreeSet<String>,
-}
-
-/// Why a slug cannot name an identity.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SlugRefusal {
-    /// It does not follow the slug rule.
-    Invalid,
-    /// It is reserved.
-    Reserved,
-}
-
-impl NamingPolicy {
-    /// The identity name of `slug` in `namespace`, or why the slug cannot
-    /// name one.
-    pub fn name(&self, namespace: &str, slug: &str) -> Result<String, SlugRefusal> {
-        let length = slug.len() as u64;
-        if length < self.slug_min || length > self.slug_max || !is_slug(slug) {
-            return Err(SlugRefusal::Invalid);
-        }
-        if self.reserved.contains(slug) {
-            return Err(SlugRefusal::Reserved);
-        }
-        let mut name = String::new();
-        for part in &self.pattern {
-            match part {
-                NamePart::Literal(text) => name.push_str(text),
-                NamePart::Namespace => name.push_str(namespace),
-                NamePart::Slug => name.push_str(slug),
-            }
-        }
-        Ok(name)
-    }
-}
-
 /// Who approves under a validated outcome.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ApproverRule {
@@ -455,8 +154,6 @@ pub enum ApproverRule {
     Id(String),
     /// The value of this authority label of the requesting agent.
     Label(String),
-    /// The requester's own identity.
-    CreatorIdentity,
 }
 
 /// A validated approval outcome.
@@ -496,51 +193,30 @@ impl OutcomeRule {
     }
 }
 
-/// A validated selector over requesters.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct CreatorSelector {
-    kind: Option<CreatorKind>,
-    selector: Selector,
-}
-
-impl CreatorSelector {
-    /// Whether a requester of kind `kind` with this identity, profile and
-    /// authority labels matches.
-    pub fn matches(
-        &self,
-        kind: CreatorKind,
-        identity: Option<&str>,
-        profile: Option<&str>,
-        labels: &BTreeMap<String, String>,
-    ) -> bool {
-        self.kind.is_none_or(|wanted| wanted == kind)
-            && self.selector.matches(identity, profile, labels)
-    }
-}
-
 /// A validated approval rule.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApprovalRule {
     changes: BTreeSet<ChangeClass>,
-    creator: CreatorSelector,
-    templates: BTreeSet<String>,
+    requesters: BTreeSet<RequesterKind>,
+    target: Selector,
     outcome: OutcomeRule,
 }
 
 impl ApprovalRule {
-    /// Whether the rule governs `change` of `template` for this requester.
+    /// Whether the rule governs `change`, asked by a requester of kind
+    /// `requester`, of the identity `identity` of profile `profile` and with
+    /// the authority labels `labels`. Who created the identity is no input.
     pub fn governs(
         &self,
         change: ChangeClass,
-        template: &str,
-        kind: CreatorKind,
-        identity: Option<&str>,
-        profile: Option<&str>,
+        requester: RequesterKind,
+        identity: &str,
+        profile: &str,
         labels: &BTreeMap<String, String>,
     ) -> bool {
         self.changes.contains(&change)
-            && (self.templates.is_empty() || self.templates.contains(template))
-            && self.creator.matches(kind, identity, profile, labels)
+            && (self.requesters.is_empty() || self.requesters.contains(&requester))
+            && self.target.matches(Some(identity), Some(profile), labels)
     }
 
     /// The outcome it gives.
@@ -563,8 +239,8 @@ pub struct Timeouts {
     pub peers: u64,
     /// An authority field update.
     pub authority: u64,
-    /// A Rebind.
-    pub rebind: u64,
+    /// A profile change.
+    pub profile: u64,
     /// A remove.
     pub remove: u64,
     /// The largest timeout.
@@ -580,7 +256,7 @@ impl Timeouts {
             ChangeClass::Capability => self.capability,
             ChangeClass::Peers => self.peers,
             ChangeClass::Authority => self.authority,
-            ChangeClass::Rebind => self.rebind,
+            ChangeClass::Profile => self.profile,
             ChangeClass::Remove => self.remove,
         }
     }
@@ -611,39 +287,18 @@ impl ApprovalPolicy {
     }
 }
 
-/// What the console may create.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ConsoleCreation {
-    /// Console creation is off: no template is listed. The console hides
-    /// its create form, and a console create is refused.
-    Disabled,
-    /// The console may create from these templates.
-    Templates(BTreeSet<String>),
-}
-
-impl ConsoleCreation {
-    /// Whether the console may create from `template`.
-    pub fn allows(&self, template: &str) -> bool {
-        match self {
-            Self::Disabled => false,
-            Self::Templates(templates) => templates.contains(template),
-        }
-    }
-}
-
-/// A validated, enabled creation policy.
+/// A validated, enabled identity policy: one change policy for every
+/// identity, whatever its origin.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IdentityCreationPolicy {
     revision: Sha256Digest,
     reserved_labels: BTreeSet<String>,
     reserved_context: BTreeSet<String>,
-    creators: Vec<CreatorRule>,
-    limits: CreationLimits,
-    templates: BTreeMap<String, Template>,
+    authority_fields: BTreeMap<String, AuthorityFieldRule>,
+    preparation: PreparationMode,
+    construction_deadline_ms: Option<u64>,
     peers: PeerPolicy,
-    naming: NamingPolicy,
     approval: ApprovalPolicy,
-    console: ConsoleCreation,
 }
 
 impl IdentityCreationPolicy {
@@ -665,18 +320,11 @@ impl IdentityCreationPolicy {
         let revision = policy_revision(&config)?;
         let reserved_labels = keys(&config.reserved_keys.labels, "reserved_keys.labels")?;
         let reserved_context = keys(&config.reserved_keys.context, "reserved_keys.context")?;
-        let limits = limits(&config)?;
-        let mut templates = BTreeMap::new();
-        for (id, template) in &config.templates {
-            let path = format!("templates.{id}");
-            let validated = validate_template(id, template, &path, &reserved_labels)?;
-            templates.insert(id.clone(), validated);
-        }
-        let creators = creator_rules(&config.creators, &templates)?;
+        let authority_fields = authority_fields(&config.authority_fields, &reserved_labels)?;
+        let construction_deadline_ms =
+            construction_deadline(config.preparation, config.construction_deadline_ms)?;
         let peers = peer_policy(&config.peers)?;
-        let naming = naming_policy(&config.naming)?;
-        let approval = approval_policy(&config.approval, &templates)?;
-        let console = console_creation(&config.console.templates, &templates)?;
+        let approval = approval_policy(&config.approval)?;
         if !config.enabled {
             return Ok(None);
         }
@@ -684,13 +332,11 @@ impl IdentityCreationPolicy {
             revision,
             reserved_labels,
             reserved_context,
-            creators,
-            limits,
-            templates,
+            authority_fields,
+            preparation: config.preparation,
+            construction_deadline_ms,
             peers,
-            naming,
             approval,
-            console,
         }))
     }
 
@@ -715,39 +361,32 @@ impl IdentityCreationPolicy {
         self.reserved_context.contains(key)
     }
 
-    /// The creator rules.
-    pub fn creators(&self) -> &[CreatorRule] {
-        &self.creators
+    /// The authority fields a request may set on any identity, by reserved
+    /// label key.
+    pub fn authority_fields(&self) -> &BTreeMap<String, AuthorityFieldRule> {
+        &self.authority_fields
     }
 
-    /// The templates an agent of this profile, identity and authority labels
-    /// may create from: the union of every matching creator rule's.
-    pub fn creator_templates(
-        &self,
-        identity: &str,
-        profile: Option<&str>,
-        labels: &BTreeMap<String, String>,
-    ) -> BTreeSet<String> {
-        self.creators
-            .iter()
-            .filter(|rule| rule.selector.matches(Some(identity), profile, labels))
-            .flat_map(|rule| rule.templates.iter().cloned())
-            .collect()
+    /// The authority field of the label key `key`, if the policy declares
+    /// one.
+    pub fn authority_field(&self, key: &str) -> Option<&AuthorityFieldRule> {
+        self.authority_fields.get(key)
     }
 
-    /// The limits.
-    pub fn limits(&self) -> CreationLimits {
-        self.limits
+    /// Whether the host prepares a new identity before its first use.
+    pub fn preparation(&self) -> PreparationMode {
+        self.preparation
     }
 
-    /// The templates, by id.
-    pub fn templates(&self) -> &BTreeMap<String, Template> {
-        &self.templates
+    /// The setup deadline of a held construction, in milliseconds.
+    pub fn construction_deadline_ms(&self) -> Option<u64> {
+        self.construction_deadline_ms
     }
 
-    /// One template.
-    pub fn template(&self, id: &str) -> Option<&Template> {
-        self.templates.get(id)
+    /// Whether the policy's preparation holds a construction, which needs a
+    /// native host composition.
+    pub fn needs_native_host(&self) -> bool {
+        self.preparation == PreparationMode::Constructed
     }
 
     /// The peer rules.
@@ -755,48 +394,9 @@ impl IdentityCreationPolicy {
         &self.peers
     }
 
-    /// The naming rule.
-    pub fn naming(&self) -> &NamingPolicy {
-        &self.naming
-    }
-
     /// The approval rules.
     pub fn approval(&self) -> &ApprovalPolicy {
         &self.approval
-    }
-
-    /// What the console may create.
-    pub fn console(&self) -> &ConsoleCreation {
-        &self.console
-    }
-
-    /// Check the policy against the profiles of the mob definition: every
-    /// profile a template lists must exist.
-    pub fn check_mob_profiles(&self, profiles: &BTreeSet<String>) -> Result<(), PolicyRefusal> {
-        for (id, template) in &self.templates {
-            if let ProfileChoice::Listed(listed) = &template.profiles {
-                for (index, profile) in listed.iter().enumerate() {
-                    if !profiles.contains(profile) {
-                        return Err(PolicyRefusal::new(
-                            format!("templates.{id}.profiles[{index}]"),
-                            PolicyRefusalKind::UnknownProfile {
-                                profile: profile.clone(),
-                            },
-                        ));
-                    }
-                }
-            }
-        }
-        Ok(())
-    }
-
-    /// The first template whose preparation needs a native host
-    /// composition, if any.
-    pub fn template_needing_native_host(&self) -> Option<&str> {
-        self.templates
-            .values()
-            .find(|template| template.preparation == PreparationMode::Constructed)
-            .map(Template::id)
     }
 }
 
@@ -823,16 +423,16 @@ impl RuntimeOptionPolicy {
 }
 
 /// The policy a launch uses: the native host's Rust form, or
-/// `runtime_options.identity_creation`, never both; checked against the mob
-/// definition's profiles. `host_policy` is the host's answer, `None` when
-/// the launch has no native host composition. Created identities are
-/// durable, so a launch without persistence (`persistent: false`) refuses a
-/// policy from either source, a disabled option included: it is never
-/// ignored.
+/// `runtime_options.identity_creation`, never both. `host_policy` is the
+/// host's answer, `None` when the launch has no native host composition.
+/// The identity records and decisions a policy governs are durable, so a
+/// launch without persistence (`persistent: false`) refuses a policy from
+/// either source, a disabled option included: it is never ignored. A
+/// `constructed` preparation holds a construction, which needs a native
+/// host composition.
 pub fn resolve_launch_policy(
     host_policy: Option<Result<Option<IdentityCreationPolicy>, PolicyRefusal>>,
     option: RuntimeOptionPolicy,
-    profiles: &BTreeSet<String>,
     persistent: bool,
 ) -> Result<Option<Arc<IdentityCreationPolicy>>, PolicyRefusal> {
     let has_native_host = host_policy.is_some();
@@ -855,13 +455,10 @@ pub fn resolve_launch_policy(
         (None, RuntimeOptionPolicy::Enabled(policy)) => *policy,
         (None, RuntimeOptionPolicy::Disabled) => return Ok(None),
     };
-    policy.check_mob_profiles(profiles)?;
-    if !has_native_host && let Some(template) = policy.template_needing_native_host() {
+    if !has_native_host && policy.needs_native_host() {
         return Err(PolicyRefusal::new(
-            format!("templates.{template}.preparation"),
-            PolicyRefusalKind::NeedsNativeHost {
-                template: template.to_owned(),
-            },
+            "preparation",
+            PolicyRefusalKind::NeedsNativeHost,
         ));
     }
     Ok(Some(Arc::new(policy)))
@@ -869,27 +466,24 @@ pub fn resolve_launch_policy(
 
 /// Where in `value` the policy's shape breaks, and the parser's detail
 /// there: the policy object itself for an unknown member, else the member,
-/// the template or its tools, limits or authority field, or the rule list
-/// item that does not parse.
+/// the authority field, or the rule list item that does not parse.
 fn locate_malformed(value: &Value) -> Option<(String, String)> {
     let object = value.as_object()?;
     for (key, member) in object {
         let found = match key.as_str() {
             "enabled" => shape_error::<bool>(member, key),
             "reserved_keys" => shape_error::<ReservedKeysConfig>(member, key),
-            "creators" => list_shape_error::<CreatorRuleConfig>(member, key),
-            "limits" => shape_error::<LimitsConfig>(member, key),
-            "templates" => templates_shape_error(member),
+            "authority_fields" => authority_fields_shape_error(member),
+            "preparation" => shape_error::<PreparationMode>(member, key),
+            "construction_deadline_ms" => shape_error::<Option<u64>>(member, key),
             "peers" => member
                 .get("rules")
                 .and_then(|rules| list_shape_error::<PeerRuleConfig>(rules, "peers.rules"))
                 .or_else(|| shape_error::<PeersConfig>(member, key)),
-            "naming" => shape_error::<NamingConfig>(member, key),
             "approval" => member
                 .get("rules")
                 .and_then(|rules| list_shape_error::<ApprovalRuleConfig>(rules, "approval.rules"))
                 .or_else(|| shape_error::<ApprovalConfig>(member, key)),
-            "console" => shape_error::<ConsoleConfig>(member, key),
             _ => Some((String::new(), format!("unknown field `{key}`"))),
         };
         if found.is_some() {
@@ -919,41 +513,18 @@ fn list_shape_error<T: DeserializeOwned>(value: &Value, path: &str) -> Option<(S
         .or_else(|| shape_error::<Vec<T>>(value, path))
 }
 
-/// The first template of `value` that does not parse, at its profiles, its
-/// models, its tools, its limits, an authority field or itself; else the
-/// map.
-fn templates_shape_error(value: &Value) -> Option<(String, String)> {
-    let Some(templates) = value.as_object() else {
-        return shape_error::<BTreeMap<String, TemplateConfig>>(value, "templates");
-    };
-    for (id, template) in templates {
-        let path = format!("templates.{id}");
-        let inner = template.as_object().and_then(|members| {
-            members.iter().find_map(|(key, member)| {
-                let member_path = format!("{path}.{key}");
-                match key.as_str() {
-                    "profiles" => shape_error::<ProfilesConfig>(member, &member_path),
-                    "models" => shape_error::<ModelsConfig>(member, &member_path),
-                    "tools" => shape_error::<ToolBoundsConfig>(member, &member_path),
-                    "max_bytes" => shape_error::<MaxBytesConfig>(member, &member_path),
-                    "authority_fields" => member.as_object().and_then(|fields| {
-                        fields.iter().find_map(|(field, rule)| {
-                            shape_error::<AuthorityFieldConfig>(
-                                rule,
-                                &format!("{member_path}.{field}"),
-                            )
-                        })
-                    }),
-                    _ => None,
-                }
+/// The first authority field of `value` that does not parse, else the map.
+fn authority_fields_shape_error(value: &Value) -> Option<(String, String)> {
+    value
+        .as_object()
+        .and_then(|fields| {
+            fields.iter().find_map(|(key, field)| {
+                shape_error::<AuthorityFieldConfig>(field, &format!("authority_fields.{key}"))
             })
-        });
-        let found = inner.or_else(|| shape_error::<TemplateConfig>(template, &path));
-        if found.is_some() {
-            return found;
-        }
-    }
-    shape_error::<BTreeMap<String, TemplateConfig>>(value, "templates")
+        })
+        .or_else(|| {
+            shape_error::<BTreeMap<String, AuthorityFieldConfig>>(value, "authority_fields")
+        })
 }
 
 fn policy_revision(config: &IdentityCreationConfig) -> Result<Sha256Digest, PolicyRefusal> {
@@ -983,18 +554,7 @@ fn invalid(path: impl Into<String>, value: &str) -> PolicyRefusal {
     )
 }
 
-fn too_long(path: impl Into<String>, length: usize, max: usize) -> PolicyRefusal {
-    refusal(
-        path,
-        PolicyRefusalKind::OutOfRange {
-            value: length as u64,
-            min: 0,
-            max: max as u64,
-        },
-    )
-}
-
-/// `[A-Za-z0-9][A-Za-z0-9_.:-]*`, at most 64 bytes: rule and template ids.
+/// `[A-Za-z0-9][A-Za-z0-9_.:-]*`, at most 64 bytes: rule ids.
 fn is_id(value: &str) -> bool {
     is_ascii_word(value, ID_MAX_BYTES, |byte| {
         byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b':' | b'-')
@@ -1009,20 +569,6 @@ pub(crate) fn is_key(value: &str) -> bool {
     })
 }
 
-/// `[A-Za-z0-9_.:/-]`, at most 128 bytes, starting with a letter, digit or
-/// underscore: tool names.
-pub(crate) fn is_tool_name(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= TOOL_NAME_MAX_BYTES
-        && value.bytes().all(|byte| {
-            byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b':' | b'/' | b'-')
-        })
-        && value
-            .bytes()
-            .next()
-            .is_some_and(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
-}
-
 fn is_ascii_word(value: &str, max: usize, allowed: impl Fn(u8) -> bool) -> bool {
     !value.is_empty()
         && value.len() <= max
@@ -1033,8 +579,8 @@ fn is_ascii_word(value: &str, max: usize, allowed: impl Fn(u8) -> bool) -> bool 
             .is_some_and(|byte| byte.is_ascii_alphanumeric())
 }
 
-/// A name of something outside the policy (a profile, a model, an
-/// identity): no control character or whitespace, at most `max` bytes.
+/// A name of something outside the policy (a profile, an identity, an
+/// approver): no control character or whitespace, at most `max` bytes.
 fn is_plain_name(value: &str, max: usize) -> bool {
     !value.is_empty()
         && value.len() <= max
@@ -1046,18 +592,6 @@ fn is_plain_name(value: &str, max: usize) -> bool {
 /// A free reference: no control character, at most `max` bytes.
 fn is_reference(value: &str, max: usize) -> bool {
     !value.is_empty() && value.len() <= max && !value.chars().any(char::is_control)
-}
-
-/// `[a-z][a-z0-9-]*`: the slug alphabet.
-pub(crate) fn is_slug(value: &str) -> bool {
-    let mut bytes = value.bytes();
-    bytes.next().is_some_and(|byte| byte.is_ascii_lowercase())
-        && bytes.all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
-}
-
-/// `[a-z][a-z0-9-]*`, at most 32 bytes: namespaces.
-fn is_namespace(value: &str) -> bool {
-    value.len() <= NAMESPACE_MAX_BYTES && is_slug(value)
 }
 
 /// The set of `values`, each checked by `valid`, with no duplicate.
@@ -1083,328 +617,106 @@ fn unique_set(
     Ok(set)
 }
 
-/// `values` in order, each checked by `valid`, with no duplicate; never
-/// empty.
-fn unique_list(
-    values: &[String],
+/// The set of the keywords `values`; a repeat is refused `duplicate` at
+/// `path`, named by its token.
+fn unique_keywords<T: Copy + Ord>(
+    values: &[T],
     path: &str,
-    valid: impl Fn(&str) -> bool,
-) -> Result<Vec<String>, PolicyRefusal> {
-    if values.is_empty() {
-        return Err(refusal(path, PolicyRefusalKind::Empty));
+    token: impl Fn(T) -> &'static str,
+) -> Result<BTreeSet<T>, PolicyRefusal> {
+    let mut set = BTreeSet::new();
+    for value in values {
+        if !set.insert(*value) {
+            return Err(refusal(
+                path,
+                PolicyRefusalKind::Duplicate {
+                    value: token(*value).to_owned(),
+                },
+            ));
+        }
     }
-    unique_set(values, path, valid)?;
-    Ok(values.to_vec())
+    Ok(set)
 }
 
 fn keys(values: &[String], path: &str) -> Result<BTreeSet<String>, PolicyRefusal> {
     unique_set(values, path, is_key)
 }
 
-fn limits(config: &IdentityCreationConfig) -> Result<CreationLimits, PolicyRefusal> {
-    let limits = &config.limits;
-    if limits.batch > CORE_BATCH_MAX {
-        return Err(refusal(
-            "limits.batch",
-            PolicyRefusalKind::OutOfRange {
-                value: limits.batch,
-                min: 0,
-                max: CORE_BATCH_MAX,
-            },
-        ));
-    }
-    Ok(CreationLimits {
-        total: Limit(limits.total),
-        per_creator: Limit(limits.per_creator),
-        peers_per_identity: Limit(limits.peers_per_identity),
-        batch: Limit(limits.batch),
-        open_decisions_per_creator: Limit(limits.open_decisions_per_creator),
-    })
-}
-
-fn validate_template(
-    id: &str,
-    config: &TemplateConfig,
-    path: &str,
+/// The authority fields, each on a reserved label key the host declares,
+/// with a non-empty list of values.
+fn authority_fields(
+    config: &BTreeMap<String, AuthorityFieldConfig>,
     reserved_labels: &BTreeSet<String>,
-) -> Result<Template, PolicyRefusal> {
-    if !is_id(id) {
-        return Err(invalid(path, id));
-    }
-    if let Some(title) = &config.title
-        && title.len() > TITLE_MAX_BYTES
-    {
-        return Err(too_long(
-            format!("{path}.title"),
-            title.len(),
-            TITLE_MAX_BYTES,
-        ));
-    }
-    if let Some(description) = &config.description
-        && description.len() > DESCRIPTION_MAX_BYTES
-    {
-        return Err(too_long(
-            format!("{path}.description"),
-            description.len(),
-            DESCRIPTION_MAX_BYTES,
-        ));
-    }
-    if let Some(version) = &config.version
-        && !is_plain_name(version, TOOL_NAME_MAX_BYTES)
-    {
-        return Err(invalid(format!("{path}.version"), version));
-    }
-    let profiles = match &config.profiles {
-        ProfilesConfig::Any => ProfileChoice::Any,
-        ProfilesConfig::Listed(names) => {
-            ProfileChoice::Listed(unique_list(names, &format!("{path}.profiles"), |name| {
-                is_plain_name(name, NAME_MAX_BYTES)
-            })?)
-        }
-    };
-    let models = match &config.models {
-        ModelsConfig::ProfileModel => ModelChoice::ProfileModel,
-        ModelsConfig::Listed(names) => {
-            ModelChoice::Listed(unique_list(names, &format!("{path}.models"), |name| {
-                is_plain_name(name, NAME_MAX_BYTES)
-            })?)
-        }
-    };
-    let accounts = unique_set(&config.accounts, &format!("{path}.accounts"), |account| {
-        is_reference(account, REFERENCE_MAX_BYTES)
-    })?;
-    let callbacks = template_callbacks(&config.callbacks, &format!("{path}.callbacks"))?;
-    let floor = unique_set(
-        &config.tools.floor,
-        &format!("{path}.tools.floor"),
-        is_tool_name,
-    )?;
-    let ceiling = unique_set(
-        &config.tools.ceiling,
-        &format!("{path}.tools.ceiling"),
-        is_tool_name,
-    )?;
-    if let Some(tool) = floor.difference(&ceiling).next() {
-        return Err(refusal(
-            format!("{path}.tools.floor"),
-            PolicyRefusalKind::FloorOutsideCeiling { tool: tool.clone() },
-        ));
-    }
-    if !config.may_grant_creation
-        && let Some(tool) = ceiling
-            .iter()
-            .find(|tool| CREATION_TOOLS.contains(&tool.as_str()))
-    {
-        return Err(refusal(
-            format!("{path}.tools.ceiling"),
-            PolicyRefusalKind::CreationToolWithoutGrant { tool: tool.clone() },
-        ));
-    }
-    let mut authority_fields = BTreeMap::new();
-    for (key, field) in &config.authority_fields {
-        let field_path = format!("{path}.authority_fields.{key}");
+) -> Result<BTreeMap<String, AuthorityFieldRule>, PolicyRefusal> {
+    let mut fields = BTreeMap::new();
+    for (key, field) in config {
+        let path = format!("authority_fields.{key}");
         if !reserved_labels.contains(key) {
             return Err(refusal(
-                field_path,
+                path,
                 PolicyRefusalKind::AuthorityFieldNotReserved { key: key.clone() },
             ));
         }
         if field.schema.is_some() {
             return Err(refusal(
-                format!("{field_path}.schema"),
+                format!("{path}.schema"),
                 PolicyRefusalKind::Unsupported {
                     feature: "an authority field schema".to_owned(),
                 },
             ));
         }
-        let Some(values) = &field.values else {
-            return Err(refusal(
-                format!("{field_path}.values"),
-                PolicyRefusalKind::Empty,
-            ));
+        let values = match &field.values {
+            Some(values) if !values.is_empty() => values,
+            Some(_) | None => {
+                return Err(refusal(format!("{path}.values"), PolicyRefusalKind::Empty));
+            }
         };
-        if values.is_empty() {
-            return Err(refusal(
-                format!("{field_path}.values"),
-                PolicyRefusalKind::Empty,
-            ));
-        }
-        let values = unique_set(values, &format!("{field_path}.values"), |value| {
+        let values = unique_set(values, &format!("{path}.values"), |value| {
             is_reference(value, AUTHORITY_VALUE_MAX_BYTES)
         })?;
-        authority_fields.insert(key.clone(), AuthorityFieldRule { values });
+        fields.insert(key.clone(), AuthorityFieldRule { values });
     }
-    if config.preamble.len() > PREAMBLE_MAX_BYTES {
-        return Err(too_long(
-            format!("{path}.preamble"),
-            config.preamble.len(),
-            PREAMBLE_MAX_BYTES,
-        ));
-    }
-    let preamble = Preamble::parse(&config.preamble).map_err(|placeholder| {
-        refusal(
-            format!("{path}.preamble"),
-            PolicyRefusalKind::InvalidPlaceholder { placeholder },
-        )
-    })?;
-    let construction_deadline_ms = match (config.preparation, config.construction_deadline_ms) {
+    Ok(fields)
+}
+
+/// The setup deadline of a held construction: given, and in range, exactly
+/// when the preparation is `constructed`.
+fn construction_deadline(
+    preparation: PreparationMode,
+    deadline: Option<u64>,
+) -> Result<Option<u64>, PolicyRefusal> {
+    const PATH: &str = "construction_deadline_ms";
+    match (preparation, deadline) {
         (PreparationMode::Constructed, Some(deadline))
             if (CONSTRUCTION_DEADLINE_MIN_MS..=CONSTRUCTION_DEADLINE_MAX_MS)
                 .contains(&deadline) =>
         {
-            Some(deadline)
+            Ok(Some(deadline))
         }
-        (PreparationMode::Constructed, Some(deadline)) => {
-            return Err(refusal(
-                format!("{path}.construction_deadline_ms"),
-                PolicyRefusalKind::OutOfRange {
-                    value: deadline,
-                    min: CONSTRUCTION_DEADLINE_MIN_MS,
-                    max: CONSTRUCTION_DEADLINE_MAX_MS,
-                },
-            ));
-        }
-        (PreparationMode::Constructed, None) => {
-            return Err(refusal(
-                format!("{path}.construction_deadline_ms"),
-                PolicyRefusalKind::Empty,
-            ));
-        }
+        (PreparationMode::Constructed, Some(deadline)) => Err(refusal(
+            PATH,
+            PolicyRefusalKind::OutOfRange {
+                value: deadline,
+                min: CONSTRUCTION_DEADLINE_MIN_MS,
+                max: CONSTRUCTION_DEADLINE_MAX_MS,
+            },
+        )),
+        (PreparationMode::Constructed, None) => Err(refusal(PATH, PolicyRefusalKind::Empty)),
         (PreparationMode::None | PreparationMode::Required, Some(deadline)) => {
-            return Err(invalid(
-                format!("{path}.construction_deadline_ms"),
-                &deadline.to_string(),
-            ));
+            Err(invalid(PATH, &deadline.to_string()))
         }
-        (PreparationMode::None | PreparationMode::Required, None) => None,
-    };
-    if !is_namespace(&config.namespace) {
-        return Err(invalid(format!("{path}.namespace"), &config.namespace));
+        (PreparationMode::None | PreparationMode::Required, None) => Ok(None),
     }
-    let max_bytes = text_limits(&config.max_bytes, &format!("{path}.max_bytes"))?;
-    Ok(Template {
-        id: id.to_owned(),
-        title: config.title.clone(),
-        description: config.description.clone(),
-        version: config.version.clone(),
-        profiles,
-        models,
-        accounts,
-        callbacks,
-        floor,
-        ceiling,
-        excess: config.excess,
-        authority_fields,
-        preamble,
-        preparation: config.preparation,
-        construction_deadline_ms,
-        kickoff: config.kickoff,
-        namespace: config.namespace.clone(),
-        max_bytes,
-        may_grant_creation: config.may_grant_creation,
-    })
-}
-
-/// The callback tools a template declares, in the shape a host's
-/// `callback/build_agent` answer gives them, parsed by the gateway's own
-/// reader of that shape. Only the members the binding seals (name,
-/// description, input schema) are declared here: how a host runs a handler
-/// (`execution`, `artifact`) is a build's, not the template's.
-fn template_callbacks(
-    declared: &[Value],
-    path: &str,
-) -> Result<BTreeMap<String, Sha256Digest>, PolicyRefusal> {
-    let mut callbacks = BTreeMap::new();
-    for (index, value) in declared.iter().enumerate() {
-        let item = format!("{path}[{index}]");
-        if let Some(object) = value.as_object()
-            && let Some(key) = object
-                .keys()
-                .find(|key| !matches!(key.as_str(), "name" | "description" | "input_schema"))
-        {
-            let kind = if matches!(key.as_str(), "execution" | "artifact") {
-                PolicyRefusalKind::Unsupported {
-                    feature: format!("a callback tool's {key} in a template"),
-                }
-            } else {
-                PolicyRefusalKind::Malformed {
-                    detail: format!("unknown field `{key}`"),
-                }
-            };
-            return Err(refusal(format!("{item}.{key}"), kind));
-        }
-        let spec = crate::rpc_gateway::CallbackToolSpec::parse(value)
-            .map_err(|detail| refusal(item.clone(), PolicyRefusalKind::Malformed { detail }))?;
-        if !is_tool_name(spec.name()) {
-            return Err(invalid(format!("{item}.name"), spec.name()));
-        }
-        if let Some(description) = spec.description()
-            && description.len() > DESCRIPTION_MAX_BYTES
-        {
-            return Err(too_long(
-                format!("{item}.description"),
-                description.len(),
-                DESCRIPTION_MAX_BYTES,
-            ));
-        }
-        let digest =
-            callback_definition_digest(spec.name(), spec.description(), spec.input_schema());
-        if callbacks.insert(spec.name().to_owned(), digest).is_some() {
-            return Err(refusal(
-                item,
-                PolicyRefusalKind::Duplicate {
-                    value: spec.name().to_owned(),
-                },
-            ));
-        }
-    }
-    Ok(callbacks)
-}
-
-fn text_limits(config: &MaxBytesConfig, path: &str) -> Result<TextLimits, PolicyRefusal> {
-    let max = RENDERING_MAX_BYTES as u64;
-    for (name, value) in [
-        ("display_name", config.display_name),
-        ("purpose", config.purpose),
-        ("instructions", config.instructions),
-        ("kickoff", config.kickoff),
-        ("supplied_context", config.supplied_context),
-        ("descriptive_labels", config.descriptive_labels),
-    ] {
-        if !(1..=max).contains(&value) {
-            return Err(refusal(
-                format!("{path}.{name}"),
-                PolicyRefusalKind::OutOfRange { value, min: 1, max },
-            ));
-        }
-    }
-    Ok(TextLimits {
-        display_name: config.display_name,
-        purpose: config.purpose,
-        instructions: config.instructions,
-        kickoff: config.kickoff,
-        supplied_context: config.supplied_context,
-        descriptive_labels: config.descriptive_labels,
-    })
 }
 
 fn selector(config: &SelectorConfig, path: &str) -> Result<Selector, PolicyRefusal> {
-    selector_parts(&config.identity, &config.profile, &config.labels, path)
-}
-
-fn selector_parts(
-    identity: &[String],
-    profile: &[String],
-    labels: &BTreeMap<String, String>,
-    path: &str,
-) -> Result<Selector, PolicyRefusal> {
-    let identity = unique_set(identity, &format!("{path}.identity"), |name| {
+    let identity = unique_set(&config.identity, &format!("{path}.identity"), |name| {
         is_plain_name(name, NAME_MAX_BYTES)
     })?;
-    let profile = unique_set(profile, &format!("{path}.profile"), |name| {
+    let profile = unique_set(&config.profile, &format!("{path}.profile"), |name| {
         is_plain_name(name, NAME_MAX_BYTES)
     })?;
-    for (key, value) in labels {
+    for (key, value) in &config.labels {
         if !is_key(key) {
             return Err(invalid(format!("{path}.labels"), key));
         }
@@ -1415,65 +727,8 @@ fn selector_parts(
     Ok(Selector {
         identity,
         profile,
-        labels: labels.clone(),
+        labels: config.labels.clone(),
     })
-}
-
-fn known_templates(
-    names: &[String],
-    path: &str,
-    templates: &BTreeMap<String, Template>,
-) -> Result<BTreeSet<String>, PolicyRefusal> {
-    let set = unique_set(names, path, |_| true)?;
-    if let Some((index, unknown)) = names
-        .iter()
-        .enumerate()
-        .find(|(_, name)| !templates.contains_key(name.as_str()))
-    {
-        return Err(refusal(
-            format!("{path}[{index}]"),
-            PolicyRefusalKind::UnknownTemplate {
-                template: unknown.clone(),
-            },
-        ));
-    }
-    Ok(set)
-}
-
-fn creator_rules(
-    rules: &[CreatorRuleConfig],
-    templates: &BTreeMap<String, Template>,
-) -> Result<Vec<CreatorRule>, PolicyRefusal> {
-    let mut ids = BTreeSet::new();
-    let mut validated = Vec::with_capacity(rules.len());
-    for (index, rule) in rules.iter().enumerate() {
-        let path = format!("creators[{index}]");
-        if !is_id(&rule.id) {
-            return Err(invalid(format!("{path}.id"), &rule.id));
-        }
-        if !ids.insert(rule.id.clone()) {
-            return Err(refusal(
-                format!("{path}.id"),
-                PolicyRefusalKind::Duplicate {
-                    value: rule.id.clone(),
-                },
-            ));
-        }
-        let selector = selector_parts(&rule.identity, &rule.profile, &rule.labels, &path)?;
-        if rule.templates.is_empty() {
-            return Err(refusal(
-                format!("{path}.templates"),
-                PolicyRefusalKind::Empty,
-            ));
-        }
-        let allowed = known_templates(&rule.templates, &format!("{path}.templates"), templates)?;
-        validated.push(CreatorRule {
-            id: rule.id.clone(),
-            selector,
-            templates: allowed,
-        });
-    }
-    Ok(validated)
 }
 
 fn peer_policy(config: &PeersConfig) -> Result<PeerPolicy, PolicyRefusal> {
@@ -1508,7 +763,6 @@ fn peer_policy(config: &PeersConfig) -> Result<PeerPolicy, PolicyRefusal> {
         rules.push(PeerRule {
             id: rule.id.clone(),
             target: selector(&rule.target, &format!("{path}.target"))?,
-            relation: rule.relation,
             outcome: rule.outcome,
             reason: rule.reason.clone(),
         });
@@ -1519,94 +773,7 @@ fn peer_policy(config: &PeersConfig) -> Result<PeerPolicy, PolicyRefusal> {
     })
 }
 
-const SLUG_PLACEHOLDER: &str = "slug";
-const NAMESPACE_PLACEHOLDER: &str = "namespace";
-
-fn naming_policy(config: &NamingConfig) -> Result<NamingPolicy, PolicyRefusal> {
-    let pattern =
-        name_pattern(&config.pattern).ok_or_else(|| invalid("naming.pattern", &config.pattern))?;
-    let slug = &config.slug;
-    if !(1..=SLUG_MAX_BYTES).contains(&slug.min_bytes) {
-        return Err(refusal(
-            "naming.slug.min_bytes",
-            PolicyRefusalKind::OutOfRange {
-                value: slug.min_bytes,
-                min: 1,
-                max: SLUG_MAX_BYTES,
-            },
-        ));
-    }
-    if !(slug.min_bytes..=SLUG_MAX_BYTES).contains(&slug.max_bytes) {
-        return Err(refusal(
-            "naming.slug.max_bytes",
-            PolicyRefusalKind::OutOfRange {
-                value: slug.max_bytes,
-                min: slug.min_bytes,
-                max: SLUG_MAX_BYTES,
-            },
-        ));
-    }
-    let reserved = unique_set(&config.reserved, "naming.reserved", is_slug)?;
-    Ok(NamingPolicy {
-        pattern,
-        slug_min: slug.min_bytes,
-        slug_max: slug.max_bytes,
-        reserved,
-    })
-}
-
-/// The parts of a naming pattern: `{slug}` once, `{namespace}` at most
-/// once, literal text in `[a-z0-9:._-]`, starting with a placeholder or a
-/// lowercase letter or digit. `None` for any other pattern.
-fn name_pattern(pattern: &str) -> Option<Vec<NamePart>> {
-    let mut parts = Vec::new();
-    let mut rest = pattern;
-    let mut slugs = 0_u32;
-    let mut namespaces = 0_u32;
-    while !rest.is_empty() {
-        if let Some(after) = rest.strip_prefix('{') {
-            let close = after.find('}')?;
-            let name = after.get(..close)?;
-            if name == SLUG_PLACEHOLDER {
-                slugs += 1;
-                parts.push(NamePart::Slug);
-            } else if name == NAMESPACE_PLACEHOLDER {
-                namespaces += 1;
-                parts.push(NamePart::Namespace);
-            } else {
-                return None;
-            }
-            rest = after.get(close + 1..)?;
-        } else {
-            let end = rest.find('{').unwrap_or(rest.len());
-            let literal = rest.get(..end)?;
-            let allowed = literal.bytes().all(|byte| {
-                byte.is_ascii_lowercase()
-                    || byte.is_ascii_digit()
-                    || matches!(byte, b':' | b'.' | b'_' | b'-')
-            });
-            if !allowed {
-                return None;
-            }
-            parts.push(NamePart::Literal(literal.to_owned()));
-            rest = rest.get(end..)?;
-        }
-    }
-    let starts_well = match parts.first() {
-        Some(NamePart::Literal(literal)) => literal
-            .bytes()
-            .next()
-            .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit()),
-        Some(NamePart::Namespace | NamePart::Slug) => true,
-        None => false,
-    };
-    (starts_well && slugs == 1 && namespaces <= 1).then_some(parts)
-}
-
-fn approval_policy(
-    config: &ApprovalConfig,
-    templates: &BTreeMap<String, Template>,
-) -> Result<ApprovalPolicy, PolicyRefusal> {
+fn approval_policy(config: &ApprovalConfig) -> Result<ApprovalPolicy, PolicyRefusal> {
     let timeouts = timeouts(&config.timeouts_ms)?;
     let mut rules = Vec::with_capacity(config.rules.len());
     for (index, rule) in config.rules.iter().enumerate() {
@@ -1614,17 +781,12 @@ fn approval_policy(
         if rule.change.is_empty() {
             return Err(refusal(format!("{path}.change"), PolicyRefusalKind::Empty));
         }
-        let mut changes = BTreeSet::new();
-        for change in &rule.change {
-            if !changes.insert(*change) {
-                return Err(refusal(
-                    format!("{path}.change"),
-                    PolicyRefusalKind::Duplicate {
-                        value: change.token().to_owned(),
-                    },
-                ));
-            }
-        }
+        let changes = unique_keywords(&rule.change, &format!("{path}.change"), ChangeClass::token)?;
+        let requesters = unique_keywords(
+            &rule.requester,
+            &format!("{path}.requester"),
+            RequesterKind::token,
+        )?;
         let outcome = outcome_rule(&rule.outcome, &format!("{path}.outcome"), &timeouts)?;
         if changes.contains(&ChangeClass::Authority)
             && matches!(
@@ -1639,8 +801,8 @@ fn approval_policy(
         }
         rules.push(ApprovalRule {
             changes,
-            creator: creator_selector(&rule.creator, &format!("{path}.creator"))?,
-            templates: known_templates(&rule.template, &format!("{path}.template"), templates)?,
+            requesters,
+            target: selector(&rule.target, &format!("{path}.target"))?,
             outcome,
         });
     }
@@ -1649,16 +811,6 @@ fn approval_policy(
         rules,
         default,
         timeouts,
-    })
-}
-
-fn creator_selector(
-    config: &CreatorSelectorConfig,
-    path: &str,
-) -> Result<CreatorSelector, PolicyRefusal> {
-    Ok(CreatorSelector {
-        kind: config.kind,
-        selector: selector_parts(&config.identity, &config.profile, &config.labels, path)?,
     })
 }
 
@@ -1747,15 +899,12 @@ fn outcome_rule(
 }
 
 fn approver_rule(config: &ApproverConfig, path: &str) -> Result<ApproverRule, PolicyRefusal> {
-    match (&config.id, &config.label, config.creator_identity) {
-        (Some(id), None, None) if is_plain_name(id, NAME_MAX_BYTES) => {
-            Ok(ApproverRule::Id(id.clone()))
-        }
-        (Some(id), None, None) => Err(invalid(format!("{path}.id"), id)),
-        (None, Some(label), None) if is_key(label) => Ok(ApproverRule::Label(label.clone())),
-        (None, Some(label), None) => Err(invalid(format!("{path}.label"), label)),
-        (None, None, Some(true)) => Ok(ApproverRule::CreatorIdentity),
-        _ => Err(refusal(path, PolicyRefusalKind::InvalidApprover)),
+    match (&config.id, &config.label) {
+        (Some(id), None) if is_plain_name(id, NAME_MAX_BYTES) => Ok(ApproverRule::Id(id.clone())),
+        (Some(id), None) => Err(invalid(format!("{path}.id"), id)),
+        (None, Some(label)) if is_key(label) => Ok(ApproverRule::Label(label.clone())),
+        (None, Some(label)) => Err(invalid(format!("{path}.label"), label)),
+        (Some(_), Some(_)) | (None, None) => Err(refusal(path, PolicyRefusalKind::InvalidApprover)),
     }
 }
 
@@ -1776,7 +925,7 @@ fn timeouts(config: &TimeoutsConfig) -> Result<Timeouts, PolicyRefusal> {
         ("capability", config.capability),
         ("peers", config.peers),
         ("authority", config.authority),
-        ("rebind", config.rebind),
+        ("profile", config.profile),
         ("remove", config.remove),
     ] {
         if !(1..=config.max).contains(&value) {
@@ -1796,20 +945,8 @@ fn timeouts(config: &TimeoutsConfig) -> Result<Timeouts, PolicyRefusal> {
         capability: config.capability,
         peers: config.peers,
         authority: config.authority,
-        rebind: config.rebind,
+        profile: config.profile,
         remove: config.remove,
         max: config.max,
-    })
-}
-
-fn console_creation(
-    names: &[String],
-    templates: &BTreeMap<String, Template>,
-) -> Result<ConsoleCreation, PolicyRefusal> {
-    let templates = known_templates(names, "console.templates", templates)?;
-    Ok(if templates.is_empty() {
-        ConsoleCreation::Disabled
-    } else {
-        ConsoleCreation::Templates(templates)
     })
 }

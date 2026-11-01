@@ -1,27 +1,32 @@
-//! Created identities: the host's creation policy, its templates, the
-//! canonical rendering of a request and its structured presentation.
+//! Identity requests under the host's identity policy: one change policy
+//! for every identity, the canonical rendering of a request and its
+//! structured presentation.
 //!
-//! A host lets agents, itself or its console create durable identities from
-//! templates it declares, through `runtime_options.identity_creation` or
-//! the Rust form a native host composition returns
-//! (`GatewayHostComposition::identity_creation_policy`). This module is the
-//! pure policy layer of that capability:
+//! A host lets agents, itself or its console ask for changes of durable
+//! identities: to create one, update one or remove one. An identity a
+//! request creates is declared with the spec a host's roster declares an
+//! identity with (`DurableAgentSpec`), binds its profile directly, and
+//! differs from a declared identity in nothing: the requester is recorded,
+//! and grants no authority. The policy comes from
+//! `runtime_options.identity_creation`, or the Rust form a native host
+//! composition returns (`GatewayHostComposition::identity_creation_policy`).
+//! This module is the pure policy layer of that capability:
 //!
 //! - the policy: parsing and validation, refused typed (`PolicyRefusal`),
 //!   and which source a launch uses (`resolve_launch_policy`);
-//! - templates: the binding an identity seals and its digest, the tool
-//!   policy a template derives, and its preamble;
 //! - requests: normalization of a create, update or remove against the
 //!   policy, refused with the closed vocabulary (`IdentityRefusal`), and the
-//!   approval plan of the normalized request;
+//!   approval plan of the normalized request, whose rules select by the
+//!   change, the requester's kind, and the target's profile and authority
+//!   labels;
 //! - `render_v1`: the one canonical, complete plain-text rendering whose
 //!   sha256 is the decision's subject digest, with the host's consequence
 //!   lines in their own section, and its canonical parts;
 //! - the structured card, parsed from the rendering.
 //!
 //! The executor over the durable decision owner, the decision ingresses,
-//! the host RPC family, preparation delivery, the per-call tool bound and
-//! the agent tools build on this module; none of them is here.
+//! the host RPC family, preparation delivery and the agent tools build on
+//! this module; none of them is here.
 
 mod approval;
 mod config;
@@ -34,19 +39,16 @@ mod presentation;
 mod refusal;
 mod render;
 mod request;
-mod template;
 
 #[cfg(test)]
 mod tests;
 
-pub use approval::{ApprovalPlan, PlanRequest, PlannedOutcome, plan_approval};
+pub use approval::{ApprovalPlan, PlanRequest, PlanTarget, PlannedOutcome, plan_approval};
 pub use config::{
     ApprovalConfig, ApprovalKind, ApprovalOutcomeConfig, ApprovalRuleConfig, ApproverConfig,
-    AuthorityFieldConfig, ChangeClass, ConsoleConfig, CreatorKind, CreatorRuleConfig,
-    CreatorSelectorConfig, DEFAULT_NAME_PATTERN, ExcessMode, IdentityCreationConfig, KickoffRule,
-    LimitsConfig, MAX_DECISION_TIMEOUT_MS, MaxBytesConfig, ModelsConfig, NamingConfig, PeerOutcome,
-    PeerRelation, PeerRuleConfig, PeersConfig, PreparationMode, ProfilesConfig, ReservedKeysConfig,
-    SelectorConfig, SlugConfig, TemplateConfig, TimeoutsConfig, ToolBoundsConfig,
+    AuthorityFieldConfig, ChangeClass, IdentityCreationConfig, MAX_DECISION_TIMEOUT_MS,
+    PeerOutcome, PeerRuleConfig, PeersConfig, PreparationMode, RequesterKind, ReservedKeysConfig,
+    SelectorConfig, TimeoutsConfig,
 };
 pub use consequences::{
     CONSEQUENCES_CALLBACK, ConsequenceHook, ConsequenceLine, HookRefusal,
@@ -55,15 +57,13 @@ pub use consequences::{
 pub use digest::Sha256Digest;
 pub use parts::{CanonicalPart, canonical_parts, part_ranges, shows_every_part};
 pub use policy::{
-    ApprovalPolicy, ApprovalRule, ApproverRule, AuthorityFieldRule, CORE_BATCH_MAX, CREATION_TOOLS,
-    ConsoleCreation, CreationLimits, CreatorRule, CreatorSelector, DEFAULT_PEER_RULE_ID,
-    IdentityCreationPolicy, Limit, META_RESERVED_LABEL_KEYS, ModelChoice, NamingPolicy,
-    OutcomeRule, PeerPolicy, PeerRule, ProfileChoice, RuntimeOptionPolicy, Selector, SlugRefusal,
-    Template, TextLimits, Timeouts, resolve_launch_policy,
+    ApprovalPolicy, ApprovalRule, ApproverRule, AuthorityFieldRule, CORE_BATCH_MAX,
+    DEFAULT_PEER_RULE_ID, IdentityCreationPolicy, META_RESERVED_LABEL_KEYS, OutcomeRule,
+    PeerPolicy, PeerRule, RuntimeOptionPolicy, Selector, Timeouts, resolve_launch_policy,
 };
 pub use presentation::{CardBlock, CardEntry, CardError, CardValue, StructuredCard, ValueSegment};
 pub use refusal::{
-    IdentityRefusal, IdentityRefusalKind, LimitKind, NameTakenBy, PolicyRefusal, PolicyRefusalKind,
+    IdentityRefusal, IdentityRefusalKind, NameTakenBy, PolicyRefusal, PolicyRefusalKind,
     RequestProblem, ValidationRefusal,
 };
 pub use render::{
@@ -71,16 +71,9 @@ pub use render::{
     Rendering, labels, render_v1,
 };
 pub use request::{
-    CONSOLE_SURFACE, Consequence, ConsequenceEffect, CreateIdentitySpec, CreatedEntryFacts,
-    CreatedSpec, CreatorOrigin, EdgeBasis, IdentityRequest, NormalizedRequest, PeerFacts,
-    PeerVerdict, REQUEST_BODY_MAX_BYTES, RemoveIdentitySpec, RequestAction, RequestContext,
-    RequestEnvelope, Requester, RequesterFacts, SourceEvidence, UpdateIdentitySpec, UpdateSetSpec,
-    UpdatedSpec, creator_templates, evaluate_peer, normalize_create, normalize_remove,
-    normalize_update, template_for,
-};
-pub use template::{
-    CREATOR_INSTRUCTIONS_HEADING, CreatorBound, MobProfiles, Preamble, PreambleInputs,
-    ProfileFacts, TemplateBinding, callback_definition_digest, check_build_callbacks,
-    compose_member_instructions, effective_tools, native_tool_policy, resolve_binding,
-    sealed_upper_bound,
+    CONSOLE_SURFACE, Consequence, ConsequenceEffect, CreateIdentitySpec, CreatedSpec, EdgeBasis,
+    IdentityEntryFacts, IdentityRequest, NormalizedRequest, PeerFacts, PeerVerdict, ProfileChange,
+    REQUEST_BODY_MAX_BYTES, RemoveIdentitySpec, RequestAction, RequestContext, RequestEnvelope,
+    Requester, RequesterFacts, SourceEvidence, UpdateIdentitySpec, UpdateSetSpec, UpdatedSpec,
+    evaluate_peer, normalize_create, normalize_remove, normalize_update,
 };

@@ -5,31 +5,27 @@
 //! refused at every level. Nothing here is validated: validation builds an
 //! `IdentityCreationPolicy` from it (see `policy`).
 //!
+//! It is one change policy for every identity. An identity a request
+//! creates is declared with the same spec as one a host's roster declares,
+//! and the rules govern the changes of any identity, however it came to
+//! be. Who asks is recorded and grants nothing: an approval rule selects by
+//! the change, the requester's kind, and the target's profile and authority
+//! labels.
+//!
 //! ```json
 //! {
 //!   "enabled": true,
-//!   "reserved_keys": {"labels": ["team"], "context": ["project"]},
-//!   "creators": [{"id": "leads", "profile": ["lead"], "templates": ["research"]}],
-//!   "limits": {"total": 0, "per_creator": 0, "peers_per_identity": 0,
-//!              "batch": 32, "open_decisions_per_creator": 3},
-//!   "templates": {"research": {
-//!     "profiles": ["assistant"], "models": "profile", "accounts": [],
-//!     "callbacks": [{"name": "notes_read", "description": "Read notes",
-//!                    "input_schema": {"type": "object"}}],
-//!     "tools": {"floor": [], "ceiling": ["notes_read", "search"]},
-//!     "excess": "strict", "authority_fields": {"team": {"values": ["a", "b"]}},
-//!     "preamble": "You were created by {creator}.", "preparation": "none",
-//!     "kickoff": "allowed", "namespace": "team",
-//!     "max_bytes": {"display_name": 100, "purpose": 200, "instructions": 4000}}},
-//!   "peers": {"rules": [{"id": "lead", "target": {"profile": ["lead"]},
-//!                        "relation": "creator", "outcome": "allow"}],
+//!   "reserved_keys": {"labels": ["team", "clearance"], "context": ["project"]},
+//!   "authority_fields": {"clearance": {"values": ["basic", "elevated"]}},
+//!   "preparation": "none",
+//!   "peers": {"rules": [{"id": "core", "target": {"labels": {"team": "core"}},
+//!                        "outcome": "require_approval", "reason": "a core team member"}],
 //!             "default": "deny"},
-//!   "naming": {"pattern": "{namespace}:{slug}", "slug": {"min_bytes": 2, "max_bytes": 48},
-//!              "reserved": []},
-//!   "approval": {"rules": [{"change": ["create"], "outcome": {"kind": "require_approval",
-//!                           "approver": {"id": "owner"}}}],
-//!                "default": {"kind": "deny"}},
-//!   "console": {"templates": ["research"]}
+//!   "approval": {"rules": [{"change": ["create"], "requester": ["agent"],
+//!                           "target": {"profile": ["assistant"]},
+//!                           "outcome": {"kind": "require_approval",
+//!                                       "approver": {"id": "owner"}}}],
+//!                "default": {"kind": "deny"}}
 //! }
 //! ```
 
@@ -44,35 +40,31 @@ use serde_json::Value;
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct IdentityCreationConfig {
-    /// Whether identities may be created at all. Off by default; a disabled
-    /// policy is still validated.
+    /// Whether identity requests are accepted at all. Off by default; a
+    /// disabled policy is still validated.
     #[serde(default)]
     pub enabled: bool,
     /// The label and context keys only the host and approved authority
     /// fields may set.
     #[serde(default)]
     pub reserved_keys: ReservedKeysConfig,
-    /// Which agents may create, from which templates.
+    /// The authority fields a request may set on any identity, by reserved
+    /// label key. They become authority only under a human decision.
     #[serde(default)]
-    pub creators: Vec<CreatorRuleConfig>,
-    /// Creation limits; 0 is unlimited for every limit.
+    pub authority_fields: BTreeMap<String, AuthorityFieldConfig>,
+    /// Whether the host prepares a new identity before its first use.
     #[serde(default)]
-    pub limits: LimitsConfig,
-    /// The templates identities are created from, by id.
+    pub preparation: PreparationMode,
+    /// For `preparation: "constructed"`: the host's setup deadline for the
+    /// held construction, in milliseconds.
     #[serde(default)]
-    pub templates: BTreeMap<String, TemplateConfig>,
-    /// Which peers a created identity may be wired to.
+    pub construction_deadline_ms: Option<u64>,
+    /// Which peers an identity may be wired to.
     #[serde(default)]
     pub peers: PeersConfig,
-    /// How a created identity is named.
-    #[serde(default)]
-    pub naming: NamingConfig,
     /// Which outcome each change gets.
     #[serde(default)]
     pub approval: ApprovalConfig,
-    /// What the console may create.
-    #[serde(default)]
-    pub console: ConsoleConfig,
 }
 
 /// `reserved_keys`: label and context keys a request may never set.
@@ -88,279 +80,7 @@ pub struct ReservedKeysConfig {
     pub context: Vec<String>,
 }
 
-/// One `creators` rule: the agents it selects may create from its
-/// templates. Every matching rule applies.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-#[non_exhaustive]
-pub struct CreatorRuleConfig {
-    /// The rule's id.
-    pub id: String,
-    /// Agent identities it selects; empty selects any.
-    #[serde(default)]
-    pub identity: Vec<String>,
-    /// Agent profiles it selects; empty selects any.
-    #[serde(default)]
-    pub profile: Vec<String>,
-    /// Authority labels a selected agent carries, all of them.
-    #[serde(default)]
-    pub labels: BTreeMap<String, String>,
-    /// The templates a selected agent may create from.
-    #[serde(default)]
-    pub templates: Vec<String>,
-}
-
-/// `limits`. Every limit takes 0 as unlimited.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-#[non_exhaustive]
-pub struct LimitsConfig {
-    /// Created identities in the mob.
-    pub total: u64,
-    /// Created identities of one creator.
-    pub per_creator: u64,
-    /// Peers of one created identity.
-    pub peers_per_identity: u64,
-    /// Identities in one create request, at most Core's per-transaction
-    /// maximum (256).
-    pub batch: u64,
-    /// Open decisions of one requester.
-    pub open_decisions_per_creator: u64,
-}
-
-impl Default for LimitsConfig {
-    fn default() -> Self {
-        Self {
-            total: 0,
-            per_creator: 0,
-            peers_per_identity: 0,
-            batch: 32,
-            open_decisions_per_creator: 3,
-        }
-    }
-}
-
-/// One template: a host-declared class over existing mob profiles.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-#[non_exhaustive]
-pub struct TemplateConfig {
-    /// A short title, for presentation only.
-    #[serde(default)]
-    pub title: Option<String>,
-    /// A description, for presentation only.
-    #[serde(default)]
-    pub description: Option<String>,
-    /// The host's install version of the template; a new version is a
-    /// Rebind of every identity created from it.
-    #[serde(default)]
-    pub version: Option<String>,
-    /// The mob profiles a request may bind: a list, or `"any"` (every
-    /// profile of the mob definition), which makes every create need a
-    /// human decision.
-    pub profiles: ProfilesConfig,
-    /// The models a request may choose: a list (the first is the default),
-    /// or `"profile"`, the bound profile's own model.
-    #[serde(default)]
-    pub models: ModelsConfig,
-    /// The account binding references the template's members act under.
-    #[serde(default)]
-    pub accounts: Vec<String>,
-    /// The callback tools the template binds, each in the shape a host's
-    /// `callback/build_agent` answer gives a callback tool: a bare name, or
-    /// `{"name", "description"?, "input_schema"?}`. The definitions are
-    /// sealed in the template binding, and every build of an identity
-    /// created from the template must be given exactly these.
-    #[serde(default)]
-    pub callbacks: Vec<Value>,
-    /// The tool floor and ceiling.
-    #[serde(default)]
-    pub tools: ToolBoundsConfig,
-    /// What a request beyond the ceiling or beyond its creator gets.
-    #[serde(default)]
-    pub excess: ExcessMode,
-    /// Authority fields a request may set, by reserved label key. They
-    /// become authority only under a human decision.
-    #[serde(default)]
-    pub authority_fields: BTreeMap<String, AuthorityFieldConfig>,
-    /// Host text composed before the creator's instructions at every build,
-    /// with the placeholders `{creator}`, `{peers}`, `{display_name}` and
-    /// `{purpose}`; `{{` and `}}` are literal braces.
-    #[serde(default)]
-    pub preamble: String,
-    /// Whether the host prepares an identity before its first use.
-    #[serde(default)]
-    pub preparation: PreparationMode,
-    /// For `preparation: "constructed"`: the host's setup deadline for the
-    /// held construction, in milliseconds.
-    #[serde(default)]
-    pub construction_deadline_ms: Option<u64>,
-    /// Whether a request may, must or must not carry a kickoff message.
-    #[serde(default)]
-    pub kickoff: KickoffRule,
-    /// The namespace of created names (`{namespace}` in the naming
-    /// pattern).
-    pub namespace: String,
-    /// Text limits, in bytes.
-    #[serde(default)]
-    pub max_bytes: MaxBytesConfig,
-    /// Whether identities created from this template may themselves be
-    /// granted creation (by a `creators` rule), and whether its tool bounds
-    /// may name the creation tools.
-    #[serde(default)]
-    pub may_grant_creation: bool,
-}
-
-/// A template's `profiles`: a list, or `"any"`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(try_from = "Value", into = "ListOrKeyword")]
-pub enum ProfilesConfig {
-    /// Every profile of the mob definition.
-    Any,
-    /// These profiles, the first being the default.
-    Listed(Vec<String>),
-}
-
-impl Default for ProfilesConfig {
-    fn default() -> Self {
-        Self::Listed(Vec::new())
-    }
-}
-
-/// A template's `models`: a list, or `"profile"`.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(try_from = "Value", into = "ListOrKeyword")]
-pub enum ModelsConfig {
-    /// The bound profile's own model.
-    #[default]
-    ProfileModel,
-    /// These models, the first being the default.
-    Listed(Vec<String>),
-}
-
-/// A list of names, or one keyword in their place.
-#[derive(Debug, Clone, Serialize)]
-#[serde(untagged)]
-enum ListOrKeyword {
-    Keyword(String),
-    List(Vec<String>),
-}
-
-impl ListOrKeyword {
-    /// `value` as one keyword or a list of names; `None` for anything else.
-    fn read(value: Value) -> Option<Self> {
-        match value {
-            Value::String(keyword) => Some(Self::Keyword(keyword)),
-            Value::Array(items) => items
-                .into_iter()
-                .map(|item| match item {
-                    Value::String(name) => Some(name),
-                    _ => None,
-                })
-                .collect::<Option<Vec<String>>>()
-                .map(Self::List),
-            _ => None,
-        }
-    }
-}
-
-const ANY_PROFILE: &str = "any";
-const PROFILE_MODEL: &str = "profile";
-
-impl TryFrom<Value> for ProfilesConfig {
-    type Error = String;
-
-    fn try_from(value: Value) -> Result<Self, Self::Error> {
-        match ListOrKeyword::read(value) {
-            Some(ListOrKeyword::Keyword(keyword)) if keyword == ANY_PROFILE => Ok(Self::Any),
-            Some(ListOrKeyword::List(names)) => Ok(Self::Listed(names)),
-            Some(ListOrKeyword::Keyword(other)) => Err(format!(
-                "profiles is a list of profile names or \"{ANY_PROFILE}\", not {other:?}"
-            )),
-            None => Err(format!(
-                "profiles is a list of profile names or \"{ANY_PROFILE}\""
-            )),
-        }
-    }
-}
-
-impl From<ProfilesConfig> for ListOrKeyword {
-    fn from(value: ProfilesConfig) -> Self {
-        match value {
-            ProfilesConfig::Any => Self::Keyword(ANY_PROFILE.to_owned()),
-            ProfilesConfig::Listed(names) => Self::List(names),
-        }
-    }
-}
-
-impl TryFrom<Value> for ModelsConfig {
-    type Error = String;
-
-    fn try_from(value: Value) -> Result<Self, Self::Error> {
-        match ListOrKeyword::read(value) {
-            Some(ListOrKeyword::Keyword(keyword)) if keyword == PROFILE_MODEL => {
-                Ok(Self::ProfileModel)
-            }
-            Some(ListOrKeyword::List(names)) => Ok(Self::Listed(names)),
-            Some(ListOrKeyword::Keyword(other)) => Err(format!(
-                "models is a list of model names or \"{PROFILE_MODEL}\", not {other:?}"
-            )),
-            None => Err(format!(
-                "models is a list of model names or \"{PROFILE_MODEL}\""
-            )),
-        }
-    }
-}
-
-impl From<ModelsConfig> for ListOrKeyword {
-    fn from(value: ModelsConfig) -> Self {
-        match value {
-            ModelsConfig::ProfileModel => Self::Keyword(PROFILE_MODEL.to_owned()),
-            ModelsConfig::Listed(names) => Self::List(names),
-        }
-    }
-}
-
-/// A template's `tools`: the floor (a constant host grant) and the ceiling
-/// (every tool a request may ask for in strict mode).
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-#[non_exhaustive]
-pub struct ToolBoundsConfig {
-    /// Tools a created identity keeps whatever happens to its creator.
-    #[serde(default)]
-    pub floor: Vec<String>,
-    /// Every tool a request may ask for in strict mode.
-    #[serde(default)]
-    pub ceiling: Vec<String>,
-}
-
-/// What a request beyond the template's ceiling, or beyond its creating
-/// agent's own tools, gets.
-#[derive(
-    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
-)]
-#[serde(rename_all = "snake_case")]
-pub enum ExcessMode {
-    /// It is refused (`exceeds_template`, `exceeds_creator`).
-    #[default]
-    Strict,
-    /// It needs a human decision, and the rendering states each excess item
-    /// as a consequence line.
-    Consequence,
-}
-
-impl ExcessMode {
-    /// The stable token (`strict`, `consequence`).
-    pub fn token(self) -> &'static str {
-        match self {
-            Self::Strict => "strict",
-            Self::Consequence => "consequence",
-        }
-    }
-}
-
-/// One authority field a template declares: `{"values": [..]}`. A schema
+/// One authority field the policy declares: `{"values": [..]}`. A schema
 /// form (`{"schema": {..}}`) is reserved and refused in this release.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -374,7 +94,7 @@ pub struct AuthorityFieldConfig {
     pub schema: Option<Value>,
 }
 
-/// Whether the host prepares an identity before its first use.
+/// Whether the host prepares a new identity before its first use.
 #[derive(
     Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
 )]
@@ -402,66 +122,7 @@ impl PreparationMode {
     }
 }
 
-/// Whether a request may, must or must not carry a kickoff message.
-#[derive(
-    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
-)]
-#[serde(rename_all = "snake_case")]
-pub enum KickoffRule {
-    /// A kickoff is optional.
-    #[default]
-    Allowed,
-    /// A kickoff is required.
-    Required,
-    /// A kickoff is refused.
-    Forbidden,
-}
-
-impl KickoffRule {
-    /// The stable token (`allowed`, `required`, `forbidden`).
-    pub fn token(self) -> &'static str {
-        match self {
-            Self::Allowed => "allowed",
-            Self::Required => "required",
-            Self::Forbidden => "forbidden",
-        }
-    }
-}
-
-/// A template's text limits, in bytes of UTF-8. Text is never cut: larger
-/// text is refused `text_too_large`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-#[non_exhaustive]
-pub struct MaxBytesConfig {
-    /// The display name.
-    pub display_name: u64,
-    /// The purpose.
-    pub purpose: u64,
-    /// The creator's instructions.
-    pub instructions: u64,
-    /// The kickoff message.
-    pub kickoff: u64,
-    /// The supplied context, as canonical JSON text.
-    pub supplied_context: u64,
-    /// The descriptive labels, keys and values together.
-    pub descriptive_labels: u64,
-}
-
-impl Default for MaxBytesConfig {
-    fn default() -> Self {
-        Self {
-            display_name: 100,
-            purpose: 200,
-            instructions: 4000,
-            kickoff: 4000,
-            supplied_context: 16_384,
-            descriptive_labels: 4096,
-        }
-    }
-}
-
-/// `peers`: which peers a created identity may be wired to.
+/// `peers`: which peers an identity may be wired to.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
@@ -475,20 +136,16 @@ pub struct PeersConfig {
     pub default: PeerOutcome,
 }
 
-/// One peer rule.
+/// One peer rule: what it gives the peers its target selects.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct PeerRuleConfig {
-    /// The rule's id, recorded as an edge's basis for a target-only rule.
+    /// The rule's id, recorded as the basis of an edge it allows.
     pub id: String,
     /// The peers it selects.
     #[serde(default)]
     pub target: SelectorConfig,
-    /// How the peer must relate to the request; absent for a target-only
-    /// rule.
-    #[serde(default)]
-    pub relation: Option<PeerRelation>,
     /// What the rule gives a peer it selects.
     #[serde(default)]
     pub outcome: PeerOutcome,
@@ -513,32 +170,6 @@ pub struct SelectorConfig {
     /// Authority labels a selected identity carries, all of them.
     #[serde(default)]
     pub labels: BTreeMap<String, String>,
-}
-
-/// How a peer relates to a create request.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PeerRelation {
-    /// The peer is the creating agent.
-    Creator,
-    /// The peer is wired to the creating agent.
-    CreatorPeer,
-    /// The peer is created by the same request.
-    SameBatch,
-    /// The peer was created by the same creator.
-    SameCreator,
-}
-
-impl PeerRelation {
-    /// The stable token (`creator`, `creator_peer`, ...).
-    pub fn token(self) -> &'static str {
-        match self {
-            Self::Creator => "creator",
-            Self::CreatorPeer => "creator_peer",
-            Self::SameBatch => "same_batch",
-            Self::SameCreator => "same_creator",
-        }
-    }
 }
 
 /// What a peer rule gives a peer, from least to most strict.
@@ -567,56 +198,8 @@ impl PeerOutcome {
     }
 }
 
-/// `naming`: how a created identity is named.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-#[non_exhaustive]
-pub struct NamingConfig {
-    /// The name's form: `{slug}` once, `{namespace}` at most once, and
-    /// literal text in `[a-z0-9:._-]`.
-    pub pattern: String,
-    /// The slug rule.
-    pub slug: SlugConfig,
-    /// Slugs no request may take.
-    pub reserved: Vec<String>,
-}
-
-impl Default for NamingConfig {
-    fn default() -> Self {
-        Self {
-            pattern: DEFAULT_NAME_PATTERN.to_owned(),
-            slug: SlugConfig::default(),
-            reserved: Vec::new(),
-        }
-    }
-}
-
-/// The default naming pattern.
-pub const DEFAULT_NAME_PATTERN: &str = "{namespace}:{slug}";
-
-/// The slug rule: a lowercase ASCII letter, then lowercase letters, digits
-/// and hyphens, with a length in bytes between the bounds.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-#[non_exhaustive]
-pub struct SlugConfig {
-    /// The shortest slug.
-    pub min_bytes: u64,
-    /// The longest slug.
-    pub max_bytes: u64,
-}
-
-impl Default for SlugConfig {
-    fn default() -> Self {
-        Self {
-            min_bytes: 2,
-            max_bytes: 48,
-        }
-    }
-}
-
 /// `approval`: which outcome each change gets. The default outcome is
-/// `deny`.
+/// `deny`, so a host opts each change in by a rule.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 #[non_exhaustive]
@@ -630,7 +213,8 @@ pub struct ApprovalConfig {
     pub timeouts_ms: TimeoutsConfig,
 }
 
-/// One approval rule.
+/// One approval rule. It governs a change of one of its classes, asked by a
+/// requester of one of its kinds, of an identity its target selects.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
@@ -638,35 +222,16 @@ pub struct ApprovalRuleConfig {
     /// The changes it governs.
     #[serde(default)]
     pub change: Vec<ChangeClass>,
-    /// The requesters it selects.
+    /// The kinds of requester it selects; empty selects any.
     #[serde(default)]
-    pub creator: CreatorSelectorConfig,
-    /// The templates it governs; empty governs every template.
+    pub requester: Vec<RequesterKind>,
+    /// The identities whose changes it governs, by identity, profile and
+    /// authority labels; empty selects any.
     #[serde(default)]
-    pub template: Vec<String>,
+    pub target: SelectorConfig,
     /// The outcome it gives.
     #[serde(default)]
     pub outcome: ApprovalOutcomeConfig,
-}
-
-/// A selector over requesters: a selector over identities plus the
-/// requester's kind.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-#[non_exhaustive]
-pub struct CreatorSelectorConfig {
-    /// The requester's kind; absent selects any.
-    #[serde(default)]
-    pub kind: Option<CreatorKind>,
-    /// Agent identities it selects.
-    #[serde(default)]
-    pub identity: Vec<String>,
-    /// Agent profiles it selects.
-    #[serde(default)]
-    pub profile: Vec<String>,
-    /// Authority labels a selected agent carries, all of them.
-    #[serde(default)]
-    pub labels: BTreeMap<String, String>,
 }
 
 /// What an approval rule gives.
@@ -724,8 +289,8 @@ impl ApprovalKind {
     }
 }
 
-/// Who approves: exactly one of an approver id, the value of one of the
-/// requesting agent's authority labels, or the requester's own identity.
+/// Who approves: exactly one of an approver id, or the value of one of the
+/// requesting agent's authority labels.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
@@ -737,9 +302,6 @@ pub struct ApproverConfig {
     /// approver id.
     #[serde(default)]
     pub label: Option<String>,
-    /// `true`: the requester's own identity is the approver id.
-    #[serde(default)]
-    pub creator_identity: Option<bool>,
 }
 
 /// The decision timeouts per change class, in milliseconds, and their
@@ -758,8 +320,8 @@ pub struct TimeoutsConfig {
     pub peers: u64,
     /// An authority field update.
     pub authority: u64,
-    /// A template Rebind.
-    pub rebind: u64,
+    /// A profile change.
+    pub profile: u64,
     /// A remove.
     pub remove: u64,
     /// The largest timeout any rule may give, at most seven days.
@@ -775,7 +337,7 @@ impl Default for TimeoutsConfig {
             capability: HOURS_4,
             peers: HOURS_4,
             authority: HOURS_4,
-            rebind: HOURS_4,
+            profile: HOURS_4,
             remove: HOURS_4,
             max: MAX_DECISION_TIMEOUT_MS,
         }
@@ -785,17 +347,6 @@ impl Default for TimeoutsConfig {
 /// The largest decision timeout: seven days.
 pub const MAX_DECISION_TIMEOUT_MS: u64 = 7 * 24 * 60 * 60 * 1000;
 
-/// `console`: what the console may create.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-#[non_exhaustive]
-pub struct ConsoleConfig {
-    /// The templates the console may create from. Absent or empty disables
-    /// console creation.
-    #[serde(default)]
-    pub templates: Vec<String>,
-}
-
 /// A change class: what part of an identity a request changes. Each has its
 /// approval rules and timeout.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -803,17 +354,19 @@ pub struct ConsoleConfig {
 pub enum ChangeClass {
     /// A new identity.
     Create,
-    /// Display name, purpose, instructions, supplied context or descriptive
+    /// Display name, additional instructions, context or descriptive
     /// labels.
     Descriptive,
-    /// Tools.
+    /// How the identity runs and who reaches it: its addressability and
+    /// runtime mode.
     Capability,
     /// Peers added or removed.
     Peers,
     /// Authority fields.
     Authority,
-    /// A new template binding (host only).
-    Rebind,
+    /// The profile: a role migration, after which the identity's model,
+    /// tools and wiring are the new profile's.
+    Profile,
     /// The identity's removal.
     Remove,
 }
@@ -827,7 +380,7 @@ impl ChangeClass {
             Self::Capability => "capability",
             Self::Peers => "peers",
             Self::Authority => "authority",
-            Self::Rebind => "rebind",
+            Self::Profile => "profile",
             Self::Remove => "remove",
         }
     }
@@ -836,7 +389,7 @@ impl ChangeClass {
 /// Who asks: an agent, the host (including its console), or a human.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum CreatorKind {
+pub enum RequesterKind {
     /// A member identity, attributed from its session.
     Agent,
     /// The embedding host or its console.
@@ -845,7 +398,7 @@ pub enum CreatorKind {
     Human,
 }
 
-impl CreatorKind {
+impl RequesterKind {
     /// The stable token (`agent`, `host`, `human`).
     pub fn token(self) -> &'static str {
         match self {

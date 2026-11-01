@@ -2,34 +2,38 @@
 //! policy makes of it. The normalized request is what a decision holds,
 //! what `render_v1` renders and what the executor runs.
 //!
-//! Normalization checks everything the policy decides on its own: the
-//! template and the requester's access to it, the name, the profile and
-//! model, text sizes, reserved keys, authority fields, the kickoff rule,
-//! tools against the template and the creating agent, peers against the
-//! peer rules, the batch, and the approval outcome. What needs Core's state
-//! (names taken, limit counts, open decisions, the entry's current
-//! revision) the executor checks with Core; it hands that state in here
-//! where normalization needs it (`CreatedEntryFacts`, `PeerFacts`).
+//! A request creates identities, or changes or removes one, whatever its
+//! origin. A create takes the declared spec a host's roster declares an
+//! identity with (`DurableAgentSpec`) and its peers; an update changes
+//! fields of that spec. Normalization checks everything the policy decides
+//! on its own: the profile against the mob's profiles, reserved keys,
+//! authority fields, peers against the peer rules, the batch, and the
+//! approval outcome. The requester is recorded, and its kind is all an
+//! approval rule reads of it; who created an identity is never read. What
+//! needs the identity's owner (names taken, open decisions, the identity's
+//! current revision, profile and authority labels) the executor reads, and
+//! hands in here where normalization needs it (`IdentityEntryFacts`,
+//! `PeerFacts`).
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use meerkat_contracts::WireRuntimeBinding;
+use meerkat_mob::{MobRuntimeMode, ProfileName};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use super::approval::{ApprovalPlan, PlanRequest, plan_approval};
-use super::config::{ChangeClass, CreatorKind, ExcessMode, KickoffRule, PeerOutcome, PeerRelation};
+use crate::identity_first::{AgentAddressability, DisplayName, DurableAgentSpec};
+
+use super::approval::{ApprovalPlan, PlanRequest, PlanTarget, plan_approval};
+use super::config::{ChangeClass, PeerOutcome, RequesterKind};
 use super::digest::{Sha256Digest, canonical_digest, canonical_json};
 use super::policy::{
-    CORE_BATCH_MAX, CREATION_TOOLS, DEFAULT_PEER_RULE_ID, IdentityCreationPolicy, PeerPolicy,
-    PeerRule, SlugRefusal, Template, is_key, is_tool_name,
+    CORE_BATCH_MAX, DEFAULT_PEER_RULE_ID, IdentityCreationPolicy, PeerPolicy, PeerRule, is_key,
 };
-use super::refusal::{
-    IdentityRefusal, IdentityRefusalKind, LimitKind, NameTakenBy, RequestProblem,
-};
-use super::template::{CreatorBound, MobProfiles, TemplateBinding, resolve_binding};
+use super::refusal::{IdentityRefusal, IdentityRefusalKind, NameTakenBy, RequestProblem};
 
 /// The host surface of the console. A console requester is the host on
-/// this surface, and creates only from the console's templates.
+/// this surface.
 pub const CONSOLE_SURFACE: &str = "console";
 
 /// The most bytes the JSON text of a normalized request may take: the
@@ -40,6 +44,11 @@ pub const REQUEST_BODY_MAX_BYTES: usize = 256 * 1024;
 const FORMAT_REQUEST: &str = "meerkat.identity.request.v1";
 const REFERENCE_MAX_BYTES: u64 = 1024;
 const LABEL_VALUE_MAX_BYTES: usize = 256;
+
+/// The `unsupported` feature of a runtime binding that carries a bootstrap
+/// token. The token is a credential, and a request, which a decision holds
+/// and renders whole, never carries one.
+const BOOTSTRAP_TOKEN_FEATURE: &str = "a bootstrap token in an identity request";
 
 /// Who asks, as the transport attributed it: an agent from its session, the
 /// host on one of its surfaces, or a human. Never taken from request
@@ -67,11 +76,11 @@ pub enum Requester {
 
 impl Requester {
     /// The requester's kind.
-    pub fn kind(&self) -> CreatorKind {
+    pub fn kind(&self) -> RequesterKind {
         match self {
-            Self::Agent { .. } => CreatorKind::Agent,
-            Self::Host { .. } => CreatorKind::Host,
-            Self::Human { .. } => CreatorKind::Human,
+            Self::Agent { .. } => RequesterKind::Agent,
+            Self::Host { .. } => RequesterKind::Host,
+            Self::Human { .. } => RequesterKind::Human,
         }
     }
 
@@ -82,41 +91,6 @@ impl Requester {
             Self::Host { .. } | Self::Human { .. } => None,
         }
     }
-
-    /// Whether this is the console.
-    pub fn is_console(&self) -> bool {
-        matches!(self, Self::Host { surface } if surface == CONSOLE_SURFACE)
-    }
-
-    /// How a created member reads its creator (the preamble's
-    /// `{creator}`): the agent's identity, `the console`, `the host` or the
-    /// human's principal.
-    pub fn preamble_name(&self) -> String {
-        match self {
-            Self::Agent { identity } => identity.clone(),
-            Self::Host { surface } if surface == CONSOLE_SURFACE => "the console".to_owned(),
-            Self::Host { .. } => "the host".to_owned(),
-            Self::Human { principal } => principal.clone(),
-        }
-    }
-}
-
-/// Where a requesting agent itself came from, which bounds whether it may
-/// create: a created identity may create only when its template grants
-/// creation, and an identity created by a created identity never creates.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum CreatorOrigin {
-    /// A declared identity, or a member that is no created identity.
-    #[default]
-    Declared,
-    /// A created identity.
-    Created {
-        /// The template it was created from.
-        template: String,
-        /// Whether its own creator was a created identity.
-        creator_was_created: bool,
-    },
 }
 
 /// What normalization knows of the requester, as the transport resolved
@@ -126,33 +100,18 @@ pub enum CreatorOrigin {
 pub struct RequesterFacts {
     /// Who asks.
     pub requester: Requester,
-    /// An agent's profile, for the selectors.
-    pub profile: Option<String>,
-    /// An agent's authority labels, for the selectors and label approvers.
+    /// An agent's authority labels, for the label approvers.
     pub authority_labels: BTreeMap<String, String>,
-    /// An agent's tools now: the creator bound. Ignored for the host and a
-    /// human, which have none.
-    pub live_tools: BTreeSet<String>,
-    /// Where an agent came from.
-    pub origin: CreatorOrigin,
 }
 
 impl RequesterFacts {
-    /// A declared agent with this profile, authority labels and tools.
-    pub fn agent(
-        identity: impl Into<String>,
-        profile: Option<String>,
-        authority_labels: BTreeMap<String, String>,
-        live_tools: BTreeSet<String>,
-    ) -> Self {
+    /// An agent with these authority labels.
+    pub fn agent(identity: impl Into<String>, authority_labels: BTreeMap<String, String>) -> Self {
         Self {
             requester: Requester::Agent {
                 identity: identity.into(),
             },
-            profile,
             authority_labels,
-            live_tools,
-            origin: CreatorOrigin::Declared,
         }
     }
 
@@ -162,23 +121,13 @@ impl RequesterFacts {
             requester: Requester::Host {
                 surface: surface.into(),
             },
-            profile: None,
             authority_labels: BTreeMap::new(),
-            live_tools: BTreeSet::new(),
-            origin: CreatorOrigin::Declared,
         }
     }
 
     /// The console: the host on its console surface.
     pub fn console() -> Self {
         Self::host(CONSOLE_SURFACE)
-    }
-
-    /// These facts, for an agent that came from `origin`.
-    #[must_use]
-    pub fn with_origin(mut self, origin: CreatorOrigin) -> Self {
-        self.origin = origin;
-        self
     }
 }
 
@@ -191,10 +140,6 @@ pub struct PeerFacts {
     pub profile: Option<String>,
     /// Its authority labels.
     pub authority_labels: BTreeMap<String, String>,
-    /// Whether it is wired to the identity's creator now.
-    pub creator_peer: bool,
-    /// Whether the identity's creator created it.
-    pub same_creator: bool,
 }
 
 impl PeerFacts {
@@ -203,23 +148,7 @@ impl PeerFacts {
         Self {
             profile,
             authority_labels,
-            creator_peer: false,
-            same_creator: false,
         }
-    }
-
-    /// These facts, for an identity wired to the creator.
-    #[must_use]
-    pub fn wired_to_creator(mut self) -> Self {
-        self.creator_peer = true;
-        self
-    }
-
-    /// These facts, for an identity the creator created.
-    #[must_use]
-    pub fn created_by_creator(mut self) -> Self {
-        self.same_creator = true;
-        self
     }
 }
 
@@ -229,35 +158,27 @@ impl PeerFacts {
 pub struct RequestContext<'a> {
     /// The requester.
     pub requester: &'a RequesterFacts,
-    /// The mob's profiles.
-    pub profiles: &'a MobProfiles,
+    /// The profiles of the mob definition: a request may name any of them.
+    pub profiles: &'a BTreeSet<String>,
     /// The existing identities the request names as peers, by identity.
     pub peers: &'a BTreeMap<String, PeerFacts>,
 }
 
-/// The created identity an update or a remove names, as Core's entry reads
-/// it.
+/// The identity an update or a remove names, as its owner reads it: Core's
+/// store for an identity created at run time, the host's roster for a
+/// declared one. Its origin is not among the facts, since nothing here
+/// depends on it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
-pub struct CreatedEntryFacts {
+pub struct IdentityEntryFacts {
     /// Its identity.
     pub identity: String,
     /// Its spec revision.
     pub revision: u64,
-    /// Its template.
-    pub template: String,
-    /// Its sealed template binding digest.
-    pub binding_digest: Sha256Digest,
-    /// Its bound profile.
+    /// Its profile.
     pub profile: String,
-    /// Its model.
-    pub model: String,
-    /// Who created it.
-    pub creator: Requester,
-    /// The creating agent's tools now, when it is an agent that resolves;
-    /// `None` when it does not resolve. Unused for a host or human creator.
-    /// An update checks tools against it, whoever updates.
-    pub creator_live_tools: Option<BTreeSet<String>>,
+    /// Its authority labels.
+    pub authority_labels: BTreeMap<String, String>,
 }
 
 /// Host-attested facts about where a request came from: provenance only,
@@ -306,76 +227,62 @@ pub struct RequestEnvelope {
     pub source_evidence: Option<SourceEvidence>,
 }
 
-/// One identity a create request asks for.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// One identity a create request asks for: the declared spec a host's
+/// roster declares an identity with, and its peers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct CreateIdentitySpec {
-    /// The slug; the name is the naming pattern over the template's
-    /// namespace and it.
-    pub slug: String,
-    /// The template.
-    pub template: String,
-    /// The profile; absent takes the template's default.
-    #[serde(default)]
-    pub profile: Option<String>,
-    /// The model; absent takes the template's default.
-    #[serde(default)]
-    pub model: Option<String>,
-    /// The display name.
-    pub display_name: String,
-    /// The purpose.
-    pub purpose: String,
-    /// The creator's instructions.
-    pub instructions: String,
-    /// Context the request supplies, under the member's `context.supplied`.
-    #[serde(default)]
-    pub supplied_context: Option<BTreeMap<String, Value>>,
-    /// Descriptive labels: shown, never matched.
-    #[serde(default)]
-    pub descriptive_labels: BTreeMap<String, String>,
-    /// Authority fields the template declares; authority only under a
-    /// human decision.
-    #[serde(default)]
-    pub authority_fields: BTreeMap<String, String>,
-    /// The tools; absent asks for every tool the template and the creator
-    /// allow.
-    #[serde(default)]
-    pub tools: Option<Vec<String>>,
+    /// The identity's declared spec: its name, its profile (which gives
+    /// its model, tools and wiring) and the rest of a roster row.
+    pub spec: DurableAgentSpec,
     /// The peers, by identity.
     #[serde(default)]
     pub peers: Vec<String>,
-    /// The kickoff message; empty is none.
-    #[serde(default)]
-    pub kickoff: Option<String>,
 }
 
-/// What an update changes. Absent fields are unchanged.
+impl CreateIdentitySpec {
+    /// A request for the identity `spec` declares, with no peer.
+    pub fn new(spec: DurableAgentSpec) -> Self {
+        Self {
+            spec,
+            peers: Vec::new(),
+        }
+    }
+}
+
+/// What an update changes: fields of the identity's declared spec, and its
+/// peers. Absent fields are unchanged. The name, the initial message and
+/// how the identity's runtime is bound and placed (backend, binding,
+/// placement) are its creation's, and an update does not change them.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct UpdateSetSpec {
+    /// The profile: a role migration from the identity's current one.
+    #[serde(default)]
+    pub profile: Option<ProfileName>,
+    /// Whether the identity accepts sends, or only dispatches.
+    #[serde(default)]
+    pub addressability: Option<AgentAddressability>,
+    /// The runtime mode.
+    #[serde(default)]
+    pub runtime_mode_override: Option<MobRuntimeMode>,
     /// The display name.
     #[serde(default)]
-    pub display_name: Option<String>,
-    /// The purpose.
+    pub display_name: Option<DisplayName>,
+    /// The additional instructions, replaced whole.
     #[serde(default)]
-    pub purpose: Option<String>,
-    /// The creator's instructions.
+    pub additional_instructions: Option<Vec<String>>,
+    /// The context, replaced whole. A null context is no change.
     #[serde(default)]
-    pub instructions: Option<String>,
-    /// The supplied context, replaced whole.
-    #[serde(default)]
-    pub supplied_context: Option<BTreeMap<String, Value>>,
-    /// The descriptive labels, replaced whole.
+    pub context: Option<Value>,
+    /// The labels that are no authority field, replaced whole.
     #[serde(default)]
     pub descriptive_labels: Option<BTreeMap<String, String>>,
     /// The authority fields, replaced whole.
     #[serde(default)]
     pub authority_fields: Option<BTreeMap<String, String>>,
-    /// The tools, replaced whole.
-    #[serde(default)]
-    pub tools: Option<Vec<String>>,
     /// Peers to add.
     #[serde(default)]
     pub peers_add: Vec<String>,
@@ -384,7 +291,7 @@ pub struct UpdateSetSpec {
     pub peers_remove: Vec<String>,
 }
 
-/// An update of one created identity.
+/// An update of one identity.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
@@ -396,12 +303,9 @@ pub struct UpdateIdentitySpec {
     /// What changes.
     #[serde(default)]
     pub set: UpdateSetSpec,
-    /// Rebind the identity to its template's current binding (host only).
-    #[serde(default)]
-    pub rebind: bool,
 }
 
-/// A removal of one created identity.
+/// A removal of one identity.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
@@ -412,20 +316,13 @@ pub struct RemoveIdentitySpec {
     pub expected_revision: u64,
 }
 
-/// Why an edge to a peer exists: what its owner's operation declared it
-/// on.
+/// Why an edge to a peer exists: the peer rule that allowed it. Who asked,
+/// or who created either end, is never a basis.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(tag = "basis", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum EdgeBasis {
-    /// The peer is the creating agent.
-    Creator,
-    /// The peer is wired to the creating agent.
-    CreatorPeer,
-    /// The peer is created by the same request.
-    SameBatch,
-    /// A target-only rule (or the peer rules' default, `default`) allowed
-    /// it.
+    /// A peer rule (or the peer rules' default, `default`) allowed it.
     Rule {
         /// The rule's id.
         id: String,
@@ -433,20 +330,10 @@ pub enum EdgeBasis {
 }
 
 impl EdgeBasis {
-    /// The basis a peer rule records: its relation, or itself.
+    /// The basis the deciding rule records: its id, or the default's.
     fn of_rule(rule: Option<&PeerRule>) -> Self {
-        match rule {
-            None => Self::Rule {
-                id: DEFAULT_PEER_RULE_ID.to_owned(),
-            },
-            Some(rule) => match rule.relation() {
-                Some(PeerRelation::Creator) => Self::Creator,
-                Some(PeerRelation::CreatorPeer) => Self::CreatorPeer,
-                Some(PeerRelation::SameBatch) => Self::SameBatch,
-                Some(PeerRelation::SameCreator) | None => Self::Rule {
-                    id: rule.id().to_owned(),
-                },
-            },
+        Self::Rule {
+            id: rule.map_or(DEFAULT_PEER_RULE_ID, PeerRule::id).to_owned(),
         }
     }
 }
@@ -478,29 +365,18 @@ pub enum PeerVerdict {
     },
 }
 
-/// What the peer rules give `peer`, of these facts and relations: the
-/// strictest outcome of every matching rule (the first such rule in
-/// declaration order decides the basis), or the default when none matches.
-pub fn evaluate_peer(
-    rules: &PeerPolicy,
-    peer: &str,
-    facts: &PeerFacts,
-    relations: &BTreeSet<PeerRelation>,
-) -> PeerVerdict {
+/// What the peer rules give `peer`, of these facts: the strictest outcome
+/// of every rule whose target selects it (the first such rule in
+/// declaration order decides the basis), or the default when none does.
+pub fn evaluate_peer(rules: &PeerPolicy, peer: &str, facts: &PeerFacts) -> PeerVerdict {
     let mut decisive: Option<&PeerRule> = None;
     for rule in rules.rules() {
-        let target_matches = rule.target().matches(
+        let selected = rule.target().matches(
             Some(peer),
             facts.profile.as_deref(),
             &facts.authority_labels,
         );
-        let relation_matches = rule
-            .relation()
-            .is_none_or(|relation| relations.contains(&relation));
-        if target_matches
-            && relation_matches
-            && decisive.is_none_or(|current| rule.outcome() > current.outcome())
-        {
+        if selected && decisive.is_none_or(|current| rule.outcome() > current.outcome()) {
             decisive = Some(rule);
         }
     }
@@ -537,17 +413,6 @@ pub struct Consequence {
 #[serde(tag = "kind", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum ConsequenceEffect {
-    /// A requested tool outside the template's ceiling (consequence mode).
-    ToolOutsideTemplate {
-        /// The tool.
-        tool: String,
-    },
-    /// A requested tool the creating agent does not hold (consequence
-    /// mode).
-    ToolNotHeldByCreator {
-        /// The tool.
-        tool: String,
-    },
     /// A peer the peer rules give only under a human decision.
     PeerNeedsApproval {
         /// The peer.
@@ -564,11 +429,6 @@ pub enum ConsequenceEffect {
         /// The value.
         value: String,
     },
-    /// A profile chosen from a template open to every profile.
-    AnyProfile {
-        /// The profile.
-        profile: String,
-    },
 }
 
 impl Consequence {
@@ -580,40 +440,31 @@ impl Consequence {
     }
 }
 
-/// One identity of a normalized create request.
+/// One identity of a normalized create request: its declared spec, as a
+/// roster would declare it, and its peers.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct CreatedSpec {
-    /// The template.
-    pub template: String,
-    /// The template binding's digest.
-    pub binding_digest: Sha256Digest,
-    /// The bound profile.
-    pub profile: String,
-    /// The model.
-    pub model: String,
-    /// The display name.
-    pub display_name: String,
-    /// The purpose.
-    pub purpose: String,
-    /// The creator's instructions.
-    pub instructions: String,
-    /// The supplied context, in canonical form.
-    pub supplied_context: Option<BTreeMap<String, Value>>,
-    /// The descriptive labels.
-    pub descriptive_labels: BTreeMap<String, String>,
-    /// The authority fields.
-    pub authority_fields: BTreeMap<String, String>,
-    /// The sealed tools.
-    pub tools: BTreeSet<String>,
+    /// The declared spec, its context in canonical form.
+    pub spec: DurableAgentSpec,
     /// The peers, with each edge's basis.
     pub peers: BTreeMap<String, EdgeBasis>,
-    /// The kickoff message.
-    pub kickoff: Option<String>,
 }
 
-/// A normalized update of one created identity.
+/// A profile change: the role migration of an identity from its profile
+/// to another of the mob's.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct ProfileChange {
+    /// The profile it migrates from: its current one.
+    pub from: ProfileName,
+    /// The profile it migrates to.
+    pub to: ProfileName,
+}
+
+/// A normalized update of one identity.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct UpdatedSpec {
@@ -621,26 +472,22 @@ pub struct UpdatedSpec {
     pub identity: String,
     /// The revision it updates.
     pub expected_revision: u64,
-    /// Its template.
-    pub template: String,
-    /// Its sealed binding's digest.
-    pub binding_digest: Sha256Digest,
-    /// The new binding's digest, for a Rebind.
-    pub rebind: Option<Sha256Digest>,
+    /// The profile change: a role migration.
+    pub profile: Option<ProfileChange>,
+    /// The new addressability.
+    pub addressability: Option<AgentAddressability>,
+    /// The new runtime mode.
+    pub runtime_mode_override: Option<MobRuntimeMode>,
     /// The new display name.
-    pub display_name: Option<String>,
-    /// The new purpose.
-    pub purpose: Option<String>,
-    /// The new instructions.
-    pub instructions: Option<String>,
-    /// The new supplied context, in canonical form.
-    pub supplied_context: Option<BTreeMap<String, Value>>,
-    /// The new descriptive labels.
+    pub display_name: Option<DisplayName>,
+    /// The new additional instructions.
+    pub additional_instructions: Option<Vec<String>>,
+    /// The new context, in canonical form.
+    pub context: Option<Value>,
+    /// The new labels that are no authority field.
     pub descriptive_labels: Option<BTreeMap<String, String>>,
     /// The new authority fields.
     pub authority_fields: Option<BTreeMap<String, String>>,
-    /// The new sealed tools.
-    pub tools: Option<BTreeSet<String>>,
     /// Peers added, with each edge's basis.
     pub peers_add: BTreeMap<String, EdgeBasis>,
     /// Peers removed.
@@ -650,26 +497,39 @@ pub struct UpdatedSpec {
 impl UpdatedSpec {
     /// The change classes the update touches.
     pub fn change_classes(&self) -> BTreeSet<ChangeClass> {
+        let Self {
+            identity: _,
+            expected_revision: _,
+            profile,
+            addressability,
+            runtime_mode_override,
+            display_name,
+            additional_instructions,
+            context,
+            descriptive_labels,
+            authority_fields,
+            peers_add,
+            peers_remove,
+        } = self;
         let mut classes = BTreeSet::new();
-        if self.display_name.is_some()
-            || self.purpose.is_some()
-            || self.instructions.is_some()
-            || self.supplied_context.is_some()
-            || self.descriptive_labels.is_some()
+        if display_name.is_some()
+            || additional_instructions.is_some()
+            || context.is_some()
+            || descriptive_labels.is_some()
         {
             classes.insert(ChangeClass::Descriptive);
         }
-        if self.tools.is_some() {
+        if addressability.is_some() || runtime_mode_override.is_some() {
             classes.insert(ChangeClass::Capability);
         }
-        if !self.peers_add.is_empty() || !self.peers_remove.is_empty() {
+        if !peers_add.is_empty() || !peers_remove.is_empty() {
             classes.insert(ChangeClass::Peers);
         }
-        if self.authority_fields.is_some() {
+        if authority_fields.is_some() {
             classes.insert(ChangeClass::Authority);
         }
-        if self.rebind.is_some() {
-            classes.insert(ChangeClass::Rebind);
+        if profile.is_some() {
+            classes.insert(ChangeClass::Profile);
         }
         classes
     }
@@ -680,10 +540,11 @@ impl UpdatedSpec {
 #[serde(tag = "kind", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum RequestAction {
-    /// Create these identities, by identity, all or nothing.
+    /// Create these identities, in the byte order of their names, all or
+    /// nothing.
     Create {
         /// The identities.
-        identities: BTreeMap<String, CreatedSpec>,
+        identities: Vec<CreatedSpec>,
     },
     /// Update one identity.
     Update(Box<UpdatedSpec>),
@@ -737,27 +598,9 @@ impl IdentityRequest {
             &json!({ "format": FORMAT_REQUEST, "request": self.to_json()? }),
         ))
     }
-
-    /// The excess items the request's consequences state for `identity`:
-    /// the tools a human decision approves beyond the template or the
-    /// creator.
-    pub fn excess_tools(&self, identity: &str) -> BTreeSet<String> {
-        self.consequences
-            .iter()
-            .filter(|consequence| consequence.identity == identity)
-            .filter_map(|consequence| match &consequence.effect {
-                ConsequenceEffect::ToolOutsideTemplate { tool }
-                | ConsequenceEffect::ToolNotHeldByCreator { tool } => Some(tool.clone()),
-                ConsequenceEffect::PeerNeedsApproval { .. }
-                | ConsequenceEffect::AuthorityField { .. }
-                | ConsequenceEffect::AnyProfile { .. } => None,
-            })
-            .collect()
-    }
 }
 
-/// A normalized request, its approval plan, and for a create the binding of
-/// each identity.
+/// A normalized request and its approval plan.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct NormalizedRequest {
@@ -765,8 +608,6 @@ pub struct NormalizedRequest {
     pub request: IdentityRequest,
     /// Which outcome it gets.
     pub plan: ApprovalPlan,
-    /// For a create, each identity's template binding, by identity.
-    pub bindings: BTreeMap<String, TemplateBinding>,
 }
 
 fn refused(kind: IdentityRefusalKind, field: impl Into<String>) -> IdentityRefusal {
@@ -789,70 +630,11 @@ fn within_body_limit(normalized: NormalizedRequest) -> Result<NormalizedRequest,
     Ok(normalized)
 }
 
-/// The template `id`, if the requester may use it: an agent from its
-/// creator rules (and its own origin), the console from the console's
-/// templates, a human through the console, and the host from any. A
-/// create, an update and a removal all check it, so the console acts only
-/// on identities of its own templates.
-pub fn template_for<'a>(
-    policy: &'a IdentityCreationPolicy,
-    requester: &RequesterFacts,
-    id: &str,
-) -> Result<&'a Template, IdentityRefusalKind> {
-    let not_allowed = || IdentityRefusalKind::TemplateNotAllowed {
-        template: id.to_owned(),
-    };
-    let template = policy.template(id).ok_or_else(not_allowed)?;
-    let allowed = match &requester.requester {
-        Requester::Agent { identity } => {
-            creator_templates(policy, requester, identity).contains(id)
-        }
-        Requester::Host { .. } if requester.requester.is_console() => policy.console().allows(id),
-        Requester::Host { .. } => true,
-        Requester::Human { .. } => policy.console().allows(id),
-    };
-    if allowed {
-        Ok(template)
-    } else {
-        Err(not_allowed())
-    }
-}
-
-/// The templates an agent may create from: its creator rules' templates,
-/// when its origin lets it create at all.
-pub fn creator_templates(
-    policy: &IdentityCreationPolicy,
-    requester: &RequesterFacts,
-    identity: &str,
-) -> BTreeSet<String> {
-    let may_create = match &requester.origin {
-        CreatorOrigin::Declared => true,
-        CreatorOrigin::Created {
-            template,
-            creator_was_created,
-        } => {
-            !creator_was_created
-                && policy
-                    .template(template)
-                    .is_some_and(Template::may_grant_creation)
-        }
-    };
-    if may_create {
-        policy.creator_templates(
-            identity,
-            requester.profile.as_deref(),
-            &requester.authority_labels,
-        )
-    } else {
-        BTreeSet::new()
-    }
-}
-
 fn check_envelope(
     requester: &Requester,
     envelope: &RequestEnvelope,
 ) -> Result<(), IdentityRefusal> {
-    if requester.kind() == CreatorKind::Agent {
+    if requester.kind() == RequesterKind::Agent {
         if envelope.proposer.is_some() {
             return Err(refused(
                 IdentityRefusalKind::InvalidRequest {
@@ -900,217 +682,187 @@ fn check_size(text: &str, limit: u64, field: &str) -> Result<(), IdentityRefusal
     Ok(())
 }
 
-/// The supplied context in canonical form, checked against the reserved
-/// keys and its limit.
-fn supplied_context(
-    policy: &IdentityCreationPolicy,
-    context: &BTreeMap<String, Value>,
-    limit: u64,
+/// Whether the mob defines `profile`, which a request may then name.
+fn mob_profile(
+    context: &RequestContext<'_>,
+    profile: &ProfileName,
     field: &str,
-) -> Result<BTreeMap<String, Value>, IdentityRefusal> {
-    for key in context.keys() {
-        if policy.is_reserved_label(key) || policy.is_reserved_context(key) {
-            return Err(refused(
-                IdentityRefusalKind::ReservedKey { key: key.clone() },
-                field,
-            ));
-        }
+) -> Result<(), IdentityRefusal> {
+    if context.profiles.contains(profile.as_str()) {
+        return Ok(());
     }
-    let value = Value::Object(
-        context
-            .iter()
-            .map(|(key, item)| (key.clone(), item.clone()))
-            .collect(),
-    );
-    let text = canonical_json(&value);
-    check_size(&text, limit, field)?;
-    let canonical: BTreeMap<String, Value> = serde_json::from_str(&text).map_err(|_| {
+    Err(refused(
+        IdentityRefusalKind::ProfileNotAllowed {
+            profile: profile.as_str().to_owned(),
+        },
+        field,
+    ))
+}
+
+/// A context in canonical form: object keys in byte order at every depth,
+/// numbers as canonical JSON writes them. A top-level key that is a
+/// reserved label or context key is refused.
+fn normalized_context(
+    policy: &IdentityCreationPolicy,
+    context: &Value,
+    field: &str,
+) -> Result<Value, IdentityRefusal> {
+    if let Value::Object(map) = context
+        && let Some(key) = map
+            .keys()
+            .find(|key| policy.is_reserved_label(key) || policy.is_reserved_context(key))
+    {
+        return Err(refused(
+            IdentityRefusalKind::ReservedKey { key: key.clone() },
+            field,
+        ));
+    }
+    serde_json::from_str(&canonical_json(context)).map_err(|_| {
         refused(
             IdentityRefusalKind::InvalidRequest {
-                problem: RequestProblem::Conflicting,
+                problem: RequestProblem::Malformed,
             },
             field,
         )
-    })?;
-    Ok(canonical)
+    })
 }
 
-/// A request's descriptive labels: keys in the label key alphabet and not
-/// reserved, values of at most 256 bytes without control characters, and
-/// at most `limit` bytes together.
-fn descriptive_labels(
+/// A context a request gives, in canonical form; a null context is none,
+/// as its JSON reads.
+fn given_context(
     policy: &IdentityCreationPolicy,
-    labels: &BTreeMap<String, String>,
-    limit: u64,
+    context: Option<&Value>,
     field: &str,
-) -> Result<BTreeMap<String, String>, IdentityRefusal> {
+) -> Result<Option<Value>, IdentityRefusal> {
+    context
+        .filter(|value| !value.is_null())
+        .map(|value| normalized_context(policy, value, field))
+        .transpose()
+}
+
+/// A label that is no authority field: a key in the label key alphabet
+/// that is not reserved, and a value of at most 256 bytes without control
+/// characters.
+fn descriptive_label(
+    policy: &IdentityCreationPolicy,
+    key: &str,
+    value: &str,
+    field: &str,
+) -> Result<(), IdentityRefusal> {
     let malformed = IdentityRefusalKind::InvalidRequest {
         problem: RequestProblem::Malformed,
     };
-    let mut size = 0_u64;
-    for (key, value) in labels {
-        if !is_key(key) {
-            return Err(refused(malformed, field));
-        }
-        if policy.is_reserved_label(key) || policy.is_reserved_context(key) {
-            return Err(refused(
-                IdentityRefusalKind::ReservedKey { key: key.clone() },
-                field,
-            ));
-        }
-        if value.len() > LABEL_VALUE_MAX_BYTES {
-            return Err(refused(
-                IdentityRefusalKind::TextTooLarge {
-                    limit: LABEL_VALUE_MAX_BYTES as u64,
-                },
-                format!("{field}.{key}"),
-            ));
-        }
-        if value.chars().any(char::is_control) {
-            return Err(refused(malformed, format!("{field}.{key}")));
-        }
-        size = size.saturating_add((key.len() + value.len()) as u64);
+    if !is_key(key) {
+        return Err(refused(malformed, field));
     }
-    if size > limit {
-        return Err(refused(IdentityRefusalKind::TextTooLarge { limit }, field));
-    }
-    Ok(labels.clone())
-}
-
-fn authority_fields(
-    template: &Template,
-    fields: &BTreeMap<String, String>,
-    field: &str,
-) -> Result<BTreeMap<String, String>, IdentityRefusal> {
-    for (key, value) in fields {
-        let allowed = template
-            .authority_fields()
-            .get(key)
-            .is_some_and(|rule| rule.allows(value));
-        if !allowed {
-            return Err(refused(
-                IdentityRefusalKind::AuthorityFieldInvalid { key: key.clone() },
-                field,
-            ));
-        }
-    }
-    Ok(fields.clone())
-}
-
-/// The creator side of a create: the requesting agent's tools, or no
-/// bound for the host or a human.
-fn requester_bound(requester: &RequesterFacts) -> CreatorBound<'_> {
-    match requester.requester.kind() {
-        CreatorKind::Agent => CreatorBound::Live(&requester.live_tools),
-        CreatorKind::Host | CreatorKind::Human => CreatorBound::Unbounded,
-    }
-}
-
-/// The creator side of an update, whoever updates: the entry's agent
-/// creator's tools now (nothing when it does not resolve), or no bound for
-/// a host or human creator.
-fn entry_creator_bound(entry: &CreatedEntryFacts) -> CreatorBound<'_> {
-    match entry.creator.kind() {
-        CreatorKind::Agent => entry
-            .creator_live_tools
-            .as_ref()
-            .map_or(CreatorBound::Unresolved, CreatorBound::Live),
-        CreatorKind::Host | CreatorKind::Human => CreatorBound::Unbounded,
-    }
-}
-
-/// The tools a request asks for when it names none: every tool of the
-/// ceiling the creator side lets through, and the floor.
-fn default_tools(template: &Template, creator: CreatorBound<'_>) -> BTreeSet<String> {
-    template
-        .ceiling()
-        .iter()
-        .filter(|tool| template.floor().contains(*tool) || creator.holds(tool))
-        .cloned()
-        .collect()
-}
-
-/// The sealed tools of a request, checked against the template's ceiling
-/// and the creator side (`creator`). In strict mode an excess is refused;
-/// in consequence mode each excess item is a consequence, except a tool no
-/// decision can grant: a name outside the tool-name rule, or a creation
-/// tool on a template that does not grant creation, which are refused
-/// `exceeds_template` in either mode. Returns whether any excess was
-/// stated.
-fn sealed_tools(
-    template: &Template,
-    creator: CreatorBound<'_>,
-    requested: Option<&[String]>,
-    identity: &str,
-    field: &str,
-    consequences: &mut BTreeSet<Consequence>,
-) -> Result<(BTreeSet<String>, bool), IdentityRefusal> {
-    let sealed: BTreeSet<String> = match requested {
-        Some(tools) => tools.iter().cloned().collect(),
-        None => default_tools(template, creator),
-    };
-    let outside_template: Vec<String> = sealed.difference(template.ceiling()).cloned().collect();
-    let not_held: Vec<String> = sealed
-        .iter()
-        .filter(|tool| !template.floor().contains(*tool) && !creator.holds(tool))
-        .cloned()
-        .collect();
-    let excess = !outside_template.is_empty() || !not_held.is_empty();
-    match template.excess() {
-        ExcessMode::Strict if !outside_template.is_empty() => Err(refused(
-            IdentityRefusalKind::ExceedsTemplate {
-                tools: outside_template,
+    if policy.is_reserved_label(key) || policy.is_reserved_context(key) {
+        return Err(refused(
+            IdentityRefusalKind::ReservedKey {
+                key: key.to_owned(),
             },
             field,
-        )),
-        ExcessMode::Strict if !not_held.is_empty() => Err(refused(
-            IdentityRefusalKind::ExceedsCreator { tools: not_held },
-            field,
-        )),
-        ExcessMode::Strict => Ok((sealed, false)),
-        ExcessMode::Consequence => {
-            let ungrantable: Vec<String> = outside_template
-                .iter()
-                .filter(|tool| {
-                    !is_tool_name(tool)
-                        || (!template.may_grant_creation()
-                            && CREATION_TOOLS.contains(&tool.as_str()))
-                })
-                .cloned()
-                .collect();
-            if !ungrantable.is_empty() {
+        ));
+    }
+    if value.len() > LABEL_VALUE_MAX_BYTES {
+        return Err(refused(
+            IdentityRefusalKind::TextTooLarge {
+                limit: LABEL_VALUE_MAX_BYTES as u64,
+            },
+            format!("{field}.{key}"),
+        ));
+    }
+    if value.chars().any(char::is_control) {
+        return Err(refused(malformed, format!("{field}.{key}")));
+    }
+    Ok(())
+}
+
+/// The authority fields among a declared spec's labels: each label on a
+/// key the policy declares an authority field, with a value it allows. Any
+/// other label is descriptive (`descriptive_label`).
+fn declared_authority(
+    policy: &IdentityCreationPolicy,
+    labels: &BTreeMap<String, String>,
+    field: &str,
+) -> Result<BTreeMap<String, String>, IdentityRefusal> {
+    let mut authority = BTreeMap::new();
+    for (key, value) in labels {
+        match policy.authority_field(key) {
+            Some(rule) if rule.allows(value) => {
+                authority.insert(key.clone(), value.clone());
+            }
+            Some(_) => {
                 return Err(refused(
-                    IdentityRefusalKind::ExceedsTemplate { tools: ungrantable },
+                    IdentityRefusalKind::AuthorityFieldInvalid { key: key.clone() },
                     field,
                 ));
             }
-            for tool in outside_template {
-                consequences.insert(Consequence::new(
-                    identity,
-                    ConsequenceEffect::ToolOutsideTemplate { tool },
-                ));
-            }
-            for tool in not_held {
-                consequences.insert(Consequence::new(
-                    identity,
-                    ConsequenceEffect::ToolNotHeldByCreator { tool },
-                ));
-            }
-            Ok((sealed, excess))
+            None => descriptive_label(policy, key, value, field)?,
         }
     }
+    Ok(authority)
 }
 
-/// How the identity's creator relates to the peers a request names.
+/// A create's declared spec, checked: no bootstrap token, and its context
+/// in canonical form. Every other field is the spec's as declared.
+fn normalized_spec(
+    policy: &IdentityCreationPolicy,
+    spec: &DurableAgentSpec,
+    path: &str,
+) -> Result<DurableAgentSpec, IdentityRefusal> {
+    let DurableAgentSpec {
+        identity,
+        profile,
+        addressability,
+        display_name,
+        labels,
+        context,
+        additional_instructions,
+        initial_message,
+        runtime_mode_override,
+        backend,
+        binding,
+        placement,
+    } = spec;
+    if let Some(WireRuntimeBinding::External {
+        bootstrap_token: Some(_),
+        ..
+    }) = binding
+    {
+        return Err(refused(
+            IdentityRefusalKind::Unsupported {
+                feature: BOOTSTRAP_TOKEN_FEATURE.to_owned(),
+            },
+            format!("{path}.binding"),
+        ));
+    }
+    let context = given_context(policy, context.as_ref(), &format!("{path}.context"))?;
+    Ok(DurableAgentSpec {
+        identity: identity.clone(),
+        profile: profile.clone(),
+        addressability: *addressability,
+        display_name: display_name.clone(),
+        labels: labels.clone(),
+        context,
+        additional_instructions: additional_instructions.clone(),
+        initial_message: initial_message.clone(),
+        runtime_mode_override: *runtime_mode_override,
+        backend: *backend,
+        binding: binding.clone(),
+        placement: placement.clone(),
+    })
+}
+
+/// The identities a request's peers resolve against: those the same
+/// request creates, then those that exist.
 struct PeerScope<'a> {
-    creator: Option<&'a str>,
     batch: &'a BTreeMap<String, PeerFacts>,
     existing: &'a BTreeMap<String, PeerFacts>,
 }
 
 /// The peers of one identity with each edge's basis, checked against the
-/// peer rules and the limit. A peer that needs approval is a consequence.
-/// Returns whether any peer needs approval.
+/// peer rules. A peer that needs approval is a consequence. Returns whether
+/// any peer needs approval.
 fn peer_edges(
     policy: &IdentityCreationPolicy,
     scope: &PeerScope<'_>,
@@ -1131,24 +883,10 @@ fn peer_edges(
                 peer_field,
             ));
         }
-        let in_batch = scope.batch.get(peer);
-        let Some(facts) = in_batch.or_else(|| scope.existing.get(peer)) else {
+        let Some(facts) = scope.batch.get(peer).or_else(|| scope.existing.get(peer)) else {
             return Err(refused(IdentityRefusalKind::PeerUnknown, peer_field));
         };
-        let mut relations = BTreeSet::new();
-        if scope.creator == Some(peer.as_str()) {
-            relations.insert(PeerRelation::Creator);
-        }
-        if facts.creator_peer {
-            relations.insert(PeerRelation::CreatorPeer);
-        }
-        if in_batch.is_some() {
-            relations.insert(PeerRelation::SameBatch);
-        }
-        if facts.same_creator || in_batch.is_some() {
-            relations.insert(PeerRelation::SameCreator);
-        }
-        let basis = match evaluate_peer(policy.peers(), peer, facts, &relations) {
+        let basis = match evaluate_peer(policy.peers(), peer, facts) {
             PeerVerdict::Allowed { basis } => basis,
             PeerVerdict::NeedsApproval {
                 basis,
@@ -1177,35 +915,14 @@ fn peer_edges(
         };
         edges.insert(peer.clone(), basis);
     }
-    if policy
-        .limits()
-        .peers_per_identity
-        .is_exceeded_by(edges.len() as u64)
-    {
-        return Err(refused(
-            IdentityRefusalKind::LimitReached {
-                limit: LimitKind::PeersPerIdentity,
-            },
-            field,
-        ));
-    }
     Ok((edges, needs_approval))
 }
 
-fn check_text(text: &str, limit: u64, field: String) -> Result<String, IdentityRefusal> {
-    if text.len() as u64 > limit {
-        return Err(refused(IdentityRefusalKind::TextTooLarge { limit }, field));
-    }
-    Ok(text.to_owned())
-}
-
-/// The first identity of a create batch, resolved before its peers are.
-struct Resolved<'a> {
+/// One identity of a create batch, checked before its peers are.
+struct Checked<'a> {
     index: usize,
-    spec: &'a CreateIdentitySpec,
-    template: &'a Template,
-    binding: TemplateBinding,
-    authority_fields: BTreeMap<String, String>,
+    request: &'a CreateIdentitySpec,
+    authority: BTreeMap<String, String>,
 }
 
 /// Normalize a create request of `specs`, all or nothing.
@@ -1217,7 +934,6 @@ pub fn normalize_create(
 ) -> Result<NormalizedRequest, IdentityRefusal> {
     let requester = context.requester;
     check_envelope(&requester.requester, &envelope)?;
-    let count = specs.len() as u64;
     if specs.is_empty() {
         return Err(refused(
             IdentityRefusalKind::InvalidRequest {
@@ -1226,7 +942,7 @@ pub fn normalize_create(
             "identities",
         ));
     }
-    if count > CORE_BATCH_MAX {
+    if specs.len() as u64 > CORE_BATCH_MAX {
         return Err(refused(
             IdentityRefusalKind::BatchTooLarge {
                 max: CORE_BATCH_MAX,
@@ -1234,202 +950,83 @@ pub fn normalize_create(
             "identities",
         ));
     }
-    if policy.limits().batch.is_exceeded_by(count) {
-        return Err(refused(
-            IdentityRefusalKind::LimitReached {
-                limit: LimitKind::Batch,
-            },
-            "identities",
-        ));
-    }
-    let mut consequences = BTreeSet::new();
-    let mut resolved: BTreeMap<String, Resolved<'_>> = BTreeMap::new();
+    let mut checked: BTreeMap<&str, Checked<'_>> = BTreeMap::new();
     let mut batch: BTreeMap<String, PeerFacts> = BTreeMap::new();
-    for (index, spec) in specs.iter().enumerate() {
-        let path = format!("identities[{index}]");
-        let template = template_for(policy, requester, &spec.template)
-            .map_err(|kind| refused(kind, format!("{path}.template")))?;
-        let identity = policy
-            .naming()
-            .name(template.namespace(), &spec.slug)
-            .map_err(|slug| {
-                let kind = match slug {
-                    SlugRefusal::Invalid => IdentityRefusalKind::InvalidName,
-                    SlugRefusal::Reserved => IdentityRefusalKind::ReservedName,
-                };
-                refused(kind, format!("{path}.slug"))
-            })?;
-        if resolved.contains_key(&identity) {
+    for (index, request) in specs.iter().enumerate() {
+        let path = format!("identities[{index}].spec");
+        let spec = &request.spec;
+        let identity = spec.identity.as_str();
+        if checked.contains_key(identity) {
             return Err(refused(
                 IdentityRefusalKind::NameTaken {
                     by: NameTakenBy::Created,
                 },
-                format!("{path}.slug"),
+                format!("{path}.identity"),
             ));
         }
-        let binding = resolve_binding(
-            template,
-            spec.profile.as_deref(),
-            spec.model.as_deref(),
-            context.profiles,
-        )
-        .map_err(|kind| {
-            let field = match kind {
-                IdentityRefusalKind::ModelNotAllowed { .. } => "model",
-                _ => "profile",
-            };
-            refused(kind, format!("{path}.{field}"))
-        })?;
-        let fields = authority_fields(
-            template,
-            &spec.authority_fields,
-            &format!("{path}.authority_fields"),
-        )?;
+        mob_profile(context, &spec.profile, &format!("{path}.profile"))?;
+        let authority = declared_authority(policy, &spec.labels, &format!("{path}.labels"))?;
         batch.insert(
-            identity.clone(),
-            PeerFacts::new(Some(binding.profile.clone()), fields.clone()).created_by_creator(),
+            identity.to_owned(),
+            PeerFacts::new(Some(spec.profile.as_str().to_owned()), authority.clone()),
         );
-        resolved.insert(
+        checked.insert(
             identity,
-            Resolved {
+            Checked {
                 index,
-                spec,
-                template,
-                binding,
-                authority_fields: fields,
+                request,
+                authority,
             },
         );
     }
     let scope = PeerScope {
-        creator: requester.requester.agent_identity(),
         batch: &batch,
         existing: context.peers,
     };
+    let mut consequences = BTreeSet::new();
     let mut raise = false;
-    let mut identities = BTreeMap::new();
-    let mut bindings = BTreeMap::new();
-    let mut templates = BTreeSet::new();
-    for (identity, entry) in resolved {
+    let mut identities = Vec::with_capacity(checked.len());
+    for (identity, entry) in &checked {
         let path = format!("identities[{}]", entry.index);
-        let spec = entry.spec;
-        let template = entry.template;
-        let limits = template.max_bytes();
-        let display_name = check_text(
-            &spec.display_name,
-            limits.display_name,
-            format!("{path}.display_name"),
-        )?;
-        let purpose = check_text(&spec.purpose, limits.purpose, format!("{path}.purpose"))?;
-        let instructions = check_text(
-            &spec.instructions,
-            limits.instructions,
-            format!("{path}.instructions"),
-        )?;
-        let supplied = match &spec.supplied_context {
-            Some(value) => Some(supplied_context(
-                policy,
-                value,
-                limits.supplied_context,
-                &format!("{path}.supplied_context"),
-            )?),
-            None => None,
-        };
-        let labels = descriptive_labels(
-            policy,
-            &spec.descriptive_labels,
-            limits.descriptive_labels,
-            &format!("{path}.descriptive_labels"),
-        )?;
-        let kickoff = spec
-            .kickoff
-            .as_deref()
-            .filter(|kickoff| !kickoff.is_empty());
-        let kickoff = match (template.kickoff(), kickoff) {
-            (KickoffRule::Forbidden, Some(_)) => {
-                return Err(refused(
-                    IdentityRefusalKind::KickoffRefused {
-                        rule: KickoffRule::Forbidden,
-                    },
-                    format!("{path}.kickoff"),
-                ));
-            }
-            (KickoffRule::Required, None) => {
-                return Err(refused(
-                    IdentityRefusalKind::KickoffRefused {
-                        rule: KickoffRule::Required,
-                    },
-                    format!("{path}.kickoff"),
-                ));
-            }
-            (_, Some(text)) => Some(check_text(text, limits.kickoff, format!("{path}.kickoff"))?),
-            (_, None) => None,
-        };
-        for (key, value) in &entry.authority_fields {
+        let spec = normalized_spec(policy, &entry.request.spec, &format!("{path}.spec"))?;
+        for (key, value) in &entry.authority {
             consequences.insert(Consequence::new(
-                &identity,
+                identity,
                 ConsequenceEffect::AuthorityField {
                     key: key.clone(),
                     value: value.clone(),
                 },
             ));
         }
-        if matches!(template.profiles(), super::policy::ProfileChoice::Any) {
-            raise = true;
-            consequences.insert(Consequence::new(
-                &identity,
-                ConsequenceEffect::AnyProfile {
-                    profile: entry.binding.profile.clone(),
-                },
-            ));
-        }
-        let (tools, excess) = sealed_tools(
-            template,
-            requester_bound(requester),
-            spec.tools.as_deref(),
-            &identity,
-            &format!("{path}.tools"),
-            &mut consequences,
-        )?;
         let (peers, peers_need_approval) = peer_edges(
             policy,
             &scope,
-            &identity,
-            &spec.peers,
+            identity,
+            &entry.request.peers,
             &format!("{path}.peers"),
             &mut consequences,
         )?;
-        raise |= excess || peers_need_approval;
-        templates.insert(template.id().to_owned());
-        identities.insert(
-            identity.clone(),
-            CreatedSpec {
-                template: template.id().to_owned(),
-                binding_digest: entry.binding.digest(),
-                profile: entry.binding.profile.clone(),
-                model: entry.binding.model.clone(),
-                display_name,
-                purpose,
-                instructions,
-                supplied_context: supplied,
-                descriptive_labels: labels,
-                authority_fields: entry.authority_fields,
-                tools,
-                peers,
-                kickoff,
-            },
-        );
-        bindings.insert(identity, entry.binding);
+        raise |= peers_need_approval;
+        identities.push(CreatedSpec { spec, peers });
     }
-    let authority_field = identities
+    let targets: Vec<PlanTarget<'_>> = checked
+        .iter()
+        .map(|(identity, entry)| PlanTarget {
+            identity: *identity,
+            profile: entry.request.spec.profile.as_str(),
+            authority_labels: &entry.authority,
+        })
+        .collect();
+    let authority_field = checked
         .values()
-        .find_map(|spec| spec.authority_fields.keys().next().cloned());
+        .find_map(|entry| entry.authority.keys().next().cloned());
     let classes = BTreeSet::from([ChangeClass::Create]);
     let plan = plan_approval(
         policy.approval(),
         requester,
         &PlanRequest {
             classes: &classes,
-            templates: &templates,
+            targets: &targets,
             raise,
             authority_field: authority_field.as_deref(),
         },
@@ -1443,27 +1040,15 @@ pub fn normalize_create(
             consequences,
         },
         plan,
-        bindings,
     })
 }
 
-/// Who may change or remove a created identity: never itself; an agent
-/// only when it is the creator; the host and a human always.
-fn check_custody(requester: &Requester, entry: &CreatedEntryFacts) -> Result<(), IdentityRefusal> {
-    match requester {
-        Requester::Agent { identity } if *identity == entry.identity => {
-            Err(IdentityRefusal::new(IdentityRefusalKind::SelfChangeRefused))
-        }
-        Requester::Agent { .. } if *requester != entry.creator => {
-            Err(IdentityRefusal::new(IdentityRefusalKind::NotCreatorCustody))
-        }
-        Requester::Agent { .. } | Requester::Host { .. } | Requester::Human { .. } => Ok(()),
-    }
-}
-
+/// The identity an update or a remove names: the entry's, at the revision
+/// the requester read. An agent never changes its own identity; who
+/// created the identity is never asked.
 fn check_entry(
     requester: &Requester,
-    entry: &CreatedEntryFacts,
+    entry: &IdentityEntryFacts,
     identity: &str,
     expected_revision: u64,
 ) -> Result<(), IdentityRefusal> {
@@ -1475,7 +1060,9 @@ fn check_entry(
             "identity",
         ));
     }
-    check_custody(requester, entry)?;
+    if requester.agent_identity() == Some(entry.identity.as_str()) {
+        return Err(IdentityRefusal::new(IdentityRefusalKind::SelfChangeRefused));
+    }
     if expected_revision != entry.revision {
         return Err(refused(
             IdentityRefusalKind::StaleRevision {
@@ -1487,12 +1074,21 @@ fn check_entry(
     Ok(())
 }
 
-/// Normalize an update of the created identity `entry`.
+/// The identity an entry names, as the approval rules select it now.
+fn entry_target(entry: &IdentityEntryFacts) -> PlanTarget<'_> {
+    PlanTarget {
+        identity: &entry.identity,
+        profile: &entry.profile,
+        authority_labels: &entry.authority_labels,
+    }
+}
+
+/// Normalize an update of the identity `entry`.
 pub fn normalize_update(
     policy: &IdentityCreationPolicy,
     context: &RequestContext<'_>,
     envelope: RequestEnvelope,
-    entry: &CreatedEntryFacts,
+    entry: &IdentityEntryFacts,
     spec: &UpdateIdentitySpec,
 ) -> Result<NormalizedRequest, IdentityRefusal> {
     let requester = context.requester;
@@ -1503,109 +1099,57 @@ pub fn normalize_update(
         &spec.identity,
         spec.expected_revision,
     )?;
-    let template = template_for(policy, requester, &entry.template)
-        .map_err(|kind| refused(kind, "template"))?;
-    let current = resolve_binding(
-        template,
-        Some(entry.profile.as_str()),
-        Some(entry.model.as_str()),
-        context.profiles,
-    )
-    .map_err(|_| refused(IdentityRefusalKind::TemplateBindingChanged, "template"))?
-    .digest();
-    let rebind = match (spec.rebind, current == entry.binding_digest) {
-        (true, _) if requester.requester.kind() != CreatorKind::Host => {
-            return Err(refused(
-                IdentityRefusalKind::CreationDenied {
-                    change: ChangeClass::Rebind,
-                },
-                "rebind",
-            ));
+    let UpdateSetSpec {
+        profile,
+        addressability,
+        runtime_mode_override,
+        display_name,
+        additional_instructions,
+        context: new_context,
+        descriptive_labels,
+        authority_fields,
+        peers_add,
+        peers_remove,
+    } = &spec.set;
+    let profile = match profile {
+        Some(to) => {
+            mob_profile(context, to, "set.profile")?;
+            (to.as_str() != entry.profile).then(|| ProfileChange {
+                from: ProfileName::from(entry.profile.as_str()),
+                to: to.clone(),
+            })
         }
-        (true, false) => Some(current),
-        (true, true) => None,
-        (false, false) => {
-            return Err(refused(
-                IdentityRefusalKind::TemplateBindingChanged,
-                "template",
-            ));
-        }
-        (false, true) => None,
+        None => None,
     };
-    let set = &spec.set;
-    let limits = template.max_bytes();
+    let new_context = given_context(policy, new_context.as_ref(), "set.context")?;
+    if let Some(labels) = descriptive_labels {
+        for (key, value) in labels {
+            descriptive_label(policy, key, value, "set.descriptive_labels")?;
+        }
+    }
     let mut consequences = BTreeSet::new();
-    let display_name = match &set.display_name {
-        Some(text) => Some(check_text(
-            text,
-            limits.display_name,
-            "set.display_name".to_owned(),
-        )?),
-        None => None,
-    };
-    let purpose = match &set.purpose {
-        Some(text) => Some(check_text(text, limits.purpose, "set.purpose".to_owned())?),
-        None => None,
-    };
-    let instructions = match &set.instructions {
-        Some(text) => Some(check_text(
-            text,
-            limits.instructions,
-            "set.instructions".to_owned(),
-        )?),
-        None => None,
-    };
-    let supplied = match &set.supplied_context {
-        Some(value) => Some(supplied_context(
-            policy,
-            value,
-            limits.supplied_context,
-            "set.supplied_context",
-        )?),
-        None => None,
-    };
-    let labels = match &set.descriptive_labels {
-        Some(labels) => Some(descriptive_labels(
-            policy,
-            labels,
-            limits.descriptive_labels,
-            "set.descriptive_labels",
-        )?),
-        None => None,
-    };
-    let authority = match &set.authority_fields {
-        Some(fields) => {
-            let fields = authority_fields(template, fields, "set.authority_fields")?;
-            for (key, value) in &fields {
-                consequences.insert(Consequence::new(
-                    &entry.identity,
-                    ConsequenceEffect::AuthorityField {
-                        key: key.clone(),
-                        value: value.clone(),
-                    },
+    if let Some(fields) = authority_fields {
+        for (key, value) in fields {
+            if !policy
+                .authority_field(key)
+                .is_some_and(|rule| rule.allows(value))
+            {
+                return Err(refused(
+                    IdentityRefusalKind::AuthorityFieldInvalid { key: key.clone() },
+                    "set.authority_fields",
                 ));
             }
-            Some(fields)
-        }
-        None => None,
-    };
-    let (tools, excess) = match &set.tools {
-        Some(tools) => {
-            let (sealed, excess) = sealed_tools(
-                template,
-                entry_creator_bound(entry),
-                Some(tools.as_slice()),
+            consequences.insert(Consequence::new(
                 &entry.identity,
-                "set.tools",
-                &mut consequences,
-            )?;
-            (Some(sealed), excess)
+                ConsequenceEffect::AuthorityField {
+                    key: key.clone(),
+                    value: value.clone(),
+                },
+            ));
         }
-        None => (None, false),
-    };
-    let peers_remove: BTreeSet<String> = set.peers_remove.iter().cloned().collect();
-    if let Some(index) = set
-        .peers_add
+    }
+    let peers_remove: BTreeSet<String> = peers_remove.iter().cloned().collect();
+    if let Some(index) = peers_add
         .iter()
         .position(|peer| peers_remove.contains(peer))
     {
@@ -1618,7 +1162,6 @@ pub fn normalize_update(
     }
     let no_batch = BTreeMap::new();
     let scope = PeerScope {
-        creator: entry.creator.agent_identity(),
         batch: &no_batch,
         existing: context.peers,
     };
@@ -1626,23 +1169,21 @@ pub fn normalize_update(
         policy,
         &scope,
         &entry.identity,
-        &set.peers_add,
+        peers_add,
         "set.peers_add",
         &mut consequences,
     )?;
     let updated = UpdatedSpec {
         identity: entry.identity.clone(),
         expected_revision: spec.expected_revision,
-        template: entry.template.clone(),
-        binding_digest: entry.binding_digest.clone(),
-        rebind,
-        display_name,
-        purpose,
-        instructions,
-        supplied_context: supplied,
-        descriptive_labels: labels,
-        authority_fields: authority,
-        tools,
+        profile,
+        addressability: *addressability,
+        runtime_mode_override: *runtime_mode_override,
+        display_name: display_name.clone(),
+        additional_instructions: additional_instructions.clone(),
+        context: new_context,
+        descriptive_labels: descriptive_labels.clone(),
+        authority_fields: authority_fields.clone(),
         peers_add,
         peers_remove,
     };
@@ -1659,14 +1200,27 @@ pub fn normalize_update(
         .authority_fields
         .as_ref()
         .and_then(|fields| fields.keys().next().cloned());
-    let templates = BTreeSet::from([entry.template.clone()]);
+    // The rules select the identity both as it is and as the update leaves
+    // it, so a rule for either governs the update.
+    let after = PlanTarget {
+        identity: &entry.identity,
+        profile: updated
+            .profile
+            .as_ref()
+            .map_or(entry.profile.as_str(), |change| change.to.as_str()),
+        authority_labels: updated
+            .authority_fields
+            .as_ref()
+            .unwrap_or(&entry.authority_labels),
+    };
+    let targets = [entry_target(entry), after];
     let plan = plan_approval(
         policy.approval(),
         requester,
         &PlanRequest {
             classes: &classes,
-            templates: &templates,
-            raise: excess || peers_need_approval,
+            targets: &targets,
+            raise: peers_need_approval,
             authority_field: authority_field.as_deref(),
         },
     )?;
@@ -1679,17 +1233,15 @@ pub fn normalize_update(
             consequences,
         },
         plan,
-        bindings: BTreeMap::new(),
     })
 }
 
-/// Normalize a removal of the created identity `entry`. The requester must
-/// be able to use the entry's template, as for an update.
+/// Normalize a removal of the identity `entry`.
 pub fn normalize_remove(
     policy: &IdentityCreationPolicy,
     requester: &RequesterFacts,
     envelope: RequestEnvelope,
-    entry: &CreatedEntryFacts,
+    entry: &IdentityEntryFacts,
     spec: &RemoveIdentitySpec,
 ) -> Result<NormalizedRequest, IdentityRefusal> {
     check_envelope(&requester.requester, &envelope)?;
@@ -1699,15 +1251,14 @@ pub fn normalize_remove(
         &spec.identity,
         spec.expected_revision,
     )?;
-    template_for(policy, requester, &entry.template).map_err(|kind| refused(kind, "template"))?;
     let classes = BTreeSet::from([ChangeClass::Remove]);
-    let templates = BTreeSet::from([entry.template.clone()]);
+    let targets = [entry_target(entry)];
     let plan = plan_approval(
         policy.approval(),
         requester,
         &PlanRequest {
             classes: &classes,
-            templates: &templates,
+            targets: &targets,
             raise: false,
             authority_field: None,
         },
@@ -1724,6 +1275,5 @@ pub fn normalize_remove(
             consequences: BTreeSet::new(),
         },
         plan,
-        bindings: BTreeMap::new(),
     })
 }

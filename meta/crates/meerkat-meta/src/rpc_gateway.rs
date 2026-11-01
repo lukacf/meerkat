@@ -254,9 +254,9 @@ struct GatewayRuntimeOptions {
     /// and receive what they subscribe to in batches. Persistent
     /// identity-first launches only; `None` keeps them off.
     mob_announcements: Option<crate::mob_announcements::AnnouncementConfig>,
-    /// `runtime_options.identity_creation`: the identity creation policy,
-    /// validated as it is parsed. Init resolves it against the native host's
-    /// Rust form and the mob definition (`launch_identity_creation_policy`).
+    /// `runtime_options.identity_creation`: the identity policy, validated as
+    /// it is parsed. Init resolves it against the native host's Rust form
+    /// (`launch_identity_creation_policy`).
     identity_creation: crate::identity_creation::RuntimeOptionPolicy,
     /// `runtime_options.control_request_window_ms`: how far a signed keyed
     /// inject request's issue time may be from this gateway's clock, in
@@ -807,29 +807,21 @@ fn launch_provider_auth_persistence(
     }
 }
 
-/// The identity creation policy a launch uses: the native host's Rust form
+/// The identity policy a launch uses: the native host's Rust form
 /// ([`GatewayHostComposition::identity_creation_policy`]) or
-/// `runtime_options.identity_creation`, never both, checked against the mob
-/// definition's profiles. A template whose preparation holds a construction
-/// needs a native host, and a launch without persistence (`persistent`
-/// false: no `persistent_state`) refuses a policy from either source, a
-/// disabled option included, rather than ignore it. The message of a
-/// refusal names the policy path.
+/// `runtime_options.identity_creation`, never both. A preparation that holds
+/// a construction needs a native host, and a launch without persistence
+/// (`persistent` false: no `persistent_state`) refuses a policy from either
+/// source, a disabled option included, rather than ignore it. The message of
+/// a refusal names the policy path.
 fn launch_identity_creation_policy(
     host: Option<&Arc<dyn GatewayHostComposition>>,
     option: crate::identity_creation::RuntimeOptionPolicy,
-    definition: &MobDefinition,
     persistent: bool,
 ) -> Result<Option<Arc<crate::identity_creation::IdentityCreationPolicy>>, String> {
-    let profiles: BTreeSet<String> = definition
-        .profiles
-        .keys()
-        .map(|name| name.as_str().to_owned())
-        .collect();
     crate::identity_creation::resolve_launch_policy(
         host.map(|host| host.identity_creation_policy()),
         option,
-        &profiles,
         persistent,
     )
     .map_err(|refusal| refusal.to_string())
@@ -12534,10 +12526,8 @@ impl crate::identity_first::gateway_bridges::CallbackBridge for StdioCallbackBri
 /// response wire: a bare name string (legacy shape) or
 /// `{name, description?, input_schema?}` so the agent — and the live
 /// projection's `live_visible_tool_defs` — see the real argument schema
-/// instead of the permissive `{"type": "object"}` placeholder. An identity
-/// creation template declares the callback tools it binds in this same shape
-/// (`crate::identity_creation`).
-pub(crate) struct CallbackToolSpec {
+/// instead of the permissive `{"type": "object"}` placeholder.
+struct CallbackToolSpec {
     name: String,
     description: Option<String>,
     input_schema: Option<Value>,
@@ -13095,7 +13085,7 @@ impl DetachedCallbackJobRuntime {
 }
 
 impl CallbackToolSpec {
-    pub(crate) fn parse(value: &Value) -> Result<Self, String> {
+    fn parse(value: &Value) -> Result<Self, String> {
         if let Some(name) = value.as_str() {
             return Ok(Self {
                 name: name.to_string(),
@@ -13159,21 +13149,6 @@ impl CallbackToolSpec {
             execution,
             artifact,
         })
-    }
-
-    /// The tool's name.
-    pub(crate) fn name(&self) -> &str {
-        &self.name
-    }
-
-    /// The tool's description, as the host gave it.
-    pub(crate) fn description(&self) -> Option<&str> {
-        self.description.as_deref()
-    }
-
-    /// The tool's input schema, as the host gave it.
-    pub(crate) fn input_schema(&self) -> Option<&Value> {
-        self.input_schema.as_ref()
     }
 }
 
@@ -15942,9 +15917,9 @@ pub trait GatewayHostComposition: Send + Sync + 'static {
         let _ = construction;
         Ok(None)
     }
-    /// The identity creation policy in its Rust form, taken once at init in
-    /// place of `runtime_options.identity_creation`: a launch that gives
-    /// both is refused, and so is a policy on a launch without persistence.
+    /// The identity policy in its Rust form, taken once at init in place of
+    /// `runtime_options.identity_creation`: a launch that gives both is
+    /// refused, and so is a policy on a launch without persistence.
     /// Build it with `IdentityCreationPolicy::from_config`, which validates
     /// it. `Ok(None)` (the default) gives none; `Err` refuses init.
     fn identity_creation_policy(
@@ -17560,15 +17535,13 @@ external_addressable = true
             PROVIDER_CREDENTIALS_ROOT_UNDER_HOST.to_string(),
         ));
     }
-    // The identity creation policy, settled before the durable phase: the
-    // native host's Rust form or the init option, never both, checked
-    // against the definition's profiles, and refused on a launch without
-    // persistence. Nothing acts on it yet; the operation executor takes it
-    // from here.
+    // The identity policy, settled before the durable phase: the native
+    // host's Rust form or the init option, never both, and refused on a
+    // launch without persistence. Nothing acts on it yet; the operation
+    // executor takes it from here.
     let _identity_creation = launch_identity_creation_policy(
         host,
         std::mem::take(&mut gateway_options.identity_creation),
-        &definition,
         persistent_state.is_some(),
     )
     .map_err(|message| fail_init(&request_id, -32602, message))?;
@@ -26219,9 +26192,7 @@ mod identity_root_forwarding_tests {
 #[cfg(test)]
 mod identity_creation_launch_tests {
     use super::*;
-    use crate::identity_creation::{
-        IdentityCreationPolicy, PolicyRefusal, PolicyRefusalKind, RuntimeOptionPolicy,
-    };
+    use crate::identity_creation::{IdentityCreationPolicy, PolicyRefusal, RuntimeOptionPolicy};
     use std::io::Write;
     use std::process::{Command, Stdio};
 
@@ -26285,151 +26256,27 @@ mod identity_creation_launch_tests {
     fn policy_value() -> Value {
         json!({
             "enabled": true,
-            "templates": {"helper": {"profiles": ["default"], "namespace": "team"}},
             "approval": {"rules": [{"change": ["create"], "outcome": {"kind": "allow"}}]}
         })
     }
 
-    fn definition() -> MobDefinition {
-        parse_mob_config(
-            r#"
-[mob]
-id = "identity-creation"
-
-[profiles.default]
-model = "gpt-5.5"
-"#,
-        )
-        .expect("a mob definition")
-    }
-
-    /// `runtime_options.identity_creation` is a known option, validated as it
-    /// is parsed: a refusal names the policy path, and the removed console
-    /// key is refused as unknown.
-    #[test]
-    fn runtime_options_identity_creation_is_parsed_and_refused_typed() {
-        let parsed = parse_gateway_runtime_options(
-            &json!({ "runtime_options": { "identity_creation": policy_value() } }),
-            None,
-        )
-        .expect("a valid policy");
-        assert!(matches!(
-            parsed.identity_creation,
-            RuntimeOptionPolicy::Enabled(_)
-        ));
-        let quiet = parse_gateway_runtime_options(&json!({ "runtime_options": {} }), None)
-            .expect("no option");
-        assert_eq!(quiet.identity_creation, RuntimeOptionPolicy::Absent);
-
-        let mut invalid = policy_value();
-        invalid["templates"]["helper"]["namespace"] = json!("Team");
-        let error = parse_gateway_runtime_options(
-            &json!({ "runtime_options": { "identity_creation": invalid } }),
-            None,
-        )
-        .err()
-        .unwrap_or_default();
-        assert!(
-            error.starts_with("runtime_options.identity_creation.templates.helper.namespace"),
-            "{error}"
-        );
-        let removed = parse_gateway_runtime_options(
-            &json!({ "runtime_options": { "identity_creation": {
-                "console": { "inherit_creator_access": true }
-            } } }),
-            None,
-        )
-        .err()
-        .unwrap_or_default();
-        assert!(removed.contains("inherit_creator_access"), "{removed}");
-    }
-
-    /// A launch takes its policy from the init option or from the native
-    /// host, never both, and checks it against the mob definition.
-    #[test]
-    fn the_launch_takes_the_policy_from_the_option_or_the_native_host() {
-        let definition = definition();
-        let option = RuntimeOptionPolicy::parse(&policy_value()).expect("a policy");
-        assert!(
-            launch_identity_creation_policy(None, option.clone(), &definition, true)
-                .expect("the option's policy")
-                .is_some()
-        );
-        let RuntimeOptionPolicy::Enabled(policy) = option.clone() else {
-            panic!("an enabled policy");
-        };
-        let naming = host(Ok(Some(*policy)));
-        assert!(
-            launch_identity_creation_policy(
-                Some(&naming),
-                RuntimeOptionPolicy::Absent,
-                &definition,
-                true
-            )
-            .expect("the host's policy")
-            .is_some()
-        );
-        let both = launch_identity_creation_policy(Some(&naming), option, &definition, true)
-            .err()
-            .unwrap_or_default();
-        assert!(both.contains("both"), "{both}");
-        let refusing = host(Err(PolicyRefusal::new(
-            "templates",
-            PolicyRefusalKind::Empty,
-        )));
-        let refused = launch_identity_creation_policy(
-            Some(&refusing),
-            RuntimeOptionPolicy::Absent,
-            &definition,
-            true,
-        )
-        .err()
-        .unwrap_or_default();
-        assert!(
-            refused.starts_with("identity_creation.templates"),
-            "{refused}"
-        );
-        assert!(
-            launch_identity_creation_policy(
-                Some(&host(Ok(None))),
-                RuntimeOptionPolicy::Absent,
-                &definition,
-                true
-            )
-            .expect("no policy")
-            .is_none()
-        );
-        let mut ghost = policy_value();
-        ghost["templates"]["helper"]["profiles"] = json!(["ghost"]);
-        let refused = launch_identity_creation_policy(
-            None,
-            RuntimeOptionPolicy::parse(&ghost).expect("a policy"),
-            &definition,
-            true,
-        )
-        .err()
-        .unwrap_or_default();
-        assert!(refused.contains("ghost"), "{refused}");
-    }
-
-    /// Created identities are durable: a launch without persistence refuses
-    /// an `identity_creation` option at init, a disabled one included, and
-    /// a policy from the native host, rather than ignore them. A launch
-    /// that gives none starts as before.
+    /// The identity records and decisions a policy governs are durable: a
+    /// launch without persistence refuses an `identity_creation` option at
+    /// init, a disabled one included, and a policy from the native host,
+    /// rather than ignore them. A launch that gives none starts as before.
     #[test]
     fn an_identity_creation_option_without_persistence_is_refused_at_init() {
-        let definition = definition();
         let mut disabled = policy_value();
         disabled["enabled"] = json!(false);
         for option in [
             RuntimeOptionPolicy::parse(&policy_value()).expect("a policy"),
             RuntimeOptionPolicy::parse(&disabled).expect("a disabled policy"),
         ] {
-            let refused = launch_identity_creation_policy(None, option, &definition, false)
+            let refused = launch_identity_creation_policy(None, option, false)
                 .err()
                 .unwrap_or_default();
             assert!(
-                refused.starts_with("identity_creation: created identities are durable"),
+                refused.starts_with("identity_creation: identity records are durable"),
                 "{refused}"
             );
         }
@@ -26441,7 +26288,6 @@ model = "gpt-5.5"
         let refused = launch_identity_creation_policy(
             Some(&host(Ok(Some(*policy)))),
             RuntimeOptionPolicy::Absent,
-            &definition,
             false,
         )
         .err()
@@ -26452,7 +26298,6 @@ model = "gpt-5.5"
                 launch_identity_creation_policy(
                     host_answer.as_ref(),
                     RuntimeOptionPolicy::Absent,
-                    &definition,
                     false
                 )
                 .expect("no policy, no refusal")
@@ -26548,7 +26393,7 @@ model = "gpt-5.5"
             response["error"]["message"]
                 .as_str()
                 .unwrap_or_default()
-                .starts_with("identity_creation: created identities are durable"),
+                .starts_with("identity_creation: identity records are durable"),
             "{response}"
         );
     }

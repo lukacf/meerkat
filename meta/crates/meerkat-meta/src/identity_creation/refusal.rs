@@ -2,17 +2,18 @@
 //! `data.kind`), and the typed refusal of a creation policy.
 //!
 //! Every identity refusal is one kind of a closed list, with the request
-//! field it concerns as a path (`identities[1].tools`). The list is closed:
-//! a client must handle every kind, and a new kind is a vocabulary change.
-//! This slice produces the policy kinds (template, request data, name,
-//! peers, limits); the executor, the decision ingresses and Core's commit
-//! path produce the others through the same type.
+//! field it concerns as a path (`identities[1].spec.labels`). The list is
+//! closed: a client must handle every kind, and a new kind is a vocabulary
+//! change. It is one vocabulary for every identity, whatever its origin.
+//! Normalization produces the request kinds (request data, name, peers,
+//! policy); the executor, the decision ingresses and Core's commit path
+//! produce the others through the same type.
 
 use std::fmt;
 
 use serde_json::{Value, json};
 
-use super::config::{ChangeClass, KickoffRule};
+use super::config::ChangeClass;
 
 /// Why an identity request is refused: one kind of the closed vocabulary,
 /// with the request field it concerns.
@@ -22,7 +23,7 @@ pub struct IdentityRefusal {
     /// The kind, with its details.
     pub kind: IdentityRefusalKind,
     /// The request field the refusal concerns, as a path such as
-    /// `identities[1].tools`; `None` for the request as a whole.
+    /// `identities[1].spec.labels`; `None` for the request as a whole.
     pub field: Option<String>,
 }
 
@@ -39,14 +40,14 @@ impl IdentityRefusal {
         self
     }
 
-    /// The kind's stable token (`template_not_allowed`, ...).
+    /// The kind's stable token (`reserved_key`, ...).
     pub fn kind_token(&self) -> &'static str {
         self.kind.token()
     }
 
     /// Whether the same request may succeed later unchanged: the creation
-    /// hold, pending host preparation, an unreadable creator, or consequence
-    /// lines the host could not produce. Every other kind is permanent.
+    /// hold, pending host preparation, or consequence lines the host could
+    /// not produce. Every other kind is permanent.
     pub fn is_retryable(&self) -> bool {
         self.kind.is_retryable()
     }
@@ -121,15 +122,18 @@ impl fmt::Display for ValidationRefusal {
 
 impl std::error::Error for ValidationRefusal {}
 
-/// Who holds a name a request asked for.
+/// Who holds a name a request asked for. `declared` and `created` name
+/// where the identity's desired record lives, the host's roster or Core's
+/// store, and nothing else.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[non_exhaustive]
 pub enum NameTakenBy {
-    /// A declared identity.
+    /// An identity a host's roster declares.
     Declared,
-    /// A created identity, or another identity of the same request.
+    /// An identity Core's store holds, created at run time, or another
+    /// identity of the same request.
     Created,
-    /// A removed created identity: its name is a tombstone, never reused.
+    /// A removed identity: its name is a tombstone, never reused.
     Removed,
     /// A worker member that is no identity.
     Worker,
@@ -146,35 +150,6 @@ impl NameTakenBy {
             Self::Removed => "removed",
             Self::Worker => "worker",
             Self::Unreadable => "unreadable",
-        }
-    }
-}
-
-/// Which creation limit a request reached.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[non_exhaustive]
-pub enum LimitKind {
-    /// Created identities in the mob.
-    Total,
-    /// Created identities of one creator.
-    PerCreator,
-    /// Peers of one created identity.
-    PeersPerIdentity,
-    /// Identities in one create request.
-    Batch,
-    /// Open decisions of one requester.
-    OpenDecisionsPerCreator,
-}
-
-impl LimitKind {
-    /// The stable token (`total`, `per_creator`, ...).
-    pub fn token(self) -> &'static str {
-        match self {
-            Self::Total => "total",
-            Self::PerCreator => "per_creator",
-            Self::PeersPerIdentity => "peers_per_identity",
-            Self::Batch => "batch",
-            Self::OpenDecisionsPerCreator => "open_decisions_per_creator",
         }
     }
 }
@@ -209,32 +184,18 @@ impl RequestProblem {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum IdentityRefusalKind {
-    // Template.
-    /// The template is unknown, or not one the requester may use.
-    TemplateNotAllowed { template: String },
-    /// The profile is not one the template binds; `None` when the request
-    /// names none and the template has no default.
-    ProfileNotAllowed { profile: Option<String> },
-    /// The model is not one the template allows for the profile.
-    ModelNotAllowed { model: String },
-    /// The template's binding changed since the identity was sealed.
-    TemplateBindingChanged,
-    /// Requested tools outside the template's ceiling (strict mode).
-    ExceedsTemplate { tools: Vec<String> },
-    /// Requested tools the creating agent does not hold (strict mode).
-    ExceedsCreator { tools: Vec<String> },
     // Request data.
+    /// The profile is not one of the mob definition's profiles.
+    ProfileNotAllowed { profile: String },
     /// The request names a reserved label or context key.
     ReservedKey { key: String },
     /// An authority field under an outcome other than a human decision.
     AuthorityFieldNeedsApproval { key: String },
-    /// An authority field the template does not declare, or a value its
+    /// An authority field the policy does not declare, or a value its
     /// declaration does not allow.
     AuthorityFieldInvalid { key: String },
     /// A text larger than its limit, in bytes. Text is never cut.
     TextTooLarge { limit: u64 },
-    /// The template's kickoff rule refuses the request's kickoff.
-    KickoffRefused { rule: KickoffRule },
     /// The host's consequence lines could not be produced. The request is
     /// never rendered without them (retryable).
     ConsequencesUnavailable,
@@ -242,10 +203,8 @@ pub enum IdentityRefusalKind {
     /// itself.
     InvalidRequest { problem: RequestProblem },
     // Name.
-    /// The slug does not follow the naming rule.
+    /// The name is not a valid identity name.
     InvalidName,
-    /// The slug is reserved.
-    ReservedName,
     /// The name is taken.
     NameTaken { by: NameTakenBy },
     // Peers.
@@ -253,9 +212,7 @@ pub enum IdentityRefusalKind {
     PeerNotAllowed { identity: String },
     /// The peer is not an identity the requester may name.
     PeerUnknown,
-    // Limits and policy.
-    /// A creation limit is reached.
-    LimitReached { limit: LimitKind },
+    // Policy.
     /// More identities than one store transaction commits.
     BatchTooLarge { max: u64 },
     /// The host's validation hook refused the request; the reason is the
@@ -265,12 +222,10 @@ pub enum IdentityRefusalKind {
     CreationDenied { change: ChangeClass },
     /// The request needs a form this release does not support.
     Unsupported { feature: String },
-    // Custody and operations.
-    /// No created identity has this name.
+    // Identities and operations.
+    /// No identity has this name.
     IdentityUnknown,
-    /// The requester does not hold custody of the identity.
-    NotCreatorCustody,
-    /// A created identity asked to change its own entry.
+    /// An agent asked to change its own identity.
     SelfChangeRefused,
     /// The expected revision is not the current one.
     StaleRevision { current: u64 },
@@ -295,7 +250,7 @@ pub enum IdentityRefusalKind {
     StaleAttempt { current: Option<u64> },
     /// The identity has no held construction.
     NotConstructed,
-    /// The template's preparation is `constructed`: a settle must name the
+    /// The policy's preparation is `constructed`: a settle must name the
     /// held attempt.
     ConstructionRequired,
     /// The attempt's activation was accepted and its publication is in
@@ -345,41 +300,28 @@ pub enum IdentityRefusalKind {
     StorageUnsupported,
     /// Core refused the held construction.
     ConstructionRefused { kind: String },
-    // Per call.
-    /// The creating agent cannot be resolved (retryable while it is only
-    /// unreadable).
-    CreatorUnresolved,
 }
 
 impl IdentityRefusalKind {
     /// The kind's stable token, the wire's `data.kind`.
     pub fn token(&self) -> &'static str {
         match self {
-            Self::TemplateNotAllowed { .. } => "template_not_allowed",
             Self::ProfileNotAllowed { .. } => "profile_not_allowed",
-            Self::ModelNotAllowed { .. } => "model_not_allowed",
-            Self::TemplateBindingChanged => "template_binding_changed",
-            Self::ExceedsTemplate { .. } => "exceeds_template",
-            Self::ExceedsCreator { .. } => "exceeds_creator",
             Self::ReservedKey { .. } => "reserved_key",
             Self::AuthorityFieldNeedsApproval { .. } => "authority_field_needs_approval",
             Self::AuthorityFieldInvalid { .. } => "authority_field_invalid",
             Self::TextTooLarge { .. } => "text_too_large",
-            Self::KickoffRefused { .. } => "kickoff_refused",
             Self::ConsequencesUnavailable => "consequences_unavailable",
             Self::InvalidRequest { .. } => "invalid_request",
             Self::InvalidName => "invalid_name",
-            Self::ReservedName => "reserved_name",
             Self::NameTaken { .. } => "name_taken",
             Self::PeerNotAllowed { .. } => "peer_not_allowed",
             Self::PeerUnknown => "peer_unknown",
-            Self::LimitReached { .. } => "limit_reached",
             Self::BatchTooLarge { .. } => "batch_too_large",
             Self::ValidationRefused { .. } => "validation_refused",
             Self::CreationDenied { .. } => "creation_denied",
             Self::Unsupported { .. } => "unsupported",
             Self::IdentityUnknown => "identity_unknown",
-            Self::NotCreatorCustody => "not_creator_custody",
             Self::SelfChangeRefused => "self_change_refused",
             Self::StaleRevision { .. } => "stale_revision",
             Self::OperationReused => "operation_reused",
@@ -414,7 +356,6 @@ impl IdentityRefusalKind {
             Self::IdentityMember => "identity_member",
             Self::StorageUnsupported => "storage_unsupported",
             Self::ConstructionRefused { .. } => "construction_refused",
-            Self::CreatorUnresolved => "creator_unresolved",
         }
     }
 
@@ -422,10 +363,7 @@ impl IdentityRefusalKind {
     pub fn is_retryable(&self) -> bool {
         matches!(
             self,
-            Self::CreationHeld
-                | Self::HostPreparationPending
-                | Self::CreatorUnresolved
-                | Self::ConsequencesUnavailable
+            Self::CreationHeld | Self::HostPreparationPending | Self::ConsequencesUnavailable
         )
     }
 
@@ -433,21 +371,14 @@ impl IdentityRefusalKind {
     /// `kind` and `field`.
     fn details(&self) -> Value {
         match self {
-            Self::TemplateNotAllowed { template } => json!({ "template": template }),
             Self::ProfileNotAllowed { profile } => json!({ "profile": profile }),
-            Self::ModelNotAllowed { model } => json!({ "model": model }),
-            Self::ExceedsTemplate { tools } | Self::ExceedsCreator { tools } => {
-                json!({ "tools": tools })
-            }
             Self::ReservedKey { key }
             | Self::AuthorityFieldNeedsApproval { key }
             | Self::AuthorityFieldInvalid { key } => json!({ "key": key }),
             Self::TextTooLarge { limit } => json!({ "limit": limit }),
-            Self::KickoffRefused { rule } => json!({ "rule": rule.token() }),
             Self::InvalidRequest { problem } => json!({ "problem": problem.token() }),
             Self::NameTaken { by } => json!({ "by": by.token() }),
             Self::PeerNotAllowed { identity } => json!({ "identity": identity }),
-            Self::LimitReached { limit } => json!({ "limit": limit.token() }),
             Self::BatchTooLarge { max } => json!({ "max": max }),
             Self::ValidationRefused { reason } => json!({ "reason": reason }),
             Self::CreationDenied { change } => json!({ "change": change.token() }),
@@ -461,13 +392,10 @@ impl IdentityRefusalKind {
                 current: Some(current),
             } => json!({ "current": current }),
             Self::ActivationPending { attempt } => json!({ "attempt": attempt }),
-            Self::TemplateBindingChanged
-            | Self::ConsequencesUnavailable
+            Self::ConsequencesUnavailable
             | Self::InvalidName
-            | Self::ReservedName
             | Self::PeerUnknown
             | Self::IdentityUnknown
-            | Self::NotCreatorCustody
             | Self::SelfChangeRefused
             | Self::OperationReused
             | Self::NotTransferring
@@ -495,15 +423,14 @@ impl IdentityRefusalKind {
             | Self::HostPreparationPending
             | Self::CandidateLaunch
             | Self::IdentityMember
-            | Self::StorageUnsupported
-            | Self::CreatorUnresolved => json!({}),
+            | Self::StorageUnsupported => json!({}),
         }
     }
 }
 
-/// Why a creation policy is refused, with where in it. The path is relative
-/// to the policy object (`templates.research.tools.floor`); the display
-/// prefixes `identity_creation`.
+/// Why an identity policy is refused, with where in it. The path is
+/// relative to the policy object (`authority_fields.clearance.values`); the
+/// display prefixes `identity_creation`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct PolicyRefusal {
@@ -535,7 +462,7 @@ impl fmt::Display for PolicyRefusal {
 
 impl std::error::Error for PolicyRefusal {}
 
-/// What is wrong with a creation policy.
+/// What is wrong with an identity policy.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum PolicyRefusalKind {
@@ -548,14 +475,6 @@ pub enum PolicyRefusalKind {
     Invalid { value: String },
     /// The same entry appears twice.
     Duplicate { value: String },
-    /// A template this policy does not declare.
-    UnknownTemplate { template: String },
-    /// A profile the mob definition does not declare.
-    UnknownProfile { profile: String },
-    /// A floor tool outside the template's ceiling.
-    FloorOutsideCeiling { tool: String },
-    /// A creation tool in a template that does not grant creation.
-    CreationToolWithoutGrant { tool: String },
     /// An authority field whose key is not a host-declared reserved label
     /// key.
     AuthorityFieldNotReserved { key: String },
@@ -563,9 +482,6 @@ pub enum PolicyRefusalKind {
     Unsupported { feature: String },
     /// A number outside its range.
     OutOfRange { value: u64, min: u64, max: u64 },
-    /// A preamble placeholder other than `creator`, `peers`,
-    /// `display_name` and `purpose`, or an unbalanced brace.
-    InvalidPlaceholder { placeholder: String },
     /// An approval outcome that needs an approver names none.
     MissingApprover,
     /// An outcome that takes no approver names one.
@@ -574,19 +490,18 @@ pub enum PolicyRefusalKind {
     MissingReviewer,
     /// An outcome other than review names a reviewer or review rounds.
     UnexpectedReviewer,
-    /// An approver names not exactly one of `id`, `label` and
-    /// `creator_identity: true`.
+    /// An approver names not exactly one of `id` and `label`.
     InvalidApprover,
     /// A rule lets an authority change through without a human decision.
     AuthorityChangeNeedsHumanDecision,
     /// A peer rule id the policy reserves.
     ReservedRuleId { id: String },
-    /// A template's preparation mode needs a native host composition, and
-    /// the launch has none.
-    NeedsNativeHost { template: String },
-    /// The launch has no persistence (`persistent_state`), and created
-    /// identities are durable: a policy, even a disabled one, is refused
-    /// rather than ignored.
+    /// The policy's preparation (`constructed`) holds a construction, which
+    /// needs a native host composition, and the launch has none.
+    NeedsNativeHost,
+    /// The launch has no persistence (`persistent_state`), and the identity
+    /// records and decisions a policy governs are durable: a policy, even a
+    /// disabled one, is refused rather than ignored.
     NeedsPersistentLaunch,
     /// The policy is given both as `runtime_options.identity_creation` and
     /// by the native host composition.
@@ -600,22 +515,6 @@ impl fmt::Display for PolicyRefusalKind {
             Self::Empty => formatter.write_str("must not be empty"),
             Self::Invalid { value } => write!(formatter, "invalid value {value:?}"),
             Self::Duplicate { value } => write!(formatter, "duplicate {value:?}"),
-            Self::UnknownTemplate { template } => {
-                write!(formatter, "unknown template {template:?}")
-            }
-            Self::UnknownProfile { profile } => {
-                write!(
-                    formatter,
-                    "profile {profile:?} is not in the mob definition"
-                )
-            }
-            Self::FloorOutsideCeiling { tool } => {
-                write!(formatter, "floor tool {tool:?} is outside the ceiling")
-            }
-            Self::CreationToolWithoutGrant { tool } => write!(
-                formatter,
-                "creation tool {tool:?} needs may_grant_creation on the template"
-            ),
             Self::AuthorityFieldNotReserved { key } => write!(
                 formatter,
                 "authority field {key:?} is not a reserved label key the host declares"
@@ -624,33 +523,26 @@ impl fmt::Display for PolicyRefusalKind {
             Self::OutOfRange { value, min, max } => {
                 write!(formatter, "{value} is outside {min}..={max}")
             }
-            Self::InvalidPlaceholder { placeholder } => write!(
-                formatter,
-                "invalid placeholder {placeholder:?}: use creator, peers, display_name or \
-                 purpose in braces, and double a literal brace"
-            ),
             Self::MissingApprover => formatter.write_str("this outcome needs an approver"),
             Self::UnexpectedApprover => formatter.write_str("this outcome takes no approver"),
             Self::MissingReviewer => formatter.write_str("a review needs a reviewer"),
             Self::UnexpectedReviewer => {
                 formatter.write_str("only a review takes a reviewer and review rounds")
             }
-            Self::InvalidApprover => formatter.write_str(
-                "an approver is exactly one of {\"id\"}, {\"label\"} or \
-                 {\"creator_identity\": true}",
-            ),
+            Self::InvalidApprover => {
+                formatter.write_str("an approver is exactly one of {\"id\"} or {\"label\"}")
+            }
             Self::AuthorityChangeNeedsHumanDecision => formatter.write_str(
                 "an authority change needs require_approval or deny: only a human decision \
                  makes an authority field authority",
             ),
             Self::ReservedRuleId { id } => write!(formatter, "rule id {id:?} is reserved"),
-            Self::NeedsNativeHost { template } => write!(
-                formatter,
-                "template {template:?} uses preparation \"constructed\", which needs a native \
-                 host composition"
+            Self::NeedsNativeHost => formatter.write_str(
+                "preparation \"constructed\" holds a construction, which needs a native host \
+                 composition",
             ),
             Self::NeedsPersistentLaunch => formatter.write_str(
-                "created identities are durable: identity creation needs a persistent launch \
+                "identity records are durable: the policy needs a persistent launch \
                  (persistent_state)",
             ),
             Self::TwoSources => formatter.write_str(

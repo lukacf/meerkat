@@ -271,7 +271,10 @@ export interface GraphViewProps {
   onOpen?: (id: string) => void;
   selectedEdge?: string | null;
   onEdgeSelect?: (id: string | null) => void;
-  /** Brings this node into view and makes it the graph's tab stop. */
+  /**
+   * Makes this node the graph's roving tab stop. It does not move the view:
+   * the handle's `reveal(id)` or `fitTo(ids)` brings a node into view.
+   */
   focusId?: string | null;
   onFocusChange?: (id: string | null) => void;
   onHover?: (target: { node?: string; edge?: string } | null) => void;

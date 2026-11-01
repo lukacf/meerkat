@@ -9,7 +9,7 @@
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -75,6 +75,9 @@ fn test_definition() -> MobDefinition {
 #[derive(Default)]
 struct FakeState {
     records: Mutex<Vec<MemoryRecord>>,
+    /// When set, `records_page` breaks the keyset contract: its cursor never
+    /// moves past the cursor it was given.
+    stuck_cursor: AtomicBool,
     gate: Mutex<Option<Arc<dyn LlmWriteGate>>>,
     gate_installs: AtomicUsize,
     sink: Mutex<Option<Arc<dyn MemoryEventSink>>>,
@@ -448,12 +451,21 @@ impl MemoryPanelStore for FakeJudgmentStore {
         _scope_key: Option<&str>,
         _status_kind: Option<&str>,
         limit: usize,
-        _cursor: Option<(u64, String)>,
+        cursor: Option<(u64, String)>,
     ) -> Result<PanelRecordsPage, AgentMemoryError> {
         let records = self.state.records.lock().unwrap();
+        let next_cursor = if self.state.stuck_cursor.load(Ordering::SeqCst) {
+            cursor.or_else(|| {
+                records
+                    .last()
+                    .map(|record| (record.updated_at_ms, record.id.clone()))
+            })
+        } else {
+            None
+        };
         Ok(PanelRecordsPage {
             records: records.iter().take(limit).cloned().collect(),
-            next_cursor: None,
+            next_cursor,
         })
     }
 
@@ -781,6 +793,37 @@ async fn classic_path_never_clobbers_an_embedder_installed_gate() {
         1,
         "set_llm_write_gate_if_absent must not clobber the embedder's gate"
     );
+    runtime.mob_handle().stop().await.expect("stop");
+}
+
+/// A panel store whose cursor does not move past the cursor it was given
+/// cannot page. A record listing that has not filled its page refuses it as a
+/// store failure, as the timeline pager refuses a cursor that does not move,
+/// instead of reading it again until the page is full of its one record.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_records_page_whose_cursor_does_not_advance_is_refused() {
+    let fake = FakeJudgmentStore::seeded();
+    fake.state.stuck_cursor.store(true, Ordering::SeqCst);
+    let runtime = Box::pin(
+        UnifiedRuntime::builder()
+            .definition(test_definition())
+            .agent_memory(Arc::new(fake.clone()), AgentMemoryConfig::default())
+            .default_llm_client(Arc::new(StubClient))
+            .build(),
+    )
+    .await
+    .expect("classic runtime over the fake provider must build");
+    let app = runtime.build_reference_app_router(decision_state());
+
+    let records = rpc(&app, "meta/memory/panel/records", json!({})).await;
+    assert_eq!(records["error"]["code"], json!(-32603), "{records:#?}");
+    assert!(
+        records["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("did not move past its cursor")),
+        "{records:#?}"
+    );
+
     runtime.mob_handle().stop().await.expect("stop");
 }
 

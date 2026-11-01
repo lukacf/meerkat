@@ -5494,6 +5494,14 @@ mod memory_panel_records_paging_tests {
                 rows(&["default/mem-router-1"]),
             ]
         );
+        // The cursor names the page's last row, a row the caller may read.
+        assert_eq!(
+            page(&store, Some(&reader), json!({ "limit": 2 })).await?,
+            (
+                rows(&["default/mem-router-3", "default/mem-router-2"]),
+                Some("20:mem-router-2".to_string())
+            )
+        );
         // The rows it may read end at this page's cut: no cursor.
         assert_eq!(
             page(&store, Some(&reader), json!({ "limit": 3 })).await?,
@@ -5583,6 +5591,19 @@ mod memory_panel_records_paging_tests {
                 rows(&["beta/mem-beta-1", "alpha/mem-alpha-1"]),
             ]
         );
+        // At one row a page, each realm stops at its share before it runs
+        // out of rows the caller may read.
+        assert_eq!(
+            walk(&store, Some(&reader), json!({ "limit": 1 })).await?,
+            vec![
+                rows(&["beta/mem-beta-3"]),
+                rows(&["alpha/mem-alpha-3"]),
+                rows(&["beta/mem-beta-2"]),
+                rows(&["alpha/mem-alpha-2"]),
+                rows(&["beta/mem-beta-1"]),
+                rows(&["alpha/mem-alpha-1"]),
+            ]
+        );
         Ok(())
     }
 
@@ -5613,6 +5634,121 @@ mod memory_panel_records_paging_tests {
                 rows(&["alpha/mem-old"]),
             ]
         );
+        Ok(())
+    }
+
+    /// Of two rows at one position, the caller may read only one here: the
+    /// page holds that row alone, and the next page starts past both.
+    #[tokio::test]
+    async fn of_two_rows_at_one_position_only_the_readable_one_is_listed() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let store = SqliteAgentMemoryStore::open(dir.path())?;
+        seed(
+            &store,
+            "alpha",
+            &[("mem-old", "router", 10), ("mem-shared", "router", 50)],
+        )
+        .await?;
+        seed(
+            &store,
+            "beta",
+            &[("mem-shared", "delivery", 50), ("mem-new", "router", 90)],
+        )
+        .await?;
+        let reader = router_reader()?;
+
+        assert_eq!(
+            walk(&store, Some(&reader), json!({ "limit": 1 })).await?,
+            vec![
+                rows(&["beta/mem-new"]),
+                rows(&["alpha/mem-shared"]),
+                rows(&["alpha/mem-old"]),
+            ]
+        );
+        assert_eq!(
+            walk(&store, Some(&reader), json!({ "limit": 2 })).await?,
+            vec![
+                rows(&["beta/mem-new", "alpha/mem-shared"]),
+                rows(&["alpha/mem-old"]),
+            ]
+        );
+        Ok(())
+    }
+
+    /// A page whose rows lie past many rows the caller may not read takes
+    /// several store reads of the realm, and lists the rows one read of the
+    /// whole realm would.
+    #[tokio::test]
+    async fn a_page_past_many_unreadable_rows_takes_several_reads() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let store = SqliteAgentMemoryStore::open(dir.path())?;
+        let delivery: Vec<String> = (1..=40)
+            .map(|index| format!("mem-delivery-{index:02}"))
+            .collect();
+        let mut records: Vec<(&str, &str, u64)> = delivery
+            .iter()
+            .zip(100_u64..)
+            .map(|(id, updated_at_ms)| (id.as_str(), "delivery", updated_at_ms))
+            .collect();
+        records.extend([
+            ("mem-router-1", "router", 10),
+            ("mem-router-2", "router", 20),
+            ("mem-router-3", "router", 30),
+        ]);
+        seed(&store, "default", &records).await?;
+        let reader = router_reader()?;
+
+        assert_eq!(
+            walk(&store, Some(&reader), json!({ "limit": 2 })).await?,
+            vec![
+                rows(&["default/mem-router-3", "default/mem-router-2"]),
+                rows(&["default/mem-router-1"]),
+            ]
+        );
+        Ok(())
+    }
+
+    /// A caller may read no row of a listing when it holds no memory read
+    /// grant, lists quarantined rows without the review grant, or lists a
+    /// scope it may not read. Its access view tells that without a store
+    /// read, so no realm is read: the realm file here is not a database, and
+    /// a read of it fails the listing, as it does for a caller who may read
+    /// some rows.
+    #[tokio::test]
+    async fn a_listing_the_caller_may_read_nothing_of_reads_no_realm() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let store = SqliteAgentMemoryStore::open(dir.path())?;
+        std::fs::write(
+            store.path_for_realm("broken"),
+            "not a database\n".repeat(64),
+        )?;
+        let nobody = AccessController::new(crate::access::AccessControlConfig {
+            enabled: true,
+            admins: vec!["root@example.test".to_string()],
+            ..crate::access::AccessControlConfig::default()
+        })?
+        .view_for_subject(None);
+        let reader = router_reader()?;
+
+        for (view, params) in [
+            (&nobody, json!({})),
+            (&reader, json!({ "status": "quarantined" })),
+            (
+                &reader,
+                json!({ "scope": "identity", "scope_key": "delivery" }),
+            ),
+        ] {
+            assert_eq!(page(&store, Some(view), params).await?, (Vec::new(), None));
+        }
+        let panel: &dyn MemoryPanelStore = &store;
+        let read = handle_memory_panel_records(
+            Some(panel),
+            MemoryPanelCaller::own(Some(&reader)),
+            &json!({}),
+            json!("records-page"),
+        )
+        .await;
+        assert!(read["error"].is_object(), "{read}");
         Ok(())
     }
 }

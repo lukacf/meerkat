@@ -37,7 +37,6 @@ import {
   type ConsoleNavigationModel,
   type ConsoleNavigationNode,
   type ConsoleSidebarDropPosition,
-  type ConsoleSidebarGroupBy,
   type ConsoleSidebarSortBy,
   type ConsoleSidebarStorageLike,
   type ConsoleSidebarViewPreferences,

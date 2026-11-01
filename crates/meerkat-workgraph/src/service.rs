@@ -3658,6 +3658,175 @@ mod tests {
         assert_eq!(rest["events"][2]["seq"], json!(high_water), "{rest}");
     }
 
+    /// A snapshot walk reports every edge between the items it returned
+    /// exactly once: a continuation carries the edges from its items to the
+    /// items before its cursor.
+    #[tokio::test]
+    async fn a_snapshot_walk_reports_each_edge_once() {
+        let service = WorkGraphService::with_scope(
+            Arc::new(MemoryWorkGraphStore::new()),
+            "realm",
+            WorkNamespace::default(),
+        );
+        let mut items = Vec::new();
+        for index in 0..5 {
+            items.push(
+                service
+                    .create(create_req(&format!("item {index}")))
+                    .await
+                    .expect("create")
+                    .id,
+            );
+        }
+        // Newest first, two to a page: [4, 3], [2, 1], [0]. The edges span
+        // pages in both directions, and one stays on its page.
+        let links = [(0, 4), (1, 2), (2, 3), (4, 1)];
+        for (from, to) in links {
+            service
+                .link(LinkWorkItemsRequest {
+                    realm_id: None,
+                    namespace: None,
+                    kind: WorkEdgeKind::Blocks,
+                    from_id: items[from].clone(),
+                    to_id: items[to].clone(),
+                })
+                .await
+                .expect("link");
+        }
+
+        let mut seen = Vec::new();
+        let mut pages = 0;
+        let mut arguments = json!({ "limit": 2 });
+        loop {
+            let page = tool_page(&service, "workgraph_snapshot", arguments).await;
+            let snapshot = &page["snapshot"];
+            pages += 1;
+            assert!(pages <= 3, "the walk ends: {page}");
+            for edge in snapshot["edges"].as_array().expect("edges") {
+                seen.push((
+                    edge["from_id"].as_str().expect("from_id").to_string(),
+                    edge["to_id"].as_str().expect("to_id").to_string(),
+                ));
+            }
+            if snapshot["truncated"] != json!(true) {
+                break;
+            }
+            arguments = json!({ "limit": 2, "cursor": next_cursor(snapshot) });
+        }
+        assert_eq!(pages, 3);
+        seen.sort();
+        let mut expected = links
+            .iter()
+            .map(|(from, to)| (items[*from].to_string(), items[*to].to_string()))
+            .collect::<Vec<_>>();
+        expected.sort();
+        assert_eq!(
+            seen, expected,
+            "each edge once, whatever pages its ends are on"
+        );
+    }
+
+    /// Snapshot and ready continuations carry their walk's anchor and flag a
+    /// write after it.
+    #[tokio::test]
+    async fn snapshot_and_ready_continuations_flag_changes_after_the_anchor() {
+        let service = WorkGraphService::with_scope(
+            Arc::new(MemoryWorkGraphStore::new()),
+            "realm",
+            WorkNamespace::default(),
+        );
+        let mut created = Vec::new();
+        for index in 0..3 {
+            created.push(
+                service
+                    .create(create_req(&format!("item {index}")))
+                    .await
+                    .expect("create"),
+            );
+        }
+
+        // Snapshot: newest first, so the oldest item is not yet returned.
+        let first = tool_page(&service, "workgraph_snapshot", json!({ "limit": 2 })).await;
+        let first = &first["snapshot"];
+        let anchor = first["anchor_event_seq"].clone();
+        assert!(anchor.is_i64(), "a page names its walk's anchor: {first}");
+        assert_eq!(first["changed_since_anchor"], json!(false), "{first}");
+        touch(&service, &created[0]).await;
+        let second = tool_page(
+            &service,
+            "workgraph_snapshot",
+            json!({ "limit": 2, "cursor": next_cursor(first) }),
+        )
+        .await;
+        let second = &second["snapshot"];
+        assert_eq!(second["anchor_event_seq"], anchor, "{second}");
+        assert_eq!(second["changed_since_anchor"], json!(true), "{second}");
+
+        // Ready: oldest first at one priority, so the newest item is not yet
+        // returned.
+        let first = tool_page(&service, "workgraph_ready", json!({ "limit": 2 })).await;
+        let anchor = first["anchor_event_seq"].clone();
+        assert!(anchor.is_i64(), "a page names its walk's anchor: {first}");
+        assert_eq!(first["changed_since_anchor"], json!(false), "{first}");
+        touch(&service, &created[2]).await;
+        let second = tool_page(
+            &service,
+            "workgraph_ready",
+            json!({ "limit": 2, "cursor": next_cursor(&first) }),
+        )
+        .await;
+        assert_eq!(second["anchor_event_seq"], anchor, "{second}");
+        assert_eq!(second["changed_since_anchor"], json!(true), "{second}");
+    }
+
+    /// A `limit: 0` page holds no row, so it has nothing to continue after:
+    /// it reports the totals and names no cursor.
+    #[tokio::test]
+    async fn a_limit_0_page_reports_the_totals_and_names_no_cursor() {
+        let service = WorkGraphService::with_scope(
+            Arc::new(MemoryWorkGraphStore::new()),
+            "realm",
+            WorkNamespace::default(),
+        );
+        for index in 0..3 {
+            service
+                .create(create_req(&format!("item {index}")))
+                .await
+                .expect("create");
+        }
+        let list = service
+            .list_page(WorkItemFilter {
+                limit: Some(0),
+                ..WorkItemFilter::default()
+            })
+            .await
+            .expect("list page");
+        let ready = service
+            .ready_page(crate::ReadyWorkFilter {
+                limit: Some(0),
+                ..crate::ReadyWorkFilter::default()
+            })
+            .await
+            .expect("ready page");
+        for page in [&list, &ready] {
+            assert!(page.items.is_empty(), "{page:?}");
+            assert_eq!(page.total_items, Some(3), "{page:?}");
+            assert_eq!(page.truncated, Some(true), "{page:?}");
+            assert_eq!(page.next_cursor, None, "{page:?}");
+        }
+        let snapshot = service
+            .snapshot(crate::WorkGraphSnapshotFilter {
+                limit: Some(0),
+                ..crate::WorkGraphSnapshotFilter::default()
+            })
+            .await
+            .expect("snapshot");
+        assert!(snapshot.items.is_empty(), "{snapshot:?}");
+        assert_eq!(snapshot.total_items, Some(3), "{snapshot:?}");
+        assert_eq!(snapshot.truncated, Some(true), "{snapshot:?}");
+        assert_eq!(snapshot.next_cursor, None, "{snapshot:?}");
+    }
+
     #[tokio::test]
     async fn blocked_dependencies_are_not_ready_until_completed() {
         let service = WorkGraphService::with_scope(

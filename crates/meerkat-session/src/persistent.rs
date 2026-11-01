@@ -19686,8 +19686,8 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             Some(metadata) => {
                 let identity = metadata.llm_identity();
                 match lowerings.get(&identity) {
-                    Some(lowering) => lowering,
-                    None => {
+                    MemoizedLowering::Resolved(lowering) => lowering,
+                    MemoizedLowering::Unresolved => {
                         let lowering = self
                             .inner
                             .instruction_lowering_for_identity(&identity)
@@ -19717,15 +19717,22 @@ struct InstructionLoweringMemo {
     )>,
 }
 
+/// What one instruction read pass knows of a model and binding's lowering.
+enum MemoizedLowering {
+    /// The pass has not resolved this model and binding yet.
+    Unresolved,
+    /// The pass resolved it: its lowering, or `None` when it has none.
+    Resolved(Option<meerkat_core::InstructionLowering>),
+}
+
 impl InstructionLoweringMemo {
-    fn get(
-        &self,
-        identity: &meerkat_core::SessionLlmIdentity,
-    ) -> Option<Option<meerkat_core::InstructionLowering>> {
+    fn get(&self, identity: &meerkat_core::SessionLlmIdentity) -> MemoizedLowering {
         self.resolved
             .iter()
             .find(|(resolved, _)| resolved == identity)
-            .map(|(_, lowering)| *lowering)
+            .map_or(MemoizedLowering::Unresolved, |(_, lowering)| {
+                MemoizedLowering::Resolved(*lowering)
+            })
     }
 
     fn insert(

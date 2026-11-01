@@ -158,10 +158,10 @@ is active. Host REST/RPC/SDK surfaces provide observability, while CLI and
 trusted in-process hosts also expose narrow goal/attention controls:
 
 ```bash
-rkat workgraph list [--namespace <NS>] [--all-namespaces] [--status <STATUS>] [--label <LABEL>] [--include-terminal] [--limit <N>] [--json]
+rkat workgraph list [--namespace <NS>] [--all-namespaces] [--status <STATUS>] [--label <LABEL>] [--include-terminal] [--limit <N>] [--cursor <CURSOR>] [--json]
 rkat workgraph show <ID> [--namespace <NS>] [--json]
-rkat workgraph ready [--namespace <NS>] [--label <LABEL>] [--limit <N>] [--json]
-rkat workgraph snapshot [--namespace <NS>] [--all-namespaces] [--status <STATUS>] [--label <LABEL>] [--include-terminal] [--limit <N>] [--json]
+rkat workgraph ready [--namespace <NS>] [--label <LABEL>] [--limit <N>] [--cursor <CURSOR>] [--json]
+rkat workgraph snapshot [--namespace <NS>] [--all-namespaces] [--status <STATUS>] [--label <LABEL>] [--include-terminal] [--limit <N>] [--cursor <CURSOR>] [--json]
 rkat workgraph events [--namespace <NS>] [--all-namespaces] [--after-seq <N>] [--limit <N>] [--json]
 rkat workgraph goal-create <SESSION_ID> <TITLE> [--namespace <NS>] [--description <TEXT>] [--mode pursue|coordinate|review|falsify|judge|observe] [--completion-policy self-attest|host-confirmed] [--json]
 rkat workgraph goal-status <BINDING_ID> [--namespace <NS>] [--json]

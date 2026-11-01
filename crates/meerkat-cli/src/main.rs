@@ -10886,7 +10886,8 @@ fn parse_work_namespace(
 }
 
 /// `--json` prints the page as the service returns it: the rows, then
-/// `total_items` and `truncated`.
+/// `total_items`, `truncated`, `next_cursor` and the walk's anchor. The text
+/// ends with the continuation when the page ended early.
 fn print_workgraph_items(page: meerkat::WorkGraphItemsResponse, json: bool) -> anyhow::Result<()> {
     if json {
         println!("{}", serde_json::to_string_pretty(&page)?);

@@ -746,10 +746,10 @@ Runtime env fallback order:
 active realm. Agents mutate ordinary WorkGraph items through `workgraph_*` tools.
 
 ```bash
-rkat workgraph list [--namespace <NS>] [--all-namespaces] [--status <STATUS>] [--label <LABEL>] [--include-terminal] [--limit <N>] [--json]
+rkat workgraph list [--namespace <NS>] [--all-namespaces] [--status <STATUS>] [--label <LABEL>] [--include-terminal] [--limit <N>] [--cursor <CURSOR>] [--json]
 rkat workgraph show <ID> [--namespace <NS>] [--json]
-rkat workgraph ready [--namespace <NS>] [--label <LABEL>] [--limit <N>] [--json]
-rkat workgraph snapshot [--namespace <NS>] [--all-namespaces] [--status <STATUS>] [--label <LABEL>] [--include-terminal] [--limit <N>] [--json]
+rkat workgraph ready [--namespace <NS>] [--label <LABEL>] [--limit <N>] [--cursor <CURSOR>] [--json]
+rkat workgraph snapshot [--namespace <NS>] [--all-namespaces] [--status <STATUS>] [--label <LABEL>] [--include-terminal] [--limit <N>] [--cursor <CURSOR>] [--json]
 rkat workgraph events [--namespace <NS>] [--all-namespaces] [--after-seq <N>] [--limit <N>] [--json]
 rkat workgraph goal-create <SESSION_ID> <TITLE> [--namespace <NS>] [--description <TEXT>] [--mode pursue|coordinate|review|falsify|judge|observe] [--completion-policy self-attest|host-confirmed] [--json]
 rkat workgraph goal-status <BINDING_ID> [--namespace <NS>] [--json]
@@ -762,6 +762,12 @@ rkat workgraph attention-resume <BINDING_ID> --expected-revision <N> [--namespac
 
 `--status` on `list`/`snapshot` is repeatable: `open`, `in-progress`,
 `blocked`, `completed`, `cancelled`, `failed`. `--label` is repeatable.
+
+`list`, `ready` and `snapshot` page: a page that ends early prints
+`N of M, more with --cursor <CURSOR>` (`--json` carries `next_cursor`), and
+`--cursor <CURSOR>` reads the next page. `events` prints
+`more with --after-seq <N>` (`--json` carries `next_after_seq`) for
+`--after-seq`.
 
 The flags above are parsed, but the current CLI binds WorkGraph to the active
 realm's immutable `default` namespace grant. Non-default `--namespace` requests

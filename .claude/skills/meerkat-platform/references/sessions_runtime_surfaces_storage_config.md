@@ -395,7 +395,7 @@ claims and evidence. Agents change it with `workgraph_*` tools when
 `enable_workgraph`. Hosts observe it:
 
 ```bash
-rkat workgraph list [--status open|in-progress|blocked|completed|cancelled|failed]... [--label L]... [--include-terminal] [--limit N] [--json]
+rkat workgraph list [--status open|in-progress|blocked|completed|cancelled|failed]... [--label L]... [--include-terminal] [--limit N] [--cursor C] [--json]
 rkat workgraph show <ID> [--json]
 rkat workgraph ready | snapshot | events [--after-seq N] ...
 rkat workgraph goal-create <SESSION_ID> <TITLE> [--mode pursue|coordinate|review|falsify|judge|observe] [--completion-policy self-attest|host-confirmed]
@@ -412,6 +412,9 @@ rkat workgraph attention-list|attention-pause|attention-resume ...
 - Collection reads default to 100 items; `--limit` above 1000 is refused
   ("limit N exceeds the WorkGraph maximum of 1000"); attention lists are capped
   at 1000 rows.
+- List, ready and snapshot pages that end early name a cursor: pass it back
+  with `--cursor` (`cursor` on the tools, RPC and REST) for the next page.
+  Events pages name `next_after_seq` for `--after-seq`.
 - Mob members resolve attention in the mob's realm (`mob.<mob_id>`); an
   attention binding that names a mob member is refused in any other realm
   (0.8.41).

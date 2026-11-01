@@ -52,11 +52,11 @@ Read (ABAC `workgraph.view`):
 
 | Method | Params | Result |
 |---|---|---|
-| `meta/workgraph/snapshot` | `{namespace?, all_namespaces?, statuses?: string[], labels?: string[], include_terminal?, limit?}` | `WorkGraphSnapshot` |
-| `meta/workgraph/list` | same filter | `{items: WorkItem[]}` |
+| `meta/workgraph/snapshot` | `{namespace?, all_namespaces?, statuses?: string[], labels?: string[], include_terminal?, limit?, cursor?}` | `WorkGraphSnapshot` with the page fields |
+| `meta/workgraph/list` | same filter | `{items: WorkItem[], total_items, truncated, next_cursor?, anchor_event_seq?, changed_since_anchor}` |
 | `meta/workgraph/get` | `{id, namespace?}` | `{item: WorkItem}` |
-| `meta/workgraph/ready` | `{namespace?, labels?, limit?}` | `{items: WorkItem[]}` |
-| `meta/workgraph/events` | `{namespace?, all_namespaces?, after_seq?, limit?}` | `{events: WorkGraphEvent[]}` |
+| `meta/workgraph/ready` | `{namespace?, labels?, limit?, cursor?}` | `{items: WorkItem[], total_items, truncated, next_cursor?, anchor_event_seq?, changed_since_anchor}` |
+| `meta/workgraph/events` | `{namespace?, all_namespaces?, after_seq?, limit?}` | `{events: WorkGraphEvent[], truncated, next_after_seq?, event_high_water_mark?}` |
 | `meta/workgraph/attention/list` | `{namespace?, status?}` — `status` accepts plain strings `active\|paused\|superseded\|stopped` (or upstream's tagged `{state: ...}` form) | `{attention: WorkAttentionBinding[]}` |
 | `meta/workgraph/goal/status` | `{binding_id, namespace?}` | `{item, attention}` |
 

@@ -174,16 +174,24 @@ export function SegmentedControl<Id extends string>({
           <button
             key={option.id}
             type="button"
-            className={cx("cc-seg__btn", pressed && "is-active")}
+            className={cx("cc-seg__btn", pressed && "is-active", option.glyph && "has-glyph")}
             aria-pressed={pressed}
             aria-label={option.ariaLabel}
-            title={option.title}
+            // A glyph option can show its glyph alone (a narrow panel header):
+            // its words stay its name and become its tooltip.
+            title={option.title ?? (option.glyph && typeof option.label === "string" ? option.label : undefined)}
             disabled={option.disabled}
             data-testid={option.testId}
             onClick={() => onChange(option.id)}
           >
-            {option.glyph ? <KitGlyph name={option.glyph} className="cc-seg__glyph" /> : null}
-            {option.label}
+            {option.glyph ? (
+              <>
+                <KitGlyph name={option.glyph} className="cc-seg__glyph" />
+                <span className="cc-seg__label">{option.label}</span>
+              </>
+            ) : (
+              option.label
+            )}
             {option.count !== null && option.count !== undefined && option.count !== "" ? (
               <>
                 {" "}

@@ -23,12 +23,15 @@
   /* Density (spec A4.3): comfortable here, compact on a PanelShell with
      data-density="compact" and in every pane under 480 px. */
   --_cc-panel-row-h: 40px;
+  /* Two-line rows: 48 px comfortable, 38 px compact. */
+  --_cc-row-pad-y: 6px;
   --_cc-card-pad: 12px 14px;
   --_cc-figure-size: var(--_cc-fs-figure);
   --_cc-lane-min-h: 88px;
 }
 .cc-panel[data-density="compact"] {
   --_cc-panel-row-h: var(--_cc-density-row);
+  --_cc-row-pad-y: 3px;
   --_cc-card-pad: 8px 10px;
   --_cc-figure-size: 16px;
   --_cc-lane-min-h: 64px;
@@ -193,15 +196,19 @@
    trigger. A refresh runs a 1 px accent hairline along the bottom rule. */
 .cc-panel-head--v2 {
   position: relative;
-  flex-wrap: nowrap;
+  flex-wrap: wrap;
   align-items: flex-start;
-  gap: 12px;
+  gap: 8px 12px;
 }
-.cc-panel-head--v2 .cc-panel-head__text { flex: 1 1 auto; }
+/* The actions wrap to a row of their own when they do not fit beside 240 px
+   of title and summary, instead of squeezing the title or running past the
+   pane's edge. */
+.cc-panel-head--v2 .cc-panel-head__text { flex: 1 1 240px; }
 .cc-panel-head__title-row {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 10px;
+  gap: 4px 10px;
   min-width: 0;
 }
 .cc-panel-head__title-row > .cc-panel-head__title { flex: 0 1 auto; min-width: 0; }
@@ -209,10 +216,40 @@
   display: inline-flex;
   flex: none;
   min-width: 0;
-  max-width: 50%;
+  max-width: 100%;
 }
 .cc-panel-head__scope .cc-field { max-width: 100%; }
 .cc-panel-head--v2 .cc-panel-head__sub { margin-top: 3px; }
+/* The facts sit in one flex line that starts one separator's width left of
+   the summary's edge: every fact after the first leads with its separator,
+   so the separator that starts a wrapped line falls in the clipped margin
+   and no line ends on a dangling dot. */
+.cc-panel-head__summary {
+  --_cc-summary-sep: 1.1em;
+  text-overflow: clip;
+}
+.cc-panel-head__facts {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: baseline;
+  min-width: 0;
+  margin-left: calc(-1 * var(--_cc-summary-sep));
+}
+.cc-panel-head__part {
+  flex: none;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cc-panel-head__part:first-child { padding-left: var(--_cc-summary-sep); }
+.cc-panel-head__part:last-child { flex: 0 1 auto; }
+.cc-panel-head__sep {
+  display: inline-block;
+  width: var(--_cc-summary-sep);
+  text-align: center;
+}
 .cc-panel-head__fact {
   color: var(--_cc-foreground-meta);
   font-variant-numeric: tabular-nums;
@@ -237,7 +274,6 @@
   align-items: center;
   gap: 2px;
 }
-.cc-panel-head__menu--fold { display: none; }
 .cc-panel-head__progress {
   position: absolute;
   left: 0;
@@ -1463,6 +1499,14 @@ button.cc-tile:focus-visible,
   color: var(--_cc-foreground-muted);
 }
 
+/* Skeleton ink: the foreground over whatever surface holds it, so a
+   skeleton reads as a faint shape in light and dark alike (never a hole
+   darker than the card). */
+.cc-skeleton,
+.cc-figure__skeleton {
+  --_cc-skeleton: color-mix(in srgb, var(--_cc-foreground) 7%, transparent);
+  --_cc-skeleton-hi: color-mix(in srgb, var(--_cc-foreground) 12%, transparent);
+}
 .cc-skeleton {
   display: flex;
   flex-direction: column;
@@ -1475,9 +1519,9 @@ button.cc-tile:focus-visible,
   border-radius: var(--_cc-radius-sm);
   background: linear-gradient(
     90deg,
-    var(--_cc-surface-soft) 0%,
-    var(--_cc-surface-hover) 50%,
-    var(--_cc-surface-soft) 100%
+    var(--_cc-skeleton) 0%,
+    var(--_cc-skeleton-hi) 50%,
+    var(--_cc-skeleton) 100%
   );
   background-size: 200% 100%;
   animation: cc-shimmer 1.4s ease-in-out infinite;
@@ -1548,6 +1592,14 @@ button.cc-tile:focus-visible,
 .cc-notice__icon {
   margin-top: 2px;
   color: var(--_cc-tone-ink);
+}
+.cc-notice__icon--mark {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
 }
 .cc-notice__text {
   flex: 1 1 auto;
@@ -1810,7 +1862,9 @@ button.cc-tile:focus-visible,
   padding: 0 calc(var(--_cc-panel-pad-x) - 12px);
   border-bottom: 1px solid var(--_cc-border-soft);
 }
-.cc-glance > * + * { border-left: 1px solid var(--_cc-border-soft); }
+/* The rule between figures: a pseudo-class keeps it above the figure's own
+   border reset below (".cc-glance > * + *" ties with ".cc-figure" and lost). */
+.cc-glance > :nth-child(n + 2) { border-left: 1px solid var(--_cc-border-soft); }
 .cc-figure {
   display: flex;
   flex-direction: column;
@@ -1907,7 +1961,7 @@ button.cc-figure:focus-visible { outline: 2px solid var(--_cc-focus-ring); outli
   width: 40px;
   height: calc(var(--_cc-figure-size) * 0.95);
   border-radius: var(--_cc-radius-sm);
-  background: var(--_cc-surface-soft);
+  background: var(--_cc-skeleton);
 }
 .cc-panel[data-density="compact"] .cc-figure__trend { display: none; }
 
@@ -2252,6 +2306,13 @@ button.cc-figure:focus-visible { outline: 2px solid var(--_cc-focus-ring); outli
   min-height: 24px;
 }
 .cc-drawer__titles { flex: 1 1 auto; min-width: 0; }
+.cc-drawer__title-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  min-width: 0;
+}
 .cc-drawer__title {
   margin: 0;
   font-family: var(--_cc-font-display);
@@ -2273,7 +2334,7 @@ button.cc-figure:focus-visible { outline: 2px solid var(--_cc-focus-ring); outli
   font-size: var(--_cc-panel-fs-meta);
   color: var(--_cc-foreground-meta);
 }
-.cc-drawer__status { flex: none; margin-top: 3px; }
+.cc-drawer__status { display: inline-flex; flex: none; }
 .cc-drawer__tools {
   display: inline-flex;
   flex: none;
@@ -2461,7 +2522,7 @@ button.cc-figure:focus-visible { outline: 2px solid var(--_cc-focus-ring); outli
   gap: 10px;
   box-sizing: border-box;
   min-height: var(--_cc-panel-row-h);
-  padding: 5px var(--_cc-panel-pad-x);
+  padding: var(--_cc-row-pad-y) var(--_cc-panel-pad-x);
   border-bottom: 1px solid var(--_cc-border-soft);
 }
 .cc-entity--row.is-interactive:hover { background: var(--_cc-surface-hover); }
@@ -2474,6 +2535,9 @@ button.cc-figure:focus-visible { outline: 2px solid var(--_cc-focus-ring); outli
   font-size: var(--_cc-panel-fs-body);
   font-weight: 500;
 }
+/* Compact two-line rows tighten their lines too (A4.3). */
+.cc-panel[data-density="compact"] .cc-entity--row .cc-entity__title { line-height: 16px; }
+.cc-panel[data-density="compact"] .cc-entity--row .cc-entity__sub { line-height: 14px; }
 .cc-entity--row .cc-entity__now { font-size: var(--_cc-panel-fs-meta); color: var(--_cc-foreground-muted); }
 .cc-entity--row .cc-entity__now > .cc-mark { margin-top: 3.5px; }
 .cc-entity--row .cc-entity__time { min-width: 48px; margin-left: 0; text-align: right; }
@@ -2620,6 +2684,9 @@ button.cc-figure:focus-visible { outline: 2px solid var(--_cc-focus-ring); outli
   text-underline-offset: 2px;
   transition: text-decoration-color var(--_cc-dur-fast) ease;
 }
+/* A link inside prose shows a faint rule at rest, so it reads as a link
+   among words; an agent name carries its avatar instead. */
+.cc-link--button { text-decoration-color: color-mix(in srgb, currentColor 35%, transparent); }
 .cc-agent--link:hover .cc-agent__name,
 .cc-link--button:hover { text-decoration-color: currentColor; }
 .cc-agent--link:focus-visible,
@@ -2726,20 +2793,30 @@ button.cc-figure:focus-visible { outline: 2px solid var(--_cc-focus-ring); outli
   .cc-figure__trend { display: none; }
   .cc-reveal { opacity: 1; }
   .cc-menu__fold { display: block; }
-  .cc-panel-head--v2 .cc-panel-head__actions {
-    flex-basis: auto;
-    margin-left: auto;
+  /* The header's actions take a row of their own (the rule below) and wrap
+     inside it. The view switch stays: pinned browser scenarios press it in a
+     180 px pane. Its glyph options show the glyph alone; the words stay
+     their names and tooltips. */
+  .cc-panel-head--v2 .cc-panel-head__actions { flex-wrap: wrap; }
+  .cc-panel-head__view .cc-seg__btn.has-glyph { padding: 0 8px; }
+  .cc-panel-head__view .cc-seg__btn.has-glyph .cc-seg__glyph { margin-right: 0; }
+  .cc-panel-head__view .cc-seg__btn.has-glyph .cc-seg__label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
   }
-  .cc-panel-head__view { display: none; }
-  .cc-panel-head__menu--fold { display: inline-flex; }
+  /* The summary may wrap to two lines here (A3.1), clamped. */
   .cc-panel-head--v2 .cc-panel-head__summary {
-    display: -webkit-box;
-    -webkit-box-orient: vertical;
-    -webkit-line-clamp: 2;
-    white-space: normal;
+    max-height: calc(2 * 1.45em);
+    line-height: 1.45;
   }
+  .cc-panel-head--v2 .cc-panel-head__facts { flex-wrap: wrap; }
   .cc-panel > * {
     --_cc-panel-row-h: var(--_cc-density-row);
+    --_cc-row-pad-y: 3px;
     --_cc-card-pad: 8px 10px;
     --_cc-figure-size: 16px;
     --_cc-lane-min-h: 64px;
@@ -2751,6 +2828,8 @@ button.cc-figure:focus-visible { outline: 2px solid var(--_cc-focus-ring); outli
   }
   .cc-row__actions { opacity: 1; }
   .cc-row__meta > :not(:first-child):not(.cc-time) { display: none; }
+  .cc-entity--row .cc-entity__title { line-height: 16px; }
+  .cc-entity--row .cc-entity__sub { line-height: 14px; }
   .cc-btn__label { display: none; }
   .cc-search__input { width: 100%; }
   .cc-search,

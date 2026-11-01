@@ -1031,14 +1031,18 @@ async fn same_session_successor_ends_queued_inputs_when_its_session_does_not_com
         .await
         .expect("roster read")
         .expect("the member is seated");
+    // An autonomous member's tracked work takes the exact runtime-input
+    // lane: its inbox delivery tracks no completion.
     let queued = mob
         .handle
-        .start_work_with_mode(
+        .start_runtime_work_with_delivery_identity_bounded(
             entry.agent_runtime_id.clone(),
             entry.fence_token,
-            WorkRef::new(),
             WorkSpec::new(QUEUED, WorkOrigin::Internal),
-            HandlingMode::Queue,
+            MobDeliveryIdentity::new("stop-branch-queued", Uuid::new_v4().to_string())
+                .expect("a stable delivery identity"),
+            BoundedResultSpec::new("queued", 1024).expect("bound"),
+            crate::mob_machine::WorkContentAttribution::Conversational,
         )
         .await
         .expect("the queued input is admitted");
@@ -1192,7 +1196,9 @@ async fn assert_nothing_happened(
 /// fresh-life respawn of an entry, so it is routed to the same-session path,
 /// which refuses it the same way. Nothing happens: the journal holds no new
 /// row, MobMachine holds no rotation of either member, no retirement of
-/// either is published, and both roster anchors are unchanged.
+/// either is published, and both roster anchors are unchanged. The mob's
+/// definition holds no AutonomousHost profile: the builder refuses one in a
+/// mob with no runtime.
 ///
 /// RED: drop the runtime-backed check from `plan_member_respawn`: the
 /// respawn starts the member's retirement.
@@ -1200,14 +1206,19 @@ async fn assert_nothing_happened(
 async fn respawn_member_of_a_member_that_is_not_runtime_backed_is_refused_typed() {
     let service = Arc::new(MockSessionService::new());
     let storage = MobStorage::in_memory();
-    let handle = MobBuilder::new(
-        with_unique_mob_id(sample_definition(), "respawn-no-runtime"),
-        storage.clone(),
-    )
-    .with_session_service(service)
-    .create()
-    .await
-    .expect("create the mob");
+    let mut definition = with_unique_mob_id(sample_definition(), "respawn-no-runtime");
+    for profile in definition
+        .profiles
+        .values_mut()
+        .filter_map(ProfileBinding::as_inline_mut)
+    {
+        profile.runtime_mode = crate::MobRuntimeMode::TurnDriven;
+    }
+    let handle = MobBuilder::new(definition, storage.clone())
+        .with_session_service(service)
+        .create()
+        .await
+        .expect("create the mob");
     handle
         .spawn_spec(worker_spec("no-runtime"))
         .await

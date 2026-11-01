@@ -1952,9 +1952,13 @@ macro_rules! mob_catalog_machine_dsl {
             // SameSession (respawn, declared role migration, runtime-mode
             // restamp): the current incarnation's retirement starts here and
             // the next incarnation is seated Dormant on the member's own
-            // session, which the retirement keeps; it names that session and
-            // no endpoint (the member keeps its own).
-            BeginMemberRotation { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, session_id: SessionId, peer_endpoint: Option<MemberPeerEndpoint>, session_archived: bool, target: Enum<RotationTarget> },
+            // session, which the retirement keeps; it names that session.
+            // profile_name: the next incarnation's role. A same-session
+            // successor under the member's own role names no endpoint (the
+            // member keeps its own); one under another role may name the
+            // member's own peer id under the new role's comms name (none for
+            // network comms, whose first wake registers it).
+            BeginMemberRotation { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, session_id: SessionId, peer_endpoint: Option<MemberPeerEndpoint>, session_archived: bool, target: Enum<RotationTarget>, profile_name: String },
             // The rotation's archive terminal: retires the old incarnation and
             // seats the next one Dormant in one transition (no non-member
             // window). Its two journal rows are appended in one batch before
@@ -2165,9 +2169,10 @@ macro_rules! mob_catalog_machine_dsl {
             // the entry in their own transition.
             RecoverIdentityEntry { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, origin: Enum<IdentityEntryOrigin> },
             // Replay: the rotation a retirement's start row records (its
-            // stored rotation: target, next session, endpoint), on the
-            // Retiring incarnation the replay of that row restored.
-            RecoverMemberRotationIntent { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, target: Enum<RotationTarget>, session_id: SessionId, peer_endpoint: Option<MemberPeerEndpoint> },
+            // stored rotation: target, next session, endpoint, and the next
+            // incarnation's role), on the Retiring incarnation the replay of
+            // that row restored.
+            RecoverMemberRotationIntent { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, target: Enum<RotationTarget>, session_id: SessionId, peer_endpoint: Option<MemberPeerEndpoint>, profile_name: String },
             // Replay: the retirement of an identity entry that the declared
             // apply's seal unlisted (its start row records the cause
             // Unlisted), on the Retiring incarnation the replay of that row
@@ -4551,13 +4556,14 @@ macro_rules! mob_catalog_machine_dsl {
 
         // A same-session rotation keeps its member's session: while it is
         // pending the member stays bound to the session the rotation names,
-        // and the rotation records no endpoint of its own (the member keeps
-        // its own).
+        // and an endpoint the rotation records (for a successor under
+        // another role) is the member's own peer id: the key stays.
         invariant same_session_rotation_keeps_its_binding {
             for_all(id in self.member_rotation_targets.keys(),
                 self.member_rotation_targets.get_cloned(id) != Some(RotationTarget::SameSession)
                 || (self.member_session_bindings.get_cloned(id) == self.member_rotation_session_ids.get_cloned(id)
-                    && self.member_rotation_peer_endpoints.contains_key(id) == false))
+                    && (self.member_rotation_peer_endpoints.contains_key(id) == false
+                        || self.member_peer_ids.get_cloned(id) == Some(mob_machine_member_peer_endpoint_peer_id(self.member_rotation_peer_endpoints.get_cloned(id).get("value"))))))
         }
 
         // An archive-only retirement is a Retiring runtime; its
@@ -26373,7 +26379,7 @@ macro_rules! mob_catalog_machine_dsl {
         // terminal's Stopped twins finish it.
         transition BeginMemberRotation {
             per_phase [Running]
-            on input BeginMemberRotation { agent_identity, agent_runtime_id, fence_token, generation, session_id, peer_endpoint, session_archived, target }
+            on input BeginMemberRotation { agent_identity, agent_runtime_id, fence_token, generation, session_id, peer_endpoint, session_archived, target, profile_name }
             guard "fresh_session_target" { target == RotationTarget::FreshSession }
             guard "composition_authoritative" { self.composition_authority == CompositionAuthorityKind::Authoritative }
             // The destroy beats the rotation. Once it is admitted the
@@ -26426,13 +26432,21 @@ macro_rules! mob_catalog_machine_dsl {
         // routes no runtime retire (the runtime is recorded archive-only): a
         // routed runtime Retire would leave the kept session's runtime
         // retired for good, so the shell's disposal releases the
-        // registration and keeps the session (KeptForSuccessor). The member
-        // keeps its own endpoint: the rotation records none. Running only,
-        // as BeginMemberRotation; a Stop that lands mid-rotation keeps the
-        // intent, and the terminal's Stopped twin finishes it.
+        // registration and keeps the session (KeptForSuccessor). A
+        // successor under the member's own role keeps the member's endpoint
+        // and edges: the rotation records no endpoint. One under another
+        // role (profile_name) runs under that role's comms name: it keeps
+        // the member's session and key but neither its descriptor nor its
+        // topology. The rotation records the member's own peer id under the
+        // new name (none for network comms), the shell's retirement unwires
+        // the member's peers' trust as a plain retirement's does, and the
+        // terminal ends the member's edges and installs that endpoint.
+        // Running only, as BeginMemberRotation; a Stop that lands
+        // mid-rotation keeps the intent, and the terminal's Stopped twin
+        // finishes it.
         transition BeginMemberRotationSameSession {
             per_phase [Running]
-            on input BeginMemberRotation { agent_identity, agent_runtime_id, fence_token, generation, session_id, peer_endpoint, session_archived, target }
+            on input BeginMemberRotation { agent_identity, agent_runtime_id, fence_token, generation, session_id, peer_endpoint, session_archived, target, profile_name }
             guard "same_session_target" { target == RotationTarget::SameSession }
             guard "composition_authoritative" { self.composition_authority == CompositionAuthorityKind::Authoritative }
             // The destroy beats the rotation, as for BeginMemberRotation.
@@ -26446,7 +26460,17 @@ macro_rules! mob_catalog_machine_dsl {
             guard "rotation_not_pending" { self.member_rotation_session_ids.contains_key(agent_identity) == false }
             guard "same_session" { self.member_session_bindings.get_cloned(agent_identity) == Some(session_id) }
             guard "session_not_archived" { session_archived == false }
-            guard "member_keeps_its_endpoint" { peer_endpoint == None }
+            // An endpoint only for a successor under another role, and only
+            // under the member's own peer id: the key stays, the name is the
+            // new role's.
+            guard "endpoint_only_for_another_role" {
+                peer_endpoint == None
+                || self.member_profile_names.get_cloned(agent_identity) != Some(profile_name)
+            }
+            guard "endpoint_keeps_the_members_peer_id" {
+                peer_endpoint == None
+                || self.member_peer_ids.get_cloned(agent_identity) == Some(mob_machine_member_peer_endpoint_peer_id(peer_endpoint.get("value")))
+            }
             update {
                 // The retirement's start, as RetireRunningPreservingBinding's
                 // archive-only twin: the binding stays.
@@ -26463,7 +26487,11 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_boot_obligation_owed.remove(agent_identity);
                 // The rotation, on the member's own session.
                 self.member_rotation_session_ids.insert(agent_identity, session_id);
-                self.member_rotation_peer_endpoints.remove(agent_identity);
+                if peer_endpoint != None {
+                    self.member_rotation_peer_endpoints.insert(agent_identity, peer_endpoint.get("value"));
+                } else {
+                    self.member_rotation_peer_endpoints.remove(agent_identity);
+                }
                 self.member_rotation_targets.insert(agent_identity, RotationTarget::SameSession);
             }
             to Running
@@ -27780,9 +27808,12 @@ macro_rules! mob_catalog_machine_dsl {
         // it kept the session (disposal KeptForSuccessor), is retired and the
         // next one is seated Dormant at the next generation on the SAME
         // session in ONE transition, so the identity is never a non-member
-        // and the session is never without its member. The binding, the
-        // member's endpoint and its wiring edges stay: the session, and with
-        // it the member's comms identity, is the same. Its MemberRetired and
+        // and the session is never without its member. The binding stays:
+        // the session, and with it the member's comms key, is the same.
+        // Under the member's own role the member's endpoint and wiring edges
+        // stay too; under another role its edges end and the endpoint the
+        // rotation recorded under the new role's comms name is installed
+        // (see the update). Its MemberRetired and
         // MemberSpawned rows (both naming the session) are appended in one
         // batch before the commit. The next incarnation's profile (its
         // grant) and runtime mode may differ from the retiring one's. A
@@ -27833,10 +27864,21 @@ macro_rules! mob_catalog_machine_dsl {
             }
             guard "spawn_profile_name_authorized" { self.spawn_profile_authority_profile_names.contains_key(agent_identity) == true }
             guard "spawn_profile_addressability_authorized" { self.spawn_profile_authority_external_addressable.get_cloned(agent_identity) == Some(external_addressable) }
+            // The rotation recorded an endpoint only for a successor under
+            // another role, under the member's own peer id: a re-drive whose
+            // grant takes the member's own role again refuses one.
+            guard "rotation_endpoint_only_for_another_role" {
+                self.member_rotation_peer_endpoints.contains_key(agent_identity) == false
+                || self.spawn_profile_authority_profile_names.get_cloned(agent_identity) != self.member_profile_names.get_cloned(agent_identity)
+            }
+            guard "rotation_endpoint_keeps_the_members_peer_id" {
+                self.member_rotation_peer_endpoints.contains_key(agent_identity) == false
+                || self.member_peer_ids.get_cloned(agent_identity) == Some(mob_machine_member_peer_endpoint_peer_id(self.member_rotation_peer_endpoints.get_cloned(agent_identity).get("value")))
+            }
             update {
                 // The retiring incarnation's runtime facts end. Its member's
-                // session, endpoint and wiring edges stay: they are the
-                // next incarnation's.
+                // session stays, and under the member's own role its
+                // endpoint and wiring edges: they are the next incarnation's.
                 self.live_runtime_ids.remove(agent_runtime_id);
                 self.externally_addressable_runtime_ids.remove(agent_runtime_id);
                 self.runtime_fence_tokens.remove(agent_runtime_id);
@@ -27871,6 +27913,42 @@ macro_rules! mob_catalog_machine_dsl {
                 self.identity_to_runtime.insert(agent_identity, next_agent_runtime_id);
                 self.identity_runtime_generations.insert(agent_identity, next_generation);
                 self.identity_runtime_fence_tokens.insert(agent_identity, next_fence_token);
+                // A successor under another role than the member's runs under
+                // that role's comms name: it keeps the member's session and
+                // key, but neither its descriptor nor its topology. Its
+                // retirement unwired the member's peers' trust, as a plain
+                // retirement's does; here the member's edges end and the
+                // successor takes the endpoint the rotation recorded under the
+                // new name (with none recorded, network comms, it owes one
+                // until its first wake registers it). The shell wires the
+                // edges the definition declares for its role in this same
+                // step, as for a fresh rotation's successor. A successor under
+                // the member's own role keeps the member's endpoint (one with
+                // none, network comms, owes it until its next wake registers
+                // one) and its edges.
+                if self.spawn_profile_authority_profile_names.get_cloned(agent_identity) != self.member_profile_names.get_cloned(agent_identity) {
+                    self.wiring_edges = mob_machine_wiring_edges_without_identity(self.wiring_edges, agent_identity);
+                    self.external_peer_edges = mob_machine_external_peer_edges_without_identity(self.external_peer_edges, agent_identity);
+                    self.owed_edge_repairs = mob_machine_wiring_edges_without_identity(self.owed_edge_repairs, agent_identity);
+                    self.owed_external_edge_repairs = mob_machine_external_peer_edges_without_identity(self.owed_external_edge_repairs, agent_identity);
+                    self.external_peer_edges_by_key = mob_machine_external_peer_edges_by_key_without_identity(self.external_peer_edges_by_key, agent_identity);
+                    self.member_prior_peer_endpoints.remove(agent_identity);
+                    if self.member_rotation_peer_endpoints.contains_key(agent_identity) == true {
+                        self.member_peer_ids.insert(agent_identity, mob_machine_member_peer_endpoint_peer_id(self.member_rotation_peer_endpoints.get_cloned(agent_identity).get("value")));
+                        self.member_peer_endpoints.insert(agent_identity, self.member_rotation_peer_endpoints.get_cloned(agent_identity).get("value"));
+                        self.member_boot_obligation_owed.remove(agent_identity);
+                    } else {
+                        self.member_peer_ids.remove(agent_identity);
+                        self.member_peer_endpoints.remove(agent_identity);
+                        self.member_boot_obligation_owed.insert(agent_identity, MemberBootObligationCause::EndpointPending);
+                    }
+                } else {
+                    if self.member_peer_endpoints.contains_key(agent_identity) == true {
+                        self.member_boot_obligation_owed.remove(agent_identity);
+                    } else {
+                        self.member_boot_obligation_owed.insert(agent_identity, MemberBootObligationCause::EndpointPending);
+                    }
+                }
                 // A changed profile (a declared role migration) or runtime
                 // mode (a restamp) is the next incarnation's own.
                 // A successor seated under another role than the incarnation
@@ -27895,13 +27973,6 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_startup_binding_requested.remove(next_agent_runtime_id);
                 self.member_startup_runtime_ready.remove(next_agent_runtime_id);
                 self.member_startup_ready.remove(next_agent_runtime_id);
-                // The member keeps its endpoint; one with none (network
-                // comms) owes it until its next wake registers one.
-                if self.member_peer_endpoints.contains_key(agent_identity) == true {
-                    self.member_boot_obligation_owed.remove(agent_identity);
-                } else {
-                    self.member_boot_obligation_owed.insert(agent_identity, MemberBootObligationCause::EndpointPending);
-                }
                 self.member_materialization.insert(agent_identity, MemberMaterializationPhase::Dormant);
                 self.member_wake_attempts.remove(agent_identity);
                 self.member_wake_bound.remove(agent_identity);
@@ -28005,10 +28076,21 @@ macro_rules! mob_catalog_machine_dsl {
             }
             guard "spawn_profile_name_authorized" { self.spawn_profile_authority_profile_names.contains_key(agent_identity) == true }
             guard "spawn_profile_addressability_authorized" { self.spawn_profile_authority_external_addressable.get_cloned(agent_identity) == Some(external_addressable) }
+            // The rotation recorded an endpoint only for a successor under
+            // another role, under the member's own peer id: a re-drive whose
+            // grant takes the member's own role again refuses one.
+            guard "rotation_endpoint_only_for_another_role" {
+                self.member_rotation_peer_endpoints.contains_key(agent_identity) == false
+                || self.spawn_profile_authority_profile_names.get_cloned(agent_identity) != self.member_profile_names.get_cloned(agent_identity)
+            }
+            guard "rotation_endpoint_keeps_the_members_peer_id" {
+                self.member_rotation_peer_endpoints.contains_key(agent_identity) == false
+                || self.member_peer_ids.get_cloned(agent_identity) == Some(mob_machine_member_peer_endpoint_peer_id(self.member_rotation_peer_endpoints.get_cloned(agent_identity).get("value")))
+            }
             update {
                 // The retiring incarnation's runtime facts end. Its member's
-                // session, endpoint and wiring edges stay: they are the
-                // next incarnation's.
+                // session stays, and under the member's own role its
+                // endpoint and wiring edges: they are the next incarnation's.
                 self.live_runtime_ids.remove(agent_runtime_id);
                 self.externally_addressable_runtime_ids.remove(agent_runtime_id);
                 self.runtime_fence_tokens.remove(agent_runtime_id);
@@ -28043,6 +28125,42 @@ macro_rules! mob_catalog_machine_dsl {
                 self.identity_to_runtime.insert(agent_identity, next_agent_runtime_id);
                 self.identity_runtime_generations.insert(agent_identity, next_generation);
                 self.identity_runtime_fence_tokens.insert(agent_identity, next_fence_token);
+                // A successor under another role than the member's runs under
+                // that role's comms name: it keeps the member's session and
+                // key, but neither its descriptor nor its topology. Its
+                // retirement unwired the member's peers' trust, as a plain
+                // retirement's does; here the member's edges end and the
+                // successor takes the endpoint the rotation recorded under the
+                // new name (with none recorded, network comms, it owes one
+                // until its first wake registers it). The shell wires the
+                // edges the definition declares for its role in this same
+                // step, as for a fresh rotation's successor. A successor under
+                // the member's own role keeps the member's endpoint (one with
+                // none, network comms, owes it until its next wake registers
+                // one) and its edges.
+                if self.spawn_profile_authority_profile_names.get_cloned(agent_identity) != self.member_profile_names.get_cloned(agent_identity) {
+                    self.wiring_edges = mob_machine_wiring_edges_without_identity(self.wiring_edges, agent_identity);
+                    self.external_peer_edges = mob_machine_external_peer_edges_without_identity(self.external_peer_edges, agent_identity);
+                    self.owed_edge_repairs = mob_machine_wiring_edges_without_identity(self.owed_edge_repairs, agent_identity);
+                    self.owed_external_edge_repairs = mob_machine_external_peer_edges_without_identity(self.owed_external_edge_repairs, agent_identity);
+                    self.external_peer_edges_by_key = mob_machine_external_peer_edges_by_key_without_identity(self.external_peer_edges_by_key, agent_identity);
+                    self.member_prior_peer_endpoints.remove(agent_identity);
+                    if self.member_rotation_peer_endpoints.contains_key(agent_identity) == true {
+                        self.member_peer_ids.insert(agent_identity, mob_machine_member_peer_endpoint_peer_id(self.member_rotation_peer_endpoints.get_cloned(agent_identity).get("value")));
+                        self.member_peer_endpoints.insert(agent_identity, self.member_rotation_peer_endpoints.get_cloned(agent_identity).get("value"));
+                        self.member_boot_obligation_owed.remove(agent_identity);
+                    } else {
+                        self.member_peer_ids.remove(agent_identity);
+                        self.member_peer_endpoints.remove(agent_identity);
+                        self.member_boot_obligation_owed.insert(agent_identity, MemberBootObligationCause::EndpointPending);
+                    }
+                } else {
+                    if self.member_peer_endpoints.contains_key(agent_identity) == true {
+                        self.member_boot_obligation_owed.remove(agent_identity);
+                    } else {
+                        self.member_boot_obligation_owed.insert(agent_identity, MemberBootObligationCause::EndpointPending);
+                    }
+                }
                 // A changed profile (a declared role migration) or runtime
                 // mode (a restamp) is the next incarnation's own.
                 // A successor seated under another role than the incarnation
@@ -28067,13 +28185,6 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_startup_binding_requested.remove(next_agent_runtime_id);
                 self.member_startup_runtime_ready.remove(next_agent_runtime_id);
                 self.member_startup_ready.remove(next_agent_runtime_id);
-                // The member keeps its endpoint; one with none (network
-                // comms) owes it until its next wake registers one.
-                if self.member_peer_endpoints.contains_key(agent_identity) == true {
-                    self.member_boot_obligation_owed.remove(agent_identity);
-                } else {
-                    self.member_boot_obligation_owed.insert(agent_identity, MemberBootObligationCause::EndpointPending);
-                }
                 self.member_materialization.insert(agent_identity, MemberMaterializationPhase::Dormant);
                 self.member_wake_attempts.remove(agent_identity);
                 self.member_wake_bound.remove(agent_identity);
@@ -28154,7 +28265,7 @@ macro_rules! mob_catalog_machine_dsl {
         // the destroy's retirement ends the identity.
         transition RecoverMemberRotationIntentFreshSession {
             per_phase [Running]
-            on signal RecoverMemberRotationIntent { agent_identity, agent_runtime_id, target, session_id, peer_endpoint }
+            on signal RecoverMemberRotationIntent { agent_identity, agent_runtime_id, target, session_id, peer_endpoint, profile_name }
             guard "fresh_session_target" { target == RotationTarget::FreshSession }
             guard "destroy_not_admitted" { self.destroy_admitted == false }
             guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
@@ -28176,7 +28287,7 @@ macro_rules! mob_catalog_machine_dsl {
 
         transition RecoverMemberRotationIntentSameSession {
             per_phase [Running]
-            on signal RecoverMemberRotationIntent { agent_identity, agent_runtime_id, target, session_id, peer_endpoint }
+            on signal RecoverMemberRotationIntent { agent_identity, agent_runtime_id, target, session_id, peer_endpoint, profile_name }
             guard "same_session_target" { target == RotationTarget::SameSession }
             guard "destroy_not_admitted" { self.destroy_admitted == false }
             guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
@@ -28184,10 +28295,24 @@ macro_rules! mob_catalog_machine_dsl {
             guard "member_not_placed" { self.member_placement.contains_key(agent_identity) == false }
             guard "rotation_not_recorded" { self.member_rotation_session_ids.contains_key(agent_identity) == false }
             guard "same_session" { self.member_session_bindings.get_cloned(agent_identity) == Some(session_id) }
-            guard "member_keeps_its_endpoint" { peer_endpoint == None }
+            // An endpoint only for a successor under another role, and only
+            // under the member's own peer id: the key stays, the name is the
+            // new role's.
+            guard "endpoint_only_for_another_role" {
+                peer_endpoint == None
+                || self.member_profile_names.get_cloned(agent_identity) != Some(profile_name)
+            }
+            guard "endpoint_keeps_the_members_peer_id" {
+                peer_endpoint == None
+                || self.member_peer_ids.get_cloned(agent_identity) == Some(mob_machine_member_peer_endpoint_peer_id(peer_endpoint.get("value")))
+            }
             update {
                 self.member_rotation_session_ids.insert(agent_identity, session_id);
-                self.member_rotation_peer_endpoints.remove(agent_identity);
+                if peer_endpoint != None {
+                    self.member_rotation_peer_endpoints.insert(agent_identity, peer_endpoint.get("value"));
+                } else {
+                    self.member_rotation_peer_endpoints.remove(agent_identity);
+                }
                 self.member_rotation_targets.insert(agent_identity, RotationTarget::SameSession);
             }
             to Running
@@ -28195,7 +28320,7 @@ macro_rules! mob_catalog_machine_dsl {
 
         transition RecoverMemberRotationIntentDestroying {
             per_phase [Running]
-            on signal RecoverMemberRotationIntent { agent_identity, agent_runtime_id, target, session_id, peer_endpoint }
+            on signal RecoverMemberRotationIntent { agent_identity, agent_runtime_id, target, session_id, peer_endpoint, profile_name }
             guard "destroy_admitted" { self.destroy_admitted == true }
             update {}
             to Running

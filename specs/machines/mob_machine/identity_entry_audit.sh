@@ -101,7 +101,9 @@
 #   only the record that names its session, a moved resume role seated only
 #   with its migration, the listing of a marked member unmarking it, the
 #   dormant seat and a role move keeping a role hold, a rotation terminal
-#   ending it exactly when it commits another role, a seated member's
+#   ending it exactly when it commits another role, a same-session
+#   successor under another role taking the endpoint its rotation recorded
+#   (the member's key under the new role's comms name), a seated member's
 #   first-boot Resume writing the role hold it masked, the replay recording
 #   an archived session only when its row archived it and keeping a hosted
 #   incarnation's entry hosted on its first use, the reset committing only
@@ -674,7 +676,8 @@ write_cfg() {
           run_properties="
   AuditHostPreparationNeverWoken
   AuditHostStepKeepsRoleHold
-  AuditRoleHoldKeepsFirstBootRow"
+  AuditRoleHoldKeepsFirstBootRow
+  AuditRoleMoveTakesItsEndpoint"
           run_invariants="
   AuditRolesDeclareExactlyOne"
           ;;
@@ -890,6 +893,7 @@ for witness in \
   "roles:Action property:MigrationRestamped" "roles:Action property:RestampVerdict" \
   "roles:Action property:RotateVerdict" "roles:Action property:RoleHoldEnded" \
   "roles:Action property:FirstBootKeptOverRoleHold" "roles:Action property:RoleHoldDroppedAtArchive" \
+  "roles:Action property:RoleMoveTakesNewName" \
   "held:Invariant:HeldWaiting" "held:Action property:HeldSpawnSeats" \
   "held:Invariant:Hosted" "held:Action property:EverCreatedOwedSeat" \
   "held:Action property:ApplyBusy" \
@@ -1350,6 +1354,22 @@ PY
   # A refusal answers beside the verdict's own arm in the roles run.
   mutate roles roles_declare_overlaps "Invariant AuditRolesDeclareExactlyOne" <<'PY'
 drop_guard("DeclareIdentityEntryRefusedNonAuthoritative", '"RefusedNonAuthoritative")')
+PY
+
+  # A same-session start under another role that records an endpoint under
+  # another key: the successor would take a key the member's peers never
+  # trusted.
+  mutate roles role_move_takes_another_key "Invariant same_session_rotation_keeps_its_binding" <<'PY'
+drop_guard("BeginMemberRotationSameSessionRunning", "member_peer_ids")
+PY
+
+  # A same-session terminal that keeps the member's endpoint whatever the
+  # role: a successor under another role keeps the old role's comms name,
+  # which its wake under the new role refuses.
+  mutate roles role_move_keeps_old_name "Action property AuditRoleMoveTakesItsEndpoint" <<'PY'
+for arm in ("CommitMemberRotationSameSessionRunning", "CommitMemberRotationSameSessionStopped",
+            "CommitMemberRotationSameSessionKickoffRunning", "CommitMemberRotationSameSessionKickoffStopped"):
+    keep_var(arm, "member_peer_endpoints")
 PY
 
   # A declared migration ends the role hold before its terminal commits the

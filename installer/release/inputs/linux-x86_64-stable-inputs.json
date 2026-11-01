@@ -38,6 +38,11 @@
       "size": 6252,
       "sha256": "268d9aa1e1c0c08014c1a079b23ce0a5f15d623bd89e28b42e853dc834463e11"
     },
+    "product/linux-x86_64/build-record.json": {
+      "path": "installer/release/inputs/product/linux-x86_64/build-record.json",
+      "size": 2045,
+      "sha256": "2a4ed564c343be175ccfa32e92319e5cecc7c2f1259e51213d19dae40dba72b8"
+    },
     "product/linux-x86_64/derived-binary-record.json": {
       "path": "installer/release/inputs/product/linux-x86_64/derived-binary-record.json",
       "size": 1362,
@@ -62,6 +67,11 @@
       "path": "installer/release/inputs/product/linux-x86_64/model-catalog.json",
       "size": 58882,
       "sha256": "c3bf3eb2f2000367921e2314672ef616d9e9baa7028cc0a037ff4463b9fceb00"
+    },
+    "product/linux-x86_64/resource-build-record.json": {
+      "path": "installer/release/inputs/product/linux-x86_64/resource-build-record.json",
+      "size": 4671,
+      "sha256": "d0cbde86f22e68b40b0303de4605b3744399bfb52350131982604fdf330beaaf"
     },
     "product/linux-x86_64/transformation-result.json": {
       "path": "installer/release/inputs/product/linux-x86_64/transformation-result.json",
@@ -88,10 +98,6 @@
       "size": null,
       "sha256": null
     },
-    "product/linux-x86_64/build-record.json": {
-      "size": 2045,
-      "sha256": "2a4ed564c343be175ccfa32e92319e5cecc7c2f1259e51213d19dae40dba72b8"
-    },
     "product/linux-x86_64/dependency-requirements.txt": {
       "size": null,
       "sha256": null
@@ -104,10 +110,6 @@
     "product/linux-x86_64/meerkat_toolkit-0.9.5-py3-none-any.whl": {
       "size": 516164,
       "sha256": "f93db3b510f2be0f9d052fbb81e97b56363ba54fd04284e02efd25724bbcbd96"
-    },
-    "product/linux-x86_64/resource-build-record.json": {
-      "size": 4671,
-      "sha256": "d0cbde86f22e68b40b0303de4605b3744399bfb52350131982604fdf330beaaf"
     },
     "product/linux-x86_64/source-manifest.json": {
       "size": 617989,

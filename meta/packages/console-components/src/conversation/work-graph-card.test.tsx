@@ -199,4 +199,43 @@ describe("WorkGraphCard", () => {
     expect(screen.getByTestId("workgraph-card:goal-1:overflow")).toHaveTextContent("+10 more items");
     expect(screen.getByText("12/40")).toBeInTheDocument();
   });
+
+  test("the last-failed chip says Failed beside its mark", () => {
+    render(<WorkGraphCard entry={entryFixture({ lastActionFailed: true })} />);
+    const chip = screen.getByTestId("workgraph-card:goal-1:last-action-failed");
+    expect(chip).toHaveTextContent("Failed");
+    expect(chip).toHaveAttribute("title", "The last WorkGraph action failed");
+    const mark = chip.querySelector(".cc-work-graph__last-failed-mark");
+    expect(mark).toHaveTextContent("✗");
+    expect(mark).toHaveAttribute("aria-hidden", "true");
+  });
+
+  test("a failed line is a sentence with the crit mark and its raw JSON behind technical details", () => {
+    const raw = "{\"error\":\"access_denied\",\"message\":\"Tool 'workgraph_ready' is not allowed by policy\"}";
+    render(
+      <WorkGraphCard
+        entry={entryFixture({
+          recentEvents: ["item claimed · 09:15", "Couldn't list ready work items: access denied"],
+          recentEventDetails: [null, { failed: true, tool: "workgraph_ready", technical: raw }],
+        })}
+      />,
+    );
+
+    const plain = screen.getByTestId("workgraph-card:goal-1:event:0");
+    expect(plain).toHaveTextContent(/^item claimed · 09:15$/);
+    expect(plain.querySelector(".cc-mark")).toBeNull();
+    expect(screen.queryByTestId("workgraph-card:goal-1:event:0:details")).toBeNull();
+
+    const failed = screen.getByTestId("workgraph-card:goal-1:event:1");
+    expect(failed).toHaveClass("is-failed");
+    expect(failed).toHaveTextContent(/^Couldn't list ready work items: access denied$/);
+    expect(failed.querySelector(".cc-mark[data-tone='crit']")).not.toBeNull();
+
+    const details = screen.getByTestId("workgraph-card:goal-1:event:1:details");
+    expect(details.tagName).toBe("DETAILS");
+    expect(details).not.toHaveAttribute("open");
+    expect(details.querySelector(".cc-tech__summary")).toHaveTextContent("Technical details");
+    expect(screen.getByTestId("workgraph-card:goal-1:event:1:response")).toHaveTextContent(raw);
+    expect(details).toHaveTextContent("workgraph_ready");
+  });
 });

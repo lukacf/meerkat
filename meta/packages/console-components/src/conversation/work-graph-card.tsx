@@ -3,10 +3,12 @@ import React, { useState } from "react";
 import type {
   ConversationWorkGraphAttentionRow,
   ConversationWorkGraphEntry,
+  ConversationWorkGraphEventDetail,
   ConversationWorkGraphItemRow,
   WorkGraphCardStatus,
 } from "@console-core";
 
+import { StatusMark, TechnicalDetails } from "../panel-kit";
 import type { IconRenderer } from "../shared";
 
 const CARD_STATUS_LABEL: Record<WorkGraphCardStatus, string> = {
@@ -309,6 +311,42 @@ function AttentionRow({
   );
 }
 
+// One line of the card's recent events. A failed call's line is a sentence
+// in words with the crit mark (A1.3); the tool and the payload it failed
+// with sit behind the kit's technical details, in muted mono, never in the
+// line itself.
+function WorkGraphEventLine({
+  line,
+  detail,
+  testId,
+}: {
+  line: string;
+  detail?: ConversationWorkGraphEventDetail | null;
+  testId: string;
+}) {
+  if (!detail?.failed) {
+    return <div className="cc-work-graph__event" data-testid={testId}>{line}</div>;
+  }
+  return (
+    <div className="cc-work-graph__event-group">
+      <div className="cc-work-graph__event is-failed" data-testid={testId}>
+        <StatusMark tone="crit" className="cc-work-graph__event-mark" />
+        <span className="cc-work-graph__event-text" title={line}>{line}</span>
+      </div>
+      {detail.technical ? (
+        <TechnicalDetails
+          className="cc-work-graph__event-tech"
+          testId={`${testId}:details`}
+          items={[
+            { label: "Tool", value: detail.tool },
+            { label: "Response", value: detail.technical, plain: true, testId: `${testId}:response` },
+          ]}
+        />
+      ) : null}
+    </div>
+  );
+}
+
 export function WorkGraphCard({
   entry,
   Icon,
@@ -383,7 +421,8 @@ export function WorkGraphCard({
             title="The last WorkGraph action failed"
             data-testid={`workgraph-card:${entry.rootId}:last-action-failed`}
           >
-            ✗
+            <span className="cc-work-graph__last-failed-mark" aria-hidden="true">✗</span>
+            Failed
           </span>
         ) : null}
         {hasBody ? (
@@ -429,7 +468,12 @@ export function WorkGraphCard({
       {!collapsed && entry.recentEvents && entry.recentEvents.length > 0 ? (
         <div className="cc-work-graph__events">
           {entry.recentEvents.map((line, index) => (
-            <div className="cc-work-graph__event" key={`${line}-${index}`}>{line}</div>
+            <WorkGraphEventLine
+              key={`${line}-${index}`}
+              line={line}
+              detail={entry.recentEventDetails?.[index]}
+              testId={`workgraph-card:${entry.rootId}:event:${index}`}
+            />
           ))}
         </div>
       ) : null}

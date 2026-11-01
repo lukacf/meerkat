@@ -2195,10 +2195,15 @@ span.cc-conversation-turn-preview__file-icon::after {
   background: color-mix(in srgb, var(--_cc-warning) 14%, var(--_cc-surface-card));
   color: var(--_cc-warning-ink);
 }
+/* The last action failed: the status in words with its tone and mark
+   (A1.3), crit like a failed goal's badge. */
 .cc-work-graph__last-failed {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   flex: none;
   height: 20px;
-  padding: 0 7px;
+  padding: 0 8px 0 7px;
   border: 1px solid color-mix(in srgb, var(--_cc-negative) 32%, var(--_cc-surface-card));
   border-radius: var(--_cc-radius-pill);
   background: color-mix(in srgb, var(--_cc-negative) 12%, var(--_cc-surface-card));
@@ -2206,6 +2211,11 @@ span.cc-conversation-turn-preview__file-icon::after {
   font-size: 11px;
   font-weight: 500;
   line-height: 18px;
+  white-space: nowrap;
+}
+.cc-work-graph__last-failed-mark {
+  font-size: 10px;
+  line-height: 1;
 }
 /* A card is a snapshot in the transcript: its live marks wear the static
    double ring instead of a pulse that would run for as long as the message
@@ -2506,6 +2516,37 @@ span.cc-conversation-turn-preview__file-icon::after {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+/* A failed call reads as a sentence with the crit mark; what it failed
+   with sits behind the technical details, in muted mono. */
+.cc-work-graph__event.is-failed {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--_cc-negative-ink);
+}
+.cc-work-graph__event-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.cc-work-graph__event-tech {
+  margin: 0 0 4px 14px;
+}
+.cc-work-graph__event-tech .cc-tech__summary {
+  font-size: var(--_cc-text-xs, 11px);
+}
+.cc-work-graph__event-tech .cc-tech__body {
+  margin-top: 4px;
+  padding: 8px 10px;
+}
+.cc-work-graph__event-tech .cc-kv dd {
+  min-width: 0;
+  font-family: var(--_cc-font-mono);
+  font-size: var(--_cc-panel-fs-mono, 11px);
+  color: var(--_cc-foreground-meta);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 @media (prefers-reduced-motion: reduce) {
   .cc-work-graph__action,

@@ -1,0 +1,1246 @@
+{
+  "cases": [
+    {
+      "acquisition": {
+        "ack": {
+          "state": "answer_forwarded"
+        },
+        "admission": {
+          "deduplicated": false,
+          "input_id": "01a1943b-592d-70f3-a3c4-096c0892ad42",
+          "session_id": "01a1943b-4dd0-71b6-8911-1638ff052c95",
+          "source_settlement": "fresh_acceptance_promoted",
+          "state": "admitted",
+          "turn_ticket": "e5093672-a61e-4d27-89e9-4dc299f7e4ab"
+        },
+        "authenticated_event": {
+          "path": "/mnt/connect-release/a1/out/verification/installed-product-success/authenticated-fixture-event.json",
+          "sha256": "174a750d4fd12637b36121829cfa588899ec493b9aa1893ea9c318de5f8268ad"
+        },
+        "business": {
+          "a_input_history_index": 1,
+          "actual_tool_result": "[{\"by\": \"karpathy\", \"descendants\": 175, \"id\": 50319510, \"kids\": [50321152, 50321118, 50320462, 50321113, 50320482, 50320675, 50321002, 50319961, 50320887, 50319936, 50319987, 50320230, 50320994, 50320964, 50321097, 50320309, 50321076, 50319765, 50320899, 50320117, 50320429, 50320827, 50319845, 50320738, 50319962, 50321084, 50320490, 50320222, 50321044, 50320064, 50320852, 50320783, 50320853, 50320632, 50319949, 50319736, 50319965, 50319874, 50320384, 50320885, 50319997, 50320102, 50319756, 50319890, 50320717, 50319967, 50320370, 50319784, 50320435, 50320413, 50320986, 50319953, 50320066, 50320848, 50320604, 50320426, 50319922, 50319996, 50319856, 50319947, 50319994, 50320037, 50320059, 50320562, 50320427, 50320998, 50320198, 50320980, 50320237, 50320193, 50319893, 50320394, 50320056, 50319833, 50319843, 50320920, 50320460, 50320424, 50320396, 50319511, 50320041, 50320741, 50319903, 50319753, 50320187], \"score\": 448, \"text\": \"YouTube-style UI over 6,454 videos sourced from 39,834 HN comments since 2007.<p><a href=\\\"https:&#x2F;&#x2F;hackertube.org&#x2F;\\\" rel=\\\"nofollow\\\">https:&#x2F;&#x2F;hackertube.org&#x2F;</a>\", \"time\": 1793476613, \"title\": \"HackerTube: YouTube built from videos recommended by HN\", \"type\": \"story\", \"url\": \"https://karpathy.bearblog.dev/hacker-tube/\", \"username\": \"karpathy\"}]\n{\"value\":\"[{\\\"by\\\": \\\"karpathy\\\", \\\"descendants\\\": 175, \\\"id\\\": 50319510, \\\"kids\\\": [50321152, 50321118, 50320462, 50321113, 50320482, 50320675, 50321002, 50319961, 50320887, 50319936, 50319987, 50320230, 50320994, 50320964, 50321097, 50320309, 50321076, 50319765, 50320899, 50320117, 50320429, 50320827, 50319845, 50320738, 50319962, 50321084, 50320490, 50320222, 50321044, 50320064, 50320852, 50320783, 50320853, 50320632, 50319949, 50319736, 50319965, 50319874, 50320384, 50320885, 50319997, 50320102, 50319756, 50319890, 50320717, 50319967, 50320370, 50319784, 50320435, 50320413, 50320986, 50319953, 50320066, 50320848, 50320604, 50320426, 50319922, 50319996, 50319856, 50319947, 50319994, 50320037, 50320059, 50320562, 50320427, 50320998, 50320198, 50320980, 50320237, 50320193, 50319893, 50320394, 50320056, 50319833, 50319843, 50320920, 50320460, 50320424, 50320396, 50319511, 50320041, 50320741, 50319903, 50319753, 50320187], \\\"score\\\": 448, \\\"text\\\": \\\"YouTube-style UI over 6,454 videos sourced from 39,834 HN comments since 2007.<p><a href=\\\\\\\"https:&#x2F;&#x2F;hackertube.org&#x2F;\\\\\\\" rel=\\\\\\\"nofollow\\\\\\\">https:&#x2F;&#x2F;hackertube.org&#x2F;</a>\\\", \\\"time\\\": 1793476613, \\\"title\\\": \\\"HackerTube: YouTube built from videos recommended by HN\\\", \\\"type\\\": \\\"story\\\", \\\"url\\\": \\\"https://karpathy.bearblog.dev/hacker-tube/\\\", \\\"username\\\": \\\"karpathy\\\"}]\"}",
+          "answer": "Hacker News story 50319510: HackerTube: YouTube built from videos recommended by HN",
+          "b_input_history_index": 6,
+          "matching_result_history_index": 16,
+          "model_request_index": 32,
+          "model_request_sha256": "d857f550b986acbaa38e16faf163880917f4ac1eb089cd6d1143d57fda3aff38",
+          "native_b_admission": "not_observed",
+          "native_b_terminal": "not_observed",
+          "original_catalog": {
+            "helper_catalog_scope_reused": false,
+            "load_call_id": "original-catalog-load",
+            "load_result": {
+              "accepted_names": [
+                "get_top_hackernews_stories"
+              ],
+              "catalog_exact": true,
+              "noop_names": [],
+              "resolutions": [
+                {
+                  "accepted": true,
+                  "name": "get_top_hackernews_stories"
+                }
+              ]
+            },
+            "load_result_history_index": 12,
+            "operation": "get_top_hackernews_stories",
+            "search_call_id": "original-catalog-search",
+            "search_result": {
+              "catalog_exact": true,
+              "results": [
+                {
+                  "currently_callable": false,
+                  "description": "Use this function to get top stories from Hacker News. This Toolkit profile applies the additional input limits shown in the schema.",
+                  "name": "get_top_hackernews_stories",
+                  "visibility_status": "deferred"
+                }
+              ],
+              "total_matches": 1
+            },
+            "search_result_history_index": 10
+          },
+          "story": {
+            "id": 50319510,
+            "title": "HackerTube: YouTube built from videos recommended by HN"
+          }
+        },
+        "custody": {
+          "ack": {
+            "state": "answer_forwarded"
+          },
+          "exchange_id": 1,
+          "operation_observation": {
+            "child": {
+              "grant": {
+                "decision": "service-input-f5e2b08cad9b96c8a6a86a68be84f0dab4233da4c06c9c202c7410df084e629f",
+                "decision_sha256": "f1e3ede59e4b7870326fe2230692ad58a6af3fc0d120a882bbd1123e6d4e4165",
+                "route": "fixture-original-route"
+              },
+              "state": "grant_issued"
+            },
+            "custody": "joined",
+            "outcome": "succeeded",
+            "parent_issuance_id": "operator-service-parent-2510796693f0a5832ada3cf657c5d54658274eb532a7ac25ed9c6dc702d1c3e9",
+            "parent_issued": true,
+            "reason": null,
+            "source": {
+              "event_sha256": "c836a38b5df33cb4df5474940165b4922036b7a5edbd3f06fa7919bfdbb679a1",
+              "original": "service-input-f5e2b08cad9b96c8a6a86a68be84f0dab4233da4c06c9c202c7410df084e629f",
+              "route": "fixture-original-route"
+            },
+            "tool_policy": {
+              "candidate": {
+                "digest": "sha256:3a7f4a38b5b223fb1e8cec40a68a2f1185a806b900d2f7b70082e72a2e40fb57",
+                "revision": 2
+              },
+              "native": "accepted",
+              "proposal_sha256": "18c82fe06e3597f57c988c7330451213df937cfeb75886af979af450e3b52f87",
+              "retained_as_current": true
+            }
+          },
+          "proposal": {
+            "path": "/mnt/connect-release/a1/out/verification/installed-product-success/service-parent-proposal.json",
+            "sha256": "e1e41b0e4873c6112cffc1a737b1d90c883c8f1d4b2df2e47baa0ee8c082c2a5"
+          },
+          "retirement": "joined",
+          "retirement_observation": {
+            "child": {
+              "grant": {
+                "decision": "service-input-f5e2b08cad9b96c8a6a86a68be84f0dab4233da4c06c9c202c7410df084e629f",
+                "decision_sha256": "f1e3ede59e4b7870326fe2230692ad58a6af3fc0d120a882bbd1123e6d4e4165",
+                "route": "fixture-original-route"
+              },
+              "state": "grant_issued"
+            },
+            "custody": "joined",
+            "outcome": "succeeded",
+            "parent_issuance_id": "operator-service-parent-2510796693f0a5832ada3cf657c5d54658274eb532a7ac25ed9c6dc702d1c3e9",
+            "parent_issued": true,
+            "reason": null,
+            "source": {
+              "event_sha256": "c836a38b5df33cb4df5474940165b4922036b7a5edbd3f06fa7919bfdbb679a1",
+              "original": "service-input-f5e2b08cad9b96c8a6a86a68be84f0dab4233da4c06c9c202c7410df084e629f",
+              "route": "fixture-original-route"
+            },
+            "tool_policy": {
+              "candidate": {
+                "digest": "sha256:3a7f4a38b5b223fb1e8cec40a68a2f1185a806b900d2f7b70082e72a2e40fb57",
+                "revision": 2
+              },
+              "native": "accepted",
+              "proposal_sha256": "18c82fe06e3597f57c988c7330451213df937cfeb75886af979af450e3b52f87",
+              "retained_as_current": true
+            }
+          },
+          "rule_exclusion_still_held": false,
+          "rule_owner_created": true,
+          "rule_releases_after_joined": 1,
+          "transfer": "sdk_owned"
+        },
+        "fresh_original": {
+          "event_sha256": "c836a38b5df33cb4df5474940165b4922036b7a5edbd3f06fa7919bfdbb679a1",
+          "original": "service-input-f5e2b08cad9b96c8a6a86a68be84f0dab4233da4c06c9c202c7410df084e629f",
+          "route": "fixture-original-route"
+        },
+        "helper_result": {
+          "fresh_instruction_retained": true,
+          "grant_issued": true,
+          "ready": false,
+          "state": "authorized"
+        },
+        "native_b": {
+          "input_id": "01a1943c-156a-7678-8190-44527d037d6d",
+          "receipt": {
+            "report": {
+              "attempt_count": 1,
+              "input_id": "01a1943c-156a-7678-8190-44527d037d6d",
+              "outcome": {
+                "completion_type": "completed",
+                "run_usage": {
+                  "cache_creation_tokens": null,
+                  "cache_read_tokens": null,
+                  "input_tokens": 0,
+                  "output_tokens": 0
+                },
+                "session_id": "01a1943b-4dd0-71b6-8911-1638ff052c95",
+                "skill_diagnostics": {
+                  "quarantined": [],
+                  "source_health": {
+                    "failure_streak": 0,
+                    "handshake_failed": false,
+                    "invalid_count": 0,
+                    "invalid_ratio": 0.0,
+                    "state": "healthy",
+                    "total_count": 14
+                  }
+                },
+                "text": "Hacker News story 50319510: HackerTube: YouTube built from videos recommended by HN",
+                "tool_calls": 3,
+                "turns": 4,
+                "usage": {
+                  "cache_creation_tokens": null,
+                  "cache_read_tokens": null,
+                  "input_tokens": 0,
+                  "output_tokens": 0
+                }
+              },
+              "owner_input_id": "01a1943c-156a-7678-8190-44527d037d6d",
+              "recipient_input_ids": [
+                "01a1943c-156a-7678-8190-44527d037d6d"
+              ],
+              "run_id": "01a1943c-1611-771a-abb4-47f2eb7e5a2b",
+              "scope": {
+                "kind": "run",
+                "run_id": "01a1943c-1611-771a-abb4-47f2eb7e5a2b"
+              },
+              "status": "finalized",
+              "terminal": {
+                "outcome_type": "consumed"
+              }
+            },
+            "source": "durable_store"
+          },
+          "session_id": "01a1943b-4dd0-71b6-8911-1638ff052c95",
+          "state": "admitted"
+        },
+        "native_receipt_reads": 2,
+        "observation": {
+          "child": {
+            "grant": {
+              "decision": "service-input-f5e2b08cad9b96c8a6a86a68be84f0dab4233da4c06c9c202c7410df084e629f",
+              "decision_sha256": "f1e3ede59e4b7870326fe2230692ad58a6af3fc0d120a882bbd1123e6d4e4165",
+              "route": "fixture-original-route"
+            },
+            "state": "grant_issued"
+          },
+          "custody": "joined",
+          "outcome": "succeeded",
+          "parent_issuance_id": "operator-service-parent-2510796693f0a5832ada3cf657c5d54658274eb532a7ac25ed9c6dc702d1c3e9",
+          "parent_issued": true,
+          "reason": null,
+          "source": {
+            "event_sha256": "c836a38b5df33cb4df5474940165b4922036b7a5edbd3f06fa7919bfdbb679a1",
+            "original": "service-input-f5e2b08cad9b96c8a6a86a68be84f0dab4233da4c06c9c202c7410df084e629f",
+            "route": "fixture-original-route"
+          },
+          "tool_policy": {
+            "candidate": {
+              "digest": "sha256:3a7f4a38b5b223fb1e8cec40a68a2f1185a806b900d2f7b70082e72a2e40fb57",
+              "revision": 2
+            },
+            "native": "accepted",
+            "proposal_sha256": "18c82fe06e3597f57c988c7330451213df937cfeb75886af979af450e3b52f87",
+            "retained_as_current": true
+          }
+        },
+        "original": {
+          "event_sha256": "1a17a57932ef92079d13be696235a344f6b27e7cd7a7396646cfea367d56412f",
+          "original": "fixture-event-5ad6da39bb3141988815197f4aa25366",
+          "route": "fixture-original-route"
+        },
+        "original_task_completion": "native_finalized_completed_for_exact_b_input",
+        "proposal": {
+          "path": "/mnt/connect-release/a1/out/verification/installed-product-success/service-parent-proposal.json",
+          "sha256": "e1e41b0e4873c6112cffc1a737b1d90c883c8f1d4b2df2e47baa0ee8c082c2a5"
+        },
+        "rule_releases_after_joined": 1,
+        "schema_evidence": {
+          "byte_convention": "exact_supplied_utf8",
+          "bytes": 2,
+          "hash_algorithm": "sha256",
+          "notice": "This digest identifies the exact supplied text, including whitespace. It does not establish schema provenance, runtime equality, readiness or authority. Retain the evidence source and any host observation's hashing convention; do not replace an existing host convention with this one.",
+          "runtime_observation": "not_established",
+          "schema_digest": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+          "schema_validation": "not_performed",
+          "schema_version": 1,
+          "scope": "supplied_schema_evidence_only"
+        },
+        "scope": "one actual installed SDK public read with an exact finalized native B result",
+        "service_readiness": "not_independently_observed"
+      },
+      "application_selection": {
+        "activation": {
+          "path": "/mnt/connect-release/a1/out/verification/installed-product-success/deployment/activation.json",
+          "sha256": "dcd10eaa6fc6ca1d08292c2c61aa461dc0ab151c293bea6a7ff3de81e2ce016b"
+        },
+        "deployment_root": "/mnt/connect-release/a1/out/verification/installed-product-success/deployment",
+        "local_policy": {
+          "path": "/mnt/connect-release/a1/out/verification/installed-product-success/deployment/policy-bundle/toolkit-local-policy.json",
+          "sha256": "b580e350742b98da1615e65e4470da7db36f00db312b1526aedf131e6237f60c"
+        },
+        "policy_manifest": {
+          "path": "/mnt/connect-release/a1/out/verification/installed-product-success/deployment/policy-bundle/manifest.json",
+          "sha256": "0b4509d7825f5f8cb657fa0cc889494e5f9745302e88f1b3344bccc5ef7e6465"
+        }
+      },
+      "callbacks": [
+        {
+          "context": {
+            "mob_definition": {
+              "backend": {
+                "default": "session",
+                "external": null
+              },
+              "event_router": null,
+              "flows": {},
+              "id": "fixture",
+              "image_generation_provider": null,
+              "limits": null,
+              "models": {},
+              "orchestrator": null,
+              "profiles": {
+                "original": {
+                  "auto_compact_threshold": null,
+                  "backend": null,
+                  "external_addressable": true,
+                  "image_generation_provider": null,
+                  "max_inline_peer_notifications": null,
+                  "model": "fixture-original-model",
+                  "output_schema": null,
+                  "peer_description": "",
+                  "provider": "self_hosted",
+                  "provider_params": null,
+                  "resume_overrides": [],
+                  "runtime_mode": "turn_driven",
+                  "self_hosted_server_id": "local",
+                  "skills": [],
+                  "tools": {
+                    "builtins": false,
+                    "comms": true,
+                    "image_generation": false,
+                    "mcp": [],
+                    "mcp_servers": [],
+                    "memory": false,
+                    "mob": false,
+                    "read_only": false,
+                    "rust_bundles": [
+                      "meerkat_toolkit.setup"
+                    ],
+                    "schedule": false,
+                    "shell": false,
+                    "workgraph": false
+                  }
+                },
+                "research": {
+                  "auto_compact_threshold": null,
+                  "backend": null,
+                  "external_addressable": false,
+                  "image_generation_provider": null,
+                  "max_inline_peer_notifications": null,
+                  "model": "fixture-helper-model",
+                  "output_schema": null,
+                  "peer_description": "",
+                  "provider": "self_hosted",
+                  "provider_params": null,
+                  "resume_overrides": [],
+                  "runtime_mode": "turn_driven",
+                  "self_hosted_server_id": "local",
+                  "skills": [],
+                  "tools": {
+                    "builtins": false,
+                    "comms": true,
+                    "image_generation": false,
+                    "mcp": [],
+                    "mcp_servers": [],
+                    "memory": false,
+                    "mob": false,
+                    "read_only": false,
+                    "rust_bundles": [],
+                    "schedule": false,
+                    "shell": false,
+                    "workgraph": false
+                  }
+                },
+                "toolkit-setup-45ac1c5e2bf1d4155cc1d2fa3f192654ec22763836bb5d3b51220a07f5cf57a9": {
+                  "auto_compact_threshold": null,
+                  "backend": null,
+                  "external_addressable": false,
+                  "image_generation_provider": null,
+                  "max_inline_peer_notifications": null,
+                  "model": "fixture-helper-model",
+                  "output_schema": null,
+                  "peer_description": "",
+                  "provider": "self_hosted",
+                  "provider_params": null,
+                  "resume_overrides": [],
+                  "runtime_mode": "turn_driven",
+                  "self_hosted_server_id": "local",
+                  "skills": [],
+                  "tools": {
+                    "builtins": false,
+                    "comms": true,
+                    "image_generation": false,
+                    "mcp": [],
+                    "mcp_servers": [
+                      {
+                        "access": {
+                          "allowed_operations": [
+                            "setup_acquire_node",
+                            "setup_acquire_node_prebuilt",
+                            "setup_acquire_python",
+                            "setup_catalog",
+                            "setup_catalog_entry",
+                            "setup_catalog_route",
+                            "setup_check",
+                            "setup_export_recipe",
+                            "setup_guide",
+                            "setup_help",
+                            "setup_inspect_acquired",
+                            "setup_inspect_package",
+                            "setup_inspect_schema",
+                            "setup_install",
+                            "setup_job",
+                            "setup_jobs",
+                            "setup_prepare",
+                            "setup_recipe",
+                            "setup_recipes",
+                            "setup_reconcile",
+                            "setup_recovery_manifest",
+                            "setup_remember_remote",
+                            "setup_retry_prepare",
+                            "setup_search_node",
+                            "setup_selected_check",
+                            "setup_selected_install",
+                            "setup_state",
+                            "setup_stop"
+                          ]
+                        },
+                        "account": "none",
+                        "args": [
+                          "-i",
+                          "PATH=/usr/bin:/bin",
+                          "PYTHONDONTWRITEBYTECODE=1",
+                          "/mnt/connect-release/a1/out/verification/installed-product-success/state/.meerkat-connect/mob.fixture/setup-Xqa3iF/prepared/client/runtime/bin/python",
+                          "-I",
+                          "-B",
+                          "/mnt/connect-release/a1/out/verification/installed-product-success/state/.meerkat-connect/mob.fixture/setup-Xqa3iF/prepared/distribution/toolkit-library-20261031-application-4d519f-linux-inputs-linux-x86_64/setup/local_session.py",
+                          "--configuration",
+                          "/mnt/connect-release/a1/out/verification/installed-product-success/state/.meerkat-connect/mob.fixture/setup-Xqa3iF/prepared/config/mcp.json",
+                          "--configuration-sha256",
+                          "1cf52444804b9669eada1555c1d8c30c849737ea0f2ffa8424ccfc202e09b27c",
+                          "--helper-sha256",
+                          "8f61bc92fa88ce529319b667c221d2575fabe181e24a0b03776b4280de83c1aa",
+                          "--adapter-sha256",
+                          "44f21f2a01d335f61ddc4bfe88943db4b4c924b2ba3f54cc992b75e845f231cc",
+                          "--backend-sha256",
+                          "072b69e77a1955db95865346f7dc0a248cc3c491a0aacd680ea37c3f5c556611",
+                          "--state-root",
+                          "/mnt/connect-release/a1/out/verification/installed-product-success/state/.meerkat-connect/mob.fixture/setup-Xqa3iF/prepared/local-session"
+                        ],
+                        "command": "/usr/bin/env",
+                        "env": {},
+                        "name": "toolkit-setup"
+                      }
+                    ],
+                    "memory": false,
+                    "mob": false,
+                    "read_only": false,
+                    "rust_bundles": [
+                      "meerkat_toolkit.setup_results"
+                    ],
+                    "schedule": false,
+                    "shell": false,
+                    "workgraph": false
+                  }
+                }
+              },
+              "runtime": {},
+              "skills": {},
+              "spawn_policy": null,
+              "supervisor": null,
+              "topology": null,
+              "wiring": {
+                "auto_wire_orchestrator": false,
+                "role_wiring": []
+              }
+            },
+            "previous_identities": []
+          },
+          "kind": "roster"
+        },
+        {
+          "context": {
+            "mob_definition": {
+              "backend": {
+                "default": "session",
+                "external": null
+              },
+              "event_router": null,
+              "flows": {},
+              "id": "fixture",
+              "image_generation_provider": null,
+              "limits": null,
+              "models": {},
+              "orchestrator": null,
+              "profiles": {
+                "original": {
+                  "auto_compact_threshold": null,
+                  "backend": null,
+                  "external_addressable": true,
+                  "image_generation_provider": null,
+                  "max_inline_peer_notifications": null,
+                  "model": "fixture-original-model",
+                  "output_schema": null,
+                  "peer_description": "",
+                  "provider": "self_hosted",
+                  "provider_params": null,
+                  "resume_overrides": [],
+                  "runtime_mode": "turn_driven",
+                  "self_hosted_server_id": "local",
+                  "skills": [],
+                  "tools": {
+                    "builtins": false,
+                    "comms": true,
+                    "image_generation": false,
+                    "mcp": [],
+                    "mcp_servers": [],
+                    "memory": false,
+                    "mob": false,
+                    "read_only": false,
+                    "rust_bundles": [
+                      "meerkat_toolkit.setup"
+                    ],
+                    "schedule": false,
+                    "shell": false,
+                    "workgraph": false
+                  }
+                },
+                "research": {
+                  "auto_compact_threshold": null,
+                  "backend": null,
+                  "external_addressable": false,
+                  "image_generation_provider": null,
+                  "max_inline_peer_notifications": null,
+                  "model": "fixture-helper-model",
+                  "output_schema": null,
+                  "peer_description": "",
+                  "provider": "self_hosted",
+                  "provider_params": null,
+                  "resume_overrides": [],
+                  "runtime_mode": "turn_driven",
+                  "self_hosted_server_id": "local",
+                  "skills": [],
+                  "tools": {
+                    "builtins": false,
+                    "comms": true,
+                    "image_generation": false,
+                    "mcp": [],
+                    "mcp_servers": [],
+                    "memory": false,
+                    "mob": false,
+                    "read_only": false,
+                    "rust_bundles": [],
+                    "schedule": false,
+                    "shell": false,
+                    "workgraph": false
+                  }
+                },
+                "toolkit-setup-45ac1c5e2bf1d4155cc1d2fa3f192654ec22763836bb5d3b51220a07f5cf57a9": {
+                  "auto_compact_threshold": null,
+                  "backend": null,
+                  "external_addressable": false,
+                  "image_generation_provider": null,
+                  "max_inline_peer_notifications": null,
+                  "model": "fixture-helper-model",
+                  "output_schema": null,
+                  "peer_description": "",
+                  "provider": "self_hosted",
+                  "provider_params": null,
+                  "resume_overrides": [],
+                  "runtime_mode": "turn_driven",
+                  "self_hosted_server_id": "local",
+                  "skills": [],
+                  "tools": {
+                    "builtins": false,
+                    "comms": true,
+                    "image_generation": false,
+                    "mcp": [],
+                    "mcp_servers": [
+                      {
+                        "access": {
+                          "allowed_operations": [
+                            "setup_acquire_node",
+                            "setup_acquire_node_prebuilt",
+                            "setup_acquire_python",
+                            "setup_catalog",
+                            "setup_catalog_entry",
+                            "setup_catalog_route",
+                            "setup_check",
+                            "setup_export_recipe",
+                            "setup_guide",
+                            "setup_help",
+                            "setup_inspect_acquired",
+                            "setup_inspect_package",
+                            "setup_inspect_schema",
+                            "setup_install",
+                            "setup_job",
+                            "setup_jobs",
+                            "setup_prepare",
+                            "setup_recipe",
+                            "setup_recipes",
+                            "setup_reconcile",
+                            "setup_recovery_manifest",
+                            "setup_remember_remote",
+                            "setup_retry_prepare",
+                            "setup_search_node",
+                            "setup_selected_check",
+                            "setup_selected_install",
+                            "setup_state",
+                            "setup_stop"
+                          ]
+                        },
+                        "account": "none",
+                        "args": [
+                          "-i",
+                          "PATH=/usr/bin:/bin",
+                          "PYTHONDONTWRITEBYTECODE=1",
+                          "/mnt/connect-release/a1/out/verification/installed-product-success/state/.meerkat-connect/mob.fixture/setup-Xqa3iF/prepared/client/runtime/bin/python",
+                          "-I",
+                          "-B",
+                          "/mnt/connect-release/a1/out/verification/installed-product-success/state/.meerkat-connect/mob.fixture/setup-Xqa3iF/prepared/distribution/toolkit-library-20261031-application-4d519f-linux-inputs-linux-x86_64/setup/local_session.py",
+                          "--configuration",
+                          "/mnt/connect-release/a1/out/verification/installed-product-success/state/.meerkat-connect/mob.fixture/setup-Xqa3iF/prepared/config/mcp.json",
+                          "--configuration-sha256",
+                          "1cf52444804b9669eada1555c1d8c30c849737ea0f2ffa8424ccfc202e09b27c",
+                          "--helper-sha256",
+                          "8f61bc92fa88ce529319b667c221d2575fabe181e24a0b03776b4280de83c1aa",
+                          "--adapter-sha256",
+                          "44f21f2a01d335f61ddc4bfe88943db4b4c924b2ba3f54cc992b75e845f231cc",
+                          "--backend-sha256",
+                          "072b69e77a1955db95865346f7dc0a248cc3c491a0aacd680ea37c3f5c556611",
+                          "--state-root",
+                          "/mnt/connect-release/a1/out/verification/installed-product-success/state/.meerkat-connect/mob.fixture/setup-Xqa3iF/prepared/local-session"
+                        ],
+                        "command": "/usr/bin/env",
+                        "env": {},
+                        "name": "toolkit-setup"
+                      }
+                    ],
+                    "memory": false,
+                    "mob": false,
+                    "read_only": false,
+                    "rust_bundles": [
+                      "meerkat_toolkit.setup_results"
+                    ],
+                    "schedule": false,
+                    "shell": false,
+                    "workgraph": false
+                  }
+                }
+              },
+              "runtime": {},
+              "skills": {},
+              "spawn_policy": null,
+              "supervisor": null,
+              "topology": null,
+              "wiring": {
+                "auto_wire_orchestrator": false,
+                "role_wiring": []
+              }
+            },
+            "previous_identities": []
+          },
+          "kind": "roster"
+        },
+        {
+          "kind": "topology",
+          "target_identities": [
+            "helper",
+            "original"
+          ]
+        }
+      ],
+      "candidate": {
+        "binary": {
+          "sha256": "b9b2205afb95c1c9aebb20e2bdf0ccd8040de1f54b737f3acfa13cf8f574d13b",
+          "size": 898696272
+        },
+        "binary_kind": "toolkit_gateway",
+        "resource_build_record_sha256": "d0cbde86f22e68b40b0303de4605b3744399bfb52350131982604fdf330beaaf",
+        "resources_sha256": "aba32d4a5bf2a2238cae8aa5993ea83ce5fb8c2c79167cd05d30675d6c0fd8ae",
+        "source_manifest_sha256": "11176a73ce4e376cbce906d4133cbbcd8685ec2e06ab789944d83f85587d44b7",
+        "target": "linux-x86_64"
+      },
+      "case": "installed-product-success",
+      "cleanup_observation": {
+        "observed_descendants_gone": true,
+        "pending_responses_empty": true,
+        "private_reader_created": true,
+        "private_reader_joined": true,
+        "process_observed": true,
+        "process_reaped": true,
+        "public_reader_created": true,
+        "public_reader_joined": true,
+        "transport_process_released": true
+      },
+      "descendant_shutdown_checks": [
+        {
+          "alive": false,
+          "monotonic_ns": 4102185844274371,
+          "pid": 2536922,
+          "process_stat": {
+            "reason": "not_found",
+            "status": "unavailable"
+          }
+        },
+        {
+          "alive": false,
+          "monotonic_ns": 4102185844283595,
+          "pid": 2564461,
+          "process_stat": {
+            "reason": "not_found",
+            "status": "unavailable"
+          }
+        }
+      ],
+      "descendant_snapshots": [
+        {
+          "children": [
+            {
+              "pgid": 2536922,
+              "pid": 2536922,
+              "ppid": 2522444,
+              "process_stat": {
+                "pgid": 2536922,
+                "ppid": 2522444,
+                "session_id": 2522406,
+                "start_ticks": 410213304,
+                "state": "S",
+                "status": "observed"
+              }
+            }
+          ],
+          "main_pid": 2522444,
+          "monotonic_ns": 4102134889697336
+        },
+        {
+          "children": [
+            {
+              "pgid": 2536922,
+              "pid": 2536922,
+              "ppid": 2522444,
+              "process_stat": {
+                "pgid": 2536922,
+                "ppid": 2522444,
+                "session_id": 2522406,
+                "start_ticks": 410213304,
+                "state": "S",
+                "status": "observed"
+              }
+            }
+          ],
+          "main_pid": 2522444,
+          "monotonic_ns": 4102135097428403
+        },
+        {
+          "children": [
+            {
+              "pgid": 2536922,
+              "pid": 2536922,
+              "ppid": 2522444,
+              "process_stat": {
+                "pgid": 2536922,
+                "ppid": 2522444,
+                "session_id": 2522406,
+                "start_ticks": 410213304,
+                "state": "S",
+                "status": "observed"
+              }
+            },
+            {
+              "pgid": 2564461,
+              "pid": 2564461,
+              "ppid": 2522444,
+              "process_stat": {
+                "pgid": 2564461,
+                "ppid": 2522444,
+                "session_id": 2522406,
+                "start_ticks": 410218203,
+                "state": "S",
+                "status": "observed"
+              }
+            }
+          ],
+          "main_pid": 2522444,
+          "monotonic_ns": 4102184412771235
+        }
+      ],
+      "events": {
+        "bytes": 165602,
+        "path": "/mnt/connect-release/a1/out/verification/installed-product-success/events.json",
+        "sha256": "bf27d858cca2f32a7c5695f2c12a596b37c5fa82663669bbfbc09ffc9bc303c2"
+      },
+      "finalization": {
+        "completed_manifest": {
+          "path": "/mnt/connect-release/a1/out/verification/installed-product-success/application-preparation/manifest.json",
+          "sha256": "3e798627e3dfe71649460012a7715189ece253ff4526ce8c739d1e058841b631"
+        },
+        "completed_server": {
+          "access": {
+            "allowed_operations": [
+              "setup_acquire_node",
+              "setup_acquire_node_prebuilt",
+              "setup_acquire_python",
+              "setup_catalog",
+              "setup_catalog_entry",
+              "setup_catalog_route",
+              "setup_check",
+              "setup_export_recipe",
+              "setup_guide",
+              "setup_help",
+              "setup_inspect_acquired",
+              "setup_inspect_package",
+              "setup_inspect_schema",
+              "setup_install",
+              "setup_job",
+              "setup_jobs",
+              "setup_prepare",
+              "setup_recipe",
+              "setup_recipes",
+              "setup_reconcile",
+              "setup_recovery_manifest",
+              "setup_remember_remote",
+              "setup_retry_prepare",
+              "setup_search_node",
+              "setup_selected_check",
+              "setup_selected_install",
+              "setup_state",
+              "setup_stop"
+            ]
+          },
+          "account": "none",
+          "args": [
+            "-i",
+            "PATH=/usr/bin:/bin",
+            "PYTHONDONTWRITEBYTECODE=1",
+            "/mnt/connect-release/a1/out/verification/installed-product-success/state/.meerkat-connect/mob.fixture/setup-Xqa3iF/prepared/client/runtime/bin/python",
+            "-I",
+            "-B",
+            "/mnt/connect-release/a1/out/verification/installed-product-success/state/.meerkat-connect/mob.fixture/setup-Xqa3iF/prepared/distribution/toolkit-library-20261031-application-4d519f-linux-inputs-linux-x86_64/setup/local_session.py",
+            "--configuration",
+            "/mnt/connect-release/a1/out/verification/installed-product-success/state/.meerkat-connect/mob.fixture/setup-Xqa3iF/prepared/config/mcp.json",
+            "--configuration-sha256",
+            "1cf52444804b9669eada1555c1d8c30c849737ea0f2ffa8424ccfc202e09b27c",
+            "--helper-sha256",
+            "8f61bc92fa88ce529319b667c221d2575fabe181e24a0b03776b4280de83c1aa",
+            "--adapter-sha256",
+            "44f21f2a01d335f61ddc4bfe88943db4b4c924b2ba3f54cc992b75e845f231cc",
+            "--backend-sha256",
+            "072b69e77a1955db95865346f7dc0a248cc3c491a0aacd680ea37c3f5c556611",
+            "--state-root",
+            "/mnt/connect-release/a1/out/verification/installed-product-success/state/.meerkat-connect/mob.fixture/setup-Xqa3iF/prepared/local-session"
+          ],
+          "command": "/usr/bin/env",
+          "env": {},
+          "name": "toolkit-setup"
+        },
+        "completed_setup": {
+          "path": "/mnt/connect-release/a1/out/verification/installed-product-success/application-preparation/application-setup.json",
+          "sha256": "de712f9d4e0b2c60d3f31628d7f9c27a4aa593598bdeef3c87ff954f8fe2af17"
+        },
+        "controller_authority": {
+          "basis": "packaged Driver joins the actual held controller report before issuing this parent",
+          "parent": [
+            {
+              "authority_generation": 1,
+              "authority_incarnation": "c7e214aa-12b2-4e31-9469-ee92ef59227b",
+              "authority_namespace": "installed-fixture",
+              "grant_id": "helper-controller-parent",
+              "issued_revision": 1,
+              "root_authority": {
+                "id": "operator",
+                "kind": "service_account",
+                "qualification": {
+                  "kind": "qualified",
+                  "trust_domain_id": "installed-gateway-fixture"
+                }
+              }
+            }
+          ],
+          "request": {
+            "issuance_id": "helper-controller-parent",
+            "target": {
+              "kind": "helper"
+            }
+          }
+        },
+        "prepare-policy": {
+          "argv": [
+            "/mnt/connect-release/a1/out/stage/meerkat-connect-linux-x86_64/bin/toolkit_gateway",
+            "--prepare-application-policy",
+            "--policy",
+            "/mnt/connect-release/a1/out/verification/installed-product-success/finalization/local-policy-input.json",
+            "--artifacts",
+            "/mnt/connect-release/a1/out/verification/installed-product-success/finalization/policy-inputs",
+            "--deployment-root",
+            "/mnt/connect-release/a1/out/verification/installed-product-success/deployment",
+            "--bundle",
+            "/mnt/connect-release/a1/out/verification/installed-product-success/deployment/policy-bundle",
+            "--activation-template",
+            "/mnt/connect-release/a1/out/verification/installed-product-success/finalization/activation-template.json",
+            "--activation",
+            "/mnt/connect-release/a1/out/verification/installed-product-success/deployment/activation.json"
+          ],
+          "exit_code": 0,
+          "pid": 2536951,
+          "stderr": {
+            "bytes": 0,
+            "path": "/mnt/connect-release/a1/out/verification/installed-product-success/finalization/prepare-policy.stderr",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "stdout": {
+            "bytes": 776,
+            "path": "/mnt/connect-release/a1/out/verification/installed-product-success/finalization/prepare-policy.stdout",
+            "sha256": "c96e00e68bfb6ca64e535b4c8a9fd29ad5c45f5cff67c24863aa30235aa9b52c"
+          }
+        },
+        "preparer_handoff": {
+          "path": "/mnt/connect-release/a1/out/verification/installed-product-success/state/.meerkat-connect/mob.fixture/setup-Xqa3iF/prepare.stdout",
+          "sha256": "05c900a98004fc3f6f6de19e7c6a99d606c17fed726f68f329e62be2cfd0751f"
+        },
+        "selection": {
+          "activation": {
+            "path": "/mnt/connect-release/a1/out/verification/installed-product-success/deployment/activation.json",
+            "sha256": "dcd10eaa6fc6ca1d08292c2c61aa461dc0ab151c293bea6a7ff3de81e2ce016b"
+          },
+          "deployment_root": "/mnt/connect-release/a1/out/verification/installed-product-success/deployment",
+          "local_policy": {
+            "path": "/mnt/connect-release/a1/out/verification/installed-product-success/deployment/policy-bundle/toolkit-local-policy.json",
+            "sha256": "b580e350742b98da1615e65e4470da7db36f00db312b1526aedf131e6237f60c"
+          },
+          "policy_manifest": {
+            "path": "/mnt/connect-release/a1/out/verification/installed-product-success/deployment/policy-bundle/manifest.json",
+            "sha256": "0b4509d7825f5f8cb657fa0cc889494e5f9745302e88f1b3344bccc5ef7e6465"
+          }
+        },
+        "validate-policy": {
+          "argv": [
+            "/mnt/connect-release/a1/out/stage/meerkat-connect-linux-x86_64/bin/toolkit_gateway",
+            "--validate-application-policy",
+            "--selection",
+            "/mnt/connect-release/a1/out/verification/installed-product-success/finalization/selection.json"
+          ],
+          "exit_code": 0,
+          "pid": 2536953,
+          "stderr": {
+            "bytes": 0,
+            "path": "/mnt/connect-release/a1/out/verification/installed-product-success/finalization/validate-policy.stderr",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "stdout": {
+            "bytes": 777,
+            "path": "/mnt/connect-release/a1/out/verification/installed-product-success/finalization/validate-policy.stdout",
+            "sha256": "13ae5d57645f423545a110c29f3065e442ff196b8dc9be4e51cdfef9e93fa45a"
+          }
+        }
+      },
+      "forced_cleanup": false,
+      "gateway_stderr": {
+        "bytes": 38008,
+        "path": "/mnt/connect-release/a1/out/verification/installed-product-success/gateway.stderr",
+        "sha256": "9b98f5761804668ded9b9d259ffe96d802d01c26f28700981021f221ac3d5009"
+      },
+      "http_listener_closed": true,
+      "main_gateway_pid": 2522444,
+      "model_catalog": {
+        "path": "/mnt/connect-release/a1/out/verification/installed-product-success/model-catalog.json",
+        "sha256": "c3bf3eb2f2000367921e2314672ef616d9e9baa7028cc0a037ff4463b9fceb00"
+      },
+      "model_configuration": {
+        "path": "/mnt/connect-release/a1/out/verification/installed-product-success/meerkat.toml",
+        "sha256": "d03963373864ad739a65d1ef35e1717b7e48ebcae626ba669893e77ca6b9751c"
+      },
+      "model_request_count": 33,
+      "model_requests": {
+        "bytes": 3467836,
+        "path": "/mnt/connect-release/a1/out/verification/installed-product-success/model-requests.json",
+        "sha256": "c67e9d83857ebb63ec2f2b9f830119e256dc64c98634eeef76b3301ad0ff571c"
+      },
+      "model_schedule_errors": [],
+      "native_ready": {
+        "contract_version": "0.5.0",
+        "control_listen_address": null,
+        "http_base_url": "http://127.0.0.1:34421",
+        "http_public_base_url": null,
+        "identity_bootstrap": {
+          "complete": true,
+          "counts": {
+            "active": 2,
+            "broken": 0,
+            "dormant": 0,
+            "warming": 0
+          },
+          "identities": {
+            "helper": {
+              "restore": {
+                "stage": "minted"
+              },
+              "state": "active"
+            },
+            "original": {
+              "restore": {
+                "stage": "minted"
+              },
+              "state": "active"
+            }
+          },
+          "mode": {
+            "mode": "eager_materialize"
+          },
+          "ready": true
+        },
+        "init_id": "init-3abf345b-cf8f-4ad2-bd25-e60874276183",
+        "loaded_modules": [],
+        "member_restore": {
+          "boot_set": "observed"
+        },
+        "outcome": "ready",
+        "runtime_fingerprint": "10b357ae0de7acd4d2e331075ebb52e626381ce5d81cdc18bb64a198d92f52bd",
+        "runtime_origin": "prepared_application",
+        "stdio_shutdown_handshake": true,
+        "stdio_shutdown_horizon_ms": 432000
+      },
+      "natural_gateway_reap": true,
+      "observed_children": [
+        {
+          "pgid": 2536922,
+          "pid": 2536922,
+          "ppid": 2522444,
+          "process_stat": {
+            "pgid": 2536922,
+            "ppid": 2522444,
+            "session_id": 2522406,
+            "start_ticks": 410213304,
+            "state": "S",
+            "status": "observed"
+          }
+        },
+        {
+          "pgid": 2564461,
+          "pid": 2564461,
+          "ppid": 2522444,
+          "process_stat": {
+            "pgid": 2564461,
+            "ppid": 2522444,
+            "session_id": 2522406,
+            "start_ticks": 410218203,
+            "state": "S",
+            "status": "observed"
+          }
+        }
+      ],
+      "observed_children_gone": true,
+      "original_business_observation": {
+        "bytes": 9453,
+        "path": "/mnt/connect-release/a1/out/verification/installed-product-success/original-business-observation.json",
+        "sha256": "22c54092924c84f7a2a0a095ff345e25df34babef458f2c0bdb9b20fe95993ba"
+      },
+      "preparation_plan": {
+        "path": "/mnt/connect-release/a1/out/verification/installed-product-success/application-plan.json",
+        "sha256": "98f88eb72996686f7ce0aa47bc44f13ee7d4c0cc4ac66962ec3614862224d8ee"
+      },
+      "provider_joined": true,
+      "scope": "installed SDK acquisition and one public read with exact native input completion",
+      "scoped_execution_proven": false,
+      "sdk_readers_joined": true,
+      "service_parent_custody": {
+        "bytes": 2269,
+        "path": "/mnt/connect-release/a1/out/verification/installed-product-success/service-parent-custody.json",
+        "sha256": "77b984818c2729a0a1b995e7413bef0eaf22bb6325299a46c06a5dfafb659753"
+      },
+      "shutdown_response": {
+        "id": "meta-shutdown-05f99cd2-7ebb-4061-931c-e341c1fc8a2e",
+        "jsonrpc": "2.0",
+        "result": {
+          "host_cleanup_completed": true,
+          "runtime_cleanup_completed": true,
+          "shutdown": true
+        }
+      },
+      "status": "passed",
+      "termination": {
+        "escalation": "none",
+        "exit_code": 0,
+        "native_shutdown": "acknowledged",
+        "signal": null,
+        "state": "exited"
+      }
+    },
+    {
+      "candidate": {
+        "binary": {
+          "sha256": "b9b2205afb95c1c9aebb20e2bdf0ccd8040de1f54b737f3acfa13cf8f574d13b",
+          "size": 898696272
+        },
+        "binary_kind": "toolkit_gateway",
+        "resource_build_record_sha256": "d0cbde86f22e68b40b0303de4605b3744399bfb52350131982604fdf330beaaf",
+        "resources_sha256": "aba32d4a5bf2a2238cae8aa5993ea83ce5fb8c2c79167cd05d30675d6c0fd8ae",
+        "source_manifest_sha256": "11176a73ce4e376cbce906d4133cbbcd8685ec2e06ab789944d83f85587d44b7",
+        "target": "linux-x86_64"
+      },
+      "case": "installed-product-resource-corruption",
+      "cleanup_observation": {
+        "observed_descendants_gone": true,
+        "pending_responses_empty": true,
+        "private_reader_created": true,
+        "private_reader_joined": true,
+        "process_observed": true,
+        "process_reaped": true,
+        "public_reader_created": true,
+        "public_reader_joined": true,
+        "transport_process_released": true
+      },
+      "connect_error": {
+        "message": "gateway startup failed and the stop of its gateway transport failed (see startup_error and cleanup_error)",
+        "type": "GatewayStartupCleanupError"
+      },
+      "descendant_shutdown_checks": [],
+      "events": {
+        "bytes": 6899,
+        "path": "/mnt/connect-release/a1/out/verification/installed-product-resource-corruption/events.json",
+        "sha256": "5c01bf67743f9477bca0c6195ea040e569e382c564673a9c65706fa7716489d7"
+      },
+      "finalization": {},
+      "forced_cleanup": false,
+      "gateway_stderr": {
+        "bytes": 135,
+        "path": "/mnt/connect-release/a1/out/verification/installed-product-resource-corruption/gateway.stderr",
+        "sha256": "155683aa42432dfde8aa499130b7cc71811e87e7809180326c36e96825f0ab51"
+      },
+      "model_configuration": {
+        "path": "/mnt/connect-release/a1/out/verification/installed-product-resource-corruption/meerkat.toml",
+        "sha256": "e5e691d97639be959aaead860887dbbd92a1e2d955d346c0c3595399dd480f1a"
+      },
+      "natural_gateway_reap": true,
+      "observed_children": [],
+      "observed_children_gone": true,
+      "preparation_plan": {
+        "path": "/mnt/connect-release/a1/out/verification/installed-product-resource-corruption/application-plan.json",
+        "sha256": "3cb724753cfa7a8ba4017d7a2cbd0bae7e4148da8cd140e7524f8b2975f1d19b"
+      },
+      "provider_joined": true,
+      "resource_corruption": {
+        "after": {
+          "bytes": 177,
+          "path": "/mnt/connect-release/a1/out/verification/installed-product-resource-corruption/meerkat-connect-linux-x86_64/libexec/meerkat-connect/prepare.py",
+          "sha256": "1035bb4a1dbbec807509cdf05777488eaf9016bad181e762578cbd9780139800"
+        },
+        "before": {
+          "bytes": 57603,
+          "path": "/mnt/connect-release/a1/out/stage/meerkat-connect-linux-x86_64/libexec/meerkat-connect/prepare.py",
+          "sha256": "5a2aec2c5477a94c8d45adf62bbff20628b6c26e9c0f8f035bc29777eb59aff3"
+        },
+        "marker": "/mnt/connect-release/a1/out/verification/installed-product-resource-corruption/bundled-entry-entered"
+      },
+      "resource_refusal": "Installed Connect resources are unavailable or changed; reinstall the complete product. No setup command was started.",
+      "scope": "installed resource corruption; zero model turns",
+      "scoped_execution_proven": false,
+      "sdk_readers_joined": true,
+      "sentinel_connections": [],
+      "status": "passed",
+      "termination": {
+        "escalation": "none",
+        "exit_code": 1,
+        "native_shutdown": "not_negotiated",
+        "signal": null,
+        "state": "exited"
+      }
+    }
+  ],
+  "execution_claim": "installed SDK acquisition and one public read; success requires exact native input completion; no live authentication or general service support claim",
+  "installed_candidate": {
+    "binary": {
+      "sha256": "b9b2205afb95c1c9aebb20e2bdf0ccd8040de1f54b737f3acfa13cf8f574d13b",
+      "size": 898696272
+    },
+    "binary_kind": "toolkit_gateway",
+    "resource_build_record_sha256": "d0cbde86f22e68b40b0303de4605b3744399bfb52350131982604fdf330beaaf",
+    "resources_sha256": "aba32d4a5bf2a2238cae8aa5993ea83ce5fb8c2c79167cd05d30675d6c0fd8ae",
+    "source_manifest_sha256": "11176a73ce4e376cbce906d4133cbbcd8685ec2e06ab789944d83f85587d44b7",
+    "target": "linux-x86_64"
+  },
+  "installed_inputs": {
+    "derived_binary": {
+      "bytes": 1362,
+      "path": "/mnt/connect-release/a1/out/stage/derived-binary-record.json",
+      "sha256": "abfbde9df2c7f2cdb964b327bc8609f2e3b86a32216b15c4c068fe159eab686f"
+    },
+    "native_build": {
+      "bytes": 2045,
+      "path": "/mnt/connect-release/a1/out/stage/build-record.json",
+      "sha256": "2a4ed564c343be175ccfa32e92319e5cecc7c2f1259e51213d19dae40dba72b8"
+    },
+    "resource_build": {
+      "bytes": 4671,
+      "path": "/mnt/connect-release/a1/out/stage/resource-build-record.json",
+      "sha256": "d0cbde86f22e68b40b0303de4605b3744399bfb52350131982604fdf330beaaf"
+    },
+    "resource_manifest": {
+      "bytes": 4255550,
+      "path": "/mnt/connect-release/a1/out/stage/meerkat-connect-linux-x86_64/libexec/meerkat-connect/resources.json",
+      "sha256": "aba32d4a5bf2a2238cae8aa5993ea83ce5fb8c2c79167cd05d30675d6c0fd8ae"
+    },
+    "source_manifest": {
+      "bytes": 617989,
+      "path": "/mnt/connect-release/a1/inputs/source/CURRENT-SOURCE-FILES.json",
+      "sha256": "11176a73ce4e376cbce906d4133cbbcd8685ec2e06ab789944d83f85587d44b7"
+    },
+    "staging": {
+      "bytes": 4970,
+      "path": "/mnt/connect-release/a1/out/stage/staging.json",
+      "sha256": "dd40e9377ca5a1b7cc22c509fa59a4ffefb541b5e75e0e62ccfc30cbf70dfdfa"
+    }
+  },
+  "platform": "Linux-7.0.0-1011-gcp-x86_64-with-glibc2.39",
+  "python": "3.11.16 (main, Sep  1 2026, 14:18:37) [Clang 22.1.3 ]",
+  "raw_gateway": null,
+  "raw_gateway_sha256": null,
+  "schema": 1,
+  "script_sha256": "c311ec28de513e0cb9a57c3735d0b8ea653b2c79dc4b38a30256a432ef337a48",
+  "sdk_sources": [
+    {
+      "path": "/mnt/connect-release/a1/venv/lib/python3.11/site-packages/meerkat_toolkit/host_control.py",
+      "sha256": "6d3130cdce9c228ac6047c8edd38ed9741f0e8dbc92d7a76e6a90704a0712c0c"
+    },
+    {
+      "path": "/mnt/connect-release/a1/venv/lib/python3.11/site-packages/meerkat_toolkit/application_runtime.py",
+      "sha256": "cea30adf279a99a11509c8f8b6ecb9178470b1866323f11626f67f272c73d155"
+    },
+    {
+      "path": "/mnt/connect-release/a1/venv/lib/python3.11/site-packages/meerkat_meta/__init__.py",
+      "sha256": "44051ffb0dfb98ad47de6fb6c25cecf93bc0afff318fef18512859a3730f14ab"
+    },
+    {
+      "path": "/mnt/connect-release/a1/venv/lib/python3.11/site-packages/meerkat_meta/builder.py",
+      "sha256": "00708bc5911e2a1ae88b3285da87b5ed2d8ffdd734bd37aaf57d42086acc8367"
+    },
+    {
+      "path": "/mnt/connect-release/a1/venv/lib/python3.11/site-packages/meerkat_meta/runtime.py",
+      "sha256": "23875129dd5e562534c2dc45ee25e97e2bc5a72b4a1b1196924b984896dadb62"
+    },
+    {
+      "path": "/mnt/connect-release/a1/venv/lib/python3.11/site-packages/meerkat_meta/_transport.py",
+      "sha256": "3f5d96042880ba8d821d19c110fdcc4006bf8e551e3336bc4c51dacbdcaa3ccf"
+    },
+    {
+      "path": "/mnt/connect-release/a1/venv/lib/python3.11/site-packages/meerkat_meta/agent_builder.py",
+      "sha256": "ae9cac48dd811bc3faec87ca361c27c66cec70a2edbcf5df45122400955ef46a"
+    },
+    {
+      "path": "/mnt/connect-release/a1/venv/lib/python3.11/site-packages/meerkat_meta/identity_first_models.py",
+      "sha256": "46160429d7c557523955eddf45ddb2955e24b891bd17c7e1b78fe37f55d1e619"
+    },
+    {
+      "path": "/mnt/connect-release/a1/venv/lib/python3.11/site-packages/meerkat_meta/identity_first_providers.py",
+      "sha256": "bc7bc3b7176e691cbdaf90a8636b6b532ac6f7bab31b34889aa811ba6469b3ce"
+    },
+    {
+      "path": "/mnt/connect-release/a1/venv/lib/python3.11/site-packages/meerkat_meta/types.py",
+      "sha256": "e0291fcf60ad451c8100701e2d96c3cfb846870cd47e0b936684dd4444c26893"
+    }
+  ],
+  "status": "passed",
+  "toolkit_gateway": "/mnt/connect-release/a1/out/stage/meerkat-connect-linux-x86_64/bin/toolkit_gateway",
+  "toolkit_gateway_sha256": "b9b2205afb95c1c9aebb20e2bdf0ccd8040de1f54b737f3acfa13cf8f574d13b"
+}

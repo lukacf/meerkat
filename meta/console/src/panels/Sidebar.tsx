@@ -2251,15 +2251,24 @@ export const Sidebar = React.memo(function Sidebar({
   // The Show filter reads the ledger's open runs; with All it never does,
   // so the roster does not re-filter on every ledger change.
   const filterLedger = activityFilter === "all" ? null : ledger;
+  const shown = React.useMemo(
+    () => (activityFilter === "all"
+      ? agents
+      : agents.filter((agent) => sidebarActivity(agent, agentOpenRun(filterLedger, agent)) === activityFilter)),
+    [agents, activityFilter, filterLedger],
+  );
   const filtered = React.useMemo(() => {
     const needle = q.toLowerCase();
-    return agents.filter((agent) => {
-      if (activityFilter !== "all" && sidebarActivity(agent, agentOpenRun(filterLedger, agent)) !== activityFilter) return false;
-      return !needle ||
-        [sidebarAgentTitle(agent), agent.label, agent.identity, agent.member_id, agent.role]
-          .some(value => value?.toLowerCase().includes(needle));
-    });
-  }, [agents, q, activityFilter, filterLedger]);
+    if (!needle) return shown;
+    return shown.filter((agent) =>
+      [sidebarAgentTitle(agent), agent.label, agent.identity, agent.member_id, agent.role]
+        .some(value => value?.toLowerCase().includes(needle)));
+  }, [shown, q]);
+  // The mast's count: "17 agents", and "1 of 17 agents" while the Show
+  // filter hides some (grouping and sorting hide nothing).
+  const mastCount = activityFilter === "all"
+    ? agentCountText(agents.length)
+    : `${shown.length} of ${agentCountText(agents.length)}`;
 
   const sectionOrderStorageKey = React.useMemo(
     () => sidebarStorageKey(SIDEBAR_SECTION_ORDER_STORAGE_PREFIX, storageNamespace),
@@ -2898,9 +2907,9 @@ export const Sidebar = React.memo(function Sidebar({
             <div className="sidebar__mast-title">Roster</div>
             <div
               className="sidebar__mast-sub"
-              title={viewIsDefault ? undefined : [agentCountText(agents.length), ...viewSummary].join(" · ")}
+              title={viewIsDefault ? undefined : [mastCount, ...viewSummary].join(" · ")}
             >
-              <span className="sidebar__mast-count">{agentCountText(agents.length)}</span>
+              <span className="sidebar__mast-count" data-testid="sidebar-agent-count">{mastCount}</span>
               {viewIsDefault ? null : (
                 <>
                   <button

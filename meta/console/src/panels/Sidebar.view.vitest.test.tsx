@@ -82,7 +82,9 @@ describe("Roster view menu (A5)", () => {
     const view = render(<Sidebar {...props} />);
     const trigger = view.getByTestId("sidebar-view-menu");
     const summary = () => view.queryByTestId("sidebar-view-summary")?.textContent ?? null;
+    const count = () => view.getByTestId("sidebar-agent-count").textContent;
     expect(summary()).toBe(null);
+    expect(count()).toBe("3 agents");
     expect(view.queryByTestId("sidebar-view-reset") === null).toBe(true);
     expect(trigger.classList.contains("has-badge")).toBe(false);
     expect(trigger.hasAttribute("data-customized")).toBe(false);
@@ -90,6 +92,8 @@ describe("Roster view menu (A5)", () => {
     fireEvent.click(trigger);
     fireEvent.click(view.getByTestId("sidebar-view-activity:working"));
     expect(summary()).toBe(" · Working");
+    // The Show filter hides rows: the count says how many of the roster show.
+    expect(count()).toBe("1 of 3 agents");
     // Customised: always shown, with the accent dot.
     expect(trigger.classList.contains("has-badge")).toBe(true);
     expect(trigger.classList.contains("cc-reveal")).toBe(false);
@@ -98,7 +102,7 @@ describe("Roster view menu (A5)", () => {
     fireEvent.click(view.getByTestId("sidebar-view-sort:name"));
     fireEvent.click(view.getByTestId("sidebar-view-group:none"));
     expect(summary()).toBe(" · Working · By name · Ungrouped");
-    expect(view.container.querySelector(".sidebar__mast-sub")?.getAttribute("title")).toBe("3 agents · Working · By name · Ungrouped");
+    expect(view.container.querySelector(".sidebar__mast-sub")?.getAttribute("title")).toBe("1 of 3 agents · Working · By name · Ungrouped");
 
     // The summary's words open the view options.
     fireEvent.keyDown(view.getByRole("dialog", { name: "Roster view" }), { key: "Escape" });
@@ -113,6 +117,15 @@ describe("Roster view menu (A5)", () => {
     expect(trigger.classList.contains("cc-reveal")).toBe(true);
     expect(JSON.parse(localStorage.getItem(VIEW_KEY) || "{}")).toEqual({ v: 1, group_by: "category", sort_by: "manual" });
     expect(rows(view.container)).toEqual(["a", "b", "c"]);
+    expect(count()).toBe("3 agents");
+
+    // Grouping and sorting hide nothing: the count stays the roster's.
+    fireEvent.click(view.getByTestId("sidebar-view-menu"));
+    fireEvent.click(view.getByTestId("sidebar-view-sort:activity"));
+    fireEvent.click(view.getByTestId("sidebar-view-group:none"));
+    expect(summary()).toBe(" · By last activity · Ungrouped");
+    expect(count()).toBe("3 agents");
+    expect(view.container.querySelector(".sidebar__mast-sub")?.getAttribute("title")).toBe("3 agents · By last activity · Ungrouped");
   });
 
   it("names Status unknown and By last activity in the summary", () => {

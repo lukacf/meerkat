@@ -7426,6 +7426,18 @@ impl SpawnMemberSpec {
         self
     }
 
+    /// A host's spawn bound to an operation owner: like an agent's creation
+    /// (`mark_agent_creation`) it claims no host root, but it keeps the entry
+    /// custody the host requested.
+    fn mark_owner_bound_host_creation(&mut self) {
+        if matches!(
+            self.creation_origin,
+            crate::member_creation::MemberCreationOrigin::HostRoot
+        ) {
+            self.creation_origin = crate::member_creation::MemberCreationOrigin::Unproven;
+        }
+    }
+
     /// Bound the operator authority this placed member is compiled with (see
     /// [`super::MemberOperatorAuthorityCeiling`]).
     ///
@@ -13939,6 +13951,11 @@ impl MobHandle {
     /// The owner bridge-session id is only an input to `MeerkatMachine`; the
     /// ops lifecycle registry is obtained from the opaque runtime binding
     /// bundle returned by machine authority.
+    ///
+    /// An externally bound member's spawn needs this owner binding. A host's
+    /// request keeps its entry custody ([`SpawnMemberSpec::entry_custody`]),
+    /// so a host creates the externally bound identity entry the declared
+    /// apply hosts on its first use; a request on the agent lane carries none.
     pub async fn spawn_spec_with_generated_owner_context(
         &self,
         spec: SpawnMemberSpec,
@@ -14108,7 +14125,17 @@ impl MobHandle {
         owner_context: CanonicalOpsOwnerContext,
         spawn_source: SpawnSource,
     ) -> Result<MemberSpawnReceipt, MobError> {
-        spec.mark_agent_creation();
+        // An owner-bound spawn claims no host root, whichever lane sends it.
+        // Entry custody is the host's: the agent lanes never carry it, and a
+        // host's owner-bound spawn (the one spawn path of an externally bound
+        // member) keeps the custody it requested, so the host can create an
+        // externally bound identity entry the declared apply hosts on its
+        // first use.
+        if self.command_authority.acts_for_agent() {
+            spec.mark_agent_creation();
+        } else {
+            spec.mark_owner_bound_host_creation();
+        }
         match self
             .execute_machine_command(MobMachineCommand::Spawn {
                 spawn_source: SpawnSource::for_launch_mode(spawn_source, &spec.launch_mode),

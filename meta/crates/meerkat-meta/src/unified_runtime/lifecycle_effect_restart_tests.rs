@@ -236,8 +236,10 @@ async fn boot(state: &Path, mob_id: &str, roster: Vec<DurableAgentSpec>, wiring:
     .await
     .expect("bootstrap the unified runtime");
     let continuity = Arc::new(
-        LocalContinuityStore::open(state_root.join("identity-continuity.sqlite3"))
-            .expect("open the identity continuity store"),
+        LocalContinuityStore::open(
+            state_root.join(crate::storage_layout::CANONICAL_CONTINUITY_DB_FILE_NAME),
+        )
+        .expect("open the identity continuity store"),
     );
     let identities = Arc::new(
         IdentityRuntime::new(IdentityRuntimeConfig {

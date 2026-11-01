@@ -107,6 +107,48 @@ function WorkStrip({ width, four }: { width: number; four?: boolean }) {
   );
 }
 
+// Hero meters in narrow panes (Topology's ladder with its legend, Memory's
+// bars): responsive meters take the room the tile measures, beside the figure
+// or below it, and nothing crosses a tile's bounds.
+function NarrowHeroes({ width }: { width: number }) {
+  return (
+    <div className="kg-stack" style={{ width, flex: "none" }}>
+      <div className="kg-pane" data-testid={`kit-hero-pane:${width}:topology`}>
+        <PanelShell>
+          <GlanceStrip ariaLabel="Topology at a glance">
+            <FigureTile
+              hero
+              label="Agents"
+              value={17}
+              live
+              meter={({ width: room }) => <BarcodeMeter filled={14} outlined={3} live={2} width={Math.min(150, room)} legend label="17 agents: 14 long-lived, 3 helpers, 2 active now" />}
+              meterMinWidth={112}
+            />
+            <FigureTile label="Problems" value={0} foot="Nothing needs attention" />
+          </GlanceStrip>
+        </PanelShell>
+      </div>
+      <div className="kg-pane" data-testid={`kit-hero-pane:${width}:memory`}>
+        <PanelShell>
+          <GlanceStrip ariaLabel="Memory at a glance">
+            <FigureTile
+              hero
+              label="Records"
+              value={80}
+              unit="active"
+              meter={({ width: room }) => <Sparkline values={series(4, 30, 4)} kind="bars" width={Math.min(128, room)} height={26} label="Records per day over 30 days" />}
+              foot="+15 written this week"
+            />
+            <FigureTile label="Needs review" value={3} tone="warn" foot="1 quarantined · 2 waiting" />
+            <FigureTile label="Given · 24h" value={1284} trend={series(9, 24, 8)} foot="to 3 agents" />
+            <FigureTile label="Checks" value={4} of={6} meter={<ProgressRing done={4} total={6} size={24} />} foot="holding" />
+          </GlanceStrip>
+        </PanelShell>
+      </div>
+    </div>
+  );
+}
+
 // Every kind of tile, loaded and loading, each alone in a strip, so its own
 // height shows (in a strip of several the row takes the tallest).
 const LOADING_KINDS: Array<[string, Omit<Parameters<typeof FigureTile>[0], "loading">]> = [
@@ -176,6 +218,13 @@ export const gallerySections: GallerySection[] = [
               <WorkStrip key={width} width={width} />
             ))}
             <WorkStrip width={600} four />
+          </div>
+        </Specimen>
+        <Specimen title="Hero meters in narrow panes" note="339, 420 and 520 px panes: a responsive meter takes the room beside the figure, or below it under its minimum (the ladder asks 112 px); nothing crosses a tile">
+          <div className="kg-inline" style={{ alignItems: "flex-start", gap: 14 }}>
+            {[339, 420, 520].map((width) => (
+              <NarrowHeroes key={width} width={width} />
+            ))}
           </div>
         </Specimen>
         <Specimen bare title="Loading keeps the height" note="each kind of tile loaded (left) and loading (right): the same boxes, the foot line kept; comfortable and compact">

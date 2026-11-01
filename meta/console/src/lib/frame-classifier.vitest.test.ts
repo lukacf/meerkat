@@ -6,7 +6,7 @@ import { createActivityLedger, createAgentResolver } from "./activity-ledger";
 import { stripPeerTransportScaffold } from "./adapters";
 import { rememberOwnSend } from "./turn-origin";
 import type { ConsoleFrame } from "../types";
-import { classifyFrame, failureWords, frameSentence, isProblemFrame, toolFailureWords } from "./frame-classifier";
+import { classifyFrame, failureWords, frameSentence, isProblemFrame, plainSnippetText, toolFailureWords } from "./frame-classifier";
 
 let serial = 0;
 function frame(event: string, data: Record<string, unknown> = {}, extra: Partial<ConsoleFrame> = {}): ConsoleFrame {
@@ -346,6 +346,30 @@ describe("words for seeded frames", () => {
     expect(stripPeerTransportScaffold("[COMMS REQUEST from dispatch] Carrier status?", ["dispatch"])).toBe("Carrier status?");
     expect(stripPeerTransportScaffold("Peer message from someone-else:\nHi", ["customer-ops/coordinator/dispatch"])).toBe("Peer message from someone-else:\nHi");
     expect(stripPeerTransportScaffold("Peer request from fugue/peer-a:\nDone.")).toBe("Peer request from fugue/peer-a:\nDone.");
+  });
+
+  it("reads model markdown in a snippet as plain words", () => {
+    const done = classifyFrame(frame("interaction_complete", { result: "**Ops Assistant** here. On it.\n\n> Remind me what is next on my calendar." }));
+    expect(done.snippet).toBe("Ops Assistant here. On it. Remind me what is next on my calendar.");
+    const standUp = classifyFrame(frame("interaction_complete", { result: "## Morning stand-up\n\n| Desk | Open |\n|---|---|\n| Billing | 3 |" }));
+    expect(standUp.snippet).toBe("Morning stand-up Desk Open Billing 3");
+    const flat = (text: string) => plainSnippetText(text).replace(/\s+/g, " ").trim();
+    expect(flat("- first\n* second\n1. third\n\n---\n```ts\nconst x = 1;\n```\nUse `refund_policy` and __this__")).toBe("first second third const x = 1; Use refund_policy and this");
+    // Single marks are words: snake_case names, arithmetic.
+    expect(flat("a snake_case_name and 2 * 3")).toBe("a snake_case_name and 2 * 3");
+  });
+
+  it("gives a name ending in s the bare apostrophe", () => {
+    const directory = createAgentDirectory([{ id: "accounts", label: "Accounts" }, { id: "billing", label: "Billing" }]);
+    const name = (key: string) => directory.lookup(key)?.label ?? key;
+    const kickoff = (member: string) => frame("system_notice", {
+      blocks: [{ type: "comms", kind: "lifecycle", direction: "incoming", intent: "mob.kickoff_started", peer: { display_name: `customer-ops/specialist/${member}`, id: `p-${member}` }, payload: { peer: member } }],
+    });
+    expect(frameSentence(classifyFrame(kickoff("accounts"), directory), name)).toBe("Accounts' kickoff started");
+    expect(frameSentence(classifyFrame(kickoff("billing"), directory), name)).toBe("Billing's kickoff started");
+    expect(frameSentence(classifyFrame(frame("run_failed", { error: "x" }, { identity: "accounts" }), directory), name)).toBe("Accounts' turn failed");
+    expect(frameSentence(classifyFrame(frame("memory.record.promoted", { scope_kind: "identity", scope_key: "accounts" }, { identity: "_system" }), directory), name))
+      .toBe("A memory record moved to Accounts' memory");
   });
 
   it("lists one kickoff once, whichever of the member's peers got a copy", () => {

@@ -11,14 +11,13 @@ import {
 } from "@console-core";
 import { ALL_NAV, type NavKind } from "../panels/Sidebar";
 import type { ConsoleAgent } from "../types";
+import { buildConsoleNavigation, type ConsoleNavigationHost } from "./console-navigation";
 import {
   NavigationFocusProvider,
-  buildConsoleNavigation,
   useNavigationFocus,
   useNavigationFocusSource,
-  type ConsoleNavigationHost,
   type NavigationFocusKind,
-} from "./console-navigation";
+} from "./navigation-focus";
 
 const agents = [
   { identity: "domain:billing", member_id: "billing-member", label: "Billing" },

@@ -103,6 +103,9 @@ describe("topology view model", () => {
     assert.deepEqual(view.lanes.map((lane) => lane.id), ["channels", "Coordinators", "Domains", "Internal", "shared", "other-teams"]);
     const byId = new Map(view.nodes.map((entry) => [entry.id, entry]));
     assert.equal(byId.get("dispatch")?.kind, "coordinator");
+    // The section that only repeats the role is said once.
+    assert.equal(byId.get("dispatch")?.sublabel, "Coordinator");
+    assert.equal(byId.get("billing")?.sublabel, "Specialist · Domains");
     assert.equal(byId.get("billing")?.kind, "agent");
     // A helper sits in its parent's lane, hung off it.
     assert.equal(byId.get("ticket-4411")?.kind, "helper");

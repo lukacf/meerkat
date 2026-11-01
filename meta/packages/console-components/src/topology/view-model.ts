@@ -354,7 +354,7 @@ export function buildTopologyView(graph: TopoGraph, options: TopologyViewOptions
         ? `${humanizeEnum(agent.role) || "Agent"} · ${agent.authority || "another team"}`
         : agent.kind === "helper" && agent.parent
           ? `${humanizeEnum(topologyLineageWord(agent.lineage))} of ${labelOf(graph, agent.parent)}`
-          : joinWords(humanizeEnum(agent.role), section),
+          : roleAndSection(humanizeEnum(agent.role), section),
       lane,
       anchor: agent.kind === "helper" ? agent.parent : undefined,
       tone: presentation.tone,
@@ -366,7 +366,7 @@ export function buildTopologyView(graph: TopoGraph, options: TopologyViewOptions
       memory: scope && scope.records > 0 ? "idle" : "none",
       title: [
         agent.label,
-        agent.kind === "external" ? `${humanizeEnum(agent.role) || "Agent"} in ${agent.authority || "another team"}` : joinWords(humanizeEnum(agent.role), section),
+        agent.kind === "external" ? `${humanizeEnum(agent.role) || "Agent"} in ${agent.authority || "another team"}` : roleAndSection(humanizeEnum(agent.role), section),
         presentation.word,
         plural(degree, "connection"),
       ].filter(Boolean).join("\n"),
@@ -533,6 +533,13 @@ export function topologyVizEdges(
 
 function joinWords(...parts: Array<string | null | undefined>): string {
   return parts.filter(Boolean).join(" · ");
+}
+
+/** "Specialist · Domains", but "Coordinator" once where the section only repeats the role. */
+function roleAndSection(role: string, section: string | undefined): string {
+  const singular = (word: string) => word.trim().toLowerCase().replace(/s$/u, "");
+  if (role && section && singular(role) === singular(section)) return role;
+  return joinWords(role, section);
 }
 
 function toVizEdge(graph: TopoGraph, edge: TopoEdge, window: TopologyWindow, now?: number): VizEdge {

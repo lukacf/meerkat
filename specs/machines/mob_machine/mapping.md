@@ -15,7 +15,8 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `mob_operator_admission_authority` (machine `MobMachine`): `crates/meerkat-mob-mcp/src/agent_tools.rs` — MobMachine operator-admission authority for the mob tool surface: resolve create mob admission from the create-mobs capability observation and resolve profile mutation admission from the mutate-profiles capability observation, emitting the create-mob and profile-mutation admission resolved verdicts the surface mirrors (denied -> access denied)
 - `mob_membership_classifier_authority` (machine `MobMachine`): `crates/meerkat-mob/src/runtime/actor.rs` — MobMachine membership and runtime-incarnation classifiers owned by the actor: probe member admission duplicate, admitted or refused as an identity entry's name without entry custody from machine-owned binding, pending-spawn and entry state; compute respawn generation successor; reconcile desired workers to spawn retain or retire against current bindings, never an identity entry, emitting member spawn required, member retain required, and member retire required; set and observe external member rebind capability available or unavailable; classify turn timeout disposition detached canceled or retryable; and seed orphan budget once at startup, emitting the member admission probed, respawn generation computed, external member rebind capability, and turn timeout disposition classified effects
 - `mob_identity_entry_authority` (machine `MobMachine`): `crates/meerkat-mob/src/runtime/actor/identity_entry_admission.rs` — MobMachine identity entries realized by the actor: refuse an agent-lane member command addressed to an identity entry from the resolved agent lane member admission, and adopt a legacy member as an identity entry from the shell's observation of its spawn row, journaling the adoption before it commits; the entry is seated or unseated with a typed cause, spared by the worker reconcile, and its custody belongs to an open spawn ladder, placed only for an entry hosted on its first use, emitting the agent lane member admission resolved and legacy identity entry adoption resolved effects
-- `mob_declared_apply_authority` (machine `MobMachine`): `crates/meerkat-mob/src/runtime/actor/declared_apply.rs` — MobMachine declared apply realized by the actor: decide one verdict per declared identity from the declaration and member facts and realize it (a Dormant seat, on the entry's archived session when it has one, a same-session restamp, a rotation, a role hold or a typed refusal), refusing every identity of a candidate composition; seal a complete declared roster, marking every unlisted Declared entry whose member is seated and removing every unseated one, and retire each marked member with the cause Unlisted, whose start row records the mark for replay; let an archived session record go when the session is lost or the host asked for a fresh life; an unseated cause belongs to an entry no member holds, an unlisted mark to a seated Declared entry, an archived session record to an identity no member holds, and an entry awaiting its held creation was never created, emitting the identity entry declared, declared roster sealed and archived session forgotten effects
+- `mob_declared_apply_authority` (machine `MobMachine`): `crates/meerkat-mob/src/runtime/actor/declared_apply.rs` — MobMachine declared apply realized by the actor: decide one verdict per declared identity from the declaration and member facts and realize it (a Dormant seat, on the entry's archived session when it has one, a same-session restamp, a rotation, a role hold or a typed refusal), refusing every identity of a candidate composition; seal a complete declared roster, marking every unlisted Declared entry whose member is seated and removing every unseated one, leaving one whose spawn is in flight to a later seal, and retire each marked member with the cause Unlisted, whose start row records the mark for replay; let an archived session record go when the session is lost or the host asked for a fresh life; an unseated cause belongs to an entry no member holds, an unlisted mark to a seated Declared entry whose member has no spawn in flight, an archived session record to an identity no member holds, and an entry awaiting its held creation was never created, emitting the identity entry declared, declared roster sealed and archived session forgotten effects
+- `mob_created_identity_entry_authority` (machine `MobMachine`): `crates/meerkat-mob/src/runtime/created_identity.rs` — MobMachine created identity entries realized by the shell at a start: recover each created entry row of the identity store from its presence and the replayed journal after the replay and before the boot plan (a present row of a seated local member records it a Created entry, a present row whose member the journal shows retired records the entry owed its seat with its member's last session as its revival record, a row pending its host's preparation records it unseated for that preparation, a removed row reserves the name as a tombstone, and an unreadable row, a row the replay contradicts or a member row whose origin token this build does not know reserves the name as unreadable), then seat a created entry owed its seat again, Dormant, on its archived session under created custody; no spawn takes a reserved name or the entry of another origin, a tombstoned name is never an entry or a member, an unseated created entry awaits its preparation or is owed its seat, and created custody belongs to an open local ladder of a Created entry, never beside entry custody
 - `mob_identity_entry_respawn_authority` (machine `MobMachine`): `crates/meerkat-mob/src/runtime/actor.rs` — MobMachine refuses a fresh-life respawn of an identity entry's member in every phase an entry lives in, realized by the actor: the respawn routes on that verdict, respawning an entry's member on its own session, and the retire-then-spawn admission answers the refusal typed, emitting the respawn refused effect
 - `mob_rotation_target_authority` (machine `MobMachine`): `crates/meerkat-mob/src/runtime/actor/dormant_seat.rs` — MobMachine rotation targets realized by the actor: a same-session successor starts its retirement archive-only on the member's kept binding with its rotation recorded in one step, and its terminal seats the next incarnation Dormant on the same session after the shell released the runtime and kept the session; a restart records a rotation again from its retirement's start row and re-drives it; the intent and its target are recorded together, and a same-session rotation keeps its binding
 - `mob_scoped_release_authority` (machine `MobMachine`): `crates/meerkat-mob/src/runtime/actor/member_wake.rs` — MobMachine scoped member release realized by the actor: a release scoped to a member incarnation that is not the current one on its session is classified stale and releases nothing
@@ -24,7 +25,7 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 ### Scenarios
 - `coordination-board-records-and-overlap` — record coordination work intent and resource claim, update coordination work intent and resource claim status across planned active blocked completed cancelled released expired, and observe coordination resource claim overlap with recomputed revision and event sequence
 - `spawn-work-terminal` — member spawn, ensure member, reconcile, runtime-ready observation, work submission, and terminal work closure
-- `retire-recover-destroy` — member retires, durable incarnation recovery preserves monotone identity history, stops/stopped, resumes, shuts down, and destroys cleanly
+- `retire-recover-destroy` — member retires, the retire of an absent identity is answered in every phase, durable incarnation recovery preserves monotone identity history, stops/stopped, resumes, shuts down, and destroys cleanly
 - `wiring-and-session-binding` — wire and unwire members, enforce known identity for session bindings, expose pending spawn, member session binding changed, and wiring lifecycle notices
 - `flow-and-run-lifecycle` — run flow, start flow, create run, create frame seed, create loop seed, project frame phase, project loop state, start run, complete flow, finish run, mark completed, kickoff resolve started or failed, kickoff clear, flow terminalized, and force cancel running work
 - `event-subscriptions-and-notices` — subscribe agent, all agent, and mob events; emit member, run, flow, progress, terminal, and wiring notices
@@ -1800,6 +1801,30 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `ProbeMemberAdmissionIdentityMemberDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ProbeMemberAdmissionIdentityMemberOfAnotherOriginRunning`
+  - anchors: `mob_created_identity_entry_authority`
+  - scenarios: (unclaimed)
+- `ProbeMemberAdmissionIdentityMemberOfAnotherOriginStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ProbeMemberAdmissionIdentityMemberOfAnotherOriginCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ProbeMemberAdmissionIdentityMemberOfAnotherOriginDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ProbeMemberAdmissionIdentityNameReservedRunning`
+  - anchors: `mob_created_identity_entry_authority`
+  - scenarios: (unclaimed)
+- `ProbeMemberAdmissionIdentityNameReservedStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ProbeMemberAdmissionIdentityNameReservedCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ProbeMemberAdmissionIdentityNameReservedDestroyed`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `ComputeRespawnGenerationRunning`
@@ -3858,11 +3883,17 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `mob_actor_authority`, `mob_membership_classifier_authority`
   - scenarios: `retire-recover-destroy`, `membership-admission-respawn-reconcile-rebind-timeout`
 - `RetireAbsentRunning`
-  - anchors: (unclaimed)
-  - scenarios: (unclaimed)
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-recover-destroy`
 - `RetireAbsentStopped`
-  - anchors: (unclaimed)
-  - scenarios: (unclaimed)
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-recover-destroy`
+- `RetireAbsentCompleted`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-recover-destroy`
+- `RetireAbsentDestroyed`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-recover-destroy`
 - `RetireAllRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -4844,6 +4875,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `AdoptLegacyIdentityEntryAlreadyAnEntry`
   - anchors: `mob_identity_entry_authority`
   - scenarios: (unclaimed)
+- `AdoptLegacyIdentityEntryOtherCustody`
+  - anchors: `mob_identity_entry_authority`
+  - scenarios: (unclaimed)
 - `AdoptLegacyIdentityEntryNonAuthoritative`
   - anchors: `mob_identity_entry_authority`
   - scenarios: (unclaimed)
@@ -4880,6 +4914,18 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ResolveAgentLaneMemberAdmissionIdentityMemberDestroyed`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `ResolveAgentLaneMemberAdmissionUnreadableNameRunning`
+  - anchors: `mob_identity_entry_authority`
+  - scenarios: (unclaimed)
+- `ResolveAgentLaneMemberAdmissionUnreadableNameStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveAgentLaneMemberAdmissionUnreadableNameCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveAgentLaneMemberAdmissionUnreadableNameDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `DeclareIdentityEntryKept`
   - anchors: `mob_declared_apply_authority`
   - scenarios: (unclaimed)
@@ -4914,6 +4960,15 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `mob_declared_apply_authority`
   - scenarios: (unclaimed)
 - `DeclareIdentityEntryRefusedNonAuthoritative`
+  - anchors: `mob_declared_apply_authority`
+  - scenarios: (unclaimed)
+- `DeclareIdentityEntryRefusedNameOwnedByCreated`
+  - anchors: `mob_declared_apply_authority`
+  - scenarios: (unclaimed)
+- `DeclareIdentityEntryRefusedNameTombstoned`
+  - anchors: `mob_declared_apply_authority`
+  - scenarios: (unclaimed)
+- `DeclareIdentityEntryRefusedNameUnreadable`
   - anchors: `mob_declared_apply_authority`
   - scenarios: (unclaimed)
 - `DeclareIdentityEntryMobNotRunningStopped`
@@ -4983,6 +5038,336 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `AdmitResetCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverCreatedIdentityEntrySeatedRunning`
+  - anchors: `mob_created_identity_entry_authority`
+  - scenarios: (unclaimed)
+- `RecoverCreatedIdentityEntrySeatedStopped`
+  - anchors: `mob_created_identity_entry_authority`
+  - scenarios: (unclaimed)
+- `RecoverCreatedIdentityEntryRetiredRunning`
+  - anchors: `mob_created_identity_entry_authority`
+  - scenarios: (unclaimed)
+- `RecoverCreatedIdentityEntryRetiredStopped`
+  - anchors: `mob_created_identity_entry_authority`
+  - scenarios: (unclaimed)
+- `RecoverCreatedIdentityEntryPendingRunning`
+  - anchors: `mob_created_identity_entry_authority`
+  - scenarios: (unclaimed)
+- `RecoverCreatedIdentityEntryPendingStopped`
+  - anchors: `mob_created_identity_entry_authority`
+  - scenarios: (unclaimed)
+- `RecoverCreatedIdentityEntryTombstoneRunning`
+  - anchors: `mob_created_identity_entry_authority`
+  - scenarios: (unclaimed)
+- `RecoverCreatedIdentityEntryTombstoneStopped`
+  - anchors: `mob_created_identity_entry_authority`
+  - scenarios: (unclaimed)
+- `RecoverCreatedIdentityEntryUnreadableRunning`
+  - anchors: `mob_created_identity_entry_authority`
+  - scenarios: (unclaimed)
+- `RecoverCreatedIdentityEntryUnreadableStopped`
+  - anchors: `mob_created_identity_entry_authority`
+  - scenarios: (unclaimed)
+- `SetOperatorInstructionBodyTooLargeRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SetOperatorInstructionBodyTooLargeStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SetOperatorInstructionSlotLimitExceededRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SetOperatorInstructionSlotLimitExceededStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SetOperatorInstructionNewOverBudgetRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SetOperatorInstructionNewOverBudgetStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SetOperatorInstructionNewRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SetOperatorInstructionNewStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SetOperatorInstructionStaleRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SetOperatorInstructionStaleStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SetOperatorInstructionDuplicateRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SetOperatorInstructionDuplicateStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SetOperatorInstructionConflictRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SetOperatorInstructionConflictStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SetOperatorInstructionAdvanceOverBudgetRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SetOperatorInstructionAdvanceOverBudgetStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SetOperatorInstructionAdvanceRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SetOperatorInstructionAdvanceStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SetOperatorInstructionTerminalCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SetOperatorInstructionTerminalDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RevokeOperatorInstructionUnknownSlotRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RevokeOperatorInstructionUnknownSlotStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RevokeOperatorInstructionStaleRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RevokeOperatorInstructionStaleStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RevokeOperatorInstructionDuplicateRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RevokeOperatorInstructionDuplicateStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RevokeOperatorInstructionConflictRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RevokeOperatorInstructionConflictStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RevokeOperatorInstructionAdvanceRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RevokeOperatorInstructionAdvanceStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RevokeOperatorInstructionTerminalCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RevokeOperatorInstructionTerminalDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverOperatorInstructionAppliedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverOperatorInstructionAppliedStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverOperatorInstructionAppliedCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverOperatorInstructionStaleRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverOperatorInstructionStaleStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverOperatorInstructionStaleCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverOperatorInstructionGenerationHighwaterRaised`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecoverOperatorInstructionGenerationHighwaterKept`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `PrepareMemberInstructionDeliveryNotOwedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `PrepareMemberInstructionDeliveryNotOwedStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `PrepareMemberInstructionDeliveryPlacedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `PrepareMemberInstructionDeliveryPlacedStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `PrepareMemberInstructionDeliveryUnbornRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `PrepareMemberInstructionDeliveryUnbornStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `PrepareMemberInstructionDeliveryUnboundRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `PrepareMemberInstructionDeliveryUnboundStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `PrepareMemberInstructionDeliveryRetiringRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `PrepareMemberInstructionDeliveryRetiringStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `PrepareMemberInstructionDeliveryDeliverRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `PrepareMemberInstructionDeliveryDeliverStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `PrepareMemberInstructionDeliverySpawningRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `PrepareMemberInstructionDeliverySpawningStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `PrepareMemberInstructionDeliveryMobNotRunningCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `PrepareMemberInstructionDeliveryMobNotRunningDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordMemberInstructionTargetNotOwedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordMemberInstructionTargetNotOwedStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordMemberInstructionTargetNotOwedCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordMemberInstructionTargetNotOwedDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordMemberInstructionTargetStaleSessionRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordMemberInstructionTargetStaleSessionStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordMemberInstructionTargetStaleSessionCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordMemberInstructionTargetStaleSessionDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordMemberInstructionTargetSupersededRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordMemberInstructionTargetSupersededStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordMemberInstructionTargetSupersededCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordMemberInstructionTargetSupersededDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordMemberInstructionTargetCurrentRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordMemberInstructionTargetCurrentStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordMemberInstructionTargetCurrentCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordMemberInstructionTargetCurrentDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordMemberInstructionTargetUnmintedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordMemberInstructionTargetUnmintedStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordMemberInstructionTargetUnmintedCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RecordMemberInstructionTargetUnmintedDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RefuseMemberInstructionTargetNotOwedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RefuseMemberInstructionTargetNotOwedStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RefuseMemberInstructionTargetNotOwedCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RefuseMemberInstructionTargetNotOwedDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RefuseMemberInstructionTargetStaleSessionRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RefuseMemberInstructionTargetStaleSessionStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RefuseMemberInstructionTargetStaleSessionCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RefuseMemberInstructionTargetStaleSessionDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RefuseMemberInstructionTargetSupersededRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RefuseMemberInstructionTargetSupersededStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RefuseMemberInstructionTargetSupersededCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RefuseMemberInstructionTargetSupersededDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RefuseMemberInstructionTargetBlockedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RefuseMemberInstructionTargetBlockedStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RefuseMemberInstructionTargetBlockedCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RefuseMemberInstructionTargetBlockedDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveMemberInstructionReleaseAuthorizedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveMemberInstructionReleaseAuthorizedStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveMemberInstructionReleaseAuthorizedCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveMemberInstructionReleaseAuthorizedDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveMemberInstructionReleaseNotNeededRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveMemberInstructionReleaseNotNeededStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveMemberInstructionReleaseNotNeededCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveMemberInstructionReleaseNotNeededDestroyed`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 
@@ -5515,6 +5900,33 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `DeclaredApplyOpenResolved`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `OperatorInstructionCommitted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `OperatorInstructionDuplicate`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `OperatorInstructionRefused`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `MemberInstructionDeliveryPrepared`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `MemberInstructionDeliveryDeferred`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `MemberInstructionTargetRecorded`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `MemberInstructionTargetBlocked`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `MemberInstructionReleaseAuthorized`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `MemberInstructionReleaseNotNeeded`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 
 ### Invariants
 - `stopped_mob_holds_member_run_starts`
@@ -5763,6 +6175,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `retiring_entry_is_a_declared_entry`
   - anchors: `mob_declared_apply_authority`
   - scenarios: (unclaimed)
+- `marked_entry_has_no_spawn_in_flight`
+  - anchors: `mob_declared_apply_authority`
+  - scenarios: (unclaimed)
 - `held_creation_entry_was_never_created`
   - anchors: `mob_declared_apply_authority`
   - scenarios: (unclaimed)
@@ -5778,6 +6193,15 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `worker_reconcile_spares_entries`
   - anchors: `mob_identity_entry_authority`
   - scenarios: (unclaimed)
+- `unseated_created_entry_is_preparing_or_owed`
+  - anchors: `mob_created_identity_entry_authority`
+  - scenarios: (unclaimed)
+- `tombstone_is_never_an_entry`
+  - anchors: `mob_created_identity_entry_authority`
+  - scenarios: (unclaimed)
+- `entry_custodies_are_disjoint`
+  - anchors: `mob_created_identity_entry_authority`
+  - scenarios: (unclaimed)
 - `entry_custody_ladder_is_open`
   - anchors: `mob_identity_entry_authority`
   - scenarios: (unclaimed)
@@ -5785,6 +6209,27 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `destroyed_mob_holds_no_member_lifecycle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `operator_instruction_records_lockstep`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `operator_instruction_records_well_formed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `operator_instruction_slot_count_bounded`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `operator_instruction_active_bytes_bounded`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `member_instruction_facts_only_for_members`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `member_instruction_generations_bounded`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `destroyed_mob_holds_no_operator_instructions`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 

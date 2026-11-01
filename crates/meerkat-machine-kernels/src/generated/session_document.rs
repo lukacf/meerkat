@@ -27,6 +27,56 @@ pub fn schema() -> meerkat_machine_schema::MachineSchema {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum ActivationHeadOrigin {
+    #[default]
+    #[serde(rename = "Own")]
+    Own,
+    #[serde(rename = "Copied")]
+    Copied,
+}
+impl ActivationHeadOrigin {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Own => "Own",
+            Self::Copied => "Copied",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for ActivationHeadOrigin {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Own" => Ok(Self::Own),
+            "Copied" => Ok(Self::Copied),
+            other => Err(format!("invalid ActivationHeadOrigin value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for ActivationHeadOrigin {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for ActivationHeadOrigin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum DurableHeadRelation {
     #[default]
     #[serde(rename = "AbsentOrExact")]
@@ -2515,6 +2565,14 @@ pub struct State {
         std::collections::BTreeMap<SessionId, std::collections::BTreeMap<String, u64>>,
     pub session_instruction_effective_generation: std::collections::BTreeMap<SessionId, u64>,
     pub session_instruction_entry_sequence: std::collections::BTreeMap<SessionId, u64>,
+    pub session_activation_rows:
+        std::collections::BTreeMap<SessionId, std::collections::BTreeMap<String, u64>>,
+    pub session_activation_retired:
+        std::collections::BTreeMap<SessionId, std::collections::BTreeMap<String, u64>>,
+    pub session_activation_head_origin: std::collections::BTreeMap<
+        SessionId,
+        std::collections::BTreeMap<String, ActivationHeadOrigin>,
+    >,
 }
 impl Default for State {
     fn default() -> Self {
@@ -2947,6 +3005,7 @@ pub mod inputs {
         pub effect: std::collections::BTreeMap<String, InstructionEffect>,
         pub digest: std::collections::BTreeMap<String, String>,
         pub bytes: std::collections::BTreeMap<String, u64>,
+        pub member_bound: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct SetSessionInstruction {
@@ -2956,12 +3015,14 @@ pub mod inputs {
         pub effect: InstructionEffect,
         pub digest: String,
         pub body_bytes: u64,
+        pub member_bound: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RebindInstructionOwner {
         pub session_id: SessionId,
         pub owner: InstructionTargetOwner,
         pub mob_id: String,
+        pub member_bound: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ReleaseInstructionTarget {
@@ -2980,6 +3041,17 @@ pub mod inputs {
         pub session_id: SessionId,
         pub at_run_start: bool,
         pub lowering: InstructionLowering,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecoverSessionActivationBodies {
+        pub session_id: SessionId,
+        pub rows: std::collections::BTreeMap<String, u64>,
+        pub retired: std::collections::BTreeMap<String, u64>,
+        pub head_origin: std::collections::BTreeMap<String, ActivationHeadOrigin>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AuthorizeActivationBodyRetirement {
+        pub session_id: SessionId,
     }
 }
 
@@ -3045,6 +3117,8 @@ pub enum Input {
     ReleaseInstructionTarget(inputs::ReleaseInstructionTarget),
     ResolveRunStartInstructions(inputs::ResolveRunStartInstructions),
     AuthorizeInstructionFold(inputs::AuthorizeInstructionFold),
+    RecoverSessionActivationBodies(inputs::RecoverSessionActivationBodies),
+    AuthorizeActivationBodyRetirement(inputs::AuthorizeActivationBodyRetirement),
 }
 impl Input {
     pub fn kind(&self) -> InputKind {
@@ -3161,6 +3235,10 @@ impl Input {
             Self::ReleaseInstructionTarget(_) => InputKind::ReleaseInstructionTarget,
             Self::ResolveRunStartInstructions(_) => InputKind::ResolveRunStartInstructions,
             Self::AuthorizeInstructionFold(_) => InputKind::AuthorizeInstructionFold,
+            Self::RecoverSessionActivationBodies(_) => InputKind::RecoverSessionActivationBodies,
+            Self::AuthorizeActivationBodyRetirement(_) => {
+                InputKind::AuthorizeActivationBodyRetirement
+            }
         }
     }
 }
@@ -3226,6 +3304,8 @@ pub enum InputKind {
     ReleaseInstructionTarget,
     ResolveRunStartInstructions,
     AuthorizeInstructionFold,
+    RecoverSessionActivationBodies,
+    AuthorizeActivationBodyRetirement,
 }
 
 pub mod effects {
@@ -3516,6 +3596,8 @@ pub mod effects {
         pub source: InstructionFoldSource,
         pub generation: u64,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ActivationBodyRetirementAuthorized {}
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -3576,6 +3658,7 @@ pub enum Effect {
     InstructionEntryNotNeeded(effects::InstructionEntryNotNeeded),
     InstructionApplicationDeferred(effects::InstructionApplicationDeferred),
     InstructionFoldAuthorized(effects::InstructionFoldAuthorized),
+    ActivationBodyRetirementAuthorized(effects::ActivationBodyRetirementAuthorized),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EffectKind {
@@ -3631,6 +3714,7 @@ pub enum EffectKind {
     InstructionEntryNotNeeded,
     InstructionApplicationDeferred,
     InstructionFoldAuthorized,
+    ActivationBodyRetirementAuthorized,
 }
 
 #[allow(non_camel_case_types)]
@@ -3761,6 +3845,9 @@ pub enum TransitionId {
     RecordInstructionTargetSlotLimitExceeded,
     RecordInstructionTargetAlreadyRecorded,
     RecordInstructionTargetOwnedBySession,
+    RecordInstructionTargetAdopt,
+    RecordInstructionTargetAdoptActiveBudgetExceeded,
+    RecordInstructionTargetAdoptSlotLimitExceeded,
     RecordInstructionTargetOwnedByOtherMob,
     SetSessionInstructionNew,
     SetSessionInstructionAdvance,
@@ -3769,10 +3856,12 @@ pub enum TransitionId {
     SetSessionInstructionConflict,
     SetSessionInstructionStale,
     SetSessionInstructionOwnedByMob,
+    SetSessionInstructionMemberSession,
     SetSessionInstructionSlotLimitExceeded,
     SetSessionInstructionUnknownSlot,
     RebindInstructionOwner,
     RebindInstructionOwnerUnowned,
+    RebindInstructionOwnerMemberSession,
     ReleaseInstructionTarget,
     ReleaseInstructionTargetAlreadyUnowned,
     ReleaseInstructionTargetOwnedByOtherMob,
@@ -3783,6 +3872,8 @@ pub enum TransitionId {
     ResolveRunStartInstructionsDeferredUnavailable,
     AuthorizeInstructionFoldAtRunStart,
     AuthorizeInstructionFoldEffective,
+    RecoverSessionActivationBodies,
+    AuthorizeActivationBodyRetirement,
 }
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -3884,5 +3975,8 @@ pub fn initial_state() -> State {
         session_instruction_effective_bytes: Default::default(),
         session_instruction_effective_generation: Default::default(),
         session_instruction_entry_sequence: Default::default(),
+        session_activation_rows: Default::default(),
+        session_activation_retired: Default::default(),
+        session_activation_head_origin: Default::default(),
     }
 }

@@ -2358,11 +2358,14 @@ pub enum IdentityEntryOrigin {
     #[default]
     #[serde(rename = "Declared")]
     Declared,
+    #[serde(rename = "Created")]
+    Created,
 }
 impl IdentityEntryOrigin {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Declared => "Declared",
+            Self::Created => "Created",
         }
     }
 }
@@ -2371,6 +2374,7 @@ impl std::convert::TryFrom<&str> for IdentityEntryOrigin {
     fn try_from(value: &str) -> Result<Self, Self::Error> {
         match value {
             "Declared" => Ok(Self::Declared),
+            "Created" => Ok(Self::Created),
             other => Err(format!("invalid IdentityEntryOrigin value `{other}`")),
         }
     }
@@ -2428,6 +2432,12 @@ pub enum IdentityEntryVerdict {
     RefusedNonAuthoritative,
     #[serde(rename = "MobNotRunning")]
     MobNotRunning,
+    #[serde(rename = "RefusedNameOwnedByCreated")]
+    RefusedNameOwnedByCreated,
+    #[serde(rename = "RefusedNameTombstoned")]
+    RefusedNameTombstoned,
+    #[serde(rename = "RefusedNameUnreadable")]
+    RefusedNameUnreadable,
 }
 impl IdentityEntryVerdict {
     pub fn as_str(&self) -> &'static str {
@@ -2445,6 +2455,9 @@ impl IdentityEntryVerdict {
             Self::RefusedHostAdopted => "RefusedHostAdopted",
             Self::RefusedNonAuthoritative => "RefusedNonAuthoritative",
             Self::MobNotRunning => "MobNotRunning",
+            Self::RefusedNameOwnedByCreated => "RefusedNameOwnedByCreated",
+            Self::RefusedNameTombstoned => "RefusedNameTombstoned",
+            Self::RefusedNameUnreadable => "RefusedNameUnreadable",
         }
     }
 }
@@ -2465,6 +2478,9 @@ impl std::convert::TryFrom<&str> for IdentityEntryVerdict {
             "RefusedHostAdopted" => Ok(Self::RefusedHostAdopted),
             "RefusedNonAuthoritative" => Ok(Self::RefusedNonAuthoritative),
             "MobNotRunning" => Ok(Self::MobNotRunning),
+            "RefusedNameOwnedByCreated" => Ok(Self::RefusedNameOwnedByCreated),
+            "RefusedNameTombstoned" => Ok(Self::RefusedNameTombstoned),
+            "RefusedNameUnreadable" => Ok(Self::RefusedNameUnreadable),
             other => Err(format!("invalid IdentityEntryVerdict value `{other}`")),
         }
     }
@@ -3224,6 +3240,110 @@ impl std::fmt::Display for InputId {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum InstructionEffect {
+    #[default]
+    #[serde(rename = "Absent")]
+    Absent,
+    #[serde(rename = "Active")]
+    Active,
+}
+impl InstructionEffect {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Absent => "Absent",
+            Self::Active => "Active",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for InstructionEffect {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Absent" => Ok(Self::Absent),
+            "Active" => Ok(Self::Active),
+            other => Err(format!("invalid InstructionEffect value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for InstructionEffect {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for InstructionEffect {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum InstructionTargetKind {
+    #[default]
+    #[serde(rename = "Mob")]
+    Mob,
+    #[serde(rename = "Profile")]
+    Profile,
+    #[serde(rename = "Member")]
+    Member,
+}
+impl InstructionTargetKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Mob => "Mob",
+            Self::Profile => "Profile",
+            Self::Member => "Member",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for InstructionTargetKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Mob" => Ok(Self::Mob),
+            "Profile" => Ok(Self::Profile),
+            "Member" => Ok(Self::Member),
+            other => Err(format!("invalid InstructionTargetKind value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for InstructionTargetKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for InstructionTargetKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum KickoffIntent {
     #[default]
     #[serde(rename = "Pending")]
@@ -3689,6 +3809,10 @@ pub enum MemberAdmissionVerdictKind {
     DuplicateRejected,
     #[serde(rename = "IdentityMemberRejected")]
     IdentityMemberRejected,
+    #[serde(rename = "IdentityMemberOfAnotherOrigin")]
+    IdentityMemberOfAnotherOrigin,
+    #[serde(rename = "IdentityNameReserved")]
+    IdentityNameReserved,
 }
 impl MemberAdmissionVerdictKind {
     pub fn as_str(&self) -> &'static str {
@@ -3696,6 +3820,8 @@ impl MemberAdmissionVerdictKind {
             Self::Admitted => "Admitted",
             Self::DuplicateRejected => "DuplicateRejected",
             Self::IdentityMemberRejected => "IdentityMemberRejected",
+            Self::IdentityMemberOfAnotherOrigin => "IdentityMemberOfAnotherOrigin",
+            Self::IdentityNameReserved => "IdentityNameReserved",
         }
     }
 }
@@ -3706,6 +3832,8 @@ impl std::convert::TryFrom<&str> for MemberAdmissionVerdictKind {
             "Admitted" => Ok(Self::Admitted),
             "DuplicateRejected" => Ok(Self::DuplicateRejected),
             "IdentityMemberRejected" => Ok(Self::IdentityMemberRejected),
+            "IdentityMemberOfAnotherOrigin" => Ok(Self::IdentityMemberOfAnotherOrigin),
+            "IdentityNameReserved" => Ok(Self::IdentityNameReserved),
             other => Err(format!(
                 "invalid MemberAdmissionVerdictKind value `{other}`"
             )),
@@ -3831,6 +3959,136 @@ impl std::convert::TryFrom<String> for MemberHealthClass {
     }
 }
 impl std::fmt::Display for MemberHealthClass {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum MemberInstructionBlock {
+    #[default]
+    #[serde(rename = "MemberHostUnsupported")]
+    MemberHostUnsupported,
+    #[serde(rename = "SlotManagedByActivation")]
+    SlotManagedByActivation,
+    #[serde(rename = "DurabilityUnavailable")]
+    DurabilityUnavailable,
+    #[serde(rename = "OwnedBySession")]
+    OwnedBySession,
+    #[serde(rename = "OwnedByOtherMob")]
+    OwnedByOtherMob,
+}
+impl MemberInstructionBlock {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::MemberHostUnsupported => "MemberHostUnsupported",
+            Self::SlotManagedByActivation => "SlotManagedByActivation",
+            Self::DurabilityUnavailable => "DurabilityUnavailable",
+            Self::OwnedBySession => "OwnedBySession",
+            Self::OwnedByOtherMob => "OwnedByOtherMob",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for MemberInstructionBlock {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "MemberHostUnsupported" => Ok(Self::MemberHostUnsupported),
+            "SlotManagedByActivation" => Ok(Self::SlotManagedByActivation),
+            "DurabilityUnavailable" => Ok(Self::DurabilityUnavailable),
+            "OwnedBySession" => Ok(Self::OwnedBySession),
+            "OwnedByOtherMob" => Ok(Self::OwnedByOtherMob),
+            other => Err(format!("invalid MemberInstructionBlock value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for MemberInstructionBlock {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for MemberInstructionBlock {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum MemberInstructionDeferReason {
+    #[default]
+    #[serde(rename = "NotOwed")]
+    NotOwed,
+    #[serde(rename = "SessionUnborn")]
+    SessionUnborn,
+    #[serde(rename = "SessionUnbound")]
+    SessionUnbound,
+    #[serde(rename = "Retiring")]
+    Retiring,
+    #[serde(rename = "MobNotRunning")]
+    MobNotRunning,
+    #[serde(rename = "SpawnInFlight")]
+    SpawnInFlight,
+}
+impl MemberInstructionDeferReason {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::NotOwed => "NotOwed",
+            Self::SessionUnborn => "SessionUnborn",
+            Self::SessionUnbound => "SessionUnbound",
+            Self::Retiring => "Retiring",
+            Self::MobNotRunning => "MobNotRunning",
+            Self::SpawnInFlight => "SpawnInFlight",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for MemberInstructionDeferReason {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "NotOwed" => Ok(Self::NotOwed),
+            "SessionUnborn" => Ok(Self::SessionUnborn),
+            "SessionUnbound" => Ok(Self::SessionUnbound),
+            "Retiring" => Ok(Self::Retiring),
+            "MobNotRunning" => Ok(Self::MobNotRunning),
+            "SpawnInFlight" => Ok(Self::SpawnInFlight),
+            other => Err(format!(
+                "invalid MemberInstructionDeferReason value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for MemberInstructionDeferReason {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for MemberInstructionDeferReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }
@@ -6842,6 +7100,78 @@ impl std::fmt::Display for NodeRunStatus {
     }
 }
 pub type OpaquePrincipalToken = meerkat_core::service::OpaquePrincipalToken;
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum OperatorInstructionRefusal {
+    #[default]
+    #[serde(rename = "StaleRevision")]
+    StaleRevision,
+    #[serde(rename = "RevisionConflict")]
+    RevisionConflict,
+    #[serde(rename = "UnknownSlot")]
+    UnknownSlot,
+    #[serde(rename = "SlotLimitExceeded")]
+    SlotLimitExceeded,
+    #[serde(rename = "BodyTooLarge")]
+    BodyTooLarge,
+    #[serde(rename = "ActiveSetBudgetExceeded")]
+    ActiveSetBudgetExceeded,
+    #[serde(rename = "MobTerminal")]
+    MobTerminal,
+}
+impl OperatorInstructionRefusal {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::StaleRevision => "StaleRevision",
+            Self::RevisionConflict => "RevisionConflict",
+            Self::UnknownSlot => "UnknownSlot",
+            Self::SlotLimitExceeded => "SlotLimitExceeded",
+            Self::BodyTooLarge => "BodyTooLarge",
+            Self::ActiveSetBudgetExceeded => "ActiveSetBudgetExceeded",
+            Self::MobTerminal => "MobTerminal",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for OperatorInstructionRefusal {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "StaleRevision" => Ok(Self::StaleRevision),
+            "RevisionConflict" => Ok(Self::RevisionConflict),
+            "UnknownSlot" => Ok(Self::UnknownSlot),
+            "SlotLimitExceeded" => Ok(Self::SlotLimitExceeded),
+            "BodyTooLarge" => Ok(Self::BodyTooLarge),
+            "ActiveSetBudgetExceeded" => Ok(Self::ActiveSetBudgetExceeded),
+            "MobTerminal" => Ok(Self::MobTerminal),
+            other => Err(format!(
+                "invalid OperatorInstructionRefusal value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for OperatorInstructionRefusal {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for OperatorInstructionRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 pub type PeerAddress = meerkat_machine_schema::catalog::dsl::mob_machine::PeerAddress;
 pub type PeerId = meerkat_machine_schema::catalog::dsl::mob_machine::PeerId;
 #[allow(non_camel_case_types)]
@@ -7214,6 +7544,64 @@ impl std::fmt::Display for PolicyDecision {
     }
 }
 pub type PrincipalId = meerkat_machine_schema::catalog::dsl::mob_machine::PrincipalId;
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum RecoveredPresence {
+    #[default]
+    #[serde(rename = "Present")]
+    Present,
+    #[serde(rename = "PresentUnseated")]
+    PresentUnseated,
+    #[serde(rename = "Tombstone")]
+    Tombstone,
+    #[serde(rename = "Unreadable")]
+    Unreadable,
+}
+impl RecoveredPresence {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Present => "Present",
+            Self::PresentUnseated => "PresentUnseated",
+            Self::Tombstone => "Tombstone",
+            Self::Unreadable => "Unreadable",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RecoveredPresence {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Present" => Ok(Self::Present),
+            "PresentUnseated" => Ok(Self::PresentUnseated),
+            "Tombstone" => Ok(Self::Tombstone),
+            "Unreadable" => Ok(Self::Unreadable),
+            other => Err(format!("invalid RecoveredPresence value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RecoveredPresence {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RecoveredPresence {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 pub type RemoteTurnObligation =
     meerkat_machine_schema::catalog::dsl::mob_machine::RemoteTurnObligation;
 #[derive(
@@ -8138,6 +8526,8 @@ pub enum UnseatedEntryCause {
     HostedOnFirstUse,
     #[serde(rename = "HeldCreation")]
     HeldCreation,
+    #[serde(rename = "TemplatePreparation")]
+    TemplatePreparation,
 }
 impl UnseatedEntryCause {
     pub fn as_str(&self) -> &'static str {
@@ -8145,6 +8535,7 @@ impl UnseatedEntryCause {
             Self::SeatOwed => "SeatOwed",
             Self::HostedOnFirstUse => "HostedOnFirstUse",
             Self::HeldCreation => "HeldCreation",
+            Self::TemplatePreparation => "TemplatePreparation",
         }
     }
 }
@@ -8155,6 +8546,7 @@ impl std::convert::TryFrom<&str> for UnseatedEntryCause {
             "SeatOwed" => Ok(Self::SeatOwed),
             "HostedOnFirstUse" => Ok(Self::HostedOnFirstUse),
             "HeldCreation" => Ok(Self::HeldCreation),
+            "TemplatePreparation" => Ok(Self::TemplatePreparation),
             other => Err(format!("invalid UnseatedEntryCause value `{other}`")),
         }
     }
@@ -8816,6 +9208,21 @@ pub struct State {
     pub identity_entry_retiring: std::collections::BTreeSet<AgentIdentity>,
     pub identity_entry_archived_sessions: std::collections::BTreeMap<AgentIdentity, SessionId>,
     pub declared_apply_open: bool,
+    pub identity_entry_tombstones: std::collections::BTreeSet<AgentIdentity>,
+    pub identity_entry_unreadable: std::collections::BTreeSet<AgentIdentity>,
+    pub spawn_exec_created_custody: std::collections::BTreeSet<AgentIdentity>,
+    pub operator_instruction_revision: std::collections::BTreeMap<String, u64>,
+    pub operator_instruction_effect: std::collections::BTreeMap<String, InstructionEffect>,
+    pub operator_instruction_digest: std::collections::BTreeMap<String, String>,
+    pub operator_instruction_body_bytes: std::collections::BTreeMap<String, u64>,
+    pub operator_instruction_target_kind: std::collections::BTreeMap<String, InstructionTargetKind>,
+    pub operator_instruction_target_profile: std::collections::BTreeMap<String, String>,
+    pub operator_instruction_target_member: std::collections::BTreeMap<String, AgentIdentity>,
+    pub operator_instruction_generation: u64,
+    pub member_instruction_owed: std::collections::BTreeMap<AgentIdentity, u64>,
+    pub member_instruction_recorded: std::collections::BTreeMap<AgentIdentity, u64>,
+    pub member_instruction_blocked:
+        std::collections::BTreeMap<AgentIdentity, MemberInstructionBlock>,
 }
 impl Default for State {
     fn default() -> Self {
@@ -9007,6 +9414,7 @@ pub mod inputs {
         pub effective_profile_override_present: bool,
         pub effective_model_override_present: bool,
         pub entry_custody: bool,
+        pub created_custody: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct CommitSpawnMembership {
@@ -9904,6 +10312,7 @@ pub mod inputs {
     pub struct ProbeMemberAdmission {
         pub agent_identity: AgentIdentity,
         pub entry_custody: bool,
+        pub created_custody: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ComputeRespawnGeneration {
@@ -11642,6 +12051,66 @@ pub mod signals {
         pub agent_identity: AgentIdentity,
         pub agent_runtime_id: AgentRuntimeId,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecoverCreatedIdentityEntry {
+        pub agent_identity: AgentIdentity,
+        pub presence: RecoveredPresence,
+        pub last_session: Option<SessionId>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SetOperatorInstruction {
+        pub slot: String,
+        pub revision: u64,
+        pub digest: String,
+        pub body_bytes: u64,
+        pub target_kind: InstructionTargetKind,
+        pub target_profile: String,
+        pub target_member: Option<AgentIdentity>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RevokeOperatorInstruction {
+        pub slot: String,
+        pub revision: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecoverOperatorInstruction {
+        pub slot: String,
+        pub revision: u64,
+        pub effect: InstructionEffect,
+        pub digest: String,
+        pub body_bytes: u64,
+        pub target_kind: InstructionTargetKind,
+        pub target_profile: String,
+        pub target_member: Option<AgentIdentity>,
+        pub generation: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecoverOperatorInstructionGenerationHighwater {
+        pub generation: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct PrepareMemberInstructionDelivery {
+        pub agent_identity: AgentIdentity,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecordMemberInstructionTarget {
+        pub agent_identity: AgentIdentity,
+        pub session_id: SessionId,
+        pub generation: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RefuseMemberInstructionTarget {
+        pub agent_identity: AgentIdentity,
+        pub session_id: SessionId,
+        pub generation: u64,
+        pub block: MemberInstructionBlock,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveMemberInstructionRelease {
+        pub agent_identity: AgentIdentity,
+        pub session_id: SessionId,
+        pub disposal: MemberSessionDisposal,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -11738,6 +12207,17 @@ pub enum Signal {
     RecoverIdentityEntry(signals::RecoverIdentityEntry),
     RecoverMemberRotationIntent(signals::RecoverMemberRotationIntent),
     RecoverIdentityEntryRetiring(signals::RecoverIdentityEntryRetiring),
+    RecoverCreatedIdentityEntry(signals::RecoverCreatedIdentityEntry),
+    SetOperatorInstruction(signals::SetOperatorInstruction),
+    RevokeOperatorInstruction(signals::RevokeOperatorInstruction),
+    RecoverOperatorInstruction(signals::RecoverOperatorInstruction),
+    RecoverOperatorInstructionGenerationHighwater(
+        signals::RecoverOperatorInstructionGenerationHighwater,
+    ),
+    PrepareMemberInstructionDelivery(signals::PrepareMemberInstructionDelivery),
+    RecordMemberInstructionTarget(signals::RecordMemberInstructionTarget),
+    RefuseMemberInstructionTarget(signals::RefuseMemberInstructionTarget),
+    ResolveMemberInstructionRelease(signals::ResolveMemberInstructionRelease),
 }
 impl Signal {
     pub fn kind(&self) -> SignalKind {
@@ -11868,6 +12348,19 @@ impl Signal {
             Self::RecoverIdentityEntry(_) => SignalKind::RecoverIdentityEntry,
             Self::RecoverMemberRotationIntent(_) => SignalKind::RecoverMemberRotationIntent,
             Self::RecoverIdentityEntryRetiring(_) => SignalKind::RecoverIdentityEntryRetiring,
+            Self::RecoverCreatedIdentityEntry(_) => SignalKind::RecoverCreatedIdentityEntry,
+            Self::SetOperatorInstruction(_) => SignalKind::SetOperatorInstruction,
+            Self::RevokeOperatorInstruction(_) => SignalKind::RevokeOperatorInstruction,
+            Self::RecoverOperatorInstruction(_) => SignalKind::RecoverOperatorInstruction,
+            Self::RecoverOperatorInstructionGenerationHighwater(_) => {
+                SignalKind::RecoverOperatorInstructionGenerationHighwater
+            }
+            Self::PrepareMemberInstructionDelivery(_) => {
+                SignalKind::PrepareMemberInstructionDelivery
+            }
+            Self::RecordMemberInstructionTarget(_) => SignalKind::RecordMemberInstructionTarget,
+            Self::RefuseMemberInstructionTarget(_) => SignalKind::RefuseMemberInstructionTarget,
+            Self::ResolveMemberInstructionRelease(_) => SignalKind::ResolveMemberInstructionRelease,
         }
     }
 }
@@ -11963,6 +12456,15 @@ pub enum SignalKind {
     RecoverIdentityEntry,
     RecoverMemberRotationIntent,
     RecoverIdentityEntryRetiring,
+    RecoverCreatedIdentityEntry,
+    SetOperatorInstruction,
+    RevokeOperatorInstruction,
+    RecoverOperatorInstruction,
+    RecoverOperatorInstructionGenerationHighwater,
+    PrepareMemberInstructionDelivery,
+    RecordMemberInstructionTarget,
+    RefuseMemberInstructionTarget,
+    ResolveMemberInstructionRelease,
 }
 
 pub mod effects {
@@ -12955,6 +13457,57 @@ pub mod effects {
     pub struct DeclaredApplyOpenResolved {
         pub verdict: DeclaredApplyOpenVerdict,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct OperatorInstructionCommitted {
+        pub slot: String,
+        pub revision: u64,
+        pub effect: InstructionEffect,
+        pub generation: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct OperatorInstructionDuplicate {
+        pub slot: String,
+        pub revision: u64,
+        pub generation: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct OperatorInstructionRefused {
+        pub slot: String,
+        pub refusal: OperatorInstructionRefusal,
+        pub current_revision: Option<u64>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct MemberInstructionDeliveryPrepared {
+        pub agent_identity: AgentIdentity,
+        pub session_id: SessionId,
+        pub generation: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct MemberInstructionDeliveryDeferred {
+        pub agent_identity: AgentIdentity,
+        pub reason: MemberInstructionDeferReason,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct MemberInstructionTargetRecorded {
+        pub agent_identity: AgentIdentity,
+        pub session_id: SessionId,
+        pub generation: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct MemberInstructionTargetBlocked {
+        pub agent_identity: AgentIdentity,
+        pub generation: u64,
+        pub block: MemberInstructionBlock,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct MemberInstructionReleaseAuthorized {
+        pub agent_identity: AgentIdentity,
+        pub session_id: SessionId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct MemberInstructionReleaseNotNeeded {
+        pub agent_identity: AgentIdentity,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -13139,6 +13692,15 @@ pub enum Effect {
     ArchivedSessionForgotten(effects::ArchivedSessionForgotten),
     ExplicitResumeMemberHeld(effects::ExplicitResumeMemberHeld),
     DeclaredApplyOpenResolved(effects::DeclaredApplyOpenResolved),
+    OperatorInstructionCommitted(effects::OperatorInstructionCommitted),
+    OperatorInstructionDuplicate(effects::OperatorInstructionDuplicate),
+    OperatorInstructionRefused(effects::OperatorInstructionRefused),
+    MemberInstructionDeliveryPrepared(effects::MemberInstructionDeliveryPrepared),
+    MemberInstructionDeliveryDeferred(effects::MemberInstructionDeliveryDeferred),
+    MemberInstructionTargetRecorded(effects::MemberInstructionTargetRecorded),
+    MemberInstructionTargetBlocked(effects::MemberInstructionTargetBlocked),
+    MemberInstructionReleaseAuthorized(effects::MemberInstructionReleaseAuthorized),
+    MemberInstructionReleaseNotNeeded(effects::MemberInstructionReleaseNotNeeded),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EffectKind {
@@ -13318,6 +13880,15 @@ pub enum EffectKind {
     ArchivedSessionForgotten,
     ExplicitResumeMemberHeld,
     DeclaredApplyOpenResolved,
+    OperatorInstructionCommitted,
+    OperatorInstructionDuplicate,
+    OperatorInstructionRefused,
+    MemberInstructionDeliveryPrepared,
+    MemberInstructionDeliveryDeferred,
+    MemberInstructionTargetRecorded,
+    MemberInstructionTargetBlocked,
+    MemberInstructionReleaseAuthorized,
+    MemberInstructionReleaseNotNeeded,
 }
 
 pub mod command_capabilities {
@@ -15107,6 +15678,134 @@ pub enum TransitionId {
     AdmitResetStopped,
     AdmitResetCompleted,
     AuthorizeExplicitResumeMemberHeldStopped,
+    ProbeMemberAdmissionIdentityMemberOfAnotherOriginRunning,
+    ProbeMemberAdmissionIdentityMemberOfAnotherOriginStopped,
+    ProbeMemberAdmissionIdentityMemberOfAnotherOriginCompleted,
+    ProbeMemberAdmissionIdentityMemberOfAnotherOriginDestroyed,
+    ProbeMemberAdmissionIdentityNameReservedRunning,
+    ProbeMemberAdmissionIdentityNameReservedStopped,
+    ProbeMemberAdmissionIdentityNameReservedCompleted,
+    ProbeMemberAdmissionIdentityNameReservedDestroyed,
+    DeclareIdentityEntryRefusedNameOwnedByCreated,
+    DeclareIdentityEntryRefusedNameTombstoned,
+    DeclareIdentityEntryRefusedNameUnreadable,
+    AdoptLegacyIdentityEntryOtherCustody,
+    ResolveAgentLaneMemberAdmissionUnreadableNameRunning,
+    ResolveAgentLaneMemberAdmissionUnreadableNameStopped,
+    ResolveAgentLaneMemberAdmissionUnreadableNameCompleted,
+    ResolveAgentLaneMemberAdmissionUnreadableNameDestroyed,
+    RecoverCreatedIdentityEntrySeatedRunning,
+    RecoverCreatedIdentityEntrySeatedStopped,
+    RecoverCreatedIdentityEntryRetiredRunning,
+    RecoverCreatedIdentityEntryRetiredStopped,
+    RecoverCreatedIdentityEntryPendingRunning,
+    RecoverCreatedIdentityEntryPendingStopped,
+    RecoverCreatedIdentityEntryTombstoneRunning,
+    RecoverCreatedIdentityEntryTombstoneStopped,
+    RecoverCreatedIdentityEntryUnreadableRunning,
+    RecoverCreatedIdentityEntryUnreadableStopped,
+    RetireAbsentCompleted,
+    RetireAbsentDestroyed,
+    SetOperatorInstructionBodyTooLargeRunning,
+    SetOperatorInstructionBodyTooLargeStopped,
+    SetOperatorInstructionSlotLimitExceededRunning,
+    SetOperatorInstructionSlotLimitExceededStopped,
+    SetOperatorInstructionNewOverBudgetRunning,
+    SetOperatorInstructionNewOverBudgetStopped,
+    SetOperatorInstructionNewRunning,
+    SetOperatorInstructionNewStopped,
+    SetOperatorInstructionStaleRunning,
+    SetOperatorInstructionStaleStopped,
+    SetOperatorInstructionDuplicateRunning,
+    SetOperatorInstructionDuplicateStopped,
+    SetOperatorInstructionConflictRunning,
+    SetOperatorInstructionConflictStopped,
+    SetOperatorInstructionAdvanceOverBudgetRunning,
+    SetOperatorInstructionAdvanceOverBudgetStopped,
+    SetOperatorInstructionAdvanceRunning,
+    SetOperatorInstructionAdvanceStopped,
+    SetOperatorInstructionTerminalCompleted,
+    SetOperatorInstructionTerminalDestroyed,
+    RevokeOperatorInstructionUnknownSlotRunning,
+    RevokeOperatorInstructionUnknownSlotStopped,
+    RevokeOperatorInstructionStaleRunning,
+    RevokeOperatorInstructionStaleStopped,
+    RevokeOperatorInstructionDuplicateRunning,
+    RevokeOperatorInstructionDuplicateStopped,
+    RevokeOperatorInstructionConflictRunning,
+    RevokeOperatorInstructionConflictStopped,
+    RevokeOperatorInstructionAdvanceRunning,
+    RevokeOperatorInstructionAdvanceStopped,
+    RevokeOperatorInstructionTerminalCompleted,
+    RevokeOperatorInstructionTerminalDestroyed,
+    RecoverOperatorInstructionAppliedRunning,
+    RecoverOperatorInstructionAppliedStopped,
+    RecoverOperatorInstructionAppliedCompleted,
+    RecoverOperatorInstructionStaleRunning,
+    RecoverOperatorInstructionStaleStopped,
+    RecoverOperatorInstructionStaleCompleted,
+    RecoverOperatorInstructionGenerationHighwaterRaised,
+    RecoverOperatorInstructionGenerationHighwaterKept,
+    PrepareMemberInstructionDeliveryNotOwedRunning,
+    PrepareMemberInstructionDeliveryNotOwedStopped,
+    PrepareMemberInstructionDeliveryPlacedRunning,
+    PrepareMemberInstructionDeliveryPlacedStopped,
+    PrepareMemberInstructionDeliveryUnbornRunning,
+    PrepareMemberInstructionDeliveryUnbornStopped,
+    PrepareMemberInstructionDeliveryUnboundRunning,
+    PrepareMemberInstructionDeliveryUnboundStopped,
+    PrepareMemberInstructionDeliveryRetiringRunning,
+    PrepareMemberInstructionDeliveryRetiringStopped,
+    PrepareMemberInstructionDeliveryDeliverRunning,
+    PrepareMemberInstructionDeliveryDeliverStopped,
+    PrepareMemberInstructionDeliveryMobNotRunningCompleted,
+    PrepareMemberInstructionDeliveryMobNotRunningDestroyed,
+    RecordMemberInstructionTargetNotOwedRunning,
+    RecordMemberInstructionTargetNotOwedStopped,
+    RecordMemberInstructionTargetNotOwedCompleted,
+    RecordMemberInstructionTargetNotOwedDestroyed,
+    RecordMemberInstructionTargetStaleSessionRunning,
+    RecordMemberInstructionTargetStaleSessionStopped,
+    RecordMemberInstructionTargetStaleSessionCompleted,
+    RecordMemberInstructionTargetStaleSessionDestroyed,
+    RecordMemberInstructionTargetSupersededRunning,
+    RecordMemberInstructionTargetSupersededStopped,
+    RecordMemberInstructionTargetSupersededCompleted,
+    RecordMemberInstructionTargetSupersededDestroyed,
+    RecordMemberInstructionTargetCurrentRunning,
+    RecordMemberInstructionTargetCurrentStopped,
+    RecordMemberInstructionTargetCurrentCompleted,
+    RecordMemberInstructionTargetCurrentDestroyed,
+    RecordMemberInstructionTargetUnmintedRunning,
+    RecordMemberInstructionTargetUnmintedStopped,
+    RecordMemberInstructionTargetUnmintedCompleted,
+    RecordMemberInstructionTargetUnmintedDestroyed,
+    RefuseMemberInstructionTargetNotOwedRunning,
+    RefuseMemberInstructionTargetNotOwedStopped,
+    RefuseMemberInstructionTargetNotOwedCompleted,
+    RefuseMemberInstructionTargetNotOwedDestroyed,
+    RefuseMemberInstructionTargetStaleSessionRunning,
+    RefuseMemberInstructionTargetStaleSessionStopped,
+    RefuseMemberInstructionTargetStaleSessionCompleted,
+    RefuseMemberInstructionTargetStaleSessionDestroyed,
+    RefuseMemberInstructionTargetSupersededRunning,
+    RefuseMemberInstructionTargetSupersededStopped,
+    RefuseMemberInstructionTargetSupersededCompleted,
+    RefuseMemberInstructionTargetSupersededDestroyed,
+    RefuseMemberInstructionTargetBlockedRunning,
+    RefuseMemberInstructionTargetBlockedStopped,
+    RefuseMemberInstructionTargetBlockedCompleted,
+    RefuseMemberInstructionTargetBlockedDestroyed,
+    ResolveMemberInstructionReleaseAuthorizedRunning,
+    ResolveMemberInstructionReleaseAuthorizedStopped,
+    ResolveMemberInstructionReleaseAuthorizedCompleted,
+    ResolveMemberInstructionReleaseAuthorizedDestroyed,
+    ResolveMemberInstructionReleaseNotNeededRunning,
+    ResolveMemberInstructionReleaseNotNeededStopped,
+    ResolveMemberInstructionReleaseNotNeededCompleted,
+    ResolveMemberInstructionReleaseNotNeededDestroyed,
+    PrepareMemberInstructionDeliverySpawningRunning,
+    PrepareMemberInstructionDeliverySpawningStopped,
 }
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -15489,5 +16188,19 @@ pub fn initial_state() -> State {
         identity_entry_retiring: Default::default(),
         identity_entry_archived_sessions: Default::default(),
         declared_apply_open: false,
+        identity_entry_tombstones: Default::default(),
+        identity_entry_unreadable: Default::default(),
+        spawn_exec_created_custody: Default::default(),
+        operator_instruction_revision: Default::default(),
+        operator_instruction_effect: Default::default(),
+        operator_instruction_digest: Default::default(),
+        operator_instruction_body_bytes: Default::default(),
+        operator_instruction_target_kind: Default::default(),
+        operator_instruction_target_profile: Default::default(),
+        operator_instruction_target_member: Default::default(),
+        operator_instruction_generation: 0,
+        member_instruction_owed: Default::default(),
+        member_instruction_recorded: Default::default(),
+        member_instruction_blocked: Default::default(),
     }
 }

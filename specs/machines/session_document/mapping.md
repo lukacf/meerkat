@@ -17,7 +17,8 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `session_realtime_transcript_event_resolve` — ResolveRealtimeItemObservedDiscardedAssistant, ResolveRealtimeItemObservedPresent, ResolveRealtimeItemSkipped, ResolveRealtimeUserTranscriptFinalEmpty, ResolveRealtimeUserTranscriptFinalStore, ResolveRealtimeUserTranscriptFinalReplayOrConflict, ResolveRealtimeAssistantDeltaInvalidOrDuplicate, ResolveRealtimeAssistantDeltaDiscarded, ResolveRealtimeAssistantDeltaLaneConflict, ResolveRealtimeAssistantDeltaAccepted, ResolveRealtimeAssistantReplacementInvalid, ResolveRealtimeAssistantReplacementDiscarded, ResolveRealtimeAssistantReplacementLocked, ResolveRealtimeAssistantReplacementLaneConflict, ResolveRealtimeAssistantReplacementAccepted, ResolveRealtimeAssistantTurnCompletedInvalid, ResolveRealtimeAssistantTurnCompletedDiscard, ResolveRealtimeAssistantTurnCompletedToolUse, ResolveRealtimeAssistantTurnInterruptedInvalid, and ResolveRealtimeAssistantTurnInterruptedValid resolve the realtime-transcript action vector from typed raw observations (set membership, segment concat emptiness, lane, completion) under RealtimeTranscriptEventResolved without the shell deciding; the shell mirrors the emitted action vector onto its bulky SessionRealtimeTranscriptState
 - `session_realtime_transcript_materialize_and_restore` — ResolveRealtimeAssistantTurnCompletedRecord, ResolveRealtimeMaterializeAlreadyDone, ResolveRealtimeMaterializeWaitForPredecessor, ResolveRealtimeMaterializeSkipped, ResolveRealtimeMaterializeWaitForReadyText, ResolveRealtimeMaterializeUser, ResolveRealtimeMaterializeAssistant, ResolveRealtimeMaterializeAssistantMissingCompletion, and AuthorizeRestoreRealtimeTranscriptState resolve the per-item materialize verdict and durable snapshot-restore legality under RealtimeMaterializeCandidateResolved and RealtimeTranscriptSnapshotRestoreAuthorized; the shell performs only the topological ordering and message assembly
 - `session_durable_config_authorize_restore` — AuthorizeSessionMetadataPersist, AuthorizeSessionBuildStatePersist, and RestoreSessionBuildState decide durable-config persist/restore admission from typed presence/count/kind observations the meerkat-core shell extracts from SessionMetadata and SessionBuildState under SessionMetadataPersistAuthorized, SessionBuildStatePersistAuthorized, and SessionBuildStateRestoreAuthorized; a rejected request matches no transition and surfaces as Err, and the shell mirrors the verdict and passes the original typed value through unchanged
-- `session_operator_instruction_region` — RecoverSessionInstructionState, RecoverSessionInstructionTarget and RecoverSessionInstructionEffective recover the per-session owner and the mob it names, the target generation and the entry sequence, then the recorded target and the slots in effect per slot (revision, effect, digest, body bytes) with the generation they realize and the later entry-sequence high-water, and refuse a torn projection; RecordInstructionTargetAdvance, RecordInstructionTargetActiveBudgetExceeded, RecordInstructionTargetSlotLimitExceeded, RecordInstructionTargetAlreadyRecorded, RecordInstructionTargetOwnedBySession and RecordInstructionTargetOwnedByOtherMob record a mob snapshot by generation alone for the mob that owns the target, within the slot limit and the active budget, and refuse one over either; SetSessionInstructionNew, SetSessionInstructionAdvance, SetSessionInstructionActiveBudgetExceeded, SetSessionInstructionDuplicate, SetSessionInstructionStale, SetSessionInstructionConflict, SetSessionInstructionOwnedByMob, SetSessionInstructionSlotLimitExceeded and SetSessionInstructionUnknownSlot decide a session-owned write per slot from the recorded slot; RebindInstructionOwner attaches a mob to a session-owned target from the slots in effect and RebindInstructionOwnerUnowned starts a new owner of an unowned target from that empty target, each checking ownership in a guard of its own, and no rebind takes a mob-owned target; ReleaseInstructionTarget, ReleaseInstructionTargetAlreadyUnowned, ReleaseInstructionTargetOwnedByOtherMob and ReleaseInstructionTargetOwnedBySession let only the owning mob release its target, which empties it so that the next fresh run start revokes what the mob had in effect, and the release verdict says whether the mob owned it; ResolveRunStartInstructionsApply, ResolveRunStartInstructionsNoChange, ResolveRunStartInstructionsDeferredLeadingPrefix and ResolveRunStartInstructionsDeferredUnavailable decide at a run start, from the machine's own target and slots in effect, whether one coalesced entry applies the pending changes, which puts the target's Active slots in effect; AuthorizeInstructionFoldAtRunStart and AuthorizeInstructionFoldEffective decide the set a compaction fold renders. The shell persists the machine's state and decides nothing
+- `session_operator_instruction_region` — RecoverSessionInstructionState, RecoverSessionInstructionTarget and RecoverSessionInstructionEffective recover the per-session owner and the mob it names, the target generation and the entry sequence, then the recorded target and the slots in effect per slot (revision, effect, digest, body bytes) with the generation they realize and the later entry-sequence high-water, and refuse a torn projection; RecordInstructionTargetAdvance, RecordInstructionTargetActiveBudgetExceeded, RecordInstructionTargetSlotLimitExceeded, RecordInstructionTargetAlreadyRecorded, RecordInstructionTargetOwnedBySession and RecordInstructionTargetOwnedByOtherMob record a mob snapshot by generation alone for the mob that owns the target, within the slot limit and the active budget, and refuse one over either; RecordInstructionTargetAdopt, RecordInstructionTargetAdoptActiveBudgetExceeded and RecordInstructionTargetAdoptSlotLimitExceeded take over, in one step, the session-owned target of a mob member's session (its host wrote it before the mob seated the session: an attach) within the same limits, and a session-owned target of a session no mob seated refuses the record; SetSessionInstructionNew, SetSessionInstructionAdvance, SetSessionInstructionActiveBudgetExceeded, SetSessionInstructionDuplicate, SetSessionInstructionStale, SetSessionInstructionConflict, SetSessionInstructionOwnedByMob, SetSessionInstructionSlotLimitExceeded and SetSessionInstructionUnknownSlot decide a session-owned write per slot from the recorded slot, and SetSessionInstructionMemberSession refuses every write of its own host on a mob member's session, from the session's binding fact; RebindInstructionOwner attaches a mob to a session-owned target from the slots in effect and RebindInstructionOwnerUnowned starts a new owner of an unowned target from that empty target, each checking ownership in a guard of its own, RebindInstructionOwnerMemberSession refuses a mob member's session to its own host, and no rebind takes a mob-owned target; ReleaseInstructionTarget, ReleaseInstructionTargetAlreadyUnowned, ReleaseInstructionTargetOwnedByOtherMob and ReleaseInstructionTargetOwnedBySession let only the owning mob release its target, which empties it so that the next fresh run start revokes what the mob had in effect, and the release verdict says whether the mob owned it; ResolveRunStartInstructionsApply, ResolveRunStartInstructionsNoChange, ResolveRunStartInstructionsDeferredLeadingPrefix and ResolveRunStartInstructionsDeferredUnavailable decide at a run start, from the machine's own target and slots in effect, whether one coalesced entry applies the pending changes, which puts the target's Active slots in effect; AuthorizeInstructionFoldAtRunStart and AuthorizeInstructionFoldEffective decide the set a compaction fold renders. The shell persists the machine's state and decides nothing
+- `session_activation_body_retirement_region` — RecoverSessionActivationBodies recovers, per instruction activation key, how many activation rows the session's transcript holds, how many of them (oldest first) carry a retired body and whether the newest row is the session's own, and refuses a torn projection (maps naming different keys, a key without rows, more retired rows than rows, a retired own newest row); AuthorizeActivationBodyRetirement decides, under ActivationBodyRetirementAuthorized, that a compaction retires every row a later row of its key follows, never lowers a recovered count and never retires an own newest row. The shell maps the retired count of each key onto that key's oldest rows and decides nothing
 
 ### Transitions
 - `MarkSessionInitialTurnPendingInactiveOrPending`
@@ -395,6 +396,15 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RecordInstructionTargetOwnedBySession`
   - anchors: (unclaimed)
   - scenarios: `session_operator_instruction_region`
+- `RecordInstructionTargetAdopt`
+  - anchors: (unclaimed)
+  - scenarios: `session_operator_instruction_region`
+- `RecordInstructionTargetAdoptActiveBudgetExceeded`
+  - anchors: (unclaimed)
+  - scenarios: `session_operator_instruction_region`
+- `RecordInstructionTargetAdoptSlotLimitExceeded`
+  - anchors: (unclaimed)
+  - scenarios: `session_operator_instruction_region`
 - `RecordInstructionTargetOwnedByOtherMob`
   - anchors: (unclaimed)
   - scenarios: `session_operator_instruction_region`
@@ -419,6 +429,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `SetSessionInstructionOwnedByMob`
   - anchors: (unclaimed)
   - scenarios: `session_operator_instruction_region`
+- `SetSessionInstructionMemberSession`
+  - anchors: (unclaimed)
+  - scenarios: `session_operator_instruction_region`
 - `SetSessionInstructionSlotLimitExceeded`
   - anchors: (unclaimed)
   - scenarios: `session_operator_instruction_region`
@@ -429,6 +442,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: `session_operator_instruction_region`
 - `RebindInstructionOwnerUnowned`
+  - anchors: (unclaimed)
+  - scenarios: `session_operator_instruction_region`
+- `RebindInstructionOwnerMemberSession`
   - anchors: (unclaimed)
   - scenarios: `session_operator_instruction_region`
 - `ReleaseInstructionTarget`
@@ -461,6 +477,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `AuthorizeInstructionFoldEffective`
   - anchors: (unclaimed)
   - scenarios: `session_operator_instruction_region`
+- `RecoverSessionActivationBodies`
+  - anchors: (unclaimed)
+  - scenarios: `session_activation_body_retirement_region`
+- `AuthorizeActivationBodyRetirement`
+  - anchors: (unclaimed)
+  - scenarios: `session_activation_body_retirement_region`
 
 ### Effects
 - `RealtimeAssistantSnapshotMaterializationAuthorized`
@@ -619,6 +641,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `InstructionFoldAuthorized`
   - anchors: (unclaimed)
   - scenarios: `session_operator_instruction_region`
+- `ActivationBodyRetirementAuthorized`
+  - anchors: (unclaimed)
+  - scenarios: `session_activation_body_retirement_region`
 
 ### Invariants
 - `live_interaction_transcript_binding_is_complete`
@@ -648,6 +673,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `instruction_mob_owner_names_its_mob`
   - anchors: (unclaimed)
   - scenarios: `session_operator_instruction_region`
+- `activation_body_maps_lockstep`
+  - anchors: (unclaimed)
+  - scenarios: `session_activation_body_retirement_region`
+- `activation_effective_body_live`
+  - anchors: (unclaimed)
+  - scenarios: `session_activation_body_retirement_region`
 
 
 <!-- GENERATED_COVERAGE_END -->

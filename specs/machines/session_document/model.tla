@@ -3,7 +3,7 @@ EXTENDS TLC, Naturals, Sequences, FiniteSets
 
 \* Generated semantic machine model for SessionDocumentMachine.
 
-CONSTANTS BooleanValues, DurableHeadRelationValues, DurableTailRecoveryClassValues, DurableTailRunCursorValues, DurableTailStopReasonValues, InstructionDeferReasonValues, InstructionEffectValues, InstructionFoldSourceValues, InstructionLoweringValues, InstructionRunStartValues, InstructionTargetOwnerValues, InstructionWriteOutcomeValues, InstructionWriteRefusalValues, LiveAssistantPlaybackTerminalDispositionValues, LiveAssistantPlaybackTerminalObservationValues, LiveContextCommittedRowDispositionValues, LiveContextCommittedRowKindValues, LiveContextCommittedTextProvenanceValues, LiveSessionAuthorityKindValues, LiveSessionAuthorityReasonValues, LiveTranscriptReconciliationValues, NatValues, ObservedSessionTailKindValues, PendingContinuationDispositionValues, PendingContinuationPublicTerminalValues, RealtimeTranscriptLaneKindValues, RealtimeTranscriptMaterializeDecisionValues, RealtimeTranscriptRoleKindValues, RealtimeTranscriptStopReasonKindValues, RealtimeUserContentBlobFinalizeDispositionValues, RealtimeUserContentBlobRecoveryDispositionValues, RealtimeUserContentBlobStageDispositionValues, RealtimeUserContentIdentityDispositionValues, RecoveryCandidateIdValues, ResumeOverrideRejectionValues, ResumeProviderSelectionValues, ResumeSelfHostedSelectionValues, RunIdCardinalityValues, RuntimeCheckpointProjectionDispositionValues, SessionArchiveDispositionValues, SessionArchiveRuntimeObservationValues, SessionDocumentLifecycleMergeValues, SessionDocumentLifecycleValues, SessionFirstTurnPhaseValues, SessionIdValues, SessionInitialPromptStageDecisionValues, StringValues, TranscriptEditKindValues, InputSamples_ClassifyDurableTail_dangling_tool_use_count, InputSamples_ClassifyDurableTail_orphan_tool_result_count, InputSamples_RecoverSessionInstructionState_target_generation, InputSamples_RecoverSessionInstructionState_entry_sequence, InputSamples_RecoverSessionInstructionEffective_generation, InputSamples_RecoverSessionInstructionEffective_last_entry_sequence, InputSamples_SetSessionInstruction_body_bytes
+CONSTANTS ActivationHeadOriginValues, BooleanValues, DurableHeadRelationValues, DurableTailRecoveryClassValues, DurableTailRunCursorValues, DurableTailStopReasonValues, InstructionDeferReasonValues, InstructionEffectValues, InstructionFoldSourceValues, InstructionLoweringValues, InstructionRunStartValues, InstructionTargetOwnerValues, InstructionWriteOutcomeValues, InstructionWriteRefusalValues, LiveAssistantPlaybackTerminalDispositionValues, LiveAssistantPlaybackTerminalObservationValues, LiveContextCommittedRowDispositionValues, LiveContextCommittedRowKindValues, LiveContextCommittedTextProvenanceValues, LiveSessionAuthorityKindValues, LiveSessionAuthorityReasonValues, LiveTranscriptReconciliationValues, NatValues, ObservedSessionTailKindValues, PendingContinuationDispositionValues, PendingContinuationPublicTerminalValues, RealtimeTranscriptLaneKindValues, RealtimeTranscriptMaterializeDecisionValues, RealtimeTranscriptRoleKindValues, RealtimeTranscriptStopReasonKindValues, RealtimeUserContentBlobFinalizeDispositionValues, RealtimeUserContentBlobRecoveryDispositionValues, RealtimeUserContentBlobStageDispositionValues, RealtimeUserContentIdentityDispositionValues, RecoveryCandidateIdValues, ResumeOverrideRejectionValues, ResumeProviderSelectionValues, ResumeSelfHostedSelectionValues, RunIdCardinalityValues, RuntimeCheckpointProjectionDispositionValues, SessionArchiveDispositionValues, SessionArchiveRuntimeObservationValues, SessionDocumentLifecycleMergeValues, SessionDocumentLifecycleValues, SessionFirstTurnPhaseValues, SessionIdValues, SessionInitialPromptStageDecisionValues, StringValues, TranscriptEditKindValues, InputSamples_ClassifyDurableTail_dangling_tool_use_count, InputSamples_ClassifyDurableTail_orphan_tool_result_count, InputSamples_RecoverSessionInstructionState_target_generation, InputSamples_RecoverSessionInstructionState_entry_sequence, InputSamples_RecoverSessionInstructionEffective_generation, InputSamples_RecoverSessionInstructionEffective_last_entry_sequence, InputSamples_SetSessionInstruction_body_bytes
 
 None == [tag |-> "none", value |-> "none"]
 Some(v) == [tag |-> "some", value |-> v]
@@ -16,11 +16,13 @@ MapSessionIdSessionDocumentLifecycleValues == {[x \in {} |-> None]} \cup { [x \i
 MapSessionIdSessionFirstTurnPhaseValues == {[x \in {} |-> None]} \cup { [x \in {k} |-> v] : k \in SessionIdValues, v \in SessionFirstTurnPhaseValues }
 MapSessionIdStringValues == {[x \in {} |-> None]} \cup { [x \in {k} |-> v] : k \in SessionIdValues, v \in StringValues }
 MapSessionIdU64Values == {[x \in {} |-> None]} \cup { [x \in {k} |-> v] : k \in SessionIdValues, v \in NatValues }
+MapStringActivationHeadOriginValues == {[x \in {} |-> None]} \cup { [x \in {k} |-> v] : k \in StringValues, v \in ActivationHeadOriginValues }
 MapStringInstructionEffectValues == {[x \in {} |-> None]} \cup { [x \in {k} |-> v] : k \in StringValues, v \in InstructionEffectValues }
 MapStringStringValues == {[x \in {} |-> None]} \cup { [x \in {k} |-> v] : k \in StringValues, v \in StringValues }
 MapStringU64Values == {[x \in {} |-> None]} \cup { [x \in {k} |-> v] : k \in StringValues, v \in NatValues }
 OptionStringValues == {None} \cup {Some(x) : x \in StringValues}
 OptionU64Values == {None} \cup {Some(x) : x \in NatValues}
+MapSessionIdMapStringActivationHeadOriginValues == {[x \in {} |-> None]} \cup { [x \in {k} |-> v] : k \in SessionIdValues, v \in MapStringActivationHeadOriginValues }
 MapSessionIdMapStringInstructionEffectValues == {[x \in {} |-> None]} \cup { [x \in {k} |-> v] : k \in SessionIdValues, v \in MapStringInstructionEffectValues }
 MapSessionIdMapStringStringValues == {[x \in {} |-> None]} \cup { [x \in {k} |-> v] : k \in SessionIdValues, v \in MapStringStringValues }
 MapSessionIdMapStringU64Values == {[x \in {} |-> None]} \cup { [x \in {k} |-> v] : k \in SessionIdValues, v \in MapStringU64Values }
@@ -38,10 +40,11 @@ SeqRemove(seq, value) == IF Len(seq) = 0 THEN <<>> ELSE IF Head(seq) = value THE
 RECURSIVE SeqRemoveAll(_, _)
 SeqRemoveAll(seq, values) == IF Len(values) = 0 THEN seq ELSE SeqRemoveAll(SeqRemove(seq, Head(values)), Tail(values))
 
-VARIABLES phase, model_step_count, session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal, session_live_channel_id, session_live_interaction_id, session_live_transcript_reconciliation, session_live_provisional_transcript_present, session_live_assistant_playback_response_id, session_live_assistant_playback_item_id, session_live_assistant_playback_content_index, session_live_assistant_final_chars, session_live_assistant_final_digest, session_live_assistant_terminal_observation, session_live_assistant_terminal_prefix_chars, session_live_assistant_terminal_prefix_digest, session_instruction_owner, session_instruction_owner_mob, session_instruction_target_generation, session_instruction_target_revision, session_instruction_target_effect, session_instruction_target_digest, session_instruction_target_bytes, session_instruction_effective_revision, session_instruction_effective_effect, session_instruction_effective_digest, session_instruction_effective_bytes, session_instruction_effective_generation, session_instruction_entry_sequence
+VARIABLES phase, model_step_count, session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal, session_live_channel_id, session_live_interaction_id, session_live_transcript_reconciliation, session_live_provisional_transcript_present, session_live_assistant_playback_response_id, session_live_assistant_playback_item_id, session_live_assistant_playback_content_index, session_live_assistant_final_chars, session_live_assistant_final_digest, session_live_assistant_terminal_observation, session_live_assistant_terminal_prefix_chars, session_live_assistant_terminal_prefix_digest, session_instruction_owner, session_instruction_owner_mob, session_instruction_target_generation, session_instruction_target_revision, session_instruction_target_effect, session_instruction_target_digest, session_instruction_target_bytes, session_instruction_effective_revision, session_instruction_effective_effect, session_instruction_effective_digest, session_instruction_effective_bytes, session_instruction_effective_generation, session_instruction_entry_sequence, session_activation_rows, session_activation_retired, session_activation_head_origin
 
-vars == << phase, model_step_count, session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal, session_live_channel_id, session_live_interaction_id, session_live_transcript_reconciliation, session_live_provisional_transcript_present, session_live_assistant_playback_response_id, session_live_assistant_playback_item_id, session_live_assistant_playback_content_index, session_live_assistant_final_chars, session_live_assistant_final_digest, session_live_assistant_terminal_observation, session_live_assistant_terminal_prefix_chars, session_live_assistant_terminal_prefix_digest, session_instruction_owner, session_instruction_owner_mob, session_instruction_target_generation, session_instruction_target_revision, session_instruction_target_effect, session_instruction_target_digest, session_instruction_target_bytes, session_instruction_effective_revision, session_instruction_effective_effect, session_instruction_effective_digest, session_instruction_effective_bytes, session_instruction_effective_generation, session_instruction_entry_sequence >>
+vars == << phase, model_step_count, session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal, session_live_channel_id, session_live_interaction_id, session_live_transcript_reconciliation, session_live_provisional_transcript_present, session_live_assistant_playback_response_id, session_live_assistant_playback_item_id, session_live_assistant_playback_content_index, session_live_assistant_final_chars, session_live_assistant_final_digest, session_live_assistant_terminal_observation, session_live_assistant_terminal_prefix_chars, session_live_assistant_terminal_prefix_digest, session_instruction_owner, session_instruction_owner_mob, session_instruction_target_generation, session_instruction_target_revision, session_instruction_target_effect, session_instruction_target_digest, session_instruction_target_bytes, session_instruction_effective_revision, session_instruction_effective_effect, session_instruction_effective_digest, session_instruction_effective_bytes, session_instruction_effective_generation, session_instruction_entry_sequence, session_activation_rows, session_activation_retired, session_activation_head_origin >>
 
+activation_body_maps_consistent(rows, retired, head_origin) == ((DOMAIN rows = DOMAIN retired) /\ (DOMAIN rows = DOMAIN head_origin) /\ (\A activation_key \in DOMAIN rows : (((IF "value" \in DOMAIN (IF (activation_key \in DOMAIN rows) THEN Some((IF activation_key \in DOMAIN rows THEN rows[activation_key] ELSE 0)) ELSE None) THEN (IF (activation_key \in DOMAIN rows) THEN Some((IF activation_key \in DOMAIN rows THEN rows[activation_key] ELSE 0)) ELSE None)["value"] ELSE None) >= 1) /\ ((IF "value" \in DOMAIN (IF (activation_key \in DOMAIN retired) THEN Some((IF activation_key \in DOMAIN retired THEN retired[activation_key] ELSE 0)) ELSE None) THEN (IF (activation_key \in DOMAIN retired) THEN Some((IF activation_key \in DOMAIN retired THEN retired[activation_key] ELSE 0)) ELSE None)["value"] ELSE None) <= (IF "value" \in DOMAIN (IF (activation_key \in DOMAIN rows) THEN Some((IF activation_key \in DOMAIN rows THEN rows[activation_key] ELSE 0)) ELSE None) THEN (IF (activation_key \in DOMAIN rows) THEN Some((IF activation_key \in DOMAIN rows THEN rows[activation_key] ELSE 0)) ELSE None)["value"] ELSE None)) /\ (IF ((IF "value" \in DOMAIN (IF (activation_key \in DOMAIN head_origin) THEN Some((IF activation_key \in DOMAIN head_origin THEN head_origin[activation_key] ELSE "None")) ELSE None) THEN (IF (activation_key \in DOMAIN head_origin) THEN Some((IF activation_key \in DOMAIN head_origin THEN head_origin[activation_key] ELSE "None")) ELSE None)["value"] ELSE None) # "Own") THEN TRUE ELSE ((IF "value" \in DOMAIN (IF (activation_key \in DOMAIN retired) THEN Some((IF activation_key \in DOMAIN retired THEN retired[activation_key] ELSE 0)) ELSE None) THEN (IF (activation_key \in DOMAIN retired) THEN Some((IF activation_key \in DOMAIN retired THEN retired[activation_key] ELSE 0)) ELSE None)["value"] ELSE None) < (IF "value" \in DOMAIN (IF (activation_key \in DOMAIN rows) THEN Some((IF activation_key \in DOMAIN rows THEN rows[activation_key] ELSE 0)) ELSE None) THEN (IF (activation_key \in DOMAIN rows) THEN Some((IF activation_key \in DOMAIN rows THEN rows[activation_key] ELSE 0)) ELSE None)["value"] ELSE None))))))
 instruction_entry_lowers(lowering, transcript_is_system_prefix) == (IF (lowering = "MidConversation") THEN TRUE ELSE ((lowering = "LeadingPrefixOnly") /\ transcript_is_system_prefix))
 instruction_change_pending(target_revision, target_effect, target_digest, effective_revision, effective_effect, effective_digest) == (IF (\E slot \in DOMAIN target_revision : (IF (((IF "value" \in DOMAIN (IF (slot \in DOMAIN target_effect) THEN Some((IF slot \in DOMAIN target_effect THEN target_effect[slot] ELSE "None")) ELSE None) THEN (IF (slot \in DOMAIN target_effect) THEN Some((IF slot \in DOMAIN target_effect THEN target_effect[slot] ELSE "None")) ELSE None)["value"] ELSE None) = "Active") /\ (IF ((slot \in DOMAIN effective_effect) = FALSE) THEN TRUE ELSE (IF ((IF "value" \in DOMAIN (IF (slot \in DOMAIN effective_effect) THEN Some((IF slot \in DOMAIN effective_effect THEN effective_effect[slot] ELSE "None")) ELSE None) THEN (IF (slot \in DOMAIN effective_effect) THEN Some((IF slot \in DOMAIN effective_effect THEN effective_effect[slot] ELSE "None")) ELSE None)["value"] ELSE None) # "Active") THEN TRUE ELSE (IF ((IF "value" \in DOMAIN (IF (slot \in DOMAIN effective_revision) THEN Some((IF slot \in DOMAIN effective_revision THEN effective_revision[slot] ELSE 0)) ELSE None) THEN (IF (slot \in DOMAIN effective_revision) THEN Some((IF slot \in DOMAIN effective_revision THEN effective_revision[slot] ELSE 0)) ELSE None)["value"] ELSE None) # (IF "value" \in DOMAIN (IF (slot \in DOMAIN target_revision) THEN Some((IF slot \in DOMAIN target_revision THEN target_revision[slot] ELSE 0)) ELSE None) THEN (IF (slot \in DOMAIN target_revision) THEN Some((IF slot \in DOMAIN target_revision THEN target_revision[slot] ELSE 0)) ELSE None)["value"] ELSE None)) THEN TRUE ELSE ((IF "value" \in DOMAIN (IF (slot \in DOMAIN effective_digest) THEN Some((IF slot \in DOMAIN effective_digest THEN effective_digest[slot] ELSE "None")) ELSE None) THEN (IF (slot \in DOMAIN effective_digest) THEN Some((IF slot \in DOMAIN effective_digest THEN effective_digest[slot] ELSE "None")) ELSE None)["value"] ELSE None) # (IF "value" \in DOMAIN (IF (slot \in DOMAIN target_digest) THEN Some((IF slot \in DOMAIN target_digest THEN target_digest[slot] ELSE "None")) ELSE None) THEN (IF (slot \in DOMAIN target_digest) THEN Some((IF slot \in DOMAIN target_digest THEN target_digest[slot] ELSE "None")) ELSE None)["value"] ELSE None)))))) THEN TRUE ELSE (((IF "value" \in DOMAIN (IF (slot \in DOMAIN target_effect) THEN Some((IF slot \in DOMAIN target_effect THEN target_effect[slot] ELSE "None")) ELSE None) THEN (IF (slot \in DOMAIN target_effect) THEN Some((IF slot \in DOMAIN target_effect THEN target_effect[slot] ELSE "None")) ELSE None)["value"] ELSE None) = "Absent") /\ (slot \in DOMAIN effective_effect) /\ ((IF "value" \in DOMAIN (IF (slot \in DOMAIN effective_effect) THEN Some((IF slot \in DOMAIN effective_effect THEN effective_effect[slot] ELSE "None")) ELSE None) THEN (IF (slot \in DOMAIN effective_effect) THEN Some((IF slot \in DOMAIN effective_effect THEN effective_effect[slot] ELSE "None")) ELSE None)["value"] ELSE None) = "Active")))) THEN TRUE ELSE (\E slot \in DOMAIN effective_effect : (((IF "value" \in DOMAIN (IF (slot \in DOMAIN effective_effect) THEN Some((IF slot \in DOMAIN effective_effect THEN effective_effect[slot] ELSE "None")) ELSE None) THEN (IF (slot \in DOMAIN effective_effect) THEN Some((IF slot \in DOMAIN effective_effect THEN effective_effect[slot] ELSE "None")) ELSE None)["value"] ELSE None) = "Active") /\ ((slot \in DOMAIN target_revision) = FALSE))))
 instruction_slot_set_empty(revision) == (Cardinality(DOMAIN revision) = 0)
@@ -78,6 +81,11 @@ session_document_instruction_active_slots(slot_effect, slot_values) ==
     [instruction_slot \in {candidate_slot \in DOMAIN slot_values :
             candidate_slot \in DOMAIN slot_effect /\ slot_effect[candidate_slot] = "Active"}
         |-> slot_values[instruction_slot]]
+session_document_activation_retired_after(activation_rows, activation_retired) ==
+    [activation_key \in DOMAIN activation_rows |->
+        LET retired_count == IF activation_key \in DOMAIN activation_retired THEN activation_retired[activation_key] ELSE 0
+            superseded_count == IF activation_rows[activation_key] > 0 THEN activation_rows[activation_key] - 1 ELSE 0
+        IN IF retired_count >= superseded_count THEN retired_count ELSE superseded_count]
 
 Init ==
     /\ phase = "Ready"
@@ -111,33 +119,38 @@ Init ==
     /\ session_instruction_effective_bytes = [x \in {} |-> None]
     /\ session_instruction_effective_generation = [x \in {} |-> None]
     /\ session_instruction_entry_sequence = [x \in {} |-> None]
+    /\ session_activation_rows = [x \in {} |-> None]
+    /\ session_activation_retired = [x \in {} |-> None]
+    /\ session_activation_head_origin = [x \in {} |-> None]
 
 \* Named UNCHANGED frames. One definition per distinct frame; every action
 \* that leaves those variables unchanged references the definition by name.
-UnchangedFrame_0711ab9608104053 == UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_live_channel_id, session_live_interaction_id, session_live_transcript_reconciliation, session_live_provisional_transcript_present, session_live_assistant_playback_response_id, session_live_assistant_playback_item_id, session_live_assistant_playback_content_index, session_live_assistant_final_chars, session_live_assistant_final_digest, session_live_assistant_terminal_observation, session_live_assistant_terminal_prefix_chars, session_live_assistant_terminal_prefix_digest, session_instruction_owner, session_instruction_owner_mob, session_instruction_target_generation, session_instruction_target_revision, session_instruction_target_effect, session_instruction_target_digest, session_instruction_target_bytes, session_instruction_effective_revision, session_instruction_effective_effect, session_instruction_effective_digest, session_instruction_effective_bytes, session_instruction_effective_generation, session_instruction_entry_sequence >>
-UnchangedFrame_138f3e22fdc07ade == UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal, session_live_assistant_final_chars, session_live_assistant_final_digest, session_live_assistant_terminal_observation, session_live_assistant_terminal_prefix_chars, session_live_assistant_terminal_prefix_digest, session_instruction_owner, session_instruction_owner_mob, session_instruction_target_generation, session_instruction_target_revision, session_instruction_target_effect, session_instruction_target_digest, session_instruction_target_bytes, session_instruction_effective_revision, session_instruction_effective_effect, session_instruction_effective_digest, session_instruction_effective_bytes, session_instruction_effective_generation, session_instruction_entry_sequence >>
-UnchangedFrame_2999b03e64d8844d == UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal, session_live_channel_id, session_live_interaction_id, session_live_transcript_reconciliation, session_live_provisional_transcript_present, session_live_assistant_playback_response_id, session_live_assistant_playback_item_id, session_live_assistant_playback_content_index, session_live_assistant_final_chars, session_live_assistant_final_digest, session_live_assistant_terminal_observation, session_live_assistant_terminal_prefix_chars, session_live_assistant_terminal_prefix_digest, session_instruction_effective_revision, session_instruction_effective_effect, session_instruction_effective_digest, session_instruction_effective_bytes, session_instruction_effective_generation, session_instruction_entry_sequence >>
-UnchangedFrame_2b67ec16fd8d9aca == UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal, session_live_channel_id, session_live_interaction_id, session_live_transcript_reconciliation, session_live_provisional_transcript_present, session_live_assistant_playback_response_id, session_live_assistant_playback_item_id, session_live_assistant_playback_content_index, session_live_assistant_final_chars, session_live_assistant_final_digest, session_live_assistant_terminal_observation, session_live_assistant_terminal_prefix_chars, session_live_assistant_terminal_prefix_digest, session_instruction_owner, session_instruction_owner_mob, session_instruction_target_generation, session_instruction_target_revision, session_instruction_target_effect, session_instruction_target_digest, session_instruction_target_bytes >>
-UnchangedFrame_2e043f788505248c == UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal, session_instruction_owner, session_instruction_owner_mob, session_instruction_target_generation, session_instruction_target_revision, session_instruction_target_effect, session_instruction_target_digest, session_instruction_target_bytes, session_instruction_effective_revision, session_instruction_effective_effect, session_instruction_effective_digest, session_instruction_effective_bytes, session_instruction_effective_generation, session_instruction_entry_sequence >>
-UnchangedFrame_3a7a9ba51b225cf4 == UNCHANGED << session_lifecycle_terminal, session_live_channel_id, session_live_interaction_id, session_live_transcript_reconciliation, session_live_provisional_transcript_present, session_live_assistant_playback_response_id, session_live_assistant_playback_item_id, session_live_assistant_playback_content_index, session_live_assistant_final_chars, session_live_assistant_final_digest, session_live_assistant_terminal_observation, session_live_assistant_terminal_prefix_chars, session_live_assistant_terminal_prefix_digest, session_instruction_owner, session_instruction_owner_mob, session_instruction_target_generation, session_instruction_target_revision, session_instruction_target_effect, session_instruction_target_digest, session_instruction_target_bytes, session_instruction_effective_revision, session_instruction_effective_effect, session_instruction_effective_digest, session_instruction_effective_bytes, session_instruction_effective_generation, session_instruction_entry_sequence >>
-UnchangedFrame_433d7a9f27015ca1 == UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal, session_live_channel_id, session_live_interaction_id, session_live_provisional_transcript_present, session_live_assistant_playback_response_id, session_live_assistant_playback_item_id, session_live_assistant_playback_content_index, session_live_assistant_final_chars, session_live_assistant_final_digest, session_live_assistant_terminal_observation, session_live_assistant_terminal_prefix_chars, session_live_assistant_terminal_prefix_digest, session_instruction_owner, session_instruction_owner_mob, session_instruction_target_generation, session_instruction_target_revision, session_instruction_target_effect, session_instruction_target_digest, session_instruction_target_bytes, session_instruction_effective_revision, session_instruction_effective_effect, session_instruction_effective_digest, session_instruction_effective_bytes, session_instruction_effective_generation, session_instruction_entry_sequence >>
+UnchangedFrame_119bdf7f4dab4fc6 == UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal, session_live_channel_id, session_live_interaction_id, session_live_transcript_reconciliation, session_live_provisional_transcript_present, session_live_assistant_final_chars, session_live_assistant_final_digest, session_instruction_owner, session_instruction_owner_mob, session_instruction_target_generation, session_instruction_target_revision, session_instruction_target_effect, session_instruction_target_digest, session_instruction_target_bytes, session_instruction_effective_revision, session_instruction_effective_effect, session_instruction_effective_digest, session_instruction_effective_bytes, session_instruction_effective_generation, session_instruction_entry_sequence, session_activation_rows, session_activation_retired, session_activation_head_origin >>
+UnchangedFrame_17aee84cd6d60a7d == UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal, session_live_channel_id, session_live_interaction_id, session_live_transcript_reconciliation, session_live_provisional_transcript_present, session_live_assistant_playback_response_id, session_live_assistant_playback_item_id, session_live_assistant_playback_content_index, session_live_assistant_final_chars, session_live_assistant_final_digest, session_live_assistant_terminal_observation, session_live_assistant_terminal_prefix_chars, session_live_assistant_terminal_prefix_digest, session_instruction_owner, session_instruction_owner_mob, session_instruction_target_generation, session_instruction_effective_revision, session_instruction_effective_effect, session_instruction_effective_digest, session_instruction_effective_bytes, session_instruction_effective_generation, session_instruction_entry_sequence, session_activation_rows, session_activation_retired, session_activation_head_origin >>
+UnchangedFrame_196a897a2d306e70 == UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal, session_live_assistant_playback_response_id, session_live_assistant_playback_item_id, session_live_assistant_playback_content_index, session_live_assistant_final_chars, session_live_assistant_final_digest, session_live_assistant_terminal_observation, session_live_assistant_terminal_prefix_chars, session_live_assistant_terminal_prefix_digest, session_instruction_owner, session_instruction_owner_mob, session_instruction_target_generation, session_instruction_target_revision, session_instruction_target_effect, session_instruction_target_digest, session_instruction_target_bytes, session_instruction_effective_revision, session_instruction_effective_effect, session_instruction_effective_digest, session_instruction_effective_bytes, session_instruction_effective_generation, session_instruction_entry_sequence, session_activation_rows, session_activation_retired, session_activation_head_origin >>
 UnchangedFrame_44bcbd08434cac9f == UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal, session_live_channel_id, session_live_interaction_id, session_live_transcript_reconciliation, session_live_provisional_transcript_present, session_live_assistant_playback_response_id, session_live_assistant_playback_item_id, session_live_assistant_playback_content_index, session_live_assistant_final_chars, session_live_assistant_final_digest, session_live_assistant_terminal_observation, session_live_assistant_terminal_prefix_chars, session_live_assistant_terminal_prefix_digest, session_instruction_owner, session_instruction_owner_mob, session_instruction_target_generation, session_instruction_target_revision, session_instruction_target_effect, session_instruction_target_digest, session_instruction_target_bytes, session_instruction_effective_revision, session_instruction_effective_effect, session_instruction_effective_digest, session_instruction_effective_bytes, session_instruction_effective_generation, session_instruction_entry_sequence >>
-UnchangedFrame_47174268e34aef7b == UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal, session_live_channel_id, session_live_interaction_id, session_live_transcript_reconciliation, session_live_provisional_transcript_present, session_live_assistant_terminal_observation, session_live_assistant_terminal_prefix_chars, session_live_assistant_terminal_prefix_digest, session_instruction_owner, session_instruction_owner_mob, session_instruction_target_generation, session_instruction_target_revision, session_instruction_target_effect, session_instruction_target_digest, session_instruction_target_bytes, session_instruction_effective_revision, session_instruction_effective_effect, session_instruction_effective_digest, session_instruction_effective_bytes, session_instruction_effective_generation, session_instruction_entry_sequence >>
-UnchangedFrame_4f5d9ea655f1ee99 == UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_lifecycle_terminal, session_live_channel_id, session_live_interaction_id, session_live_transcript_reconciliation, session_live_provisional_transcript_present, session_live_assistant_playback_response_id, session_live_assistant_playback_item_id, session_live_assistant_playback_content_index, session_live_assistant_final_chars, session_live_assistant_final_digest, session_live_assistant_terminal_observation, session_live_assistant_terminal_prefix_chars, session_live_assistant_terminal_prefix_digest, session_instruction_owner, session_instruction_owner_mob, session_instruction_target_generation, session_instruction_target_revision, session_instruction_target_effect, session_instruction_target_digest, session_instruction_target_bytes, session_instruction_effective_revision, session_instruction_effective_effect, session_instruction_effective_digest, session_instruction_effective_bytes, session_instruction_effective_generation, session_instruction_entry_sequence >>
-UnchangedFrame_596d257c703034bc == UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal, session_live_channel_id, session_live_interaction_id, session_live_transcript_reconciliation, session_live_provisional_transcript_present, session_live_assistant_playback_response_id, session_live_assistant_playback_item_id, session_live_assistant_playback_content_index, session_live_assistant_terminal_observation, session_live_assistant_terminal_prefix_chars, session_live_assistant_terminal_prefix_digest, session_instruction_owner, session_instruction_owner_mob, session_instruction_target_generation, session_instruction_target_revision, session_instruction_target_effect, session_instruction_target_digest, session_instruction_target_bytes, session_instruction_effective_revision, session_instruction_effective_effect, session_instruction_effective_digest, session_instruction_effective_bytes, session_instruction_effective_generation, session_instruction_entry_sequence >>
-UnchangedFrame_5e494352ab2e7e45 == UNCHANGED << session_first_turn_phase, session_pending_tool_results_count, session_lifecycle_terminal, session_live_channel_id, session_live_interaction_id, session_live_transcript_reconciliation, session_live_provisional_transcript_present, session_live_assistant_playback_response_id, session_live_assistant_playback_item_id, session_live_assistant_playback_content_index, session_live_assistant_final_chars, session_live_assistant_final_digest, session_live_assistant_terminal_observation, session_live_assistant_terminal_prefix_chars, session_live_assistant_terminal_prefix_digest, session_instruction_owner, session_instruction_owner_mob, session_instruction_target_generation, session_instruction_target_revision, session_instruction_target_effect, session_instruction_target_digest, session_instruction_target_bytes, session_instruction_effective_revision, session_instruction_effective_effect, session_instruction_effective_digest, session_instruction_effective_bytes, session_instruction_effective_generation, session_instruction_entry_sequence >>
-UnchangedFrame_69701730652d9513 == UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal, session_live_channel_id, session_live_interaction_id, session_live_transcript_reconciliation, session_live_provisional_transcript_present, session_live_assistant_playback_response_id, session_live_assistant_playback_item_id, session_live_assistant_playback_content_index, session_live_assistant_final_chars, session_live_assistant_final_digest, session_live_assistant_terminal_observation, session_live_assistant_terminal_prefix_chars, session_live_assistant_terminal_prefix_digest, session_instruction_owner_mob, session_instruction_effective_revision, session_instruction_effective_effect, session_instruction_effective_digest, session_instruction_effective_bytes, session_instruction_effective_generation, session_instruction_entry_sequence >>
-UnchangedFrame_7fb5fd2297000ba9 == UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal, session_live_channel_id, session_live_interaction_id, session_live_transcript_reconciliation, session_live_provisional_transcript_present, session_live_assistant_final_chars, session_live_assistant_final_digest, session_instruction_owner, session_instruction_owner_mob, session_instruction_target_generation, session_instruction_target_revision, session_instruction_target_effect, session_instruction_target_digest, session_instruction_target_bytes, session_instruction_effective_revision, session_instruction_effective_effect, session_instruction_effective_digest, session_instruction_effective_bytes, session_instruction_effective_generation, session_instruction_entry_sequence >>
-UnchangedFrame_8f85d92b50112077 == UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal, session_live_assistant_playback_response_id, session_live_assistant_playback_item_id, session_live_assistant_playback_content_index, session_live_assistant_final_chars, session_live_assistant_final_digest, session_live_assistant_terminal_observation, session_live_assistant_terminal_prefix_chars, session_live_assistant_terminal_prefix_digest, session_instruction_owner, session_instruction_owner_mob, session_instruction_target_generation, session_instruction_target_revision, session_instruction_target_effect, session_instruction_target_digest, session_instruction_target_bytes, session_instruction_effective_revision, session_instruction_effective_effect, session_instruction_effective_digest, session_instruction_effective_bytes, session_instruction_effective_generation, session_instruction_entry_sequence >>
-UnchangedFrame_99c0c7c5a3f3ae36 == UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal, session_live_channel_id, session_live_interaction_id, session_live_transcript_reconciliation, session_live_provisional_transcript_present, session_live_assistant_final_chars, session_live_assistant_final_digest, session_live_assistant_terminal_observation, session_live_assistant_terminal_prefix_chars, session_live_assistant_terminal_prefix_digest, session_instruction_owner, session_instruction_owner_mob, session_instruction_target_generation, session_instruction_target_revision, session_instruction_target_effect, session_instruction_target_digest, session_instruction_target_bytes, session_instruction_effective_revision, session_instruction_effective_effect, session_instruction_effective_digest, session_instruction_effective_bytes, session_instruction_effective_generation, session_instruction_entry_sequence >>
-UnchangedFrame_a26768aa2b7e30dc == UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal, session_live_channel_id, session_live_interaction_id, session_live_transcript_reconciliation, session_live_provisional_transcript_present, session_live_assistant_playback_response_id, session_live_assistant_playback_item_id, session_live_assistant_playback_content_index, session_live_assistant_final_chars, session_live_assistant_final_digest, session_live_assistant_terminal_observation, session_live_assistant_terminal_prefix_chars, session_live_assistant_terminal_prefix_digest, session_instruction_target_revision, session_instruction_target_effect, session_instruction_target_digest, session_instruction_target_bytes, session_instruction_effective_revision, session_instruction_effective_effect, session_instruction_effective_digest, session_instruction_effective_bytes, session_instruction_effective_generation, session_instruction_entry_sequence >>
-UnchangedFrame_a6146a1f3b9f1b60 == UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal, session_live_channel_id, session_live_interaction_id, session_live_transcript_reconciliation, session_live_provisional_transcript_present, session_live_assistant_playback_response_id, session_live_assistant_playback_item_id, session_live_assistant_playback_content_index, session_live_assistant_final_chars, session_live_assistant_final_digest, session_live_assistant_terminal_observation, session_live_assistant_terminal_prefix_chars, session_live_assistant_terminal_prefix_digest, session_instruction_owner, session_instruction_owner_mob, session_instruction_target_generation, session_instruction_effective_revision, session_instruction_effective_effect, session_instruction_effective_digest, session_instruction_effective_bytes, session_instruction_effective_generation, session_instruction_entry_sequence >>
-UnchangedFrame_afcdf325669eb17c == UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal, session_live_channel_id, session_live_interaction_id, session_live_transcript_reconciliation, session_live_provisional_transcript_present, session_live_assistant_playback_response_id, session_live_assistant_playback_item_id, session_live_assistant_playback_content_index, session_live_assistant_final_chars, session_live_assistant_final_digest, session_live_assistant_terminal_observation, session_live_assistant_terminal_prefix_chars, session_live_assistant_terminal_prefix_digest >>
-UnchangedFrame_c525efbe4aa2156c == UNCHANGED << session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal, session_live_channel_id, session_live_interaction_id, session_live_transcript_reconciliation, session_live_provisional_transcript_present, session_live_assistant_playback_response_id, session_live_assistant_playback_item_id, session_live_assistant_playback_content_index, session_live_assistant_final_chars, session_live_assistant_final_digest, session_live_assistant_terminal_observation, session_live_assistant_terminal_prefix_chars, session_live_assistant_terminal_prefix_digest, session_instruction_owner, session_instruction_owner_mob, session_instruction_target_generation, session_instruction_target_revision, session_instruction_target_effect, session_instruction_target_digest, session_instruction_target_bytes, session_instruction_effective_revision, session_instruction_effective_effect, session_instruction_effective_digest, session_instruction_effective_bytes, session_instruction_effective_generation, session_instruction_entry_sequence >>
-UnchangedFrame_efa9360e0c81d6cf == UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal, session_live_channel_id, session_live_interaction_id, session_live_transcript_reconciliation, session_live_provisional_transcript_present, session_live_assistant_playback_response_id, session_live_assistant_playback_item_id, session_live_assistant_playback_content_index, session_live_assistant_final_chars, session_live_assistant_final_digest, session_live_assistant_terminal_observation, session_live_assistant_terminal_prefix_chars, session_live_assistant_terminal_prefix_digest, session_instruction_owner, session_instruction_owner_mob, session_instruction_target_generation, session_instruction_target_revision, session_instruction_target_effect, session_instruction_target_digest, session_instruction_target_bytes, session_instruction_effective_revision, session_instruction_effective_effect, session_instruction_effective_digest, session_instruction_effective_bytes, session_instruction_effective_generation >>
-UnchangedFrame_efd8609eaa54492a == UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal, session_live_channel_id, session_live_interaction_id, session_live_transcript_reconciliation, session_live_assistant_playback_response_id, session_live_assistant_playback_item_id, session_live_assistant_playback_content_index, session_live_assistant_final_chars, session_live_assistant_final_digest, session_live_assistant_terminal_observation, session_live_assistant_terminal_prefix_chars, session_live_assistant_terminal_prefix_digest, session_instruction_owner, session_instruction_owner_mob, session_instruction_target_generation, session_instruction_target_revision, session_instruction_target_effect, session_instruction_target_digest, session_instruction_target_bytes, session_instruction_effective_revision, session_instruction_effective_effect, session_instruction_effective_digest, session_instruction_effective_bytes, session_instruction_effective_generation, session_instruction_entry_sequence >>
-UnchangedFrame_f76c28a808303d50 == UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal, session_live_channel_id, session_live_interaction_id, session_live_transcript_reconciliation, session_live_provisional_transcript_present, session_live_assistant_playback_response_id, session_live_assistant_playback_item_id, session_live_assistant_playback_content_index, session_live_assistant_final_chars, session_live_assistant_final_digest, session_instruction_owner, session_instruction_owner_mob, session_instruction_target_generation, session_instruction_target_revision, session_instruction_target_effect, session_instruction_target_digest, session_instruction_target_bytes, session_instruction_effective_revision, session_instruction_effective_effect, session_instruction_effective_digest, session_instruction_effective_bytes, session_instruction_effective_generation, session_instruction_entry_sequence >>
-UnchangedFrame_ff1eba536507aee7 == UNCHANGED << session_first_turn_phase, session_lifecycle_terminal, session_live_channel_id, session_live_interaction_id, session_live_transcript_reconciliation, session_live_provisional_transcript_present, session_live_assistant_playback_response_id, session_live_assistant_playback_item_id, session_live_assistant_playback_content_index, session_live_assistant_final_chars, session_live_assistant_final_digest, session_live_assistant_terminal_observation, session_live_assistant_terminal_prefix_chars, session_live_assistant_terminal_prefix_digest, session_instruction_owner, session_instruction_owner_mob, session_instruction_target_generation, session_instruction_target_revision, session_instruction_target_effect, session_instruction_target_digest, session_instruction_target_bytes, session_instruction_effective_revision, session_instruction_effective_effect, session_instruction_effective_digest, session_instruction_effective_bytes, session_instruction_effective_generation, session_instruction_entry_sequence >>
+UnchangedFrame_53d646e937316eae == UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal, session_live_channel_id, session_live_interaction_id, session_live_provisional_transcript_present, session_live_assistant_playback_response_id, session_live_assistant_playback_item_id, session_live_assistant_playback_content_index, session_live_assistant_final_chars, session_live_assistant_final_digest, session_live_assistant_terminal_observation, session_live_assistant_terminal_prefix_chars, session_live_assistant_terminal_prefix_digest, session_instruction_owner, session_instruction_owner_mob, session_instruction_target_generation, session_instruction_target_revision, session_instruction_target_effect, session_instruction_target_digest, session_instruction_target_bytes, session_instruction_effective_revision, session_instruction_effective_effect, session_instruction_effective_digest, session_instruction_effective_bytes, session_instruction_effective_generation, session_instruction_entry_sequence, session_activation_rows, session_activation_retired, session_activation_head_origin >>
+UnchangedFrame_5413dce9fac975b1 == UNCHANGED << session_lifecycle_terminal, session_live_channel_id, session_live_interaction_id, session_live_transcript_reconciliation, session_live_provisional_transcript_present, session_live_assistant_playback_response_id, session_live_assistant_playback_item_id, session_live_assistant_playback_content_index, session_live_assistant_final_chars, session_live_assistant_final_digest, session_live_assistant_terminal_observation, session_live_assistant_terminal_prefix_chars, session_live_assistant_terminal_prefix_digest, session_instruction_owner, session_instruction_owner_mob, session_instruction_target_generation, session_instruction_target_revision, session_instruction_target_effect, session_instruction_target_digest, session_instruction_target_bytes, session_instruction_effective_revision, session_instruction_effective_effect, session_instruction_effective_digest, session_instruction_effective_bytes, session_instruction_effective_generation, session_instruction_entry_sequence, session_activation_rows, session_activation_retired, session_activation_head_origin >>
+UnchangedFrame_55b95824a0914e0d == UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal, session_live_channel_id, session_live_interaction_id, session_live_transcript_reconciliation, session_live_provisional_transcript_present, session_live_assistant_playback_response_id, session_live_assistant_playback_item_id, session_live_assistant_playback_content_index, session_live_assistant_final_chars, session_live_assistant_final_digest, session_instruction_owner, session_instruction_owner_mob, session_instruction_target_generation, session_instruction_target_revision, session_instruction_target_effect, session_instruction_target_digest, session_instruction_target_bytes, session_instruction_effective_revision, session_instruction_effective_effect, session_instruction_effective_digest, session_instruction_effective_bytes, session_instruction_effective_generation, session_instruction_entry_sequence, session_activation_rows, session_activation_retired, session_activation_head_origin >>
+UnchangedFrame_600f2e306f5c47ff == UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal, session_live_assistant_final_chars, session_live_assistant_final_digest, session_live_assistant_terminal_observation, session_live_assistant_terminal_prefix_chars, session_live_assistant_terminal_prefix_digest, session_instruction_owner, session_instruction_owner_mob, session_instruction_target_generation, session_instruction_target_revision, session_instruction_target_effect, session_instruction_target_digest, session_instruction_target_bytes, session_instruction_effective_revision, session_instruction_effective_effect, session_instruction_effective_digest, session_instruction_effective_bytes, session_instruction_effective_generation, session_instruction_entry_sequence, session_activation_rows, session_activation_retired, session_activation_head_origin >>
+UnchangedFrame_614f04e6d2a8b76b == UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal, session_live_channel_id, session_live_interaction_id, session_live_transcript_reconciliation, session_live_provisional_transcript_present, session_live_assistant_playback_response_id, session_live_assistant_playback_item_id, session_live_assistant_playback_content_index, session_live_assistant_final_chars, session_live_assistant_final_digest, session_live_assistant_terminal_observation, session_live_assistant_terminal_prefix_chars, session_live_assistant_terminal_prefix_digest, session_instruction_owner, session_instruction_owner_mob, session_instruction_target_generation, session_instruction_target_revision, session_instruction_target_effect, session_instruction_target_digest, session_instruction_target_bytes, session_activation_rows, session_activation_retired, session_activation_head_origin >>
+UnchangedFrame_63277eaeb681196c == UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_live_channel_id, session_live_interaction_id, session_live_transcript_reconciliation, session_live_provisional_transcript_present, session_live_assistant_playback_response_id, session_live_assistant_playback_item_id, session_live_assistant_playback_content_index, session_live_assistant_final_chars, session_live_assistant_final_digest, session_live_assistant_terminal_observation, session_live_assistant_terminal_prefix_chars, session_live_assistant_terminal_prefix_digest, session_instruction_owner, session_instruction_owner_mob, session_instruction_target_generation, session_instruction_target_revision, session_instruction_target_effect, session_instruction_target_digest, session_instruction_target_bytes, session_instruction_effective_revision, session_instruction_effective_effect, session_instruction_effective_digest, session_instruction_effective_bytes, session_instruction_effective_generation, session_instruction_entry_sequence, session_activation_rows, session_activation_retired, session_activation_head_origin >>
+UnchangedFrame_642685be5fffced6 == UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_lifecycle_terminal, session_live_channel_id, session_live_interaction_id, session_live_transcript_reconciliation, session_live_provisional_transcript_present, session_live_assistant_playback_response_id, session_live_assistant_playback_item_id, session_live_assistant_playback_content_index, session_live_assistant_final_chars, session_live_assistant_final_digest, session_live_assistant_terminal_observation, session_live_assistant_terminal_prefix_chars, session_live_assistant_terminal_prefix_digest, session_instruction_owner, session_instruction_owner_mob, session_instruction_target_generation, session_instruction_target_revision, session_instruction_target_effect, session_instruction_target_digest, session_instruction_target_bytes, session_instruction_effective_revision, session_instruction_effective_effect, session_instruction_effective_digest, session_instruction_effective_bytes, session_instruction_effective_generation, session_instruction_entry_sequence, session_activation_rows, session_activation_retired, session_activation_head_origin >>
+UnchangedFrame_6a9c96ef79a93fd9 == UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal, session_instruction_owner, session_instruction_owner_mob, session_instruction_target_generation, session_instruction_target_revision, session_instruction_target_effect, session_instruction_target_digest, session_instruction_target_bytes, session_instruction_effective_revision, session_instruction_effective_effect, session_instruction_effective_digest, session_instruction_effective_bytes, session_instruction_effective_generation, session_instruction_entry_sequence, session_activation_rows, session_activation_retired, session_activation_head_origin >>
+UnchangedFrame_70ebca5fcc9ceea7 == UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal, session_live_channel_id, session_live_interaction_id, session_live_transcript_reconciliation, session_live_provisional_transcript_present, session_live_assistant_final_chars, session_live_assistant_final_digest, session_live_assistant_terminal_observation, session_live_assistant_terminal_prefix_chars, session_live_assistant_terminal_prefix_digest, session_instruction_owner, session_instruction_owner_mob, session_instruction_target_generation, session_instruction_target_revision, session_instruction_target_effect, session_instruction_target_digest, session_instruction_target_bytes, session_instruction_effective_revision, session_instruction_effective_effect, session_instruction_effective_digest, session_instruction_effective_bytes, session_instruction_effective_generation, session_instruction_entry_sequence, session_activation_rows, session_activation_retired, session_activation_head_origin >>
+UnchangedFrame_747e8ddbf95a8180 == UNCHANGED << session_first_turn_phase, session_lifecycle_terminal, session_live_channel_id, session_live_interaction_id, session_live_transcript_reconciliation, session_live_provisional_transcript_present, session_live_assistant_playback_response_id, session_live_assistant_playback_item_id, session_live_assistant_playback_content_index, session_live_assistant_final_chars, session_live_assistant_final_digest, session_live_assistant_terminal_observation, session_live_assistant_terminal_prefix_chars, session_live_assistant_terminal_prefix_digest, session_instruction_owner, session_instruction_owner_mob, session_instruction_target_generation, session_instruction_target_revision, session_instruction_target_effect, session_instruction_target_digest, session_instruction_target_bytes, session_instruction_effective_revision, session_instruction_effective_effect, session_instruction_effective_digest, session_instruction_effective_bytes, session_instruction_effective_generation, session_instruction_entry_sequence, session_activation_rows, session_activation_retired, session_activation_head_origin >>
+UnchangedFrame_8496f1a494f4dd2c == UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal, session_live_channel_id, session_live_interaction_id, session_live_transcript_reconciliation, session_live_provisional_transcript_present, session_live_assistant_playback_response_id, session_live_assistant_playback_item_id, session_live_assistant_playback_content_index, session_live_assistant_final_chars, session_live_assistant_final_digest, session_live_assistant_terminal_observation, session_live_assistant_terminal_prefix_chars, session_live_assistant_terminal_prefix_digest, session_instruction_owner_mob, session_instruction_effective_revision, session_instruction_effective_effect, session_instruction_effective_digest, session_instruction_effective_bytes, session_instruction_effective_generation, session_instruction_entry_sequence, session_activation_rows, session_activation_retired, session_activation_head_origin >>
+UnchangedFrame_8941b7cedeafec51 == UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal, session_live_channel_id, session_live_interaction_id, session_live_transcript_reconciliation, session_live_provisional_transcript_present, session_live_assistant_playback_response_id, session_live_assistant_playback_item_id, session_live_assistant_playback_content_index, session_live_assistant_final_chars, session_live_assistant_final_digest, session_live_assistant_terminal_observation, session_live_assistant_terminal_prefix_chars, session_live_assistant_terminal_prefix_digest, session_instruction_owner, session_instruction_owner_mob, session_instruction_target_generation, session_instruction_target_revision, session_instruction_target_effect, session_instruction_target_digest, session_instruction_target_bytes, session_instruction_effective_revision, session_instruction_effective_effect, session_instruction_effective_digest, session_instruction_effective_bytes, session_instruction_effective_generation, session_instruction_entry_sequence, session_activation_rows, session_activation_head_origin >>
+UnchangedFrame_92d26318e93e2c8b == UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal, session_live_channel_id, session_live_interaction_id, session_live_transcript_reconciliation, session_live_assistant_playback_response_id, session_live_assistant_playback_item_id, session_live_assistant_playback_content_index, session_live_assistant_final_chars, session_live_assistant_final_digest, session_live_assistant_terminal_observation, session_live_assistant_terminal_prefix_chars, session_live_assistant_terminal_prefix_digest, session_instruction_owner, session_instruction_owner_mob, session_instruction_target_generation, session_instruction_target_revision, session_instruction_target_effect, session_instruction_target_digest, session_instruction_target_bytes, session_instruction_effective_revision, session_instruction_effective_effect, session_instruction_effective_digest, session_instruction_effective_bytes, session_instruction_effective_generation, session_instruction_entry_sequence, session_activation_rows, session_activation_retired, session_activation_head_origin >>
+UnchangedFrame_9cfb267baa486f98 == UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal, session_live_channel_id, session_live_interaction_id, session_live_transcript_reconciliation, session_live_provisional_transcript_present, session_live_assistant_playback_response_id, session_live_assistant_playback_item_id, session_live_assistant_playback_content_index, session_live_assistant_final_chars, session_live_assistant_final_digest, session_live_assistant_terminal_observation, session_live_assistant_terminal_prefix_chars, session_live_assistant_terminal_prefix_digest, session_instruction_owner, session_instruction_owner_mob, session_instruction_target_generation, session_instruction_target_revision, session_instruction_target_effect, session_instruction_target_digest, session_instruction_target_bytes, session_instruction_effective_revision, session_instruction_effective_effect, session_instruction_effective_digest, session_instruction_effective_bytes, session_instruction_effective_generation, session_activation_rows, session_activation_retired, session_activation_head_origin >>
+UnchangedFrame_a191bdb127527008 == UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal, session_live_channel_id, session_live_interaction_id, session_live_transcript_reconciliation, session_live_provisional_transcript_present, session_live_assistant_playback_response_id, session_live_assistant_playback_item_id, session_live_assistant_playback_content_index, session_live_assistant_final_chars, session_live_assistant_final_digest, session_live_assistant_terminal_observation, session_live_assistant_terminal_prefix_chars, session_live_assistant_terminal_prefix_digest, session_instruction_owner, session_instruction_owner_mob, session_instruction_target_generation, session_instruction_target_revision, session_instruction_target_effect, session_instruction_target_digest, session_instruction_target_bytes, session_instruction_effective_revision, session_instruction_effective_effect, session_instruction_effective_digest, session_instruction_effective_bytes, session_instruction_effective_generation, session_instruction_entry_sequence, session_activation_rows, session_activation_retired, session_activation_head_origin >>
+UnchangedFrame_a2d3fb4f11d5bff9 == UNCHANGED << session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal, session_live_channel_id, session_live_interaction_id, session_live_transcript_reconciliation, session_live_provisional_transcript_present, session_live_assistant_playback_response_id, session_live_assistant_playback_item_id, session_live_assistant_playback_content_index, session_live_assistant_final_chars, session_live_assistant_final_digest, session_live_assistant_terminal_observation, session_live_assistant_terminal_prefix_chars, session_live_assistant_terminal_prefix_digest, session_instruction_owner, session_instruction_owner_mob, session_instruction_target_generation, session_instruction_target_revision, session_instruction_target_effect, session_instruction_target_digest, session_instruction_target_bytes, session_instruction_effective_revision, session_instruction_effective_effect, session_instruction_effective_digest, session_instruction_effective_bytes, session_instruction_effective_generation, session_instruction_entry_sequence, session_activation_rows, session_activation_retired, session_activation_head_origin >>
+UnchangedFrame_b58404755dfafd89 == UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal, session_live_channel_id, session_live_interaction_id, session_live_transcript_reconciliation, session_live_provisional_transcript_present, session_live_assistant_playback_response_id, session_live_assistant_playback_item_id, session_live_assistant_playback_content_index, session_live_assistant_final_chars, session_live_assistant_final_digest, session_live_assistant_terminal_observation, session_live_assistant_terminal_prefix_chars, session_live_assistant_terminal_prefix_digest, session_instruction_target_revision, session_instruction_target_effect, session_instruction_target_digest, session_instruction_target_bytes, session_instruction_effective_revision, session_instruction_effective_effect, session_instruction_effective_digest, session_instruction_effective_bytes, session_instruction_effective_generation, session_instruction_entry_sequence, session_activation_rows, session_activation_retired, session_activation_head_origin >>
+UnchangedFrame_b84cdca0230d8d69 == UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal, session_live_channel_id, session_live_interaction_id, session_live_transcript_reconciliation, session_live_provisional_transcript_present, session_live_assistant_playback_response_id, session_live_assistant_playback_item_id, session_live_assistant_playback_content_index, session_live_assistant_final_chars, session_live_assistant_final_digest, session_live_assistant_terminal_observation, session_live_assistant_terminal_prefix_chars, session_live_assistant_terminal_prefix_digest, session_activation_rows, session_activation_retired, session_activation_head_origin >>
+UnchangedFrame_b8d01ff667a8deea == UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal, session_live_channel_id, session_live_interaction_id, session_live_transcript_reconciliation, session_live_provisional_transcript_present, session_live_assistant_playback_response_id, session_live_assistant_playback_item_id, session_live_assistant_playback_content_index, session_live_assistant_final_chars, session_live_assistant_final_digest, session_live_assistant_terminal_observation, session_live_assistant_terminal_prefix_chars, session_live_assistant_terminal_prefix_digest, session_instruction_effective_revision, session_instruction_effective_effect, session_instruction_effective_digest, session_instruction_effective_bytes, session_instruction_effective_generation, session_instruction_entry_sequence, session_activation_rows, session_activation_retired, session_activation_head_origin >>
+UnchangedFrame_b90cb080a784de84 == UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal, session_live_channel_id, session_live_interaction_id, session_live_transcript_reconciliation, session_live_provisional_transcript_present, session_live_assistant_terminal_observation, session_live_assistant_terminal_prefix_chars, session_live_assistant_terminal_prefix_digest, session_instruction_owner, session_instruction_owner_mob, session_instruction_target_generation, session_instruction_target_revision, session_instruction_target_effect, session_instruction_target_digest, session_instruction_target_bytes, session_instruction_effective_revision, session_instruction_effective_effect, session_instruction_effective_digest, session_instruction_effective_bytes, session_instruction_effective_generation, session_instruction_entry_sequence, session_activation_rows, session_activation_retired, session_activation_head_origin >>
+UnchangedFrame_f550e723d81d1492 == UNCHANGED << session_first_turn_phase, session_pending_tool_results_count, session_lifecycle_terminal, session_live_channel_id, session_live_interaction_id, session_live_transcript_reconciliation, session_live_provisional_transcript_present, session_live_assistant_playback_response_id, session_live_assistant_playback_item_id, session_live_assistant_playback_content_index, session_live_assistant_final_chars, session_live_assistant_final_digest, session_live_assistant_terminal_observation, session_live_assistant_terminal_prefix_chars, session_live_assistant_terminal_prefix_digest, session_instruction_owner, session_instruction_owner_mob, session_instruction_target_generation, session_instruction_target_revision, session_instruction_target_effect, session_instruction_target_digest, session_instruction_target_bytes, session_instruction_effective_revision, session_instruction_effective_effect, session_instruction_effective_digest, session_instruction_effective_bytes, session_instruction_effective_generation, session_instruction_entry_sequence, session_activation_rows, session_activation_retired, session_activation_head_origin >>
+UnchangedFrame_f6d3b7c07badfaa9 == UNCHANGED << session_first_turn_phase, session_pending_initial_prompt_present, session_pending_tool_results_count, session_lifecycle_terminal, session_live_channel_id, session_live_interaction_id, session_live_transcript_reconciliation, session_live_provisional_transcript_present, session_live_assistant_playback_response_id, session_live_assistant_playback_item_id, session_live_assistant_playback_content_index, session_live_assistant_terminal_observation, session_live_assistant_terminal_prefix_chars, session_live_assistant_terminal_prefix_digest, session_instruction_owner, session_instruction_owner_mob, session_instruction_target_generation, session_instruction_target_revision, session_instruction_target_effect, session_instruction_target_digest, session_instruction_target_bytes, session_instruction_effective_revision, session_instruction_effective_effect, session_instruction_effective_digest, session_instruction_effective_bytes, session_instruction_effective_generation, session_instruction_entry_sequence, session_activation_rows, session_activation_retired, session_activation_head_origin >>
 
 MarkSessionInitialTurnPendingInactiveOrPending(session_id) ==
     /\ phase = "Ready"
@@ -145,7 +158,7 @@ MarkSessionInitialTurnPendingInactiveOrPending(session_id) ==
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
     /\ session_first_turn_phase' = MapSet(session_first_turn_phase, session_id, "Pending")
-    /\ UnchangedFrame_c525efbe4aa2156c
+    /\ UnchangedFrame_a2d3fb4f11d5bff9
 
 
 MarkSessionInitialTurnPendingConsumed(session_id) ==
@@ -153,7 +166,7 @@ MarkSessionInitialTurnPendingConsumed(session_id) ==
     /\ ((session_id \in DOMAIN session_first_turn_phase) /\ ((session_first_turn_phase)[session_id] = "Consumed"))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44bcbd08434cac9f
+    /\ UnchangedFrame_a191bdb127527008
 
 
 StartSessionInitialTurnPending(session_id) ==
@@ -162,7 +175,7 @@ StartSessionInitialTurnPending(session_id) ==
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
     /\ session_first_turn_phase' = MapSet(session_first_turn_phase, session_id, "Consumed")
-    /\ UnchangedFrame_c525efbe4aa2156c
+    /\ UnchangedFrame_a2d3fb4f11d5bff9
 
 
 StartSessionInitialTurnInactive(session_id) ==
@@ -170,7 +183,7 @@ StartSessionInitialTurnInactive(session_id) ==
     /\ ((session_id \in DOMAIN session_first_turn_phase) /\ ((session_first_turn_phase)[session_id] = "Inactive"))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44bcbd08434cac9f
+    /\ UnchangedFrame_a191bdb127527008
 
 
 StartSessionInitialTurnConsumed(session_id) ==
@@ -178,7 +191,7 @@ StartSessionInitialTurnConsumed(session_id) ==
     /\ ((session_id \in DOMAIN session_first_turn_phase) /\ ((session_first_turn_phase)[session_id] = "Consumed"))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44bcbd08434cac9f
+    /\ UnchangedFrame_a191bdb127527008
 
 
 ResolveSessionFirstTurnOverridesAllowed(session_id) ==
@@ -186,7 +199,7 @@ ResolveSessionFirstTurnOverridesAllowed(session_id) ==
     /\ ((session_id \in DOMAIN session_first_turn_phase) /\ phase_allows_initial_turn_overrides((session_first_turn_phase)[session_id]))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44bcbd08434cac9f
+    /\ UnchangedFrame_a191bdb127527008
 
 
 ResolveSessionFirstTurnOverridesDenied(session_id) ==
@@ -194,7 +207,7 @@ ResolveSessionFirstTurnOverridesDenied(session_id) ==
     /\ ((session_id \in DOMAIN session_first_turn_phase) /\ (phase_allows_initial_turn_overrides((session_first_turn_phase)[session_id]) = FALSE))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44bcbd08434cac9f
+    /\ UnchangedFrame_a191bdb127527008
 
 
 StageSessionInitialPromptStore(session_id, prompt_has_content) ==
@@ -203,7 +216,7 @@ StageSessionInitialPromptStore(session_id, prompt_has_content) ==
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
     /\ session_pending_initial_prompt_present' = MapSet(session_pending_initial_prompt_present, session_id, TRUE)
-    /\ UnchangedFrame_5e494352ab2e7e45
+    /\ UnchangedFrame_f550e723d81d1492
 
 
 StageSessionInitialPromptClear(session_id, prompt_has_content) ==
@@ -212,7 +225,7 @@ StageSessionInitialPromptClear(session_id, prompt_has_content) ==
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
     /\ session_pending_initial_prompt_present' = MapSet(session_pending_initial_prompt_present, session_id, FALSE)
-    /\ UnchangedFrame_5e494352ab2e7e45
+    /\ UnchangedFrame_f550e723d81d1492
 
 
 StageSessionToolResults(session_id, result_count) ==
@@ -221,7 +234,7 @@ StageSessionToolResults(session_id, result_count) ==
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
     /\ session_pending_tool_results_count' = MapSet(session_pending_tool_results_count, session_id, result_count)
-    /\ UnchangedFrame_4f5d9ea655f1ee99
+    /\ UnchangedFrame_642685be5fffced6
 
 
 ConsumeSessionDeferredInputsPending(session_id) ==
@@ -232,7 +245,7 @@ ConsumeSessionDeferredInputsPending(session_id) ==
     /\ session_first_turn_phase' = MapSet(session_first_turn_phase, session_id, "Consumed")
     /\ session_pending_initial_prompt_present' = MapSet(session_pending_initial_prompt_present, session_id, FALSE)
     /\ session_pending_tool_results_count' = MapSet(session_pending_tool_results_count, session_id, 0)
-    /\ UnchangedFrame_3a7a9ba51b225cf4
+    /\ UnchangedFrame_5413dce9fac975b1
 
 
 ConsumeSessionDeferredInputsInactive(session_id) ==
@@ -242,7 +255,7 @@ ConsumeSessionDeferredInputsInactive(session_id) ==
     /\ model_step_count' = model_step_count + 1
     /\ session_pending_initial_prompt_present' = MapSet(session_pending_initial_prompt_present, session_id, FALSE)
     /\ session_pending_tool_results_count' = MapSet(session_pending_tool_results_count, session_id, 0)
-    /\ UnchangedFrame_ff1eba536507aee7
+    /\ UnchangedFrame_747e8ddbf95a8180
 
 
 ConsumeSessionDeferredInputsConsumed(session_id) ==
@@ -252,7 +265,7 @@ ConsumeSessionDeferredInputsConsumed(session_id) ==
     /\ model_step_count' = model_step_count + 1
     /\ session_pending_initial_prompt_present' = MapSet(session_pending_initial_prompt_present, session_id, FALSE)
     /\ session_pending_tool_results_count' = MapSet(session_pending_tool_results_count, session_id, 0)
-    /\ UnchangedFrame_ff1eba536507aee7
+    /\ UnchangedFrame_747e8ddbf95a8180
 
 
 RestoreSessionConsumedInputs(session_id, restore_first_turn_pending, pending_initial_prompt_present, pending_tool_result_message_count) ==
@@ -263,7 +276,7 @@ RestoreSessionConsumedInputs(session_id, restore_first_turn_pending, pending_ini
     /\ session_first_turn_phase' = MapSet(session_first_turn_phase, session_id, "Pending")
     /\ session_pending_initial_prompt_present' = MapSet(session_pending_initial_prompt_present, session_id, pending_initial_prompt_present)
     /\ session_pending_tool_results_count' = MapSet(session_pending_tool_results_count, session_id, pending_tool_result_message_count)
-    /\ UnchangedFrame_3a7a9ba51b225cf4
+    /\ UnchangedFrame_5413dce9fac975b1
 
 
 RestoreSessionConsumedInputsNoPhaseRollback(session_id, restore_first_turn_pending, pending_initial_prompt_present, pending_tool_result_message_count) ==
@@ -273,7 +286,7 @@ RestoreSessionConsumedInputsNoPhaseRollback(session_id, restore_first_turn_pendi
     /\ model_step_count' = model_step_count + 1
     /\ session_pending_initial_prompt_present' = MapSet(session_pending_initial_prompt_present, session_id, pending_initial_prompt_present)
     /\ session_pending_tool_results_count' = MapSet(session_pending_tool_results_count, session_id, pending_tool_result_message_count)
-    /\ UnchangedFrame_ff1eba536507aee7
+    /\ UnchangedFrame_747e8ddbf95a8180
 
 
 RecoverSessionFirstTurnPhase(session_id, arg_phase, pending_initial_prompt_present, pending_tool_result_message_count) ==
@@ -284,7 +297,7 @@ RecoverSessionFirstTurnPhase(session_id, arg_phase, pending_initial_prompt_prese
     /\ session_first_turn_phase' = MapSet(session_first_turn_phase, session_id, arg_phase)
     /\ session_pending_initial_prompt_present' = MapSet(session_pending_initial_prompt_present, session_id, pending_initial_prompt_present)
     /\ session_pending_tool_results_count' = MapSet(session_pending_tool_results_count, session_id, pending_tool_result_message_count)
-    /\ UnchangedFrame_3a7a9ba51b225cf4
+    /\ UnchangedFrame_5413dce9fac975b1
 
 
 ResolveRealtimeItemObservedDiscardedAssistant(role, response_discarded) ==
@@ -292,7 +305,7 @@ ResolveRealtimeItemObservedDiscardedAssistant(role, response_discarded) ==
     /\ ((role = "Assistant") /\ response_discarded)
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44bcbd08434cac9f
+    /\ UnchangedFrame_a191bdb127527008
 
 
 ResolveRealtimeItemObservedPresent(role, response_discarded) ==
@@ -300,14 +313,14 @@ ResolveRealtimeItemObservedPresent(role, response_discarded) ==
     /\ (IF (role # "Assistant") THEN TRUE ELSE (response_discarded = FALSE))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44bcbd08434cac9f
+    /\ UnchangedFrame_a191bdb127527008
 
 
 ResolveRealtimeItemSkipped ==
     /\ phase = "Ready"
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44bcbd08434cac9f
+    /\ UnchangedFrame_a191bdb127527008
 
 
 ResolveRealtimeUserTranscriptFinalEmpty(text_present, segment_empty, segment_matches) ==
@@ -315,7 +328,7 @@ ResolveRealtimeUserTranscriptFinalEmpty(text_present, segment_empty, segment_mat
     /\ (text_present = FALSE)
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44bcbd08434cac9f
+    /\ UnchangedFrame_a191bdb127527008
 
 
 ResolveRealtimeUserTranscriptFinalStore(text_present, segment_empty, segment_matches) ==
@@ -323,7 +336,7 @@ ResolveRealtimeUserTranscriptFinalStore(text_present, segment_empty, segment_mat
     /\ (text_present /\ segment_empty)
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44bcbd08434cac9f
+    /\ UnchangedFrame_a191bdb127527008
 
 
 ResolveRealtimeUserTranscriptFinalReplayOrConflict(text_present, segment_empty, segment_matches) ==
@@ -331,7 +344,7 @@ ResolveRealtimeUserTranscriptFinalReplayOrConflict(text_present, segment_empty, 
     /\ (text_present /\ (segment_empty = FALSE))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44bcbd08434cac9f
+    /\ UnchangedFrame_a191bdb127527008
 
 
 ResolveRealtimeUserContentIdentityInvalid(identity_fields_valid, key_tombstoned, predecessor_materialized, existing_identity_present, existing_payload_matches, target_item_id_available, reducer_commit_proof_required, reducer_commit_proof_present) ==
@@ -339,7 +352,7 @@ ResolveRealtimeUserContentIdentityInvalid(identity_fields_valid, key_tombstoned,
     /\ (IF (identity_fields_valid = FALSE) THEN TRUE ELSE ((key_tombstoned = FALSE) /\ predecessor_materialized /\ (existing_identity_present = FALSE) /\ target_item_id_available /\ reducer_commit_proof_required /\ (reducer_commit_proof_present = FALSE)))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44bcbd08434cac9f
+    /\ UnchangedFrame_a191bdb127527008
 
 
 ResolveRealtimeUserContentIdentityUnmaterializedPredecessor(identity_fields_valid, key_tombstoned, predecessor_materialized, existing_identity_present, existing_payload_matches, target_item_id_available, reducer_commit_proof_required, reducer_commit_proof_present) ==
@@ -347,7 +360,7 @@ ResolveRealtimeUserContentIdentityUnmaterializedPredecessor(identity_fields_vali
     /\ (identity_fields_valid /\ (key_tombstoned = FALSE) /\ (predecessor_materialized = FALSE))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44bcbd08434cac9f
+    /\ UnchangedFrame_a191bdb127527008
 
 
 ResolveRealtimeUserContentIdentityConflict(identity_fields_valid, key_tombstoned, predecessor_materialized, existing_identity_present, existing_payload_matches, target_item_id_available, reducer_commit_proof_required, reducer_commit_proof_present) ==
@@ -355,7 +368,7 @@ ResolveRealtimeUserContentIdentityConflict(identity_fields_valid, key_tombstoned
     /\ (identity_fields_valid /\ (IF key_tombstoned THEN TRUE ELSE (predecessor_materialized /\ (IF (existing_identity_present /\ (existing_payload_matches = FALSE)) THEN TRUE ELSE ((existing_identity_present = FALSE) /\ (target_item_id_available = FALSE))))))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44bcbd08434cac9f
+    /\ UnchangedFrame_a191bdb127527008
 
 
 ResolveRealtimeUserContentIdentityReplay(identity_fields_valid, key_tombstoned, predecessor_materialized, existing_identity_present, existing_payload_matches, target_item_id_available, reducer_commit_proof_required, reducer_commit_proof_present) ==
@@ -363,7 +376,7 @@ ResolveRealtimeUserContentIdentityReplay(identity_fields_valid, key_tombstoned, 
     /\ (identity_fields_valid /\ (key_tombstoned = FALSE) /\ predecessor_materialized /\ existing_identity_present /\ existing_payload_matches)
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44bcbd08434cac9f
+    /\ UnchangedFrame_a191bdb127527008
 
 
 ResolveRealtimeUserContentIdentityCommitNew(identity_fields_valid, key_tombstoned, predecessor_materialized, existing_identity_present, existing_payload_matches, target_item_id_available, reducer_commit_proof_required, reducer_commit_proof_present) ==
@@ -371,7 +384,7 @@ ResolveRealtimeUserContentIdentityCommitNew(identity_fields_valid, key_tombstone
     /\ (identity_fields_valid /\ (key_tombstoned = FALSE) /\ predecessor_materialized /\ (existing_identity_present = FALSE) /\ target_item_id_available /\ (IF (reducer_commit_proof_required = FALSE) THEN TRUE ELSE reducer_commit_proof_present))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44bcbd08434cac9f
+    /\ UnchangedFrame_a191bdb127527008
 
 
 ResolveRealtimeUserContentBlobStageNew(pending_present, pending_matches_request) ==
@@ -379,7 +392,7 @@ ResolveRealtimeUserContentBlobStageNew(pending_present, pending_matches_request)
     /\ (pending_present = FALSE)
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44bcbd08434cac9f
+    /\ UnchangedFrame_a191bdb127527008
 
 
 ResolveRealtimeUserContentBlobStageReuseExact(pending_present, pending_matches_request) ==
@@ -387,7 +400,7 @@ ResolveRealtimeUserContentBlobStageReuseExact(pending_present, pending_matches_r
     /\ (pending_present /\ pending_matches_request)
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44bcbd08434cac9f
+    /\ UnchangedFrame_a191bdb127527008
 
 
 ResolveRealtimeUserContentBlobStageRejectOccupied(pending_present, pending_matches_request) ==
@@ -395,7 +408,7 @@ ResolveRealtimeUserContentBlobStageRejectOccupied(pending_present, pending_match
     /\ (pending_present /\ (pending_matches_request = FALSE))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44bcbd08434cac9f
+    /\ UnchangedFrame_a191bdb127527008
 
 
 ResolveRealtimeUserContentBlobRecoveryNone(pending_present, request_matches_pending, pending_blob_valid) ==
@@ -403,7 +416,7 @@ ResolveRealtimeUserContentBlobRecoveryNone(pending_present, request_matches_pend
     /\ (pending_present = FALSE)
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44bcbd08434cac9f
+    /\ UnchangedFrame_a191bdb127527008
 
 
 ResolveRealtimeUserContentBlobRecoveryExact(pending_present, request_matches_pending, pending_blob_valid) ==
@@ -411,7 +424,7 @@ ResolveRealtimeUserContentBlobRecoveryExact(pending_present, request_matches_pen
     /\ (pending_present /\ request_matches_pending)
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44bcbd08434cac9f
+    /\ UnchangedFrame_a191bdb127527008
 
 
 ResolveRealtimeUserContentBlobRecoveryCommitVerified(pending_present, request_matches_pending, pending_blob_valid) ==
@@ -419,7 +432,7 @@ ResolveRealtimeUserContentBlobRecoveryCommitVerified(pending_present, request_ma
     /\ (pending_present /\ (request_matches_pending = FALSE) /\ pending_blob_valid)
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44bcbd08434cac9f
+    /\ UnchangedFrame_a191bdb127527008
 
 
 ResolveRealtimeUserContentBlobRecoveryClearInvalid(pending_present, request_matches_pending, pending_blob_valid) ==
@@ -427,7 +440,7 @@ ResolveRealtimeUserContentBlobRecoveryClearInvalid(pending_present, request_matc
     /\ (pending_present /\ (request_matches_pending = FALSE) /\ (pending_blob_valid = FALSE))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44bcbd08434cac9f
+    /\ UnchangedFrame_a191bdb127527008
 
 
 ResolveRealtimeUserContentBlobFinalizeNone(pending_present, pending_matches_committed) ==
@@ -435,7 +448,7 @@ ResolveRealtimeUserContentBlobFinalizeNone(pending_present, pending_matches_comm
     /\ (pending_present = FALSE)
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44bcbd08434cac9f
+    /\ UnchangedFrame_a191bdb127527008
 
 
 ResolveRealtimeUserContentBlobFinalizeClearCommitted(pending_present, pending_matches_committed) ==
@@ -443,7 +456,7 @@ ResolveRealtimeUserContentBlobFinalizeClearCommitted(pending_present, pending_ma
     /\ (pending_present /\ pending_matches_committed)
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44bcbd08434cac9f
+    /\ UnchangedFrame_a191bdb127527008
 
 
 ResolveRealtimeUserContentBlobFinalizeRejectMismatch(pending_present, pending_matches_committed) ==
@@ -451,7 +464,7 @@ ResolveRealtimeUserContentBlobFinalizeRejectMismatch(pending_present, pending_ma
     /\ (pending_present /\ (pending_matches_committed = FALSE))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44bcbd08434cac9f
+    /\ UnchangedFrame_a191bdb127527008
 
 
 ResolveRealtimeUserContentFinalEmpty(content_present, segment_empty, segment_matches) ==
@@ -459,7 +472,7 @@ ResolveRealtimeUserContentFinalEmpty(content_present, segment_empty, segment_mat
     /\ (content_present = FALSE)
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44bcbd08434cac9f
+    /\ UnchangedFrame_a191bdb127527008
 
 
 ResolveRealtimeUserContentFinalStore(content_present, segment_empty, segment_matches) ==
@@ -467,7 +480,7 @@ ResolveRealtimeUserContentFinalStore(content_present, segment_empty, segment_mat
     /\ (content_present /\ segment_empty)
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44bcbd08434cac9f
+    /\ UnchangedFrame_a191bdb127527008
 
 
 ResolveRealtimeUserContentFinalReplayOrConflict(content_present, segment_empty, segment_matches) ==
@@ -475,7 +488,7 @@ ResolveRealtimeUserContentFinalReplayOrConflict(content_present, segment_empty, 
     /\ (content_present /\ (segment_empty = FALSE))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44bcbd08434cac9f
+    /\ UnchangedFrame_a191bdb127527008
 
 
 ResolveRealtimeAssistantDeltaInvalidOrDuplicate(response_id_valid, response_discarded, delta_id_present, delta_id_seen, item_has_text, current_lane, requested_lane, response_completed, text_after_write_present) ==
@@ -483,7 +496,7 @@ ResolveRealtimeAssistantDeltaInvalidOrDuplicate(response_id_valid, response_disc
     /\ (IF (response_id_valid = FALSE) THEN TRUE ELSE realtime_delta_is_duplicate(delta_id_present, delta_id_seen))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44bcbd08434cac9f
+    /\ UnchangedFrame_a191bdb127527008
 
 
 ResolveRealtimeAssistantDeltaDiscarded(response_id_valid, response_discarded, delta_id_present, delta_id_seen, item_has_text, current_lane, requested_lane, response_completed, text_after_write_present) ==
@@ -491,7 +504,7 @@ ResolveRealtimeAssistantDeltaDiscarded(response_id_valid, response_discarded, de
     /\ (response_id_valid /\ response_discarded)
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44bcbd08434cac9f
+    /\ UnchangedFrame_a191bdb127527008
 
 
 ResolveRealtimeAssistantDeltaLaneConflict(response_id_valid, response_discarded, delta_id_present, delta_id_seen, item_has_text, current_lane, requested_lane, response_completed, text_after_write_present) ==
@@ -499,7 +512,7 @@ ResolveRealtimeAssistantDeltaLaneConflict(response_id_valid, response_discarded,
     /\ (response_id_valid /\ (response_discarded = FALSE) /\ (realtime_delta_is_duplicate(delta_id_present, delta_id_seen) = FALSE) /\ (realtime_lane_accepts(item_has_text, current_lane, requested_lane) = FALSE))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44bcbd08434cac9f
+    /\ UnchangedFrame_a191bdb127527008
 
 
 ResolveRealtimeAssistantDeltaAccepted(response_id_valid, response_discarded, delta_id_present, delta_id_seen, item_has_text, current_lane, requested_lane, response_completed, text_after_write_present) ==
@@ -507,7 +520,7 @@ ResolveRealtimeAssistantDeltaAccepted(response_id_valid, response_discarded, del
     /\ (response_id_valid /\ (response_discarded = FALSE) /\ (realtime_delta_is_duplicate(delta_id_present, delta_id_seen) = FALSE) /\ realtime_lane_accepts(item_has_text, current_lane, requested_lane))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44bcbd08434cac9f
+    /\ UnchangedFrame_a191bdb127527008
 
 
 ResolveRealtimeAssistantReplacementInvalid(response_id_valid, response_discarded, item_materialized, item_has_text, current_lane, requested_lane, response_completed, text_after_replace_present) ==
@@ -515,7 +528,7 @@ ResolveRealtimeAssistantReplacementInvalid(response_id_valid, response_discarded
     /\ (response_id_valid = FALSE)
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44bcbd08434cac9f
+    /\ UnchangedFrame_a191bdb127527008
 
 
 ResolveRealtimeAssistantReplacementDiscarded(response_id_valid, response_discarded, item_materialized, item_has_text, current_lane, requested_lane, response_completed, text_after_replace_present) ==
@@ -523,7 +536,7 @@ ResolveRealtimeAssistantReplacementDiscarded(response_id_valid, response_discard
     /\ (response_id_valid /\ response_discarded)
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44bcbd08434cac9f
+    /\ UnchangedFrame_a191bdb127527008
 
 
 ResolveRealtimeAssistantReplacementLocked(response_id_valid, response_discarded, item_materialized, item_has_text, current_lane, requested_lane, response_completed, text_after_replace_present) ==
@@ -531,7 +544,7 @@ ResolveRealtimeAssistantReplacementLocked(response_id_valid, response_discarded,
     /\ (response_id_valid /\ (response_discarded = FALSE) /\ item_materialized)
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44bcbd08434cac9f
+    /\ UnchangedFrame_a191bdb127527008
 
 
 ResolveRealtimeAssistantReplacementLaneConflict(response_id_valid, response_discarded, item_materialized, item_has_text, current_lane, requested_lane, response_completed, text_after_replace_present) ==
@@ -539,7 +552,7 @@ ResolveRealtimeAssistantReplacementLaneConflict(response_id_valid, response_disc
     /\ (response_id_valid /\ (response_discarded = FALSE) /\ (item_materialized = FALSE) /\ (realtime_lane_accepts(item_has_text, current_lane, requested_lane) = FALSE))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44bcbd08434cac9f
+    /\ UnchangedFrame_a191bdb127527008
 
 
 ResolveRealtimeAssistantReplacementAccepted(response_id_valid, response_discarded, item_materialized, item_has_text, current_lane, requested_lane, response_completed, text_after_replace_present) ==
@@ -547,7 +560,7 @@ ResolveRealtimeAssistantReplacementAccepted(response_id_valid, response_discarde
     /\ (response_id_valid /\ (response_discarded = FALSE) /\ (item_materialized = FALSE) /\ realtime_lane_accepts(item_has_text, current_lane, requested_lane))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44bcbd08434cac9f
+    /\ UnchangedFrame_a191bdb127527008
 
 
 ResolveRealtimeAssistantTurnCompletedInvalid(response_id_valid, response_discarded, stop_reason) ==
@@ -555,7 +568,7 @@ ResolveRealtimeAssistantTurnCompletedInvalid(response_id_valid, response_discard
     /\ (response_id_valid = FALSE)
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44bcbd08434cac9f
+    /\ UnchangedFrame_a191bdb127527008
 
 
 ResolveRealtimeAssistantTurnCompletedDiscard(response_id_valid, response_discarded, stop_reason) ==
@@ -563,7 +576,7 @@ ResolveRealtimeAssistantTurnCompletedDiscard(response_id_valid, response_discard
     /\ (response_id_valid /\ (IF response_discarded THEN TRUE ELSE realtime_stop_reason_discards(stop_reason)))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44bcbd08434cac9f
+    /\ UnchangedFrame_a191bdb127527008
 
 
 ResolveRealtimeAssistantTurnCompletedToolUse(response_id_valid, response_discarded, stop_reason) ==
@@ -571,7 +584,7 @@ ResolveRealtimeAssistantTurnCompletedToolUse(response_id_valid, response_discard
     /\ (response_id_valid /\ (response_discarded = FALSE) /\ realtime_stop_reason_removes_completion(stop_reason))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44bcbd08434cac9f
+    /\ UnchangedFrame_a191bdb127527008
 
 
 ResolveRealtimeAssistantTurnCompletedRecord(response_id_valid, response_discarded, stop_reason) ==
@@ -579,7 +592,7 @@ ResolveRealtimeAssistantTurnCompletedRecord(response_id_valid, response_discarde
     /\ (response_id_valid /\ (response_discarded = FALSE) /\ realtime_stop_reason_records_completion(stop_reason))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44bcbd08434cac9f
+    /\ UnchangedFrame_a191bdb127527008
 
 
 ResolveRealtimeAssistantPlaybackSnapshot(target_matches, snapshot_present, response_discarded, item_materialized, requested_lane) ==
@@ -587,7 +600,7 @@ ResolveRealtimeAssistantPlaybackSnapshot(target_matches, snapshot_present, respo
     /\ (target_matches /\ snapshot_present /\ (response_discarded = FALSE) /\ (item_materialized = FALSE) /\ (IF (requested_lane = "Spoken") THEN TRUE ELSE (requested_lane = "SpokenUnmeasured")))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44bcbd08434cac9f
+    /\ UnchangedFrame_a191bdb127527008
 
 
 ResolveRealtimeAssistantTurnInterruptedInvalid(response_id_valid) ==
@@ -595,7 +608,7 @@ ResolveRealtimeAssistantTurnInterruptedInvalid(response_id_valid) ==
     /\ (response_id_valid = FALSE)
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44bcbd08434cac9f
+    /\ UnchangedFrame_a191bdb127527008
 
 
 ResolveRealtimeAssistantTurnInterruptedValid(response_id_valid) ==
@@ -603,7 +616,7 @@ ResolveRealtimeAssistantTurnInterruptedValid(response_id_valid) ==
     /\ response_id_valid
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44bcbd08434cac9f
+    /\ UnchangedFrame_a191bdb127527008
 
 
 ResolveRealtimeMaterializeAlreadyDone(item_materialized, predecessor_materialized, item_skipped, item_ready, item_text_present, role, response_id_present, completion_present, completion_usage_consumed) ==
@@ -611,7 +624,7 @@ ResolveRealtimeMaterializeAlreadyDone(item_materialized, predecessor_materialize
     /\ item_materialized
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44bcbd08434cac9f
+    /\ UnchangedFrame_a191bdb127527008
 
 
 ResolveRealtimeMaterializeWaitForPredecessor(item_materialized, predecessor_materialized, item_skipped, item_ready, item_text_present, role, response_id_present, completion_present, completion_usage_consumed) ==
@@ -619,7 +632,7 @@ ResolveRealtimeMaterializeWaitForPredecessor(item_materialized, predecessor_mate
     /\ ((item_materialized = FALSE) /\ (predecessor_materialized = FALSE))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44bcbd08434cac9f
+    /\ UnchangedFrame_a191bdb127527008
 
 
 ResolveRealtimeMaterializeSkipped(item_materialized, predecessor_materialized, item_skipped, item_ready, item_text_present, role, response_id_present, completion_present, completion_usage_consumed) ==
@@ -627,7 +640,7 @@ ResolveRealtimeMaterializeSkipped(item_materialized, predecessor_materialized, i
     /\ ((item_materialized = FALSE) /\ predecessor_materialized /\ item_skipped)
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44bcbd08434cac9f
+    /\ UnchangedFrame_a191bdb127527008
 
 
 ResolveRealtimeMaterializeWaitForReadyText(item_materialized, predecessor_materialized, item_skipped, item_ready, item_text_present, role, response_id_present, completion_present, completion_usage_consumed) ==
@@ -635,7 +648,7 @@ ResolveRealtimeMaterializeWaitForReadyText(item_materialized, predecessor_materi
     /\ ((item_materialized = FALSE) /\ predecessor_materialized /\ (item_skipped = FALSE) /\ (IF (item_ready = FALSE) THEN TRUE ELSE (item_text_present = FALSE)))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44bcbd08434cac9f
+    /\ UnchangedFrame_a191bdb127527008
 
 
 ResolveRealtimeMaterializeUser(item_materialized, predecessor_materialized, item_skipped, item_ready, item_text_present, role, response_id_present, completion_present, completion_usage_consumed) ==
@@ -643,7 +656,7 @@ ResolveRealtimeMaterializeUser(item_materialized, predecessor_materialized, item
     /\ ((item_materialized = FALSE) /\ predecessor_materialized /\ (item_skipped = FALSE) /\ item_ready /\ item_text_present /\ (role = "User"))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44bcbd08434cac9f
+    /\ UnchangedFrame_a191bdb127527008
 
 
 ResolveRealtimeMaterializeAssistant(item_materialized, predecessor_materialized, item_skipped, item_ready, item_text_present, role, response_id_present, completion_present, completion_usage_consumed) ==
@@ -651,7 +664,7 @@ ResolveRealtimeMaterializeAssistant(item_materialized, predecessor_materialized,
     /\ ((item_materialized = FALSE) /\ predecessor_materialized /\ (item_skipped = FALSE) /\ item_ready /\ item_text_present /\ (role = "Assistant") /\ response_id_present /\ completion_present)
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44bcbd08434cac9f
+    /\ UnchangedFrame_a191bdb127527008
 
 
 ResolveRealtimeMaterializeAssistantMissingCompletion(item_materialized, predecessor_materialized, item_skipped, item_ready, item_text_present, role, response_id_present, completion_present, completion_usage_consumed) ==
@@ -659,7 +672,7 @@ ResolveRealtimeMaterializeAssistantMissingCompletion(item_materialized, predeces
     /\ ((item_materialized = FALSE) /\ predecessor_materialized /\ (item_skipped = FALSE) /\ item_ready /\ item_text_present /\ (role = "Assistant") /\ (IF (response_id_present = FALSE) THEN TRUE ELSE (completion_present = FALSE)))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44bcbd08434cac9f
+    /\ UnchangedFrame_a191bdb127527008
 
 
 AuthorizeRestoreRealtimeTranscriptState(item_count, first_seen_count, first_seen_unique_count, every_item_has_order_entry, every_order_entry_has_item, all_materialized_predecessor_references_exist, no_self_predecessor_references, causal_graph_acyclic, all_materialized_items_have_materialized_ancestry, all_identity_fields_valid, all_user_content_identity_keys_match, all_user_content_identity_fields_valid, all_user_content_identity_item_ids_unique, all_user_content_identities_reference_materialized_user_items, all_user_content_tombstones_valid, user_content_identities_and_tombstones_disjoint, pending_user_content_blob_fields_valid, pending_user_content_blob_uncommitted, all_delta_ids_valid, all_completion_response_ids_valid, all_discarded_response_ids_valid, all_materialized_items_were_ready_or_skipped, all_assistant_items_have_response_unless_skipped, all_ready_assistant_items_have_completion_or_are_skipped, all_materialized_assistant_completions_consumed, all_completed_assistant_text_items_are_ready_or_materialized_or_skipped, all_discarded_assistant_items_are_skipped_or_materialized) ==
@@ -667,7 +680,7 @@ AuthorizeRestoreRealtimeTranscriptState(item_count, first_seen_count, first_seen
     /\ ((item_count = first_seen_count) /\ (first_seen_count = first_seen_unique_count) /\ every_item_has_order_entry /\ every_order_entry_has_item /\ all_materialized_predecessor_references_exist /\ no_self_predecessor_references /\ causal_graph_acyclic /\ all_materialized_items_have_materialized_ancestry /\ all_identity_fields_valid /\ all_user_content_identity_keys_match /\ all_user_content_identity_fields_valid /\ all_user_content_identity_item_ids_unique /\ all_user_content_identities_reference_materialized_user_items /\ all_user_content_tombstones_valid /\ user_content_identities_and_tombstones_disjoint /\ pending_user_content_blob_fields_valid /\ pending_user_content_blob_uncommitted /\ all_delta_ids_valid /\ all_completion_response_ids_valid /\ all_discarded_response_ids_valid /\ all_materialized_items_were_ready_or_skipped /\ all_assistant_items_have_response_unless_skipped /\ all_ready_assistant_items_have_completion_or_are_skipped /\ all_materialized_assistant_completions_consumed /\ all_completed_assistant_text_items_are_ready_or_materialized_or_skipped /\ all_discarded_assistant_items_are_skipped_or_materialized)
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44bcbd08434cac9f
+    /\ UnchangedFrame_a191bdb127527008
 
 
 AdmitLiveInteractionTranscript(session_id, channel_id, interaction_id) ==
@@ -679,7 +692,7 @@ AdmitLiveInteractionTranscript(session_id, channel_id, interaction_id) ==
     /\ session_live_interaction_id' = MapSet(session_live_interaction_id, session_id, interaction_id)
     /\ session_live_transcript_reconciliation' = MapSet(session_live_transcript_reconciliation, session_id, "Provisional")
     /\ session_live_provisional_transcript_present' = MapSet(session_live_provisional_transcript_present, session_id, FALSE)
-    /\ UnchangedFrame_8f85d92b50112077
+    /\ UnchangedFrame_196a897a2d306e70
 
 
 StageLiveProvisionalUserTranscript(session_id, channel_id, interaction_id, provisional_has_content) ==
@@ -688,7 +701,7 @@ StageLiveProvisionalUserTranscript(session_id, channel_id, interaction_id, provi
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
     /\ session_live_provisional_transcript_present' = MapSet(session_live_provisional_transcript_present, session_id, TRUE)
-    /\ UnchangedFrame_efd8609eaa54492a
+    /\ UnchangedFrame_92d26318e93e2c8b
 
 
 ReconcileLiveFinalUserTranscript(session_id, channel_id, interaction_id, reconciliation) ==
@@ -697,7 +710,7 @@ ReconcileLiveFinalUserTranscript(session_id, channel_id, interaction_id, reconci
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
     /\ session_live_transcript_reconciliation' = MapSet(session_live_transcript_reconciliation, session_id, reconciliation)
-    /\ UnchangedFrame_433d7a9f27015ca1
+    /\ UnchangedFrame_53d646e937316eae
 
 
 CompleteLiveInteractionTranscript(session_id, channel_id, interaction_id) ==
@@ -709,7 +722,7 @@ CompleteLiveInteractionTranscript(session_id, channel_id, interaction_id) ==
     /\ session_live_interaction_id' = MapRemove(session_live_interaction_id, session_id)
     /\ session_live_transcript_reconciliation' = MapRemove(session_live_transcript_reconciliation, session_id)
     /\ session_live_provisional_transcript_present' = MapRemove(session_live_provisional_transcript_present, session_id)
-    /\ UnchangedFrame_8f85d92b50112077
+    /\ UnchangedFrame_196a897a2d306e70
 
 
 AdmitLiveAssistantPlaybackTarget(session_id, channel_id, interaction_id, response_id, item_id, content_index) ==
@@ -720,7 +733,7 @@ AdmitLiveAssistantPlaybackTarget(session_id, channel_id, interaction_id, respons
     /\ session_live_assistant_playback_response_id' = MapSet(session_live_assistant_playback_response_id, session_id, response_id)
     /\ session_live_assistant_playback_item_id' = MapSet(session_live_assistant_playback_item_id, session_id, item_id)
     /\ session_live_assistant_playback_content_index' = MapSet(session_live_assistant_playback_content_index, session_id, content_index)
-    /\ UnchangedFrame_99c0c7c5a3f3ae36
+    /\ UnchangedFrame_70ebca5fcc9ceea7
 
 
 RecoverLiveAssistantPlaybackTarget(session_id, channel_id, interaction_id, response_id, item_id, content_index) ==
@@ -735,7 +748,7 @@ RecoverLiveAssistantPlaybackTarget(session_id, channel_id, interaction_id, respo
     /\ session_live_assistant_playback_response_id' = MapSet(session_live_assistant_playback_response_id, session_id, response_id)
     /\ session_live_assistant_playback_item_id' = MapSet(session_live_assistant_playback_item_id, session_id, item_id)
     /\ session_live_assistant_playback_content_index' = MapSet(session_live_assistant_playback_content_index, session_id, content_index)
-    /\ UnchangedFrame_138f3e22fdc07ade
+    /\ UnchangedFrame_600f2e306f5c47ff
 
 
 ResolveLiveAssistantPlaybackOnChannelClose(session_id, channel_id, interaction_id, response_id, item_id, content_index) ==
@@ -755,7 +768,7 @@ ResolveLiveAssistantPlaybackOnChannelClose(session_id, channel_id, interaction_i
     /\ session_live_assistant_terminal_observation' = MapRemove(session_live_assistant_terminal_observation, session_id)
     /\ session_live_assistant_terminal_prefix_chars' = MapRemove(session_live_assistant_terminal_prefix_chars, session_id)
     /\ session_live_assistant_terminal_prefix_digest' = MapRemove(session_live_assistant_terminal_prefix_digest, session_id)
-    /\ UnchangedFrame_2e043f788505248c
+    /\ UnchangedFrame_6a9c96ef79a93fd9
 
 
 ObserveLiveAssistantPlaybackSnapshot(session_id, channel_id, interaction_id, response_id, item_id, content_index, snapshot_chars, snapshot_digest, canonical_chars, canonical_digest, prefix_matches_snapshot, observation_only) ==
@@ -768,7 +781,7 @@ ObserveLiveAssistantPlaybackSnapshot(session_id, channel_id, interaction_id, res
     /\ session_live_assistant_playback_content_index' = MapRemove(session_live_assistant_playback_content_index, session_id)
     /\ session_live_assistant_final_chars' = MapRemove(session_live_assistant_final_chars, session_id)
     /\ session_live_assistant_final_digest' = MapRemove(session_live_assistant_final_digest, session_id)
-    /\ UnchangedFrame_47174268e34aef7b
+    /\ UnchangedFrame_b90cb080a784de84
 
 
 ObserveLiveAssistantPlaybackFinalPendingTerminal(session_id, channel_id, interaction_id, response_id, item_id, content_index, authoritative_assistant_chars, authoritative_text_digest, pending_terminal_observation, pending_reported_prefix_chars, pending_reported_prefix_digest, reported_prefix_matches_authoritative) ==
@@ -778,7 +791,7 @@ ObserveLiveAssistantPlaybackFinalPendingTerminal(session_id, channel_id, interac
     /\ model_step_count' = model_step_count + 1
     /\ session_live_assistant_final_chars' = MapSet(session_live_assistant_final_chars, session_id, authoritative_assistant_chars)
     /\ session_live_assistant_final_digest' = MapSet(session_live_assistant_final_digest, session_id, authoritative_text_digest)
-    /\ UnchangedFrame_596d257c703034bc
+    /\ UnchangedFrame_f6d3b7c07badfaa9
 
 
 RecoverLiveAssistantPlaybackFinal(session_id, channel_id, interaction_id, response_id, item_id, content_index, authoritative_assistant_chars, authoritative_text_digest) ==
@@ -788,7 +801,7 @@ RecoverLiveAssistantPlaybackFinal(session_id, channel_id, interaction_id, respon
     /\ model_step_count' = model_step_count + 1
     /\ session_live_assistant_final_chars' = MapSet(session_live_assistant_final_chars, session_id, authoritative_assistant_chars)
     /\ session_live_assistant_final_digest' = MapSet(session_live_assistant_final_digest, session_id, authoritative_text_digest)
-    /\ UnchangedFrame_596d257c703034bc
+    /\ UnchangedFrame_f6d3b7c07badfaa9
 
 
 ObserveLiveAssistantPlaybackTerminalPendingFinal(session_id, channel_id, interaction_id, response_id, item_id, content_index, observation, reported_prefix_chars, reported_prefix_digest, authoritative_assistant_chars, authoritative_text_digest, authoritative_assistant_final, reported_prefix_matches_authoritative) ==
@@ -799,7 +812,7 @@ ObserveLiveAssistantPlaybackTerminalPendingFinal(session_id, channel_id, interac
     /\ session_live_assistant_terminal_observation' = MapSet(session_live_assistant_terminal_observation, session_id, observation)
     /\ session_live_assistant_terminal_prefix_chars' = MapSet(session_live_assistant_terminal_prefix_chars, session_id, reported_prefix_chars)
     /\ session_live_assistant_terminal_prefix_digest' = MapSet(session_live_assistant_terminal_prefix_digest, session_id, reported_prefix_digest)
-    /\ UnchangedFrame_f76c28a808303d50
+    /\ UnchangedFrame_55b95824a0914e0d
 
 
 RecoverLiveAssistantPlaybackTerminal(session_id, channel_id, interaction_id, response_id, item_id, content_index, observation, reported_prefix_chars, reported_prefix_digest) ==
@@ -810,7 +823,7 @@ RecoverLiveAssistantPlaybackTerminal(session_id, channel_id, interaction_id, res
     /\ session_live_assistant_terminal_observation' = MapSet(session_live_assistant_terminal_observation, session_id, observation)
     /\ session_live_assistant_terminal_prefix_chars' = MapSet(session_live_assistant_terminal_prefix_chars, session_id, reported_prefix_chars)
     /\ session_live_assistant_terminal_prefix_digest' = MapSet(session_live_assistant_terminal_prefix_digest, session_id, reported_prefix_digest)
-    /\ UnchangedFrame_f76c28a808303d50
+    /\ UnchangedFrame_55b95824a0914e0d
 
 
 ObserveLiveAssistantPlaybackFinalJoinsComplete(session_id, channel_id, interaction_id, response_id, item_id, content_index, authoritative_assistant_chars, authoritative_text_digest, pending_terminal_observation, pending_reported_prefix_chars, pending_reported_prefix_digest, reported_prefix_matches_authoritative) ==
@@ -824,7 +837,7 @@ ObserveLiveAssistantPlaybackFinalJoinsComplete(session_id, channel_id, interacti
     /\ session_live_assistant_terminal_observation' = MapRemove(session_live_assistant_terminal_observation, session_id)
     /\ session_live_assistant_terminal_prefix_chars' = MapRemove(session_live_assistant_terminal_prefix_chars, session_id)
     /\ session_live_assistant_terminal_prefix_digest' = MapRemove(session_live_assistant_terminal_prefix_digest, session_id)
-    /\ UnchangedFrame_7fb5fd2297000ba9
+    /\ UnchangedFrame_119bdf7f4dab4fc6
 
 
 ObserveLiveAssistantPlaybackFinalJoinsPrefix(session_id, channel_id, interaction_id, response_id, item_id, content_index, authoritative_assistant_chars, authoritative_text_digest, pending_terminal_observation, pending_reported_prefix_chars, pending_reported_prefix_digest, reported_prefix_matches_authoritative) ==
@@ -838,7 +851,7 @@ ObserveLiveAssistantPlaybackFinalJoinsPrefix(session_id, channel_id, interaction
     /\ session_live_assistant_terminal_observation' = MapRemove(session_live_assistant_terminal_observation, session_id)
     /\ session_live_assistant_terminal_prefix_chars' = MapRemove(session_live_assistant_terminal_prefix_chars, session_id)
     /\ session_live_assistant_terminal_prefix_digest' = MapRemove(session_live_assistant_terminal_prefix_digest, session_id)
-    /\ UnchangedFrame_7fb5fd2297000ba9
+    /\ UnchangedFrame_119bdf7f4dab4fc6
 
 
 ObserveLiveAssistantPlaybackTerminalJoinsComplete(session_id, channel_id, interaction_id, response_id, item_id, content_index, observation, reported_prefix_chars, reported_prefix_digest, authoritative_assistant_chars, authoritative_text_digest, authoritative_assistant_final, reported_prefix_matches_authoritative) ==
@@ -851,7 +864,7 @@ ObserveLiveAssistantPlaybackTerminalJoinsComplete(session_id, channel_id, intera
     /\ session_live_assistant_playback_content_index' = MapRemove(session_live_assistant_playback_content_index, session_id)
     /\ session_live_assistant_final_chars' = MapRemove(session_live_assistant_final_chars, session_id)
     /\ session_live_assistant_final_digest' = MapRemove(session_live_assistant_final_digest, session_id)
-    /\ UnchangedFrame_47174268e34aef7b
+    /\ UnchangedFrame_b90cb080a784de84
 
 
 ObserveLiveAssistantPlaybackTerminalJoinsPrefix(session_id, channel_id, interaction_id, response_id, item_id, content_index, observation, reported_prefix_chars, reported_prefix_digest, authoritative_assistant_chars, authoritative_text_digest, authoritative_assistant_final, reported_prefix_matches_authoritative) ==
@@ -864,7 +877,7 @@ ObserveLiveAssistantPlaybackTerminalJoinsPrefix(session_id, channel_id, interact
     /\ session_live_assistant_playback_content_index' = MapRemove(session_live_assistant_playback_content_index, session_id)
     /\ session_live_assistant_final_chars' = MapRemove(session_live_assistant_final_chars, session_id)
     /\ session_live_assistant_final_digest' = MapRemove(session_live_assistant_final_digest, session_id)
-    /\ UnchangedFrame_47174268e34aef7b
+    /\ UnchangedFrame_b90cb080a784de84
 
 
 ObserveLiveAssistantPlaybackUnmeasured(session_id, channel_id, interaction_id, response_id, item_id, content_index, observation, reported_prefix_chars, reported_prefix_digest, authoritative_assistant_chars, authoritative_text_digest, authoritative_assistant_final, reported_prefix_matches_authoritative) ==
@@ -877,7 +890,7 @@ ObserveLiveAssistantPlaybackUnmeasured(session_id, channel_id, interaction_id, r
     /\ session_live_assistant_playback_content_index' = MapRemove(session_live_assistant_playback_content_index, session_id)
     /\ session_live_assistant_final_chars' = MapRemove(session_live_assistant_final_chars, session_id)
     /\ session_live_assistant_final_digest' = MapRemove(session_live_assistant_final_digest, session_id)
-    /\ UnchangedFrame_47174268e34aef7b
+    /\ UnchangedFrame_b90cb080a784de84
 
 
 ClassifyLiveContextCommittedRow(session_id, canonical_row_sequence, row_kind, provenance, content_digest, store_commit_authority) ==
@@ -885,7 +898,7 @@ ClassifyLiveContextCommittedRow(session_id, canonical_row_sequence, row_kind, pr
     /\ ((canonical_row_sequence > 0) /\ (content_digest # "") /\ (store_commit_authority # ""))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44bcbd08434cac9f
+    /\ UnchangedFrame_a191bdb127527008
 
 
 AuthorizeSessionMetadataPersist(schema_version, model_present) ==
@@ -893,7 +906,7 @@ AuthorizeSessionMetadataPersist(schema_version, model_present) ==
     /\ ((schema_version > 0) /\ (model_present = TRUE))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44bcbd08434cac9f
+    /\ UnchangedFrame_a191bdb127527008
 
 
 AuthorizeSessionBuildStatePersist(mob_tool_authority_context_present, mob_tool_authority_context_generated) ==
@@ -901,14 +914,14 @@ AuthorizeSessionBuildStatePersist(mob_tool_authority_context_present, mob_tool_a
     /\ (IF (mob_tool_authority_context_present = FALSE) THEN TRUE ELSE (mob_tool_authority_context_generated = TRUE))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44bcbd08434cac9f
+    /\ UnchangedFrame_a191bdb127527008
 
 
 RestoreSessionBuildState ==
     /\ phase = "Ready"
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44bcbd08434cac9f
+    /\ UnchangedFrame_a191bdb127527008
 
 
 ResolvePendingContinuationWithBoundary(session_tail, staged_tool_result_count) ==
@@ -916,7 +929,7 @@ ResolvePendingContinuationWithBoundary(session_tail, staged_tool_result_count) =
     /\ has_effective_pending_boundary(session_tail, staged_tool_result_count)
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44bcbd08434cac9f
+    /\ UnchangedFrame_a191bdb127527008
 
 
 ResolvePendingContinuationWithoutBoundary(session_tail, staged_tool_result_count) ==
@@ -924,7 +937,7 @@ ResolvePendingContinuationWithoutBoundary(session_tail, staged_tool_result_count
     /\ (has_effective_pending_boundary(session_tail, staged_tool_result_count) = FALSE)
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44bcbd08434cac9f
+    /\ UnchangedFrame_a191bdb127527008
 
 
 AuthorizeSessionResumeOverridesRejectProviderRequiresModel(provider_override_present, model_override_present, self_hosted_server_override_present, has_build_only_overrides, first_turn_phase) ==
@@ -932,7 +945,7 @@ AuthorizeSessionResumeOverridesRejectProviderRequiresModel(provider_override_pre
     /\ resume_reject_provider_requires_model(provider_override_present, model_override_present)
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44bcbd08434cac9f
+    /\ UnchangedFrame_a191bdb127527008
 
 
 AuthorizeSessionResumeOverridesRejectBuildOnlyAfterFirstTurn(provider_override_present, model_override_present, self_hosted_server_override_present, has_build_only_overrides, first_turn_phase) ==
@@ -940,7 +953,7 @@ AuthorizeSessionResumeOverridesRejectBuildOnlyAfterFirstTurn(provider_override_p
     /\ ((resume_reject_provider_requires_model(provider_override_present, model_override_present) = FALSE) /\ resume_reject_build_only_after_first_turn(has_build_only_overrides, first_turn_phase))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44bcbd08434cac9f
+    /\ UnchangedFrame_a191bdb127527008
 
 
 AuthorizeSessionResumeOverridesAcceptRecomputeProvider(provider_override_present, model_override_present, self_hosted_server_override_present, has_build_only_overrides, first_turn_phase) ==
@@ -948,7 +961,7 @@ AuthorizeSessionResumeOverridesAcceptRecomputeProvider(provider_override_present
     /\ (resume_overrides_admissible(provider_override_present, model_override_present, has_build_only_overrides, first_turn_phase) /\ resume_provider_recompute_from_model(model_override_present, provider_override_present) /\ (self_hosted_server_override_present = FALSE))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44bcbd08434cac9f
+    /\ UnchangedFrame_a191bdb127527008
 
 
 AuthorizeSessionResumeOverridesAcceptRecomputeProviderWithSelfHostedOverride(provider_override_present, model_override_present, self_hosted_server_override_present, has_build_only_overrides, first_turn_phase) ==
@@ -956,7 +969,7 @@ AuthorizeSessionResumeOverridesAcceptRecomputeProviderWithSelfHostedOverride(pro
     /\ (resume_overrides_admissible(provider_override_present, model_override_present, has_build_only_overrides, first_turn_phase) /\ resume_provider_recompute_from_model(model_override_present, provider_override_present) /\ self_hosted_server_override_present)
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44bcbd08434cac9f
+    /\ UnchangedFrame_a191bdb127527008
 
 
 AuthorizeSessionResumeOverridesAcceptUseOverride(provider_override_present, model_override_present, self_hosted_server_override_present, has_build_only_overrides, first_turn_phase) ==
@@ -964,7 +977,7 @@ AuthorizeSessionResumeOverridesAcceptUseOverride(provider_override_present, mode
     /\ (resume_overrides_admissible(provider_override_present, model_override_present, has_build_only_overrides, first_turn_phase) /\ (resume_provider_recompute_from_model(model_override_present, provider_override_present) = FALSE) /\ provider_override_present /\ (self_hosted_server_override_present = FALSE))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44bcbd08434cac9f
+    /\ UnchangedFrame_a191bdb127527008
 
 
 AuthorizeSessionResumeOverridesAcceptUseOverrideWithSelfHostedOverride(provider_override_present, model_override_present, self_hosted_server_override_present, has_build_only_overrides, first_turn_phase) ==
@@ -972,7 +985,7 @@ AuthorizeSessionResumeOverridesAcceptUseOverrideWithSelfHostedOverride(provider_
     /\ (resume_overrides_admissible(provider_override_present, model_override_present, has_build_only_overrides, first_turn_phase) /\ (resume_provider_recompute_from_model(model_override_present, provider_override_present) = FALSE) /\ provider_override_present /\ self_hosted_server_override_present)
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44bcbd08434cac9f
+    /\ UnchangedFrame_a191bdb127527008
 
 
 AuthorizeSessionResumeOverridesAcceptRetainStored(provider_override_present, model_override_present, self_hosted_server_override_present, has_build_only_overrides, first_turn_phase) ==
@@ -980,7 +993,7 @@ AuthorizeSessionResumeOverridesAcceptRetainStored(provider_override_present, mod
     /\ (resume_overrides_admissible(provider_override_present, model_override_present, has_build_only_overrides, first_turn_phase) /\ (resume_provider_recompute_from_model(model_override_present, provider_override_present) = FALSE) /\ (provider_override_present = FALSE) /\ (self_hosted_server_override_present = FALSE))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44bcbd08434cac9f
+    /\ UnchangedFrame_a191bdb127527008
 
 
 AuthorizeSessionResumeOverridesAcceptRetainStoredWithSelfHostedOverride(provider_override_present, model_override_present, self_hosted_server_override_present, has_build_only_overrides, first_turn_phase) ==
@@ -988,7 +1001,7 @@ AuthorizeSessionResumeOverridesAcceptRetainStoredWithSelfHostedOverride(provider
     /\ (resume_overrides_admissible(provider_override_present, model_override_present, has_build_only_overrides, first_turn_phase) /\ (resume_provider_recompute_from_model(model_override_present, provider_override_present) = FALSE) /\ (provider_override_present = FALSE) /\ self_hosted_server_override_present)
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44bcbd08434cac9f
+    /\ UnchangedFrame_a191bdb127527008
 
 
 ClassifyLiveSessionAuthorityLive(stored_transcript_diverged, live_has_uncommitted_transcript, stored_is_archived) ==
@@ -996,7 +1009,7 @@ ClassifyLiveSessionAuthorityLive(stored_transcript_diverged, live_has_uncommitte
     /\ ((stored_transcript_diverged = FALSE) /\ (live_has_uncommitted_transcript = FALSE) /\ (stored_is_archived = FALSE))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44bcbd08434cac9f
+    /\ UnchangedFrame_a191bdb127527008
 
 
 ClassifyLiveSessionAuthorityDurableArchived(stored_transcript_diverged, live_has_uncommitted_transcript, stored_is_archived) ==
@@ -1004,7 +1017,7 @@ ClassifyLiveSessionAuthorityDurableArchived(stored_transcript_diverged, live_has
     /\ (stored_is_archived = TRUE)
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44bcbd08434cac9f
+    /\ UnchangedFrame_a191bdb127527008
 
 
 ClassifyLiveSessionAuthorityDurableUncommitted(stored_transcript_diverged, live_has_uncommitted_transcript, stored_is_archived) ==
@@ -1012,7 +1025,7 @@ ClassifyLiveSessionAuthorityDurableUncommitted(stored_transcript_diverged, live_
     /\ ((stored_is_archived = FALSE) /\ (live_has_uncommitted_transcript = TRUE))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44bcbd08434cac9f
+    /\ UnchangedFrame_a191bdb127527008
 
 
 ClassifyLiveSessionAuthorityDurableRevision(stored_transcript_diverged, live_has_uncommitted_transcript, stored_is_archived) ==
@@ -1020,7 +1033,7 @@ ClassifyLiveSessionAuthorityDurableRevision(stored_transcript_diverged, live_has
     /\ ((stored_is_archived = FALSE) /\ (live_has_uncommitted_transcript = FALSE) /\ (stored_transcript_diverged = TRUE))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44bcbd08434cac9f
+    /\ UnchangedFrame_a191bdb127527008
 
 
 RecoverSessionFromStoreAuthorized(session_id, has_metadata, has_build_state, runtime_projection_quarantined) ==
@@ -1028,7 +1041,7 @@ RecoverSessionFromStoreAuthorized(session_id, has_metadata, has_build_state, run
     /\ store_projection_can_recover_authority(has_metadata, has_build_state, runtime_projection_quarantined)
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44bcbd08434cac9f
+    /\ UnchangedFrame_a191bdb127527008
 
 
 RecoverSessionFromStoreUnrecoverable(session_id, has_metadata, has_build_state, runtime_projection_quarantined) ==
@@ -1036,7 +1049,7 @@ RecoverSessionFromStoreUnrecoverable(session_id, has_metadata, has_build_state, 
     /\ (store_projection_can_recover_authority(has_metadata, has_build_state, runtime_projection_quarantined) = FALSE)
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44bcbd08434cac9f
+    /\ UnchangedFrame_a191bdb127527008
 
 
 ClassifyDurableTailCompleted(session_id, candidate_id, relation, run_id_cardinality, terminal_stop_reason, dangling_tool_use_count, orphan_tool_result_count, messages_after_terminal, run_cursor, cursor_inputs_open) ==
@@ -1044,7 +1057,7 @@ ClassifyDurableTailCompleted(session_id, candidate_id, relation, run_id_cardinal
     /\ ((IF (relation = "VerifiedStrictDescendant") THEN TRUE ELSE (relation = "VerifiedRewriteDescendant")) /\ (run_id_cardinality = "SingleRunId") /\ (terminal_stop_reason = "EndTurn") /\ (dangling_tool_use_count = 0) /\ (orphan_tool_result_count = 0) /\ (messages_after_terminal = FALSE) /\ (run_cursor = "Absent"))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44bcbd08434cac9f
+    /\ UnchangedFrame_a191bdb127527008
 
 
 ClassifyDurableTailRepairable(session_id, candidate_id, relation, run_id_cardinality, terminal_stop_reason, dangling_tool_use_count, orphan_tool_result_count, messages_after_terminal, run_cursor, cursor_inputs_open) ==
@@ -1052,7 +1065,7 @@ ClassifyDurableTailRepairable(session_id, candidate_id, relation, run_id_cardina
     /\ ((IF (relation = "VerifiedStrictDescendant") THEN TRUE ELSE (relation = "VerifiedRewriteDescendant")) /\ (IF (run_id_cardinality = "SingleRunId") THEN TRUE ELSE ((run_id_cardinality = "NoRunRows") /\ (terminal_stop_reason = "Absent") /\ (IF (relation = "VerifiedStrictDescendant") THEN TRUE ELSE (run_cursor = "Agrees")))) /\ (dangling_tool_use_count = 0) /\ (orphan_tool_result_count = 0) /\ (messages_after_terminal = FALSE) /\ (IF (terminal_stop_reason = "ToolUse") THEN TRUE ELSE (terminal_stop_reason = "Absent")) /\ (IF (run_cursor = "Absent") THEN TRUE ELSE ((run_cursor = "Agrees") /\ (cursor_inputs_open = FALSE))))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44bcbd08434cac9f
+    /\ UnchangedFrame_a191bdb127527008
 
 
 ClassifyDurableTailContinuable(session_id, candidate_id, relation, run_id_cardinality, terminal_stop_reason, dangling_tool_use_count, orphan_tool_result_count, messages_after_terminal, run_cursor, cursor_inputs_open) ==
@@ -1060,7 +1073,7 @@ ClassifyDurableTailContinuable(session_id, candidate_id, relation, run_id_cardin
     /\ ((IF (relation = "VerifiedStrictDescendant") THEN TRUE ELSE (relation = "VerifiedRewriteDescendant")) /\ (IF (run_id_cardinality = "SingleRunId") THEN TRUE ELSE ((run_id_cardinality = "NoRunRows") /\ (terminal_stop_reason = "Absent") /\ (IF (relation = "VerifiedStrictDescendant") THEN TRUE ELSE (run_cursor = "Agrees")))) /\ (dangling_tool_use_count = 0) /\ (orphan_tool_result_count = 0) /\ (messages_after_terminal = FALSE) /\ (IF (terminal_stop_reason = "ToolUse") THEN TRUE ELSE (terminal_stop_reason = "Absent")) /\ (run_cursor = "Agrees") /\ (cursor_inputs_open = TRUE))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44bcbd08434cac9f
+    /\ UnchangedFrame_a191bdb127527008
 
 
 ClassifyDurableTailAmbiguous(session_id, candidate_id, relation, run_id_cardinality, terminal_stop_reason, dangling_tool_use_count, orphan_tool_result_count, messages_after_terminal, run_cursor, cursor_inputs_open) ==
@@ -1068,7 +1081,7 @@ ClassifyDurableTailAmbiguous(session_id, candidate_id, relation, run_id_cardinal
     /\ (IF ((relation # "VerifiedStrictDescendant") /\ (relation # "VerifiedRewriteDescendant")) THEN TRUE ELSE (IF ~((IF (run_id_cardinality = "SingleRunId") THEN TRUE ELSE ((run_id_cardinality = "NoRunRows") /\ (terminal_stop_reason = "Absent") /\ (IF (relation = "VerifiedStrictDescendant") THEN TRUE ELSE (run_cursor = "Agrees"))))) THEN TRUE ELSE (IF (orphan_tool_result_count # 0) THEN TRUE ELSE (IF (messages_after_terminal = TRUE) THEN TRUE ELSE (IF (terminal_stop_reason = "Other") THEN TRUE ELSE (IF (dangling_tool_use_count # 0) THEN TRUE ELSE (IF (run_cursor = "Disagrees") THEN TRUE ELSE ((terminal_stop_reason = "EndTurn") /\ (run_cursor # "Absent")))))))))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44bcbd08434cac9f
+    /\ UnchangedFrame_a191bdb127527008
 
 
 ResolveRuntimeCheckpointProjectionActive(session_id) ==
@@ -1076,7 +1089,7 @@ ResolveRuntimeCheckpointProjectionActive(session_id) ==
     /\ ((session_id \in DOMAIN session_lifecycle_terminal) /\ ((session_lifecycle_terminal)[session_id] = "Active"))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44bcbd08434cac9f
+    /\ UnchangedFrame_a191bdb127527008
 
 
 ResolveRuntimeCheckpointProjectionArchived(session_id) ==
@@ -1084,7 +1097,7 @@ ResolveRuntimeCheckpointProjectionArchived(session_id) ==
     /\ ((session_id \in DOMAIN session_lifecycle_terminal) /\ ((session_lifecycle_terminal)[session_id] = "Archived"))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44bcbd08434cac9f
+    /\ UnchangedFrame_a191bdb127527008
 
 
 ResolveSessionDocumentLifecycleMergeArchivedAbsorbing(session_id, authority_archived, candidate_archived) ==
@@ -1092,7 +1105,7 @@ ResolveSessionDocumentLifecycleMergeArchivedAbsorbing(session_id, authority_arch
     /\ (IF (authority_archived = TRUE) THEN TRUE ELSE (candidate_archived = TRUE))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44bcbd08434cac9f
+    /\ UnchangedFrame_a191bdb127527008
 
 
 ResolveSessionDocumentLifecycleMergeAuthority(session_id, authority_archived, candidate_archived) ==
@@ -1100,14 +1113,14 @@ ResolveSessionDocumentLifecycleMergeAuthority(session_id, authority_archived, ca
     /\ ((authority_archived = FALSE) /\ (candidate_archived = FALSE))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44bcbd08434cac9f
+    /\ UnchangedFrame_a191bdb127527008
 
 
 ApplyPendingToolResults(session_id, result_count) ==
     /\ phase = "Ready"
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44bcbd08434cac9f
+    /\ UnchangedFrame_a191bdb127527008
 
 
 TranscriptEditFork(session_id, fork_or_rewrite_directive) ==
@@ -1115,7 +1128,7 @@ TranscriptEditFork(session_id, fork_or_rewrite_directive) ==
     /\ (fork_or_rewrite_directive = "Fork")
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44bcbd08434cac9f
+    /\ UnchangedFrame_a191bdb127527008
 
 
 TranscriptEditRewrite(session_id, fork_or_rewrite_directive) ==
@@ -1123,7 +1136,7 @@ TranscriptEditRewrite(session_id, fork_or_rewrite_directive) ==
     /\ (fork_or_rewrite_directive = "Rewrite")
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44bcbd08434cac9f
+    /\ UnchangedFrame_a191bdb127527008
 
 
 RecoverSessionLifecycleTerminal(session_id, terminal) ==
@@ -1132,7 +1145,7 @@ RecoverSessionLifecycleTerminal(session_id, terminal) ==
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
     /\ session_lifecycle_terminal' = MapSet(session_lifecycle_terminal, session_id, terminal)
-    /\ UnchangedFrame_0711ab9608104053
+    /\ UnchangedFrame_63277eaeb681196c
 
 
 ReviveArchivedSessionDocument(session_id) ==
@@ -1141,7 +1154,7 @@ ReviveArchivedSessionDocument(session_id) ==
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
     /\ session_lifecycle_terminal' = MapSet(session_lifecycle_terminal, session_id, "Active")
-    /\ UnchangedFrame_0711ab9608104053
+    /\ UnchangedFrame_63277eaeb681196c
 
 
 ArchiveSessionDocumentActive(session_id, runtime_backed, durable_document_present, runtime_observation) ==
@@ -1150,7 +1163,7 @@ ArchiveSessionDocumentActive(session_id, runtime_backed, durable_document_presen
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
     /\ session_lifecycle_terminal' = MapSet(session_lifecycle_terminal, session_id, "Archived")
-    /\ UnchangedFrame_0711ab9608104053
+    /\ UnchangedFrame_63277eaeb681196c
 
 
 ArchiveSessionDocumentAlreadyArchived(session_id, runtime_backed, durable_document_present, runtime_observation) ==
@@ -1159,7 +1172,7 @@ ArchiveSessionDocumentAlreadyArchived(session_id, runtime_backed, durable_docume
     /\ (runtime_observation # "RetirementRequired")
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44bcbd08434cac9f
+    /\ UnchangedFrame_a191bdb127527008
 
 
 ArchiveSessionDocumentCompleteRetire(session_id, runtime_backed, durable_document_present, runtime_observation) ==
@@ -1168,7 +1181,7 @@ ArchiveSessionDocumentCompleteRetire(session_id, runtime_backed, durable_documen
     /\ (runtime_observation = "RetirementRequired")
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44bcbd08434cac9f
+    /\ UnchangedFrame_a191bdb127527008
 
 
 RecoverSessionInstructionState(session_id, owner, owner_mob, target_generation, entry_sequence) ==
@@ -1189,7 +1202,7 @@ RecoverSessionInstructionState(session_id, owner, owner_mob, target_generation, 
     /\ session_instruction_effective_bytes' = MapSet(session_instruction_effective_bytes, session_id, [x \in {} |-> None])
     /\ session_instruction_effective_generation' = MapSet(session_instruction_effective_generation, session_id, 0)
     /\ session_instruction_entry_sequence' = MapSet(session_instruction_entry_sequence, session_id, entry_sequence)
-    /\ UnchangedFrame_afcdf325669eb17c
+    /\ UnchangedFrame_b84cdca0230d8d69
 
 
 RecoverSessionInstructionTarget(session_id, revision, effect, digest, bytes) ==
@@ -1201,7 +1214,7 @@ RecoverSessionInstructionTarget(session_id, revision, effect, digest, bytes) ==
     /\ session_instruction_target_effect' = MapSet(session_instruction_target_effect, session_id, effect)
     /\ session_instruction_target_digest' = MapSet(session_instruction_target_digest, session_id, digest)
     /\ session_instruction_target_bytes' = MapSet(session_instruction_target_bytes, session_id, bytes)
-    /\ UnchangedFrame_a6146a1f3b9f1b60
+    /\ UnchangedFrame_17aee84cd6d60a7d
 
 
 RecoverSessionInstructionEffective(session_id, revision, effect, digest, bytes, generation, last_entry_sequence) ==
@@ -1215,10 +1228,10 @@ RecoverSessionInstructionEffective(session_id, revision, effect, digest, bytes, 
     /\ session_instruction_effective_bytes' = MapSet(session_instruction_effective_bytes, session_id, bytes)
     /\ session_instruction_effective_generation' = MapSet(session_instruction_effective_generation, session_id, generation)
     /\ session_instruction_entry_sequence' = MapSet(session_instruction_entry_sequence, session_id, (IF (last_entry_sequence > (IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_instruction_entry_sequence) THEN Some((IF session_id \in DOMAIN session_instruction_entry_sequence THEN session_instruction_entry_sequence[session_id] ELSE 0)) ELSE None) THEN (IF (session_id \in DOMAIN session_instruction_entry_sequence) THEN Some((IF session_id \in DOMAIN session_instruction_entry_sequence THEN session_instruction_entry_sequence[session_id] ELSE 0)) ELSE None)["value"] ELSE None)) THEN last_entry_sequence ELSE (IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_instruction_entry_sequence) THEN Some((IF session_id \in DOMAIN session_instruction_entry_sequence THEN session_instruction_entry_sequence[session_id] ELSE 0)) ELSE None) THEN (IF (session_id \in DOMAIN session_instruction_entry_sequence) THEN Some((IF session_id \in DOMAIN session_instruction_entry_sequence THEN session_instruction_entry_sequence[session_id] ELSE 0)) ELSE None)["value"] ELSE None)))
-    /\ UnchangedFrame_2b67ec16fd8d9aca
+    /\ UnchangedFrame_614f04e6d2a8b76b
 
 
-RecordInstructionTargetAdvance(session_id, mob_id, generation, revision, effect, digest, bytes) ==
+RecordInstructionTargetAdvance(session_id, mob_id, generation, revision, effect, digest, bytes, member_bound) ==
     /\ phase = "Ready"
     /\ ((IF ~((mob_id # "")) THEN TRUE ELSE (session_id \in DOMAIN session_instruction_target_generation)) /\ ((mob_id # "") /\ (generation > (session_instruction_target_generation)[session_id]) /\ instruction_slot_maps_consistent(revision, effect, digest, bytes) /\ instruction_slot_count_within_limit(revision)))
     /\ (1048576 >= session_document_instruction_active_bytes(effect, bytes))
@@ -1232,53 +1245,90 @@ RecordInstructionTargetAdvance(session_id, mob_id, generation, revision, effect,
     /\ session_instruction_target_effect' = MapSet(session_instruction_target_effect, session_id, effect)
     /\ session_instruction_target_digest' = MapSet(session_instruction_target_digest, session_id, digest)
     /\ session_instruction_target_bytes' = MapSet(session_instruction_target_bytes, session_id, bytes)
-    /\ UnchangedFrame_2999b03e64d8844d
+    /\ UnchangedFrame_b8d01ff667a8deea
 
 
-RecordInstructionTargetActiveBudgetExceeded(session_id, mob_id, generation, revision, effect, digest, bytes) ==
+RecordInstructionTargetActiveBudgetExceeded(session_id, mob_id, generation, revision, effect, digest, bytes, member_bound) ==
     /\ phase = "Ready"
     /\ ((IF ~((mob_id # "")) THEN TRUE ELSE ((session_id \in DOMAIN session_instruction_target_generation) /\ (IF ~((generation > (session_instruction_target_generation)[session_id])) THEN TRUE ELSE (IF ~(instruction_slot_maps_consistent(revision, effect, digest, bytes)) THEN TRUE ELSE (IF ~(instruction_slot_count_within_limit(revision)) THEN TRUE ELSE (IF ~((session_document_instruction_active_bytes(effect, bytes) > 1048576)) THEN TRUE ELSE ((session_id \in DOMAIN session_instruction_owner) /\ (IF ((session_instruction_owner)[session_id] = "Unowned") THEN TRUE ELSE ((session_id \in DOMAIN session_instruction_owner) /\ (IF ~(((session_instruction_owner)[session_id] = "Mob")) THEN TRUE ELSE (session_id \in DOMAIN session_instruction_owner_mob))))))))))) /\ ((mob_id # "") /\ (generation > (session_instruction_target_generation)[session_id]) /\ instruction_slot_maps_consistent(revision, effect, digest, bytes) /\ instruction_slot_count_within_limit(revision) /\ (session_document_instruction_active_bytes(effect, bytes) > 1048576) /\ (IF ((session_instruction_owner)[session_id] = "Unowned") THEN TRUE ELSE (((session_instruction_owner)[session_id] = "Mob") /\ ((session_instruction_owner_mob)[session_id] = mob_id)))))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44bcbd08434cac9f
+    /\ UnchangedFrame_a191bdb127527008
 
 
-RecordInstructionTargetSlotLimitExceeded(session_id, mob_id, generation, revision, effect, digest, bytes) ==
+RecordInstructionTargetSlotLimitExceeded(session_id, mob_id, generation, revision, effect, digest, bytes, member_bound) ==
     /\ phase = "Ready"
     /\ ((IF ~((mob_id # "")) THEN TRUE ELSE ((session_id \in DOMAIN session_instruction_target_generation) /\ (IF ~((generation > (session_instruction_target_generation)[session_id])) THEN TRUE ELSE (IF ~(instruction_slot_maps_consistent(revision, effect, digest, bytes)) THEN TRUE ELSE (IF ~((instruction_slot_count_within_limit(revision) = FALSE)) THEN TRUE ELSE ((session_id \in DOMAIN session_instruction_owner) /\ (IF ((session_instruction_owner)[session_id] = "Unowned") THEN TRUE ELSE ((session_id \in DOMAIN session_instruction_owner) /\ (IF ~(((session_instruction_owner)[session_id] = "Mob")) THEN TRUE ELSE (session_id \in DOMAIN session_instruction_owner_mob)))))))))) /\ ((mob_id # "") /\ (generation > (session_instruction_target_generation)[session_id]) /\ instruction_slot_maps_consistent(revision, effect, digest, bytes) /\ (instruction_slot_count_within_limit(revision) = FALSE) /\ (IF ((session_instruction_owner)[session_id] = "Unowned") THEN TRUE ELSE (((session_instruction_owner)[session_id] = "Mob") /\ ((session_instruction_owner_mob)[session_id] = mob_id)))))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44bcbd08434cac9f
+    /\ UnchangedFrame_a191bdb127527008
 
 
-RecordInstructionTargetAlreadyRecorded(session_id, mob_id, generation, revision, effect, digest, bytes) ==
+RecordInstructionTargetAlreadyRecorded(session_id, mob_id, generation, revision, effect, digest, bytes, member_bound) ==
     /\ phase = "Ready"
     /\ (((session_id \in DOMAIN session_instruction_owner) /\ (IF ~(((session_instruction_owner)[session_id] = "Mob")) THEN TRUE ELSE ((session_id \in DOMAIN session_instruction_owner_mob) /\ (IF ~(((session_instruction_owner_mob)[session_id] = mob_id)) THEN TRUE ELSE (session_id \in DOMAIN session_instruction_target_generation))))) /\ (((session_instruction_owner)[session_id] = "Mob") /\ ((session_instruction_owner_mob)[session_id] = mob_id) /\ (generation <= (session_instruction_target_generation)[session_id])))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44bcbd08434cac9f
+    /\ UnchangedFrame_a191bdb127527008
 
 
-RecordInstructionTargetOwnedBySession(session_id, mob_id, generation, revision, effect, digest, bytes) ==
+RecordInstructionTargetOwnedBySession(session_id, mob_id, generation, revision, effect, digest, bytes, member_bound) ==
     /\ phase = "Ready"
     /\ ((session_id \in DOMAIN session_instruction_owner) /\ ((session_instruction_owner)[session_id] = "Session"))
+    /\ (member_bound = FALSE)
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44bcbd08434cac9f
+    /\ UnchangedFrame_a191bdb127527008
 
 
-RecordInstructionTargetOwnedByOtherMob(session_id, mob_id, generation, revision, effect, digest, bytes) ==
+RecordInstructionTargetAdopt(session_id, mob_id, generation, revision, effect, digest, bytes, member_bound) ==
+    /\ phase = "Ready"
+    /\ ((IF ~((mob_id # "")) THEN TRUE ELSE (IF ~((generation >= 1)) THEN TRUE ELSE (IF ~(instruction_slot_maps_consistent(revision, effect, digest, bytes)) THEN TRUE ELSE (IF ~(instruction_slot_count_within_limit(revision)) THEN TRUE ELSE (session_id \in DOMAIN session_instruction_owner))))) /\ ((mob_id # "") /\ (generation >= 1) /\ instruction_slot_maps_consistent(revision, effect, digest, bytes) /\ instruction_slot_count_within_limit(revision) /\ ((session_instruction_owner)[session_id] = "Session")))
+    /\ (1048576 >= session_document_instruction_active_bytes(effect, bytes))
+    /\ (member_bound = TRUE)
+    /\ phase' = "Ready"
+    /\ model_step_count' = model_step_count + 1
+    /\ session_instruction_owner' = MapSet(session_instruction_owner, session_id, "Mob")
+    /\ session_instruction_owner_mob' = MapSet(session_instruction_owner_mob, session_id, mob_id)
+    /\ session_instruction_target_generation' = MapSet(session_instruction_target_generation, session_id, generation)
+    /\ session_instruction_target_revision' = MapSet(session_instruction_target_revision, session_id, revision)
+    /\ session_instruction_target_effect' = MapSet(session_instruction_target_effect, session_id, effect)
+    /\ session_instruction_target_digest' = MapSet(session_instruction_target_digest, session_id, digest)
+    /\ session_instruction_target_bytes' = MapSet(session_instruction_target_bytes, session_id, bytes)
+    /\ UnchangedFrame_b8d01ff667a8deea
+
+
+RecordInstructionTargetAdoptActiveBudgetExceeded(session_id, mob_id, generation, revision, effect, digest, bytes, member_bound) ==
+    /\ phase = "Ready"
+    /\ ((IF ~((mob_id # "")) THEN TRUE ELSE (IF ~((generation >= 1)) THEN TRUE ELSE (IF ~(instruction_slot_maps_consistent(revision, effect, digest, bytes)) THEN TRUE ELSE (IF ~(instruction_slot_count_within_limit(revision)) THEN TRUE ELSE (IF ~((session_document_instruction_active_bytes(effect, bytes) > 1048576)) THEN TRUE ELSE (session_id \in DOMAIN session_instruction_owner)))))) /\ ((mob_id # "") /\ (generation >= 1) /\ instruction_slot_maps_consistent(revision, effect, digest, bytes) /\ instruction_slot_count_within_limit(revision) /\ (session_document_instruction_active_bytes(effect, bytes) > 1048576) /\ ((session_instruction_owner)[session_id] = "Session")))
+    /\ (member_bound = TRUE)
+    /\ phase' = "Ready"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_a191bdb127527008
+
+
+RecordInstructionTargetAdoptSlotLimitExceeded(session_id, mob_id, generation, revision, effect, digest, bytes, member_bound) ==
+    /\ phase = "Ready"
+    /\ ((IF ~((mob_id # "")) THEN TRUE ELSE (IF ~((generation >= 1)) THEN TRUE ELSE (IF ~(instruction_slot_maps_consistent(revision, effect, digest, bytes)) THEN TRUE ELSE (IF ~((instruction_slot_count_within_limit(revision) = FALSE)) THEN TRUE ELSE (session_id \in DOMAIN session_instruction_owner))))) /\ ((mob_id # "") /\ (generation >= 1) /\ instruction_slot_maps_consistent(revision, effect, digest, bytes) /\ (instruction_slot_count_within_limit(revision) = FALSE) /\ ((session_instruction_owner)[session_id] = "Session")))
+    /\ (member_bound = TRUE)
+    /\ phase' = "Ready"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_a191bdb127527008
+
+
+RecordInstructionTargetOwnedByOtherMob(session_id, mob_id, generation, revision, effect, digest, bytes, member_bound) ==
     /\ phase = "Ready"
     /\ (((session_id \in DOMAIN session_instruction_owner) /\ (IF ~(((session_instruction_owner)[session_id] = "Mob")) THEN TRUE ELSE (session_id \in DOMAIN session_instruction_owner_mob))) /\ (((session_instruction_owner)[session_id] = "Mob") /\ ((session_instruction_owner_mob)[session_id] # mob_id)))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44bcbd08434cac9f
+    /\ UnchangedFrame_a191bdb127527008
 
 
-SetSessionInstructionNew(session_id, slot, revision, effect, digest, body_bytes) ==
+SetSessionInstructionNew(session_id, slot, revision, effect, digest, body_bytes, member_bound) ==
     /\ phase = "Ready"
     /\ (((session_id \in DOMAIN session_instruction_owner) /\ (IF ~(((session_instruction_owner)[session_id] # "Mob")) THEN TRUE ELSE ((session_id \in DOMAIN session_instruction_target_revision) /\ (IF ~(((slot \in DOMAIN (session_instruction_target_revision)[session_id]) = FALSE)) THEN TRUE ELSE (IF ~((effect = "Active")) THEN TRUE ELSE (IF ~((digest # "")) THEN TRUE ELSE (IF ~((revision >= 1)) THEN TRUE ELSE (session_id \in DOMAIN session_instruction_target_revision)))))))) /\ (((session_instruction_owner)[session_id] # "Mob") /\ ((slot \in DOMAIN (session_instruction_target_revision)[session_id]) = FALSE) /\ (effect = "Active") /\ (digest # "") /\ (revision >= 1) /\ (64 > Cardinality(DOMAIN (session_instruction_target_revision)[session_id]))))
     /\ (((session_id \in DOMAIN session_instruction_target_effect) /\ (session_id \in DOMAIN session_instruction_target_bytes)) /\ (1048576 >= session_document_instruction_active_bytes(session_document_instruction_slot_after_set((session_instruction_target_effect)[session_id], slot, effect), session_document_instruction_slot_after_set((session_instruction_target_bytes)[session_id], slot, body_bytes))))
+    /\ (member_bound = FALSE)
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
     /\ session_instruction_owner' = MapSet(session_instruction_owner, session_id, "Session")
@@ -1287,14 +1337,15 @@ SetSessionInstructionNew(session_id, slot, revision, effect, digest, body_bytes)
     /\ session_instruction_target_effect' = MapSet(session_instruction_target_effect, session_id, session_document_instruction_slot_after_set((IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_instruction_target_effect) THEN Some((IF session_id \in DOMAIN session_instruction_target_effect THEN session_instruction_target_effect[session_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (session_id \in DOMAIN session_instruction_target_effect) THEN Some((IF session_id \in DOMAIN session_instruction_target_effect THEN session_instruction_target_effect[session_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None), slot, effect))
     /\ session_instruction_target_digest' = MapSet(session_instruction_target_digest, session_id, session_document_instruction_slot_after_set((IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_instruction_target_digest) THEN Some((IF session_id \in DOMAIN session_instruction_target_digest THEN session_instruction_target_digest[session_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (session_id \in DOMAIN session_instruction_target_digest) THEN Some((IF session_id \in DOMAIN session_instruction_target_digest THEN session_instruction_target_digest[session_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None), slot, digest))
     /\ session_instruction_target_bytes' = MapSet(session_instruction_target_bytes, session_id, session_document_instruction_slot_after_set((IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_instruction_target_bytes) THEN Some((IF session_id \in DOMAIN session_instruction_target_bytes THEN session_instruction_target_bytes[session_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (session_id \in DOMAIN session_instruction_target_bytes) THEN Some((IF session_id \in DOMAIN session_instruction_target_bytes THEN session_instruction_target_bytes[session_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None), slot, body_bytes))
-    /\ UnchangedFrame_69701730652d9513
+    /\ UnchangedFrame_8496f1a494f4dd2c
 
 
-SetSessionInstructionAdvance(session_id, slot, revision, effect, digest, body_bytes) ==
+SetSessionInstructionAdvance(session_id, slot, revision, effect, digest, body_bytes, member_bound) ==
     /\ phase = "Ready"
     /\ (((session_id \in DOMAIN session_instruction_owner) /\ (IF ~(((session_instruction_owner)[session_id] # "Mob")) THEN TRUE ELSE (session_id \in DOMAIN session_instruction_target_revision))) /\ (((session_instruction_owner)[session_id] # "Mob") /\ (slot \in DOMAIN (session_instruction_target_revision)[session_id]) /\ (IF ((effect = "Active") /\ (digest # "")) THEN TRUE ELSE ((effect = "Absent") /\ (digest = "") /\ (body_bytes = 0)))))
     /\ (((session_id \in DOMAIN session_instruction_target_effect) /\ (session_id \in DOMAIN session_instruction_target_bytes)) /\ (1048576 >= session_document_instruction_active_bytes(session_document_instruction_slot_after_set((session_instruction_target_effect)[session_id], slot, effect), session_document_instruction_slot_after_set((session_instruction_target_bytes)[session_id], slot, body_bytes))))
     /\ ((session_id \in DOMAIN session_instruction_target_revision) /\ (revision > (IF "value" \in DOMAIN (IF (slot \in DOMAIN (session_instruction_target_revision)[session_id]) THEN Some((IF slot \in DOMAIN (session_instruction_target_revision)[session_id] THEN (session_instruction_target_revision)[session_id][slot] ELSE None)) ELSE None) THEN (IF (slot \in DOMAIN (session_instruction_target_revision)[session_id]) THEN Some((IF slot \in DOMAIN (session_instruction_target_revision)[session_id] THEN (session_instruction_target_revision)[session_id][slot] ELSE None)) ELSE None)["value"] ELSE None)))
+    /\ (member_bound = FALSE)
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
     /\ session_instruction_owner' = MapSet(session_instruction_owner, session_id, "Session")
@@ -1303,66 +1354,81 @@ SetSessionInstructionAdvance(session_id, slot, revision, effect, digest, body_by
     /\ session_instruction_target_effect' = MapSet(session_instruction_target_effect, session_id, session_document_instruction_slot_after_set((IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_instruction_target_effect) THEN Some((IF session_id \in DOMAIN session_instruction_target_effect THEN session_instruction_target_effect[session_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (session_id \in DOMAIN session_instruction_target_effect) THEN Some((IF session_id \in DOMAIN session_instruction_target_effect THEN session_instruction_target_effect[session_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None), slot, effect))
     /\ session_instruction_target_digest' = MapSet(session_instruction_target_digest, session_id, session_document_instruction_slot_after_set((IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_instruction_target_digest) THEN Some((IF session_id \in DOMAIN session_instruction_target_digest THEN session_instruction_target_digest[session_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (session_id \in DOMAIN session_instruction_target_digest) THEN Some((IF session_id \in DOMAIN session_instruction_target_digest THEN session_instruction_target_digest[session_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None), slot, digest))
     /\ session_instruction_target_bytes' = MapSet(session_instruction_target_bytes, session_id, session_document_instruction_slot_after_set((IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_instruction_target_bytes) THEN Some((IF session_id \in DOMAIN session_instruction_target_bytes THEN session_instruction_target_bytes[session_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (session_id \in DOMAIN session_instruction_target_bytes) THEN Some((IF session_id \in DOMAIN session_instruction_target_bytes THEN session_instruction_target_bytes[session_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None), slot, body_bytes))
-    /\ UnchangedFrame_69701730652d9513
+    /\ UnchangedFrame_8496f1a494f4dd2c
 
 
-SetSessionInstructionActiveBudgetExceeded(session_id, slot, revision, effect, digest, body_bytes) ==
+SetSessionInstructionActiveBudgetExceeded(session_id, slot, revision, effect, digest, body_bytes, member_bound) ==
     /\ phase = "Ready"
     /\ (((session_id \in DOMAIN session_instruction_owner) /\ (IF ~(((session_instruction_owner)[session_id] # "Mob")) THEN TRUE ELSE (IF ~((effect = "Active")) THEN TRUE ELSE (IF ~((digest # "")) THEN TRUE ELSE ((((session_id \in DOMAIN session_instruction_target_revision) /\ (IF ~(((slot \in DOMAIN (session_instruction_target_revision)[session_id]) = FALSE)) THEN TRUE ELSE (IF ~((revision >= 1)) THEN TRUE ELSE (session_id \in DOMAIN session_instruction_target_revision)))) /\ (IF (((slot \in DOMAIN (session_instruction_target_revision)[session_id]) = FALSE) /\ (revision >= 1) /\ (64 > Cardinality(DOMAIN (session_instruction_target_revision)[session_id]))) THEN TRUE ELSE ((session_id \in DOMAIN session_instruction_target_revision) /\ (IF ~((slot \in DOMAIN (session_instruction_target_revision)[session_id])) THEN TRUE ELSE (session_id \in DOMAIN session_instruction_target_revision))))) /\ (IF ~((IF (((slot \in DOMAIN (session_instruction_target_revision)[session_id]) = FALSE) /\ (revision >= 1) /\ (64 > Cardinality(DOMAIN (session_instruction_target_revision)[session_id]))) THEN TRUE ELSE ((slot \in DOMAIN (session_instruction_target_revision)[session_id]) /\ (revision > (IF "value" \in DOMAIN (IF (slot \in DOMAIN (session_instruction_target_revision)[session_id]) THEN Some((IF slot \in DOMAIN (session_instruction_target_revision)[session_id] THEN (session_instruction_target_revision)[session_id][slot] ELSE None)) ELSE None) THEN (IF (slot \in DOMAIN (session_instruction_target_revision)[session_id]) THEN Some((IF slot \in DOMAIN (session_instruction_target_revision)[session_id] THEN (session_instruction_target_revision)[session_id][slot] ELSE None)) ELSE None)["value"] ELSE None))))) THEN TRUE ELSE ((session_id \in DOMAIN session_instruction_target_effect) /\ (session_id \in DOMAIN session_instruction_target_bytes)))))))) /\ (((session_instruction_owner)[session_id] # "Mob") /\ (effect = "Active") /\ (digest # "") /\ (IF (((slot \in DOMAIN (session_instruction_target_revision)[session_id]) = FALSE) /\ (revision >= 1) /\ (64 > Cardinality(DOMAIN (session_instruction_target_revision)[session_id]))) THEN TRUE ELSE ((slot \in DOMAIN (session_instruction_target_revision)[session_id]) /\ (revision > (IF "value" \in DOMAIN (IF (slot \in DOMAIN (session_instruction_target_revision)[session_id]) THEN Some((IF slot \in DOMAIN (session_instruction_target_revision)[session_id] THEN (session_instruction_target_revision)[session_id][slot] ELSE None)) ELSE None) THEN (IF (slot \in DOMAIN (session_instruction_target_revision)[session_id]) THEN Some((IF slot \in DOMAIN (session_instruction_target_revision)[session_id] THEN (session_instruction_target_revision)[session_id][slot] ELSE None)) ELSE None)["value"] ELSE None)))) /\ (session_document_instruction_active_bytes(session_document_instruction_slot_after_set((session_instruction_target_effect)[session_id], slot, effect), session_document_instruction_slot_after_set((session_instruction_target_bytes)[session_id], slot, body_bytes)) > 1048576)))
+    /\ (member_bound = FALSE)
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44bcbd08434cac9f
+    /\ UnchangedFrame_a191bdb127527008
 
 
-SetSessionInstructionDuplicate(session_id, slot, revision, effect, digest, body_bytes) ==
+SetSessionInstructionDuplicate(session_id, slot, revision, effect, digest, body_bytes, member_bound) ==
     /\ phase = "Ready"
     /\ (((session_id \in DOMAIN session_instruction_owner) /\ (IF ~(((session_instruction_owner)[session_id] # "Mob")) THEN TRUE ELSE ((session_id \in DOMAIN session_instruction_target_revision) /\ (IF ~((slot \in DOMAIN (session_instruction_target_revision)[session_id])) THEN TRUE ELSE ((session_id \in DOMAIN session_instruction_target_revision) /\ (IF ~((revision = (IF "value" \in DOMAIN (IF (slot \in DOMAIN (session_instruction_target_revision)[session_id]) THEN Some((IF slot \in DOMAIN (session_instruction_target_revision)[session_id] THEN (session_instruction_target_revision)[session_id][slot] ELSE None)) ELSE None) THEN (IF (slot \in DOMAIN (session_instruction_target_revision)[session_id]) THEN Some((IF slot \in DOMAIN (session_instruction_target_revision)[session_id] THEN (session_instruction_target_revision)[session_id][slot] ELSE None)) ELSE None)["value"] ELSE None))) THEN TRUE ELSE ((session_id \in DOMAIN session_instruction_target_effect) /\ (IF ~(((IF "value" \in DOMAIN (IF (slot \in DOMAIN (session_instruction_target_effect)[session_id]) THEN Some((IF slot \in DOMAIN (session_instruction_target_effect)[session_id] THEN (session_instruction_target_effect)[session_id][slot] ELSE None)) ELSE None) THEN (IF (slot \in DOMAIN (session_instruction_target_effect)[session_id]) THEN Some((IF slot \in DOMAIN (session_instruction_target_effect)[session_id] THEN (session_instruction_target_effect)[session_id][slot] ELSE None)) ELSE None)["value"] ELSE None) = effect)) THEN TRUE ELSE (session_id \in DOMAIN session_instruction_target_digest))))))))) /\ (((session_instruction_owner)[session_id] # "Mob") /\ (slot \in DOMAIN (session_instruction_target_revision)[session_id]) /\ (revision = (IF "value" \in DOMAIN (IF (slot \in DOMAIN (session_instruction_target_revision)[session_id]) THEN Some((IF slot \in DOMAIN (session_instruction_target_revision)[session_id] THEN (session_instruction_target_revision)[session_id][slot] ELSE None)) ELSE None) THEN (IF (slot \in DOMAIN (session_instruction_target_revision)[session_id]) THEN Some((IF slot \in DOMAIN (session_instruction_target_revision)[session_id] THEN (session_instruction_target_revision)[session_id][slot] ELSE None)) ELSE None)["value"] ELSE None)) /\ ((IF "value" \in DOMAIN (IF (slot \in DOMAIN (session_instruction_target_effect)[session_id]) THEN Some((IF slot \in DOMAIN (session_instruction_target_effect)[session_id] THEN (session_instruction_target_effect)[session_id][slot] ELSE None)) ELSE None) THEN (IF (slot \in DOMAIN (session_instruction_target_effect)[session_id]) THEN Some((IF slot \in DOMAIN (session_instruction_target_effect)[session_id] THEN (session_instruction_target_effect)[session_id][slot] ELSE None)) ELSE None)["value"] ELSE None) = effect) /\ ((IF "value" \in DOMAIN (IF (slot \in DOMAIN (session_instruction_target_digest)[session_id]) THEN Some((IF slot \in DOMAIN (session_instruction_target_digest)[session_id] THEN (session_instruction_target_digest)[session_id][slot] ELSE None)) ELSE None) THEN (IF (slot \in DOMAIN (session_instruction_target_digest)[session_id]) THEN Some((IF slot \in DOMAIN (session_instruction_target_digest)[session_id] THEN (session_instruction_target_digest)[session_id][slot] ELSE None)) ELSE None)["value"] ELSE None) = digest)))
+    /\ (member_bound = FALSE)
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44bcbd08434cac9f
+    /\ UnchangedFrame_a191bdb127527008
 
 
-SetSessionInstructionConflict(session_id, slot, revision, effect, digest, body_bytes) ==
+SetSessionInstructionConflict(session_id, slot, revision, effect, digest, body_bytes, member_bound) ==
     /\ phase = "Ready"
     /\ (((session_id \in DOMAIN session_instruction_owner) /\ (IF ~(((session_instruction_owner)[session_id] # "Mob")) THEN TRUE ELSE ((session_id \in DOMAIN session_instruction_target_revision) /\ (IF ~((slot \in DOMAIN (session_instruction_target_revision)[session_id])) THEN TRUE ELSE ((session_id \in DOMAIN session_instruction_target_revision) /\ (IF ~((revision = (IF "value" \in DOMAIN (IF (slot \in DOMAIN (session_instruction_target_revision)[session_id]) THEN Some((IF slot \in DOMAIN (session_instruction_target_revision)[session_id] THEN (session_instruction_target_revision)[session_id][slot] ELSE None)) ELSE None) THEN (IF (slot \in DOMAIN (session_instruction_target_revision)[session_id]) THEN Some((IF slot \in DOMAIN (session_instruction_target_revision)[session_id] THEN (session_instruction_target_revision)[session_id][slot] ELSE None)) ELSE None)["value"] ELSE None))) THEN TRUE ELSE ((session_id \in DOMAIN session_instruction_target_effect) /\ (IF ((IF "value" \in DOMAIN (IF (slot \in DOMAIN (session_instruction_target_effect)[session_id]) THEN Some((IF slot \in DOMAIN (session_instruction_target_effect)[session_id] THEN (session_instruction_target_effect)[session_id][slot] ELSE None)) ELSE None) THEN (IF (slot \in DOMAIN (session_instruction_target_effect)[session_id]) THEN Some((IF slot \in DOMAIN (session_instruction_target_effect)[session_id] THEN (session_instruction_target_effect)[session_id][slot] ELSE None)) ELSE None)["value"] ELSE None) # effect) THEN TRUE ELSE (session_id \in DOMAIN session_instruction_target_digest))))))))) /\ (((session_instruction_owner)[session_id] # "Mob") /\ (slot \in DOMAIN (session_instruction_target_revision)[session_id]) /\ (revision = (IF "value" \in DOMAIN (IF (slot \in DOMAIN (session_instruction_target_revision)[session_id]) THEN Some((IF slot \in DOMAIN (session_instruction_target_revision)[session_id] THEN (session_instruction_target_revision)[session_id][slot] ELSE None)) ELSE None) THEN (IF (slot \in DOMAIN (session_instruction_target_revision)[session_id]) THEN Some((IF slot \in DOMAIN (session_instruction_target_revision)[session_id] THEN (session_instruction_target_revision)[session_id][slot] ELSE None)) ELSE None)["value"] ELSE None)) /\ (IF ((IF "value" \in DOMAIN (IF (slot \in DOMAIN (session_instruction_target_effect)[session_id]) THEN Some((IF slot \in DOMAIN (session_instruction_target_effect)[session_id] THEN (session_instruction_target_effect)[session_id][slot] ELSE None)) ELSE None) THEN (IF (slot \in DOMAIN (session_instruction_target_effect)[session_id]) THEN Some((IF slot \in DOMAIN (session_instruction_target_effect)[session_id] THEN (session_instruction_target_effect)[session_id][slot] ELSE None)) ELSE None)["value"] ELSE None) # effect) THEN TRUE ELSE ((IF "value" \in DOMAIN (IF (slot \in DOMAIN (session_instruction_target_digest)[session_id]) THEN Some((IF slot \in DOMAIN (session_instruction_target_digest)[session_id] THEN (session_instruction_target_digest)[session_id][slot] ELSE None)) ELSE None) THEN (IF (slot \in DOMAIN (session_instruction_target_digest)[session_id]) THEN Some((IF slot \in DOMAIN (session_instruction_target_digest)[session_id] THEN (session_instruction_target_digest)[session_id][slot] ELSE None)) ELSE None)["value"] ELSE None) # digest))))
+    /\ (member_bound = FALSE)
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44bcbd08434cac9f
+    /\ UnchangedFrame_a191bdb127527008
 
 
-SetSessionInstructionStale(session_id, slot, revision, effect, digest, body_bytes) ==
+SetSessionInstructionStale(session_id, slot, revision, effect, digest, body_bytes, member_bound) ==
     /\ phase = "Ready"
     /\ (((session_id \in DOMAIN session_instruction_owner) /\ (IF ~(((session_instruction_owner)[session_id] # "Mob")) THEN TRUE ELSE ((session_id \in DOMAIN session_instruction_target_revision) /\ (IF ~((slot \in DOMAIN (session_instruction_target_revision)[session_id])) THEN TRUE ELSE (session_id \in DOMAIN session_instruction_target_revision))))) /\ (((session_instruction_owner)[session_id] # "Mob") /\ (slot \in DOMAIN (session_instruction_target_revision)[session_id]) /\ (revision < (IF "value" \in DOMAIN (IF (slot \in DOMAIN (session_instruction_target_revision)[session_id]) THEN Some((IF slot \in DOMAIN (session_instruction_target_revision)[session_id] THEN (session_instruction_target_revision)[session_id][slot] ELSE None)) ELSE None) THEN (IF (slot \in DOMAIN (session_instruction_target_revision)[session_id]) THEN Some((IF slot \in DOMAIN (session_instruction_target_revision)[session_id] THEN (session_instruction_target_revision)[session_id][slot] ELSE None)) ELSE None)["value"] ELSE None))))
+    /\ (member_bound = FALSE)
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44bcbd08434cac9f
+    /\ UnchangedFrame_a191bdb127527008
 
 
-SetSessionInstructionOwnedByMob(session_id, slot, revision, effect, digest, body_bytes) ==
+SetSessionInstructionOwnedByMob(session_id, slot, revision, effect, digest, body_bytes, member_bound) ==
     /\ phase = "Ready"
     /\ ((session_id \in DOMAIN session_instruction_owner) /\ ((session_instruction_owner)[session_id] = "Mob"))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44bcbd08434cac9f
+    /\ UnchangedFrame_a191bdb127527008
 
 
-SetSessionInstructionSlotLimitExceeded(session_id, slot, revision, effect, digest, body_bytes) ==
+SetSessionInstructionMemberSession(session_id, slot, revision, effect, digest, body_bytes, member_bound) ==
+    /\ phase = "Ready"
+    /\ ((session_id \in DOMAIN session_instruction_owner) /\ ((session_instruction_owner)[session_id] # "Mob"))
+    /\ (member_bound = TRUE)
+    /\ phase' = "Ready"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_a191bdb127527008
+
+
+SetSessionInstructionSlotLimitExceeded(session_id, slot, revision, effect, digest, body_bytes, member_bound) ==
     /\ phase = "Ready"
     /\ (((session_id \in DOMAIN session_instruction_owner) /\ (IF ~(((session_instruction_owner)[session_id] # "Mob")) THEN TRUE ELSE ((session_id \in DOMAIN session_instruction_target_revision) /\ (IF ~(((slot \in DOMAIN (session_instruction_target_revision)[session_id]) = FALSE)) THEN TRUE ELSE (IF ~((effect = "Active")) THEN TRUE ELSE (session_id \in DOMAIN session_instruction_target_revision)))))) /\ (((session_instruction_owner)[session_id] # "Mob") /\ ((slot \in DOMAIN (session_instruction_target_revision)[session_id]) = FALSE) /\ (effect = "Active") /\ (Cardinality(DOMAIN (session_instruction_target_revision)[session_id]) >= 64)))
+    /\ (member_bound = FALSE)
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44bcbd08434cac9f
+    /\ UnchangedFrame_a191bdb127527008
 
 
-SetSessionInstructionUnknownSlot(session_id, slot, revision, effect, digest, body_bytes) ==
+SetSessionInstructionUnknownSlot(session_id, slot, revision, effect, digest, body_bytes, member_bound) ==
     /\ phase = "Ready"
     /\ (((session_id \in DOMAIN session_instruction_owner) /\ (IF ~(((session_instruction_owner)[session_id] # "Mob")) THEN TRUE ELSE (session_id \in DOMAIN session_instruction_target_revision))) /\ (((session_instruction_owner)[session_id] # "Mob") /\ ((slot \in DOMAIN (session_instruction_target_revision)[session_id]) = FALSE) /\ (effect = "Absent")))
+    /\ (member_bound = FALSE)
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44bcbd08434cac9f
+    /\ UnchangedFrame_a191bdb127527008
 
 
-RebindInstructionOwner(session_id, owner, mob_id) ==
+RebindInstructionOwner(session_id, owner, mob_id, member_bound) ==
     /\ phase = "Ready"
     /\ ((IF ~((owner = "Mob")) THEN TRUE ELSE (IF ~((mob_id # "")) THEN TRUE ELSE (session_id \in DOMAIN session_instruction_effective_revision))) /\ ((owner = "Mob") /\ (mob_id # "") /\ (Cardinality(DOMAIN (session_instruction_effective_revision)[session_id]) <= 64)))
     /\ ((session_id \in DOMAIN session_instruction_owner) /\ ((session_instruction_owner)[session_id] = "Session"))
@@ -1375,19 +1441,29 @@ RebindInstructionOwner(session_id, owner, mob_id) ==
     /\ session_instruction_target_effect' = MapSet(session_instruction_target_effect, session_id, (IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_instruction_effective_effect) THEN Some((IF session_id \in DOMAIN session_instruction_effective_effect THEN session_instruction_effective_effect[session_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (session_id \in DOMAIN session_instruction_effective_effect) THEN Some((IF session_id \in DOMAIN session_instruction_effective_effect THEN session_instruction_effective_effect[session_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None))
     /\ session_instruction_target_digest' = MapSet(session_instruction_target_digest, session_id, (IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_instruction_effective_digest) THEN Some((IF session_id \in DOMAIN session_instruction_effective_digest THEN session_instruction_effective_digest[session_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (session_id \in DOMAIN session_instruction_effective_digest) THEN Some((IF session_id \in DOMAIN session_instruction_effective_digest THEN session_instruction_effective_digest[session_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None))
     /\ session_instruction_target_bytes' = MapSet(session_instruction_target_bytes, session_id, (IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_instruction_effective_bytes) THEN Some((IF session_id \in DOMAIN session_instruction_effective_bytes THEN session_instruction_effective_bytes[session_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (session_id \in DOMAIN session_instruction_effective_bytes) THEN Some((IF session_id \in DOMAIN session_instruction_effective_bytes THEN session_instruction_effective_bytes[session_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None))
-    /\ UnchangedFrame_2999b03e64d8844d
+    /\ UnchangedFrame_b8d01ff667a8deea
 
 
-RebindInstructionOwnerUnowned(session_id, owner, mob_id) ==
+RebindInstructionOwnerUnowned(session_id, owner, mob_id, member_bound) ==
     /\ phase = "Ready"
-    /\ (IF ((owner = "Session") /\ (mob_id = "")) THEN TRUE ELSE ((owner = "Mob") /\ (mob_id # "")))
+    /\ (IF ((owner = "Session") /\ (mob_id = "") /\ (member_bound = FALSE)) THEN TRUE ELSE ((owner = "Mob") /\ (mob_id # "")))
     /\ ((session_id \in DOMAIN session_instruction_owner) /\ ((session_instruction_owner)[session_id] = "Unowned"))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
     /\ session_instruction_owner' = MapSet(session_instruction_owner, session_id, owner)
     /\ session_instruction_owner_mob' = MapSet(session_instruction_owner_mob, session_id, mob_id)
     /\ session_instruction_target_generation' = MapSet(session_instruction_target_generation, session_id, 0)
-    /\ UnchangedFrame_a26768aa2b7e30dc
+    /\ UnchangedFrame_b58404755dfafd89
+
+
+RebindInstructionOwnerMemberSession(session_id, owner, mob_id, member_bound) ==
+    /\ phase = "Ready"
+    /\ ((owner = "Session") /\ (mob_id = ""))
+    /\ (member_bound = TRUE)
+    /\ ((session_id \in DOMAIN session_instruction_owner) /\ ((session_instruction_owner)[session_id] = "Unowned"))
+    /\ phase' = "Ready"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_a191bdb127527008
 
 
 ReleaseInstructionTarget(session_id, mob_id) ==
@@ -1402,7 +1478,7 @@ ReleaseInstructionTarget(session_id, mob_id) ==
     /\ session_instruction_target_effect' = MapSet(session_instruction_target_effect, session_id, [x \in {} |-> None])
     /\ session_instruction_target_digest' = MapSet(session_instruction_target_digest, session_id, [x \in {} |-> None])
     /\ session_instruction_target_bytes' = MapSet(session_instruction_target_bytes, session_id, [x \in {} |-> None])
-    /\ UnchangedFrame_2999b03e64d8844d
+    /\ UnchangedFrame_b8d01ff667a8deea
 
 
 ReleaseInstructionTargetAlreadyUnowned(session_id, mob_id) ==
@@ -1410,7 +1486,7 @@ ReleaseInstructionTargetAlreadyUnowned(session_id, mob_id) ==
     /\ ((session_id \in DOMAIN session_instruction_owner) /\ ((session_instruction_owner)[session_id] = "Unowned"))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44bcbd08434cac9f
+    /\ UnchangedFrame_a191bdb127527008
 
 
 ReleaseInstructionTargetOwnedByOtherMob(session_id, mob_id) ==
@@ -1418,7 +1494,7 @@ ReleaseInstructionTargetOwnedByOtherMob(session_id, mob_id) ==
     /\ (((session_id \in DOMAIN session_instruction_owner) /\ (IF ~(((session_instruction_owner)[session_id] = "Mob")) THEN TRUE ELSE (session_id \in DOMAIN session_instruction_owner_mob))) /\ (((session_instruction_owner)[session_id] = "Mob") /\ ((session_instruction_owner_mob)[session_id] # mob_id)))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44bcbd08434cac9f
+    /\ UnchangedFrame_a191bdb127527008
 
 
 ReleaseInstructionTargetOwnedBySession(session_id, mob_id) ==
@@ -1426,7 +1502,7 @@ ReleaseInstructionTargetOwnedBySession(session_id, mob_id) ==
     /\ ((session_id \in DOMAIN session_instruction_owner) /\ ((session_instruction_owner)[session_id] = "Session"))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44bcbd08434cac9f
+    /\ UnchangedFrame_a191bdb127527008
 
 
 ResolveRunStartInstructionsApply(session_id, run_start, lowering, transcript_is_system_prefix) ==
@@ -1442,7 +1518,7 @@ ResolveRunStartInstructionsApply(session_id, run_start, lowering, transcript_is_
     /\ session_instruction_effective_bytes' = MapSet(session_instruction_effective_bytes, session_id, session_document_instruction_active_slots((IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_instruction_target_effect) THEN Some((IF session_id \in DOMAIN session_instruction_target_effect THEN session_instruction_target_effect[session_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (session_id \in DOMAIN session_instruction_target_effect) THEN Some((IF session_id \in DOMAIN session_instruction_target_effect THEN session_instruction_target_effect[session_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None), (IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_instruction_target_bytes) THEN Some((IF session_id \in DOMAIN session_instruction_target_bytes THEN session_instruction_target_bytes[session_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (session_id \in DOMAIN session_instruction_target_bytes) THEN Some((IF session_id \in DOMAIN session_instruction_target_bytes THEN session_instruction_target_bytes[session_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)))
     /\ session_instruction_effective_generation' = MapSet(session_instruction_effective_generation, session_id, (IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_instruction_target_generation) THEN Some((IF session_id \in DOMAIN session_instruction_target_generation THEN session_instruction_target_generation[session_id] ELSE 0)) ELSE None) THEN (IF (session_id \in DOMAIN session_instruction_target_generation) THEN Some((IF session_id \in DOMAIN session_instruction_target_generation THEN session_instruction_target_generation[session_id] ELSE 0)) ELSE None)["value"] ELSE None))
     /\ session_instruction_entry_sequence' = MapSet(session_instruction_entry_sequence, session_id, ((IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_instruction_entry_sequence) THEN Some((IF session_id \in DOMAIN session_instruction_entry_sequence THEN session_instruction_entry_sequence[session_id] ELSE 0)) ELSE None) THEN (IF (session_id \in DOMAIN session_instruction_entry_sequence) THEN Some((IF session_id \in DOMAIN session_instruction_entry_sequence THEN session_instruction_entry_sequence[session_id] ELSE 0)) ELSE None)["value"] ELSE None) + 1))
-    /\ UnchangedFrame_2b67ec16fd8d9aca
+    /\ UnchangedFrame_614f04e6d2a8b76b
 
 
 ResolveRunStartInstructionsNoChange(session_id, run_start, lowering, transcript_is_system_prefix) ==
@@ -1450,7 +1526,7 @@ ResolveRunStartInstructionsNoChange(session_id, run_start, lowering, transcript_
     /\ ((IF ~((session_id \in DOMAIN session_instruction_entry_sequence)) THEN TRUE ELSE (IF (run_start # "FreshRun") THEN TRUE ELSE ((((((session_id \in DOMAIN session_instruction_target_revision) /\ (session_id \in DOMAIN session_instruction_target_effect)) /\ (session_id \in DOMAIN session_instruction_target_digest)) /\ (session_id \in DOMAIN session_instruction_effective_revision)) /\ (session_id \in DOMAIN session_instruction_effective_effect)) /\ (session_id \in DOMAIN session_instruction_effective_digest)))) /\ ((session_id \in DOMAIN session_instruction_entry_sequence) /\ (IF (run_start # "FreshRun") THEN TRUE ELSE (instruction_change_pending((session_instruction_target_revision)[session_id], (session_instruction_target_effect)[session_id], (session_instruction_target_digest)[session_id], (session_instruction_effective_revision)[session_id], (session_instruction_effective_effect)[session_id], (session_instruction_effective_digest)[session_id]) = FALSE))))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44bcbd08434cac9f
+    /\ UnchangedFrame_a191bdb127527008
 
 
 ResolveRunStartInstructionsDeferredLeadingPrefix(session_id, run_start, lowering, transcript_is_system_prefix) ==
@@ -1458,7 +1534,7 @@ ResolveRunStartInstructionsDeferredLeadingPrefix(session_id, run_start, lowering
     /\ ((IF ~((run_start = "FreshRun")) THEN TRUE ELSE ((((((session_id \in DOMAIN session_instruction_target_revision) /\ (session_id \in DOMAIN session_instruction_target_effect)) /\ (session_id \in DOMAIN session_instruction_target_digest)) /\ (session_id \in DOMAIN session_instruction_effective_revision)) /\ (session_id \in DOMAIN session_instruction_effective_effect)) /\ (session_id \in DOMAIN session_instruction_effective_digest))) /\ ((run_start = "FreshRun") /\ instruction_change_pending((session_instruction_target_revision)[session_id], (session_instruction_target_effect)[session_id], (session_instruction_target_digest)[session_id], (session_instruction_effective_revision)[session_id], (session_instruction_effective_effect)[session_id], (session_instruction_effective_digest)[session_id]) /\ (lowering = "LeadingPrefixOnly") /\ (transcript_is_system_prefix = FALSE)))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44bcbd08434cac9f
+    /\ UnchangedFrame_a191bdb127527008
 
 
 ResolveRunStartInstructionsDeferredUnavailable(session_id, run_start, lowering, transcript_is_system_prefix) ==
@@ -1466,7 +1542,7 @@ ResolveRunStartInstructionsDeferredUnavailable(session_id, run_start, lowering, 
     /\ ((IF ~((run_start = "FreshRun")) THEN TRUE ELSE ((((((session_id \in DOMAIN session_instruction_target_revision) /\ (session_id \in DOMAIN session_instruction_target_effect)) /\ (session_id \in DOMAIN session_instruction_target_digest)) /\ (session_id \in DOMAIN session_instruction_effective_revision)) /\ (session_id \in DOMAIN session_instruction_effective_effect)) /\ (session_id \in DOMAIN session_instruction_effective_digest))) /\ ((run_start = "FreshRun") /\ instruction_change_pending((session_instruction_target_revision)[session_id], (session_instruction_target_effect)[session_id], (session_instruction_target_digest)[session_id], (session_instruction_effective_revision)[session_id], (session_instruction_effective_effect)[session_id], (session_instruction_effective_digest)[session_id]) /\ (lowering = "Unavailable")))
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_44bcbd08434cac9f
+    /\ UnchangedFrame_a191bdb127527008
 
 
 AuthorizeInstructionFoldAtRunStart(session_id, at_run_start, lowering) ==
@@ -1482,7 +1558,7 @@ AuthorizeInstructionFoldAtRunStart(session_id, at_run_start, lowering) ==
     /\ session_instruction_effective_bytes' = MapSet(session_instruction_effective_bytes, session_id, session_document_instruction_active_slots((IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_instruction_target_effect) THEN Some((IF session_id \in DOMAIN session_instruction_target_effect THEN session_instruction_target_effect[session_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (session_id \in DOMAIN session_instruction_target_effect) THEN Some((IF session_id \in DOMAIN session_instruction_target_effect THEN session_instruction_target_effect[session_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None), (IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_instruction_target_bytes) THEN Some((IF session_id \in DOMAIN session_instruction_target_bytes THEN session_instruction_target_bytes[session_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (session_id \in DOMAIN session_instruction_target_bytes) THEN Some((IF session_id \in DOMAIN session_instruction_target_bytes THEN session_instruction_target_bytes[session_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)))
     /\ session_instruction_effective_generation' = MapSet(session_instruction_effective_generation, session_id, (IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_instruction_target_generation) THEN Some((IF session_id \in DOMAIN session_instruction_target_generation THEN session_instruction_target_generation[session_id] ELSE 0)) ELSE None) THEN (IF (session_id \in DOMAIN session_instruction_target_generation) THEN Some((IF session_id \in DOMAIN session_instruction_target_generation THEN session_instruction_target_generation[session_id] ELSE 0)) ELSE None)["value"] ELSE None))
     /\ session_instruction_entry_sequence' = MapSet(session_instruction_entry_sequence, session_id, ((IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_instruction_entry_sequence) THEN Some((IF session_id \in DOMAIN session_instruction_entry_sequence THEN session_instruction_entry_sequence[session_id] ELSE 0)) ELSE None) THEN (IF (session_id \in DOMAIN session_instruction_entry_sequence) THEN Some((IF session_id \in DOMAIN session_instruction_entry_sequence THEN session_instruction_entry_sequence[session_id] ELSE 0)) ELSE None)["value"] ELSE None) + 1))
-    /\ UnchangedFrame_2b67ec16fd8d9aca
+    /\ UnchangedFrame_614f04e6d2a8b76b
 
 
 AuthorizeInstructionFoldEffective(session_id, at_run_start, lowering) ==
@@ -1491,7 +1567,27 @@ AuthorizeInstructionFoldEffective(session_id, at_run_start, lowering) ==
     /\ phase' = "Ready"
     /\ model_step_count' = model_step_count + 1
     /\ session_instruction_entry_sequence' = MapSet(session_instruction_entry_sequence, session_id, ((IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_instruction_entry_sequence) THEN Some((IF session_id \in DOMAIN session_instruction_entry_sequence THEN session_instruction_entry_sequence[session_id] ELSE 0)) ELSE None) THEN (IF (session_id \in DOMAIN session_instruction_entry_sequence) THEN Some((IF session_id \in DOMAIN session_instruction_entry_sequence THEN session_instruction_entry_sequence[session_id] ELSE 0)) ELSE None)["value"] ELSE None) + 1))
-    /\ UnchangedFrame_efa9360e0c81d6cf
+    /\ UnchangedFrame_9cfb267baa486f98
+
+
+RecoverSessionActivationBodies(session_id, rows, retired, head_origin) ==
+    /\ phase = "Ready"
+    /\ activation_body_maps_consistent(rows, retired, head_origin)
+    /\ phase' = "Ready"
+    /\ model_step_count' = model_step_count + 1
+    /\ session_activation_rows' = MapSet(session_activation_rows, session_id, rows)
+    /\ session_activation_retired' = MapSet(session_activation_retired, session_id, retired)
+    /\ session_activation_head_origin' = MapSet(session_activation_head_origin, session_id, head_origin)
+    /\ UnchangedFrame_44bcbd08434cac9f
+
+
+AuthorizeActivationBodyRetirement(session_id) ==
+    /\ phase = "Ready"
+    /\ (session_id \in DOMAIN session_activation_rows)
+    /\ phase' = "Ready"
+    /\ model_step_count' = model_step_count + 1
+    /\ session_activation_retired' = MapSet(session_activation_retired, session_id, session_document_activation_retired_after((IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_activation_rows) THEN Some((IF session_id \in DOMAIN session_activation_rows THEN session_activation_rows[session_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (session_id \in DOMAIN session_activation_rows) THEN Some((IF session_id \in DOMAIN session_activation_rows THEN session_activation_rows[session_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None), (IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_activation_retired) THEN Some((IF session_id \in DOMAIN session_activation_retired THEN session_activation_retired[session_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (session_id \in DOMAIN session_activation_retired) THEN Some((IF session_id \in DOMAIN session_activation_retired THEN session_activation_retired[session_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)))
+    /\ UnchangedFrame_8941b7cedeafec51
 
 
 Next ==
@@ -1615,23 +1711,28 @@ Next ==
     \/ (phase = "Ready") /\ \E session_id \in SessionIdValues : \E owner \in InstructionTargetOwnerValues : \E owner_mob \in StringValues : \E target_generation \in InputSamples_RecoverSessionInstructionState_target_generation : \E entry_sequence \in InputSamples_RecoverSessionInstructionState_entry_sequence : RecoverSessionInstructionState(session_id, owner, owner_mob, target_generation, entry_sequence)
     \/ (phase = "Ready") /\ \E session_id \in SessionIdValues : \E revision \in MapStringU64Values : \E effect \in MapStringInstructionEffectValues : \E digest \in MapStringStringValues : \E bytes \in MapStringU64Values : RecoverSessionInstructionTarget(session_id, revision, effect, digest, bytes)
     \/ (phase = "Ready") /\ \E session_id \in SessionIdValues : \E revision \in MapStringU64Values : \E effect \in MapStringInstructionEffectValues : \E digest \in MapStringStringValues : \E bytes \in MapStringU64Values : \E generation \in InputSamples_RecoverSessionInstructionEffective_generation : \E last_entry_sequence \in InputSamples_RecoverSessionInstructionEffective_last_entry_sequence : RecoverSessionInstructionEffective(session_id, revision, effect, digest, bytes, generation, last_entry_sequence)
-    \/ (phase = "Ready") /\ \E session_id \in SessionIdValues : \E mob_id \in StringValues : \E generation \in 0..2 : \E revision \in MapStringU64Values : \E effect \in MapStringInstructionEffectValues : \E digest \in MapStringStringValues : \E bytes \in MapStringU64Values : RecordInstructionTargetAdvance(session_id, mob_id, generation, revision, effect, digest, bytes)
-    \/ (phase = "Ready") /\ \E session_id \in SessionIdValues : \E mob_id \in StringValues : \E generation \in 0..2 : \E revision \in MapStringU64Values : \E effect \in MapStringInstructionEffectValues : \E digest \in MapStringStringValues : \E bytes \in MapStringU64Values : RecordInstructionTargetActiveBudgetExceeded(session_id, mob_id, generation, revision, effect, digest, bytes)
-    \/ (phase = "Ready") /\ \E session_id \in SessionIdValues : \E mob_id \in StringValues : \E generation \in 0..2 : \E revision \in MapStringU64Values : \E effect \in MapStringInstructionEffectValues : \E digest \in MapStringStringValues : \E bytes \in MapStringU64Values : RecordInstructionTargetSlotLimitExceeded(session_id, mob_id, generation, revision, effect, digest, bytes)
-    \/ (phase = "Ready") /\ \E session_id \in SessionIdValues : \E mob_id \in StringValues : \E generation \in 0..2 : \E revision \in MapStringU64Values : \E effect \in MapStringInstructionEffectValues : \E digest \in MapStringStringValues : \E bytes \in MapStringU64Values : RecordInstructionTargetAlreadyRecorded(session_id, mob_id, generation, revision, effect, digest, bytes)
-    \/ (phase = "Ready") /\ \E session_id \in SessionIdValues : \E mob_id \in StringValues : \E generation \in 0..2 : \E revision \in MapStringU64Values : \E effect \in MapStringInstructionEffectValues : \E digest \in MapStringStringValues : \E bytes \in MapStringU64Values : RecordInstructionTargetOwnedBySession(session_id, mob_id, generation, revision, effect, digest, bytes)
-    \/ (phase = "Ready") /\ \E session_id \in SessionIdValues : \E mob_id \in StringValues : \E generation \in 0..2 : \E revision \in MapStringU64Values : \E effect \in MapStringInstructionEffectValues : \E digest \in MapStringStringValues : \E bytes \in MapStringU64Values : RecordInstructionTargetOwnedByOtherMob(session_id, mob_id, generation, revision, effect, digest, bytes)
-    \/ (phase = "Ready") /\ \E session_id \in SessionIdValues : \E slot \in StringValues : \E revision \in 0..2 : \E effect \in InstructionEffectValues : \E digest \in StringValues : \E body_bytes \in InputSamples_SetSessionInstruction_body_bytes : SetSessionInstructionNew(session_id, slot, revision, effect, digest, body_bytes)
-    \/ (phase = "Ready") /\ \E session_id \in SessionIdValues : \E slot \in StringValues : \E revision \in 0..2 : \E effect \in InstructionEffectValues : \E digest \in StringValues : \E body_bytes \in InputSamples_SetSessionInstruction_body_bytes : SetSessionInstructionAdvance(session_id, slot, revision, effect, digest, body_bytes)
-    \/ (phase = "Ready") /\ \E session_id \in SessionIdValues : \E slot \in StringValues : \E revision \in 0..2 : \E effect \in InstructionEffectValues : \E digest \in StringValues : \E body_bytes \in InputSamples_SetSessionInstruction_body_bytes : SetSessionInstructionActiveBudgetExceeded(session_id, slot, revision, effect, digest, body_bytes)
-    \/ (phase = "Ready") /\ \E session_id \in SessionIdValues : \E slot \in StringValues : \E revision \in 0..2 : \E effect \in InstructionEffectValues : \E digest \in StringValues : \E body_bytes \in InputSamples_SetSessionInstruction_body_bytes : SetSessionInstructionDuplicate(session_id, slot, revision, effect, digest, body_bytes)
-    \/ (phase = "Ready") /\ \E session_id \in SessionIdValues : \E slot \in StringValues : \E revision \in 0..2 : \E effect \in InstructionEffectValues : \E digest \in StringValues : \E body_bytes \in InputSamples_SetSessionInstruction_body_bytes : SetSessionInstructionConflict(session_id, slot, revision, effect, digest, body_bytes)
-    \/ (phase = "Ready") /\ \E session_id \in SessionIdValues : \E slot \in StringValues : \E revision \in 0..2 : \E effect \in InstructionEffectValues : \E digest \in StringValues : \E body_bytes \in InputSamples_SetSessionInstruction_body_bytes : SetSessionInstructionStale(session_id, slot, revision, effect, digest, body_bytes)
-    \/ (phase = "Ready") /\ \E session_id \in SessionIdValues : \E slot \in StringValues : \E revision \in 0..2 : \E effect \in InstructionEffectValues : \E digest \in StringValues : \E body_bytes \in InputSamples_SetSessionInstruction_body_bytes : SetSessionInstructionOwnedByMob(session_id, slot, revision, effect, digest, body_bytes)
-    \/ (phase = "Ready") /\ \E session_id \in SessionIdValues : \E slot \in StringValues : \E revision \in 0..2 : \E effect \in InstructionEffectValues : \E digest \in StringValues : \E body_bytes \in InputSamples_SetSessionInstruction_body_bytes : SetSessionInstructionSlotLimitExceeded(session_id, slot, revision, effect, digest, body_bytes)
-    \/ (phase = "Ready") /\ \E session_id \in SessionIdValues : \E slot \in StringValues : \E revision \in 0..2 : \E effect \in InstructionEffectValues : \E digest \in StringValues : \E body_bytes \in InputSamples_SetSessionInstruction_body_bytes : SetSessionInstructionUnknownSlot(session_id, slot, revision, effect, digest, body_bytes)
-    \/ (phase = "Ready") /\ \E session_id \in SessionIdValues : \E owner \in InstructionTargetOwnerValues : \E mob_id \in StringValues : RebindInstructionOwner(session_id, owner, mob_id)
-    \/ (phase = "Ready") /\ \E session_id \in SessionIdValues : \E owner \in InstructionTargetOwnerValues : \E mob_id \in StringValues : RebindInstructionOwnerUnowned(session_id, owner, mob_id)
+    \/ (phase = "Ready") /\ \E session_id \in SessionIdValues : \E mob_id \in StringValues : \E generation \in 0..2 : \E revision \in MapStringU64Values : \E effect \in MapStringInstructionEffectValues : \E digest \in MapStringStringValues : \E bytes \in MapStringU64Values : \E member_bound \in BOOLEAN : RecordInstructionTargetAdvance(session_id, mob_id, generation, revision, effect, digest, bytes, member_bound)
+    \/ (phase = "Ready") /\ \E session_id \in SessionIdValues : \E mob_id \in StringValues : \E generation \in 0..2 : \E revision \in MapStringU64Values : \E effect \in MapStringInstructionEffectValues : \E digest \in MapStringStringValues : \E bytes \in MapStringU64Values : \E member_bound \in BOOLEAN : RecordInstructionTargetActiveBudgetExceeded(session_id, mob_id, generation, revision, effect, digest, bytes, member_bound)
+    \/ (phase = "Ready") /\ \E session_id \in SessionIdValues : \E mob_id \in StringValues : \E generation \in 0..2 : \E revision \in MapStringU64Values : \E effect \in MapStringInstructionEffectValues : \E digest \in MapStringStringValues : \E bytes \in MapStringU64Values : \E member_bound \in BOOLEAN : RecordInstructionTargetSlotLimitExceeded(session_id, mob_id, generation, revision, effect, digest, bytes, member_bound)
+    \/ (phase = "Ready") /\ \E session_id \in SessionIdValues : \E mob_id \in StringValues : \E generation \in 0..2 : \E revision \in MapStringU64Values : \E effect \in MapStringInstructionEffectValues : \E digest \in MapStringStringValues : \E bytes \in MapStringU64Values : \E member_bound \in BOOLEAN : RecordInstructionTargetAlreadyRecorded(session_id, mob_id, generation, revision, effect, digest, bytes, member_bound)
+    \/ (phase = "Ready") /\ \E session_id \in SessionIdValues : \E mob_id \in StringValues : \E generation \in 0..2 : \E revision \in MapStringU64Values : \E effect \in MapStringInstructionEffectValues : \E digest \in MapStringStringValues : \E bytes \in MapStringU64Values : RecordInstructionTargetOwnedBySession(session_id, mob_id, generation, revision, effect, digest, bytes, FALSE)
+    \/ (phase = "Ready") /\ \E session_id \in SessionIdValues : \E mob_id \in StringValues : \E generation \in 0..2 : \E revision \in MapStringU64Values : \E effect \in MapStringInstructionEffectValues : \E digest \in MapStringStringValues : \E bytes \in MapStringU64Values : RecordInstructionTargetAdopt(session_id, mob_id, generation, revision, effect, digest, bytes, TRUE)
+    \/ (phase = "Ready") /\ \E session_id \in SessionIdValues : \E mob_id \in StringValues : \E generation \in 0..2 : \E revision \in MapStringU64Values : \E effect \in MapStringInstructionEffectValues : \E digest \in MapStringStringValues : \E bytes \in MapStringU64Values : RecordInstructionTargetAdoptActiveBudgetExceeded(session_id, mob_id, generation, revision, effect, digest, bytes, TRUE)
+    \/ (phase = "Ready") /\ \E session_id \in SessionIdValues : \E mob_id \in StringValues : \E generation \in 0..2 : \E revision \in MapStringU64Values : \E effect \in MapStringInstructionEffectValues : \E digest \in MapStringStringValues : \E bytes \in MapStringU64Values : RecordInstructionTargetAdoptSlotLimitExceeded(session_id, mob_id, generation, revision, effect, digest, bytes, TRUE)
+    \/ (phase = "Ready") /\ \E session_id \in SessionIdValues : \E mob_id \in StringValues : \E generation \in 0..2 : \E revision \in MapStringU64Values : \E effect \in MapStringInstructionEffectValues : \E digest \in MapStringStringValues : \E bytes \in MapStringU64Values : \E member_bound \in BOOLEAN : RecordInstructionTargetOwnedByOtherMob(session_id, mob_id, generation, revision, effect, digest, bytes, member_bound)
+    \/ (phase = "Ready") /\ \E session_id \in SessionIdValues : \E slot \in StringValues : \E revision \in 0..2 : \E effect \in InstructionEffectValues : \E digest \in StringValues : \E body_bytes \in InputSamples_SetSessionInstruction_body_bytes : SetSessionInstructionNew(session_id, slot, revision, effect, digest, body_bytes, FALSE)
+    \/ (phase = "Ready") /\ \E session_id \in SessionIdValues : \E slot \in StringValues : \E revision \in 0..2 : \E effect \in InstructionEffectValues : \E digest \in StringValues : \E body_bytes \in InputSamples_SetSessionInstruction_body_bytes : SetSessionInstructionAdvance(session_id, slot, revision, effect, digest, body_bytes, FALSE)
+    \/ (phase = "Ready") /\ \E session_id \in SessionIdValues : \E slot \in StringValues : \E revision \in 0..2 : \E effect \in InstructionEffectValues : \E digest \in StringValues : \E body_bytes \in InputSamples_SetSessionInstruction_body_bytes : SetSessionInstructionActiveBudgetExceeded(session_id, slot, revision, effect, digest, body_bytes, FALSE)
+    \/ (phase = "Ready") /\ \E session_id \in SessionIdValues : \E slot \in StringValues : \E revision \in 0..2 : \E effect \in InstructionEffectValues : \E digest \in StringValues : \E body_bytes \in InputSamples_SetSessionInstruction_body_bytes : SetSessionInstructionDuplicate(session_id, slot, revision, effect, digest, body_bytes, FALSE)
+    \/ (phase = "Ready") /\ \E session_id \in SessionIdValues : \E slot \in StringValues : \E revision \in 0..2 : \E effect \in InstructionEffectValues : \E digest \in StringValues : \E body_bytes \in InputSamples_SetSessionInstruction_body_bytes : SetSessionInstructionConflict(session_id, slot, revision, effect, digest, body_bytes, FALSE)
+    \/ (phase = "Ready") /\ \E session_id \in SessionIdValues : \E slot \in StringValues : \E revision \in 0..2 : \E effect \in InstructionEffectValues : \E digest \in StringValues : \E body_bytes \in InputSamples_SetSessionInstruction_body_bytes : SetSessionInstructionStale(session_id, slot, revision, effect, digest, body_bytes, FALSE)
+    \/ (phase = "Ready") /\ \E session_id \in SessionIdValues : \E slot \in StringValues : \E revision \in 0..2 : \E effect \in InstructionEffectValues : \E digest \in StringValues : \E body_bytes \in InputSamples_SetSessionInstruction_body_bytes : \E member_bound \in BOOLEAN : SetSessionInstructionOwnedByMob(session_id, slot, revision, effect, digest, body_bytes, member_bound)
+    \/ (phase = "Ready") /\ \E session_id \in SessionIdValues : \E slot \in StringValues : \E revision \in 0..2 : \E effect \in InstructionEffectValues : \E digest \in StringValues : \E body_bytes \in InputSamples_SetSessionInstruction_body_bytes : SetSessionInstructionMemberSession(session_id, slot, revision, effect, digest, body_bytes, TRUE)
+    \/ (phase = "Ready") /\ \E session_id \in SessionIdValues : \E slot \in StringValues : \E revision \in 0..2 : \E effect \in InstructionEffectValues : \E digest \in StringValues : \E body_bytes \in InputSamples_SetSessionInstruction_body_bytes : SetSessionInstructionSlotLimitExceeded(session_id, slot, revision, effect, digest, body_bytes, FALSE)
+    \/ (phase = "Ready") /\ \E session_id \in SessionIdValues : \E slot \in StringValues : \E revision \in 0..2 : \E effect \in InstructionEffectValues : \E digest \in StringValues : \E body_bytes \in InputSamples_SetSessionInstruction_body_bytes : SetSessionInstructionUnknownSlot(session_id, slot, revision, effect, digest, body_bytes, FALSE)
+    \/ (phase = "Ready") /\ \E session_id \in SessionIdValues : \E owner \in InstructionTargetOwnerValues : \E mob_id \in StringValues : \E member_bound \in BOOLEAN : RebindInstructionOwner(session_id, owner, mob_id, member_bound)
+    \/ (phase = "Ready") /\ \E session_id \in SessionIdValues : \E owner \in InstructionTargetOwnerValues : \E mob_id \in StringValues : \E member_bound \in BOOLEAN : RebindInstructionOwnerUnowned(session_id, owner, mob_id, member_bound)
+    \/ (phase = "Ready") /\ \E session_id \in SessionIdValues : \E owner \in InstructionTargetOwnerValues : \E mob_id \in StringValues : RebindInstructionOwnerMemberSession(session_id, owner, mob_id, TRUE)
     \/ (phase = "Ready") /\ \E session_id \in SessionIdValues : \E mob_id \in StringValues : ReleaseInstructionTarget(session_id, mob_id)
     \/ (phase = "Ready") /\ \E session_id \in SessionIdValues : \E mob_id \in StringValues : ReleaseInstructionTargetAlreadyUnowned(session_id, mob_id)
     \/ (phase = "Ready") /\ \E session_id \in SessionIdValues : \E mob_id \in StringValues : ReleaseInstructionTargetOwnedByOtherMob(session_id, mob_id)
@@ -1642,6 +1743,8 @@ Next ==
     \/ (phase = "Ready") /\ \E session_id \in SessionIdValues : \E run_start \in InstructionRunStartValues : \E lowering \in InstructionLoweringValues : \E transcript_is_system_prefix \in BOOLEAN : ResolveRunStartInstructionsDeferredUnavailable(session_id, run_start, lowering, transcript_is_system_prefix)
     \/ (phase = "Ready") /\ \E session_id \in SessionIdValues : \E lowering \in InstructionLoweringValues : AuthorizeInstructionFoldAtRunStart(session_id, TRUE, lowering)
     \/ (phase = "Ready") /\ \E session_id \in SessionIdValues : \E at_run_start \in BOOLEAN : \E lowering \in InstructionLoweringValues : AuthorizeInstructionFoldEffective(session_id, at_run_start, lowering)
+    \/ (phase = "Ready") /\ \E session_id \in SessionIdValues : \E rows \in MapStringU64Values : \E retired \in MapStringU64Values : \E head_origin \in MapStringActivationHeadOriginValues : RecoverSessionActivationBodies(session_id, rows, retired, head_origin)
+    \/ (phase = "Ready") /\ \E session_id \in SessionIdValues : AuthorizeActivationBodyRetirement(session_id)
 
 live_interaction_transcript_binding_is_complete == ((DOMAIN session_live_channel_id = DOMAIN session_live_interaction_id) /\ (DOMAIN session_live_channel_id = DOMAIN session_live_transcript_reconciliation) /\ (DOMAIN session_live_channel_id = DOMAIN session_live_provisional_transcript_present))
 committed_live_transcript_had_provisional_admission == (\A session_id \in DOMAIN session_live_transcript_reconciliation : (IF ((IF (session_id \in DOMAIN session_live_transcript_reconciliation) THEN Some((IF session_id \in DOMAIN session_live_transcript_reconciliation THEN session_live_transcript_reconciliation[session_id] ELSE "None")) ELSE None) # Some("Committed")) THEN TRUE ELSE ((IF (session_id \in DOMAIN session_live_provisional_transcript_present) THEN Some((IF session_id \in DOMAIN session_live_provisional_transcript_present THEN session_live_provisional_transcript_present[session_id] ELSE FALSE)) ELSE None) = Some(TRUE))))
@@ -1652,9 +1755,11 @@ instruction_slot_count_bounded == (\A session_id \in DOMAIN session_instruction_
 instruction_active_bytes_bounded == (\A session_id \in DOMAIN session_instruction_target_effect : ((1048576 >= session_document_instruction_active_bytes((IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_instruction_target_effect) THEN Some((IF session_id \in DOMAIN session_instruction_target_effect THEN session_instruction_target_effect[session_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (session_id \in DOMAIN session_instruction_target_effect) THEN Some((IF session_id \in DOMAIN session_instruction_target_effect THEN session_instruction_target_effect[session_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None), (IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_instruction_target_bytes) THEN Some((IF session_id \in DOMAIN session_instruction_target_bytes THEN session_instruction_target_bytes[session_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (session_id \in DOMAIN session_instruction_target_bytes) THEN Some((IF session_id \in DOMAIN session_instruction_target_bytes THEN session_instruction_target_bytes[session_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None))) /\ (1048576 >= session_document_instruction_active_bytes((IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_instruction_effective_effect) THEN Some((IF session_id \in DOMAIN session_instruction_effective_effect THEN session_instruction_effective_effect[session_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (session_id \in DOMAIN session_instruction_effective_effect) THEN Some((IF session_id \in DOMAIN session_instruction_effective_effect THEN session_instruction_effective_effect[session_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None), (IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_instruction_effective_bytes) THEN Some((IF session_id \in DOMAIN session_instruction_effective_bytes THEN session_instruction_effective_bytes[session_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (session_id \in DOMAIN session_instruction_effective_bytes) THEN Some((IF session_id \in DOMAIN session_instruction_effective_bytes THEN session_instruction_effective_bytes[session_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)))))
 instruction_entry_sequence_covers_effective == (\A session_id \in DOMAIN session_instruction_effective_effect : (IF ((IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_instruction_entry_sequence) THEN Some((IF session_id \in DOMAIN session_instruction_entry_sequence THEN session_instruction_entry_sequence[session_id] ELSE 0)) ELSE None) THEN (IF (session_id \in DOMAIN session_instruction_entry_sequence) THEN Some((IF session_id \in DOMAIN session_instruction_entry_sequence THEN session_instruction_entry_sequence[session_id] ELSE 0)) ELSE None)["value"] ELSE None) >= 1) THEN TRUE ELSE (\A slot \in DOMAIN (IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_instruction_effective_effect) THEN Some((IF session_id \in DOMAIN session_instruction_effective_effect THEN session_instruction_effective_effect[session_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (session_id \in DOMAIN session_instruction_effective_effect) THEN Some((IF session_id \in DOMAIN session_instruction_effective_effect THEN session_instruction_effective_effect[session_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None) : ((IF "value" \in DOMAIN (IF (slot \in DOMAIN (IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_instruction_effective_effect) THEN Some((IF session_id \in DOMAIN session_instruction_effective_effect THEN session_instruction_effective_effect[session_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (session_id \in DOMAIN session_instruction_effective_effect) THEN Some((IF session_id \in DOMAIN session_instruction_effective_effect THEN session_instruction_effective_effect[session_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)) THEN Some((IF slot \in DOMAIN (IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_instruction_effective_effect) THEN Some((IF session_id \in DOMAIN session_instruction_effective_effect THEN session_instruction_effective_effect[session_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (session_id \in DOMAIN session_instruction_effective_effect) THEN Some((IF session_id \in DOMAIN session_instruction_effective_effect THEN session_instruction_effective_effect[session_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None) THEN (IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_instruction_effective_effect) THEN Some((IF session_id \in DOMAIN session_instruction_effective_effect THEN session_instruction_effective_effect[session_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (session_id \in DOMAIN session_instruction_effective_effect) THEN Some((IF session_id \in DOMAIN session_instruction_effective_effect THEN session_instruction_effective_effect[session_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)[slot] ELSE None)) ELSE None) THEN (IF (slot \in DOMAIN (IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_instruction_effective_effect) THEN Some((IF session_id \in DOMAIN session_instruction_effective_effect THEN session_instruction_effective_effect[session_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (session_id \in DOMAIN session_instruction_effective_effect) THEN Some((IF session_id \in DOMAIN session_instruction_effective_effect THEN session_instruction_effective_effect[session_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)) THEN Some((IF slot \in DOMAIN (IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_instruction_effective_effect) THEN Some((IF session_id \in DOMAIN session_instruction_effective_effect THEN session_instruction_effective_effect[session_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (session_id \in DOMAIN session_instruction_effective_effect) THEN Some((IF session_id \in DOMAIN session_instruction_effective_effect THEN session_instruction_effective_effect[session_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None) THEN (IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_instruction_effective_effect) THEN Some((IF session_id \in DOMAIN session_instruction_effective_effect THEN session_instruction_effective_effect[session_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (session_id \in DOMAIN session_instruction_effective_effect) THEN Some((IF session_id \in DOMAIN session_instruction_effective_effect THEN session_instruction_effective_effect[session_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)[slot] ELSE None)) ELSE None)["value"] ELSE None) # "Active"))))
 instruction_mob_owner_names_its_mob == (\A session_id \in DOMAIN session_instruction_owner : (IF (((IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_instruction_owner) THEN Some((IF session_id \in DOMAIN session_instruction_owner THEN session_instruction_owner[session_id] ELSE "None")) ELSE None) THEN (IF (session_id \in DOMAIN session_instruction_owner) THEN Some((IF session_id \in DOMAIN session_instruction_owner THEN session_instruction_owner[session_id] ELSE "None")) ELSE None)["value"] ELSE None) = "Mob") /\ ((IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_instruction_owner_mob) THEN Some((IF session_id \in DOMAIN session_instruction_owner_mob THEN session_instruction_owner_mob[session_id] ELSE "None")) ELSE None) THEN (IF (session_id \in DOMAIN session_instruction_owner_mob) THEN Some((IF session_id \in DOMAIN session_instruction_owner_mob THEN session_instruction_owner_mob[session_id] ELSE "None")) ELSE None)["value"] ELSE None) # "")) THEN TRUE ELSE (((IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_instruction_owner) THEN Some((IF session_id \in DOMAIN session_instruction_owner THEN session_instruction_owner[session_id] ELSE "None")) ELSE None) THEN (IF (session_id \in DOMAIN session_instruction_owner) THEN Some((IF session_id \in DOMAIN session_instruction_owner THEN session_instruction_owner[session_id] ELSE "None")) ELSE None)["value"] ELSE None) # "Mob") /\ ((IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_instruction_owner_mob) THEN Some((IF session_id \in DOMAIN session_instruction_owner_mob THEN session_instruction_owner_mob[session_id] ELSE "None")) ELSE None) THEN (IF (session_id \in DOMAIN session_instruction_owner_mob) THEN Some((IF session_id \in DOMAIN session_instruction_owner_mob THEN session_instruction_owner_mob[session_id] ELSE "None")) ELSE None)["value"] ELSE None) = ""))))
+activation_body_maps_lockstep == ((DOMAIN session_activation_rows = DOMAIN session_activation_retired) /\ (DOMAIN session_activation_rows = DOMAIN session_activation_head_origin) /\ (\A session_id \in DOMAIN session_activation_rows : ((DOMAIN (IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_activation_rows) THEN Some((IF session_id \in DOMAIN session_activation_rows THEN session_activation_rows[session_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (session_id \in DOMAIN session_activation_rows) THEN Some((IF session_id \in DOMAIN session_activation_rows THEN session_activation_rows[session_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None) = DOMAIN (IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_activation_retired) THEN Some((IF session_id \in DOMAIN session_activation_retired THEN session_activation_retired[session_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (session_id \in DOMAIN session_activation_retired) THEN Some((IF session_id \in DOMAIN session_activation_retired THEN session_activation_retired[session_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)) /\ (DOMAIN (IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_activation_rows) THEN Some((IF session_id \in DOMAIN session_activation_rows THEN session_activation_rows[session_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (session_id \in DOMAIN session_activation_rows) THEN Some((IF session_id \in DOMAIN session_activation_rows THEN session_activation_rows[session_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None) = DOMAIN (IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_activation_head_origin) THEN Some((IF session_id \in DOMAIN session_activation_head_origin THEN session_activation_head_origin[session_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (session_id \in DOMAIN session_activation_head_origin) THEN Some((IF session_id \in DOMAIN session_activation_head_origin THEN session_activation_head_origin[session_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)) /\ (\A activation_key \in DOMAIN (IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_activation_rows) THEN Some((IF session_id \in DOMAIN session_activation_rows THEN session_activation_rows[session_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (session_id \in DOMAIN session_activation_rows) THEN Some((IF session_id \in DOMAIN session_activation_rows THEN session_activation_rows[session_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None) : ((IF "value" \in DOMAIN (IF (activation_key \in DOMAIN (IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_activation_rows) THEN Some((IF session_id \in DOMAIN session_activation_rows THEN session_activation_rows[session_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (session_id \in DOMAIN session_activation_rows) THEN Some((IF session_id \in DOMAIN session_activation_rows THEN session_activation_rows[session_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)) THEN Some((IF activation_key \in DOMAIN (IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_activation_rows) THEN Some((IF session_id \in DOMAIN session_activation_rows THEN session_activation_rows[session_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (session_id \in DOMAIN session_activation_rows) THEN Some((IF session_id \in DOMAIN session_activation_rows THEN session_activation_rows[session_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None) THEN (IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_activation_rows) THEN Some((IF session_id \in DOMAIN session_activation_rows THEN session_activation_rows[session_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (session_id \in DOMAIN session_activation_rows) THEN Some((IF session_id \in DOMAIN session_activation_rows THEN session_activation_rows[session_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)[activation_key] ELSE None)) ELSE None) THEN (IF (activation_key \in DOMAIN (IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_activation_rows) THEN Some((IF session_id \in DOMAIN session_activation_rows THEN session_activation_rows[session_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (session_id \in DOMAIN session_activation_rows) THEN Some((IF session_id \in DOMAIN session_activation_rows THEN session_activation_rows[session_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)) THEN Some((IF activation_key \in DOMAIN (IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_activation_rows) THEN Some((IF session_id \in DOMAIN session_activation_rows THEN session_activation_rows[session_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (session_id \in DOMAIN session_activation_rows) THEN Some((IF session_id \in DOMAIN session_activation_rows THEN session_activation_rows[session_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None) THEN (IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_activation_rows) THEN Some((IF session_id \in DOMAIN session_activation_rows THEN session_activation_rows[session_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (session_id \in DOMAIN session_activation_rows) THEN Some((IF session_id \in DOMAIN session_activation_rows THEN session_activation_rows[session_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)[activation_key] ELSE None)) ELSE None)["value"] ELSE None) >= 1)))))
+activation_effective_body_live == (\A session_id \in DOMAIN session_activation_rows : ((session_id \in DOMAIN session_activation_retired) /\ (session_id \in DOMAIN session_activation_head_origin) /\ (\A activation_key \in DOMAIN (IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_activation_rows) THEN Some((IF session_id \in DOMAIN session_activation_rows THEN session_activation_rows[session_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (session_id \in DOMAIN session_activation_rows) THEN Some((IF session_id \in DOMAIN session_activation_rows THEN session_activation_rows[session_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None) : ((activation_key \in DOMAIN (IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_activation_retired) THEN Some((IF session_id \in DOMAIN session_activation_retired THEN session_activation_retired[session_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (session_id \in DOMAIN session_activation_retired) THEN Some((IF session_id \in DOMAIN session_activation_retired THEN session_activation_retired[session_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)) /\ (activation_key \in DOMAIN (IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_activation_head_origin) THEN Some((IF session_id \in DOMAIN session_activation_head_origin THEN session_activation_head_origin[session_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (session_id \in DOMAIN session_activation_head_origin) THEN Some((IF session_id \in DOMAIN session_activation_head_origin THEN session_activation_head_origin[session_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)) /\ ((IF "value" \in DOMAIN (IF (activation_key \in DOMAIN (IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_activation_retired) THEN Some((IF session_id \in DOMAIN session_activation_retired THEN session_activation_retired[session_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (session_id \in DOMAIN session_activation_retired) THEN Some((IF session_id \in DOMAIN session_activation_retired THEN session_activation_retired[session_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)) THEN Some((IF activation_key \in DOMAIN (IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_activation_retired) THEN Some((IF session_id \in DOMAIN session_activation_retired THEN session_activation_retired[session_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (session_id \in DOMAIN session_activation_retired) THEN Some((IF session_id \in DOMAIN session_activation_retired THEN session_activation_retired[session_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None) THEN (IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_activation_retired) THEN Some((IF session_id \in DOMAIN session_activation_retired THEN session_activation_retired[session_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (session_id \in DOMAIN session_activation_retired) THEN Some((IF session_id \in DOMAIN session_activation_retired THEN session_activation_retired[session_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)[activation_key] ELSE None)) ELSE None) THEN (IF (activation_key \in DOMAIN (IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_activation_retired) THEN Some((IF session_id \in DOMAIN session_activation_retired THEN session_activation_retired[session_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (session_id \in DOMAIN session_activation_retired) THEN Some((IF session_id \in DOMAIN session_activation_retired THEN session_activation_retired[session_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)) THEN Some((IF activation_key \in DOMAIN (IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_activation_retired) THEN Some((IF session_id \in DOMAIN session_activation_retired THEN session_activation_retired[session_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (session_id \in DOMAIN session_activation_retired) THEN Some((IF session_id \in DOMAIN session_activation_retired THEN session_activation_retired[session_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None) THEN (IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_activation_retired) THEN Some((IF session_id \in DOMAIN session_activation_retired THEN session_activation_retired[session_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (session_id \in DOMAIN session_activation_retired) THEN Some((IF session_id \in DOMAIN session_activation_retired THEN session_activation_retired[session_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)[activation_key] ELSE None)) ELSE None)["value"] ELSE None) <= (IF "value" \in DOMAIN (IF (activation_key \in DOMAIN (IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_activation_rows) THEN Some((IF session_id \in DOMAIN session_activation_rows THEN session_activation_rows[session_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (session_id \in DOMAIN session_activation_rows) THEN Some((IF session_id \in DOMAIN session_activation_rows THEN session_activation_rows[session_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)) THEN Some((IF activation_key \in DOMAIN (IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_activation_rows) THEN Some((IF session_id \in DOMAIN session_activation_rows THEN session_activation_rows[session_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (session_id \in DOMAIN session_activation_rows) THEN Some((IF session_id \in DOMAIN session_activation_rows THEN session_activation_rows[session_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None) THEN (IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_activation_rows) THEN Some((IF session_id \in DOMAIN session_activation_rows THEN session_activation_rows[session_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (session_id \in DOMAIN session_activation_rows) THEN Some((IF session_id \in DOMAIN session_activation_rows THEN session_activation_rows[session_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)[activation_key] ELSE None)) ELSE None) THEN (IF (activation_key \in DOMAIN (IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_activation_rows) THEN Some((IF session_id \in DOMAIN session_activation_rows THEN session_activation_rows[session_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (session_id \in DOMAIN session_activation_rows) THEN Some((IF session_id \in DOMAIN session_activation_rows THEN session_activation_rows[session_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)) THEN Some((IF activation_key \in DOMAIN (IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_activation_rows) THEN Some((IF session_id \in DOMAIN session_activation_rows THEN session_activation_rows[session_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (session_id \in DOMAIN session_activation_rows) THEN Some((IF session_id \in DOMAIN session_activation_rows THEN session_activation_rows[session_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None) THEN (IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_activation_rows) THEN Some((IF session_id \in DOMAIN session_activation_rows THEN session_activation_rows[session_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (session_id \in DOMAIN session_activation_rows) THEN Some((IF session_id \in DOMAIN session_activation_rows THEN session_activation_rows[session_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)[activation_key] ELSE None)) ELSE None)["value"] ELSE None)) /\ (IF ((IF "value" \in DOMAIN (IF (activation_key \in DOMAIN (IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_activation_head_origin) THEN Some((IF session_id \in DOMAIN session_activation_head_origin THEN session_activation_head_origin[session_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (session_id \in DOMAIN session_activation_head_origin) THEN Some((IF session_id \in DOMAIN session_activation_head_origin THEN session_activation_head_origin[session_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)) THEN Some((IF activation_key \in DOMAIN (IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_activation_head_origin) THEN Some((IF session_id \in DOMAIN session_activation_head_origin THEN session_activation_head_origin[session_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (session_id \in DOMAIN session_activation_head_origin) THEN Some((IF session_id \in DOMAIN session_activation_head_origin THEN session_activation_head_origin[session_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None) THEN (IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_activation_head_origin) THEN Some((IF session_id \in DOMAIN session_activation_head_origin THEN session_activation_head_origin[session_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (session_id \in DOMAIN session_activation_head_origin) THEN Some((IF session_id \in DOMAIN session_activation_head_origin THEN session_activation_head_origin[session_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)[activation_key] ELSE None)) ELSE None) THEN (IF (activation_key \in DOMAIN (IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_activation_head_origin) THEN Some((IF session_id \in DOMAIN session_activation_head_origin THEN session_activation_head_origin[session_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (session_id \in DOMAIN session_activation_head_origin) THEN Some((IF session_id \in DOMAIN session_activation_head_origin THEN session_activation_head_origin[session_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)) THEN Some((IF activation_key \in DOMAIN (IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_activation_head_origin) THEN Some((IF session_id \in DOMAIN session_activation_head_origin THEN session_activation_head_origin[session_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (session_id \in DOMAIN session_activation_head_origin) THEN Some((IF session_id \in DOMAIN session_activation_head_origin THEN session_activation_head_origin[session_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None) THEN (IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_activation_head_origin) THEN Some((IF session_id \in DOMAIN session_activation_head_origin THEN session_activation_head_origin[session_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (session_id \in DOMAIN session_activation_head_origin) THEN Some((IF session_id \in DOMAIN session_activation_head_origin THEN session_activation_head_origin[session_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)[activation_key] ELSE None)) ELSE None)["value"] ELSE None) # "Own") THEN TRUE ELSE ((IF "value" \in DOMAIN (IF (activation_key \in DOMAIN (IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_activation_retired) THEN Some((IF session_id \in DOMAIN session_activation_retired THEN session_activation_retired[session_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (session_id \in DOMAIN session_activation_retired) THEN Some((IF session_id \in DOMAIN session_activation_retired THEN session_activation_retired[session_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)) THEN Some((IF activation_key \in DOMAIN (IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_activation_retired) THEN Some((IF session_id \in DOMAIN session_activation_retired THEN session_activation_retired[session_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (session_id \in DOMAIN session_activation_retired) THEN Some((IF session_id \in DOMAIN session_activation_retired THEN session_activation_retired[session_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None) THEN (IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_activation_retired) THEN Some((IF session_id \in DOMAIN session_activation_retired THEN session_activation_retired[session_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (session_id \in DOMAIN session_activation_retired) THEN Some((IF session_id \in DOMAIN session_activation_retired THEN session_activation_retired[session_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)[activation_key] ELSE None)) ELSE None) THEN (IF (activation_key \in DOMAIN (IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_activation_retired) THEN Some((IF session_id \in DOMAIN session_activation_retired THEN session_activation_retired[session_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (session_id \in DOMAIN session_activation_retired) THEN Some((IF session_id \in DOMAIN session_activation_retired THEN session_activation_retired[session_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)) THEN Some((IF activation_key \in DOMAIN (IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_activation_retired) THEN Some((IF session_id \in DOMAIN session_activation_retired THEN session_activation_retired[session_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (session_id \in DOMAIN session_activation_retired) THEN Some((IF session_id \in DOMAIN session_activation_retired THEN session_activation_retired[session_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None) THEN (IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_activation_retired) THEN Some((IF session_id \in DOMAIN session_activation_retired THEN session_activation_retired[session_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (session_id \in DOMAIN session_activation_retired) THEN Some((IF session_id \in DOMAIN session_activation_retired THEN session_activation_retired[session_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)[activation_key] ELSE None)) ELSE None)["value"] ELSE None) < (IF "value" \in DOMAIN (IF (activation_key \in DOMAIN (IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_activation_rows) THEN Some((IF session_id \in DOMAIN session_activation_rows THEN session_activation_rows[session_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (session_id \in DOMAIN session_activation_rows) THEN Some((IF session_id \in DOMAIN session_activation_rows THEN session_activation_rows[session_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)) THEN Some((IF activation_key \in DOMAIN (IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_activation_rows) THEN Some((IF session_id \in DOMAIN session_activation_rows THEN session_activation_rows[session_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (session_id \in DOMAIN session_activation_rows) THEN Some((IF session_id \in DOMAIN session_activation_rows THEN session_activation_rows[session_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None) THEN (IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_activation_rows) THEN Some((IF session_id \in DOMAIN session_activation_rows THEN session_activation_rows[session_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (session_id \in DOMAIN session_activation_rows) THEN Some((IF session_id \in DOMAIN session_activation_rows THEN session_activation_rows[session_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)[activation_key] ELSE None)) ELSE None) THEN (IF (activation_key \in DOMAIN (IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_activation_rows) THEN Some((IF session_id \in DOMAIN session_activation_rows THEN session_activation_rows[session_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (session_id \in DOMAIN session_activation_rows) THEN Some((IF session_id \in DOMAIN session_activation_rows THEN session_activation_rows[session_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)) THEN Some((IF activation_key \in DOMAIN (IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_activation_rows) THEN Some((IF session_id \in DOMAIN session_activation_rows THEN session_activation_rows[session_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (session_id \in DOMAIN session_activation_rows) THEN Some((IF session_id \in DOMAIN session_activation_rows THEN session_activation_rows[session_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None) THEN (IF "value" \in DOMAIN (IF (session_id \in DOMAIN session_activation_rows) THEN Some((IF session_id \in DOMAIN session_activation_rows THEN session_activation_rows[session_id] ELSE [x \in {} |-> None])) ELSE None) THEN (IF (session_id \in DOMAIN session_activation_rows) THEN Some((IF session_id \in DOMAIN session_activation_rows THEN session_activation_rows[session_id] ELSE [x \in {} |-> None])) ELSE None)["value"] ELSE None)[activation_key] ELSE None)) ELSE None)["value"] ELSE None)))))))
 
-CiStateConstraint == /\ model_step_count <= 5 /\ Cardinality(DOMAIN session_first_turn_phase) <= 1 /\ Cardinality(DOMAIN session_pending_initial_prompt_present) <= 1 /\ Cardinality(DOMAIN session_pending_tool_results_count) <= 1 /\ Cardinality(DOMAIN session_lifecycle_terminal) <= 1 /\ Cardinality(DOMAIN session_live_channel_id) <= 1 /\ Cardinality(DOMAIN session_live_interaction_id) <= 1 /\ Cardinality(DOMAIN session_live_transcript_reconciliation) <= 1 /\ Cardinality(DOMAIN session_live_provisional_transcript_present) <= 1 /\ Cardinality(DOMAIN session_live_assistant_playback_response_id) <= 1 /\ Cardinality(DOMAIN session_live_assistant_playback_item_id) <= 1 /\ Cardinality(DOMAIN session_live_assistant_playback_content_index) <= 1 /\ Cardinality(DOMAIN session_live_assistant_final_chars) <= 1 /\ Cardinality(DOMAIN session_live_assistant_final_digest) <= 1 /\ Cardinality(DOMAIN session_live_assistant_terminal_observation) <= 1 /\ Cardinality(DOMAIN session_live_assistant_terminal_prefix_chars) <= 1 /\ Cardinality(DOMAIN session_live_assistant_terminal_prefix_digest) <= 1 /\ Cardinality(DOMAIN session_instruction_owner) <= 1 /\ Cardinality(DOMAIN session_instruction_owner_mob) <= 1 /\ Cardinality(DOMAIN session_instruction_target_generation) <= 1 /\ Cardinality(DOMAIN session_instruction_target_revision) <= 1 /\ Cardinality(DOMAIN session_instruction_target_effect) <= 1 /\ Cardinality(DOMAIN session_instruction_target_digest) <= 1 /\ Cardinality(DOMAIN session_instruction_target_bytes) <= 1 /\ Cardinality(DOMAIN session_instruction_effective_revision) <= 1 /\ Cardinality(DOMAIN session_instruction_effective_effect) <= 1 /\ Cardinality(DOMAIN session_instruction_effective_digest) <= 1 /\ Cardinality(DOMAIN session_instruction_effective_bytes) <= 1 /\ Cardinality(DOMAIN session_instruction_effective_generation) <= 1 /\ Cardinality(DOMAIN session_instruction_entry_sequence) <= 1
-DeepStateConstraint == /\ model_step_count <= 8 /\ Cardinality(DOMAIN session_first_turn_phase) <= 2 /\ Cardinality(DOMAIN session_pending_initial_prompt_present) <= 2 /\ Cardinality(DOMAIN session_pending_tool_results_count) <= 2 /\ Cardinality(DOMAIN session_lifecycle_terminal) <= 2 /\ Cardinality(DOMAIN session_live_channel_id) <= 2 /\ Cardinality(DOMAIN session_live_interaction_id) <= 2 /\ Cardinality(DOMAIN session_live_transcript_reconciliation) <= 2 /\ Cardinality(DOMAIN session_live_provisional_transcript_present) <= 2 /\ Cardinality(DOMAIN session_live_assistant_playback_response_id) <= 2 /\ Cardinality(DOMAIN session_live_assistant_playback_item_id) <= 2 /\ Cardinality(DOMAIN session_live_assistant_playback_content_index) <= 2 /\ Cardinality(DOMAIN session_live_assistant_final_chars) <= 2 /\ Cardinality(DOMAIN session_live_assistant_final_digest) <= 2 /\ Cardinality(DOMAIN session_live_assistant_terminal_observation) <= 2 /\ Cardinality(DOMAIN session_live_assistant_terminal_prefix_chars) <= 2 /\ Cardinality(DOMAIN session_live_assistant_terminal_prefix_digest) <= 2 /\ Cardinality(DOMAIN session_instruction_owner) <= 2 /\ Cardinality(DOMAIN session_instruction_owner_mob) <= 2 /\ Cardinality(DOMAIN session_instruction_target_generation) <= 2 /\ Cardinality(DOMAIN session_instruction_target_revision) <= 2 /\ Cardinality(DOMAIN session_instruction_target_effect) <= 2 /\ Cardinality(DOMAIN session_instruction_target_digest) <= 2 /\ Cardinality(DOMAIN session_instruction_target_bytes) <= 2 /\ Cardinality(DOMAIN session_instruction_effective_revision) <= 2 /\ Cardinality(DOMAIN session_instruction_effective_effect) <= 2 /\ Cardinality(DOMAIN session_instruction_effective_digest) <= 2 /\ Cardinality(DOMAIN session_instruction_effective_bytes) <= 2 /\ Cardinality(DOMAIN session_instruction_effective_generation) <= 2 /\ Cardinality(DOMAIN session_instruction_entry_sequence) <= 2
+CiStateConstraint == /\ model_step_count <= 5 /\ Cardinality(DOMAIN session_first_turn_phase) <= 1 /\ Cardinality(DOMAIN session_pending_initial_prompt_present) <= 1 /\ Cardinality(DOMAIN session_pending_tool_results_count) <= 1 /\ Cardinality(DOMAIN session_lifecycle_terminal) <= 1 /\ Cardinality(DOMAIN session_live_channel_id) <= 1 /\ Cardinality(DOMAIN session_live_interaction_id) <= 1 /\ Cardinality(DOMAIN session_live_transcript_reconciliation) <= 1 /\ Cardinality(DOMAIN session_live_provisional_transcript_present) <= 1 /\ Cardinality(DOMAIN session_live_assistant_playback_response_id) <= 1 /\ Cardinality(DOMAIN session_live_assistant_playback_item_id) <= 1 /\ Cardinality(DOMAIN session_live_assistant_playback_content_index) <= 1 /\ Cardinality(DOMAIN session_live_assistant_final_chars) <= 1 /\ Cardinality(DOMAIN session_live_assistant_final_digest) <= 1 /\ Cardinality(DOMAIN session_live_assistant_terminal_observation) <= 1 /\ Cardinality(DOMAIN session_live_assistant_terminal_prefix_chars) <= 1 /\ Cardinality(DOMAIN session_live_assistant_terminal_prefix_digest) <= 1 /\ Cardinality(DOMAIN session_instruction_owner) <= 1 /\ Cardinality(DOMAIN session_instruction_owner_mob) <= 1 /\ Cardinality(DOMAIN session_instruction_target_generation) <= 1 /\ Cardinality(DOMAIN session_instruction_target_revision) <= 1 /\ Cardinality(DOMAIN session_instruction_target_effect) <= 1 /\ Cardinality(DOMAIN session_instruction_target_digest) <= 1 /\ Cardinality(DOMAIN session_instruction_target_bytes) <= 1 /\ Cardinality(DOMAIN session_instruction_effective_revision) <= 1 /\ Cardinality(DOMAIN session_instruction_effective_effect) <= 1 /\ Cardinality(DOMAIN session_instruction_effective_digest) <= 1 /\ Cardinality(DOMAIN session_instruction_effective_bytes) <= 1 /\ Cardinality(DOMAIN session_instruction_effective_generation) <= 1 /\ Cardinality(DOMAIN session_instruction_entry_sequence) <= 1 /\ Cardinality(DOMAIN session_activation_rows) <= 1 /\ Cardinality(DOMAIN session_activation_retired) <= 1 /\ Cardinality(DOMAIN session_activation_head_origin) <= 1
+DeepStateConstraint == /\ model_step_count <= 8 /\ Cardinality(DOMAIN session_first_turn_phase) <= 2 /\ Cardinality(DOMAIN session_pending_initial_prompt_present) <= 2 /\ Cardinality(DOMAIN session_pending_tool_results_count) <= 2 /\ Cardinality(DOMAIN session_lifecycle_terminal) <= 2 /\ Cardinality(DOMAIN session_live_channel_id) <= 2 /\ Cardinality(DOMAIN session_live_interaction_id) <= 2 /\ Cardinality(DOMAIN session_live_transcript_reconciliation) <= 2 /\ Cardinality(DOMAIN session_live_provisional_transcript_present) <= 2 /\ Cardinality(DOMAIN session_live_assistant_playback_response_id) <= 2 /\ Cardinality(DOMAIN session_live_assistant_playback_item_id) <= 2 /\ Cardinality(DOMAIN session_live_assistant_playback_content_index) <= 2 /\ Cardinality(DOMAIN session_live_assistant_final_chars) <= 2 /\ Cardinality(DOMAIN session_live_assistant_final_digest) <= 2 /\ Cardinality(DOMAIN session_live_assistant_terminal_observation) <= 2 /\ Cardinality(DOMAIN session_live_assistant_terminal_prefix_chars) <= 2 /\ Cardinality(DOMAIN session_live_assistant_terminal_prefix_digest) <= 2 /\ Cardinality(DOMAIN session_instruction_owner) <= 2 /\ Cardinality(DOMAIN session_instruction_owner_mob) <= 2 /\ Cardinality(DOMAIN session_instruction_target_generation) <= 2 /\ Cardinality(DOMAIN session_instruction_target_revision) <= 2 /\ Cardinality(DOMAIN session_instruction_target_effect) <= 2 /\ Cardinality(DOMAIN session_instruction_target_digest) <= 2 /\ Cardinality(DOMAIN session_instruction_target_bytes) <= 2 /\ Cardinality(DOMAIN session_instruction_effective_revision) <= 2 /\ Cardinality(DOMAIN session_instruction_effective_effect) <= 2 /\ Cardinality(DOMAIN session_instruction_effective_digest) <= 2 /\ Cardinality(DOMAIN session_instruction_effective_bytes) <= 2 /\ Cardinality(DOMAIN session_instruction_effective_generation) <= 2 /\ Cardinality(DOMAIN session_instruction_entry_sequence) <= 2 /\ Cardinality(DOMAIN session_activation_rows) <= 2 /\ Cardinality(DOMAIN session_activation_retired) <= 2 /\ Cardinality(DOMAIN session_activation_head_origin) <= 2
 
 Spec == Init /\ [][Next]_vars
 
@@ -1667,5 +1772,7 @@ THEOREM Spec => []instruction_slot_count_bounded
 THEOREM Spec => []instruction_active_bytes_bounded
 THEOREM Spec => []instruction_entry_sequence_covers_effective
 THEOREM Spec => []instruction_mob_owner_names_its_mob
+THEOREM Spec => []activation_body_maps_lockstep
+THEOREM Spec => []activation_effective_body_live
 
 =============================================================================

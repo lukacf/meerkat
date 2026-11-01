@@ -119,10 +119,25 @@ export function usePanelPreference<T extends string>(
 
 const DENSITIES = ["comfortable", "compact"] as const;
 
-/** The panel kind's density (`meta-console-density:<kind>`), comfortable by
- * default. Pass it to PanelShell's `density`. */
+const PanelDensityDefaultContext = createContext<PanelDensity>("comfortable");
+
+/**
+ * The density of every panel below it whose kind has no choice of its own:
+ * the display settings' Density (spec B21), comfortable without a provider.
+ * A kind's stored choice still wins. Choosing the default again clears that
+ * choice, so the kind follows the default from then on; the default itself
+ * is never written to the kind's key.
+ */
+export function PanelDensityDefaultProvider({ density, children }: { density: PanelDensity; children?: ReactNode }) {
+  return <PanelDensityDefaultContext.Provider value={density === "compact" ? "compact" : "comfortable"}>{children}</PanelDensityDefaultContext.Provider>;
+}
+
+/** The panel kind's density (`meta-console-density:<kind>`); without a
+ * choice, the PanelDensityDefaultProvider's density (comfortable without
+ * one). Pass it to PanelShell's `density`. */
 export function usePanelDensity(kind: string): [PanelDensity, (next: PanelDensity) => void] {
-  return usePanelPreference<PanelDensity>(`meta-console-density:${kind}`, "comfortable", DENSITIES);
+  const fallback = useContext(PanelDensityDefaultContext);
+  return usePanelPreference<PanelDensity>(`meta-console-density:${kind}`, fallback, DENSITIES);
 }
 
 const ON_OFF = ["on", "off"] as const;

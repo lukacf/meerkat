@@ -3288,6 +3288,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rows_with_one_updated_at_page_by_id() {
+        let store = Arc::new(MemoryWorkGraphStore::new());
+        let service =
+            WorkGraphService::with_scope(store.clone(), "realm", WorkNamespace::default());
+        // Seven items stored with one `updated_at`: only the id orders them.
+        let at = Utc::now();
+        let mut expected = Vec::new();
+        for index in 0..7 {
+            let (item, event) = crate::WorkGraphMachine::create_item(
+                create_req(&format!("tied {index}")),
+                "realm".to_string(),
+                WorkNamespace::default(),
+                at,
+            )
+            .expect("item");
+            expected.push(store.insert_item(item, event).await.expect("insert").id);
+        }
+        expected.sort_by(|left, right| right.cmp(left));
+
+        let mut seen = Vec::new();
+        let mut page = tool_page(&service, "workgraph_list", json!({ "limit": 3 })).await;
+        loop {
+            seen.extend(page_ids(&page));
+            if page["truncated"] != json!(true) {
+                break;
+            }
+            assert!(seen.len() < expected.len(), "the walk ends: {page}");
+            page = tool_page(
+                &service,
+                "workgraph_list",
+                json!({ "limit": 3, "cursor": next_cursor(&page) }),
+            )
+            .await;
+        }
+        assert_eq!(seen, expected, "no row is skipped or repeated");
+    }
+
+    #[tokio::test]
     async fn blocked_dependencies_are_not_ready_until_completed() {
         let service = WorkGraphService::with_scope(
             Arc::new(MemoryWorkGraphStore::new()),

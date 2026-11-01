@@ -307,6 +307,8 @@ export interface TopologyRelationReads {
  */
 export async function readTopologyRelations(
   reads: TopologyRelationReads,
+  /** Each read as it lands, so a slow one (the lineage of a large team) holds back no other. */
+  onPartial?: (partial: Partial<Omit<ConsoleTopologyRelationsState, "updatedAtMs" | "error">>) => void,
 ): Promise<Omit<ConsoleTopologyRelationsState, "updatedAtMs" | "error">> {
   const has = (command: ConsoleCommandName) => reads.methods.includes(reads.methodOf(command));
   const routesRead: Promise<Pick<ConsoleTopologyRelationsState, "routes" | "routesAccess">> = has(CONSOLE_COMMAND_NAMES.listRoutingRoutes)
@@ -332,6 +334,11 @@ export async function readTopologyRelations(
         () => null,
       )
     : Promise.resolve(null);
+  if (onPartial) {
+    void routesRead.then((routes) => onPartial(routes));
+    void lineageRead.then((lineage) => onPartial({ lineage }));
+    void memoryRead.then((memory) => onPartial({ memoryScopes: memory?.memoryScopes ?? null, stores: memory?.stores ?? null }));
+  }
   const [routes, lineage, memory] = await Promise.all([routesRead, lineageRead, memoryRead]);
   return {
     ...routes,

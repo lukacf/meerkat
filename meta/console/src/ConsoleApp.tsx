@@ -3505,7 +3505,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
         methodOf: consoleCommandMethod,
         execute: (command, kind, params) => executeHeadlessCommand(command, controlWorkbenchTarget(kind), params),
         memoryAvailable: topologyMemoryReadable,
-      });
+      }, (partial) => setTopologyRelations((current) => ({ ...current, ...partial })));
       const queryMethod = consoleCommandMethod(CONSOLE_COMMAND_NAMES.topologyQuery);
       if (!capabilities.methods.includes(queryMethod)) {
         // Older and topology-unaware runtimes retain the passive graph/roles

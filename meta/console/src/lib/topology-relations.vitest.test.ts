@@ -216,6 +216,29 @@ describe("the topology's relation reads", () => {
     assert.deepEqual(result.stores, [{ id: "team", label: "Team memory", records: 3 }]);
   });
 
+  test("each read reaches the map as it lands: a slow lineage read holds back no other", async () => {
+    let releaseLineage: () => void = () => undefined;
+    const lineageGate = new Promise<void>((resolve) => { releaseLineage = resolve; });
+    const partials: string[] = [];
+    const done = readTopologyRelations({
+      methods: Object.values(methods),
+      methodOf: methodOf as never,
+      execute: async (command) => {
+        if (command === "topologyMobEvents") await lineageGate;
+        return answers[command];
+      },
+      memoryAvailable: true,
+    }, (partial) => { partials.push(Object.keys(partial).sort().join("+")); });
+    // Every read but the lineage settles.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.deepEqual(partials.sort(), ["memoryScopes+stores", "routes+routesAccess"]);
+    releaseLineage();
+    const result = await done;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.deepEqual(partials.sort(), ["lineage", "memoryScopes+stores", "routes+routesAccess"]);
+    assert.equal(result.lineage?.length, 1);
+  });
+
   test("a refused routes read says why, a failed one leaves only its relation out, and nothing unadvertised is read", async () => {
     const calls: string[] = [];
     const result = await readTopologyRelations({

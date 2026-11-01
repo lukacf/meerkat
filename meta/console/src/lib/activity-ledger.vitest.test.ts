@@ -187,6 +187,125 @@ describe("peer traffic per ordered pair", () => {
   });
 });
 
+describe("one message, many frames", () => {
+  const agents = [
+    { identity: "domain:billing", member_id: "billing-member", agent_id: "billing-member", label: "Billing" },
+    { identity: "domain:support", member_id: "support-member", agent_id: "support-member", label: "Support" },
+  ];
+  const billing = { id: "peer-1", display_name: "reference-mob/lead/billing-member" };
+  const support = { id: "peer-7", display_name: "reference-mob/lead/support-member" };
+  /** Billing's peers list: how its send calls' peer ids resolve. */
+  const peersList = () => frame("tool_result_received", NOW - 30 * MIN, {
+    id: "p0", name: "peers",
+    content: [{ type: "text", text: JSON.stringify({ peers: [{ peer_id: support.id, name: support.display_name }] }) }],
+  });
+  const send = (n: number, to = support) => ({
+    id: `demo-call-${n}`, name: "send_message", args: { body: `Status ${n}?`, handling_mode: "queue", peer_id: to.id },
+  });
+  /** One message as the console sees it, no receipt: the sender's call and its
+   * saved copy (one call id), the recipient's comms notice and its ingest (one
+   * delivery id). */
+  const fourFrames = (n: number, atMs: number, lagMs = 300, from = "domain:billing", to = "domain:support", sender = billing, recipient = support): ConsoleFrame[] => [
+    frame("tool_call_requested", atMs, send(n, recipient), { identity: from, sourceKind: "console_event" }),
+    frame("tool_call_requested", atMs, send(n, recipient), { identity: from, sourceKind: "session_history" }),
+    frame("system_notice", atMs + lagMs, { blocks: [{ type: "comms", direction: "incoming", kind: "message", peer: sender, delivery_id: `env-${n}` }] }, { identity: to, sourceKind: "session_history" }),
+    frame("peer_content_ingested", atMs + lagMs, { delivery_id: `env-${n}`, kind: "message", peer: sender }, { identity: to, sourceKind: "console_event" }),
+  ];
+  /** The send's receipt, live and as the saved copy (which names no tool). */
+  const receipts = (n: number, atMs: number, from = "domain:billing"): ConsoleFrame[] => {
+    const content = [{ type: "text", text: JSON.stringify({ kind: "peer_message", receipt: { envelope_id: `env-${n}`, kind: "peer_message_sent" } }) }];
+    return [
+      frame("tool_execution_completed", atMs, { id: `demo-call-${n}`, name: "send_message", is_error: false, content }, { identity: from }),
+      frame("tool_result_received", atMs, { id: `demo-call-${n}`, name: null, content }, { identity: from, sourceKind: "session_history" }),
+    ];
+  };
+  const total = (ledger: ReturnType<typeof ledgerAt>) => ledger.traffic({ sinceMs: NOW - 60 * MIN }).reduce((n, row) => n + row.count, 0);
+
+  it("counts the four frames of one message once, in any order", () => {
+    const frames = fourFrames(1, NOW - 5 * MIN);
+    for (const order of [frames, [...frames].reverse(), [frames[2]!, frames[0]!, frames[3]!, frames[1]!]]) {
+      const ledger = ledgerAt();
+      ledger.setResolver(createAgentResolver(agents));
+      ledger.ingest(peersList());
+      for (const item of order) ledger.ingest(item);
+      expect(ledger.traffic({ sinceMs: NOW - 60 * MIN })).toEqual([
+        { from: "domain:billing", to: "domain:support", count: 1, lastMs: NOW - 5 * MIN },
+      ]);
+      expect(ledger.totals("domain:billing").messagesSent).toBe(1);
+    }
+  });
+
+  it("counts each of 13 messages a pair sends within a minute once", () => {
+    // Without receipts the ends pair one to one; with receipts (one of them
+    // only as its saved copy) every end joins by id, whatever order they land in.
+    for (const [withReceipts, reversed] of [[false, false], [true, false], [true, true]]) {
+      const ledger = ledgerAt();
+      ledger.setResolver(createAgentResolver(agents));
+      ledger.ingest(peersList());
+      const frames: ConsoleFrame[] = [];
+      for (let n = 0; n < 13; n += 1) {
+        const atMs = NOW - 3 * MIN + n * 4_000;
+        // Deliveries land late and out of step with the calls.
+        frames.push(...fourFrames(n, atMs, 9_000 - (n % 3) * 4_000));
+        if (withReceipts) frames.push(...receipts(n, atMs + 50).slice(n === 6 ? 1 : 0));
+      }
+      // Support answers twice in the same minute.
+      frames.push(...fourFrames(20, NOW - 2 * MIN, 300, "domain:support", "domain:billing", support, billing));
+      frames.push(...fourFrames(21, NOW - 2 * MIN + 1_000, 300, "domain:support", "domain:billing", support, billing));
+      const peersOfSupport = frame("tool_result_received", NOW - 30 * MIN, {
+        id: "p1", name: "peers",
+        content: [{ type: "text", text: JSON.stringify({ peers: [{ peer_id: billing.id, name: billing.display_name }] }) }],
+      }, { identity: "domain:support" });
+      ledger.ingest(peersOfSupport);
+      frames.sort((a, b) => (a.timestampMs ?? 0) - (b.timestampMs ?? 0));
+      ledger.ingestMany(reversed ? frames.reverse() : frames);
+      expect(ledger.traffic({ sinceMs: NOW - 60 * MIN }).map(({ from, to, count }) => ({ from, to, count }))).toEqual([
+        { from: "domain:billing", to: "domain:support", count: 13 },
+        { from: "domain:support", to: "domain:billing", count: 2 },
+      ]);
+      expect(total(ledger)).toBe(15);
+      expect(ledger.totals("domain:billing").messagesSent).toBe(13);
+    }
+  });
+
+  it("counts a refused send as no message, from its live result or its saved copy, in any order", () => {
+    for (const source of ["console_event", "session_history"]) {
+      for (const resultFirst of [false, true]) {
+        const ledger = ledgerAt();
+        ledger.setResolver(createAgentResolver(agents));
+        ledger.ingest(peersList());
+        const call = send(9);
+        const refusal = JSON.stringify({ error: "access_denied", message: "Tool 'send_message' is not allowed by policy" });
+        const result = frame("tool_result_received", NOW - MIN + 100, {
+          id: call.id, name: source === "session_history" ? null : "send_message",
+          content: [{ type: "text", text: refusal }],
+        }, { sourceKind: source });
+        if (resultFirst) ledger.ingest(result);
+        ledger.ingest(frame("tool_call_requested", NOW - MIN, call, { sourceKind: "console_event" }));
+        if (!resultFirst) ledger.ingest(result);
+        ledger.ingest(frame("tool_call_requested", NOW - MIN, call, { sourceKind: "session_history" }));
+        expect(ledger.traffic()).toEqual([]);
+        expect(ledger.totals("domain:billing").messagesSent).toBe(0);
+      }
+    }
+  });
+
+  it("keeps ends more than a minute apart, or tied to other ids, as two messages", () => {
+    const ledger = ledgerAt();
+    ledger.setResolver(createAgentResolver(agents));
+    ledger.ingest(peersList());
+    const [call, copy] = fourFrames(1, NOW - 10 * MIN);
+    const [, , notice, ingest] = fourFrames(2, NOW - 5 * MIN);
+    for (const item of [call!, copy!, notice!, ingest!]) ledger.ingest(item);
+    expect(total(ledger)).toBe(2);
+    // A receipted call waits for its own delivery: it does not take another one close by.
+    const [call3] = fourFrames(3, NOW - 2 * MIN);
+    const [, , , ingest4] = fourFrames(4, NOW - 2 * MIN + 2_000);
+    for (const item of [call3!, ...receipts(3, NOW - 2 * MIN + 50), ingest4!]) ledger.ingest(item);
+    expect(total(ledger)).toBe(4);
+  });
+});
+
 describe("bounds", () => {
   it("keeps at most 2000 agents, dropping the least recently active", () => {
     const ledger = ledgerAt();

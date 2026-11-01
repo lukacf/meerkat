@@ -2207,12 +2207,15 @@ span.cc-conversation-turn-preview__file-icon::after {
   font-weight: 500;
   line-height: 18px;
 }
+/* A card is a snapshot in the transcript: its live marks wear the static
+   double ring instead of a pulse that would run for as long as the message
+   stays mounted. */
 .cc-work-graph__pulse {
   width: 7px;
   height: 7px;
   border-radius: var(--_cc-radius-round);
   background: var(--_cc-viz-live);
-  animation: cc-live-pulse var(--_cc-dur-pulse) ease-in-out infinite;
+  box-shadow: 0 0 0 1.5px var(--_cc-viz-live-soft), 0 0 0 2.5px var(--_cc-viz-live);
 }
 .cc-work-graph__collapse {
   flex: none;
@@ -2290,8 +2293,7 @@ span.cc-conversation-turn-preview__file-icon::after {
 }
 .cc-work-graph__dot.is-in_progress {
   background: var(--_cc-viz-live);
-  box-shadow: none;
-  animation: cc-live-pulse var(--_cc-dur-pulse) ease-in-out infinite;
+  box-shadow: 0 0 0 1.5px var(--_cc-surface-card), 0 0 0 2.5px var(--_cc-viz-live);
 }
 .cc-work-graph__dot.is-completed { background: var(--_cc-positive); box-shadow: none; }
 .cc-work-graph__dot.is-failed {
@@ -2506,18 +2508,8 @@ span.cc-conversation-turn-preview__file-icon::after {
   text-overflow: ellipsis;
 }
 @media (prefers-reduced-motion: reduce) {
-  .cc-work-graph__pulse,
-  .cc-work-graph__dot.is-in_progress {
-    animation: none;
-    box-shadow: 0 0 0 1.5px var(--_cc-surface-card), 0 0 0 2.5px var(--_cc-viz-live);
-  }
   .cc-work-graph__action,
   .cc-work-graph__progress-fill { transition: none; }
-}
-.reduced-motion .cc-work-graph__pulse,
-.reduced-motion .cc-work-graph__dot.is-in_progress {
-  animation: none;
-  box-shadow: 0 0 0 1.5px var(--_cc-surface-card), 0 0 0 2.5px var(--_cc-viz-live);
 }
 
 .cc-markdown-document {

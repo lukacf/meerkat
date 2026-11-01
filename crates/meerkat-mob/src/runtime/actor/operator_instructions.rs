@@ -517,12 +517,15 @@ impl MobActor {
             let session_id = release.session_id().clone();
             match service.release_member_instruction_target(release).await {
                 Ok(_)
-                | Err(meerkat_core::service::SessionInstructionError::Refused(
-                    InstructionWriteError::OwnedBySession | InstructionWriteError::OwnedByOtherMob,
-                ))
-                | Err(meerkat_core::service::SessionInstructionError::Session(
-                    meerkat_core::service::SessionError::NotFound { .. },
-                )) => Ok(()),
+                | Err(
+                    meerkat_core::service::SessionInstructionError::Refused(
+                        InstructionWriteError::OwnedBySession
+                        | InstructionWriteError::OwnedByOtherMob,
+                    )
+                    | meerkat_core::service::SessionInstructionError::Session(
+                        meerkat_core::service::SessionError::NotFound { .. },
+                    ),
+                ) => Ok(()),
                 // A session whose recorded target or instruction history does
                 // not read holds no target this release can clear: as for a
                 // session that is gone, there is nothing to release, so a

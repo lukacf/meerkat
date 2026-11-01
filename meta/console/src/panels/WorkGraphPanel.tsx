@@ -237,14 +237,18 @@ export function workGraphEventsNewestFirst(events: WorkGraphWireEvent[]): WorkGr
 }
 
 /// The cut one snapshot read reports, for the panel's notice: whether more
-/// items match than the page holds, and how many match when the runtime
-/// reports it.
+/// items match than the page holds, and how many match. The server's own
+/// `truncated` decides; only a runtime that predates the field leaves it to
+/// the page size, where a full page may have more behind it.
 export function workGraphSnapshotCut(
   snapshot: Pick<WorkGraphSnapshotResult, "truncated" | "total_items"> | null | undefined,
   itemCount: number,
 ): { truncated: boolean; total: number | null } {
   return {
-    truncated: snapshot?.truncated === true || itemCount >= WORKGRAPH_SNAPSHOT_LIMIT,
+    truncated:
+      typeof snapshot?.truncated === "boolean"
+        ? snapshot.truncated
+        : itemCount >= WORKGRAPH_SNAPSHOT_LIMIT,
     total: typeof snapshot?.total_items === "number" ? snapshot.total_items : null,
   };
 }

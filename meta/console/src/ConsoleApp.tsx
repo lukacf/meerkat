@@ -3360,8 +3360,9 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
         // failed items must stay visible (outline rows, graph status
         // classes), so opt into terminal rows - the default snapshot is the
         // live working set and would drop them on the first refresh. Ask for
-        // the server's maximum: the default of 100 kept only the 100 least
-        // recently updated items, silently.
+        // the server's maximum: the default of 100 cuts a larger graph
+        // sooner. A cut keeps the most recently updated items, and the
+        // server reports it (total_items, truncated).
         snapshot = (await executeHeadlessCommand(
           CONSOLE_COMMAND_NAMES.workgraphSnapshot,
           workGraphTarget,
@@ -3402,8 +3403,9 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
         // The server's readiness (open, unblocked, children done, time
         // window open); absent on older runtimes, where the panel derives it.
         readyItemIds: Array.isArray(snapshot?.ready_item_ids) ? snapshot.ready_item_ids : null,
-        // Today's snapshot carries no total, so a full page may have more
-        // behind it; a runtime that reports the total (S4) says so exactly.
+        // The server says whether it cut the page and how many items match;
+        // only a runtime that predates those fields leaves the console to
+        // guess from a full page.
         truncated: cut.truncated,
         total: cut.total,
         unavailable: false,

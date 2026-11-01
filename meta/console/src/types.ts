@@ -847,8 +847,8 @@ export interface WorkGraphSnapshotResult {
   edges?: WorkGraphWireEdge[];
   attention?: WorkGraphWireBinding[];
   ready_item_ids?: string[];
-  /// How many items match before the limit, and whether the limit cut them
-  /// (server change S4; absent on today's runtimes).
+  /// How many items match before the limit, and whether the limit cut them;
+  /// absent only from a runtime that predates them.
   total_items?: number;
   truncated?: boolean;
 }

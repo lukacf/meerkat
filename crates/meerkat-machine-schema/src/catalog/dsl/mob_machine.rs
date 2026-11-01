@@ -658,6 +658,15 @@ macro_rules! mob_catalog_machine_dsl {
             // again (RecoverMemberRotationIntent); every step that drops the
             // intent drops it.
             member_rotation_targets: Map<AgentIdentity, Enum<RotationTarget>>,
+            // The role a same-session rotation started with (its next
+            // incarnation's profile name), recorded by its start and by the
+            // replay of its start row, and dropped with the rest of the
+            // intent. The same-session terminals take the role change from
+            // it and refuse a grant of any other role: the start's retirement
+            // prepared the member's topology for this role (unwired its
+            // peers' trust and ended its edges for another role, kept them
+            // for its own), so every attempt seats it.
+            member_rotation_profile_names: Map<AgentIdentity, String>,
             // The unseated identity entries, each with its typed cause: owed a
             // seat (SeatOwed: the declared apply seats it Dormant), hosted on
             // its first use (HostedOnFirstUse: a placed or externally bound
@@ -1004,6 +1013,7 @@ macro_rules! mob_catalog_machine_dsl {
             identity_entry_origins = EmptyMap,
             spawn_exec_entry_custody = EmptySet,
             member_rotation_targets = EmptyMap,
+            member_rotation_profile_names = EmptyMap,
             identity_entry_unseated = EmptyMap,
             identity_entry_retiring = EmptySet,
             identity_entry_archived_sessions = EmptyMap,
@@ -2170,8 +2180,9 @@ macro_rules! mob_catalog_machine_dsl {
             RecoverIdentityEntry { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, origin: Enum<IdentityEntryOrigin> },
             // Replay: the rotation a retirement's start row records (its
             // stored rotation: target, next session, endpoint, and the next
-            // incarnation's role), on the Retiring incarnation the replay of
-            // that row restored.
+            // incarnation's role, which a same-session rotation records as
+            // the role it started with), on the Retiring incarnation the
+            // replay of that row restored.
             RecoverMemberRotationIntent { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, target: Enum<RotationTarget>, session_id: SessionId, peer_endpoint: Option<MemberPeerEndpoint>, profile_name: String },
             // Replay: the retirement of an identity entry that the declared
             // apply's seal unlisted (its start row records the cause
@@ -4556,14 +4567,24 @@ macro_rules! mob_catalog_machine_dsl {
 
         // A same-session rotation keeps its member's session: while it is
         // pending the member stays bound to the session the rotation names,
-        // and an endpoint the rotation records (for a successor under
-        // another role) is the member's own peer id: the key stays.
+        // the rotation holds the role it started with, and an endpoint the
+        // rotation records (for a successor under another role) is the
+        // member's own peer id: the key stays.
         invariant same_session_rotation_keeps_its_binding {
             for_all(id in self.member_rotation_targets.keys(),
                 self.member_rotation_targets.get_cloned(id) != Some(RotationTarget::SameSession)
                 || (self.member_session_bindings.get_cloned(id) == self.member_rotation_session_ids.get_cloned(id)
+                    && self.member_rotation_profile_names.contains_key(id)
                     && (self.member_rotation_peer_endpoints.contains_key(id) == false
                         || self.member_peer_ids.get_cloned(id) == Some(mob_machine_member_peer_endpoint_peer_id(self.member_rotation_peer_endpoints.get_cloned(id).get("value"))))))
+        }
+
+        // Only a same-session rotation holds a started role: its start and
+        // the replay of its start row record one, and every step that drops a
+        // rotation's intent drops it.
+        invariant rotation_started_role_is_a_same_session_rotations {
+            for_all(id in self.member_rotation_profile_names.keys(),
+                self.member_rotation_targets.get_cloned(id) == Some(RotationTarget::SameSession))
         }
 
         // An archive-only retirement is a Retiring runtime; its
@@ -9908,6 +9929,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_rotation_session_ids.remove(agent_identity);
                 self.member_rotation_peer_endpoints.remove(agent_identity);
                 self.member_rotation_targets.remove(agent_identity);
+                self.member_rotation_profile_names.remove(agent_identity);
                 self.external_member_rebind_capability.remove(agent_identity);
                 self.members_to_retire.remove(agent_identity);
                 self.member_placement.remove(agent_identity);
@@ -10052,6 +10074,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_rotation_session_ids.remove(agent_identity);
                 self.member_rotation_peer_endpoints.remove(agent_identity);
                 self.member_rotation_targets.remove(agent_identity);
+                self.member_rotation_profile_names.remove(agent_identity);
                 self.external_member_rebind_capability.remove(agent_identity);
                 self.members_to_retire.remove(agent_identity);
                 self.member_placement.remove(agent_identity);
@@ -13077,6 +13100,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_rotation_session_ids.remove(agent_identity);
                 self.member_rotation_peer_endpoints.remove(agent_identity);
                 self.member_rotation_targets.remove(agent_identity);
+                self.member_rotation_profile_names.remove(agent_identity);
                 self.spawn_exec_phase.remove(agent_identity);
                 self.member_peer_ids.remove(agent_identity);
                 self.member_peer_endpoints.remove(agent_identity);
@@ -13212,6 +13236,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_rotation_session_ids.remove(agent_identity);
                 self.member_rotation_peer_endpoints.remove(agent_identity);
                 self.member_rotation_targets.remove(agent_identity);
+                self.member_rotation_profile_names.remove(agent_identity);
                 self.member_placement.remove(agent_identity);
                 self.member_materialization_failures.remove(agent_identity);
                 self.pending_respawn_topology.remove(agent_identity);
@@ -13318,6 +13343,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_rotation_session_ids.remove(agent_identity);
                 self.member_rotation_peer_endpoints.remove(agent_identity);
                 self.member_rotation_targets.remove(agent_identity);
+                self.member_rotation_profile_names.remove(agent_identity);
                 self.member_placement.remove(agent_identity);
                 self.member_materialization_failures.remove(agent_identity);
                 if self.pending_respawn_topology.contains(agent_identity) == false {
@@ -13430,6 +13456,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_rotation_session_ids.remove(agent_identity);
                 self.member_rotation_peer_endpoints.remove(agent_identity);
                 self.member_rotation_targets.remove(agent_identity);
+                self.member_rotation_profile_names.remove(agent_identity);
                 self.member_placement.remove(agent_identity);
                 self.member_materialization_failures.remove(agent_identity);
                 self.pending_respawn_topology.remove(agent_identity);
@@ -13540,6 +13567,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_rotation_session_ids.remove(agent_identity);
                 self.member_rotation_peer_endpoints.remove(agent_identity);
                 self.member_rotation_targets.remove(agent_identity);
+                self.member_rotation_profile_names.remove(agent_identity);
                 self.member_placement.remove(agent_identity);
                 self.member_materialization_failures.remove(agent_identity);
                 self.pending_respawn_topology.remove(agent_identity);
@@ -13638,6 +13666,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_rotation_session_ids.remove(agent_identity);
                 self.member_rotation_peer_endpoints.remove(agent_identity);
                 self.member_rotation_targets.remove(agent_identity);
+                self.member_rotation_profile_names.remove(agent_identity);
                 self.member_placement.remove(agent_identity);
                 self.member_materialization_failures.remove(agent_identity);
                 if self.pending_respawn_topology.contains(agent_identity) == false {
@@ -13743,6 +13772,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_rotation_session_ids.remove(agent_identity);
                 self.member_rotation_peer_endpoints.remove(agent_identity);
                 self.member_rotation_targets.remove(agent_identity);
+                self.member_rotation_profile_names.remove(agent_identity);
                 self.member_placement.remove(agent_identity);
                 self.member_materialization_failures.remove(agent_identity);
                 self.pending_respawn_topology.remove(agent_identity);
@@ -13841,6 +13871,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_rotation_session_ids.remove(agent_identity);
                 self.member_rotation_peer_endpoints.remove(agent_identity);
                 self.member_rotation_targets.remove(agent_identity);
+                self.member_rotation_profile_names.remove(agent_identity);
                 self.member_placement.remove(agent_identity);
                 self.member_materialization_failures.remove(agent_identity);
                 if preserve_machine_topology && self.abandoned_respawn_topology.get_copied(agent_identity) != Some(generation) {
@@ -13959,6 +13990,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_rotation_session_ids.remove(agent_identity);
                 self.member_rotation_peer_endpoints.remove(agent_identity);
                 self.member_rotation_targets.remove(agent_identity);
+                self.member_rotation_profile_names.remove(agent_identity);
                 self.member_placement.remove(agent_identity);
                 self.member_materialization_failures.remove(agent_identity);
                 if preserve_machine_topology && self.abandoned_respawn_topology.get_copied(agent_identity) != Some(generation) {
@@ -14174,6 +14206,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_rotation_session_ids.remove(agent_identity);
                 self.member_rotation_peer_endpoints.remove(agent_identity);
                 self.member_rotation_targets.remove(agent_identity);
+                self.member_rotation_profile_names.remove(agent_identity);
                 // §19.L4 teardown completeness: destroy-retirement clears the
                 // placement and materialization-failure facts too.
                 self.member_placement.remove(agent_identity);
@@ -14262,6 +14295,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_rotation_session_ids.remove(agent_identity);
                 self.member_rotation_peer_endpoints.remove(agent_identity);
                 self.member_rotation_targets.remove(agent_identity);
+                self.member_rotation_profile_names.remove(agent_identity);
                 // §19.L4 teardown completeness: destroy-retirement clears the
                 // placement and materialization-failure facts too.
                 self.member_placement.remove(agent_identity);
@@ -14344,6 +14378,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_rotation_session_ids.remove(agent_identity);
                 self.member_rotation_peer_endpoints.remove(agent_identity);
                 self.member_rotation_targets.remove(agent_identity);
+                self.member_rotation_profile_names.remove(agent_identity);
                 // §19.L4 teardown completeness: destroy-retirement clears the
                 // placement and materialization-failure facts too.
                 self.member_placement.remove(agent_identity);
@@ -14425,6 +14460,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_rotation_session_ids.remove(agent_identity);
                 self.member_rotation_peer_endpoints.remove(agent_identity);
                 self.member_rotation_targets.remove(agent_identity);
+                self.member_rotation_profile_names.remove(agent_identity);
                 // §19.L4 teardown completeness: destroy-retirement clears the
                 // placement and materialization-failure facts too.
                 self.member_placement.remove(agent_identity);
@@ -14522,6 +14558,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_rotation_session_ids.remove(agent_identity);
                 self.member_rotation_peer_endpoints.remove(agent_identity);
                 self.member_rotation_targets.remove(agent_identity);
+                self.member_rotation_profile_names.remove(agent_identity);
                 self.member_placement.remove(agent_identity);
                 self.member_materialization_failures.remove(agent_identity);
                 self.topology_epoch += 1;
@@ -14623,6 +14660,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_rotation_session_ids.remove(agent_identity);
                 self.member_rotation_peer_endpoints.remove(agent_identity);
                 self.member_rotation_targets.remove(agent_identity);
+                self.member_rotation_profile_names.remove(agent_identity);
                 self.member_placement.remove(agent_identity);
                 self.member_materialization_failures.remove(agent_identity);
                 self.topology_epoch += 1;
@@ -15144,6 +15182,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_rotation_session_ids = EmptyMap;
                 self.member_rotation_peer_endpoints = EmptyMap;
                 self.member_rotation_targets = EmptyMap;
+                self.member_rotation_profile_names = EmptyMap;
                 // Nothing waits on a host carry-out after the destroy.
                 self.member_host_preparation_causes = EmptyMap;
                 // Spawn-exec phase ladder: total teardown — clear the whole phase
@@ -22550,6 +22589,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_rotation_session_ids = EmptyMap;
                 self.member_rotation_peer_endpoints = EmptyMap;
                 self.member_rotation_targets = EmptyMap;
+                self.member_rotation_profile_names = EmptyMap;
                 // Nothing waits on a host carry-out after the destroy.
                 self.member_host_preparation_causes = EmptyMap;
                 self.runtime_retire_archive_only = EmptySet;
@@ -26432,11 +26472,13 @@ macro_rules! mob_catalog_machine_dsl {
         // routes no runtime retire (the runtime is recorded archive-only): a
         // routed runtime Retire would leave the kept session's runtime
         // retired for good, so the shell's disposal releases the
-        // registration and keeps the session (KeptForSuccessor). A
-        // successor under the member's own role keeps the member's endpoint
-        // and edges: the rotation records no endpoint. One under another
-        // role (profile_name) runs under that role's comms name: it keeps
-        // the member's session and key but neither its descriptor nor its
+        // registration and keeps the session (KeptForSuccessor). The start
+        // records the role it starts with (profile_name,
+        // member_rotation_profile_names), which every attempt of the
+        // rotation seats. A successor under the member's own role keeps the
+        // member's endpoint and edges: the rotation records no endpoint. One
+        // under another role runs under that role's comms name: it keeps the
+        // member's session and key but neither its descriptor nor its
         // topology. The rotation records the member's own peer id under the
         // new name (none for network comms), the shell's retirement unwires
         // the member's peers' trust as a plain retirement's does, and the
@@ -26493,6 +26535,7 @@ macro_rules! mob_catalog_machine_dsl {
                     self.member_rotation_peer_endpoints.remove(agent_identity);
                 }
                 self.member_rotation_targets.insert(agent_identity, RotationTarget::SameSession);
+                self.member_rotation_profile_names.insert(agent_identity, profile_name);
             }
             to Running
             emit AppendLifecycleJournal {
@@ -26698,6 +26741,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_rotation_session_ids.remove(agent_identity);
                 self.member_rotation_peer_endpoints.remove(agent_identity);
                 self.member_rotation_targets.remove(agent_identity);
+                self.member_rotation_profile_names.remove(agent_identity);
                 self.topology_epoch += 1;
             }
             to Running
@@ -26900,6 +26944,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_rotation_session_ids.remove(agent_identity);
                 self.member_rotation_peer_endpoints.remove(agent_identity);
                 self.member_rotation_targets.remove(agent_identity);
+                self.member_rotation_profile_names.remove(agent_identity);
                 self.topology_epoch += 1;
             }
             to Running
@@ -27569,6 +27614,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_rotation_session_ids.remove(agent_identity);
                 self.member_rotation_peer_endpoints.remove(agent_identity);
                 self.member_rotation_targets.remove(agent_identity);
+                self.member_rotation_profile_names.remove(agent_identity);
                 self.topology_epoch += 1;
             }
             to Running
@@ -27782,6 +27828,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_rotation_session_ids.remove(agent_identity);
                 self.member_rotation_peer_endpoints.remove(agent_identity);
                 self.member_rotation_targets.remove(agent_identity);
+                self.member_rotation_profile_names.remove(agent_identity);
                 self.topology_epoch += 1;
             }
             to Running
@@ -27864,13 +27911,13 @@ macro_rules! mob_catalog_machine_dsl {
             }
             guard "spawn_profile_name_authorized" { self.spawn_profile_authority_profile_names.contains_key(agent_identity) == true }
             guard "spawn_profile_addressability_authorized" { self.spawn_profile_authority_external_addressable.get_cloned(agent_identity) == Some(external_addressable) }
-            // The rotation recorded an endpoint only for a successor under
-            // another role, under the member's own peer id: a re-drive whose
-            // grant takes the member's own role again refuses one.
-            guard "rotation_endpoint_only_for_another_role" {
-                self.member_rotation_peer_endpoints.contains_key(agent_identity) == false
-                || self.spawn_profile_authority_profile_names.get_cloned(agent_identity) != self.member_profile_names.get_cloned(agent_identity)
-            }
+            // Every attempt seats the role the rotation started with: a grant
+            // of any other role (the member's own after a start under
+            // another, or a third one) is refused, since the start's
+            // retirement prepared the member's topology for its role. An
+            // endpoint the rotation recorded (only for another role, under the
+            // member's own peer id) is that role's.
+            guard "grant_takes_the_started_role" { self.spawn_profile_authority_profile_names.get_cloned(agent_identity) == self.member_rotation_profile_names.get_cloned(agent_identity) }
             guard "rotation_endpoint_keeps_the_members_peer_id" {
                 self.member_rotation_peer_endpoints.contains_key(agent_identity) == false
                 || self.member_peer_ids.get_cloned(agent_identity) == Some(mob_machine_member_peer_endpoint_peer_id(self.member_rotation_peer_endpoints.get_cloned(agent_identity).get("value")))
@@ -27913,9 +27960,10 @@ macro_rules! mob_catalog_machine_dsl {
                 self.identity_to_runtime.insert(agent_identity, next_agent_runtime_id);
                 self.identity_runtime_generations.insert(agent_identity, next_generation);
                 self.identity_runtime_fence_tokens.insert(agent_identity, next_fence_token);
-                // A successor under another role than the member's runs under
-                // that role's comms name: it keeps the member's session and
-                // key, but neither its descriptor nor its topology. Its
+                // A successor under another role than the member's (the role
+                // the rotation started with) runs under that role's comms
+                // name: it keeps the member's session and key, but neither its
+                // descriptor nor its topology. Its
                 // retirement unwired the member's peers' trust, as a plain
                 // retirement's does; here the member's edges end and the
                 // successor takes the endpoint the rotation recorded under the
@@ -27926,7 +27974,7 @@ macro_rules! mob_catalog_machine_dsl {
                 // the member's own role keeps the member's endpoint (one with
                 // none, network comms, owes it until its next wake registers
                 // one) and its edges.
-                if self.spawn_profile_authority_profile_names.get_cloned(agent_identity) != self.member_profile_names.get_cloned(agent_identity) {
+                if self.member_rotation_profile_names.get_cloned(agent_identity) != self.member_profile_names.get_cloned(agent_identity) {
                     self.wiring_edges = mob_machine_wiring_edges_without_identity(self.wiring_edges, agent_identity);
                     self.external_peer_edges = mob_machine_external_peer_edges_without_identity(self.external_peer_edges, agent_identity);
                     self.owed_edge_repairs = mob_machine_wiring_edges_without_identity(self.owed_edge_repairs, agent_identity);
@@ -28012,6 +28060,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_rotation_session_ids.remove(agent_identity);
                 self.member_rotation_peer_endpoints.remove(agent_identity);
                 self.member_rotation_targets.remove(agent_identity);
+                self.member_rotation_profile_names.remove(agent_identity);
                 self.topology_epoch += 1;
             }
             to Running
@@ -28076,13 +28125,13 @@ macro_rules! mob_catalog_machine_dsl {
             }
             guard "spawn_profile_name_authorized" { self.spawn_profile_authority_profile_names.contains_key(agent_identity) == true }
             guard "spawn_profile_addressability_authorized" { self.spawn_profile_authority_external_addressable.get_cloned(agent_identity) == Some(external_addressable) }
-            // The rotation recorded an endpoint only for a successor under
-            // another role, under the member's own peer id: a re-drive whose
-            // grant takes the member's own role again refuses one.
-            guard "rotation_endpoint_only_for_another_role" {
-                self.member_rotation_peer_endpoints.contains_key(agent_identity) == false
-                || self.spawn_profile_authority_profile_names.get_cloned(agent_identity) != self.member_profile_names.get_cloned(agent_identity)
-            }
+            // Every attempt seats the role the rotation started with: a grant
+            // of any other role (the member's own after a start under
+            // another, or a third one) is refused, since the start's
+            // retirement prepared the member's topology for its role. An
+            // endpoint the rotation recorded (only for another role, under the
+            // member's own peer id) is that role's.
+            guard "grant_takes_the_started_role" { self.spawn_profile_authority_profile_names.get_cloned(agent_identity) == self.member_rotation_profile_names.get_cloned(agent_identity) }
             guard "rotation_endpoint_keeps_the_members_peer_id" {
                 self.member_rotation_peer_endpoints.contains_key(agent_identity) == false
                 || self.member_peer_ids.get_cloned(agent_identity) == Some(mob_machine_member_peer_endpoint_peer_id(self.member_rotation_peer_endpoints.get_cloned(agent_identity).get("value")))
@@ -28125,9 +28174,10 @@ macro_rules! mob_catalog_machine_dsl {
                 self.identity_to_runtime.insert(agent_identity, next_agent_runtime_id);
                 self.identity_runtime_generations.insert(agent_identity, next_generation);
                 self.identity_runtime_fence_tokens.insert(agent_identity, next_fence_token);
-                // A successor under another role than the member's runs under
-                // that role's comms name: it keeps the member's session and
-                // key, but neither its descriptor nor its topology. Its
+                // A successor under another role than the member's (the role
+                // the rotation started with) runs under that role's comms
+                // name: it keeps the member's session and key, but neither its
+                // descriptor nor its topology. Its
                 // retirement unwired the member's peers' trust, as a plain
                 // retirement's does; here the member's edges end and the
                 // successor takes the endpoint the rotation recorded under the
@@ -28138,7 +28188,7 @@ macro_rules! mob_catalog_machine_dsl {
                 // the member's own role keeps the member's endpoint (one with
                 // none, network comms, owes it until its next wake registers
                 // one) and its edges.
-                if self.spawn_profile_authority_profile_names.get_cloned(agent_identity) != self.member_profile_names.get_cloned(agent_identity) {
+                if self.member_rotation_profile_names.get_cloned(agent_identity) != self.member_profile_names.get_cloned(agent_identity) {
                     self.wiring_edges = mob_machine_wiring_edges_without_identity(self.wiring_edges, agent_identity);
                     self.external_peer_edges = mob_machine_external_peer_edges_without_identity(self.external_peer_edges, agent_identity);
                     self.owed_edge_repairs = mob_machine_wiring_edges_without_identity(self.owed_edge_repairs, agent_identity);
@@ -28232,6 +28282,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_rotation_session_ids.remove(agent_identity);
                 self.member_rotation_peer_endpoints.remove(agent_identity);
                 self.member_rotation_targets.remove(agent_identity);
+                self.member_rotation_profile_names.remove(agent_identity);
                 self.topology_epoch += 1;
             }
             to Running
@@ -28314,6 +28365,7 @@ macro_rules! mob_catalog_machine_dsl {
                     self.member_rotation_peer_endpoints.remove(agent_identity);
                 }
                 self.member_rotation_targets.insert(agent_identity, RotationTarget::SameSession);
+                self.member_rotation_profile_names.insert(agent_identity, profile_name);
             }
             to Running
         }

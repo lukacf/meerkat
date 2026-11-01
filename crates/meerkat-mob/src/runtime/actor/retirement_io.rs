@@ -4532,7 +4532,7 @@ impl MobActor {
         reply: RetirementReply,
         redriven: bool,
     ) -> Option<RetirementReply> {
-        let (standing, standing_endpoint) = {
+        let (standing, started_role) = {
             let state = self.dsl_authority.state();
             let dsl_identity = mob_dsl::AgentIdentity::from_domain(identity);
             (
@@ -4547,7 +4547,7 @@ impl MobActor {
                             .cloned(),
                     ),
                 state
-                    .member_rotation_peer_endpoints
+                    .member_rotation_profile_names
                     .get(&dsl_identity)
                     .cloned(),
             )
@@ -4574,30 +4574,31 @@ impl MobActor {
         };
         let reply = match reply {
             RetirementReply::Rotate { rotation, reply } => {
-                // The endpoint a standing same-session rotation recorded (a
-                // successor under another role) carries that role's comms
-                // name, which the terminal installs: a re-issue naming
-                // another endpoint (another role) is another rotation.
-                let same_endpoint = standing_target != mob_dsl::RotationTarget::SameSession
-                    || standing_endpoint.is_none()
-                    || standing_endpoint.as_ref()
-                        == rotation
-                            .endpoint
-                            .as_ref()
-                            .map(mob_dsl::MemberPeerEndpoint::from)
-                            .as_ref();
+                // A standing same-session rotation seats the role it started
+                // with (MobMachine's started role, which its terminal requires
+                // of the grant): its start's retirement prepared the member's
+                // topology for that role, so a re-issue under another role is
+                // another rotation.
+                let same_role = standing_target != mob_dsl::RotationTarget::SameSession
+                    || started_role.as_deref() == Some(rotation.candidate.profile_name.as_str());
                 if rotation.target.to_machine() == standing_target
                     && mob_dsl::SessionId::from_domain(&rotation.candidate.session_id)
                         == standing_session
-                    && same_endpoint
+                    && same_role
                 {
                     return Some(RetirementReply::Rotate { rotation, reply });
                 }
                 // Another rotation waits for the standing one: a same-session
-                // rotation the mob finishes itself, or a FreshSession one its
-                // re-issue or `redrive_retirement` finishes.
+                // rotation the mob finishes itself (re-issued only under the
+                // role it started with), or a FreshSession one its re-issue or
+                // `redrive_retirement` finishes.
                 let intent = if standing_target == mob_dsl::RotationTarget::SameSession {
-                    format!("same-session rotation of member {identity}")
+                    match started_role.as_deref() {
+                        Some(role) => {
+                            format!("same-session rotation of member {identity} under role {role}")
+                        }
+                        None => format!("same-session rotation of member {identity}"),
+                    }
                 } else {
                     format!("rotation of member {identity}")
                 };

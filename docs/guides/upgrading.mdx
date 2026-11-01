@@ -136,7 +136,9 @@ entry row, and a name whose row is removed or that this build cannot read is
 reserved, never free (see
 [Identity entries](/reference/mob-architecture#identity-entries)). The origin
 is provenance and the custody of the entry's desired record only: a created
-entry's member is a member like any other, with its own roster labels. A mob
+entry's member is built from its profile like any other member, with its own
+roster labels, tools, grants and wiring. A created entry is still local and
+created at once: nothing places one or holds its creation yet. A mob
 that holds no created entry row sees no change but the new read answers.
 
 - **The entry reads have new answers.** `identity_entry` answers

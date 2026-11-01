@@ -90,8 +90,9 @@ pub(crate) const LEGACY_IDENTITY_LABEL: &str = "agent_identity";
 /// How an identity became an identity entry: its provenance, and with it the
 /// custody of its desired record (see the module docs). Custody decides only
 /// where that record lives, which recovery and writer use it, and the name
-/// guards and reservations that follow; never what the entry's member is or
-/// may do.
+/// guards and reservations that follow; never the member's profile, labels,
+/// tools, grants or wiring. A created entry is still local and created at
+/// once: nothing places one or holds its creation yet.
 ///
 /// The handle's entry reads and the journal's rows answer with this type.
 /// MobMachine's own state holds the generated machine enum of the same name

@@ -713,8 +713,13 @@ macro_rules! mob_catalog_machine_dsl {
             // (identity_entry_origins) is its provenance and the custody of
             // its desired record: the host's roster for a Declared entry, the
             // identity store's created entry row for a Created one. Custody
-            // decides only the recovery source, the name guards and the name
-            // reservations below, never what the entry's member is or may do.
+            // decides only the recovery source, which writer persists a
+            // change of that record, the name guards and the name
+            // reservations below, never the member's profile, labels, tools,
+            // grants or wiring. A Created entry is still local and created at
+            // once: nothing places one or holds its creation yet (the peer-only
+            // and placed spawns' created_custody_local guard, and
+            // unseated_created_entry_is_preparing_or_owed).
             // The names of removed created entries: a tombstoned name is
             // never an entry or a member again
             // (tombstone_is_never_an_entry), and no spawn, declaration or
@@ -34934,9 +34939,11 @@ pub enum MemberAdmissionVerdictKind {
 
 /// How an identity became an identity entry (`identity_entry_origins`): its
 /// provenance, and the custody of its desired record. Custody decides only
-/// the recovery source, the name guards and the name reservations, never
-/// what the entry's member is or may do. The stored form of an entry's
-/// journal row names the origin.
+/// the recovery source, which writer persists a change of that record, the
+/// name guards and the name reservations, never the member's profile,
+/// labels, tools, grants or wiring. A Created entry is still local and
+/// created at once: nothing places one or holds its creation yet. The stored
+/// form of an entry's journal row names the origin.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum IdentityEntryOrigin {
     /// The host declared it: a spawn or a dormant seat that carried entry

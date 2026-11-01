@@ -213,8 +213,10 @@ beside the host-adopted identity intents). The origin is the entry's
 provenance and the custody of its desired record (the host's roster for a
 declared entry, the identity store's row for a created one): it decides which
 recovery and writer use that record, the name guards and the name
-reservations below, and nothing about the entry's member, which is built from
-its profile like any member. A start reads every created entry row into
+reservations below. The entry's member is built from its profile like any
+member, with its own labels, tools, grants and wiring, which custody never
+decides. A created entry is still local and created at once: nothing places
+one or holds its creation yet. A start reads every created entry row into
 MobMachine (`RecoverCreatedIdentityEntry`), after the journal replay and
 before the start's member plan, and MobMachine decides each row from its
 presence and the replayed facts:

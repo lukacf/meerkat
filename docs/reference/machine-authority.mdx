@@ -238,8 +238,12 @@ custody, remote commit, retirement and replay, with witnesses and mutants.
 Created identity entries (`IdentityEntryOrigin::Created`, since 0.9.9) are
 entries of the same map, recovered from the identity store at a start. The
 origin is the entry's provenance and the custody of its desired record: it
-decides the recovery, the name guards and the reservations below, and nothing
-about the entry's member. After
+decides the recovery, which writer persists a change of that record, the name
+guards and the reservations below, never the member's profile, labels, tools,
+grants or wiring. A created entry is still local and created at once: nothing
+places one or holds its creation yet (the `created_custody_local` guard of
+`BeginSpawnExecFreshPeerOnly` and `BeginSpawnExecRemote`, and
+`unseated_created_entry_is_preparing_or_owed`). After
 the journal replay and before the boot plan is sealed, the shell sends one
 `RecoverCreatedIdentityEntry` per created entry row, with the row's presence
 (`RecoveredPresence`: `Present`, `PresentUnseated`, `Tombstone`,

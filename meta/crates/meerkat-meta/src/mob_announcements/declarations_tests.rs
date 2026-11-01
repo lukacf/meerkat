@@ -1708,7 +1708,7 @@ const CALL_BOUND: std::time::Duration = std::time::Duration::from_secs(30);
 /// How long a row allows an entry point to answer while a call of the
 /// reconcile it waits for never answers: past [`CALL_BOUND`], and short of
 /// [`HELD_PUT_BOUND`], after which a held put goes on by itself.
-const STOPS_WITHIN: std::time::Duration = std::time::Duration::from_secs(60);
+const STOPS_WITHIN: std::time::Duration = std::time::Duration::from_mins(1);
 
 /// `future`'s output, failing the row with `what` when it is not ready
 /// within [`STOPS_WITHIN`].

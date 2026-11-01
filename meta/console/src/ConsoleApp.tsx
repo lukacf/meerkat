@@ -991,10 +991,6 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
   const [memoryDataRuntimeKey, setMemoryDataRuntimeKey] = React.useState("");
   const [workGraphDataRuntimeKey, setWorkGraphDataRuntimeKey] = React.useState("");
   const [agents, setAgents] = React.useState<ConsoleAgent[]>([]);
-  // Display names for every key an agent is known by (identity, member,
-  // agent and session ids): panels show names, with the key in a tooltip.
-  // Panels name agents the way the sidebar does.
-  const agentDirectory = React.useMemo(() => createAgentDirectory(agents.map(agentDirectoryEntry)), [agents]);
   // Roster labels keyed by public alias (durable identity and member id), so
   // transcript rows can name a peer the way the sidebar does.
   const peerLabels = React.useMemo(() => {
@@ -3844,6 +3840,25 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
   React.useEffect(() => {
     timelineScope.ledger.setResolver(agentResolver);
   }, [agentResolver, timelineScope]);
+  // Display names for every key an agent is known by (identity, member,
+  // agent and session ids, and the comms peer ids the ledger has seen: a
+  // send names its recipient by peer id only): panels show names, with the
+  // key in a tooltip. Panels name agents the way the sidebar does.
+  const ledgerPeersVersion = React.useSyncExternalStore(
+    timelineScope.ledger.subscribe,
+    timelineScope.ledger.getPeersVersion,
+    timelineScope.ledger.getPeersVersion,
+  );
+  const agentDirectory = React.useMemo(() => {
+    const peerIds = timelineScope.ledger.peerIds();
+    return createAgentDirectory(agents.map((agent) => {
+      const entry = agentDirectoryEntry(agent);
+      const ids = peerIds.get(agent.identity || agent.member_id || agent.agent_id) ?? [];
+      return ids.length ? { ...entry, aliases: [...entry.aliases, ...ids] } : entry;
+    }));
+    // Read again whenever the ledger learns a peer id.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [agents, timelineScope, ledgerPeersVersion]);
 
   React.useEffect(() => {
     const scope = timelineScope;

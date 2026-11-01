@@ -3856,15 +3856,36 @@ const PEER_TRANSPORT_SCAFFOLD_SPAN_RE =
 
 /// Remove canonical peer transport scaffold spans, keeping any human-authored
 /// remainder (e.g. an appended request body). Returns "" when the text is
-/// pure transport scaffold.
-export function stripPeerTransportScaffold(text: string): string {
-  if (!text || !PEER_TRANSPORT_SCAFFOLD_START_RE.test(text)) return text;
+/// pure transport scaffold. Given the names of the peer a comms notice came
+/// from (its display name, its id), it also drops the envelope line that
+/// opens the notice's text ("Peer message from <name>:"); without them,
+/// ordinary text that merely starts that way is kept.
+export function stripPeerTransportScaffold(text: string, peerAliases: readonly string[] = []): string {
+  if (!text || !PEER_TRANSPORT_SCAFFOLD_START_RE.test(text)) return stripLeadingPeerEnvelope(text, peerAliases);
   let scrubbed = text.replace(PEER_TRANSPORT_SCAFFOLD_SPAN_RE, " ");
   // Defensive: a projection without its coaching terminator (e.g. truncated
   // upstream) must still never render; cut from the marker onward.
   const residualIndex = scrubbed.search(PEER_TRANSPORT_SCAFFOLD_START_RE);
   if (residualIndex >= 0) scrubbed = scrubbed.slice(0, residualIndex);
-  return scrubbed.replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+  return stripLeadingPeerEnvelope(scrubbed.replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim(), peerAliases);
+}
+
+/// The text after an opening envelope line that names one of the peer's
+/// names: "Peer message from <name>:" (request, response) or
+/// "[COMMS MESSAGE from <name>]". Text without one is returned as it is.
+function stripLeadingPeerEnvelope(text: string, peerAliases: readonly string[]): string {
+  if (!text || peerAliases.length === 0) return text;
+  const opening = text.replace(/^\s+/, "");
+  const aliases = peerAliases.map((alias) => alias.trim()).filter(Boolean).sort((a, b) => b.length - a.length);
+  for (const alias of aliases) {
+    const escaped = escapeRegExp(alias);
+    const envelope = new RegExp(
+      `^(?:Peer\\s+(?:message|request|response)\\s+from\\s+${escaped}:|\\[COMMS\\s+(?:MESSAGE|REQUEST|RESPONSE)\\s+from\\s+${escaped}\\])[ \\t]*(?:\\r?\\n)?`,
+      "i",
+    );
+    if (envelope.test(opening)) return opening.replace(envelope, "").trim();
+  }
+  return text;
 }
 
 function escapeRegExp(value: string): string {

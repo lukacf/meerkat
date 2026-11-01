@@ -749,7 +749,11 @@ export function WorkGraphGraphView({
           density={density}
           selection={selection}
           onSelect={(ids) => onSelect?.(ids.length > 0 ? ids[ids.length - 1] : null)}
-          onOpen={(id) => onSelect?.(id)}
+          onOpen={(id) => {
+            onSelect?.(id);
+            // Double-click (or Enter on) a goal's header zooms to that goal.
+            if (model.frames.some((frame) => frame.id === id)) graphRef.current?.fitTo([id]);
+          }}
           hoverHighlight="chain"
           accentPath={graph.accentPath}
           edgeLabels={graph.edgeLabels}

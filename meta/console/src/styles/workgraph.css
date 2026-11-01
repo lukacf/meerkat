@@ -71,6 +71,15 @@
   flex: 1 1 auto;
   min-height: 0;
 }
+/* A lone state (empty, no access, failed) sits a little above the middle. */
+.workgraph__body.is-state {
+  display: flex;
+  flex-direction: column;
+}
+.workgraph__body.is-state > .cc-panel-empty {
+  margin-block: auto;
+  padding-bottom: max(40px, 8%);
+}
 
 /* === Graph view ====================================================== */
 

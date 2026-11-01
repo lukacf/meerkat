@@ -109,6 +109,28 @@ describe("WorkGraphGraphView refresh", () => {
   });
 });
 
+describe("WorkGraphGraphView goal zoom", () => {
+  it("zooms to a goal when its header is double-clicked, and opens it", () => {
+    sizeTheCanvas();
+    const onSelect = vi.fn();
+    const twoGoals = [...items, item("other", "2026-07-08T07:00:00Z", { title: "Other goal" }), item("other-a", "2026-07-08T07:10:00Z")];
+    const view = render(
+      <WorkGraphGraphView
+        items={twoGoals}
+        edges={[...edges, { kind: "parent", from_id: "other-a", to_id: "other" }]}
+        attention={[]}
+        onSelect={onSelect}
+      />,
+    );
+    const transform = () => view.getByTestId("workgraph-graph-viewport").getAttribute("transform");
+    const fitted = transform();
+    const header = view.getAllByTestId("workgraph-graph-node").find((element) => element.getAttribute("data-item-id") === "root")!;
+    fireEvent.doubleClick(header);
+    expect(onSelect.mock.calls.map((call) => call[0]).includes("root")).toBe(true);
+    expect(transform() === fitted).toBe(false);
+  });
+});
+
 describe("WorkGraphGraphView drawer", () => {
   it("opens on a node and says what blocks the item and what it unblocks", () => {
     const onSelect = vi.fn();

@@ -52,6 +52,7 @@ import {
   TechnicalId,
   IconButton,
   KitGlyph,
+  cx,
   humanizeEnum,
   plural,
   priorityTone,
@@ -1179,7 +1180,14 @@ export function WorkGraphPanel({
         updatedTitle={capturedLabel ? `Snapshot as of ${capturedLabel}` : undefined}
         onRetry={onRefresh}
       />
-      <PanelBody className={viewMode === "graph" && model.items.size > 0 && !data.denied && !loading ? "workgraph__body is-graph" : "workgraph__body"}>
+      <PanelBody
+        className={cx(
+          "workgraph__body",
+          viewMode === "graph" && model.items.size > 0 && !data.denied && !loading && "is-graph",
+          // A state on its own (no access, failed, nothing yet) sits mid-pane.
+          (data.denied || (!loading && model.items.size === 0 && data.attention.length === 0)) && "is-state",
+        )}
+      >
         <div ref={measureRef} className="workgraph__measure" aria-hidden="true" />
         {content}
       </PanelBody>

@@ -30,7 +30,9 @@ calendar. Schedules own time and delivery. They do not own live work state.
   `meerkat_schedule_occurrences` before creating duplicates.
 - `meerkat_schedule_list` returns one page of summaries (50 by default, at
   most 200 whatever `limit` asks; continue with `cursor` from
-  `page.next_cursor`). A summary
+  `page.next_cursor`; `phase` and `target_id` list only the schedules in one
+  phase or naming one session, identity or member, so pass `target_id` to see
+  what runs for one agent instead of paging through the realm). A summary
   names the schedule, its trigger and target, and the first 160 characters of
   its action text (`action_head`; `action_chars` is the full length). Read the
   whole action, policies and options with `meerkat_schedule_get`.

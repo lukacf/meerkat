@@ -897,7 +897,7 @@ Each schedule produces `Occurrence` instances (individual fires) projected withi
 |------|-------------|
 | `meerkat_schedule_create` | Create a schedule with trigger + target |
 | `meerkat_schedule_get` | Read one schedule |
-| `meerkat_schedule_list` | List active and paused schedules (deleted ones are not listed) as a page of summaries: 50 by default, at most 200 (a larger `limit` returns 200), opaque `cursor`; full detail through `meerkat_schedule_get` |
+| `meerkat_schedule_list` | List active and paused schedules (deleted ones are not listed) as a page of summaries: 50 by default, at most 200 (a larger `limit` returns 200), opaque `cursor`; `phase` (active/paused) and `target_id` (an id the target names) list only matches; full detail through `meerkat_schedule_get` |
 | `meerkat_schedule_update` | Update trigger, target, or policies |
 | `meerkat_schedule_pause` / `meerkat_schedule_resume` | Pause/resume a schedule |
 | `meerkat_schedule_delete` | Delete a schedule |

@@ -365,6 +365,15 @@ them.
 
 ### Added
 
+- `meerkat-schedule`: `meerkat_schedule_list` takes two optional filters,
+  `phase` (`active` or `paused`) and `target_id` (a session, bound session,
+  identity, mob, member, source member, flow or host runnable id the target
+  names exactly), applied before the page cut: a page holds only matching
+  schedules and its cursor continues the same filtered listing. An agent can
+  find the schedules that run for one member without paging through every
+  schedule in the realm. `phase: "deleted"` and an empty `target_id` are
+  refused as invalid arguments.
+
 - `meerkat-session`, `meerkat-mob`, `meerkat`:
   `PersistentSessionService::runtime_turn_lost_its_host_runtime` answers
   whether a session's task ended with the runtime it ran on, and then degrades

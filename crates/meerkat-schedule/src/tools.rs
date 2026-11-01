@@ -49,13 +49,18 @@ impl ScheduleToolError {
     }
 }
 
-/// Arguments of `meerkat_schedule_list`: one page of schedule summaries.
+/// Arguments of `meerkat_schedule_list`: one page of schedule summaries,
+/// optionally only the schedules in one phase or naming one target id.
 #[derive(Debug, Deserialize)]
 struct ListArgs {
     #[serde(default)]
     limit: Option<usize>,
     #[serde(default)]
     cursor: Option<String>,
+    #[serde(default)]
+    phase: Option<SchedulePhase>,
+    #[serde(default)]
+    target_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -132,6 +137,19 @@ const SUMMARY_TRIGGER_BYTES: usize = 1_024;
 /// session, identity, mob, member, flow or host runnable it names. Everything
 /// else (the action, prompt, helper options, materialization spec, flow and
 /// runnable params) is payload and stays out of a summary.
+/// The fields of a serialized target that `meerkat_schedule_list`'s
+/// `target_id` filter compares: every id a target can name.
+const TARGET_ID_KEYS: &[&str] = &[
+    "session_id",
+    "bound_session_id",
+    "identity",
+    "mob_id",
+    "member_id",
+    "source_member_id",
+    "flow_id",
+    "runnable",
+];
+
 const SUMMARY_TARGET_KEYS: &[&str] = &[
     "target_kind",
     "type",
@@ -196,7 +214,9 @@ pub fn schedule_tools_list() -> Vec<Value> {
                 "created and updated times. Read a schedule's full action, policies and options with ",
                 "meerkat_schedule_get. limit sets the page size (default 50, at most 200: a larger limit ",
                 "returns 200); pass the reply's opaque page.next_cursor as cursor to continue after its ",
-                "last row.",
+                "last row. phase (active or paused) and target_id (a session, identity, mob, member, ",
+                "flow or runnable id the target names) list only the matching schedules; a cursor ",
+                "continues the same filtered listing.",
             ),
             list_schema(),
         ),
@@ -1006,9 +1026,11 @@ impl<'a> OccurrenceDetail<'a> {
 }
 
 /// `meerkat_schedule_list`: one page of schedule summaries in creation order.
-/// The store returns every live schedule; the order, the cursor and the page
-/// cut are applied here, so the reply stays bounded whatever the realm holds
-/// and whatever order a host-injected store returns.
+/// The store returns every live schedule; the filters, the order, the cursor
+/// and the page cut are applied here, so the reply stays bounded whatever the
+/// realm holds and whatever order a host-injected store returns. The filters
+/// apply before the page cut: a page holds only matching schedules, and a
+/// cursor continues the same filtered listing.
 async fn list_schedule_summaries(
     service: &ScheduleService,
     args: &ListArgs,
@@ -1019,7 +1041,35 @@ async fn list_schedule_summaries(
         .as_deref()
         .map(SchedulePageKey::decode)
         .transpose()?;
+    if args.phase == Some(SchedulePhase::Deleted) {
+        return Err(ScheduleToolError::invalid_arguments(
+            "deleted schedules are not listed; phase must be active or paused",
+        )
+        .into());
+    }
+    let wanted_target = match args.target_id.as_deref().map(str::trim) {
+        Some("") => {
+            return Err(ScheduleToolError::invalid_arguments("target_id must not be empty").into());
+        }
+        other => other,
+    };
     let mut schedules = service.list().await?;
+    if let Some(phase) = args.phase {
+        schedules.retain(|schedule| schedule.phase == phase);
+    }
+    if let Some(wanted) = wanted_target {
+        let mut named = Vec::with_capacity(schedules.len());
+        for schedule in schedules {
+            let target = encode("meerkat_schedule_list", &schedule.target)?;
+            if TARGET_ID_KEYS
+                .iter()
+                .any(|key| target.get(key).and_then(Value::as_str) == Some(wanted))
+            {
+                named.push(schedule);
+            }
+        }
+        schedules = named;
+    }
     schedules.sort_by_cached_key(SchedulePageKey::of);
     if let Some(after) = &after_key {
         schedules.retain(|schedule| SchedulePageKey::of(schedule) > *after);
@@ -1701,7 +1751,16 @@ fn list_schema() -> Value {
             },
             "cursor": {
                 "type": "string",
-                "description": "page.next_cursor from the previous reply, to continue after its last schedule. Opaque: pass it back unchanged.",
+                "description": "page.next_cursor from the previous reply, to continue after its last schedule. Opaque: pass it back unchanged, with the same filters.",
+            },
+            "phase": {
+                "type": "string",
+                "enum": ["active", "paused"],
+                "description": "Only schedules in this phase.",
+            },
+            "target_id": {
+                "type": "string",
+                "description": "Only schedules whose target names this id exactly: a session, bound session, identity, mob, member, source member, flow or host runnable id. Use it to find the schedules that run for one agent or member.",
             },
         },
         "additionalProperties": false,
@@ -4785,6 +4844,115 @@ mod tests {
         let small = call_tool(&service, "meerkat_schedule_list", json!({ "limit": 7 })).await?;
         assert_eq!(listed_ids(&small)?, expected[..7].to_vec());
         assert_eq!(small["page"]["has_more"].as_bool(), Some(true), "{small}");
+        Ok(())
+    }
+
+    /// `phase` and `target_id` list only the matching schedules, before the
+    /// page cut: a page holds only matches and its cursor continues them.
+    #[tokio::test]
+    async fn schedule_list_filters_by_phase_and_target_before_paging() -> Result<(), String> {
+        let service = ScheduleService::new(Arc::new(MemoryScheduleStore::default()));
+        let mut created = Vec::new();
+        for index in 0..4 {
+            let schedule = service
+                .create(prompt_schedule_request(&format!("prompt {index}")))
+                .await
+                .map_err(|error| error.to_string())?;
+            created.push(schedule);
+        }
+        service
+            .pause(&created[1].schedule_id)
+            .await
+            .map_err(|error| error.to_string())?;
+        let all = call_tool(&service, "meerkat_schedule_list", json!({})).await?;
+        let rows = all["schedules"].as_array().ok_or("schedules array")?;
+        let session_of = |id: &ScheduleId| -> Result<String, String> {
+            rows.iter()
+                .find(|row| row["schedule_id"] == json!(id))
+                .and_then(|row| row["target"]["session_id"].as_str())
+                .map(str::to_string)
+                .ok_or_else(|| format!("no session id for {id}"))
+        };
+
+        let paused = call_tool(
+            &service,
+            "meerkat_schedule_list",
+            json!({ "phase": "paused" }),
+        )
+        .await?;
+        assert_eq!(
+            listed_ids(&paused)?,
+            vec![created[1].schedule_id.to_string()]
+        );
+
+        let session = session_of(&created[2].schedule_id)?;
+        let one = call_tool(
+            &service,
+            "meerkat_schedule_list",
+            json!({ "target_id": session }),
+        )
+        .await?;
+        assert_eq!(listed_ids(&one)?, vec![created[2].schedule_id.to_string()]);
+        let none = call_tool(
+            &service,
+            "meerkat_schedule_list",
+            json!({ "target_id": session, "phase": "paused" }),
+        )
+        .await?;
+        assert!(listed_ids(&none)?.is_empty(), "{none}");
+
+        let mut expected: Vec<_> = created
+            .iter()
+            .filter(|schedule| schedule.schedule_id != created[1].schedule_id)
+            .map(|schedule| {
+                (
+                    schedule.config.created_at_utc,
+                    schedule.schedule_id.to_string(),
+                )
+            })
+            .collect();
+        expected.sort();
+        let expected: Vec<String> = expected.into_iter().map(|(_, id)| id).collect();
+        let first = call_tool(
+            &service,
+            "meerkat_schedule_list",
+            json!({ "phase": "active", "limit": 2 }),
+        )
+        .await?;
+        assert_eq!(first["page"]["has_more"].as_bool(), Some(true), "{first}");
+        let cursor = first["page"]["next_cursor"]
+            .as_str()
+            .ok_or("cursor")?
+            .to_string();
+        let second = call_tool(
+            &service,
+            "meerkat_schedule_list",
+            json!({ "phase": "active", "limit": 2, "cursor": cursor }),
+        )
+        .await?;
+        assert_eq!(
+            second["page"]["has_more"].as_bool(),
+            Some(false),
+            "{second}"
+        );
+        let mut paged = listed_ids(&first)?;
+        paged.extend(listed_ids(&second)?);
+        assert_eq!(
+            paged, expected,
+            "the active schedules, each once, in creation order"
+        );
+
+        for case in [
+            json!({ "phase": "deleted" }),
+            json!({ "phase": "sleeping" }),
+            json!({ "target_id": "" }),
+            json!({ "target_id": 7 }),
+        ] {
+            match handle_schedule_tools_call(&service, "meerkat_schedule_list", &case).await {
+                Err(error) => assert_eq!(error.code, INVALID_ARGUMENTS, "{case}: {error:?}"),
+                Ok(reply) => return Err(format!("{case} was accepted: {reply}")),
+            }
+        }
         Ok(())
     }
 

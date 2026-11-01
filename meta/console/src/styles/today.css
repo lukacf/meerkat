@@ -48,9 +48,6 @@
 }
 .today__story > .cc-panel-empty { margin-top: 24px; }
 .today__hour {
-  position: sticky;
-  top: 47px;
-  z-index: 2;
   display: flex;
   align-items: baseline;
   gap: 10px;
@@ -239,6 +236,14 @@
 .today__drawer-item .today__time { padding-top: 0; }
 .today__drawer-item .cc-mark { align-self: center; }
 .today__drawer-words { min-width: 0; overflow-wrap: anywhere; }
+.today__drawer-agents {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+.today__drawer-arrow { width: 14px; height: 14px; color: var(--_cc-foreground-meta); }
 .today__drawer-words .cc-agent { display: inline; }
 
 /* Narrow panes: the time column shrinks, the rail stays. */

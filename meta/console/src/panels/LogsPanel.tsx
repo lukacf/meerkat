@@ -1,5 +1,5 @@
 import React from "react";
-import type { ConsoleFrame } from "../types";
+import type { ConsoleAgent, ConsoleFrame } from "../types";
 import {
   AgentAvatar,
   AgentName,
@@ -53,6 +53,7 @@ import {
   type LogLevel,
 } from "./activity/logs-model";
 import { useVirtualRows } from "./activity/use-virtual-rows";
+import { useHistoryBackfill } from "./activity/use-history-backfill";
 
 export { isLogFrameVisible, logIdentityLabel, sanitizeLogFrameData, summarizeLogFrame } from "./activity/logs-model";
 
@@ -64,6 +65,10 @@ interface LogsPanelProps {
   /** Resolves identity keys to display names; keys show without their kind
    * prefix when absent. */
   agentDirectory?: AgentDirectory;
+  /** The roster: whose history to load. */
+  agents?: readonly ConsoleAgent[];
+  /** Loads one agent's history for the day (the console's identity log). */
+  loadHistory?: (identity: string) => Promise<void>;
   /** Opens an agent's chat or details while the console provides no
    * navigation context. */
   onOpenAgent?: (identity: string, how: "details" | "chat") => void;
@@ -121,9 +126,13 @@ export function LogsPanel({
   frames,
   historyFrames,
   agentDirectory = EMPTY_AGENT_DIRECTORY,
+  agents,
+  loadHistory,
   onOpenAgent,
 }: LogsPanelProps): React.JSX.Element {
   const navigation = useConsoleNavigation();
+  // The record of the day: the agents' history joins the live buffer.
+  const history = useHistoryBackfill(agents, loadHistory);
   const [density, setDensity] = usePanelDensity("logs");
   const [showTechnicalIds, setShowTechnicalIds] = useShowTechnicalIds("logs");
   const [grouped, setGrouped] = usePanelPreference<"on" | "off">("meta-console-logs-group", "off", ["on", "off"]);
@@ -166,7 +175,7 @@ export function LogsPanel({
     return { start: oldest, end: Math.max(newest, oldest + 60_000) };
   }, [entries, paused]);
 
-  const agents = React.useMemo(() => {
+  const agentOptions = React.useMemo(() => {
     const seen = new Map<string, number>();
     for (const entry of entries) {
       const key = entry.frame.identity?.trim();
@@ -302,6 +311,7 @@ export function LogsPanel({
       interaction_id: entry.interactionId ?? null,
       frame_id: entry.frame.id,
     })),
+    onRefresh: loadHistory ? history.refresh : undefined,
     testIdPrefix: "logs",
   });
 
@@ -441,6 +451,7 @@ export function LogsPanel({
         title="Logs"
         summary={summaryFacts}
         summaryTestId="logs-summary"
+        refreshing={history.loading}
         actions={(
           <Button
             size="sm"
@@ -500,7 +511,7 @@ export function LogsPanel({
           testId="logs-agent-filter"
           options={[
             { value: "", label: "All agents" },
-            ...agents.map(([key, count]) => ({ value: key, label: `${nameOf(key)} (${count})` })),
+            ...agentOptions.map(([key, count]) => ({ value: key, label: `${nameOf(key)} (${count})` })),
           ]}
         />
       </FilterBar>

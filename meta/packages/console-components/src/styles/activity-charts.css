@@ -11,6 +11,11 @@
   min-width: 0;
   font-family: var(--_cc-font-display);
 }
+.cc-lanes__svg,
+.cc-sevstrip__svg {
+  user-select: none;
+  -webkit-user-select: none;
+}
 .cc-lanes__labels {
   position: absolute;
   inset: 0 auto 0 0;
@@ -172,6 +177,8 @@
   position: relative;
   width: 100%;
   min-width: 0;
+  user-select: none;
+  -webkit-user-select: none;
 }
 .cc-sevstrip__svg {
   display: block;
@@ -182,6 +189,7 @@
   touch-action: pan-y;
   border-radius: var(--_cc-radius-xs);
 }
+.cc-sevstrip__svg:focus { outline: none; }
 .cc-sevstrip__svg:focus-visible {
   outline: 2px solid var(--_cc-focus-ring);
   outline-offset: 2px;

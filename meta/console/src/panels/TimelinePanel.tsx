@@ -61,7 +61,7 @@ import {
   type StoryRow,
   type TodayView,
 } from "./activity/story-model";
-import { backfillOrder, inBatches } from "./activity/history-frames";
+import { useHistoryBackfill } from "./activity/use-history-backfill";
 import { useVirtualRows } from "./activity/use-virtual-rows";
 import type { PendingApprovalLike } from "./activity/signals-model";
 
@@ -112,8 +112,6 @@ const VIEW_OPTIONS: ReadonlyArray<{ id: TodayView; label: string; testId: string
   { id: "3h", label: "3h", testId: "timeline-view:3h" },
   { id: "1h", label: "1h", testId: "timeline-view:1h" },
 ];
-const BACKFILL_AGENTS = 24;
-const BACKFILL_CONCURRENCY = 4;
 const ROW_ESTIMATE = { comfortable: 46, compact: 34 } as const;
 const HOUR_ESTIMATE = 30;
 
@@ -184,9 +182,6 @@ export function TimelinePanel({
   const [showTechnicalIds, setShowTechnicalIds] = useShowTechnicalIds("timeline");
   const [selection, setSelection] = React.useState<Selection | null>(null);
   const [open, setOpen] = React.useState<Set<string>>(() => new Set());
-  const [loading, setLoading] = React.useState(false);
-  const [loadedOnce, setLoadedOnce] = React.useState(false);
-  const loaded = React.useRef(new Set<string>());
   const storyRef = React.useRef<HTMLDivElement | null>(null);
   const scrollRef = React.useRef<HTMLElement | null>(null);
   const nameOf = React.useCallback((key: string) => agentDisplayName(key, directory) || key, [directory]);
@@ -194,25 +189,9 @@ export function TimelinePanel({
   const nowMs = ledger.nowMs;
 
   // Load the day's history of the most active agents, four at a time.
-  const agentKeys = React.useMemo(
-    () => (agents ?? []).map((agent) => ({ identity: (agent.identity || agent.member_id || "").trim(), lastActivityMs: agent.last_activity_ms })),
-    [agents],
-  );
-  const backfill = React.useCallback((force: boolean) => {
-    if (!loadHistory) return;
-    if (force) loaded.current.clear();
-    const wanted = backfillOrder(agentKeys, BACKFILL_AGENTS).filter((identity) => !loaded.current.has(identity));
-    if (!wanted.length) return;
-    for (const identity of wanted) loaded.current.add(identity);
-    setLoading(true);
-    void inBatches(wanted, BACKFILL_CONCURRENCY, loadHistory).finally(() => {
-      setLoading(false);
-      setLoadedOnce(true);
-    });
-  }, [agentKeys, loadHistory]);
-  React.useEffect(() => {
-    backfill(false);
-  }, [backfill]);
+  const history = useHistoryBackfill(agents, loadHistory);
+  const loading = history.loading;
+  const loadedOnce = history.loaded;
 
   const merged = React.useMemo(() => mergeFrameSources(frames, historyFrames), [frames, historyFrames]);
   const allEntries = React.useMemo(() => {
@@ -350,9 +329,19 @@ export function TimelinePanel({
     return entry ? { kind: "event", key: `event:${entry.key}`, entry, actor: entry.actor, atMs: entry.atMs, severity: entry.severity } : undefined;
   })();
   const selectedSpan = selection?.kind === "span" ? lanes.spans.find((span) => span.id === selection.id) : undefined;
-  const selectedLaneId = selection?.kind === "span" ? selection.id
-    : selection?.kind === "entry" ? [...lanes.links, ...lanes.marks, ...lanes.problems].find((mark) => mark.entryKey === selection.key)?.id ?? null
-      : null;
+  // The lane mark of what the drawer shows: a span, or an event's mark.
+  const selectedLaneId = (() => {
+    if (!selection) return null;
+    if (selection.kind === "span") return selection.id;
+    const markOf = (key: string) => [...lanes.problems, ...lanes.marks, ...lanes.links].find((mark) => mark.entryKey === key)?.id ?? null;
+    if (selection.kind === "entry") return markOf(selection.key);
+    const row = selectedRow;
+    if (row?.kind === "event") return markOf(row.entry.key);
+    if (row?.kind === "turn") {
+      return lanes.spans.find((span) => span.agent === row.actor && span.interactionId === row.interactionId)?.id ?? null;
+    }
+    return null;
+  })();
 
   const menuItems = standardPanelMenu({
     density,
@@ -369,7 +358,7 @@ export function TimelinePanel({
       target: entry.target ?? null,
       interaction_id: entry.interactionId ?? null,
     })),
-    onRefresh: loadHistory ? () => backfill(true) : undefined,
+    onRefresh: loadHistory ? history.refresh : undefined,
     testIdPrefix: "timeline",
   });
 
@@ -621,7 +610,7 @@ export function TimelinePanel({
         refreshing={loading}
         view={{ ariaLabel: "Time span", options: VIEW_OPTIONS, value: view, onChange: setView, testId: "timeline-view" }}
         tools={loadHistory ? (
-          <IconButton label="Refresh today" glyph="refresh" onClick={() => backfill(true)} data-testid="timeline-refresh" />
+          <IconButton label="Refresh today" glyph="refresh" onClick={history.refresh} data-testid="timeline-refresh" />
         ) : undefined}
         menu={{ label: "More actions for Today", items: menuItems, triggerTestId: "timeline-menu" }}
       />
@@ -861,7 +850,7 @@ function TodayDrawer({
         title={entry.title}
         mark={<StatusMark tone={tone} size="md" />}
         status={<StatusPill tone={tone}>{word}</StatusPill>}
-        subtitle={<RelativeTime value={entry.atMs} prefix={formatClockTime(entry.atMs)} />}
+        subtitle={<RelativeTime value={entry.atMs} prefix={`${formatClockTime(entry.atMs)} ·`} />}
         onClose={onClose}
         actions={(
           <>
@@ -884,9 +873,13 @@ function TodayDrawer({
           <p className="today__drawer-text"><Sentence entry={entry} link={canLink} /></p>
           {entry.snippet ? <p className="today__drawer-quote">{entry.snippet}</p> : null}
         </DrawerSection>
-        {entry.target ? (
-          <DrawerSection label="With">
-            <AgentName id={entry.target} avatar={22} link={canLink} />
+        {entry.actor || entry.target ? (
+          <DrawerSection label={entry.target ? "Between" : "Agent"}>
+            <span className="today__drawer-agents">
+              {entry.actor ? <AgentName id={entry.actor} avatar={22} link={canLink} /> : null}
+              {entry.actor && entry.target ? <KitGlyph name="arrow-right" className="today__drawer-arrow" /> : null}
+              {entry.target ? <AgentName id={entry.target} avatar={22} link={canLink} /> : null}
+            </span>
           </DrawerSection>
         ) : null}
       </DetailDrawer>

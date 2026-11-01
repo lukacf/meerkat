@@ -5858,6 +5858,8 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           frames={activityRef.current}
           historyFrames={historyFramesOf(identityLogRef.current)}
           agentDirectory={agentDirectory}
+          agents={agents}
+          loadHistory={loadDayHistory}
         />
       );
     if (target.kind === "access")

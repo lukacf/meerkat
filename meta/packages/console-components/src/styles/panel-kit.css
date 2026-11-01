@@ -1704,11 +1704,8 @@ button.cc-tile:focus-visible,
   animation: cc-pop-in var(--_cc-dur-enter) var(--_cc-ease-out);
 }
 .cc-popover[data-side="top"] { animation-name: cc-pop-in-above; }
-.cc-popover[data-state="closing"] {
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity var(--_cc-dur-exit) var(--_cc-ease-in);
-}
+/* No exit fade: a popover unmounts the moment it closes, so nothing closed
+   stays on screen, in the top layer or under the pointer. */
 @keyframes cc-pop-in {
   from { opacity: 0; transform: translateY(-4px); }
   to   { opacity: 1; transform: none; }
@@ -1871,6 +1868,9 @@ button.cc-tile:focus-visible,
   box-sizing: border-box;
   min-width: 0;
   margin: 0;
+  /* Nothing a tile holds crosses its bounds (a meter wider than the room
+     shrinks, moves below the figure or is clipped here). */
+  overflow: hidden;
   padding: 11px 12px 12px;
   border: 0;
   background: transparent;
@@ -1925,6 +1925,16 @@ button.cc-figure:focus-visible { outline: 2px solid var(--_cc-focus-ring); outli
   color: var(--_cc-foreground-meta);
   white-space: nowrap;
 }
+/* The figure, its "of" and its unit: a short figure keeps two figures'
+   width, so a loading tile and a loaded one leave the same room beside it. */
+.cc-figure__group {
+  display: inline-flex;
+  flex: none;
+  align-items: baseline;
+  gap: 6px;
+  min-width: calc(var(--_cc-figure-size) * 2);
+}
+.cc-figure--hero .cc-figure__group { min-width: calc(var(--_cc-fs-hero) * 2); }
 .cc-figure__trend,
 .cc-figure__meter {
   align-self: center;
@@ -1932,11 +1942,25 @@ button.cc-figure:focus-visible { outline: 2px solid var(--_cc-focus-ring); outli
   margin-left: 6px;
 }
 .cc-figure__meter { display: inline-flex; align-items: center; }
+/* A fixed meter shrinks to the room left and is clipped there. */
+.cc-figure__meter.is-fixed {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+}
+/* A responsive meter without room beside the figure goes below it. */
+.cc-figure__meter.is-below {
+  align-self: flex-start;
+  max-width: 100%;
+  margin: 6px 0 0;
+}
 .cc-figure__foot {
   display: flex;
   align-items: center;
   gap: 10px;
   min-width: 0;
+  /* One foot line even when empty: a tile is as tall with or without a foot. */
+  min-height: 1.4em;
   margin-top: 5px;
   overflow: hidden;
   font-size: 11px;
@@ -1956,13 +1980,26 @@ button.cc-figure:focus-visible { outline: 2px solid var(--_cc-focus-ring); outli
 .cc-figure__arrow { width: 11px; height: 11px; stroke-width: 2.25; }
 .cc-figure__arrow.is-up { transform: rotate(-45deg); }
 .cc-figure__arrow.is-down { transform: rotate(45deg); }
+/* Loading (A3.7): the tile keeps every box of the loaded tile. The value
+   holds a non-breaking space, so its line box is the figure's own, and the
+   skeleton bar lies over it; the meter, the trend slot and the foot keep
+   their boxes, hidden. */
+.cc-figure.is-loading .cc-figure__value {
+  position: relative;
+  min-width: 2em;
+}
 .cc-figure__skeleton {
-  display: inline-block;
-  width: 40px;
-  height: calc(var(--_cc-figure-size) * 0.95);
+  position: absolute;
+  top: 50%;
+  left: 0;
+  width: 100%;
+  height: 0.8em;
   border-radius: var(--_cc-radius-sm);
   background: var(--_cc-skeleton);
+  transform: translateY(-50%);
 }
+.cc-figure.is-loading .cc-figure__meter,
+.cc-figure.is-loading .cc-figure__foot > * { visibility: hidden; }
 .cc-panel[data-density="compact"] .cc-figure__trend { display: none; }
 
 /* ── Micro charts (spec A3.8) ──────────────────────────────────────

@@ -142,7 +142,9 @@ export function BarcodeMeter({
     );
   }
   return (
-    <span className={cx("cc-barcode", className)} data-testid={testId}>
+    // With its legend, the meter is as wide as its ladder: the legend wraps
+    // under it instead of widening it past the room it was given.
+    <span className={cx("cc-barcode", className)} data-testid={testId} style={legend ? { width } : undefined}>
       <svg className="cc-barcode__svg" width={width} height={svgH} style={{ width, height: svgH }} viewBox={`0 0 ${width} ${svgH}`} role="img" aria-label={unitNote ? `${label} (${unitNote})` : label}>
         {rects}
         {peakSeg > 0 ? (

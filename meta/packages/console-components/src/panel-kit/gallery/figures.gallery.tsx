@@ -53,6 +53,14 @@ const DECISIONS: DotStripItem[] = [
   { id: "d7", t: NOW - 1 * HOUR, shape: "dot", tone: "ok", label: "Approved: publish notes" },
 ];
 
+// A window that starts at now: the "now" label sits at the left end.
+const UPCOMING: DotStripItem[] = [2, 5, 9, 14, 21].map((hours, index) => ({
+  id: `run-${index}`,
+  t: NOW + hours * HOUR,
+  shape: "hollow",
+  label: `Heartbeat check in ${hours} h`,
+}));
+
 const WEEK_ROWS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].map((day, index) => ({
   key: day,
   label: day,
@@ -99,6 +107,80 @@ function WorkStrip({ width, four }: { width: number; four?: boolean }) {
   );
 }
 
+// Hero meters in narrow panes (Topology's ladder with its legend, Memory's
+// bars): responsive meters take the room the tile measures, beside the figure
+// or below it, and nothing crosses a tile's bounds.
+function NarrowHeroes({ width }: { width: number }) {
+  return (
+    <div className="kg-stack" style={{ width, flex: "none" }}>
+      <div className="kg-pane" data-testid={`kit-hero-pane:${width}:topology`}>
+        <PanelShell>
+          <GlanceStrip ariaLabel="Topology at a glance">
+            <FigureTile
+              hero
+              label="Agents"
+              value={17}
+              live
+              meter={({ width: room }) => <BarcodeMeter filled={14} outlined={3} live={2} width={Math.min(150, room)} legend label="17 agents: 14 long-lived, 3 helpers, 2 active now" />}
+              meterMinWidth={112}
+            />
+            <FigureTile label="Problems" value={0} foot="Nothing needs attention" />
+          </GlanceStrip>
+        </PanelShell>
+      </div>
+      <div className="kg-pane" data-testid={`kit-hero-pane:${width}:memory`}>
+        <PanelShell>
+          <GlanceStrip ariaLabel="Memory at a glance">
+            <FigureTile
+              hero
+              label="Records"
+              value={80}
+              unit="active"
+              meter={({ width: room }) => <Sparkline values={series(4, 30, 4)} kind="bars" width={Math.min(128, room)} height={26} label="Records per day over 30 days" />}
+              foot="+15 written this week"
+            />
+            <FigureTile label="Needs review" value={3} tone="warn" foot="1 quarantined · 2 waiting" />
+            <FigureTile label="Given · 24h" value={1284} trend={series(9, 24, 8)} foot="to 3 agents" />
+            <FigureTile label="Checks" value={4} of={6} meter={<ProgressRing done={4} total={6} size={24} />} foot="holding" />
+          </GlanceStrip>
+        </PanelShell>
+      </div>
+    </div>
+  );
+}
+
+// Every kind of tile, loaded and loading, each alone in a strip, so its own
+// height shows (in a strip of several the row takes the tallest).
+const LOADING_KINDS: Array<[string, Omit<Parameters<typeof FigureTile>[0], "loading">]> = [
+  ["plain", { label: "Ready", value: 2 }],
+  ["foot", { label: "Ready", value: 2, tone: "ok", foot: "can start now" }],
+  ["of", { label: "Done", value: 1, of: 9, foot: "none today" }],
+  ["unit", { label: "To finish", value: 3, unit: "steps", foot: "Critical path" }],
+  ["delta", { label: "Messages", value: 48, delta: { value: 12, period: "the hour before" }, foot: "rising" }],
+  ["trend", { label: "Given · 24h", value: 1284, trend: series(9, 24, 8), trendLive: true, foot: "to 3 agents" }],
+  ["meter", { label: "Checks", value: 3, of: 4, meter: <ProgressRing done={3} total={4} size={24} />, foot: "holding" }],
+  ["hero", { label: "Records", value: 74, unit: "active", hero: true, meter: <Sparkline values={series(4, 30, 4)} kind="bars" width={128} height={26} label="Records per day" />, foot: "+9 written this week" }],
+  ["button", { label: "Blocked", value: 1, tone: "warn", foot: "Publish to all regions", onActivate: () => {} }],
+];
+
+function LoadingPairs({ density }: { density: "comfortable" | "compact" }) {
+  return (
+    <PanelShell density={density}>
+      <div className="kg-grid" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(460px, 1fr))", padding: 12 }}>
+        {LOADING_KINDS.map(([kind, props]) => (
+          <div key={kind} className="kg-inline" style={{ alignItems: "flex-start", gap: 8, flexWrap: "nowrap" }} data-testid={`kit-figure-pair:${density}:${kind}`}>
+            {[false, true].map((loading) => (
+              <div key={String(loading)} className="cc-glance" style={{ flex: "1 1 0", border: "1px solid var(--_cc-border-soft)" }}>
+                <FigureTile {...props} loading={loading} testId={`kit-figure:${density}:${kind}:${loading ? "loading" : "loaded"}`} />
+              </div>
+            ))}
+          </div>
+        ))}
+      </div>
+    </PanelShell>
+  );
+}
+
 export const gallerySections: GallerySection[] = [
   {
     id: "figures",
@@ -137,6 +219,17 @@ export const gallerySections: GallerySection[] = [
             ))}
             <WorkStrip width={600} four />
           </div>
+        </Specimen>
+        <Specimen title="Hero meters in narrow panes" note="339, 420 and 520 px panes: a responsive meter takes the room beside the figure, or below it under its minimum (the ladder asks 112 px); nothing crosses a tile">
+          <div className="kg-inline" style={{ alignItems: "flex-start", gap: 14 }}>
+            {[339, 420, 520].map((width) => (
+              <NarrowHeroes key={width} width={width} />
+            ))}
+          </div>
+        </Specimen>
+        <Specimen bare title="Loading keeps the height" note="each kind of tile loaded (left) and loading (right): the same boxes, the foot line kept; comfortable and compact">
+          <LoadingPairs density="comfortable" />
+          <LoadingPairs density="compact" />
         </Specimen>
       </>
     ),
@@ -240,10 +333,11 @@ export const gallerySections: GallerySection[] = [
               formatCell={(row, column, value) => `${row.label} ${String(column).padStart(2, "0")}:00 · ${value} turns`}
             />
           </Specimen>
-          <Specimen title="DotStrip" note="records over 30 days; decisions over 24 h">
+          <Specimen title="DotStrip" note="records over 30 days; decisions over the last 24 h; runs over the next 24 h">
             <div className="kg-stack" style={{ gap: 18 }}>
-              <DotStrip items={RECORDS} start={NOW - 30 * DAY} end={NOW} width={320} height={18} now axis label="64 records over 30 days, 1 quarantined" onSelect={() => {}} />
-              <DotStrip items={DECISIONS} start={NOW - 24 * HOUR} end={NOW} width={320} height={18} axis now markSize={8} label="7 decisions in the last 24 hours" />
+              <DotStrip items={RECORDS} start={NOW - 30 * DAY} end={NOW} width={320} height={18} now={NOW} axis label="64 records over 30 days, 1 quarantined" onSelect={() => {}} />
+              <DotStrip items={DECISIONS} start={NOW - 24 * HOUR} end={NOW} width={320} height={18} axis now={NOW} markSize={8} label="7 decisions in the last 24 hours" />
+              <DotStrip items={UPCOMING} start={NOW} end={NOW + 24 * HOUR} width={320} height={18} axis now={NOW} markSize={8} label="5 runs in the next 24 hours" />
             </div>
           </Specimen>
         </SpecimenRow>

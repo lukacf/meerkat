@@ -70,12 +70,6 @@ function anchorOutOfSight(anchor: HTMLElement): boolean {
   return false;
 }
 
-function prefersReducedMotion(element: Element): boolean {
-  if (element.closest(".reduced-motion")) return true;
-  const view = element.ownerDocument.defaultView;
-  return Boolean(view?.matchMedia?.("(prefers-reduced-motion: reduce)").matches);
-}
-
 /**
  * A non-modal popover anchored to its trigger (spec A3.2): bottom end by
  * default, flipping above and shifting to stay inside the pane and then the
@@ -113,16 +107,9 @@ export function Popover({
   const initialFocusRef = useRef(initialFocus);
   initialFocusRef.current = initialFocus;
   const [position, setPosition] = useState<{ top: number; left: number; side: "top" | "bottom" } | null>(null);
-  // A popover that closes fades out over the exit duration before it
-  // unmounts, where the browser animates and motion is not reduced (never in
-  // jsdom, so tests see it gone at once).
-  const [shownOpen, setShownOpen] = useState(open);
-  const [closing, setClosing] = useState(false);
-  if (shownOpen !== open) {
-    setShownOpen(open);
-    const element = popoverRef.current;
-    setClosing(!open && Boolean(element && typeof element.animate === "function" && !prefersReducedMotion(element)));
-  }
+  // A popover closes at once: it unmounts the moment `open` turns false (a
+  // press outside it, focus leaving it, Escape), with no exit fade, so it is
+  // never still mounted, shown or :popover-open while closed.
   const topLayer = supportsTopLayer();
 
   const place = useCallback(() => {
@@ -162,12 +149,6 @@ export function Popover({
     const top = Math.min(Math.max(rawTop, viewport.top), Math.max(viewport.top, viewport.bottom - box.height));
     setPosition((previous) => (previous && previous.top === top && previous.left === left && previous.side === side ? previous : { top, left, side }));
   }, [anchorRef, offset, placement]);
-
-  useEffect(() => {
-    if (!closing) return undefined;
-    const timer = setTimeout(() => setClosing(false), 140);
-    return () => clearTimeout(timer);
-  }, [closing]);
 
   useLayoutEffect(() => {
     if (!open) return undefined;
@@ -226,7 +207,7 @@ export function Popover({
     return () => doc.removeEventListener("pointerdown", onPointerDown, true);
   }, [open, anchorRef]);
 
-  if (!open && !closing) return null;
+  if (!open) return null;
   const style: CSSProperties = {
     top: position?.top ?? 0,
     left: position?.left ?? 0,
@@ -245,12 +226,11 @@ export function Popover({
       aria-modal={role === "dialog" ? false : undefined}
       aria-label={ariaLabel}
       aria-labelledby={ariaLabelledBy}
-      aria-hidden={closing ? true : undefined}
       tabIndex={-1}
       popover={topLayer ? "manual" : undefined}
       className={cx("cc-popover", className)}
       data-side={position?.side}
-      data-state={closing ? "closing" : "open"}
+      data-state="open"
       data-testid={testId}
       style={style}
       onKeyDown={(event) => {

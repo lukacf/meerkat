@@ -230,11 +230,13 @@ import {
   pruneStaleSidebarStorage,
   readSidebarPins,
   sidebarAgentPinId,
+  sidebarAgentsWithLineage,
   sidebarPinnedFamilyPinIds,
   sidebarStorageKey,
   writeSidebarStringSet,
   SIDEBAR_PINS_STORAGE_PREFIX,
   type NavKind,
+  type SidebarNavAttention,
 } from "./panels/Sidebar";
 import { SignalsRail } from "./panels/SignalsRail";
 import { ChatPane, type StagedAttachment } from "./panels/ChatPane";
@@ -5150,6 +5152,51 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       ),
     [agents],
   );
+  // The sidebar's inputs (B14). Lineage: the live snapshot drops
+  // `labels.spawned_by` and the topology read keeps it, so the topology is
+  // read once whenever the team's membership changes (a read; the Topology
+  // panel reads it again when it opens).
+  const sidebarMembershipKey = React.useMemo(
+    () => agents.map((agent) => agent.identity || agent.member_id).sort().join("\n"),
+    [agents],
+  );
+  React.useEffect(() => {
+    if (loading || !hasMobControlSurface || !sidebarMembershipKey) return;
+    void refreshTopologyData().catch(() => {});
+    // Once per membership; the read itself is single-flight.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loading, hasMobControlSurface, sidebarMembershipKey]);
+  const sidebarAgents = React.useMemo(
+    () => sidebarAgentsWithLineage(agents, topologyQueryResult),
+    [agents, topologyQueryResult],
+  );
+  // The views the active workspace shows, and the focused pane's: the nav's
+  // accent rule and the Logs badge's "last visit".
+  const sidebarOpenControls = React.useMemo(
+    () => visiblePanelTargets
+      .map((target) => normalizeNavKind(target.kind))
+      .filter((kind): kind is NavKind => kind !== null),
+    [visiblePanelTargets],
+  );
+  const sidebarActiveControl = normalizeNavKind(dock.focusedTarget?.kind);
+  // What WorkGraph and Memory count for their nav entries, once their data
+  // has loaded (no count before: no zero, no spinner).
+  const sidebarNavAttention = React.useMemo(() => {
+    const attention: Partial<Record<NavKind, SidebarNavAttention>> = {};
+    if (!workGraphData.unavailable && !workGraphData.denied) {
+      const blocked = workGraphData.items.filter((item) => item.status === "blocked").length;
+      if (blocked > 0) {
+        attention.workgraph = { count: blocked, tone: "warn", description: `${blocked} blocked work ${blocked === 1 ? "item" : "items"}` };
+      }
+    }
+    if (memoryData.loaded && !memoryData.unavailable) {
+      const review = memoryData.quarantineRecords.length + memoryData.pendingPromotions.length;
+      if (review > 0) {
+        attention.memory = { count: review, tone: "warn", description: `${review} memory ${review === 1 ? "record waits" : "records wait"} for review` };
+      }
+    }
+    return attention;
+  }, [memoryData, workGraphData]);
 
   if (loading)
     return (
@@ -5948,7 +5995,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
         data-rail-collapsed={railCollapsed ? "true" : "false"}
       >
         <DesignSidebar
-          agents={agents}
+          agents={sidebarAgents}
           selectedMemberId={focusedMemberId}
           recentActivity={activityRef.current}
           collapsed={sidebarCollapsed}
@@ -5967,6 +6014,9 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           approvals={activeApprovals}
           onOpenApproval={openApproval}
           hostAttentionCount={hostAttention?.items.length || 0}
+          activeControl={sidebarActiveControl}
+          openControls={sidebarOpenControls}
+          navAttention={sidebarNavAttention}
         />
         <div
           className="pane-resizer"

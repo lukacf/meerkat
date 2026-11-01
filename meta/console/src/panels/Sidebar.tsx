@@ -1,5 +1,11 @@
 import { ApprovalAttention } from "../../../packages/console-components/src/conversation/approval-card";
 import { CopyButton } from "../../../packages/console-components/src/copy-button";
+import { IconButton } from "../../../packages/console-components/src/panel-kit/button";
+import { RelativeTime } from "../../../packages/console-components/src/panel-kit/relative-time";
+import { StatusMark } from "../../../packages/console-components/src/panel-kit/status-mark";
+import { SearchField } from "../../../packages/console-components/src/panel-kit/toolbar";
+import { ViewOptions, type ViewOptionsControl } from "../../../packages/console-components/src/panel-kit/view-options";
+import { Sparkline } from "../../../packages/console-components/src/viz/charts/sparkline";
 import type { PendingApprovalSnapshot } from "../../../packages/console-core/src/pending-approvals";
 import React from "react";
 import {
@@ -31,6 +37,7 @@ import {
   type ConsoleNavigationModel,
   type ConsoleNavigationNode,
   type ConsoleSidebarDropPosition,
+  type ConsoleSidebarGroupBy,
   type ConsoleSidebarSortBy,
   type ConsoleSidebarStorageLike,
   type ConsoleSidebarViewPreferences,
@@ -43,9 +50,11 @@ import type {
 } from "../types";
 import { Icon } from "../icon";
 import { isAgentPinned, operatorPanelPath, sidebarAgentPinId } from "../lib/adapters";
-import { agentDisplayTitle, agentKindLabel } from "../lib/agents";
+import { agentDisplayTitle, agentKindLabel, responsePhaseWords } from "../lib/agents";
 import { AGENT_BUCKET_ORDER as SECTION_ORDER, bucketOf, type AgentBucket as Bucket } from "../lib/agent-buckets";
-import { responsePhaseActivity } from "../lib/agent-status";
+import { agentHealth, isAgentWorking, type AgentHealth, type AgentStatusTone } from "../lib/agent-status";
+import { useActivityLedger, type ActivityLedgerReader } from "../lib/activity-ledger";
+import { classifyFrame } from "../lib/frame-classifier";
 import { countRender } from "../lib/render-counts";
 
 export { sidebarAgentPinId } from "../lib/adapters";
@@ -65,6 +74,20 @@ export {
 };
 
 export type NavKind = "topology" | "timeline" | "gating" | "roster" | "routing" | "logs" | "health" | "access" | "memory" | "workgraph" | "schedules";
+
+/** The roster's row density: the Display setting (B21). */
+export type SidebarDensity = "comfortable" | "compact";
+
+/**
+ * Something behind a nav entry that needs attention (B14): a count with the
+ * tone of its mark (warn: a triangle, crit: a diamond) and the words the nav
+ * button's description reads ("2 blocked work items").
+ */
+export interface SidebarNavAttention {
+  count: number;
+  tone: "warn" | "crit";
+  description: string;
+}
 
 interface SidebarProps {
   agents: ConsoleAgent[];
@@ -88,6 +111,14 @@ interface SidebarProps {
   onOpenApproval?: (pendingId?: string) => void;
   /** Host-provided attention items, counted in "Needs you". */
   hostAttentionCount?: number;
+  /** Comfortable (two-line 44 px rows) or compact (one-line 32 px rows). */
+  density?: SidebarDensity;
+  /** The view the focused pane shows: its nav entry wears the accent rule. */
+  activeControl?: NavKind | null;
+  /** The views the workspace's panes show now: a shown Logs view counts as a visit. */
+  openControls?: readonly NavKind[];
+  /** Attention the host counts for a nav entry (WorkGraph, Memory); absent until its data has loaded. */
+  navAttention?: Partial<Record<NavKind, SidebarNavAttention>>;
   onSelect: (agent: ConsoleAgent) => void;
   onTogglePinnedAgent?: (agent: ConsoleAgent, familyPinIds?: Set<string>) => void;
   onOpenControl: (kind: NavKind) => void;
@@ -118,6 +149,20 @@ export const NAV_LABEL: Record<NavKind, string> = {
   workgraph: "WorkGraph",
   schedules: "Schedules",
 };
+/** Each nav kind's sprite icon: the sidebar's Workbench list and the pane menu. */
+export const NAV_ICON: Record<NavKind, string> = {
+  topology: "i-topology",
+  timeline: "i-today",
+  gating: "i-approvals",
+  roster: "i-roster",
+  routing: "i-routing",
+  logs: "i-logs",
+  health: "i-health",
+  access: "i-access",
+  memory: "i-memory",
+  workgraph: "i-workgraph",
+  schedules: "i-schedules",
+};
 
 export function normalizeNavKind(value: unknown): NavKind | null {
   return typeof value === "string" && ALL_NAV.includes(value as NavKind)
@@ -143,6 +188,18 @@ function visibleNavKinds(): NavKind[] {
   const hide = parseNavList(params.get("hide_nav"));
   if (hide.size > 0) return ALL_NAV.filter((k) => !hide.has(k));
   return ALL_NAV;
+}
+
+/**
+ * The views the console offers, in nav order: `ALL_NAV`, narrowed by the
+ * `?show_nav` / `?hide_nav` query and by the host's visible controls. The
+ * sidebar's Workbench list and the pane menu list exactly these.
+ */
+export function workbenchNavKinds(visibleControls?: readonly NavKind[]): NavKind[] {
+  const configured = visibleNavKinds();
+  if (!visibleControls) return configured;
+  const allowed = new Set(visibleControls);
+  return configured.filter((kind) => allowed.has(kind));
 }
 
 interface AgentRow {
@@ -210,12 +267,18 @@ interface SidebarSortContext {
   lastActivity: (agent: ConsoleAgent) => number | undefined;
 }
 
+/**
+ * Row heights the virtual list lays out with; the CSS row heights in
+ * styles/sidebar.css must match. An agent row is two lines (name, then role
+ * and status) at 44 px, one line at 32 px in compact density.
+ */
 const SIDEBAR_ROW_HEIGHT = {
   section: 36,
   empty: 58,
   subgroup: 28,
-  agent: 72,
+  agent: 44,
 } as const;
+const SIDEBAR_COMPACT_AGENT_ROW_HEIGHT = 32;
 
 const SIDEBAR_OVERSCAN_PX = 360;
 const PINNED_SECTION_NAME = "Pinned";
@@ -236,6 +299,72 @@ function localSidebarStorage(): ConsoleSidebarStorageLike | null {
   } catch {
     return null;
   }
+}
+
+/** Whether the user folded the Workbench list away (per user). */
+const SIDEBAR_WORKBENCH_STORAGE_PREFIX = "meta-console-sidebar-workbench-collapsed";
+/** When the user last had a Logs view in sight (per user): its badge counts errors after it. */
+const SIDEBAR_LOGS_SEEN_STORAGE_PREFIX = "meta-console-sidebar-logs-seen";
+
+function readSidebarFlag(storage: ConsoleSidebarStorageLike | null, key: string): boolean {
+  try {
+    return storage?.getItem(key) === "true";
+  } catch {
+    return false;
+  }
+}
+
+function writeSidebarFlag(storage: ConsoleSidebarStorageLike | null, key: string, on: boolean): void {
+  try {
+    storage?.setItem(key, on ? "true" : "false");
+  } catch {
+    // Storage full or denied: the choice holds for this session.
+  }
+}
+
+function readSidebarTime(storage: ConsoleSidebarStorageLike | null, key: string): number {
+  try {
+    const value = Number(storage?.getItem(key) ?? "");
+    return Number.isFinite(value) && value > 0 ? value : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function writeSidebarTime(storage: ConsoleSidebarStorageLike | null, key: string, atMs: number): void {
+  try {
+    storage?.setItem(key, String(Math.floor(atMs)));
+  } catch {
+    // Storage full or denied: the visit counts for this session.
+  }
+}
+
+/** Approvals waiting for a decision, once the approvals have loaded. */
+function pendingApprovalCount(snapshot: PendingApprovalSnapshot | undefined): number {
+  if (!snapshot || snapshot.status !== "ready") return 0;
+  return snapshot.requests.filter((request) =>
+    request.status === "pending" && snapshot.decisions[request.pendingId]?.phase !== "settled").length;
+}
+
+/** Agents whose health is a problem, by word ("1 stalled, 2 degraded"); crit when one is stuck. */
+function healthNavAttention(agents: readonly ConsoleAgent[]): SidebarNavAttention | null {
+  const byWord = new Map<string, number>();
+  let count = 0;
+  let crit = false;
+  for (const agent of agents) {
+    const health = agentHealth(agent);
+    if (!health.problem) continue;
+    count += 1;
+    if (health.tone === "crit") crit = true;
+    const word = health.word.toLowerCase();
+    byWord.set(word, (byWord.get(word) || 0) + 1);
+  }
+  if (count === 0) return null;
+  return {
+    count,
+    tone: crit ? "crit" : "warn",
+    description: Array.from(byWord, ([word, n]) => `${n} ${word}`).join(", "),
+  };
 }
 
 /**
@@ -424,9 +553,11 @@ export const __sidebarTest = {
   sidebarAgentTitle,
   newestFrameTimes,
   agentLastActivity,
-  agentStatusText,
+  agentRowStatus,
   agentDetailText,
-  relativeActivityText,
+  sidebarActivity,
+  sidebarViewSummary,
+  logsErrorCount,
   FLAT_SECTION_NAME,
   FLAT_SECTION_KEY,
   SIDEBAR_AGENT_ORDER_STORAGE_PREFIX,
@@ -437,6 +568,47 @@ export const __sidebarTest = {
   SECTION_COLLAPSE_STORAGE_PREFIX,
   SUBGROUP_COLLAPSE_STORAGE_PREFIX,
 };
+
+/**
+ * The lineage the topology read knows: each node identity's `spawned_by`.
+ * The sidebar's live snapshot drops that label; `meta/topology/query` node
+ * labels keep it.
+ */
+function topologyLineage(topologyQuery: unknown): Map<string, string> {
+  const out = new Map<string, string>();
+  if (!topologyQuery || typeof topologyQuery !== "object") return out;
+  const nodes = (topologyQuery as { nodes?: unknown }).nodes;
+  if (!Array.isArray(nodes)) return out;
+  for (const node of nodes) {
+    if (!node || typeof node !== "object") continue;
+    const endpoint = (node as { endpoint?: { identity?: unknown } }).endpoint;
+    const labels = (node as { labels?: Record<string, unknown> }).labels;
+    const identity = typeof endpoint?.identity === "string" ? endpoint.identity.trim() : "";
+    const spawnedBy = typeof labels?.spawned_by === "string" ? labels.spawned_by.trim() : "";
+    if (identity && spawnedBy) out.set(identity, spawnedBy);
+  }
+  return out;
+}
+
+/**
+ * The roster with the lineage the topology read knows (B14), so a spawned
+ * helper lists under the agent that spawned it. An agent that names its
+ * parent keeps its own label; with nothing to add the same array comes
+ * back, so the sidebar's memo holds.
+ */
+export function sidebarAgentsWithLineage(agents: ConsoleAgent[], topologyQuery: unknown): ConsoleAgent[] {
+  const lineage = topologyLineage(topologyQuery);
+  if (lineage.size === 0) return agents;
+  let changed = false;
+  const out = agents.map((agent) => {
+    if (agent.labels?.spawned_by) return agent;
+    const spawnedBy = lineage.get(agent.identity) ?? lineage.get(agent.member_id);
+    if (!spawnedBy) return agent;
+    changed = true;
+    return { ...agent, labels: { ...agent.labels, spawned_by: spawnedBy } };
+  });
+  return changed ? out : agents;
+}
 
 export function sidebarPinnedFamilyPinIds(agent: ConsoleAgent, agents: ConsoleAgent[]): Set<string> {
   const host = agents.find(isCommanderLike);
@@ -727,50 +899,131 @@ function agentLastActivity(agent: ConsoleAgent, frameTimes: ReadonlyMap<string, 
   return Math.max(fromRoster, fromFrames);
 }
 
-function relativeActivityText(elapsedMs: number): string {
-  const seconds = Math.max(0, Math.floor(elapsedMs / 1000));
-  if (seconds < 60) return "just now";
-  const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes} min ago`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours} h ago`;
-  return `${Math.floor(hours / 24)} d ago`;
+/**
+ * What the roster's Show filter reads (A5): `working` by the one working
+ * rule (exactly the rows whose mark pulses); `quiet` when the agent is not
+ * working and its owner reports it (a response phase, null included, or its
+ * progress); `unknown` when the owner reports nothing. A member state or
+ * prose never makes an agent working.
+ */
+export type SidebarActivity = "working" | "quiet" | "unknown";
+
+function sidebarActivity(agent: ConsoleAgent, openRun = false): SidebarActivity {
+  if (isAgentWorking(agent, { openRun })) return "working";
+  if (agent.response_phase !== undefined || agent.progress) return "quiet";
+  return "unknown";
 }
 
-/** What the agent is doing, in words, or when it was last active. */
-function agentStatusText(agent: ConsoleAgent, lastActivityMs: number | undefined, nowMs: number): string {
-  const state = (agent.state || "").toLowerCase();
-  if (state === "retired" || state === "stopped") return "retired";
-  if (state === "retiring") return "retiring";
-  if (state === "needs_repair") return "needs repair";
-  if (state === "broken") return "broken";
-  if (agent.labels?.console_degraded === "true" || state.includes("degrade")) return "degraded";
-  if (agent.response_phase === "generating") return "working";
-  if (agent.response_phase === "tool-executing") return "using a tool";
-  if (agent.response_phase === "waiting") return "waiting";
-  if (lastActivityMs !== undefined) return `active ${relativeActivityText(nowMs - lastActivityMs)}`;
-  if (agent.response_phase === null) return "idle";
+/** The tone of an agent's mark (A2.4): a health problem first, live while it works, else its health. */
+function agentMarkTone(health: AgentHealth, working: boolean): AgentStatusTone {
+  if (health.problem) return health.tone;
+  return working ? "live" : health.tone;
+}
+
+/**
+ * What the agent is doing, in the roster's words ("writing a reply",
+ * "running a tool"), or its health when it is not well, has left or is not
+ * observed; "idle" when its owner says so; empty when nothing is known. A
+ * busy agent whose health cannot be read says what it is doing, never
+ * "unknown".
+ */
+function agentStatusWords(agent: ConsoleAgent, health: AgentHealth, working: boolean): string {
+  switch (health.kind) {
+    case "retired":
+    case "retiring":
+    case "degraded":
+    case "needs_repair":
+    case "stalled":
+    case "broken":
+    case "unobserved":
+      return health.word.toLowerCase();
+    default:
+      break;
+  }
+  if (working) {
+    const phase = responsePhaseWords(agent.response_phase);
+    if (phase) return phase;
+    const inFlight = agent.progress?.in_flight_work ?? 0;
+    return inFlight > 1 ? `working on ${inFlight} tasks` : "working";
+  }
+  if (agent.response_phase === null || agent.progress?.run_state === "idle") return "idle";
   return "";
 }
 
 /**
- * The row's second line, for people: what the agent is (its role, else its
- * group) and its status in words or how long ago it was last active. The
- * identity is not shown here; the row's tooltip and copy action carry it.
+ * An agent row's status, read once: whether it works now (the live mark),
+ * its health, the tone of its mark, and the second line's words: what the
+ * agent is (its role, else its group) and what it is doing. When the row has
+ * no role or group the status stands alone, capitalised. The identity is not
+ * shown here; the row's tooltip and copy action carry it, and the last
+ * activity time sits at the row's right.
  */
-function agentDetailParts(
-  agent: ConsoleAgent,
-  lastActivityMs: number | undefined,
-  nowMs: number,
-): { kind: string; status: string } {
-  const kind = agentKindLabel(agent);
-  const status = agentStatusText(agent, lastActivityMs, nowMs);
-  return kind ? { kind, status } : { kind: "", status: status ? status[0]!.toUpperCase() + status.slice(1) : "" };
+interface AgentRowStatus {
+  working: boolean;
+  health: AgentHealth;
+  tone: AgentStatusTone;
+  kind: string;
+  status: string;
 }
 
-function agentDetailText(agent: ConsoleAgent, lastActivityMs: number | undefined, nowMs: number): string {
-  const { kind, status } = agentDetailParts(agent, lastActivityMs, nowMs);
+function agentRowStatus(agent: ConsoleAgent, openRun = false): AgentRowStatus {
+  const working = isAgentWorking(agent, { openRun });
+  const health = agentHealth(agent, { openRun });
+  const kind = agentKindLabel(agent);
+  const words = agentStatusWords(agent, health, working);
+  return {
+    working,
+    health,
+    tone: agentMarkTone(health, working),
+    kind,
+    status: kind || !words ? words : words[0]!.toUpperCase() + words.slice(1),
+  };
+}
+
+function agentDetailText(agent: ConsoleAgent, openRun = false): string {
+  const { kind, status } = agentRowStatus(agent, openRun);
   return [kind, status].filter(Boolean).join(" · ");
+}
+
+/** The roster's Show filter: every agent, or one activity. Session state. */
+type SidebarActivityFilter = "all" | SidebarActivity;
+
+const ACTIVITY_SUMMARY_WORD: Readonly<Record<SidebarActivity, string>> = {
+  working: "Working",
+  quiet: "Quiet",
+  unknown: "Status unknown",
+};
+
+/**
+ * The parts of the roster view that differ from the default (All,
+ * Category, Manual), in words and in the order the summary lists them
+ * (A5): "Working", "Quiet" or "Status unknown"; "By name" or "By last
+ * activity"; "Ungrouped". Empty for the default view.
+ */
+function sidebarViewSummary(activity: SidebarActivityFilter, view: ConsoleSidebarViewPreferences): string[] {
+  const parts: string[] = [];
+  if (activity !== "all") parts.push(ACTIVITY_SUMMARY_WORD[activity]);
+  if (view.sortBy === "name") parts.push("By name");
+  else if (view.sortBy === "activity") parts.push("By last activity");
+  if (view.groupBy === "none") parts.push("Ungrouped");
+  return parts;
+}
+
+/** "1 agent", "17 agents": the roster mast's count. */
+function agentCountText(count: number): string {
+  return `${count} ${count === 1 ? "agent" : "agents"}`;
+}
+
+/** Failures the console saw after `sinceMs` (crit and not plumbing): the Logs entry's badge. */
+function logsErrorCount(frames: readonly ConsoleFrame[], sinceMs: number): number {
+  let count = 0;
+  for (const frame of frames) {
+    const at = frame.timestampMs;
+    if (typeof at !== "number" || !Number.isFinite(at) || at <= sinceMs) continue;
+    const classified = classifyFrame(frame);
+    if (!classified.internal && classified.severity === "crit") count += 1;
+  }
+  return count;
 }
 
 function orderRowsPreorder(
@@ -1451,21 +1704,23 @@ function deriveStateAttr(agent: ConsoleAgent): "active" | "degraded" | "retired"
   return "active";
 }
 
-function pulseSamples(activity: ConsoleFrame[], identity: string): number[] {
-  const bucket = new Array<number>(10).fill(0);
-  const now = Date.now();
-  const window = 15 * 60 * 1000;
-  for (const f of activity) {
-    if (!f.timestampMs || (f.identity || "") !== identity) continue;
-    const age = now - f.timestampMs;
-    if (age < 0 || age > window) continue;
-    const idx = 9 - Math.floor((age / window) * 10);
-    if (idx >= 0 && idx < 10) bucket[idx]++;
-  }
-  return bucket;
+/** The row sparkline's window: the last 15 minutes, a bar a minute. */
+const ROW_SPARK_BINS = 15;
+const ROW_SPARK_BIN_MS = 60_000;
+
+/** An agent's activity in the last 15 minutes, a count a minute, from the activity ledger. */
+function agentActivitySeries(ledger: ActivityLedgerReader, identity: string, nowMs: number): number[] {
+  return ledger.series(identity, "events", { bins: ROW_SPARK_BINS, binMs: ROW_SPARK_BIN_MS, endMs: nowMs });
 }
 
-function virtualRowHeight(row: SidebarVirtualRow): number {
+function activitySeriesLabel(values: readonly number[]): string {
+  const total = values.reduce((sum, value) => sum + value, 0);
+  if (total === 0) return "No activity in the last 15 minutes";
+  return `${total} ${total === 1 ? "event" : "events"} in the last 15 minutes`;
+}
+
+function virtualRowHeight(row: SidebarVirtualRow, density: SidebarDensity = "comfortable"): number {
+  if (row.kind === "agent" && density === "compact") return SIDEBAR_COMPACT_AGENT_ROW_HEIGHT;
   return SIDEBAR_ROW_HEIGHT[row.kind];
 }
 
@@ -1555,7 +1810,7 @@ function renderSidebarDragPreviewRows(rows: SidebarVirtualRow[]): React.JSX.Elem
         data-depth={row.row.childOfHost ? String(Math.min(row.row.depth, 3)) : undefined}
         key={`preview:${row.key}`}
       >
-        <span className="agent__dot" />
+        <StatusMark tone={agentRowStatus(row.row.agent).tone} className="agent__mark" />
         <span className="sidebar__drag-preview-agent-body">
           <span className="agent__name">{sidebarAgentTitle(row.row.agent)}</span>
           {agentKindLabel(row.row.agent) ? <span className="agent__detail">{agentKindLabel(row.row.agent)}</span> : null}
@@ -1576,12 +1831,15 @@ function lowerBound(values: number[], needle: number): number {
   return lo;
 }
 
-function sidebarVirtualOffsets(rows: SidebarVirtualRow[]): { offsets: number[]; total: number } {
+function sidebarVirtualOffsets(
+  rows: SidebarVirtualRow[],
+  density: SidebarDensity = "comfortable",
+): { offsets: number[]; total: number } {
   const offsets: number[] = [];
   let total = 0;
   for (const row of rows) {
     offsets.push(total);
-    total += virtualRowHeight(row);
+    total += virtualRowHeight(row, density);
   }
   return { offsets, total };
 }
@@ -1660,38 +1918,39 @@ interface AgentRowReorder {
 interface AgentRowRender {
   row: AgentRow;
   selectedMemberId: string;
-  recentActivity: ConsoleFrame[];
   grouping: ConsoleAgentListConfig | undefined;
   pinnedAgentIds: Set<string> | undefined;
   onSelect: (agent: ConsoleAgent) => void;
   onTogglePinnedAgent: ((agent: ConsoleAgent, familyPinIds?: Set<string>) => void) | undefined;
   familyPinIds?: Set<string>;
   lastActivityMs?: number;
-  nowMs: number;
+  /** What the agent did in the last 15 minutes, a count a minute (the activity ledger). */
+  activity: readonly number[];
+  /** The ledger saw a run of the agent start and not end. */
+  openRun: boolean;
   reorder?: AgentRowReorder;
 }
 
 function renderAgentRow({
   row,
   selectedMemberId,
-  recentActivity,
   grouping,
   pinnedAgentIds,
   onSelect,
   onTogglePinnedAgent,
   familyPinIds,
   lastActivityMs,
-  nowMs,
+  activity,
+  openRun,
   reorder,
 }: AgentRowRender): React.JSX.Element {
   const { agent, childOfHost, depth } = row;
   const stateAttr = deriveStateAttr(agent);
   const identity = agent.identity || agent.member_id;
-  const pulse = pulseSamples(recentActivity, identity);
   const inbox = inboxCount(agent);
   const badges = configuredAgentBadges(agent, grouping);
   const pinned = isAgentPinned(agent, pinnedAgentIds);
-  const detail = agentDetailParts(agent, lastActivityMs, nowMs);
+  const status = agentRowStatus(agent, openRun);
   // The name for people; the raw identity is the tooltip and the copy action.
   const title = sidebarAgentTitle(agent);
   const movable = reorder?.enabled === true;
@@ -1705,6 +1964,8 @@ function renderAgentRow({
       <div
         className={`agent ${childOfHost ? "agent--child" : ""} ${agent.member_id === selectedMemberId ? "is-active" : ""}`}
         data-state={stateAttr}
+        data-health={status.health.kind}
+        data-live={status.working ? "true" : undefined}
         data-child-of-host={childOfHost ? "true" : undefined}
         data-side-chat={agent.side_chat_of ? "true" : undefined}
         data-depth={childOfHost ? String(Math.min(depth, 3)) : undefined}
@@ -1739,51 +2000,62 @@ function renderAgentRow({
           />
         ) : null}
         {reorder?.dragOver ? <span className="agent__drop-line" data-where={reorder.dragOver} aria-hidden="true" /> : null}
-        <span className="agent__dot" />
+        {/* Tone and shape; the words are the detail line's. */}
+        <StatusMark tone={status.tone} className="agent__mark" testId={`sidebar-agent-mark:${agent.member_id}`} />
         <span className="agent__body">
-          <span className="agent__name">{title}</span>
-          {detail.kind || detail.status ? (
+          <span className="agent__title-line">
+            <span className="agent__name">{title}</span>
+            {badges.length > 0 || agent.side_chat_of ? (
+              <span className="agent__badges">
+                {agent.side_chat_of ? (
+                  <span
+                    className="agent__badge"
+                    data-tone="neutral"
+                    data-testid={`sidebar-side-chat:${agent.member_id}`}
+                    title={`Side chat of ${agent.side_chat_of}`}
+                  >
+                    <span>Side chat</span>
+                  </span>
+                ) : null}
+                {badges.map((badge) => (
+                  <span
+                    className="agent__badge"
+                    data-tone={badge.tone || "neutral"}
+                    key={badge.id}
+                    title={`${badge.label}: ${badge.value}`}
+                  >
+                    <span>{badge.label}</span>
+                    <strong>{badge.value}</strong>
+                  </span>
+                ))}
+              </span>
+            ) : null}
+          </span>
+          {status.kind || status.status ? (
             // The kind gives way first, so the status always shows in a narrow roster.
             <span className="agent__detail" data-testid={`sidebar-agent-detail:${agent.member_id}`}>
-              {detail.kind ? <span className="agent__detail-kind" title={detail.kind}>{detail.kind}</span> : null}
+              {status.kind ? <span className="agent__detail-kind" title={status.kind}>{status.kind}</span> : null}
               {/* Outside the kind, so truncating the kind never hides it. */}
-              {detail.kind && detail.status ? <span className="agent__detail-separator"> · </span> : null}
-              {detail.status ? <span className="agent__detail-status">{detail.status}</span> : null}
-            </span>
-          ) : null}
-          {badges.length > 0 || agent.side_chat_of ? (
-            <span className="agent__badges">
-              {agent.side_chat_of ? (
-                <span
-                  className="agent__badge"
-                  data-tone="neutral"
-                  data-testid={`sidebar-side-chat:${agent.member_id}`}
-                  title={`Side chat of ${agent.side_chat_of}`}
-                >
-                  <span>Side chat</span>
-                </span>
-              ) : null}
-              {badges.map((badge) => (
-                <span
-                  className="agent__badge"
-                  data-tone={badge.tone || "neutral"}
-                  key={badge.id}
-                  title={`${badge.label}: ${badge.value}`}
-                >
-                  <span>{badge.label}</span>
-                  <strong>{badge.value}</strong>
-                </span>
-              ))}
+              {status.kind && status.status ? <span className="agent__detail-separator"> · </span> : null}
+              {status.status ? <span className="agent__detail-status">{status.status}</span> : null}
             </span>
           ) : null}
         </span>
         <span className="agent__meta">
-          <span className="agent__pulse">
-            {pulse.map((v, i) => (
-              <span key={i} style={{ height: `${Math.max(1, Math.min(12, v * 2 + 1))}px` }} />
-            ))}
+          <span className="agent__spark">
+            <Sparkline
+              values={activity}
+              kind="bars"
+              width={42}
+              height={12}
+              live={status.working}
+              label={activitySeriesLabel(activity)}
+            />
           </span>
-          {inbox > 0 && <span className="agent__inbox">{inbox}</span>}
+          <span className="agent__meta-line">
+            {inbox > 0 ? <span className="agent__inbox" title={`${inbox} unread`}>{inbox}</span> : null}
+            {lastActivityMs !== undefined ? <RelativeTime value={lastActivityMs} className="agent__time" /> : null}
+          </span>
         </span>
       </div>
       <span className="agent__actions">
@@ -1826,6 +2098,15 @@ function inboxCount(agent: ConsoleAgent): number {
   return Number.isFinite(n) ? n : 0;
 }
 
+/**
+ * Whether the ledger saw the agent's run start and not end. Read only where
+ * the working rule uses it: the owner reports no phase and no idle run.
+ */
+function agentOpenRun(ledger: ActivityLedgerReader | null, agent: ConsoleAgent): boolean {
+  if (!ledger || agent.response_phase !== undefined || agent.progress?.run_state === "idle") return false;
+  return ledger.hasOpenRun(agent.identity || agent.member_id);
+}
+
 /// Memoised: the app root re-renders on every coalesced frame flush and on
 /// each debounced draft publish, and the props here are stable references
 /// (see ConsoleApp), so unchanged input skips the whole subtree.
@@ -1849,10 +2130,18 @@ export const Sidebar = React.memo(function Sidebar({
   approvals,
   onOpenApproval,
   hostAttentionCount = 0,
+  density = "comfortable",
+  activeControl = null,
+  openControls,
+  navAttention,
 }: SidebarProps): React.JSX.Element {
   countRender("Sidebar");
   const [q, setQ] = React.useState("");
-  const [activityFilter, setActivityFilter] = React.useState<"all" | "working" | "quiet" | "unknown">("all");
+  const [activityFilter, setActivityFilter] = React.useState<SidebarActivityFilter>("all");
+  const [viewMenuOpen, setViewMenuOpen] = React.useState(false);
+  const viewTriggerRef = React.useRef<HTMLButtonElement | null>(null);
+  const searchRef = React.useRef<HTMLInputElement | null>(null);
+  const viewMenuId = `${React.useId()}-roster-view`;
   const [draggingOrder, setDraggingOrder] = React.useState<SidebarOrderItem | null>(null);
   const [dragOverOrder, setDragOverOrder] = React.useState<SidebarDragOver | null>(null);
   const [dragPreview, setDragPreview] = React.useState<SidebarDragPreview | null>(null);
@@ -1874,12 +2163,7 @@ export const Sidebar = React.memo(function Sidebar({
     draggingOrderRef.current = draggingOrder;
   }, [draggingOrder]);
   // Computed once; URL-driven config doesn't change without a reload.
-  const navKinds = React.useMemo(() => {
-    const configured = visibleNavKinds();
-    if (!visibleControls) return configured;
-    const allowed = new Set(visibleControls);
-    return configured.filter((kind) => allowed.has(kind));
-  }, [visibleControls]);
+  const navKinds = React.useMemo(() => workbenchNavKinds(visibleControls), [visibleControls]);
 
   // Per-user preferences: the roster view and the manual agent order. Their
   // keys take the principal scope, so an agent-list configuration edit
@@ -1926,13 +2210,18 @@ export const Sidebar = React.memo(function Sidebar({
     });
   }, [viewStorageKey]);
 
-  // The clock behind "active 3 min ago"; frames re-render the roster too.
-  const [nowMs, setNowMs] = React.useState(() => Date.now());
-  React.useEffect(() => {
-    if (collapsed || typeof window === "undefined") return undefined;
-    const timer = window.setInterval(() => setNowMs(Date.now()), 30_000);
-    return () => window.clearInterval(timer);
-  }, [collapsed]);
+  // The roster view (A5): Show is session state; Group by and Sort by persist.
+  const viewSummary = sidebarViewSummary(activityFilter, view);
+  const viewIsDefault = viewSummary.length === 0;
+  const resetView = React.useCallback(() => {
+    setActivityFilter("all");
+    updateView({ ...DEFAULT_CONSOLE_SIDEBAR_VIEW });
+  }, [updateView]);
+
+  // The activity ledger: each row's 15-minute sparkline and the runs it saw
+  // open. Its clock moves every minute, so the sparklines slide while
+  // nothing happens.
+  const ledger = useActivityLedger({ tickMs: collapsed ? undefined : 60_000 });
   const frameTimes = React.useMemo(() => newestFrameTimes(recentActivity), [recentActivity]);
   const liveActivity = React.useMemo(() => {
     const byMember = new Map<string, number>();
@@ -1956,15 +2245,18 @@ export const Sidebar = React.memo(function Sidebar({
   const flat = view.groupBy === "none";
   const searchActive = Boolean(q) || activityFilter !== "all";
 
+  // The Show filter reads the ledger's open runs; with All it never does,
+  // so the roster does not re-filter on every ledger change.
+  const filterLedger = activityFilter === "all" ? null : ledger;
   const filtered = React.useMemo(() => {
     const needle = q.toLowerCase();
     return agents.filter((agent) => {
-      const activity = responsePhaseActivity(agent);
-      return (activityFilter === "all" || activity === activityFilter) && (!needle ||
+      if (activityFilter !== "all" && sidebarActivity(agent, agentOpenRun(filterLedger, agent)) !== activityFilter) return false;
+      return !needle ||
         [sidebarAgentTitle(agent), agent.label, agent.identity, agent.member_id, agent.role]
-          .some(value => value?.toLowerCase().includes(needle)));
+          .some(value => value?.toLowerCase().includes(needle));
     });
-  }, [agents, q, activityFilter]);
+  }, [agents, q, activityFilter, filterLedger]);
 
   const sectionOrderStorageKey = React.useMemo(
     () => sidebarStorageKey(SIDEBAR_SECTION_ORDER_STORAGE_PREFIX, storageNamespace),
@@ -2102,7 +2394,7 @@ export const Sidebar = React.memo(function Sidebar({
   );
   // Why agents cannot be reordered right now, or null when they can.
   const agentReorderBlocked = view.sortBy !== "manual"
-    ? "Choose Sort: Manual to reorder agents."
+    ? "Choose Manual under Sort by in the roster view options to reorder agents."
     : searchActive
       ? "Clear the search and the activity filter to reorder agents."
       : null;
@@ -2320,7 +2612,7 @@ export const Sidebar = React.memo(function Sidebar({
     }
     return counts;
   }, [virtualRows]);
-  const virtualOffsets = React.useMemo(() => sidebarVirtualOffsets(virtualRows), [virtualRows]);
+  const virtualOffsets = React.useMemo(() => sidebarVirtualOffsets(virtualRows, density), [virtualRows, density]);
   const [listRef, listHeight] = useMeasuredHeight<HTMLDivElement>();
   const [scrollTop, setScrollTop] = React.useState(0);
   React.useEffect(() => {
@@ -2381,7 +2673,7 @@ export const Sidebar = React.memo(function Sidebar({
       return;
     }
     const rowTop = virtualOffsets.offsets[rowIndex] || 0;
-    const rowBottom = rowTop + virtualRowHeight(virtualRows[rowIndex]!);
+    const rowBottom = rowTop + virtualRowHeight(virtualRows[rowIndex]!, density);
     const currentTop = list.scrollTop;
     if (listHeight > 0) {
       const currentBottom = currentTop + listHeight;
@@ -2407,7 +2699,7 @@ export const Sidebar = React.memo(function Sidebar({
     } else {
       window.setTimeout(restoreFocus, 0);
     }
-  }, [listHeight, listRef, scrollTop, virtualOffsets, virtualRows]);
+  }, [density, listHeight, listRef, scrollTop, virtualOffsets, virtualRows]);
   const dragPreviewRows = React.useMemo(
     () => sidebarDragPreviewRows(virtualRows, draggingOrder),
     [virtualRows, draggingOrder],
@@ -2417,6 +2709,150 @@ export const Sidebar = React.memo(function Sidebar({
     if (suppressOrderClickRef.current) return;
     onSelect(agent);
   }, [onSelect]);
+
+  // "/" focuses the roster search, unless the focus is in a text field or a
+  // panel took the key for its own search (it prevents the default).
+  React.useEffect(() => {
+    if (collapsed || typeof window === "undefined") return undefined;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "/" || event.ctrlKey || event.metaKey || event.altKey || event.defaultPrevented) return;
+      const target = event.target as HTMLElement | null;
+      if (target?.isContentEditable || target?.closest?.("input, textarea, select, [contenteditable]")) return;
+      const input = searchRef.current;
+      if (!input) return;
+      event.preventDefault();
+      input.focus();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [collapsed]);
+
+  // The Workbench list folds away; the choice is the user's, kept per user.
+  const workbenchStorageKey = React.useMemo(
+    () => sidebarStorageKey(SIDEBAR_WORKBENCH_STORAGE_PREFIX, preferenceNamespace),
+    [preferenceNamespace],
+  );
+  const [workbenchCollapsed, setWorkbenchCollapsed] = React.useState(
+    () => readSidebarFlag(localSidebarStorage(), workbenchStorageKey),
+  );
+  React.useEffect(() => {
+    setWorkbenchCollapsed(readSidebarFlag(localSidebarStorage(), workbenchStorageKey));
+  }, [workbenchStorageKey]);
+  const toggleWorkbench = React.useCallback(() => {
+    setWorkbenchCollapsed((current) => {
+      const next = !current;
+      writeSidebarFlag(localSidebarStorage(), workbenchStorageKey, next);
+      return next;
+    });
+  }, [workbenchStorageKey]);
+
+  // Logs: errors since the last visit. A Logs view shown in the workspace is
+  // a visit for as long as it shows; the time is kept per user.
+  const logsShown = Boolean(openControls?.includes("logs"));
+  const logsSeenStorageKey = React.useMemo(
+    () => sidebarStorageKey(SIDEBAR_LOGS_SEEN_STORAGE_PREFIX, preferenceNamespace),
+    [preferenceNamespace],
+  );
+  const [logsSeenAtMs, setLogsSeenAtMs] = React.useState(
+    () => readSidebarTime(localSidebarStorage(), logsSeenStorageKey),
+  );
+  React.useEffect(() => {
+    setLogsSeenAtMs(readSidebarTime(localSidebarStorage(), logsSeenStorageKey));
+  }, [logsSeenStorageKey]);
+  React.useEffect(() => {
+    if (!logsShown || typeof window === "undefined") return undefined;
+    const visit = () => {
+      const now = Date.now();
+      setLogsSeenAtMs(now);
+      writeSidebarTime(localSidebarStorage(), logsSeenStorageKey, now);
+    };
+    visit();
+    const timer = window.setInterval(visit, 5_000);
+    return () => {
+      window.clearInterval(timer);
+      visit();
+    };
+  }, [logsShown, logsSeenStorageKey]);
+  const logsErrors = React.useMemo(
+    () => (logsShown ? 0 : logsErrorCount(recentActivity, logsSeenAtMs)),
+    [logsSeenAtMs, logsShown, recentActivity],
+  );
+
+  // What needs attention behind each view (B14): approvals waiting, agents
+  // that are not well, errors since the Logs were last seen, and what the
+  // host counts (WorkGraph blocked, Memory waiting for review).
+  const healthAttention = React.useMemo(() => healthNavAttention(agents), [agents]);
+  const pendingApprovals = pendingApprovalCount(approvals);
+  const attentionByKind = React.useMemo<Partial<Record<NavKind, SidebarNavAttention>>>(() => {
+    const out: Partial<Record<NavKind, SidebarNavAttention>> = { ...navAttention };
+    if (pendingApprovals > 0) {
+      out.gating = {
+        count: pendingApprovals,
+        tone: "warn",
+        description: `${pendingApprovals} pending ${pendingApprovals === 1 ? "approval" : "approvals"}`,
+      };
+    }
+    if (healthAttention) out.health = healthAttention;
+    if (logsErrors > 0) {
+      out.logs = {
+        count: logsErrors,
+        tone: "crit",
+        description: `${logsErrors} ${logsErrors === 1 ? "error" : "errors"} since you last looked`,
+      };
+    }
+    return out;
+  }, [healthAttention, logsErrors, navAttention, pendingApprovals]);
+  const workbenchAttention = React.useMemo(() => {
+    let count = 0;
+    let tone: SidebarNavAttention["tone"] = "warn";
+    for (const kind of navKinds) {
+      const attention = attentionByKind[kind];
+      if (!attention) continue;
+      count += attention.count;
+      if (attention.tone === "crit") tone = "crit";
+    }
+    return count > 0 ? { count, tone } : null;
+  }, [attentionByKind, navKinds]);
+  const navDescriptionId = React.useId();
+
+  // The roster view popover's controls (A5): Show, Group by, Sort by.
+  const viewControls = React.useMemo<ReadonlyArray<ViewOptionsControl<string>>>(() => [
+    {
+      label: "Show",
+      ariaLabel: "Agent activity",
+      testId: "sidebar-view-activity",
+      value: activityFilter,
+      options: [
+        { id: "all", label: "All", testId: "sidebar-view-activity:all" },
+        { id: "working", label: "Working", title: "Working now", testId: "sidebar-view-activity:working" },
+        { id: "quiet", label: "Quiet", title: "Not working now", testId: "sidebar-view-activity:quiet" },
+        { id: "unknown", label: "Unknown", title: "No status reported", testId: "sidebar-view-activity:unknown" },
+      ],
+      onChange: (id: string) => setActivityFilter(id === "working" || id === "quiet" || id === "unknown" ? id : "all"),
+    },
+    {
+      label: "Group by",
+      testId: "sidebar-view-group",
+      value: view.groupBy,
+      options: [
+        { id: "category", label: "Category", testId: "sidebar-view-group:category" },
+        { id: "none", label: "None", testId: "sidebar-view-group:none" },
+      ],
+      onChange: (id: string) => updateView({ groupBy: normalizeConsoleSidebarGroupBy(id) }),
+    },
+    {
+      label: "Sort by",
+      testId: "sidebar-view-sort",
+      value: view.sortBy,
+      options: [
+        { id: "manual", label: "Manual", testId: "sidebar-view-sort:manual" },
+        { id: "name", label: "Name", testId: "sidebar-view-sort:name" },
+        { id: "activity", label: "Last activity", testId: "sidebar-view-sort:activity" },
+      ],
+      onChange: (id: string) => updateView({ sortBy: normalizeConsoleSidebarSortBy(id) }),
+      hint: view.sortBy === "manual" ? "Manual order: drag agents to reorder" : "Switch to Manual to drag agents",
+    },
+  ], [activityFilter, updateView, view.groupBy, view.sortBy]);
 
   if (collapsed) {
     return (
@@ -2431,7 +2867,7 @@ export const Sidebar = React.memo(function Sidebar({
   }
 
   return (
-    <aside className="sidebar" data-testid="sidebar-root">
+    <aside className="sidebar" data-testid="sidebar-root" data-density={density}>
       <div
         aria-live="polite"
         data-testid="sidebar-reorder-live"
@@ -2450,128 +2886,224 @@ export const Sidebar = React.memo(function Sidebar({
         {orderAnnouncement}
       </div>
       {approvals || hostAttentionCount ? <ApprovalAttention snapshot={approvals} hostItems={hostAttentionCount} onOpen={onOpenApproval || (() => onOpenControl("gating"))} /> : null}
-      <div className="sidebar__mast">
-        <div>
-          <div className="sidebar__mast-title">Roster</div>
-          <div className="sidebar__mast-sub">{agents.length} agents</div>
-        </div>
-      </div>
-      <div className="sidebar__search">
-        <input
-          placeholder="Search roster..."
-          value={q}
-          onChange={(e) => setQ(e.target.value)}
-          data-testid="sidebar-search"
-        />
-        <div className="sidebar__activity-filters" role="group" aria-label="Agent activity">
-          {(["all", "working", "quiet", "unknown"] as const).map(filter => (
-            <button key={filter} type="button" aria-pressed={activityFilter === filter}
-              onClick={() => setActivityFilter(filter)}>
-              {filter[0].toUpperCase() + filter.slice(1)}
-            </button>
-          ))}
-        </div>
-        <div className="sidebar__view" role="group" aria-label="Roster view">
-          <label className="sidebar__view-control">
-            <span>Group</span>
-            <select
-              value={view.groupBy}
-              data-testid="sidebar-view-group"
-              onChange={(event) => updateView({ groupBy: normalizeConsoleSidebarGroupBy(event.target.value) })}
+      {/* The roster's mast and search: the view menu's trigger shows while
+          either is hovered or focused, and always while the view is not
+          the default (A5). */}
+      <div className="sidebar__head cc-reveal-host">
+        <div className="sidebar__mast">
+          <div className="sidebar__mast-text">
+            <div className="sidebar__mast-title">Roster</div>
+            <div
+              className="sidebar__mast-sub"
+              title={viewIsDefault ? undefined : [agentCountText(agents.length), ...viewSummary].join(" · ")}
             >
-              <option value="category">Category</option>
-              <option value="none">None</option>
-            </select>
-          </label>
-          <label className="sidebar__view-control">
-            <span>Sort</span>
-            <select
-              value={view.sortBy}
-              data-testid="sidebar-view-sort"
-              onChange={(event) => updateView({ sortBy: normalizeConsoleSidebarSortBy(event.target.value) })}
-            >
-              <option value="manual">Manual</option>
-              <option value="name">Name</option>
-              <option value="activity">Last activity</option>
-            </select>
-          </label>
+              <span className="sidebar__mast-count">{agentCountText(agents.length)}</span>
+              {viewIsDefault ? null : (
+                <>
+                  <button
+                    type="button"
+                    className="sidebar__view-summary"
+                    aria-haspopup="dialog"
+                    aria-expanded={viewMenuOpen}
+                    aria-controls={viewMenuOpen ? viewMenuId : undefined}
+                    aria-label={`Roster view: ${viewSummary.join(", ")}. Change the view`}
+                    data-testid="sidebar-view-summary"
+                    onClick={() => setViewMenuOpen(true)}
+                  >
+                    {viewSummary.map((part) => ` · ${part}`).join("")}
+                  </button>
+                  <IconButton
+                    label="Reset roster view"
+                    glyph="close"
+                    size="sm"
+                    quiet
+                    className="sidebar__view-reset"
+                    data-testid="sidebar-view-reset"
+                    onClick={() => {
+                      resetView();
+                      viewTriggerRef.current?.focus();
+                    }}
+                  />
+                </>
+              )}
+            </div>
+          </div>
+          <IconButton
+            ref={viewTriggerRef}
+            label="Roster view options"
+            glyph="ellipsis"
+            size="sm"
+            quiet
+            reveal={viewIsDefault}
+            badge={!viewIsDefault}
+            aria-haspopup="dialog"
+            aria-expanded={viewMenuOpen}
+            aria-controls={viewMenuOpen ? viewMenuId : undefined}
+            className="sidebar__view-trigger"
+            data-testid="sidebar-view-menu"
+            data-customized={viewIsDefault ? undefined : "true"}
+            onClick={() => setViewMenuOpen((open) => !open)}
+          />
+          <ViewOptions
+            open={viewMenuOpen}
+            anchorRef={viewTriggerRef}
+            onClose={() => setViewMenuOpen(false)}
+            ariaLabel="Roster view"
+            controls={viewControls}
+            onReset={resetView}
+            resetDisabled={viewIsDefault}
+            resetTestId="sidebar-view-options-reset"
+            id={viewMenuId}
+            testId="sidebar-view-options"
+            className="sidebar__view-options"
+          />
+        </div>
+        <div className="sidebar__search">
+          <SearchField
+            ref={searchRef}
+            label="Search agents"
+            placeholder="Search agents"
+            value={q}
+            onChange={(value) => setQ(value)}
+            shortcut="/"
+            aria-keyshortcuts="/"
+            testId="sidebar-search"
+          />
         </div>
       </div>
 
       {(navKinds.length > 0 || customSidebarButtons.length > 0 || customPanels.length > 0) && (
-          <div className="sidebar__section sidebar__section--nav">
-            <div className="sidebar__sec-head">
+        <nav
+          className="sidebar__section sidebar__section--nav"
+          aria-label="Workbench"
+          data-collapsed={workbenchCollapsed ? "true" : undefined}
+        >
+          <button
+            type="button"
+            className="sidebar__sec-head sidebar__sec-head--button sidebar__nav-head cc-reveal-host"
+            aria-expanded={!workbenchCollapsed}
+            data-testid="sidebar-workbench-toggle"
+            onClick={toggleWorkbench}
+          >
             <span className="sidebar__sec-label">Workbench</span>
-          </div>
-          <div className="sidebar__navgrid">
-          {navKinds.map((kind) => (
-            <button
-              key={kind}
-              className="sidebar__navitem"
-              onClick={() => onOpenControl(kind)}
-              data-testid={`nav:${kind}`}
-            >
-              {NAV_LABEL[kind]}
-            </button>
-          ))}
-          {customPanels.map(panel => <button key={panel.id} className="sidebar__navitem"
-            data-testid={`nav-custom-panel:${panel.id}`} onClick={() => onOpenCustomPanel?.(panel.id)}>
-            {panel.title}
-          </button>)}
-          {customSidebarButtons.map((button) => {
-            if (button.panel) {
-              if (!operatorPanelPath(button.panel) || !onOpenOperatorPanel) return null;
-              return (
+            {workbenchCollapsed && workbenchAttention ? (
+              <span className="sidebar__navbadge" data-tone={workbenchAttention.tone} aria-hidden="true">
+                <StatusMark tone={workbenchAttention.tone} />
+                {workbenchAttention.count}
+              </span>
+            ) : null}
+            <span className="sidebar__sec-spacer" />
+            <span className="sidebar__sec-chevron cc-reveal" aria-hidden="true" data-testid="sidebar-section-collapse:workbench">
+              <Icon name="i-chevron" />
+            </span>
+          </button>
+          {workbenchCollapsed ? null : (
+            <div className="sidebar__navlist">
+              {navKinds.map((kind) => {
+                const attention = attentionByKind[kind];
+                const descriptionId = `${navDescriptionId}-${kind}`;
+                const active = activeControl === kind;
+                return (
+                  <React.Fragment key={kind}>
+                    <button
+                      type="button"
+                      className={`sidebar__navitem ${active ? "is-active" : ""}`}
+                      aria-current={active ? "true" : undefined}
+                      aria-describedby={attention ? descriptionId : undefined}
+                      onClick={() => onOpenControl(kind)}
+                      data-testid={`nav:${kind}`}
+                    >
+                      <Icon name={NAV_ICON[kind]} className="sidebar__navicon" />
+                      <span className="sidebar__navlabel">{NAV_LABEL[kind]}</span>
+                      {attention ? (
+                        <span
+                          className="sidebar__navbadge"
+                          data-tone={attention.tone}
+                          data-testid={`nav-badge:${kind}`}
+                          title={attention.description}
+                          aria-hidden="true"
+                        >
+                          <StatusMark tone={attention.tone} />
+                          {attention.count}
+                        </span>
+                      ) : null}
+                    </button>
+                    {attention ? <span id={descriptionId} hidden>{attention.description}</span> : null}
+                  </React.Fragment>
+                );
+              })}
+              {customPanels.map((panel) => (
                 <button
-                  key={button.id}
+                  key={panel.id}
+                  type="button"
                   className="sidebar__navitem"
-                  onClick={() => onOpenOperatorPanel(button.id)}
-                  data-testid={`nav-panel:${button.id}`}
-                  title={button.label}
+                  data-testid={`nav-custom-panel:${panel.id}`}
+                  onClick={() => onOpenCustomPanel?.(panel.id)}
                 >
-                  {button.label}
+                  <Icon name="i-cube" className="sidebar__navicon" />
+                  <span className="sidebar__navlabel">{panel.title}</span>
                 </button>
-              );
-            }
-            const control = normalizeNavKind(button.control);
-            if (control) {
-              return (
-                <button
-                  key={button.id}
-                  className="sidebar__navitem"
-                  onClick={() => onOpenControl(control)}
-                  data-testid={`nav-custom:${button.id}`}
-                  title={button.label}
-                >
-                  {button.label}
-                </button>
-              );
-            }
-            if (button.href) {
-              const safeHref = safeConsoleHref(button.href);
-              if (!safeHref) {
+              ))}
+              {customSidebarButtons.map((button) => {
+                if (button.panel) {
+                  if (!operatorPanelPath(button.panel) || !onOpenOperatorPanel) return null;
+                  return (
+                    <button
+                      key={button.id}
+                      type="button"
+                      className="sidebar__navitem"
+                      onClick={() => onOpenOperatorPanel(button.id)}
+                      data-testid={`nav-panel:${button.id}`}
+                      title={button.label}
+                    >
+                      <Icon name="i-open" className="sidebar__navicon" />
+                      <span className="sidebar__navlabel">{button.label}</span>
+                    </button>
+                  );
+                }
+                const control = normalizeNavKind(button.control);
+                if (control) {
+                  return (
+                    <button
+                      key={button.id}
+                      type="button"
+                      className="sidebar__navitem"
+                      onClick={() => onOpenControl(control)}
+                      data-testid={`nav-custom:${button.id}`}
+                      title={button.label}
+                    >
+                      <Icon name={NAV_ICON[control]} className="sidebar__navicon" />
+                      <span className="sidebar__navlabel">{button.label}</span>
+                    </button>
+                  );
+                }
+                if (button.href) {
+                  const safeHref = safeConsoleHref(button.href);
+                  if (!safeHref) {
+                    return null;
+                  }
+                  const target = button.target || undefined;
+                  const rel = target === "_blank" ? "noopener noreferrer" : undefined;
+                  return (
+                    <a
+                      key={button.id}
+                      className="sidebar__navitem"
+                      href={safeHref}
+                      target={target}
+                      rel={rel}
+                      data-testid={`nav-custom:${button.id}`}
+                      title={button.label}
+                    >
+                      <Icon name="i-link" className="sidebar__navicon" />
+                      <span className="sidebar__navlabel">{button.label}</span>
+                    </a>
+                  );
+                }
                 return null;
-              }
-              const target = button.target || undefined;
-              const rel = target === "_blank" ? "noopener noreferrer" : undefined;
-              return (
-                <a
-                  key={button.id}
-                  className="sidebar__navitem"
-                  href={safeHref}
-                  target={target}
-                  rel={rel}
-                  data-testid={`nav-custom:${button.id}`}
-                  title={button.label}
-                >
-                  {button.label}
-                </a>
-              );
-            }
-            return null;
-          })}
-          </div>
-        </div>
+              })}
+            </div>
+          )}
+        </nav>
       )}
 
       <div
@@ -2580,12 +3112,27 @@ export const Sidebar = React.memo(function Sidebar({
         onScroll={(event) => setScrollTop(event.currentTarget.scrollTop)}
         data-testid="sidebar-agent-list"
       >
-        {filtered.length === 0 && (q || activityFilter !== "all") ? <div className="sidebar__empty" role="status">No matching agents.</div> : null}
+        {filtered.length === 0 && (q || activityFilter !== "all") ? (
+          <div className="sidebar__empty sidebar__empty--filtered" role="status">
+            <span>No matching agents.</span>
+            <button
+              type="button"
+              className="sidebar__empty-clear"
+              data-testid="sidebar-clear-filters"
+              onClick={() => {
+                setQ("");
+                setActivityFilter("all");
+              }}
+            >
+              Clear filters
+            </button>
+          </div>
+        ) : null}
         <div className="sidebar__virtual-space" style={{ height: `${virtualOffsets.total}px` }}>
           {visibleRows.map((row, index) => {
             const rowIndex = visibleRange.start + index;
             const top = virtualOffsets.offsets[rowIndex] || 0;
-            const height = virtualRowHeight(row);
+            const height = virtualRowHeight(row, density);
             return (
               <div
                 className={`sidebar__virtual-row sidebar__virtual-row--${row.kind}`}
@@ -2601,7 +3148,7 @@ export const Sidebar = React.memo(function Sidebar({
                   >
                     <button
                       type="button"
-                      className={`sidebar__sec-head sidebar__sec-head--button ${row.reorderable ? "sidebar__order-target" : ""}`}
+                      className={`sidebar__sec-head sidebar__sec-head--button cc-reveal-host ${row.reorderable ? "sidebar__order-target" : ""}`}
                       aria-expanded={!row.collapsed}
                       aria-keyshortcuts={row.reorderable ? "Alt+ArrowUp Alt+ArrowDown" : undefined}
                       data-sidebar-order-kind={row.reorderable ? "section" : undefined}
@@ -2623,8 +3170,15 @@ export const Sidebar = React.memo(function Sidebar({
                       data-testid={`sidebar-section-toggle:${row.bucket}`}
                     >
                       <span className="sidebar__sec-label">{row.bucket}</span>
-                      <span className="sidebar__sec-spacer" />
                       <span className="sidebar__sec-count">{row.count}</span>
+                      <span className="sidebar__sec-spacer" />
+                      <span
+                        className="sidebar__sec-chevron cc-reveal"
+                        aria-hidden="true"
+                        data-testid={`sidebar-section-collapse:${row.bucket}`}
+                      >
+                        <Icon name="i-chevron" />
+                      </span>
                     </button>
                   </div>
                 ) : row.kind === "empty" ? (
@@ -2666,14 +3220,14 @@ export const Sidebar = React.memo(function Sidebar({
                   renderAgentRow({
                     row: row.row,
                     selectedMemberId,
-                    recentActivity,
                     grouping,
                     pinnedAgentIds,
                     onSelect: selectUnlessDropped,
                     onTogglePinnedAgent,
                     familyPinIds: familyPinIdsByMemberId.get(row.row.agent.member_id),
                     lastActivityMs: liveActivity.get(row.row.agent.member_id),
-                    nowMs,
+                    activity: agentActivitySeries(ledger, row.row.agent.identity || row.row.agent.member_id, ledger.nowMs),
+                    openRun: agentOpenRun(ledger, row.row.agent),
                     reorder: {
                       container: row.container,
                       enabled: agentReorderBlocked === null && (agentSiblingCounts.get(row.container) || 0) > 1,

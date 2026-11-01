@@ -15,35 +15,41 @@ const props = { agents, selectedMemberId: "", recentActivity: [], collapsed: fal
 };
 const rows = (container: HTMLElement) => [...container.querySelectorAll('[data-testid^="sidebar-agent:"]')]
   .map(node => node.getAttribute("data-testid")?.split(":")[1]);
+// The Show filter lives in the roster view options popover (A5): open it
+// unless it is open; its buttons keep their names and aria-pressed.
+const show = (view: ReturnType<typeof render>, name: "All" | "Working" | "Quiet" | "Unknown") => {
+  if (!view.queryByTestId("sidebar-view-options")) fireEvent.click(view.getByTestId("sidebar-view-menu"));
+  fireEvent.click(view.getByRole("button", { name, exact: true }));
+};
 
 describe("Roster activity filters", () => {
   it("filters typed activity, reveals matching collapsed rows, and combines with search", () => {
     const view = render(<Sidebar {...props} />);
     expect(rows(view.container)).toEqual([]);
-    fireEvent.click(view.getByRole("button", { name: "Working", exact: true }));
+    show(view, "Working");
     expect(rows(view.container)).toEqual(["Working reviewer"]);
-    fireEvent.click(view.getByRole("button", { name: "Quiet", exact: true }));
+    show(view, "Quiet");
     expect(rows(view.container)).toEqual(["Quiet reviewer"]);
-    fireEvent.click(view.getByRole("button", { name: "Unknown", exact: true }));
+    show(view, "Unknown");
     expect(rows(view.container)).toEqual(["Unknown reviewer"]);
-    fireEvent.change(view.getByPlaceholderText("Search roster..."), { target: { value: "Working" } });
+    fireEvent.change(view.getByPlaceholderText("Search agents"), { target: { value: "Working" } });
     expect(rows(view.container)).toEqual([]);
     expect(view.getByText("No matching agents.")).toBeTruthy();
-    fireEvent.click(view.getByRole("button", { name: "All", exact: true }));
+    show(view, "All");
     expect(rows(view.container)).toEqual(["Working reviewer"]);
-    fireEvent.change(view.getByPlaceholderText("Search roster..."), { target: { value: "" } });
+    fireEvent.change(view.getByPlaceholderText("Search agents"), { target: { value: "" } });
     expect(rows(view.container)).toEqual([]);
   });
 
   it("updates from owner phases without inferring activity from a running state or prose", () => {
     const view = render(<Sidebar {...props} />);
-    fireEvent.click(view.getByRole("button", { name: "Working", exact: true }));
+    show(view, "Working");
     view.rerender(<Sidebar {...props} agents={[
       { ...agent("Working reviewer", null), state: "running" },
       agent("Quiet reviewer", "tool-executing"), agent("Unknown reviewer", "waiting"),
     ]} />);
     expect(rows(view.container)).toEqual(["Quiet reviewer", "Unknown reviewer"]);
-    fireEvent.click(view.getByRole("button", { name: "Quiet", exact: true }));
+    show(view, "Quiet");
     expect(rows(view.container)).toEqual(["Working reviewer"]);
     expect(view.getByRole("button", { name: "Quiet", exact: true }).getAttribute("aria-pressed")).toBe("true");
   });
@@ -51,9 +57,9 @@ describe("Roster activity filters", () => {
     const view = render(<Sidebar {...props} agents={[
       agent("Z pinned", "waiting"), agent("A reviewer", "generating"), agent("No phase"),
     ]} pinnedAgentIds={new Set(["Z pinned"])} />);
-    fireEvent.click(view.getByRole("button", { name: "Working", exact: true }));
+    show(view, "Working");
     expect(rows(view.container)).toEqual(["Z pinned", "A reviewer"]);
-    fireEvent.click(view.getByRole("button", { name: "Unknown", exact: true }));
+    show(view, "Unknown");
     expect(rows(view.container)).toEqual(["No phase"]);
   });
 
@@ -73,7 +79,8 @@ describe("Roster order under activity", () => {
     ]} />);
     expect(rows(view.container)).toEqual(names);
 
-    fireEvent.change(view.getByTestId("sidebar-view-sort"), { target: { value: "activity" } });
+    fireEvent.click(view.getByTestId("sidebar-view-menu"));
+    fireEvent.click(view.getByTestId("sidebar-view-sort:activity"));
     const timed = [
       { ...agent("Quiet reviewer", null), last_activity_ms: 10 },
       { ...agent("Working reviewer", "generating"), last_activity_ms: 20 },

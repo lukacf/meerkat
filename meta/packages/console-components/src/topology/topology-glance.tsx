@@ -60,15 +60,20 @@ export function TopologyGlance({
         loading={loading}
         live={counts.working > 0}
         testId="topology-glance:agents"
-        meter={(
+        // The ladder takes the room the tile measures beside the figure (at
+        // most its own 150 px); in a narrow tile it moves below the figure,
+        // and its legend wraps under it, inside the tile.
+        meter={({ width }) => (
           <BarcodeMeter
             filled={counts.longLived}
             outlined={counts.helpers}
             live={counts.working}
+            width={Math.min(150, width)}
             label={`${counts.agents} agents: ${meterLegend}`}
             legend
           />
         )}
+        meterMinWidth={112}
       />
       {narrow ? null : (
         <FigureTile

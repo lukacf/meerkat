@@ -41,8 +41,7 @@ export interface MemoryRecordsFilter {
   /// Identity name when scope is identity; scope key for mob/operator.
   key?: string;
   status?: "active" | "quarantined" | "superseded" | "tombstoned";
-  /// Realm name. Keyset cursors are single-realm on the server, so picking a
-  /// realm is what makes load-more honest on multi-realm gateways.
+  /// Realm name: the listing reads that realm's records only.
   realm?: string;
 }
 
@@ -621,11 +620,11 @@ export function latticeFingerprint(
 }
 
 /// Walk the store page by page. Single-realm gateways follow the keyset
-/// cursor directly; multi-realm gateways walk EACH realm independently via
-/// the server-supported `realm` param (merged multi-realm pages never carry
-/// a cursor and are truncated, so an unscoped walk can neither continue nor
-/// honestly claim completeness). `complete` = every realm exhausted its
-/// cursor within the shared cap.
+/// cursor directly; multi-realm gateways walk each realm in turn through the
+/// server-supported `realm` param. A merged multi-realm page carries a cursor
+/// as well (one position in the order every realm shares, which resumes them
+/// all), so the per-realm walk is a choice of order, not a need. `complete` =
+/// every realm exhausted its cursor within the shared cap.
 export async function runLatticeWalk(
   fetchPage: (params: Record<string, unknown>) => Promise<MemoryPanelRecordsResult | null>,
   options: {

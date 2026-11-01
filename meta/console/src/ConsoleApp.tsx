@@ -334,7 +334,7 @@ type MemoryPanelData = {
   /// A records listing has landed. Until then the records and realms are an
   /// empty placeholder, which the panel may already be showing.
   loaded: boolean;
-  /// Keyset cursor from the base records page (single-realm only).
+  /// Keyset cursor from the base records page.
   nextCursor: string | null;
   /// Per-section -32030 outcomes so the panel can render "no access"
   /// (never green) instead of an indistinguishable empty section.

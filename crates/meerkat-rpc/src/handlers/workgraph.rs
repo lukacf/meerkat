@@ -294,12 +294,43 @@ mod tests {
 
     use serde_json::{Value, json};
 
-    use super::work_items_response;
+    use super::{handle_list, handle_snapshot, work_items_response};
     use crate::protocol::{RpcId, RpcResponse};
+    use crate::session_runtime::SessionRuntime;
 
     fn result_json(response: &RpcResponse) -> Value {
         let raw = response.result.as_ref().expect("result");
         serde_json::from_str(raw.get()).expect("result json")
+    }
+
+    fn raw_params(params: Value) -> Box<serde_json::value::RawValue> {
+        serde_json::value::to_raw_value(&params).expect("raw params")
+    }
+
+    /// An RPC runtime of realm `realm-a` over an in-memory WorkGraph store.
+    fn workgraph_runtime(temp: &tempfile::TempDir) -> Arc<SessionRuntime> {
+        let store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let runtime = SessionRuntime::new(
+            meerkat::AgentFactory::new(temp.path().join("sessions")),
+            meerkat_core::Config::default(),
+            10,
+            meerkat::PersistenceBundle::new_with_subsystem_stores(
+                store,
+                Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
+                Arc::new(meerkat_store::MemoryBlobStore::new()),
+                Arc::new(meerkat::MemoryScheduleStore::new()),
+                Arc::new(meerkat::MemoryWorkGraphStore::new()),
+            )
+            .expect("persistence"),
+            crate::router::NotificationSink::noop(),
+        )
+        .expect("compose the RPC session runtime");
+        runtime.set_realm_context(
+            Some(meerkat_core::connection::RealmId::parse("realm-a").expect("realm id")),
+            None,
+            None,
+        );
+        Arc::new(runtime)
     }
 
     /// `workgraph/list` and `workgraph/ready` answer through
@@ -345,5 +376,59 @@ mod tests {
         assert!(keys.contains_key("items"), "{result}");
         assert!(!keys.contains_key("total_items"), "{result}");
         assert!(!keys.contains_key("truncated"), "{result}");
+    }
+
+    /// `workgraph/list` and `workgraph/snapshot` continue a walk from the
+    /// `next_cursor` the previous page returned.
+    #[tokio::test]
+    async fn workgraph_rpc_list_and_snapshot_cursor_round_trip() {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let runtime = workgraph_runtime(&temp);
+        let service = runtime.workgraph_service().expect("realm-scoped WorkGraph");
+        let mut created = Vec::new();
+        for title in ["first", "second", "third"] {
+            let item = service
+                .create(meerkat::CreateWorkItemRequest {
+                    title: title.to_string(),
+                    ..Default::default()
+                })
+                .await
+                .expect("create");
+            created.push(item.id.to_string());
+        }
+        created.sort();
+
+        for method in ["workgraph/list", "workgraph/snapshot"] {
+            let call = |params: Value| {
+                let runtime = Arc::clone(&runtime);
+                async move {
+                    let params = raw_params(params);
+                    let response = if method == "workgraph/list" {
+                        handle_list(Some(RpcId::Num(1)), Some(params.as_ref()), runtime).await
+                    } else {
+                        handle_snapshot(Some(RpcId::Num(1)), Some(params.as_ref()), runtime).await
+                    };
+                    result_json(&response)
+                }
+            };
+            let first = call(json!({ "limit": 2 })).await;
+            assert_eq!(first["truncated"], json!(true), "{method}: {first}");
+            let cursor = first["next_cursor"]
+                .as_str()
+                .expect("a truncated page names its next cursor")
+                .to_string();
+            let second = call(json!({ "limit": 2, "cursor": cursor })).await;
+            assert_eq!(second["truncated"], json!(false), "{method}: {second}");
+            assert!(second.get("next_cursor").is_none(), "{method}: {second}");
+            let mut walked = first["items"]
+                .as_array()
+                .expect("items")
+                .iter()
+                .chain(second["items"].as_array().expect("items"))
+                .map(|item| item["id"].as_str().expect("id").to_string())
+                .collect::<Vec<_>>();
+            walked.sort();
+            assert_eq!(walked, created, "{method}");
+        }
     }
 }

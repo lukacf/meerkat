@@ -1318,12 +1318,29 @@
 .cc-viz-list {
   height: 100%;
   overflow: auto;
+  container-type: inline-size;
+  container-name: cc-viz-list;
 }
 
+/* Fixed columns: the name takes what the others leave, every cell is one
+   line, and nothing widens the table past its frame. */
 .cc-viz-list__table {
   width: 100%;
+  table-layout: fixed;
   border-collapse: collapse;
   font-size: var(--_cc-text-sm, 13px);
+}
+
+th.cc-viz-list__group {
+  width: 18%;
+}
+
+th.cc-viz-list__status {
+  width: 16%;
+}
+
+th.cc-viz-list__connections {
+  width: 30%;
 }
 
 .cc-viz-list__table th {
@@ -1408,6 +1425,9 @@
 }
 
 .cc-viz-list__select {
+  display: block;
+  max-width: 100%;
+  overflow: hidden;
   padding: 0;
   border: 0;
   background: none;
@@ -1415,6 +1435,8 @@
   font: inherit;
   font-weight: 500;
   text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   cursor: pointer;
 }
 
@@ -1454,15 +1476,37 @@
 
 td.cc-viz-list__group,
 td.cc-viz-list__status {
+  overflow: hidden;
   color: var(--_cc-foreground-muted);
   font-size: 12px;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 td.cc-viz-list__connections {
-  max-width: 320px;
+  overflow: hidden;
   color: var(--_cc-foreground-meta);
   font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cc-viz-list__fold {
+  display: none;
+}
+
+/* A narrow list (a Topology pane of 340 px): the name column alone, its
+   meta line carrying the status and the connection count. */
+@container cc-viz-list (max-width: 479px) {
+  .cc-viz-list__group,
+  .cc-viz-list__status,
+  .cc-viz-list__connections {
+    display: none;
+  }
+
+  .cc-viz-list__fold {
+    display: inline;
+  }
 }
 
 .cc-viz-list__count {

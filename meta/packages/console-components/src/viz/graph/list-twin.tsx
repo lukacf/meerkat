@@ -128,6 +128,12 @@ export function connectionsSummary(row: GraphListRow, limit = 3): string {
   return more > 0 ? `${parts.join(", ")}, +${more}` : parts.join(", ");
 }
 
+/** "3 connections", "1 connection", "No connections". */
+export function connectionCount(degree: number): string {
+  if (degree === 0) return "No connections";
+  return `${degree} ${degree === 1 ? "connection" : "connections"}`;
+}
+
 function RowMark({ node }: { node: VizNode }): React.JSX.Element {
   if (isCardKind(node.kind)) {
     return (
@@ -233,7 +239,14 @@ export function GraphList(props: GraphListProps): React.JSX.Element {
                         <button type="button" className="cc-viz-list__select" aria-pressed={row.selected} onClick={() => props.onSelect?.(row.selected ? [] : [node.id])}>
                           {node.label}
                         </button>
-                        {node.sublabel ? <span className="cc-viz-list__sub">{node.sublabel}</span> : null}
+                        <span className="cc-viz-list__sub">
+                          {node.sublabel}
+                          {/* A narrow list folds the status and connection columns into this line. */}
+                          <span className="cc-viz-list__fold">
+                            {node.sublabel ? " · " : ""}
+                            {[nodeStatusWord(node), connectionCount(row.degree)].filter(Boolean).join(" · ")}
+                          </span>
+                        </span>
                       </span>
                       {props.onOpen ? (
                         <button type="button" className="cc-viz-list__open" aria-label={`Open ${node.label}`} onClick={() => props.onOpen?.(node.id)}>

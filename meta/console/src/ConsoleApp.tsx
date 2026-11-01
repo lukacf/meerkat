@@ -237,7 +237,7 @@ import {
   type NavKind,
 } from "./panels/Sidebar";
 import { SignalsRail } from "./panels/SignalsRail";
-import { historyFramesOf } from "./panels/activity/history-frames";
+import { feedHistoryToLedger, historyFramesOf } from "./panels/activity/history-frames";
 import { railPresetsFromActivityFeed } from "./panels/activity/signals-model";
 import { ChatPane, type StagedAttachment } from "./panels/ChatPane";
 import { MetaDock } from "./panels/MetaDock";
@@ -1720,9 +1720,10 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
   ): boolean {
     const log = getOrCreateLog(identity);
     log.hasServerLog = available;
-    // History reaches the activity ledger too (Today's turns, the traffic
-    // figures); the ledger counts an event once however often it arrives.
-    timelineScopeRef.current?.ledger.ingestMany(frames.map((frame) => (frame.identity ? frame : { ...frame, identity })));
+    // History reaches the activity ledger too (Today's turns, the 24 h
+    // charts): each frame version once, by its row key, however often its
+    // page loads; the ledger counts an event once across its copies.
+    if (timelineScopeRef.current) feedHistoryToLedger(timelineScopeRef.current.ledger, identity, frames);
     let changed = false;
     let appended = false;
     for (const frame of frames) {

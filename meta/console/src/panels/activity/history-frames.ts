@@ -2,8 +2,10 @@
 // spec B4, B5): every frame the console has loaded per agent (live frames
 // and backfilled history pages), concatenated once per change. The console
 // keeps one log per identity and bumps its version on every change, so the
-// list is rebuilt only when a log's version moves. Pure module (no React).
+// list is rebuilt only when a log's version moves. The same history feeds
+// the activity ledger, each frame version once. Pure module (no React).
 
+import { consoleFrameRowKey, createConsoleTimelineDedupe, type ConsoleTimelineDedupe } from "../../../../packages/console-core/src/timeline-recovery";
 import type { ConsoleFrame } from "../../types";
 
 export interface HistoryLogLike {
@@ -55,4 +57,36 @@ export async function inBatches<T>(items: readonly T[], concurrency: number, tas
     }
   });
   await Promise.all(workers);
+}
+
+/** What the history feeds: the activity ledger (its ingest only). */
+export interface HistoryLedgerSink {
+  ingestMany(frames: readonly ConsoleFrame[]): boolean;
+}
+
+/** About a day of history for the busiest agents; past it the ledger's own event keys still count each event once. */
+const LEDGER_HISTORY_KEYS = 50_000;
+const FED = new WeakMap<HistoryLedgerSink, ConsoleTimelineDedupe>();
+
+/**
+ * Feed one agent's history page to the activity ledger (Today's turns, the
+ * 24 h charts): each frame version once, keyed by its row key, however
+ * often the page loads again. A frame without an identity takes the log's.
+ * Returns how many frames went in.
+ */
+export function feedHistoryToLedger(ledger: HistoryLedgerSink, identity: string, frames: readonly ConsoleFrame[]): number {
+  let fed = FED.get(ledger);
+  if (!fed) {
+    fed = createConsoleTimelineDedupe(LEDGER_HISTORY_KEYS);
+    FED.set(ledger, fed);
+  }
+  const fresh: ConsoleFrame[] = [];
+  for (const frame of frames) {
+    const key = consoleFrameRowKey(frame);
+    if (fed.has(key)) continue;
+    fed.add(key);
+    fresh.push(frame.identity ? frame : { ...frame, identity });
+  }
+  if (fresh.length) ledger.ingestMany(fresh);
+  return fresh.length;
 }

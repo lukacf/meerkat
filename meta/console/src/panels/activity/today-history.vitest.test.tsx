@@ -6,7 +6,7 @@
  * only in its own log), so the retired member's lane and its retire row
  * come from that backfill.
  */
-import { act, cleanup, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 
 import { ConsoleApp } from "../../ConsoleApp";
@@ -136,4 +136,28 @@ it("loads each agent's day into the ledger, the retired member's included", asyn
   expect(story.textContent).toContain("Weekend cover was retired");
   expect(story.textContent).toContain("An operator asked Billing");
   expect(story.textContent).not.toMatch(/identity_retired|interaction_complete/);
+});
+
+it("counts a day's history once when it loads again", async () => {
+  const queries: ConsoleTimelineQueryInput[] = [];
+  render(<ConsoleApp baseUrl="" transport={transport(queries)} />);
+  await screen.findByTestId("timeline-panel");
+  const turns = () => screen.getByTestId("timeline-glance:turns").querySelector(".cc-figure__value")?.textContent;
+  // Billing's turn and the retired member's: two turns started today.
+  await vi.waitFor(() => expect(turns()).toBe("2"), { timeout: 3_000 });
+  const loads = (identity: string) => queries.filter((query) => query.identity === identity).length;
+  expect(loads("billing")).toBe(1);
+
+  // Refresh loads every agent's day again: the same frames reach the
+  // identity logs and the ledger a second time, and count once.
+  await act(async () => { fireEvent.click(screen.getByTestId("timeline-refresh")); });
+  await vi.waitFor(() => {
+    expect(loads("billing")).toBe(2);
+    expect(loads("weekend-cover")).toBe(2);
+  });
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 50)); });
+  expect(turns()).toBe("2");
+  expect(document.querySelectorAll('[data-testid^="timeline-span:"]').length).toBe(2);
+  const story = screen.getByRole("list", { name: "The day's events, newest first" });
+  expect(story.textContent?.match(/Weekend cover was retired/g)?.length).toBe(1);
 });

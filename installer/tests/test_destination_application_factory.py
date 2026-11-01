@@ -49,7 +49,9 @@ def destination(installation, monkeypatch):
         patch.setattr(guide_store, "uuid4", lambda: UUID(selected.context["guide_id"]))
         f.saved = f.store.create({"proposal": deepcopy(f.spec), "version": 3,
             "messages": [], "status": "refining", "stage": "purpose"})
-    f.guide = GuideService(f.store, None)
+    # GuideService retains its command store on the architect. No architect
+    # execution is available in this destination-only fixture.
+    f.guide = GuideService(f.store, SimpleNamespace())
     f.implementation = ImplementationService(selected.custody.home / ".local/state/meta-forge", f.guide)
     f.service = deployment.DeploymentService(selected.custody.home / ".local/state/meta-forge",
         f.guide, f.implementation)

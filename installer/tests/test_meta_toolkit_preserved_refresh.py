@@ -130,7 +130,8 @@ def test_actual_archive_product_successor_preserves_policy_viewer_access_and_set
     archive = deployment.package_files(packed(candidate))
     assert archive == candidate
     descriptor = updates.runtime_dependency_transition(previous, archive, original_receipt(previous), runtime_target=target)
-    assert descriptor is not None and descriptor["version"] == 5
+    assert descriptor is not None and descriptor["version"] == 7
+    assert descriptor["previous_framework_version"] == 6
     assert descriptor["previous_runtime_candidate"] == selection.candidate_selection(old_product.target)
     assert descriptor["runtime_candidate"] == selection.candidate_selection(target)
     assert descriptor["previous_runtime_candidate"] != descriptor["runtime_candidate"]
@@ -147,6 +148,21 @@ def test_actual_archive_product_successor_preserves_policy_viewer_access_and_set
     assert private == {name: (destination / name).read_bytes() for name in private_names}
     for name in descriptor["protected_application_paths"] + ["application/domain.py", "requirements.application.txt"]:
         assert (destination / name).read_bytes() == previous[name][0]
+
+
+def test_actual_product_refresh_preserves_host_adopted_announcement_declarations(tmp_path, products, inputs):
+    name = compiler.DECLARATIONS_PATH
+    source = tmp_path / "selected-announcements.json"
+    source.write_bytes(b'{"revision":7,"sources":[],"subscriptions":[]}\r\n')
+    selected = {**inputs, name: source}
+    value = crossing.__wrapped__(tmp_path, products, selected)
+    _, _, previous, candidate, _, _ = value
+    assert previous[name] == candidate[name] == (source.read_bytes(), 0o644)
+    directory, destination, identity = staged(tmp_path, value)
+    _, _, update = updates.transaction(directory, identity)
+    assert name in update["runtime_dependency_update"]["protected_application_paths"]
+    updates.activate(directory, identity)
+    assert (destination / name).read_bytes() == source.read_bytes()
 
 
 @pytest.mark.parametrize("predecessor", ["compiler-default", "customized"])
@@ -270,7 +286,42 @@ def test_closed_product_history_uses_archived_source_and_original_both_product_p
     assert historical["runtime_dependency_update"] == descriptor
 
 
-@pytest.mark.parametrize("defect", ["relabel", "protected-hash", "protected-path", "prior-sdk", "prior-native", "new-sdk", "prior-receipt", "source-map", "old-build", "admission"])
+@pytest.mark.parametrize("successor", [False, True])
+def test_fixed_v5_product_history_and_v7_successor_preserve_original_inventory(
+        tmp_path, products, inputs, monkeypatch, successor):
+    # Synthetic old fixed-inventory package, not a historical native result.
+    export = compiler.connect_application_finalizer_export
+    generate = compiler.generate_package
+    def old_generation(*args, **kwargs):
+        if successor and kwargs.get("runtime_target") is not products[0].target:
+            return generate(*args, **kwargs)
+        with monkeypatch.context() as historical:
+            historical.setattr(compiler, "connect_application_finalizer_export", lambda: [item
+                for item in export() if item.path != "launchkit/connect_member_class_requests.py"])
+            return generate(*args, **kwargs)
+    with monkeypatch.context() as old:
+        old.setattr(compiler, "generate_package", old_generation)
+        # Workspace seeding imports this function directly. Both entry points
+        # must apply the historical finalizer export to the predecessor.
+        old.setattr("launchkit.implementation_workspace.generate_package", old_generation)
+        selected = crossing.__wrapped__(tmp_path, products, inputs)
+        assert "launchkit/connect_member_class_requests.py" not in selected[2]
+        assert ("launchkit/connect_member_class_requests.py" in selected[3]) is successor
+        directory, _, _, identity, descriptor = completed(tmp_path, selected)
+    assert descriptor["version"] == (7 if successor else 5)
+    assert descriptor.get("previous_framework_version", 4) == 4
+    assert ("launchkit/connect_member_class_requests.py" in descriptor["protected_paths"]) is successor
+    def forbidden(*args, **kwargs):
+        pytest.fail("Historical product read attempted current compilation or artifact admission")
+    for name in ("generate_package", "generate_runtime_refresh"):
+        monkeypatch.setattr(compiler, name, forbidden)
+    for name in ("selected_runtime_artifacts", "candidate_selection"):
+        monkeypatch.setattr(selection, name, forbidden)
+    _, _, historical = updates.transaction(directory, identity)
+    assert historical["runtime_dependency_update"] == descriptor
+
+
+@pytest.mark.parametrize("defect", ["relabel", "v5-relabel", "previous-framework", "protected-hash", "protected-path", "prior-sdk", "prior-native", "new-sdk", "prior-receipt", "source-map", "old-build", "admission"])
 def test_completed_product_history_refuses_changed_frozen_bindings(crossing, tmp_path, defect):
     _, _, previous, candidate, _, _ = crossing
     directory, _, root, identity, _ = completed(tmp_path, crossing)
@@ -278,6 +329,8 @@ def test_completed_product_history_refuses_changed_frozen_bindings(crossing, tmp
     corrupted = deepcopy(current)
     descriptor = corrupted["runtime_dependency_update"]
     if defect == "relabel": descriptor["version"] = 4
+    elif defect == "v5-relabel": descriptor["version"] = 5
+    elif defect == "previous-framework": descriptor["previous_framework_version"] = 4
     elif defect == "protected-hash": descriptor["protected_application_inventory"]["config/access.toml"]["sha256"] = "f" * 64
     elif defect == "protected-path": descriptor["protected_application_paths"].remove("config/access.toml")
     elif defect == "prior-sdk": corrupted["runtime_files_retained"]["previous_native"]["sdk"]["meta"]["source_payload"][0][1] = "f" * 64
@@ -313,8 +366,10 @@ def retained(tmp_path, products, monkeypatch):
     for name, (kind, mode, _) in old.nodes.items():
         if kind != "link": (native / name).chmod(mode)
     site = root / ".venv/lib/python-fixture/site-packages"
-    site.mkdir(parents=True, mode=0o700)
-    (root / ".venv").chmod(0o700)
+    # These inert SDK directories model a private installation independently
+    # of the validation host's umask. Native specimen modes above stay exact.
+    for directory in (root / ".venv", root / ".venv/lib", site.parent, site):
+        directory.mkdir(mode=0o700, exist_ok=True)
     (root / ".venv/bin").mkdir(mode=0o700)
     (root / ".venv/bin/python").write_bytes(b"INERT interpreter must never run\n")
     (root / ".venv/bin/python").chmod(0o700)
@@ -322,7 +377,10 @@ def retained(tmp_path, products, monkeypatch):
         with zipfile.ZipFile(wheel.path) as archive:
             for name in archive.namelist():
                 path = site / name
-                path.parent.mkdir(parents=True, exist_ok=True)
+                parent = site
+                for part in Path(name).parts[:-1]:
+                    parent = parent / part
+                    parent.mkdir(mode=0o700, exist_ok=True)
                 path.write_bytes(archive.read(name)); path.chmod(0o600)
     def locations(base, python=None, site_packages=None):
         assert python is None or Path(python) == Path(base) / ".venv/bin/python"

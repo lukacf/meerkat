@@ -194,7 +194,7 @@ source checkout are not required to open this wizard. New bundles carry the
 published MobKit 0.8.47 SDK, which pins Meerkat 0.8.51, for the application
 packages they build. Packaging and startup verify the SDK's fixed PyPI checksum, package
 identity, release provenance and matching SDK/native version pins. Agent team
-packages install the published Meta 0.9.4 release instead (see **Install agent
+packages install the published Meta 0.9.6 release instead (see **Install agent
 team**). The bundle downloads no native runtime of its own: each exported
 package installs its runtime and checks the release checksums itself.
 
@@ -402,6 +402,12 @@ guide a question. Previous answers remain in the conversation and can be revisit
 Revisiting a topic keeps its saved context and asks what you want to change;
 the guide uses your answer to shape the next choices.
 
+Use **Attach files** to share existing workplace notes, skills, reference data or
+text PDFs with your message. Ordinary prose is enough. The builder and reviewer
+can read submitted source documents beyond the guide's summary. See
+[getting started](GETTING_STARTED.md) for supported formats, PDF limits and upload
+recovery. Reading an upload does not automatically add it to the exported app.
+
 The right side animates the current proposal: named agents, messages moving along
 workflow dependencies, parallel work, tool access and shared knowledge. Choose a
 workflow, pause, step, replay, or expand the map. Select an agent or source to
@@ -498,6 +504,14 @@ organization plugin does not rewrite an existing guide or build. Acceptance and
 package matching include the saved context, so changing it requires fresh review.
 Older builds without organization context retain their original scope.
 
+That context can be a plain document or skill describing tools, data and how to
+reach them. The application builder receives the saved wording and is instructed
+to give it to the application agent, which can pass it to Connect's setup agent
+when it needs a connection. Connect uses its existing
+discovery and installation flow; an organization does not need to define a tool
+catalog. See the [workplace example](examples/workplace-starters/README.md) for
+a short prose contribution and the supported handoff.
+
 This handoff carries visible context and references only. A reference to a private
 authentication or installation package does not install it or grant access. The
 host must adopt the actual package through its supported source-preparation path,
@@ -555,7 +569,7 @@ the behavior of retained packages and receipts.
 
 The installed Forge (the packaged product) and the developer source entry both
 offer the agent-team path. An agent team package, downloaded or installed,
-installs the published Meta 0.9.4 release it pins: the `meerkat-meta` 0.9.4 SDK
+installs the published Meta 0.9.6 release it pins: the `meerkat-meta` 0.9.6 SDK
 from PyPI by its fixed SHA-256, and the official `meta-rpc-gateway` and
 `meta-gateway` archives, each checked against the release's published SHA-256
 checksums. It does not use the runtime an installed Forge selected for its own
@@ -612,9 +626,12 @@ selections fail closed. Its full catalog is validated after connector startup;
 Selection changes require a cold host restart; reconciliation does not rebind
 existing agents. Retained Python callback scopes alone do not establish native
 access. After native startup, inspect
-`context.runtime.mob_handle().identity_resolved_tools(identity)` or
-`identity_resolved_tools_detail(identity)` and verify denied old-name calls on
-continuing identities before claiming installed isolation.
+`context.runtime.mob_handle().identity_resolved_tools_detail(identity)` and read
+its `tools_source` where the selected SDK reports one: a member that is not
+built yet can answer `no_build_recorded` with an empty tools list, which is no
+catalog. Warm or wake that member first (`identity_warm` where the selected SDK
+offers it), then verify denial of omitted old names on continuing seed/dynamic
+sessions before claiming an installed access boundary.
 Frozen packages need an explicit framework refresh/rebuild to acquire this hook.
 
 Applications serving independent groups must also define their native memory
@@ -1853,6 +1870,15 @@ copies for this caller while checking the original accepted source separately.
 Canonical compilation and native provider binding remain required. This trusted
 host observation is not a native principal or approval; source validation alone
 does not establish a working native deployment.
+
+Dynamic-roster installations prepared before installation-owned Console domains
+were introduced must be installed fresh when moving to a Toolkit that requires
+that domain pair. The new preparation selects both `authentication_domain` and
+`event_domain`, including when there are no initial members. Restoring an older
+preparation preserves its original bytes and refuses member-class Add when the
+pair is absent. Updating source or SDK files alone does not upgrade it, and
+dynamic rosters cannot be updated in place. Static-roster installations do not
+use member-class Add and are unaffected by this requirement.
 
 The trusted preparation draft can explicitly select Toolkit's
 `application.helper_tools = "checked_installation"` composition. The native

@@ -5052,20 +5052,23 @@ async fn a_slow_first_continuity_mirror_put_is_offered_again() {
         .expect("the wake creates alice's session");
     let counts = runtime.continuity_mirror_counts().await.expect("mirror");
     // A round before the wake may copy the empty roster; the copy is
-    // complete once it holds alice's record and session.
+    // complete once it holds alice's record and session. The sink writes the
+    // files inside its put and the mirror counts a write only after the put
+    // returns, so the wait also needs a counted write.
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
     let records = loop {
         let records = mirror_lines(&mirror_dir, "records.jsonl");
-        if records.first().is_some_and(|record| {
+        let complete = records.first().is_some_and(|record| {
             record["session_id"]
                 .as_str()
                 .is_some_and(|session_id| mirrored_session(&mirror_dir, session_id).is_some())
-        }) {
+        });
+        if complete && counts.writes.load(Ordering::Relaxed) >= 1 {
             break records;
         }
         assert!(
             std::time::Instant::now() < deadline,
-            "the copy never completed: {records:?}"
+            "the copy never completed: {records:?}, counts {counts:?}"
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
     };

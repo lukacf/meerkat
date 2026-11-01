@@ -24,7 +24,14 @@ BACKUP = "runtime-before"
 FORMAT = "mobkit-launch-runtime-retention-v1"
 MAX_RUNTIME_BYTES = 2 * 1024 * 1024 * 1024
 MAX_RUNTIME_ENTRIES = 50_000
-MAX_FILE_BYTES = 512 * 1024 * 1024
+# Retention streams native files, which can exceed 512 MiB. Keep a finite
+# per-file ceiling matching executable custody, within the total runtime bound.
+# The same ceiling bounds _hash_executable, which streams a native
+# executable to its SHA-256 for verify_runtime (official receipts, and
+# candidate runtimes through _verify_candidate_runtime) and for the retained
+# predecessor check (_verify_previous_candidate); each compares that digest
+# with the one it expects.
+MAX_FILE_BYTES = 1024 * 1024 * 1024
 MAX_INVENTORY_BYTES = 16 * 1024 * 1024
 MAX_RECEIPT_BYTES = 1024 * 1024
 HEX = re.compile(r"[a-f0-9]{64}")
@@ -393,9 +400,6 @@ def _interpreter_link(path, target):
             or not (PYTHON_NAME.fullmatch(path.name) or path.name == PYTHON314_ALIAS)
             or not target or len(target) > 4096):
         raise RuntimeDependencyError("Only normal Python interpreter links in .venv/bin can be retained.")
-    # Python 3.14's UTF-8 venv setup adds this exact interpreter alias.
-    if path.name == PYTHON314_ALIAS and target != "python3.14":
-        raise RuntimeDependencyError("The Python 3.14 interpreter alias must point exactly to python3.14.")
     selected = Path(target)
     if not selected.is_absolute() and (selected.name != target or not PYTHON_NAME.fullmatch(target)):
         raise RuntimeDependencyError("A relative interpreter link must stay inside .venv/bin.")
@@ -407,6 +411,17 @@ def _interpreter_link(path, target):
             raise ValueError
     except (OSError, ValueError, RuntimeError):
         raise RuntimeDependencyError("The retained interpreter link does not resolve to an ordinary Python executable.") from None
+    if path.name == PYTHON314_ALIAS:
+        # CPython 3.14's venv adds this extra interpreter alias. It links to
+        # whichever name created the environment (python3.14 or python3), so
+        # accept it only when it resolves to the environment's own Python:
+        # the final executable of its python entry.
+        try:
+            own = (path.parent / "python").resolve(strict=True)
+        except (OSError, RuntimeError):
+            own = None
+        if resolved != own:
+            raise RuntimeDependencyError("The Python 3.14 interpreter alias must resolve to the environment's own Python.")
 
 
 def _scan(root, name, device, *, product_links=None):

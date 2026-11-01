@@ -71,9 +71,10 @@ def kept_files(f):
 
 
 def no_archive_pass(monkeypatch, product):
+    # Both open-file reads and the bytes wrapper use this archive walker.
     def inflate(*args, **kwargs):
         pytest.fail("A retained Start inflated the product archive.")
-    monkeypatch.setattr(candidates, "product_prefix_entries", inflate)
+    monkeypatch.setattr(candidates, "_product_prefix_stream", inflate)
     original = candidates._Inputs.read
     def read(self, path, expected, limit, **kwargs):
         assert Path(path) != product.archive.path, "A retained Start hashed the product archive."
@@ -83,11 +84,11 @@ def no_archive_pass(monkeypatch, product):
 
 def archive_passes(monkeypatch):
     calls = []
-    original = candidates.product_prefix_entries
+    original = candidates._product_prefix_stream
     def counted(*args, **kwargs):
         calls.append(args[1])
         return original(*args, **kwargs)
-    monkeypatch.setattr(candidates, "product_prefix_entries", counted)
+    monkeypatch.setattr(candidates, "_product_prefix_stream", counted)
     return calls
 
 
@@ -525,8 +526,14 @@ def test_r18_the_recording_walk_syncs_each_file_before_reading_it(installed, mon
     f = installed
     events = []
     original_fsync, original_read = os.fsync, adapter.read_owned
+    files = [f.destination / ".bin" / entry.name for entry in f.artifacts.entries
+        if entry.kind == "file"]
     def fsync(descriptor):
-        events.append(("fsync", os.readlink(f"/proc/self/fd/{descriptor}")))
+        # Observe the actual file synced on either Linux or macOS.
+        opened = os.fstat(descriptor)
+        matching = [str(path) for path in files if os.path.samestat(opened, path.stat())]
+        assert len(matching) == 1
+        events.append(("fsync", matching[0]))
         return original_fsync(descriptor)
     def read_owned(path, *args, **kwargs):
         events.append(("read", str(path)))

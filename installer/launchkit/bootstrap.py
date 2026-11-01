@@ -50,14 +50,18 @@ class SelectedGuideRuntime:
 
         selected = guide_sdk.SELECTED_VERSION
         if (type(self.gateway) is not ExactFile
-                or self.version != selected or self.core_version != selected
+                or self.version != selected or self.core_version != guide_sdk.declared_core_version()
                 or any(type(value) is not str or not re.fullmatch("[0-9a-f]{40}", value)
                     for value in (self.meta_source, self.core_source))):
             raise GatewayInstallError(f"The guide requires its exact selected Meta {selected} runtime.")
         object.__setattr__(self, "_gateway_pin", (self.gateway.path, self.gateway.sha256))
         route = deepcopy(self._model_route)
         if route is not None:
-            allowed = {"provider", "model", "auth_binding", "meerkat_config_path"}
+            if type(route) is dict and "auth_binding" in route:
+                # Core ignores this key in mob profiles. An explicit selection
+                # must reach the native member API before Forge can accept it.
+                raise GatewayInstallError("This guide runtime cannot apply an explicit auth binding.")
+            allowed = {"provider", "model", "meerkat_config_path"}
             if (type(route) is not dict or not {"provider", "model"} <= route.keys()
                     or not route.keys() <= allowed
                     or any(type(value) is not str or not value or len(value) > 4096
@@ -135,8 +139,10 @@ _selected_guide_runtime = None
 
 def configure_selected_guide_runtime(selected):
     """Select once from the original trusted launcher before server import."""
+    from .guide_transport import SelectedGuideTransport
+    from .protected_startup import SelectedProtectedRuntime
     global _selected_guide_runtime
-    if type(selected) is not SelectedGuideRuntime:
+    if type(selected) not in (SelectedGuideRuntime, SelectedGuideTransport, SelectedProtectedRuntime):
         raise GatewayInstallError("Select the original trusted Meta guide runtime.")
     if _selected_guide_runtime is not None and selected is not _selected_guide_runtime:
         raise GatewayInstallError("The original guide runtime cannot be replaced during this process.")
@@ -154,7 +160,7 @@ def selected_guide_runtime():
 
 def selected_guide_gateway():
     selected = selected_guide_runtime()
-    return selected.gateway.path if selected is not None else None
+    return selected.gateway.path if type(selected) is SelectedGuideRuntime else None
 
 
 def export_selected_guide_context():
@@ -162,6 +168,9 @@ def export_selected_guide_context():
     selected = selected_guide_runtime()
     if selected is None:
         return None
+    if type(selected) is not SelectedGuideRuntime:
+        raise GatewayInstallError("The worker needs its own trusted original gateway channel; "
+                                  "a process-local transport cannot be exported.")
     return {"gateway": selected.gateway.pin(), "version": selected.version,
         "core_version": selected.core_version, "meta_source": selected.meta_source,
         "core_source": selected.core_source,
@@ -177,6 +186,9 @@ def restore_selected_guide_context(value):
     browser request, model-visible input or an environment-selected route.
     """
     from .connect_installer_caller import ExactFile
+
+    if _selected_guide_runtime is not None and type(_selected_guide_runtime) is not SelectedGuideRuntime:
+        raise GatewayInstallError("A saved worker record cannot replace the original guide transport.")
 
     names = {"gateway", "version", "core_version", "meta_source", "core_source",
         "model_configuration", "model_custody"}

@@ -16,7 +16,7 @@ from launchkit.blueprint import starter_blueprint
 from launchkit.schema import DEFAULT_MODELS
 
 VERSION = public_meta_runtime.VERSION
-FIXTURES = Path(__file__).parent / "fixtures/meta_release_0_9_4"
+FIXTURES = Path(__file__).parent / "fixtures/meta_release_0_9_6"
 TEMPLATES = Path(__file__).resolve().parents[1] / "launchkit/templates"
 UNIX_TARGETS = ("x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu", "aarch64-apple-darwin",
     "x86_64-apple-darwin")
@@ -202,7 +202,7 @@ def test_meta_install_reads_the_meta_release_and_writes_its_receipts(tmp_path, m
         receipt = json.loads((tmp_path / ".bin" / (name + ".receipt.json")).read_text())
         assert receipt["version"] == VERSION and receipt["release_url"] == release.rstrip("/")
         assert receipt["archive"] == f"{prefix}-{VERSION}-{target}.tar.gz"
-    # The pinned 0.9.4 binaries fit the Meta bound (rpc_gateway is about 471 MiB).
+    # The pinned 0.9.6 binaries fit the Meta bound (rpc_gateway is about 520 MiB).
     sizes = json.loads((FIXTURES / "SOURCE.json").read_text())["binaries"]["x86_64-unknown-linux-gnu"]
     assert max(sizes.values()) < module.MAX_BINARY_BYTES
 
@@ -238,7 +238,7 @@ def storage():
 
 
 def meta_project(root, plan):
-    """A package whose .bin/meta_gateway replays reports recorded from the 0.9.4 tool."""
+    """A package whose .bin/meta_gateway replays reports recorded from the 0.9.6 tool."""
     (root / "deployment.json").write_text(json.dumps({"slug": "test-team", "mobkitVersion": VERSION}))
     (root / ".bin").mkdir()
     tool = root / ".bin/meta_gateway"

@@ -83,6 +83,44 @@ def test_retain_preserves_exact_inodes_bytes_modes_and_private_inventory(install
     assert (transaction / runtime.BACKUP).stat().st_mode & 0o777 == 0o700
 
 
+def test_retention_accepts_gateway_sized_file_above_512_mib(installed):
+    destination, transaction = installed
+    # Match the reported Meta 0.9.6 Linux gateway size without downloading or
+    # executing a binary. Sparse bytes exercise the real inventory/hash path.
+    path = destination / ".bin/retained-gateway"
+    size = 545_707_016
+    with path.open("wb") as stream:
+        stream.truncate(size)
+        stream.seek(size - 1)
+        stream.write(b"x")
+    path.chmod(0o700)
+    inode = path.stat().st_ino
+    with path.open("rb") as stream:
+        digest = hashlib.file_digest(stream, "sha256").hexdigest()
+
+    proof = runtime.retain_runtime(destination, transaction)
+    saved = transaction / runtime.BACKUP / ".bin/retained-gateway"
+    assert proof["retained"] is True
+    assert saved.stat().st_ino == inode and saved.stat().st_size == size
+    entry = read_inventory(transaction)["roots"][".bin"][".bin/retained-gateway"]
+    assert (entry["size"], entry["sha256"], entry["mode"]) == (size, digest, 0o700)
+    assert not (destination / ".bin").exists()
+
+
+def test_retention_refuses_file_above_one_gib_before_moving_roots(installed):
+    destination, transaction = installed
+    path = destination / ".bin/oversized-gateway"
+    with path.open("wb") as stream:
+        stream.truncate(1024 * 1024 * 1024 + 1)
+    path.chmod(0o700)
+    roots = {name: (destination / name).stat().st_ino for name in runtime.ROOTS}
+    with pytest.raises(runtime.RuntimeDependencyError, match="oversized file"):
+        runtime.retain_runtime(destination, transaction)
+    assert roots == {name: (destination / name).stat().st_ino for name in runtime.ROOTS}
+    assert not (transaction / runtime.INVENTORY).exists()
+    assert not (transaction / runtime.COMPLETED).exists()
+
+
 def test_repeat_keeps_previous_backup_and_never_labels_candidate_as_previous(installed):
     destination, transaction = installed
     first = runtime.retain_runtime(destination, transaction)
@@ -324,12 +362,36 @@ def test_python314_utf8_alias_is_retained_and_verified_on_resume(installed):
     assert runtime.retain_runtime(destination, transaction) == first
 
 
-@pytest.mark.parametrize("target", ["python3", "python3.13", "./python3.14", "../bin/python3.14", "absolute"])
-def test_python314_utf8_alias_wrong_target_refuses_before_move(installed, tmp_path, target):
+@pytest.mark.parametrize("target", ["python3", "absolute"])
+def test_python314_utf8_alias_of_a_python3_created_venv_is_retained(installed, tmp_path, target):
+    # `python3 -m venv` on a CPython 3.14 host links the alias to python3. Any
+    # link that resolves to the environment's own Python is kept, as is.
     destination, transaction = installed
     selected = str(tmp_path / "python3.14") if target == "absolute" else target
     (destination / ".venv/bin" / runtime.PYTHON314_ALIAS).symlink_to(selected)
-    with pytest.raises(runtime.RuntimeDependencyError, match="point exactly"):
+    first = runtime.retain_runtime(destination, transaction)
+    entry = read_inventory(transaction)["roots"][".venv"][".venv/bin/" + runtime.PYTHON314_ALIAS]
+    assert entry["kind"] == "interpreter-link" and entry["target"] == selected
+    retained = transaction / runtime.BACKUP / ".venv/bin" / runtime.PYTHON314_ALIAS
+    assert retained.resolve(strict=True) == (tmp_path / "python3.14").resolve()
+    assert runtime.retain_runtime(destination, transaction) == first
+
+
+@pytest.mark.parametrize("target,message", [
+    ("python3.13", "ordinary Python executable"), ("./python3.14", "stay inside"),
+    ("../bin/python3.14", "stay inside"), ("other-python", "own Python")])
+def test_python314_utf8_alias_wrong_target_refuses_before_move(installed, tmp_path, target, message):
+    destination, transaction = installed
+    if target == "other-python":
+        # An ordinary Python executable, but not the environment's own.
+        other = tmp_path / "other/python3.13"
+        other.parent.mkdir()
+        other.write_text("Another test executable, never executed.\n")
+        other.chmod(0o700)
+        (destination / ".venv/bin/python3.13").symlink_to(other)
+        target = "python3.13"
+    (destination / ".venv/bin" / runtime.PYTHON314_ALIAS).symlink_to(target)
+    with pytest.raises(runtime.RuntimeDependencyError, match=message):
         runtime.retain_runtime(destination, transaction)
     assert not (transaction / runtime.INVENTORY).exists()
     assert all((destination / name).exists() for name in runtime.ROOTS)

@@ -138,7 +138,7 @@ def closed_crossing(tmp_path, monkeypatch):
     proof = native_fixture_proof("0.8.48")
     proof["core_version"] = "0.8.51"
     admitted = updates.runtime_dependency_transition(previous, candidate, receipt)
-    assert admitted is not None and admitted["version"] == 4
+    assert admitted is not None and admitted["version"] == 6
     update = {"status": "completed", "blockers": [], "rollback_available": False,
         "runtime_dependency_update": admitted,
         "runtime_admission_possible": True, "native_definition_update": False,

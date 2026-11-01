@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import ExitStack
 import json
 import logging
 import os
@@ -87,13 +88,13 @@ def parse_design(text: str) -> DesignResult:
 
 
 async def design_team(request: DesignRequest) -> DesignResult:
-    gateway = gateway_path()
-    from .guide_runtime import selected_runtime, configure_builder, model_profile_lines, build_with_cleanup
-    selected = selected_runtime() if gateway else None
+    from .bootstrap import selected_guide_runtime
+    from .guide_runtime import configure_builder, model_profile_lines, build_with_cleanup
+    selected = selected_guide_runtime()
     configuration = selected.model_configuration if selected is not None else None
     provider = configuration["provider"] if configuration is not None else request.provider
     model = configuration["model"] if configuration is not None else request.model
-    if not gateway or configuration is None and not os.getenv(ENV_KEYS[provider]):
+    if selected is None or configuration is None and not os.getenv(ENV_KEYS[provider]):
         return starter_design(request, f"Using a starter team. To enable AI design with {request.provider}, configure {ENV_KEYS[request.provider]} on the studio server and install its gateway.")
 
     from meerkat_meta import Meta
@@ -111,16 +112,21 @@ async def design_team(request: DesignRequest) -> DesignResult:
         '', '[profiles.designer.tools]', 'builtins = false', 'comms = true',
         'mob = false', 'memory = false',
     ])
-    # An isolated temporary state root prevents one user's planning session
-    # from becoming another user's context. It is removed after shutdown.
-    with tempfile.TemporaryDirectory(prefix="mobkit-launch-design-") as directory:
+    # Ordinary local planning keeps its temporary state. Protected admission
+    # selects its original root-owned state before any SDK state setter.
+    with ExitStack() as stack:
         runtime = None
         retained_cleanup = []
         try:
             async with asyncio.timeout(110):
+                from .role_runtime import prepare_runtime
+                prepared = await prepare_runtime("planner", selected, None, retained_cleanup)
+                directory = (prepared.persistent_state if prepared is not None else
+                    stack.enter_context(tempfile.TemporaryDirectory(prefix="mobkit-launch-design-")))
                 builder = (Meta.builder().mob_inline(mob).persistent_state(directory)
                            .roster(DesignerRoster()).console_auth_required(False))
-                runtime = await build_with_cleanup(configure_builder(builder, selected), retained_cleanup)
+                runtime = (await prepared.build(builder) if prepared is not None else
+                    await build_with_cleanup(configure_builder(builder, selected), retained_cleanup))
                 agent = runtime.agent("designer:main")
                 admission = await agent.send(json.dumps({"purpose": request.description, "starting_template": request.template}))
                 # A busy observation lane is retryable. Keep the send's exact
@@ -145,7 +151,18 @@ async def design_team(request: DesignRequest) -> DesignResult:
                     raise ValueError("The designer returned an empty answer.")
                 return parse_design(output)
         finally:
+            failures = []
             if runtime:
-                await runtime.shutdown()
+                from .role_runtime import shutdown_runtime
+                try:
+                    await shutdown_runtime(runtime, retained_cleanup)
+                except BaseException as error:
+                    failures.append(error)
             for cleanup in retained_cleanup:
-                await cleanup.shutdown()
+                try:
+                    await cleanup.shutdown()
+                except BaseException as error:
+                    if not any(error is prior for prior in failures):
+                        failures.append(error)
+            if failures:
+                raise BaseExceptionGroup("Planner runtime cleanup failed.", failures)

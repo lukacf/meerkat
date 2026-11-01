@@ -213,7 +213,8 @@ def validate_pin(pin, name):
 
 def validate_target(target, entry):
     keys = "files gateway selection paths"
-    rc.exact_keys(entry, keys + (" ordinary_gateway" if isinstance(entry, dict) and "ordinary_gateway" in entry else ""),
+    rc.exact_keys(entry, keys + "".join(" " + key for key in ("ordinary_gateway", "native_programs")
+        if isinstance(entry, dict) and key in entry),
         f"{target} inputs")
     files = entry["files"]
     require(isinstance(files, dict) and 0 < len(files) <= MAX_INPUT_FILES, f"{target} needs pinned input files")
@@ -258,6 +259,20 @@ def validate_target(target, entry):
                                    f"v{version}/meta-rpc-gateway-{version}-{GATEWAY_TRIPLES[target]}.tar.gz")
                 and pin["member"] == "rpc_gateway",
                 f"{target} ordinary gateway must be the Meta {version} rpc_gateway release asset for {target}")
+
+    if "native_programs" in entry:
+        programs = entry["native_programs"]
+        require(target == "linux-x86_64" and isinstance(programs, dict) and bool(programs)
+                and programs.keys() <= {"collection", "provider"},
+                "supplemental native programs must name a Linux collection or provider")
+        used = {entry["gateway"], entry.get("ordinary_gateway")}
+        for role, pins in programs.items():
+            rc.exact_keys(pins, "executable evidence", f"{target} native {role}")
+            for kind, name in pins.items():
+                require(isinstance(name, str) and name in files and name not in used
+                        and not name.startswith(root + "/"),
+                        f"{target} native {role} {kind} must be a separate pinned input outside the product root")
+                used.add(name)
 
 
 def validate_inputs(value):
@@ -687,7 +702,9 @@ def fetch_inputs(args):
             else:
                 download(pin["url"], destination, pin["size"])
             check_bytes(destination, pin["size"], pin["sha256"], name)
-            destination.chmod(0o700 if name in {entry["gateway"], entry.get("ordinary_gateway")} else 0o600)
+            executables = {entry["gateway"], entry.get("ordinary_gateway")} | {
+                pins["executable"] for pins in entry.get("native_programs", {}).values()}
+            destination.chmod(0o700 if name in executables else 0o600)
     finally:
         shutil.rmtree(downloads)
     print(f"fetched {len(entry['files'])} pinned inputs for {args.target} into {output}")
@@ -718,8 +735,14 @@ def package(args):
             root.joinpath(*PurePosixPath(entry["ordinary_gateway"]).parts),
             entry["files"][entry["ordinary_gateway"]]["sha256"])
     require(args.output.name == package_name(forge_version(), args.target), "unexpected package name")
+    options = {"ordinary_gateway": ordinary} if ordinary is not None else {}
+    if "native_programs" in entry:
+        artifact_file = launchkit_module("runtime_candidates").ArtifactFile
+        options["native_programs"] = {role: {kind: artifact_file(
+            root.joinpath(*PurePosixPath(name).parts), entry["files"][name]["size"], entry["files"][name]["sha256"])
+            for kind, name in pins.items()} for role, pins in entry["native_programs"].items()}
     result = launchkit_module("product_distribution").package(ROOT / "installer", target, selected_guide, args.output,
-        **({"ordinary_gateway": ordinary} if ordinary is not None else {}))
+        **options)
     require(result["native_target"] == args.target, "the package was built for another target")
     print(json.dumps(result, sort_keys=True))
 

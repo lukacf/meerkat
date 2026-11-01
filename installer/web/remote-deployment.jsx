@@ -41,8 +41,9 @@ export function RemoteDeployment({ state, build, options, plan, blocked = false,
   const observation = saved.guideId !== state.id || saved.selectionToken !== selectionToken || selectionBlocked || busy ||
     removalSignal?.pending === true && !remoteCloudRemoval(receipt)
     ? "loading" : unavailable ? "unknown" : saved.observation;
-  useEffect(() => { onReceipt?.(receipt, { guideId: state.id, selectionToken, observation }); },
-    [receipt, state.id, selectionToken, observation, onReceipt]);
+  const retainedOperation = !!busy || connectionRequest.current.has(state.id);
+  useEffect(() => { onReceipt?.(receipt, { guideId: state.id, selectionToken, observation, retainedOperation }); },
+    [receipt, state.id, selectionToken, observation, retainedOperation, onReceipt]);
   blocked = blocked || !allowConnection || cloudRemoving;
   const cloudMode = receipt ? receipt.target === "gcp" : plan.target === "gcp";
   const selection = remoteSelectionKey(state, build), binding = receipt ? remoteReceiptBinding(receipt) : "";

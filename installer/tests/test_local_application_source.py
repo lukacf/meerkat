@@ -725,3 +725,14 @@ def test_builder_contract_distinguishes_protected_and_authorable_configuration()
     assert "automatic local product routes both with and without a setup helper" in text
     assert "report missing declarations to that source owner instead of editing or replacing the file" in text
     assert "Only where this file is authorable, declare additional private wizard fields" in text
+
+
+def test_builder_contract_reads_resolved_tools_with_their_source():
+    # A member that is not built yet answers no_build_recorded with an empty
+    # tools list, so an empty list alone is not the member's catalog.
+    from launchkit.implementation import APPLICATION_CONTRACT
+    text = " ".join(APPLICATION_CONTRACT.split())
+    assert "identity_resolved_tools_detail(identity) and read its tools_source" in text
+    assert "no_build_recorded with an empty tools list, which is no catalog" in text
+    assert "Warm or wake that member first" in text
+    assert "identity_resolved_tools(identity), or its" not in text

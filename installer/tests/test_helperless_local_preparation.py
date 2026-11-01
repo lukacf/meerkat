@@ -73,12 +73,18 @@ def test_helperless_local_defaults_request_only_actual_original_route_controller
     assert not {"helper", "acquisition"} & result.keys()
     assert set(result["authorities"]) == {"controllers"}
     native = result["owner"]["native_host"]
+    assert native["authentication_domain"] == {
+        "authority": native["ingress_domain"]["authority"], "namespace": "console-authentication"}
+    assert native["event_domain"] == {
+        "authority": native["ingress_domain"]["authority"], "namespace": "console-events"}
     assert len(native["members"]) == len(native["routes"]) == len(f.original["roster"])
     assert len(result["authorities"]["controllers"]) == len(native["routes"])
     for request, route in zip(result["authorities"]["controllers"], native["routes"]):
         assert request["target"] == {"kind": "original_route", "route": route["id"]}
         assert route["application_parent"] is route["controller_parent"] is None
         assert route["origin"]["requester"] == f.choices["console_operator"]
+        assert route["authentication_domain"] == native["authentication_domain"]
+        assert route["event_domain"] == native["event_domain"]
     assert f.checks == ["original-owner", "original-owner"]
     assert not {"limits", "initial_setup_identities", "backend_generation", "output_audience"} & f.choices.keys()
 
@@ -92,6 +98,8 @@ def test_local_class_defaults_join_the_actual_forge_plan_reader(selected, monkey
     monkeypatch.setattr(NativeApplicationInventory, "authenticate", lambda self: (deepcopy(f.original), deepcopy(actual)))
     declarations = f.owner.declarations(inventory)
     plan = json.loads(selected.host.preparation_plan(inventory, **declarations))
+    for name in ("authentication_domain", "event_domain"):
+        assert plan["owner"]["native_host"][name] == declarations["owner"]["native_host"][name]
     assert plan["application"]["roster"] == f.original["roster"]
     assert plan["application"]["member_classes"] == f.original["member_classes"]
     assert plan["owner"]["native_host"]["member_classes"] == f.original["member_classes"]
@@ -200,3 +208,24 @@ def test_helperless_initial_policy_contains_no_setup_helper_grants(selected, mon
         original["roster"] = []
     policy = json.loads(_initial_policy(Blueprint.model_validate(selected.spec), original, "original-guide"))
     assert policy["members"] == ([] if empty else [{"member_identity": "assistant:main", "grants": []}])
+
+
+@pytest.mark.parametrize("helper", [False, True])
+@pytest.mark.parametrize("legacy", [False, True])
+def test_recovered_declarations_preserve_original_console_domain_presence(tmp_path, monkeypatch, helper, legacy):
+    f = local_owner(tmp_path, original_inventory(helper=helper), monkeypatch)
+    original = f.owner.declarations(f.native)
+    if legacy:
+        native = original["owner"]["native_host"]
+        del native["authentication_domain"], native["event_domain"]
+    # Author the historical specimen before its retained selection is made.
+    plan = put(tmp_path / "original-plan.json", {"owner": original["owner"],
+        "authorities": original["authorities"]})
+    fresh = {"preparation_plan": plan.pin()}
+    f.owner._fresh_value = fresh
+    f.owner._fresh_pin = put(tmp_path / "original-fresh.json", fresh)
+    f.owner.factory._installed_admission = object()
+    monkeypatch.setattr(f.owner, "_recovery_admission", lambda value: value)
+    before = (plan.read(), f.owner._fresh_pin.read())
+    assert f.owner.declarations(f.native) == original
+    assert (plan.read(), f.owner._fresh_pin.read()) == before

@@ -36,14 +36,24 @@ def test_trial_retains_proposed_models_and_peers_without_old_registry_or_executi
     for profile in definition["profiles"].values():
         if profile["provider"] == "openai":
             assert profile["model"] == "gpt-6.1-sol"
-            assert profile["auth_binding"] == "fixture-host-route"
         else:
             assert (profile["provider"], profile["model"]) == ("anthropic", "claude-fixture-other-model")
-            assert "auth_binding" not in profile, "the guide host binding cannot be reused for another model route"
+        assert "auth_binding" not in profile, "Core cannot apply an auth binding from mob TOML"
         tools = profile["tools"]
         assert tools["comms"] is True
         assert all(tools[name] is False for name in ["mob", "shell", "builtins", "workgraph", "schedule"])
     assert resolved_blueprint(spec)["edges"], "this proposal still has its intended peer collaboration"
+
+
+def test_trial_refuses_a_changed_explicit_binding_before_compiling(selected, monkeypatch):
+    selected._model_route["auth_binding"] = "fixture-host-route"
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("A changed guide selection cannot reach trial compilation")
+
+    monkeypatch.setattr(worker, "mob_toml", forbidden)
+    with pytest.raises(RuntimeError, match="selected guide model route changed"):
+        worker.rehearsal_mob_toml(mixed_spec(), selected)
 
 
 def test_trial_host_credentials_cover_only_original_model_and_environment_remains_scoped(selected, tmp_path, monkeypatch):

@@ -11,14 +11,13 @@ import signal
 import sqlite3
 import sys
 import time
-import tomllib
 
 from .architect import _native_request, _schema
 from .blueprint import Blueprint
 from .compiler import _runtime, mob_toml
 from .implementation import now, update_receipt
 from .owned_worker import begin_worker_cleanup, end_after_owner_loss, owned_job_deadline, serve_as_owned_worker
-from .guide_runtime import selected_runtime, configure_builder, build_with_cleanup
+from .guide_runtime import selected_runtime, configure_builder, build_with_cleanup, worker_persistent_state
 from .rehearsal import (MAX_TRACE_BYTES, MAX_TRACE_FRAMES, REHEARSAL_SECONDS, REHEARSAL_IDLE_SECONDS,
     MAX_REHEARSAL_TURNS, MAX_COMMAND_BYTES, SCOPE, deadline_after, masked_capabilities, validate_trial)
 from .templates.storage_setup import project_lock, write_private
@@ -29,9 +28,8 @@ QUIET_SECONDS = 2
 def rehearsal_mob_toml(spec, selected=None):
     """Keep compiler roles, members, profiles and flows; mask execution grants."""
     selected = selected or selected_runtime()
+    selected.recheck()
     definition = mob_toml(spec, native_version=selected.version, guide_runtime=selected)
-    profiles = tomllib.loads(definition)["profiles"]
-    configuration = selected.model_configuration
     lines, in_tools = [], False
     for line in definition.splitlines():
         if line.startswith("["):
@@ -39,13 +37,6 @@ def rehearsal_mob_toml(spec, selected=None):
             lines.append(line)
             if in_tools:
                 lines.append("mob = false")
-            elif line.startswith("[profiles.") and line.endswith("]"):
-                profile = profiles.get(line[len("[profiles."):-1])
-                if (profile is not None and configuration is not None
-                        and configuration.get("auth_binding") is not None
-                        and (profile["provider"], profile["model"]) ==
-                            (configuration["provider"], configuration["model"])):
-                    lines.append("auth_binding = " + json.dumps(configuration["auth_binding"]))
             continue
         if in_tools and line.partition(" = ")[0] in {"builtins", "shell", "workgraph", "schedule"}:
             line = line.partition(" = ")[0] + " = false"
@@ -293,6 +284,7 @@ async def execute(directory, stop, commands=None):
     application, application_catalog = None, {}
     scope = frozen.get("scope", SCOPE)
     native_root = directory / "native"
+    state_path = worker_persistent_state(selected, native_root / ".meta/state")
     native_root.mkdir(mode=0o700)
     tools = FixtureTools(directory, fixtures["files"], fixtures["notes"])
 
@@ -343,7 +335,7 @@ async def execute(directory, stop, commands=None):
     owned_runtimes = []
     async def build():
         builder = (Meta.builder().mob_inline(rehearsal_mob_toml(spec, selected))
-            .persistent_state(str(native_root / ".meta/state")).roster(Roster()).topology_provider(Topology())
+            .persistent_state(state_path).roster(Roster()).topology_provider(Topology())
             .session_service(SessionBuilder()).agent_memory({"enabled": True,
                 "distiller": {"enabled": False}, "steward": {"enabled": False},
                 "content_trust": {"untrusted_tools": ["files_list", "files_read", "notes_search", "notes_save", "rehearsal_capabilities"]

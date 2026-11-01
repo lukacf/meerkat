@@ -6,6 +6,7 @@ specimens; this does not establish an installed restart or hosted acceptance.
 """
 from dataclasses import replace
 import hashlib
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
@@ -45,7 +46,7 @@ def newer_target(tmp_path):
 
 def upgraded_registry(f, newer_target, retained, *, gateway=None):
     store = GuideStore(f.store.root)
-    guide = GuideService(store, architect=None)
+    guide = GuideService(store, architect=SimpleNamespace())
     implementation = ImplementationService(f.implementation.root.parent, guide)
     service = deployment.DeploymentService(f.service.root.parent, guide, implementation)
     owner = LocalApplicationRegistry(guide_store=store, implementation=implementation,

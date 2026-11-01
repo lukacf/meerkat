@@ -44,7 +44,7 @@ def test_legacy_generated_startup_refuses_changed_retained_script_or_source_map(
         retained["start.sh"] = (content.replace(b"interpreter is unavailable", b"interpreter is available"), mode)
     else:
         bound["required_supervisor_sources"]["launchkit/templates/start.sh"] = "0" * 64
-    assert updates._archived_supervisor_sources(retained, bound, 4) is None
+    assert updates._archived_supervisor_sources(retained, bound, 6) is None
 
 
 def catalog_target(product, model="gpt-6-astra"):
@@ -120,7 +120,7 @@ def test_product_descriptor_requires_selected_current_framework_and_offline_byte
     descriptor = updates.runtime_dependency_transition(old, candidate, {}, runtime_target=target)
     assert descriptor is not None
     assert descriptor["kind"] == "selected-meta-toolkit-runtime-dependency-update"
-    assert descriptor["version"] == 4 and not descriptor["native_registry_update"]
+    assert descriptor["version"] == 6 and not descriptor["native_registry_update"]
     assert descriptor["runtime_candidate"] == selection.candidate_selection(target)
     assert descriptor["runtime_candidate_artifacts"]["sdk"] == selection._json_paths({"meta": asdict(target.meta), "toolkit": asdict(target.toolkit)})
     assert updates.runtime_dependency_transition(old, candidate, {"execution_mode": "background"}, runtime_target=target) is None
@@ -280,8 +280,8 @@ def staged_product_update(crossing, tmp_path):
     return directory, lambda: updates.stage(directory, packed(candidate), new_report, runtime_target=target)
 
 
-@pytest.mark.parametrize("host_glibc", [[2, 35], [2, 39]], ids=["glibc-2.35", "glibc-2.39"])
-def test_stage_refuses_a_product_update_below_the_declared_glibc_floor_before_staging(
+@pytest.mark.parametrize("host_glibc", [[2, 35], [2, 39], [2, 41]], ids=["glibc-2.35", "glibc-2.39", "glibc-2.41"])
+def test_stage_requires_exact_product_glibc_before_staging(
         previous_product_crossing, tmp_path, monkeypatch, host_glibc):
     # Without this, the update is staged and applied, and only the install
     # worker refuses it, after the current runtime has been retained. This
@@ -297,8 +297,8 @@ def test_stage_refuses_a_product_update_below_the_declared_glibc_floor_before_st
     monkeypatch.setattr(deployment, "forge_interpreter", lambda: {**LINUX_CP311, "glibc_minimum": host_glibc},
         raising=False)
     directory, stage = staged_product_update(previous_product_crossing, tmp_path)
-    if host_glibc < [2, 39]:
-        with pytest.raises(updates.DraftConflict, match=r"glibc 2\.39 or newer, but this computer has glibc 2\.35"):
+    if host_glibc != [2, 39]:
+        with pytest.raises(updates.DraftConflict, match=rf"exactly glibc 2\.39, but this computer has glibc {host_glibc[0]}\.{host_glibc[1]}"):
             stage()
         assert "update" not in updates.read_receipt(directory)
         assert not (directory / "updates").exists() or not any((directory / "updates").iterdir())

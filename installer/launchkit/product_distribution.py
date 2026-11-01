@@ -24,11 +24,82 @@ PUBLIC_EXTRA = {"LICENSE-MIT", "LICENSE-APACHE", "THIRD_PARTY_NOTICES.md"}
 ORDINARY_GATEWAY = "vendor/ordinary/rpc_gateway"
 MAX_TOTAL = 4 * 1024 * 1024 * 1024
 MAX_FILES = 8192
+# Supplemental executables are explicitly selected by the package owner. Their
+# original evidence is transported unchanged; this is not native qualification.
+NATIVE_PROGRAMS = {"collection": "forge-service-host", "provider": "meerkat-connect"}
+NATIVE_EVIDENCE_LIMIT = 16 * 1024 * 1024
+
+
+def _native_paths(role):
+    return {"executable": f"vendor/native/{role}/{NATIVE_PROGRAMS[role]}",
+        "evidence": f"vendor/native/{role}/evidence.json"}
+
+
+def _linux_elf(path):
+    # Header screening only. Build provenance, dynamic dependencies, protocol
+    # behavior and installed acceptance remain the native owners' contracts.
+    with Path(path).open("rb") as source:
+        header = source.read(64)
+    if (len(header) != 64 or header[:7] != b"\x7fELF\x02\x01\x01"
+            or int.from_bytes(header[16:18], "little") not in {2, 3}
+            or header[18:24] != b"\x3e\x00\x01\x00\x00\x00"
+            or int.from_bytes(header[52:54], "little") != 64):
+        raise legacy.DistributionError("A supplemental native program needs an ELF64 x86_64 header.")
+
+
+def _native_inputs(programs, target):
+    if (target != "linux-x86_64" or type(programs) is not dict or not programs
+            or not programs.keys() <= NATIVE_PROGRAMS.keys()):
+        raise legacy.DistributionError("Select named supplemental Linux native programs.")
+    sources, records, selected_paths = {}, {}, set()
+    for role, pins in programs.items():
+        if type(pins) is not dict or pins.keys() != {"executable", "evidence"}:
+            raise legacy.DistributionError("A native program needs exact executable and evidence pins.")
+        records[role] = {}
+        for kind, name in _native_paths(role).items():
+            pin = pins[kind]
+            if (type(pin) is not ArtifactFile or type(pin.size) is not int
+                    or type(pin.sha256) is not str or not legacy.HEX.fullmatch(pin.sha256)):
+                raise legacy.DistributionError("A native program needs exact executable and evidence pins.")
+            limit = MAX_PRODUCT_ARCHIVE_BYTES if kind == "executable" else NATIVE_EVIDENCE_LIMIT
+            hashed, size = _ordinary(pin.path, limit)
+            if (hashed, size) != (pin.sha256, pin.size) or pin.path.resolve() in selected_paths:
+                raise legacy.DistributionError("Native program inputs changed or reuse an input path.")
+            selected_paths.add(pin.path.resolve())
+            if kind == "executable":
+                _linux_elf(pin.path)
+            sources[name] = pin.path
+            records[role][kind] = {"path": name, "sha256": hashed, "bytes": size}
+    return sources, records
+
+
+def _verify_native_bindings(data, target, root=None):
+    programs = data.get("native_programs")
+    native_files = {name for name in data["files"] if name.startswith("vendor/native/")}
+    if programs is None and "native_programs" not in data and not native_files:
+        return
+    if (target != "linux-x86_64" or type(programs) is not dict or not programs
+            or not programs.keys() <= NATIVE_PROGRAMS.keys()):
+        raise legacy.DistributionError("The supplemental Linux native program selection is invalid.")
+    selected = set()
+    for role, records in programs.items():
+        if type(records) is not dict or records.keys() != {"executable", "evidence"}:
+            raise legacy.DistributionError("A native program lacks its executable or original evidence.")
+        for kind, name in _native_paths(role).items():
+            selected.add(name)
+            if (name not in data["files"] or records[kind] != {"path": name, **data["files"][name]}
+                    or data["file_modes"][name] != (0o700 if kind == "executable" else 0o600)
+                    or kind == "evidence" and data["files"][name]["bytes"] > NATIVE_EVIDENCE_LIMIT):
+                raise legacy.DistributionError("A supplemental native program binding differs from its files.")
+            if root is not None and kind == "executable":
+                _linux_elf(root / name)
+    if selected != native_files:
+        raise legacy.DistributionError("Supplemental native files must have one explicit program binding.")
 
 
 def candidate_readme(guide, target, origin, *, ordinary=False, glibc_floor=None):
-    # A Linux product's glibc floor is the one its resource build declares.
-    linux = "Linux x86_64" + (f" with glibc {glibc_floor[0]}.{glibc_floor[1]} or newer" if glibc_floor else "")
+    # The legacy field name carries the resource library's exact host version.
+    linux = "Linux x86_64" + (f" with exactly glibc {glibc_floor[0]}.{glibc_floor[1]}" if glibc_floor else "")
     host = (linux if target.target == "linux-x86_64"
         else "Apple Silicon macOS 13.5 or newer")
     ordinary_note = (f"\nApplications without a connection setup helper use the included Meta "
@@ -156,7 +227,7 @@ def _ordinary(path, limit, *, allow_empty=False):
 
 
 def _public_path(name):
-    if name in PUBLIC_EXTRA:
+    if name in PUBLIC_EXTRA or name in {name for role in NATIVE_PROGRAMS for name in _native_paths(role).values()}:
         return True
     if name.startswith("vendor/product/") or name in {"vendor/guide/rpc_gateway", ORDINARY_GATEWAY, guide_sdk.WHEEL}:
         from pathlib import PurePosixPath
@@ -187,7 +258,7 @@ def _pinned_guide_sdk():
         raise legacy.DistributionError(str(exc)) from exc
 
 
-def package(root, target, guide, output, *, ordinary_gateway=None):
+def package(root, target, guide, output, *, ordinary_gateway=None, native_programs=None):
     """Select public source and the actual owner's complete product closure.
 
     The target and guide selection come from the original trusted packaging
@@ -219,7 +290,7 @@ def package(root, target, guide, output, *, ordinary_gateway=None):
         artifacts = selected_runtime_artifacts(target)
         selection = candidate_selection(target, verified_artifacts=artifacts)
     inputs = _product_inputs(target, artifacts)
-    source_files = {}
+    source_files, native_records = ({}, None) if native_programs is None else _native_inputs(native_programs, target.target)
     for name in legacy.TOP_LEVEL | PUBLIC_EXTRA:
         path = root / name
         if name in PUBLIC_EXTRA and not path.exists():
@@ -279,8 +350,9 @@ def package(root, target, guide, output, *, ordinary_gateway=None):
             limit = MAX_PRODUCT_ARCHIVE_BYTES if name.startswith("vendor/") else legacy.MAX_FILE
             hashed, size = _ordinary(path, limit, allow_empty=not name.startswith("vendor/"))
             file_records[name] = {"sha256": hashed, "bytes": size}
-            modes[name] = dom_files.get(name, 0o700 if name in {"vendor/guide/rpc_gateway", ORDINARY_GATEWAY} else
-                0o755 if name == "start.sh" else 0o600 if name.startswith("vendor/product/") else 0o644)
+            modes[name] = dom_files.get(name, 0o700 if name in {"vendor/guide/rpc_gateway", ORDINARY_GATEWAY}
+                or any(name == _native_paths(role)["executable"] for role in NATIVE_PROGRAMS) else
+                0o755 if name == "start.sh" else 0o600 if name.startswith(("vendor/product/", "vendor/native/")) else 0o644)
             total += size
         if len(source_files) > MAX_FILES or total > MAX_TOTAL:
             raise legacy.DistributionError("The product distribution exceeds its bounds.")
@@ -306,6 +378,9 @@ def package(root, target, guide, output, *, ordinary_gateway=None):
                 "installed_use_accepted": False}}
         if ordinary is not None:
             data["ordinary"] = ordinary
+        if native_records is not None:
+            data["native_programs"] = native_records
+            _verify_native_bindings(data, target.target)
         content = (json.dumps(data, sort_keys=True, indent=2, ensure_ascii=True) + "\n").encode()
         output.parent.mkdir(parents=True, exist_ok=True)
         with output.open("xb") as stream, zipfile.ZipFile(stream, "w", compression=zipfile.ZIP_DEFLATED) as archive:
@@ -349,7 +424,7 @@ def verify(root):
     data = json.loads(raw, object_pairs_hook=legacy._unique_object)
     names = {"format", "product", "guide", "frontend_source_sha256", "dom_dependencies_sha256",
         "files", "file_modes", "support"}
-    if (type(data) is not dict or data.keys() not in (names, names | {"ordinary"}) or data["format"] != FORMAT
+    if (type(data) is not dict or not names <= data.keys() <= names | {"ordinary", "native_programs"} or data["format"] != FORMAT
             or type(data["files"]) is not dict or type(data["file_modes"]) is not dict
             or data["files"].keys() != data["file_modes"].keys()
             or not (legacy.REQUIRED | {"LICENSE-MIT", "LICENSE-APACHE", "vendor/guide/rpc_gateway"}) <= data["files"].keys()
@@ -373,6 +448,7 @@ def verify(root):
         total += size
         if total > MAX_TOTAL or record != {"sha256": hashed, "bytes": size}:
             raise legacy.DistributionError("Product distribution files changed. Unpack a fresh copy.")
+    _verify_native_bindings(data, product["selection"].get("target"), root)
     # Restore only the already byte-verified payload modes. ZIP extraction does
     # not reliably preserve permissions required by exact SDK/native custody.
     for name, mode in data["file_modes"].items():
@@ -408,6 +484,12 @@ def verify(root):
         if parent.is_symlink() or not parent.is_dir() or parent.stat().st_uid != os.getuid():
             raise legacy.DistributionError("The product runtime parent is not an owned ordinary directory.")
         parent.chmod(0o700)
+    if "native_programs" in data:
+        for role in data["native_programs"]:
+            for parent in (root / "vendor/native", root / "vendor/native" / role):
+                if parent.is_symlink() or not parent.is_dir() or parent.stat().st_uid != os.getuid():
+                    raise legacy.DistributionError("The native program parent is not an owned ordinary directory.")
+                parent.chmod(0o700)
     target = relocate_selection(product["selection"], product["paths"], root)
     selected_runtime_artifacts(target)
     if ordinary is not None and ordinary["version"] != target.meta.version:
@@ -415,7 +497,7 @@ def verify(root):
     guide = data["guide"]
     if (type(guide) is not dict or guide.keys() != {"version", "core_version", "meta_source", "core_source", "gateway", "sdk"}
             or guide["version"] != guide_sdk.SELECTED_VERSION
-            or guide["core_version"] != guide_sdk.SELECTED_VERSION
+            or guide["core_version"] != guide_sdk.declared_core_version()
             or guide["sdk"] != guide_sdk.selection()
             or guide_sdk.WHEEL not in data["files"]
             or guide["gateway"] != {"path": "vendor/guide/rpc_gateway",

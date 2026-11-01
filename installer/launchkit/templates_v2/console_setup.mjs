@@ -1,6 +1,6 @@
 // Presentation beside the native Console. The authenticated host owns all work.
 const PREFIX = "/console/forge/connect";
-const COMPLETIONS = new Set(["completed", "completed_without_result", "callback_pending", "callback_batch_pending", "cancelled", "abandoned", "abandoned_with_error", "completed_with_finalization_failure", "runtime_terminated"]);
+const COMPLETIONS = new Set(["completed", "completed_without_result", "callback_pending", "callback_batch_pending", "cancelled", "abandoned", "abandoned_with_error", "completed_with_finalization_failure", "runtime_terminated", "outcome_unknown"]);
 const COMMITTED = new Set(["completed", "completed_without_result"]);
 const STARTUP_REFUSALS = new Set(["native_auth_required", "required_context_missing", "unsupported_presenter"]);
 const PROVIDER_ACTIONS = new Set(["use", "enter_key", "sign_in", "back"]);
@@ -379,7 +379,7 @@ const startupRefusalLabels = {
 const completionLabels = {
   completed: "Response completed", completed_without_result: "Run completed without a reply", callback_pending: "Waiting for a protected decision",
   callback_batch_pending: "Waiting for protected decisions", cancelled: "Agent run cancelled", abandoned: "Run abandoned",
-  abandoned_with_error: "Run ended with an error", completed_with_finalization_failure: "Run finished, finalization failed", runtime_terminated: "Runtime terminated",
+  abandoned_with_error: "Run ended with an error", completed_with_finalization_failure: "Run finished, finalization failed", runtime_terminated: "Runtime terminated", outcome_unknown: "Outcome unknown",
 };
 
 export function mountConsoleSetup(container, options) {

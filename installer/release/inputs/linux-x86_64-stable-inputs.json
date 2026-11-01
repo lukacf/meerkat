@@ -1,0 +1,154 @@
+{
+  "schema_version": 1,
+  "kind": "forge-release-stable-inputs",
+  "target": "linux-x86_64",
+  "status": "Stable inputs of the next Linux target. forge-release.py does not read this file; the Linux target in forge-release-inputs.json changes only when every pending input is final.",
+  "files": {
+    "guide/rpc_gateway": {
+      "url": "https://github.com/lukacf/meerkat-meta/releases/download/v0.9.3/meta-rpc-gateway-0.9.3-x86_64-unknown-linux-gnu.tar.gz",
+      "archive_size": 101221673,
+      "archive_sha256": "b416df1ba5648ca3ed849dec2692f664c37b0e7277232a6d2421ac53961a18b0",
+      "member": "rpc_gateway",
+      "size": 479374128,
+      "sha256": "757519ed1210d16d865e2e37de3fba098a1cca6ccba6a7e1dc646963fb04a335"
+    },
+    "native/collection/evidence.json": {
+      "url": "https://github.com/lukacf/meerkat-meta/releases/download/forge-native-v0.3.0/forge-service-host-0.3.0-linux-x86_64.evidence.json",
+      "size": 23506,
+      "sha256": "3aac3fc09eb988afd74c551ef3efa226a11cc919693a4d4d94a2b00164fc58d0"
+    },
+    "native/collection/forge-service-host": {
+      "url": "https://github.com/lukacf/meerkat-meta/releases/download/forge-native-v0.3.0/forge-service-host-0.3.0-linux-x86_64.tar.gz",
+      "archive_size": 87079769,
+      "archive_sha256": "30cce9fdfc562f50feebc51c798599dbf23755d40d748354717ca810c49653a2",
+      "member": "forge-service-host-0.3.0-linux-x86_64/bin/forge-service-host",
+      "size": 459753872,
+      "sha256": "09f55c57ba43be7534f6268fd883bdab281690e3d40c19692d93ef62cba2011b"
+    },
+    "ordinary/rpc_gateway": {
+      "url": "https://github.com/lukacf/meerkat-meta/releases/download/v0.9.7/meta-rpc-gateway-0.9.7-x86_64-unknown-linux-gnu.tar.gz",
+      "archive_size": 116220251,
+      "archive_sha256": "2be9339a4fca4460de1900340082f110ae15128547532d8fd640386ed2686b6b",
+      "member": "rpc_gateway",
+      "size": 545758864,
+      "sha256": "652b598831ebaf70e76a320230e0ce49b759ec15d1ecccfcd1e092193eacd0d5"
+    },
+    "product/linux-x86_64/assembly.json": {
+      "path": "installer/release/inputs/product/linux-x86_64/assembly.json",
+      "size": 6252,
+      "sha256": "268d9aa1e1c0c08014c1a079b23ce0a5f15d623bd89e28b42e853dc834463e11"
+    },
+    "product/linux-x86_64/build-record.json": {
+      "path": "installer/release/inputs/product/linux-x86_64/build-record.json",
+      "size": 2045,
+      "sha256": "2a4ed564c343be175ccfa32e92319e5cecc7c2f1259e51213d19dae40dba72b8"
+    },
+    "product/linux-x86_64/derived-binary-record.json": {
+      "path": "installer/release/inputs/product/linux-x86_64/derived-binary-record.json",
+      "size": 1362,
+      "sha256": "abfbde9df2c7f2cdb964b327bc8609f2e3b86a32216b15c4c068fe159eab686f"
+    },
+    "product/linux-x86_64/gateway-verification.json": {
+      "path": "installer/release/inputs/product/linux-x86_64/gateway-verification.json",
+      "size": 55835,
+      "sha256": "7c190f5495516f3b81e7d2653c52878f75f6659d80d11d06990a7555cca00362"
+    },
+    "product/linux-x86_64/meerkat-connect-gateway-0.9.5-linux-x86_64.tar.gz.sha256": {
+      "path": "installer/release/inputs/product/linux-x86_64/meerkat-connect-gateway-0.9.5-linux-x86_64.tar.gz.sha256",
+      "size": 116,
+      "sha256": "5c6ffca299e06c10b135ac7fd13ddb198363d90df43bbd060a17ceecaeaa0124"
+    },
+    "product/linux-x86_64/meerkat_meta-0.9.7-py3-none-any.whl": {
+      "path": "installer/release/inputs/product/linux-x86_64/meerkat_meta-0.9.7-py3-none-any.whl",
+      "size": 210136,
+      "sha256": "350d5ef9aec971b345a360ebb6d5c54f262578068df539f59981b42edbe86c9e"
+    },
+    "product/linux-x86_64/model-catalog.json": {
+      "path": "installer/release/inputs/product/linux-x86_64/model-catalog.json",
+      "size": 58882,
+      "sha256": "c3bf3eb2f2000367921e2314672ef616d9e9baa7028cc0a037ff4463b9fceb00"
+    },
+    "product/linux-x86_64/resource-build-record.json": {
+      "path": "installer/release/inputs/product/linux-x86_64/resource-build-record.json",
+      "size": 4671,
+      "sha256": "d0cbde86f22e68b40b0303de4605b3744399bfb52350131982604fdf330beaaf"
+    },
+    "product/linux-x86_64/transformation-result.json": {
+      "path": "installer/release/inputs/product/linux-x86_64/transformation-result.json",
+      "size": 1206,
+      "sha256": "22df464f70793379cfb2630cf1a2fe7477de68685564babd4ddb1068020c07d7"
+    },
+    "product/linux-x86_64/transformation-start.json": {
+      "path": "installer/release/inputs/product/linux-x86_64/transformation-start.json",
+      "size": 1199,
+      "sha256": "d7c2449ea4abe3d13ba2ed450a99ffd685a773690b269625c0a89c26a989a4ec"
+    }
+  },
+  "pending_files": {
+    "native/provider/evidence.json": {
+      "url": null,
+      "size": null,
+      "sha256": null
+    },
+    "native/provider/meerkat-connect": {
+      "url": null,
+      "archive_size": null,
+      "archive_sha256": null,
+      "member": "meerkat-connect-linux-x86_64/bin/meerkat-connect",
+      "size": null,
+      "sha256": null
+    },
+    "product/linux-x86_64/dependency-requirements.txt": {
+      "size": null,
+      "sha256": null
+    },
+    "product/linux-x86_64/meerkat-connect-gateway-0.9.5-linux-x86_64.tar.gz": {
+      "url": null,
+      "size": 482238167,
+      "sha256": "147414661aa56ad5f7d4dca818c23b09e8f71fac5a40feee48861cd0ca6a86ba"
+    },
+    "product/linux-x86_64/meerkat_toolkit-0.9.5-py3-none-any.whl": {
+      "size": 516164,
+      "sha256": "f93db3b510f2be0f9d052fbb81e97b56363ba54fd04284e02efd25724bbcbd96"
+    },
+    "product/linux-x86_64/source-manifest.json": {
+      "size": 617989,
+      "sha256": "11176a73ce4e376cbce906d4133cbbcd8685ec2e06ab789944d83f85587d44b7"
+    }
+  },
+  "gateway": "guide/rpc_gateway",
+  "ordinary_gateway": "ordinary/rpc_gateway",
+  "native_programs": {
+    "collection": {
+      "executable": "native/collection/forge-service-host",
+      "evidence": "native/collection/evidence.json"
+    },
+    "provider": {
+      "executable": "native/provider/meerkat-connect",
+      "evidence": "native/provider/evidence.json"
+    }
+  },
+  "derivation_records": [
+    "product/linux-x86_64/derived-binary-record.json",
+    "product/linux-x86_64/transformation-start.json",
+    "product/linux-x86_64/transformation-result.json"
+  ],
+  "provider": {
+    "archive": "meerkat-connect-0.9.5-linux-x86_64.tar.gz",
+    "member": "meerkat-connect-linux-x86_64/bin/meerkat-connect",
+    "sidecar": "meerkat-connect-0.9.5-linux-x86_64.evidence.json",
+    "package_path": "vendor/native/provider/meerkat-connect"
+  },
+  "sources": {
+    "connect": {
+      "version": "0.9.5",
+      "commit": "bf183e2a5e9aaaf234723d6fb2b565c4b93cf9ca",
+      "tree": "fcf43572f7d66ca9459126af6538a70001c59bf9"
+    },
+    "meta": {
+      "version": "0.9.7",
+      "commit": "df3f8a653117414a9399a69e0567413ce0dd3aaf"
+    }
+  },
+  "required_resources_sha256": "aba32d4a5bf2a2238cae8aa5993ea83ce5fb8c2c79167cd05d30675d6c0fd8ae"
+}

@@ -136,8 +136,8 @@ test('selected review warns before acceptance and keeps Use this plan available'
     const shortcuts=document.querySelector('nav[aria-label="Try, build and run this proposal"]');
     assert.deepEqual({
       status:status.textContent,
-      buildShortcut:shortcuts.querySelector('a[href="#setup-implementation"]')?.textContent||null,
-      caption:document.querySelector('.setup-chat-top small').textContent,
+      buildShortcut:shortcuts?.querySelector('a[href="#setup-implementation"]')?.textContent||null,
+      caption:document.querySelector('.setup-current-status h2').textContent,
     },{
       status:setupProgress(state,{},{}).title,
       buildShortcut:null,
@@ -178,7 +178,7 @@ test('default unselected plan still offers package/install and admits its builde
   });
 });
 
-test('accepted available team keeps the header Build shortcut and optional package paths',async()=>{
+test('accepted available team keeps current-step navigation and optional package paths',async()=>{
   const {state}=fixture(false);
   const read=readControls(state);
   await mounted(React.createElement(GuidedSetup,{active:true,bp:null,Icon,onBlueprint:()=>{},config:{architect:{available:true}}}),async(url,options)=>{
@@ -190,10 +190,11 @@ test('accepted available team keeps the header Build shortcut and optional packa
     return read(url,options);
   },async(document,calls)=>{
     const shortcuts=document.querySelector('nav[aria-label="Try, build and run this proposal"]');
-    assert.equal(shortcuts.querySelector('a[href="#setup-implementation"]').textContent,'Build');
+    assert.equal(shortcuts === null,true,'Current-step controls replace the duplicate header shortcuts');
+    assert.ok(document.querySelector('.setup-current-status'), 'The current application outcome remains available');
     assert.equal(byText(document,'Download agent team package').disabled,false);
     assert.equal(byText(document,'Install agent team').disabled,false);
-    assert.match(document.querySelector('.setup-chat-top small').textContent,/ready to install/);
+    assert.match(document.querySelector('.setup-current-status h2').textContent,/ready to install/);
     assert.ok(!document.querySelector('.setup-visually-hidden[role="status"]').textContent.includes('package preparation is pending'));
     assert.equal(calls.filter(call=>call.method==='POST').length,0);
   },state);
@@ -288,7 +289,8 @@ test('package-pending plan keeps current saved-build navigation and continuation
     assert.notEqual(progress.kind,'package-pending');
     assert.equal(document.querySelector('.setup-visually-hidden[role="status"]').textContent,progress.title);
     const shortcuts=document.querySelector('nav[aria-label="Try, build and run this proposal"]');
-    assert.equal(shortcuts.querySelector('a[href="#setup-implementation"]').textContent,'Build');
+    assert.equal(shortcuts === null,true,'Current-step controls replace the duplicate header shortcuts');
+    assert.ok(document.querySelector('.setup-current-status'), 'The current application outcome remains available');
     assert.equal(byText(document,'Resume saved build').disabled,false);
     assert.equal(byText(document,'Rebuild with updated runtime').disabled,true);
     assert.equal(byText(document,'Download agent team package').disabled,true);

@@ -116,7 +116,7 @@ async def test_run_keeps_selected_gateway_and_sdk_types_through_host_callbacks(
 
     async def exercise(config, application):
         events.append("connect")
-        assert host.os.environ["META_IDENTITY_RESTORE_CONCURRENCY"] == ("1" if selected else "9")
+        assert host.os.environ["META_IDENTITY_RESTORE_CONCURRENCY"] == "9"
         assert host.os.environ["MOBKIT_IDENTITY_RESTORE_CONCURRENCY"] == ("7" if selected else "1")
         assert type(config) is config_type
         assert config.gateway_bin == str(selected_path if selected else ordinary)

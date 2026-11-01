@@ -141,7 +141,7 @@ test('the narrow Menu retains existing controls and closes with Escape without c
     await act(async () => menu.click());
     assert.equal(menu.getAttribute('aria-expanded'), 'true');
     assert.equal(actions.classList.contains('is-open'), true);
-    for (const label of ['Your setups', 'Guide settings', 'Saved tools', 'Configuration'])
+    for (const label of ['Your setups', 'Guide settings', 'Advanced configuration'])
       assert.ok([...actions.querySelectorAll('button')].some(button => button.textContent.includes(label)), label);
     assert.equal(actions.querySelector('.setup-provider-model').textContent, 'gpt-6.1-sol');
     const histories = actions.querySelector('.setup-history-control > button');
@@ -163,7 +163,7 @@ test('the narrow Menu retains existing controls and closes with Escape without c
   });
 });
 
-test('actual textarea focus compacts mobile chrome and preserves native mounts, accessible attachment control and growing draft', async () => {
+test('actual textarea focus preserves mobile navigation mounts, accessible attachment control and growing draft', async () => {
   await mount({ narrow: true, draft: '', selected: [] }, async ({ document, window, calls, input, local, setNarrow }) => {
     const shell = document.querySelector('.setup-shell'), textarea = document.querySelector('#setup-message');
     const native = document.querySelector('[data-native-console-chat]'), header = document.querySelector('.setup-header');
@@ -230,7 +230,7 @@ test('mobile New response sits above the conversation and only opening the exact
     const scroll = document.querySelector('.setup-chat-scroll'), before = local.get(input.key);
     assert.ok(scroll.querySelector('.cc-message--assistant'), 'The real native transcript contains the saved reply');
     assert.ok(notice(), 'Automatic decision arrival does not claim the off-screen reply was read');
-    assert.equal(notice().parentElement.className, 'setup-mobile-response');
+    assert.equal(notice().closest('.setup-journey-now') !== null, true);
     assert.ok(notice().parentElement.compareDocumentPosition(scroll) & window.Node.DOCUMENT_POSITION_FOLLOWING);
     assert.equal(document.querySelector('.setup-composer-area .setup-new-response') === null, true);
     await act(async () => {
@@ -272,13 +272,13 @@ test('the real composer uploads multipart files, previews and removes them, then
 
 test('a fresh anonymous setup keeps Saved tools closed and never reads a null guide', async () => {
   await mount({ state: { ...structuredClone(guide), id: null } }, async ({ document, calls, input }) => {
-    const button = [...document.querySelectorAll('button')].find(node => node.textContent === 'Saved tools');
-    assert.ok(button);
-    assert.equal(button.disabled, true);
-    assert.equal(button.getAttribute('aria-expanded'), 'false');
+    const disclosure = document.querySelector('.setup-advanced-tools');
+    assert.ok(disclosure);
+    assert.equal(disclosure.open, false);
+    assert.equal([...document.querySelectorAll('button')].some(node => node.textContent === 'Import saved tool'), false);
     assert.equal(document.querySelector('.setup-saved-tools') === null, true);
-    await act(async () => { button.click(); await pause(); });
-    assert.equal(button.getAttribute('aria-expanded'), 'false');
+    await act(async () => { disclosure.querySelector('summary').click(); await pause(); });
+    assert.equal([...document.querySelectorAll('button')].some(node => node.textContent === 'Import saved tool'), false);
     assert.equal(document.querySelector('.setup-saved-tools') === null, true);
     assert.equal(calls.some(call => call.url.includes('/toolkit-saved')), false);
     assert.equal(document.querySelector('#setup-message').value, input.draft);
@@ -293,7 +293,8 @@ test('discussing an approved saved-tool review preserves the real unsent note, c
     selection: { request_id: '1'.repeat(32), request_sha256: 'a'.repeat(64), version: guide.version },
     review: { status: 'review_required', profile: 'gmail', values: {}, prior_operations: ['old_operation'], unapplied: [] } };
   await mount({ session, savedToolkit }, async ({ document, calls, input }) => {
-    await act(async () => { [...document.querySelectorAll('button')].find(node => node.textContent === 'Saved tools').click(); await pause(); });
+    await act(async () => { document.querySelector('.setup-advanced-tools summary').click(); await pause(); });
+    await act(async () => { [...document.querySelectorAll('button')].find(node => node.textContent === 'Import saved tool').click(); await pause(); });
     assert.equal(calls.filter(call => call.method === 'POST').length, 0);
     await act(async () => { [...document.querySelectorAll('button')].find(node => node.textContent === 'Discuss how this fits my mob').click(); await pause(); });
     const posted = calls.find(call => call.url.endsWith('/respond')).body;
@@ -668,18 +669,22 @@ test('only positively available image analysis suppresses the notice, and docume
   }
 });
 
-test('actual navigation cancels the old upload, hides its late failure and allows the new guide upload without losing old checked refs', async () => {
+for (const outcome of ['success', 'error']) test(`navigation cancels the old upload and fences late ${outcome} while the new guide uploads`, async () => {
   const other = { ...structuredClone(guide), id: 'other-file-guide', name: 'Other saved setup',
     question: { ...guide.question, title: 'Other saved question' } };
   const session = new Map();
   createGuideAttachmentStore(() => storage(session)).add(guide.id, [ref('kept.md')]);
-  let failOld;
-  await mount({ session, otherGuides: [other], onPost: ({ url }) => {
+  let finishOld, finishNew;
+  await mount({ session, otherGuides: [other, { ...structuredClone(guide), name: 'Original saved setup' }], onPost: ({ url }) => {
     if (url === `/api/guide/${guide.id}/attachments`) return new Promise(resolve => {
-      failOld = () => resolve({ httpError: 422, detail: 'Old guide upload failed.' });
+      finishOld = () => resolve(outcome === 'success' ? { attachments: [ref('late.png', 4)] }
+        : { httpError: 422, detail: 'Old guide upload failed.' });
     });
-    if (url === `/api/guide/${other.id}/attachments`) return { attachments: [ref('new.md', 2, other.id)] };
-  } }, async ({ document, choose, calls }) => {
+    if (url === `/api/guide/${other.id}/attachments`) return new Promise(resolve => {
+      finishNew = () => resolve({ attachments: [ref('new.md', 2, other.id)] });
+    });
+  } }, async ({ document, choose, calls, input, local }) => {
+    const savedDraft = local.get(input.key);
     await choose('late.png');
     const oldUpload = calls.find(call => call.url === `/api/guide/${guide.id}/attachments`);
     assert.match(document.querySelector('.setup-attachments [role="status"]').textContent, /Uploading/);
@@ -691,13 +696,33 @@ test('actual navigation cancels the old upload, hides its late failure and allow
     assert.equal(document.querySelector('.setup-attachments [role="alert"]') === null, true);
     assert.equal(document.querySelector('.setup-attachments a') === null, true);
     await choose('new.md');
-    assert.equal(document.querySelector('.setup-attachments a').getAttribute('href'), ref('new.md', 2, other.id).url);
-    await act(async () => { failOld(); await pause(); });
+    const newUpload = calls.find(call => call.url === `/api/guide/${other.id}/attachments`);
+    assert.match(document.querySelector('.setup-attachments [role="status"]').textContent, /Uploading/);
+    await act(async () => { finishOld(); await pause(); });
+    assert.equal(newUpload.signal.aborted, false, 'The abandoned upload cannot cancel the new owner.');
+    assert.match(document.querySelector('.setup-attachments [role="status"]').textContent, /Uploading/);
+    assert.equal(document.querySelector('#setup-send').disabled, true, 'The new upload still owns the pending state.');
+    assert.equal(document.querySelector('.setup-attachments a') === null, true, 'A late success cannot publish the old file here.');
     assert.doesNotMatch(document.body.textContent, /Old guide upload failed/);
+    const beforeCompletion = createGuideAttachmentStore(() => storage(session));
+    assert.deepEqual(beforeCompletion.read(guide.id), [ref('kept.md')], 'A late success cannot add the old pending file to saved refs.');
+    assert.deepEqual(beforeCompletion.read(other.id), []);
+    await act(async () => { finishNew(); await pause(); });
+    assert.equal(document.querySelector('.setup-attachments [role="status"]') === null, true);
+    assert.equal(document.querySelector('.setup-attachments a').getAttribute('href'), ref('new.md', 2, other.id).url);
     assert.equal(document.querySelector('.setup-attachments a').textContent, 'new.md');
     const recovered = createGuideAttachmentStore(() => storage(session));
     assert.deepEqual(recovered.read(guide.id), [ref('kept.md')]);
     assert.deepEqual(recovered.read(other.id), [ref('new.md', 2, other.id)]);
+    // Errors are scoped to their original guide, so inspect it again after
+    // the new upload completes to expose an incorrectly retained late error.
+    await act(async () => [...document.querySelectorAll('button')].find(node => node.textContent.includes('Your setups')).click());
+    await act(async () => { [...document.querySelectorAll('.setup-history-menu button')].find(node => node.textContent.includes('Original saved setup')).click(); await pause(); });
+    assert.match(document.body.textContent, /Which evidence\?/);
+    assert.doesNotMatch(document.body.textContent, /Old guide upload failed/);
+    assert.equal(document.querySelector('.setup-attachments [role="alert"]') === null, true);
+    assert.equal(document.querySelector('.setup-attachments a').textContent, 'kept.md');
+    assert.equal(local.get(input.key), savedDraft, 'Navigation and late completion preserve the old guide draft and choices.');
     assert.equal(calls.filter(call => call.url.endsWith('/respond')).length, 0);
   });
 });
@@ -1012,5 +1037,98 @@ test('first turn transition restores the initial question after refusal or inter
     assert.ok(document.querySelector('.setup-native-chat').textContent.includes(sent));
     assert.equal(document.querySelector('#setup-message').value, next);
     assert.equal(calls.filter(call => call.method === 'POST').length, 0);
+  });
+});
+
+
+test('expired-session send refusal offers host sign-in and preserves draft without replay', async () => {
+  const draft = '  Check GHE and Slack before building. Keep this exact draft.  ';
+  await mount({draft, selected:[], onPost: () => ({httpError:401,detail:'Current sign-in required'}),
+    onRead: ({url}) => url === '/api/architect/status' ? {available:true,status:'ready'} : null,
+    setupDom: ({window: {document}}) => {
+      const meta=document.createElement('meta'); meta.name='forge-sign-in'; meta.content='/host/login';
+      document.head.append(meta);
+    }}, async ({document,calls,local,input}) => {
+      await act(async () => {document.querySelector('#setup-send').click(); await pause();});
+      const alert = document.querySelector('.setup-sign-in-anchor[role="alert"]');
+      assert.ok(alert); assert.match(alert.textContent,/Sign in to continue/);
+      assert.doesNotMatch(document.body.textContent,/Live updates interrupted|Let's pick up from here/);
+      assert.equal(alert.querySelector('a').getAttribute('href'),'/host/login');
+      assert.equal(alert.querySelector('a').target,'_blank');
+      assert.equal(document.querySelector('#setup-message').value,draft);
+      assert.equal(document.querySelector('#setup-send').disabled,true);
+      assert.equal(JSON.parse(local.get(input.key)).draft,draft);
+      assert.equal(calls.filter(c=>c.method==='POST').length,1);
+      await act(async () => {[...alert.querySelectorAll('button')].find(b=>b.textContent==='Check sign-in').click(); await pause();});
+      assert.equal(document.querySelector('.setup-sign-in-anchor[role="alert"]') === null, true);
+      assert.equal(document.querySelector('#setup-send').disabled,false);
+      assert.equal(document.querySelector('#setup-message').value,draft);
+      assert.equal(calls.filter(c=>c.method==='POST').length,1,'Authentication recovery never resends the correction.');
+    });
+});
+
+for (const mode of ['mobile Escape', 'mobile Close', 'resized desktop Escape']) test(`deployment dialog returns focus to visible navigation after ${mode}`, async () => {
+  await mount({ narrow: true, onRead: ({ url }) => url.startsWith('/api/guide/list') ? { setups: [] } : undefined,
+    setupDom: dom => {
+      dom.window.HTMLDialogElement.prototype.showModal = function () { this.open = true; };
+      dom.window.HTMLDialogElement.prototype.close = function () { this.open = false; };
+    } }, async ({ document, window, calls, input, local, setNarrow }) => {
+    const menu = document.querySelector('.setup-mobile-menu-toggle');
+    const trigger = [...document.querySelectorAll('button')].find(node => node.textContent === 'My deployments');
+    const textarea = document.querySelector('#setup-message'), before = local.get(input.key);
+    await act(async () => { menu.click(); });
+    await act(async () => { trigger.focus(); trigger.click(); await pause(); });
+    assert.equal(menu.getAttribute('aria-expanded'), 'false');
+    assert.equal(document.querySelector('#setup-header-menu').classList.contains('is-open'), false);
+    const dialog = document.querySelector('dialog');
+    assert.ok(dialog?.open);
+    if (mode.startsWith('resized')) await setNarrow(false);
+    await act(async () => {
+      if (mode.endsWith('Close')) [...dialog.querySelectorAll('button')].find(node => node.textContent === 'Close').click();
+      else dialog.dispatchEvent(new window.Event('cancel', { bubbles: true, cancelable: true }));
+      await pause();
+    });
+    assert.equal(document.querySelector('dialog') === null, true);
+    assert.ok(document.activeElement === (mode.startsWith('resized') ? trigger : menu));
+    assert.ok(document.querySelector('#setup-message') === textarea);
+    assert.equal(textarea.value, input.draft);
+    assert.equal(local.get(input.key), before);
+    assert.deepEqual(calls.filter(call => call.method === 'POST'), []);
+  });
+});
+
+test('deployments modal presents authoritative sign-in recovery and only refreshes reads after renewal', async () => {
+  let signedOut = false;
+  await mount({ narrow: true, onRead: ({ url }) => {
+    if (url.startsWith('/api/guide/list?')) return signedOut
+      ? { httpError: 401, detail: 'Sign in required' } : { setups: [] };
+    if (url.includes('/timeline') && signedOut) return { httpError: 401, detail: 'Sign in required' };
+  }, setupDom: dom => {
+    const meta = dom.window.document.createElement('meta');
+    meta.name = 'forge-sign-in'; meta.content = '/sign-in'; dom.window.document.head.append(meta);
+    dom.window.HTMLDialogElement.prototype.showModal = function () { this.open = true; };
+    dom.window.HTMLDialogElement.prototype.close = function () { this.open = false; };
+  } }, async ({ document, calls, input, local }) => {
+    const button = (label, scope = document) => [...scope.querySelectorAll('button')].find(node => node.textContent === label);
+    const before = local.get(input.key), textarea = document.querySelector('#setup-message');
+    await act(async () => { document.querySelector('.setup-mobile-menu-toggle').click(); });
+    await act(async () => { button('My deployments').click(); await pause(); });
+    const dialog = document.querySelector('dialog');
+    assert.match(dialog.textContent, /No saved deployments/);
+    signedOut = true;
+    await act(async () => { button('Refresh deployments', dialog).click(); await pause(); });
+    assert.match(dialog.textContent, /Sign in to continue/);
+    assert.doesNotMatch(dialog.textContent, /No saved deployments|could not be listed/);
+    assert.equal(dialog.querySelector('a').getAttribute('href'), '/sign-in');
+    assert.equal(document.querySelectorAll('.setup-error').length, 1, 'Only the modal owns visible auth recovery.');
+    await act(async () => { button('Check sign-in', dialog).click(); await pause(); });
+    assert.match(dialog.textContent, /Sign-in could not be confirmed/);
+    signedOut = false;
+    await act(async () => { button('Check sign-in', dialog).click(); await pause(); });
+    assert.match(dialog.textContent, /No saved deployments/);
+    assert.doesNotMatch(dialog.textContent, /Sign in to continue|could not be listed/);
+    assert.equal(local.get(input.key), before); assert.equal(textarea.value, input.draft);
+    assert.ok(calls.filter(call => call.url.includes('/timeline')).length >= 3);
+    assert.deepEqual(calls.filter(call => call.method === 'POST'), []);
   });
 });

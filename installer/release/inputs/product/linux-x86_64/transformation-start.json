@@ -1,0 +1,36 @@
+{
+  "argv": [
+    "/usr/bin/x86_64-linux-gnu-objcopy",
+    "--strip-debug",
+    "/mnt/connect-release/a1/parent/20261031T215548Z/binary/toolkit_gateway",
+    "/mnt/connect-release/a1/out/derived-gateway/toolkit_gateway"
+  ],
+  "binary_kind": "toolkit_gateway",
+  "cwd": "/",
+  "environment": {
+    "LC_ALL": "C",
+    "PATH": "/usr/bin:/bin"
+  },
+  "input": {
+    "path": "/mnt/connect-release/a1/parent/20261031T215548Z/binary/toolkit_gateway",
+    "sha256": "938c232480c0b1f3dbd13f07ccf511dd0b339f15193927e275ae2a222cb9cb8a",
+    "size": 2544390736
+  },
+  "kind": "meerkat_connect_strip_debug_start",
+  "output": {
+    "path": "/mnt/connect-release/a1/out/derived-gateway/toolkit_gateway"
+  },
+  "producer": {
+    "path": "/mnt/connect-release/a1/tools/derive-strip-debug.py",
+    "sha256": "c5aed01ca0b8d304b262ecef92bc4d952125eab25c2336f1ffdd4e1cf583d373"
+  },
+  "schema_version": 1,
+  "started_at": "2026-10-31T22:56:57.891308Z",
+  "term_grace_seconds": 15.0,
+  "timeout_seconds": 900,
+  "tool": {
+    "path": "/usr/bin/x86_64-linux-gnu-objcopy",
+    "sha256": "9276e918e3c26d3aa7ef9dd2232cd8ac692f03d3c1f270bfa5144a2b5492b713",
+    "version": "GNU objcopy (GNU Binutils for Ubuntu) 2.42"
+  }
+}

@@ -88,15 +88,15 @@ test('returning-user status: actual guide keeps current navigation outside its l
     const document = dom.window.document, scroll = document.querySelector('.setup-chat-scroll');
     const anchor = document.querySelector('.setup-current-status');
     assert.ok(anchor, 'The actual mounted guide renders the current projection.');
-    assert.equal(anchor.parentNode === scroll.parentNode, true);
+    assert.equal(anchor.closest('.setup-journey-now') !== null, true);
     assert.equal(scroll.contains(anchor), false);
     assert.ok(anchor.compareDocumentPosition(scroll) & dom.window.Node.DOCUMENT_POSITION_FOLLOWING);
     assert.match(anchor.textContent, /Your installed custom application is running/);
     assert.match(scroll.textContent, /Your application is currently stopped and native runtime availability is false/);
     assert.ok(scroll.textContent.includes('This is a retained historical explanation. '.repeat(45).trim()));
     assert.equal(guide.messages[1].text, oldReply, 'Historical source text stays exact.');
-    assert.ok(scroll.querySelector('.setup-progress-card'), 'The full current status card remains available.');
-    assert.equal(document.querySelector('.setup-conversation-history-boundary').parentNode === scroll.parentNode, true);
+    assert.ok(anchor.querySelector('h2') && anchor.querySelector('p'), 'The current status title and detail remain available outside history.');
+    assert.equal(document.querySelector('.setup-journey-now').parentNode === scroll.parentNode, true);
     const button = anchor.querySelector('button');
     assert.equal(button.textContent.trim(), 'Use your application');
     assert.equal(button.disabled, false);
@@ -108,7 +108,7 @@ test('returning-user status: actual guide keeps current navigation outside its l
     const captured = button[Object.keys(button).find(key => key.startsWith('__reactProps$'))].onClick;
     await render({ appError: 'Current application request failed.' });
     assert.equal(document.querySelector('.setup-current-status') === null, true, 'A transient error remains primary.');
-    assert.match(document.querySelector('.setup-chat-top').textContent, /The guide needs your attention/);
+    assert.match(document.querySelector('.setup-journey-now').textContent, /The guide needs your attention/);
     await act(async () => { captured({ currentTarget: button }); await settle(); });
     assert.equal(revealed.length, 1, 'A detached old anchor cannot reveal another status panel.');
     guide.operation = { status: 'failed', detail: 'Your installed custom application is running' };
@@ -117,7 +117,7 @@ test('returning-user status: actual guide keeps current navigation outside its l
     await render();
     assert.equal(document.querySelector('.setup-current-status') === null, true,
       'Saved failure wording identical to the application title cannot become an application-status anchor.');
-    assert.match(document.querySelector('.setup-chat-top').textContent, /Your installed custom application is running/);
+    assert.match(document.querySelector('.setup-journey-now').textContent, /Your installed custom application is running/);
     await render({ active: false });
     await act(async () => { captured({ currentTarget: button }); await settle(); });
     assert.equal(revealed.length, 1, 'An inactive guide cannot reuse the captured navigation.');

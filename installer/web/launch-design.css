@@ -39,6 +39,12 @@
 .setup-shell .setup-chat-top small { color: var(--setup-muted); font-size: 12px; line-height: 1.5; }
 .setup-shell .setup-chat-top i { background: var(--setup-accent); }
 .setup-shell .setup-chat-scroll { padding: 28px 24px; scrollbar-color: #ccc9c0 transparent; }
+.setup-shell .setup-conversation > .setup-sign-in-anchor {
+  flex: 0 0 auto;
+  margin: 14px 24px 0;
+  padding: 14px 16px;
+}
+.setup-sign-in-anchor a, .setup-sign-in-anchor button { display: inline-block; margin-right: 10px; }
 .setup-shell .setup-current-status {
   flex: 0 0 auto;
   display: flex;
@@ -55,6 +61,8 @@
 .setup-shell .setup-current-status .setup-eyebrow { font-size: 10px; letter-spacing: .08em; color: var(--setup-muted); }
 .setup-shell .setup-current-status h2 { margin: 4px 0 0; font-size: 15px; line-height: 1.4; letter-spacing: -.015em; font-weight: 650; }
 .setup-shell .setup-current-status-note { margin: 5px 0 0; font-size: 12px; line-height: 1.5; color: var(--setup-muted); }
+.setup-shell .setup-status-options { flex-basis: 100%; padding: 0; }
+.setup-shell .setup-status-options > summary { padding: 4px 0; }
 .setup-shell .setup-current-status > button,
 .setup-shell .setup-current-status > a {
   display: inline-flex;
@@ -268,6 +276,11 @@
     margin-inline: auto;
   }
 }
+@media (min-width: 761px) {
+  .setup-shell .setup-columns:has(.setup-plan-details:not([open])) { position: relative; grid-template-columns: minmax(0, 1fr); }
+  .setup-shell .setup-plan-pane:has(.setup-plan-details:not([open])) { position: absolute; top: 0; right: 8px; z-index: 2; background: transparent; }
+  .setup-shell .setup-columns:has(.setup-plan-details:not([open])) .setup-chat-top { padding-right: 220px; }
+}
 @media (max-width: 760px) {
   .setup-shell .setup-header { min-height: 52px; padding: 4px 14px; flex-wrap: nowrap; position: relative; gap: 8px; }
   .setup-shell .setup-brand strong { font-size: 17px; }
@@ -282,8 +295,7 @@
   .setup-shell .setup-header-actions .setup-history-menu > button { min-height: 44px; }
   .setup-shell .setup-mobile-tabs { padding: 2px 14px; gap: 8px; }
   .setup-shell .setup-mobile-tabs button { min-height: 36px; padding: 4px 10px; }
-  .setup-shell.setup-composer-focused > .setup-header,
-  .setup-shell.setup-composer-focused > .setup-mobile-tabs { display: none; }
+  /* Keep workspace navigation available while the composer has focus. */
   .setup-shell .setup-chat-top,
   .setup-shell .setup-chat-top.has-lifecycle { min-height: 40px; padding: 4px 14px; gap: 8px; flex-wrap: nowrap; }
   .setup-shell .setup-chat-top > span { flex-shrink: 0; font-size: 12px; }
@@ -314,4 +326,13 @@
   .setup-shell.setup-has-draft .setup-composer-area .cc-composer__textarea { height: 88px; min-height: 88px; max-height: min(180px, 28dvh); }
   .setup-shell .setup-composer-foot { display: none; }
   .setup-shell .evolving-plan .ep-inner { padding: 20px 14px; }
+}
+
+.setup-shell .setup-advanced-tools > summary { min-height: 36px; box-sizing: border-box; padding: 8px 10px; }
+@media (min-width: 701px) and (max-width: 760px) {
+  /* The host account disclosure uses the same breakpoint as the Forge menu. */
+  .setup-shell [data-forge-workspace-slot] > details > div { position: static !important; width: 100%; max-width: none; box-shadow: none; }
+}
+@media (max-width: 760px) {
+  .setup-shell .setup-advanced-tools > summary { min-height: 44px; padding: 12px 10px; }
 }

@@ -238,6 +238,68 @@ async def test_shipping_sdk_inherits_unchanged_role_for_send_and_keyed_dispatch(
     await runtime.shutdown()
 
 
+async def test_sdk_agent_handle_track_turn_keyword_keeps_unchanged_role_send(tmp_path, monkeypatch):
+    # From 0.8.43 on (a generated package pins 0.8.47), the SDK's agent handle
+    # passes track_turn to every send.
+    runtime, deployment, _, _, admissions, _, _ = await host_fixture(tmp_path, monkeypatch)
+    identity = deployment["agents"][0]["identity"]
+    assert await runtime.send(identity, "Use that correction", track_turn=False) == "native send admission"
+    with pytest.raises(RuntimeError, match="No input was sent"):
+        await runtime.send(identity, "Track this turn", track_turn=True)
+    assert admissions == [("send", identity, "Use that correction", {})]
+    await runtime.shutdown()
+
+
+@pytest.mark.parametrize("path", ["inherited", "carrier-parameter", "carrier-rpc"])
+async def test_tracked_send_reaches_an_sdk_send_that_accepts_track_turn(tmp_path, monkeypatch, path):
+    # The 0.8.47 SDK's send accepts track_turn. The host forwards it on each
+    # admission path: the inherited send, a send with a system_prompt
+    # parameter, and the raw carrier request.
+    runtime, deployment, _, calls, admissions, _, _ = await host_fixture(
+        tmp_path, monkeypatch, carrier=path != "inherited")
+    identity = deployment["agents"][0]["identity"]
+    native_runtime = type(runtime).__mro__[1]
+    original_send = native_runtime.send
+
+    if path == "carrier-parameter":
+        async def send(self, selected, content, *, system_prompt=None, track_turn=False):
+            return await original_send(self, selected, content, system_prompt=system_prompt,
+                                       track_turn=track_turn)
+    else:
+        async def send(self, selected, content, *, track_turn=False):
+            return await original_send(self, selected, content, track_turn=track_turn)
+
+    monkeypatch.setattr(native_runtime, "send", send)
+    original_rpc = runtime._rpc
+
+    async def rpc(method, params):
+        if method == "mobkit/send":
+            calls.append((method, copy.deepcopy(params)))
+            return "native carrier admission"
+        return await original_rpc(method, params)
+
+    monkeypatch.setattr(runtime, "_rpc", rpc)
+    result = await runtime.send(identity, "Track this turn", track_turn=True)
+    instructions = deployment["classes"][0]["instructions"]
+    carried = [params for method, params in calls if method == "mobkit/send"]
+    if path == "carrier-rpc":
+        assert result == "native carrier admission" and admissions == []
+        assert len(carried) == 1
+        assert (carried[0]["identity"], carried[0]["content"], carried[0]["track_turn"]) == (
+            identity, "Track this turn", True)
+        assert instructions in carried[0]["system_prompt"]
+    else:
+        assert result == "native send admission" and carried == []
+        assert len(admissions) == 1 and admissions[0][:3] == ("send", identity, "Track this turn")
+        kwargs = admissions[0][3]
+        assert kwargs["track_turn"] is True
+        if path == "carrier-parameter":
+            assert instructions in kwargs["system_prompt"]
+        else:
+            assert "system_prompt" not in kwargs
+    await runtime.shutdown()
+
+
 async def test_later_native_role_change_is_refused_before_another_admission(tmp_path, monkeypatch):
     runtime, deployment, page, calls, admissions, _, _ = await host_fixture(tmp_path, monkeypatch)
     identity = deployment["agents"][0]["identity"]

@@ -171,8 +171,15 @@
 /* ── Glance ──────────────────────────────────────────────────────────── */
 
 .memory-glance.cc-glance { grid-template-columns: minmax(0, 1.35fr) repeat(3, minmax(0, 1fr)); }
-.memory-glance__marks { display: inline-flex; align-items: center; gap: 5px; margin-left: 6px; align-self: center; }
-.memory-glance__trend { display: block; }
+.memory-glance__marks { display: inline-flex; align-items: center; gap: 5px; align-self: center; }
+/* A chart as wide as its slot (FluidSparkline): the slot sets the width. */
+.memory-fluid { display: block; width: 100%; min-width: 0; overflow: hidden; }
+/* A figure's meter sits beside the value while there is room for it and
+   moves under the value when there is not; the hero's chart then takes the
+   room the figure leaves, up to its own width. */
+.memory-glance .cc-figure__fig { flex-wrap: wrap; row-gap: 4px; }
+.memory-glance .cc-figure__meter { margin-left: 0; }
+.memory-glance .cc-figure--hero .cc-figure__meter { flex: 1 1 64px; min-width: 64px; max-width: 128px; }
 
 /* ── Holdings: checks strip ──────────────────────────────────────────── */
 
@@ -205,6 +212,9 @@
   gap: 7px;
 }
 .memory-check .cc-tile__status { position: static; }
+/* A narrow cell ends its label with an ellipsis instead of cutting it. */
+.memory-check .cc-tile__head,
+.memory-check .cc-tile__label { max-width: 100%; min-width: 0; }
 .memory-check__pill { font-size: 10.5px; letter-spacing: 0.04em; }
 .memory-check .cc-tile__summary {
   display: -webkit-box;
@@ -904,7 +914,7 @@
   font-variant-numeric: proportional-nums;
 }
 .memory-use__unit { font-size: 11px; color: var(--_cc-foreground-meta); }
-.memory-use__chart { display: flex; flex-direction: column; gap: 3px; }
+.memory-use__chart { display: flex; flex: 1 1 120px; flex-direction: column; gap: 3px; min-width: 0; max-width: 176px; }
 .memory-use__axis { display: flex; justify-content: space-between; font-family: var(--_cc-font-mono); font-size: var(--_cc-fs-tick); color: var(--_cc-foreground-meta); }
 .memory-usage { margin: 0; font-size: var(--_cc-panel-fs-meta); color: var(--_cc-foreground-meta); }
 .memory-given {

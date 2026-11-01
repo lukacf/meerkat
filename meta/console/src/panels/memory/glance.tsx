@@ -5,8 +5,9 @@
 import React from "react";
 
 import type { MemoryLedgerEntry, MemoryPanelRecord } from "../../types";
-import { FigureTile, GlanceStrip, Sparkline, StatusMark, plural, type SummaryFact, type Tone } from "./kit";
+import { FigureTile, GlanceStrip, StatusMark, plural, type SummaryFact, type Tone } from "./kit";
 import { verdictTone, type VerdictTile } from "./model";
+import { FluidSparkline } from "./parts";
 import {
   DAY_MS,
   HOUR_MS,
@@ -120,11 +121,11 @@ export function MemoryGlance({
         unit={inputs.recordsDenied ? undefined : "active"}
         meter={
           inputs.recordsDenied ? undefined : (
-            <Sparkline
+            <FluidSparkline
               className="memory-glance__trend"
               values={perDay}
               kind="bars"
-              width={128}
+              maxWidth={128}
               height={26}
               label={`${plural(perDay.reduce((sum, count) => sum + count, 0), "record")} written in the last 30 days`}
             />

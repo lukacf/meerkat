@@ -11,6 +11,7 @@ import {
   EntityRow,
   KitGlyph,
   RelativeTime,
+  Sparkline,
   StatusPill,
   TechnicalId,
   TrustLadder,
@@ -54,6 +55,23 @@ export function useMeasuredWidth<T extends HTMLElement>(fallback: number): [Reac
   }, []);
   React.useEffect(() => () => observer.current?.disconnect(), []);
   return [ref, width];
+}
+
+/// A sparkline as wide as its slot, up to `maxWidth`: never a fixed width
+/// that runs out of a narrow pane. The slot sets the width (CSS); the chart
+/// follows it.
+export function FluidSparkline({
+  maxWidth,
+  minWidth = 32,
+  className,
+  ...props
+}: Omit<React.ComponentProps<typeof Sparkline>, "width"> & { maxWidth: number; minWidth?: number }): React.JSX.Element {
+  const [ref, width] = useMeasuredWidth<HTMLSpanElement>(maxWidth);
+  return (
+    <span className={cx("memory-fluid", className)} ref={ref} style={{ maxWidth }}>
+      <Sparkline {...props} width={Math.max(minWidth, Math.min(maxWidth, width))} />
+    </span>
+  );
 }
 
 /// Display names for agent keys, from the directory the console provides.

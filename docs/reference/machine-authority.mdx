@@ -180,12 +180,24 @@ journal row of its own: the replay derives an entry's unseated standing and
 its archived session from its member's retirement rows (the terminal row
 records whether the retirement archived the session, `session_archived`, and
 the replay passes whether the incarnation was hosted elsewhere,
-`hosted_incarnation`), and the next apply declares the rest again. The seal
+`hosted_incarnation`), and the next apply declares the rest again. Some
+row fields are journal-only facts, for the member lifecycle journal read
+(`MobHandle::member_lifecycle_events`), and the replay reads none of them:
+a retirement's session, the entry it was the member of, its cause (the
+seal's mark) and the rotation whose terminal step retired it, and a seat's
+session and the rotation that seated it (a rotation's terminal step, or
+`rotate_member`'s fresh life of an identity no member holds, which follows
+the generation the machine retains for the identity). The shell writes each
+from the machine's state before the step or from the step's journal effect;
+no machine input or effect field carries them. The seal
 of a complete roster (`SealDeclaredRoster`) marks the seated Declared entries
-it does not list (`identity_entry_retiring`) and removes the unseated ones;
-a declaration that lists a marked entry again before its retirement started
-drops the mark. The shell retires each marked member, its start row records
-the cause, and its replay passes every such row
+it does not list (`identity_entry_retiring`) and removes the unseated ones,
+and leaves an entry whose spawn ladder is open to a later seal
+(`marked_entry_has_no_spawn_in_flight`), so no mark lands between a spawn
+rollback's start row and its Retire step; a declaration that lists a marked
+entry again before its retirement started drops the mark. The shell retires
+each marked member, its start row records the cause, and its replay passes
+every such row
 (`RecoverIdentityEntryRetiring`, which marks only the identity's seated
 Declared incarnation and takes a no-op arm for any other row). The end of an
 entry's retirement records the session it archived, and removes the entry
@@ -207,14 +219,21 @@ made, on the internal lane: no grant and no Shutdown step refuses the close.
 A mob reset ends every identity entry, and it commits
 only on an empty roster (`ResetToRunning`'s `roster_empty` guard): its
 preflight, `AdmitReset`, answers the reset's other guards, changing nothing,
-before the retirement batch that empties the roster. The audit's apply runs
+before the retirement batch that empties the roster. It also ends every
+identity's retained incarnation history, as a restart after the reset does
+(the resume replays only the events after the last reset): it folds each
+retained generation into the identity's high-water
+(`identity_generation_highwater`), so the next incarnation still mints above
+every generation the identity used, and drops the retained generation,
+fence, profile and runtime mode together. The generation high-water audit's
+reset run checks both, with a witness of the fold and one mutant per half. The audit's apply runs
 (`apply`, `legacy`, `resume`, `roles`, `hold`, `held` and `placed`) drive
-the declare arms, the seal, the legacy adoption before an unlisted
-retirement, the dormant seat with and without an archived record, the
-retirement to its terminals, the reset over an emptied roster, the role
-hold against the wakes of every cause and the explicit resume, held
-creation, and a placed identity's custody, remote commit, retirement and
-replay, with witnesses and mutants.
+the declare arms, the seal (which leaves a member whose spawn is in flight
+unmarked), the legacy adoption before an unlisted retirement, the dormant
+seat with and without an archived record, the retirement to its terminals,
+the reset over an emptied roster, the role hold against the wakes of every
+cause and the explicit resume, held creation, and a placed identity's
+custody, remote commit, retirement and replay, with witnesses and mutants.
 
 Created identity entries (`IdentityEntryOrigin::Created`, since 0.9.9) are
 entries of the same map, recovered from the identity store at a start. After

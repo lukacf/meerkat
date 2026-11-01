@@ -10231,6 +10231,62 @@ mod tests {
         assert_eq!(authority.state().lifecycle_phase, MobPhase::Running);
     }
 
+    /// A mob reset ends every incarnation's retained history, as a restart
+    /// after the reset does (the resume replays only the events after the
+    /// last reset): it folds each identity's retained generation into the
+    /// identity's high-water, so the next incarnation still mints above it,
+    /// and drops the retained generation, fence, profile and runtime mode.
+    ///
+    /// RED (before the reset folds and drops them): the reset keeps the
+    /// retired identity's generation, so a fresh life after the reset
+    /// follows a pre-reset incarnation only until a restart.
+    #[test]
+    fn the_reset_folds_retained_generations_into_the_high_water() {
+        let (mut authority, member) = dormant_member_authority("reset-fold");
+        begin_completion_lifecycle_quiesce(
+            &mut authority,
+            PlacedCompletionLifecycleIntentKind::Reset,
+        );
+        MobMachineMutator::apply(
+            &mut authority,
+            retire_input(&member, Some(member.session_id.clone())),
+        )
+        .expect("the member's retirement is admitted");
+        authority
+            .apply_signal(archived_signal(&member))
+            .expect("the member's retirement ends");
+        assert_eq!(
+            authority
+                .state()
+                .identity_runtime_generations
+                .get(&member.identity),
+            Some(&Generation(0)),
+            "the retirement keeps the identity's generation"
+        );
+        MobMachineMutator::apply(&mut authority, MobMachineInput::Reset)
+            .expect("the reset commits on the empty roster");
+        let state = authority.state();
+        assert!(
+            !state
+                .identity_runtime_generations
+                .contains_key(&member.identity),
+            "the reset drops the retained generation, as a restart after it does"
+        );
+        assert_eq!(
+            state.identity_generation_highwater.get(&member.identity),
+            Some(&Generation(0)),
+            "the reset folds the retained generation into the high-water"
+        );
+        assert!(
+            !state
+                .identity_runtime_fence_tokens
+                .contains_key(&member.identity)
+                && !state.member_profile_names.contains_key(&member.identity)
+                && !state.member_runtime_modes.contains_key(&member.identity),
+            "the reset drops the rest of the retained history with it"
+        );
+    }
+
     fn wake_input(identity: &AgentIdentity) -> MobMachineInput {
         MobMachineInput::WakeMember {
             agent_identity: identity.clone(),
@@ -14467,6 +14523,71 @@ mod tests {
         assert!(
             authority.state().identity_entry_retiring.is_empty(),
             "an entry listed again before its retirement started loses its mark"
+        );
+    }
+
+    /// The seal leaves an unlisted member whose spawn is still in flight (its
+    /// ladder committed its membership, not its activation) to a later seal,
+    /// as it leaves an unseated entry whose ladder is open: it neither marks
+    /// the member nor removes the entry, and a seal once the ladder ended
+    /// marks the member. No marked entry's member has a spawn in flight
+    /// (`marked_entry_has_no_spawn_in_flight`): recovery refuses such a
+    /// state.
+    #[test]
+    fn the_seal_defers_a_member_whose_spawn_is_in_flight() {
+        let mut authority = MobMachineAuthority::new();
+        let identity = AgentIdentity::from("in-flight-entry");
+        let runtime_id = AgentRuntimeId::from("in-flight-entry:0");
+        seed_membership_committed_member_with(&mut authority, &identity, &runtime_id, false, true);
+        assert_eq!(
+            authority.state().identity_entry_origins.get(&identity),
+            Some(&IdentityEntryOrigin::Declared),
+            "the membership commit of a ladder holding the entry's custody records the entry"
+        );
+        assert_eq!(
+            seal(&mut authority, std::collections::BTreeSet::new()),
+            DeclaredRosterSealVerdict::Sealed
+        );
+        let state = authority.state();
+        assert!(
+            !state.identity_entry_retiring.contains(&identity),
+            "the seal marks no member whose spawn is in flight"
+        );
+        assert_eq!(
+            state.identity_entry_origins.get(&identity),
+            Some(&IdentityEntryOrigin::Declared),
+            "nor removes its entry"
+        );
+
+        let mut marked = authority.state().clone();
+        marked.identity_entry_retiring.insert(identity.clone());
+        let refusal = MobMachineAuthority::recover_from_state(marked)
+            .err()
+            .map(|error| error.to_string());
+        assert!(
+            refusal.as_deref().is_some_and(|refusal| {
+                refusal.contains("'marked_entry_has_no_spawn_in_flight'")
+            }),
+            "recovery refuses an entry marked while its member's spawn is in flight: {refusal:?}"
+        );
+
+        MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::CommitSpawnActivation {
+                agent_identity: identity.clone(),
+            },
+        )
+        .expect("the activation ends the ladder");
+        assert_eq!(
+            seal(&mut authority, std::collections::BTreeSet::new()),
+            DeclaredRosterSealVerdict::Sealed
+        );
+        assert!(
+            authority
+                .state()
+                .identity_entry_retiring
+                .contains(&identity),
+            "a seal once the ladder ended marks the member"
         );
     }
 

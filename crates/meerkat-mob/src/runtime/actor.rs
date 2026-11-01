@@ -7004,6 +7004,10 @@ pub(super) struct PendingSpawn {
     /// The notice a fresh seat embodied after the loss of the identity's
     /// archived session carries, for the spawn's row.
     pub(super) history_unavailable: Option<crate::runtime::HistoryUnavailable>,
+    /// Whether the spawn embodies `rotate_member`'s fresh life of an identity
+    /// no member held: its row names the incarnation it follows, read from
+    /// the machine state before its membership step.
+    pub(super) fresh_life: bool,
     /// Objective causality inherited from the spawning turn.
     pub(super) objective_id: Option<meerkat_core::interaction::ObjectiveId>,
     /// Per-spawn external-tool overlay carried to the finalize commit so the
@@ -7927,6 +7931,10 @@ struct SpawnFinalizeCtx {
     /// The notice a fresh seat embodied after the loss of the identity's
     /// archived session carries: the spawn's row records it.
     history_unavailable: Option<crate::runtime::HistoryUnavailable>,
+    /// Whether the spawn embodies `rotate_member`'s fresh life of an identity
+    /// no member held: its row names the incarnation it follows, read from
+    /// the machine state before its membership step.
+    fresh_life: bool,
     objective_id: Option<meerkat_core::interaction::ObjectiveId>,
     per_spawn_external_tools: Option<Arc<dyn AgentToolDispatcher>>,
     authorized_profile_material: AuthorizedSpawnProfileMaterial,
@@ -8043,6 +8051,7 @@ impl SpawnActivateState {
             entry_custody: _,
             // Recorded on the spawn's row at its admission.
             history_unavailable: _,
+            fresh_life: _,
             objective_id,
             per_spawn_external_tools,
             authorized_profile_material: _,
@@ -35757,6 +35766,7 @@ impl MobActor {
             definition_wiring: entry.definition_wiring,
             entry_custody: false,
             history_unavailable: None,
+            fresh_life: false,
             objective_id: None,
             per_spawn_external_tools: None,
             authorized_profile_material,
@@ -36149,6 +36159,9 @@ impl MobActor {
             // session: its spawn row records the notice, as a dormant seat's
             // row does.
             history_unavailable,
+            // A fresh life `rotate_member` embodies for an identity no member
+            // held: its spawn row names the incarnation it follows.
+            fresh_life,
             // Read only by the dormant seat of a created entry owed its seat;
             // a spawn ignores it.
             created_custody: _,
@@ -36374,6 +36387,7 @@ impl MobActor {
             definition_wiring,
             entry_custody,
             history_unavailable,
+            fresh_life,
             owner_bridge_session_id: owner_bridge_session_id.clone(),
             ops_registry: ops_registry.clone(),
             held,
@@ -37004,6 +37018,7 @@ impl MobActor {
             definition_wiring,
             entry_custody,
             history_unavailable,
+            fresh_life,
             owner_bridge_session_id,
             ops_registry,
             held,
@@ -37216,6 +37231,7 @@ impl MobActor {
                 definition_wiring,
                 entry_custody,
                 history_unavailable,
+                fresh_life,
                 objective_id,
                 per_spawn_external_tools,
                 authorized_profile_material,
@@ -37420,6 +37436,7 @@ impl MobActor {
             definition_wiring,
             entry_custody,
             history_unavailable,
+            fresh_life,
             objective_id,
             per_spawn_external_tools,
             authorized_profile_material,
@@ -38442,6 +38459,7 @@ impl MobActor {
             // Set only by a dormant seat, whose spawns are local.
             fresh_session_id: _,
             history_unavailable: _,
+            fresh_life: _,
             // A placed spawn never acts for a created entry: only a dormant
             // seat does.
             created_custody: _,
@@ -39357,6 +39375,7 @@ impl MobActor {
             // Refused above: a placed spawn never acts for an identity entry.
             entry_custody: false,
             history_unavailable: None,
+            fresh_life: false,
             objective_id,
             authorized_profile_material,
             continuity_intent,
@@ -39653,6 +39672,7 @@ impl MobActor {
                 definition_wiring,
                 entry_custody,
                 history_unavailable,
+                fresh_life,
                 objective_id,
                 per_spawn_external_tools,
                 authorized_profile_material,
@@ -39858,6 +39878,7 @@ impl MobActor {
                                 definition_wiring,
                                 entry_custody,
                                 history_unavailable,
+                                fresh_life,
                                 objective_id,
                                 per_spawn_external_tools,
                                 authorized_profile_material,
@@ -39943,6 +39964,7 @@ impl MobActor {
                                 definition_wiring,
                                 entry_custody,
                                 history_unavailable,
+                                fresh_life,
                                 objective_id,
                                 per_spawn_external_tools,
                                 authorized_profile_material,
@@ -40092,6 +40114,7 @@ impl MobActor {
             // Set only by a dormant seat, whose spawns are local.
             fresh_session_id: _,
             history_unavailable: _,
+            fresh_life: _,
             // A policy auto-spawn is a worker's.
             created_custody: _,
         } = member_spec;
@@ -40311,6 +40334,7 @@ impl MobActor {
             definition_wiring: crate::DefinitionWiring::Applies,
             entry_custody: false,
             history_unavailable: None,
+            fresh_life: false,
             objective_id: None,
             per_spawn_external_tools: per_spawn_external_tools.clone(),
             authorized_profile_material: authorized_profile_material.clone(),
@@ -41103,6 +41127,12 @@ impl MobActor {
         );
 
         if let Some(remote) = ctx.remote.as_ref() {
+            // A respawn's successor names the incarnation the respawn retired:
+            // MobMachine's respawn hold, which this membership step takes,
+            // read from the state before the step (the row is appended after
+            // it).
+            let seat_rotation =
+                super::identity_entry::respawn_rotation(self.dsl_authority.state(), &identity);
             let persist_result = boxed_arm_future(|| {
                 self.persist_placed_spawn_commit_exact(
                     &remote.pending_carrier,
@@ -41186,7 +41216,13 @@ impl MobActor {
             .with_bridge_member_ref(Some(Self::sanitized_member_ref(&member_ref)))
             .with_placed_spawn_id(Some(remote.placed_spawn_id.clone()))
             .with_member_peer_endpoint(Some(member_peer_endpoint.clone()))
-            .with_direct_member_fence(ctx.direct_member_fence.clone());
+            .with_direct_member_fence(ctx.direct_member_fence.clone())
+            // The session the membership step's journal effect named (the
+            // ACK's, checked against the effect above): the placed row's
+            // member ref is the host peer's and carries none, so the row
+            // records it for the journal read.
+            .with_seat_session(Some(remote.ack.session_id.clone()))
+            .with_seat_rotation(seat_rotation);
             spawned.creation = creation.clone();
             spawned.runtime_mode = runtime_mode;
             spawned.labels = labels.clone();
@@ -41373,6 +41409,18 @@ impl MobActor {
         // A fresh seat embodied after the loss of the identity's archived
         // session records the notice, as a dormant seat's row does.
         spawned_event = spawned_event.with_history_unavailable(ctx.history_unavailable.clone());
+        // What seated this incarnation when a rotation did, read from the
+        // machine state before this membership step: a fresh life
+        // `rotate_member` embodied for an identity no member held names the
+        // incarnation it follows, as its seat's row would (the generation
+        // MobMachine retains for the identity); a respawn's successor names
+        // the incarnation the respawn retired (MobMachine's respawn hold,
+        // which this step takes).
+        spawned_event = spawned_event.with_seat_rotation(if ctx.fresh_life {
+            super::identity_entry::fresh_life_rotation(self.dsl_authority.state(), &identity)
+        } else {
+            super::identity_entry::respawn_rotation(self.dsl_authority.state(), &identity)
+        });
         spawned_event = spawned_event.with_placed_spawn_id(None);
         if let Err(append_error) = boxed_arm_future(|| {
             self.append_member_spawned_with_identity_fence(
@@ -41437,6 +41485,7 @@ impl MobActor {
                             generation,
                             role: profile_name.clone(),
                             session_archived: false,
+                            facts: crate::event::MemberRetiredFacts::default(),
                         },
                     })
                     .await
@@ -53441,6 +53490,7 @@ impl MobActor {
         let prepared = self
             .prepare_dsl_signal_transition(terminal_signal, "dispose_member_archive_completed")?;
         if !final_event_exists {
+            let journal_session = if is_peer_only { None } else { session_id };
             Self::require_member_lifecycle_journal_effect(
                 &prepared.transition,
                 mob_dsl::MobLifecycleJournalKind::MemberRetired,
@@ -53448,12 +53498,23 @@ impl MobActor {
                 &ctx.entry.agent_runtime_id,
                 None,
                 ctx.entry.generation,
-                if is_peer_only { None } else { session_id },
+                journal_session.clone(),
                 "dispose_member_archive_completed",
+            )?;
+            // What the row records for the journal read, as this step decides
+            // it: the session its journal effect names, and the cause and the
+            // entry from the machine state before the step (the end of an
+            // unlisted retirement ends the entry in it).
+            let facts = super::identity_entry::plain_retirement_facts(
+                self.dsl_authority.state(),
+                &ctx.entry.agent_identity,
+                &ctx.entry.agent_runtime_id,
+                journal_session.as_ref(),
             )?;
             self.append_retire_event_for_entry(
                 &ctx.entry,
                 !is_peer_only && disposal == mob_dsl::MemberSessionDisposal::Archived,
+                facts,
             )
             .await?;
         }
@@ -54100,6 +54161,12 @@ impl MobActor {
         };
         let prepared =
             self.prepare_dsl_signal_transition(archive_signal, "destroy_member_archive_completed")?;
+        let peer_only = Self::runtime_binding_for_entry(&ctx.entry).is_some() && !is_placed;
+        let journal_session = if peer_only {
+            None
+        } else {
+            session_id_for_journal
+        };
         Self::require_member_lifecycle_journal_effect(
             &prepared.transition,
             mob_dsl::MobLifecycleJournalKind::MemberRetired,
@@ -54107,21 +54174,25 @@ impl MobActor {
             &ctx.entry.agent_runtime_id,
             None,
             ctx.entry.generation,
-            if Self::runtime_binding_for_entry(&ctx.entry).is_some() && !is_placed {
-                None
-            } else {
-                session_id_for_journal
-            },
+            journal_session.clone(),
             "destroy_member_archive_completed",
         )?;
         if !self
             .retire_event_exists(&ctx.entry.agent_identity, ctx.entry.generation)
             .await?
         {
-            let peer_only = Self::runtime_binding_for_entry(&ctx.entry).is_some() && !is_placed;
+            // As the retire's terminal: the session the journal effect names,
+            // and the cause and the entry from the state before the step.
+            let facts = super::identity_entry::plain_retirement_facts(
+                self.dsl_authority.state(),
+                &ctx.entry.agent_identity,
+                &ctx.entry.agent_runtime_id,
+                journal_session.as_ref(),
+            )?;
             self.append_retire_event_for_entry(
                 &ctx.entry,
                 !peer_only && disposal == mob_dsl::MemberSessionDisposal::Archived,
+                facts,
             )
             .await?;
         }
@@ -64162,13 +64233,12 @@ impl MobActor {
         // cause, so a replay marks the entry again and the end of the
         // retirement ends the entry, as it does live. The seal marks only a
         // member whose retirement has not started and never drops the mark of
-        // one whose retirement has, so the mark here is the mark at the end.
-        let cause = self
-            .dsl_authority
-            .state()
-            .identity_entry_retiring
-            .contains(&mob_dsl::AgentIdentity::from_domain(&entry.agent_identity))
-            .then_some(super::MemberRetirementCause::Unlisted);
+        // one whose retirement has, so the mark here is the mark at the end,
+        // which the terminal row reads through the same helper.
+        let cause = super::identity_entry::stored_retirement_cause(
+            self.dsl_authority.state(),
+            &entry.agent_identity,
+        );
         let desired = MobEventKind::MemberRetirementStarted {
             agent_identity: entry.agent_identity.clone(),
             agent_runtime_id: entry.agent_runtime_id.clone(),
@@ -64236,17 +64306,22 @@ impl MobActor {
     /// Append the terminal `MemberRetired` row of `entry`'s retirement.
     /// `session_archived` records that the retirement archived the member's
     /// session (its disposal was Archived): replay records an identity
-    /// entry's archived session from it, as the live terminal does.
+    /// entry's archived session from it, as the live terminal does. `facts`
+    /// is what the row records for the member lifecycle journal read, as the
+    /// terminal step decided it
+    /// ([`super::identity_entry::plain_retirement_facts`]).
     async fn append_retire_event_for_entry(
         &mut self,
         entry: &RosterEntry,
         session_archived: bool,
+        facts: crate::event::MemberRetiredFacts,
     ) -> Result<(), MobError> {
         let desired = MobEventKind::MemberRetired {
             agent_identity: entry.agent_identity.clone(),
             generation: entry.generation,
             role: entry.role.clone(),
             session_archived,
+            facts,
         };
         let append = self
             .events

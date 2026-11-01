@@ -366,8 +366,10 @@ trap 'rm -rf "$tlc_env_tmp"' EXIT
 # witnesses violated, and with --mutants each seeded defect's property or
 # invariant.
 # generation_highwater_audit.sh requires each of its six reachability
-# witnesses violated, and with --mutants each seeded defect's property or
-# invariant; its exact-successor mutant needs the success line above.
+# witnesses violated, the success line for its reset run and its reset
+# witness violated, and with --mutants each seeded defect's property or
+# invariant (its two reset mutants' target invariants among them); its
+# exact-successor mutant needs the success line above.
 # member_lifecycle_audit.sh requires a final distinct-state count at or
 # above its floor, a coverage block in which each of its covered actions
 # generated a state, its five state witnesses and three step witnesses
@@ -408,8 +410,10 @@ trap 'rm -rf "$tlc_env_tmp"' EXIT
 # adoption mutant's invariant or property, its replay, archive and destroy
 # mutants' generated invariants, its rotation, seat, respawn and
 # preserving-archive mutants' action properties, its declared apply
-# mutants' generated invariants, totality invariants and action properties
-# (one per declared apply invariant, property and guard), and its forced
+# mutants' generated invariants (the in-flight seal mutant's run with its
+# target invariant alone), totality invariants and action properties
+# (one per declared apply invariant, property and guard; the reset
+# mutant's run with its target property alone), and its forced
 # destroy mutants' generated invariants violated.
 # input_controller_hold_audit.sh requires its nine witnesses violated, and
 # with --mutants each seeded defect's property or the generated
@@ -539,6 +543,9 @@ printf '%s\n' \
   'echo "Error: Invariant NotAuditWitnessRetainedBelowHighwater is violated."' \
   'echo "Error: Invariant NotAuditWitnessFirstRecoveredAboveZero is violated."' \
   'echo "Error: Invariant NotAuditWitnessResetGap is violated."' \
+  'echo "Error: Invariant NotAuditWitnessResetFolded is violated."' \
+  'echo "Error: Invariant AuditRetainedOnlyThisEpoch is violated."' \
+  'echo "Error: Invariant AuditMintAboveEverySeat is violated."' \
   'echo "Error: Invariant next_generation_above_highwater is violated."' \
   'echo "Error: Action property AuditSealClosesRecovery is violated."' \
   'echo "Error: Action property AuditHighwaterNeverLowers is violated."' \
@@ -816,6 +823,7 @@ printf '%s\n' \
   'echo "Error: Action property NotAuditWitnessReplayEndsRoleHold is violated."' \
   'echo "Error: Action property NotAuditWitnessApplyBusy is violated."' \
   'echo "Error: Action property NotAuditWitnessDestroyEndsCommittedLadder is violated."' \
+  'echo "Error: Action property NotAuditWitnessSealDefersInFlightSpawn is violated."' \
   'echo "Error: Action property NotAuditWitnessPlacedEntrySeated is violated."' \
   'echo "Error: Action property NotAuditWitnessPlacedEndHosted is violated."' \
   'echo "Error: Action property NotAuditWitnessMigrateKeepsHold is violated."' \
@@ -880,6 +888,7 @@ printf '%s\n' \
   'echo "Error: Invariant first_presentation_is_a_reading is violated."' \
   'echo "Error: Invariant unseated_entry_is_not_a_member is violated."' \
   'echo "Error: Invariant retiring_entry_is_a_declared_entry is violated."' \
+  'echo "Error: Invariant marked_entry_has_no_spawn_in_flight is violated."' \
   'echo "Error: Invariant archived_session_record_is_unseated is violated."' \
   'echo "Error: Action property AuditEntryLeavesBySealDestroyOrReset is violated."' \
   'echo "Error: Action property AuditCandidateChangesNothing is violated."' \

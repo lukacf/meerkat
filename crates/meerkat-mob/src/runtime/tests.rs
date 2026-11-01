@@ -18,6 +18,8 @@ mod identity_entry_rows;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 mod lazy_boot;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+mod lifecycle_journal_rows;
+#[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 mod lift_binding_rows;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 mod lift_observation_bound;

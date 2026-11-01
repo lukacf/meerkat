@@ -100,6 +100,7 @@ fn representative_mob_event_kinds_project_with_kind_label() {
         generation: Generation::new(1),
         role: ProfileName::from("worker"),
         session_archived: false,
+        facts: meerkat_mob::MemberRetiredFacts::default(),
     });
     assert_eq!(m.kind, "member_retired");
     assert_eq!(m.agent_identity.as_deref(), Some("worker-1"));

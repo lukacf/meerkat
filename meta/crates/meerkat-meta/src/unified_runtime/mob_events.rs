@@ -1114,6 +1114,7 @@ mod tests {
                 generation: Generation::INITIAL,
                 role: ProfileName::from("review"),
                 session_archived: false,
+                facts: meerkat_mob::MemberRetiredFacts::default(),
             },
             MobEventKind::StepDispatched {
                 run_id: RunId::new(),

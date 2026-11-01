@@ -6306,6 +6306,16 @@ impl MobActor {
                                 "spawn rollback retirement journal has an invalid session: {error}"
                             ))
                         })?;
+                    // The cause read through the helper every start row reads
+                    // it with, from the machine state before its step. The
+                    // seal marks no member whose spawn is still in flight
+                    // (`marked_entry_has_no_spawn_in_flight`), so a spawn
+                    // rollback's start row records none: a seal before its
+                    // Retire step leaves the entry to a later seal.
+                    let cause = super::super::identity_entry::stored_retirement_cause(
+                        self.dsl_authority.state(),
+                        &identity,
+                    );
                     let desired = MobEventKind::MemberRetirementStarted {
                         agent_identity: identity,
                         agent_runtime_id: continuation.entry.agent_runtime_id.clone(),
@@ -6322,7 +6332,7 @@ impl MobActor {
                         retiring_peer_endpoint: endpoint,
                         preserve_machine_topology: false,
                         rotation: None,
-                        cause: None,
+                        cause,
                     };
                     return Ok(Some(self.spawn_rollback_journal_effect(desired, false)));
                 }
@@ -6580,6 +6590,7 @@ impl MobActor {
                         generation: continuation.entry.generation,
                         role: continuation.entry.role.clone(),
                         session_archived: false,
+                        facts: crate::event::MemberRetiredFacts::default(),
                     };
                     return Ok(Some(self.spawn_rollback_journal_effect(desired, true)));
                 }

@@ -70,7 +70,8 @@
 \*     externally bound, held or not; the held spawn (the spawn ladder with
 \*     entry custody and its membership commit) and its abort; the dormant
 \*     seat's refusal of a held or hosted entry; member 1 recovered and
-\*     retired by replay (ever created), declared held; the seal; Stop,
+\*     retired by replay (ever created), declared held; the seal (which
+\*     leaves member 2 unmarked while its spawn is in flight); Stop,
 \*     Resume, Complete and the forced destroy (which ends the held spawn's
 \*     ladder, its membership committed or not), where the declaration and
 \*     the seal refuse; the declared apply's open fact (open, busy, refused,
@@ -86,6 +87,7 @@
 \* coverage. Properties: every generated invariant of ci.cfg (the declared
 \* apply's among them: entry_is_seated_or_has_an_unseated_cause,
 \* unseated_entry_is_not_a_member, retiring_entry_is_a_declared_entry,
+\* marked_entry_has_no_spawn_in_flight,
 \* held_creation_entry_was_never_created, archived_session_record_is_unseated,
 \* placed_entry_custody_is_hosted_on_first_use, entry_custody_ladder_is_open,
 \* role_hold_belongs_to_an_entry, destroyed_mob_holds_no_member_lifecycle),
@@ -973,6 +975,17 @@ AuditWitnessDestroyEndsCommittedLadder ==
     /\ DestroyFromAny
     /\ DOMAIN spawn_exec_phase' = {}
     /\ member_startup_binding_requested' = {}
+\* A complete seal that does not list a seated entry whose spawn is still
+\* in flight (its membership committed, its activation not) leaves it
+\* unmarked, as it leaves an unseated entry whose ladder is open: a later
+\* seal marks it (marked_entry_has_no_spawn_in_flight).
+AuditWitnessSealDefersInFlightSpawn ==
+    /\ Id2 \in DOMAIN identity_to_runtime
+    /\ Id2 \in DOMAIN spawn_exec_phase
+    /\ Id2 \in Entries
+    /\ identity_entry_origins[Id2] = "Declared"
+    /\ \E d \in SUBSET {Id1} : SealDeclaredRosterSealed(d)
+    /\ Id2 \notin identity_entry_retiring'
 
 NotAuditWitnessHeldWaiting == ~AuditWitnessHeldWaiting
 NotAuditWitnessHeldSpawnSeats == [][~AuditWitnessHeldSpawnSeats]_vars
@@ -980,6 +993,7 @@ NotAuditWitnessHosted == ~AuditWitnessHosted
 NotAuditWitnessEverCreatedOwedSeat == [][~AuditWitnessEverCreatedOwedSeat]_vars
 NotAuditWitnessApplyBusy == [][~AuditWitnessApplyBusy]_vars
 NotAuditWitnessDestroyEndsCommittedLadder == [][~AuditWitnessDestroyEndsCommittedLadder]_vars
+NotAuditWitnessSealDefersInFlightSpawn == [][~AuditWitnessSealDefersInFlightSpawn]_vars
 
 (***************************************************************************)
 (* The placed run.                                                         *)

@@ -3751,8 +3751,9 @@ macro_rules! mob_catalog_machine_dsl {
 
         // Whatever an identity mints next is above its recovered high-water,
         // so no generation repeats within the mob incarnation, across a reset
-        // and a restart too. None is an exhausted generation space, which
-        // mints nothing.
+        // and a restart too (a reset folds each retained generation into the
+        // high-water as it drops it, ResetToRunning). None is an exhausted
+        // generation space, which mints nothing.
         invariant next_generation_above_highwater {
             for_all(id in self.identity_generation_highwater.keys(),
                 mob_machine_next_minted_generation(self.identity_runtime_generations, self.identity_generation_highwater, id) == None
@@ -3764,7 +3765,9 @@ macro_rules! mob_catalog_machine_dsl {
         // above are the durable incarnation high-water history used to mint
         // and fence a later generation. Every current binding therefore has
         // history, but a fully retired identity intentionally has history
-        // without a current binding.
+        // without a current binding, until a mob reset drops the history of
+        // every identity (ResetToRunning folds the generation into the
+        // high-water), as a restart after the reset does.
         invariant current_runtime_binding_has_history {
             for_all(id in self.identity_to_runtime.keys(), self.member_profile_names.contains_key(id))
             && for_all(id in self.identity_to_runtime.keys(), self.member_runtime_modes.contains_key(id))
@@ -4710,6 +4713,17 @@ macro_rules! mob_catalog_machine_dsl {
             for_all(id in self.identity_entry_retiring,
                 self.identity_entry_origins.get_cloned(id) == Some(IdentityEntryOrigin::Declared)
                 && self.identity_to_runtime.contains_key(id))
+        }
+
+        // A marked entry's member has no spawn in flight: the seal marks no
+        // member whose spawn ladder is open (a later seal marks it), a ladder
+        // opens only for an unseated identity, and the replay that marks an
+        // entry again opens no ladder. So no mark lands between a spawn
+        // rollback's start row and its Retire step, and the row's cause is
+        // the one a restart recovers.
+        invariant marked_entry_has_no_spawn_in_flight {
+            for_all(id in self.identity_entry_retiring,
+                self.spawn_exec_phase.contains_key(id) == false)
         }
 
         // An entry awaiting its held creation was never created: the declared
@@ -15912,6 +15926,26 @@ macro_rules! mob_catalog_machine_dsl {
                 // names are the identity store's, which a reset keeps, so it
                 // keeps them too.
                 self.spawn_exec_created_custody = EmptySet;
+                // A mob reset ends every incarnation's retained history, as a
+                // restart after the reset does (the resume replays only the
+                // events after the last reset): each identity's retained
+                // generation is folded into its high-water, so its next
+                // incarnation still mints above every generation it used, and
+                // the retained generation, fence, profile and runtime mode are
+                // dropped together. No incarnation after the reset follows one
+                // before it, live or restarted.
+                for id in self.identity_runtime_generations.keys() {
+                    if self.identity_generation_highwater.contains_key(id) == false
+                        || self.identity_runtime_generations.get_copied(id).get("value")
+                            > self.identity_generation_highwater.get_copied(id).get("value")
+                    {
+                        self.identity_generation_highwater.insert(id, self.identity_runtime_generations.get_copied(id).get("value"));
+                    }
+                }
+                self.identity_runtime_generations = EmptyMap;
+                self.identity_runtime_fence_tokens = EmptyMap;
+                self.member_profile_names = EmptyMap;
+                self.member_runtime_modes = EmptyMap;
                 self.external_peer_edges_by_key = EmptyMap;
                 self.topology_epoch += 1;
             }
@@ -30206,12 +30240,14 @@ macro_rules! mob_catalog_machine_dsl {
         // unlisted: a seated one is marked (identity_entry_retiring) while its
         // member is not retiring, and the shell retires the member with the
         // cause Unlisted, whose end removes the entry; an unseated one is
-        // removed at once, unless a spawn ladder is open for it (its commit
-        // seats it, and a later seal marks it). A listed entry loses its mark
-        // while its member's retirement has not started: the host listed it
-        // again. A member whose retirement started for another reason is
-        // left to that retirement, whose end keeps the entry unseated, and a
-        // later seal removes it.
+        // removed at once. Neither happens while a spawn ladder is open for
+        // the identity (marked_entry_has_no_spawn_in_flight): a later seal
+        // marks the member once its activation ends the ladder, or removes
+        // the entry its abort or its failed spawn's rollback left unseated. A
+        // listed entry loses its mark while its member's retirement has not
+        // started: the host listed it again. A member whose retirement
+        // started for another reason is left to that retirement, whose end
+        // keeps the entry unseated, and a later seal removes it.
         transition SealDeclaredRosterSealed {
             on input SealDeclaredRoster { desired }
             guard { self.lifecycle_phase == Phase::Running }
@@ -30223,7 +30259,9 @@ macro_rules! mob_catalog_machine_dsl {
                         if self.identity_to_runtime.contains_key(id) == true {
                             if self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(id).get("value")) != Some(MobMemberState::Retiring) {
                                 if desired.contains(id) == false {
-                                    self.identity_entry_retiring.insert(id);
+                                    if self.spawn_exec_phase.contains_key(id) == false {
+                                        self.identity_entry_retiring.insert(id);
+                                    }
                                 } else {
                                     self.identity_entry_retiring.remove(id);
                                 }

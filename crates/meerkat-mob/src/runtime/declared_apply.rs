@@ -333,7 +333,8 @@ pub struct DeclaredRosterOutcome {
     /// request names.
     pub entries: BTreeMap<AgentIdentity, DeclaredEntryOutcome>,
     /// What a complete roster's seal did with each Declared entry it does
-    /// not list.
+    /// not list, but one whose spawn is still in flight, which a later seal
+    /// unlists.
     pub unlisted: BTreeMap<AgentIdentity, UnlistedEntryOutcome>,
     /// The identities whose first-boot request this apply carried out: the
     /// host consumes exactly these requests
@@ -652,7 +653,11 @@ impl super::MobHandle {
     /// the retirement ends the entry; one no member holds is removed at once.
     /// A worker is never unlisted, and neither is a created entry. An entry whose member's retirement started
     /// for another reason is left to it: the entry outlives that retirement,
-    /// unseated, and a later complete apply removes it.
+    /// unseated, and a later complete apply removes it. An entry whose spawn
+    /// is still in flight is left to a later complete apply, and the answer
+    /// does not name it: once the spawn completes, that apply retires the
+    /// member; when the spawn fails, the entry is left unseated, and that
+    /// apply removes it.
     ///
     /// The apply decides and seats in chunks of [`DECLARED_APPLY_CHUNK`]
     /// identities, each one MobMachine step. Applies of one mob run one at a

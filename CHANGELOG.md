@@ -862,7 +862,10 @@ them.
   the seal that removes the unseated entry, and at the mob's reset or
   destroy, so no member later seated under the name inherits it. A
   placed or externally bound identity is hosted on its first use (its host's
-  placed spawn with entry custody creates it), and an identity whose
+  spawn with entry custody creates it: a placed spawn, or for an externally
+  bound one the owner-bound spawn,
+  `MobHandle::spawn_spec_with_generated_owner_context`, which keeps a host's
+  entry custody), and an identity whose
   creation the host holds (`DeclaredEntry::with_held_creation`) and that was
   never created awaits its held creation; neither is seated by the apply or
   by a dormant seat. A complete roster is sealed: every Declared entry it

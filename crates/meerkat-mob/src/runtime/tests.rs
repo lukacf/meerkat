@@ -27662,7 +27662,9 @@ fn test_lifecycle_command_admission_arms_do_not_shadow_mob_machine_guards() {
         ("Stop", "Stop"),
         ("ResumeLifecycle", "Resume"),
         ("Complete", "Complete"),
-        ("Reset", "Reset"),
+        // The reset's admission is its pure preflight input: `ResetToRunning`
+        // itself needs the empty roster its retirement batch leaves.
+        ("Reset", "AdmitReset"),
     ] {
         let arm = mob_command_arm_source(source, command);
         for disallowed in [
@@ -27690,6 +27692,16 @@ fn test_lifecycle_command_admission_arms_do_not_shadow_mob_machine_guards() {
             assert!(
                 arm.contains(&format!("MobMachineInput::{input}")),
                 "MobCommand::{command} must submit MobMachineInput::{input} for command admission before shell mechanics"
+            );
+        }
+        if command == "Reset" {
+            let retirement = include_str!("actor/retirement_io.rs");
+            assert!(
+                arm.contains("self.begin_retirement_batch(")
+                    && retirement.contains("self.handle_reset(")
+                    && source
+                        .contains("prepare_dsl_input_transition(mob_dsl::MobMachineInput::Reset,"),
+                "MobCommand::Reset must commit through MobMachineInput::Reset after member retirement mechanics"
             );
         }
     }
@@ -90494,7 +90506,9 @@ fn mob_runtime_parity_field_value(
         "member_wake_attempt_sequence" | "member_materialization_drift_count" => {
             Some(MobRuntimeParityExprValue::U64(0))
         }
-        "boot_plan_sealed" => Some(MobRuntimeParityExprValue::Bool(false)),
+        "boot_plan_sealed"
+        // The declared apply's open fact: the parity probes open no apply.
+        | "declared_apply_open" => Some(MobRuntimeParityExprValue::Bool(false)),
         "member_restore_policy" => Some(MobRuntimeParityExprValue::String("OnDemand".to_string())),
         "composition_authority" => Some(MobRuntimeParityExprValue::String(
             "Authoritative".to_string(),

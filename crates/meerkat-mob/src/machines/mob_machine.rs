@@ -10214,6 +10214,7 @@ mod tests {
             retire_input(&member, Some(member.session_id.clone())),
         )
         .expect("the member's retirement is admitted");
+        close_ingress_detach(&mut authority, &member);
         authority
             .apply_signal(archived_signal(&member))
             .expect("the member's retirement ends");
@@ -13844,6 +13845,10 @@ mod tests {
             "a refusal writes nothing"
         );
 
+        begin_completion_lifecycle_quiesce(
+            &mut authority,
+            PlacedCompletionLifecycleIntentKind::Stop,
+        );
         MobMachineMutator::apply(&mut authority, MobMachineInput::Stop).expect("stop");
         assert_eq!(
             declare(&mut authority, &fresh, Declaration::default()),

@@ -1450,8 +1450,15 @@ them.
   definition plans, for a FreshSession rotation, and
   `MobHandle::respawn_member` naming a profile the definition has, for a
   same-session one, which `rotate_member` cannot end (it plans a fresh
-  session, refused while that rotation stands). The mob's destroy ends
-  either.
+  session, refused while that rotation stands). A same-session rotation
+  whose successor took another profile recorded the member's key under that
+  role's comms name, so only a call naming that profile re-drives it. Either
+  is finished by restoring its profile: `MobStorage::update_definition`
+  while the mob's process is down (a pending rotation does not hold the
+  definition's epoch back), then a resume, whose start re-drives a
+  same-session rotation from its record; `MobHandle::redrive_retirement`,
+  or the call above, re-drives either. The mob's destroy, which ends
+  either, is the last resort.
 - `meerkat-mob`, `meerkat-machine-schema`: the mob's reset commits only on an
   empty roster. MobMachine's `ResetToRunning` requires that no member holds
   an identity (`roster_empty`), so no member before a reset is a member after

@@ -1,0 +1,94 @@
+/* Reset, root theme scope, utilities and scrollbars.
+   Split from console-host.css (imported there, in this order). */
+
+/* ── Reset ─────────────────────────────────────────────────────── */
+
+*,
+*::before,
+*::after { box-sizing: border-box; }
+
+html, body, #root {
+  margin: 0; padding: 0; height: 100%; width: 100%;
+  overflow: hidden;
+}
+
+body {
+  font-family: "Inter Tight", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  background: oklch(0.16 0.005 80);
+  color: rgba(232, 234, 237, 0.96);
+  font-size: 13px;
+  line-height: 1.45;
+  letter-spacing: -0.003em;
+}
+
+button {
+  border: none; background: transparent; color: inherit; font: inherit;
+  cursor: pointer; padding: 0;
+}
+button:disabled { cursor: default; }
+
+svg {
+  width: 16px; height: 16px;
+  fill: none; stroke: currentColor;
+  stroke-linecap: round; stroke-linejoin: round; stroke-width: 2;
+}
+/* Full-size SVGs opt out of the 16x16 icon reset */
+svg[data-svg="fit"],
+.topo__svg {
+  width: 100%; height: 100%;
+  stroke-linecap: inherit; stroke-linejoin: inherit; stroke-width: inherit;
+}
+
+.sprite-root {
+  position: absolute;
+  width: 0 !important; height: 0 !important;
+  overflow: hidden; pointer-events: none;
+}
+
+/* ── Root theme scope ──────────────────────────────────────────── */
+
+[data-testid="meerkat-console"] {
+  height: 100%; width: 100%;
+  background: var(--_cc-surface-canvas);
+  color: var(--_cc-foreground);
+}
+
+.cc-theme-scope {
+  --cc-workbench-sidebar-width: 260px;
+  --cc-workbench-activity-width: 300px;
+  --cc-workbench-collapsed-rail-width: 28px;
+  --cc-sidebar-safe-top: 6px;
+  --cc-sidebar-pad-left: 0;
+  --cc-sidebar-pad-right: 0;
+}
+
+/* ══════════════════════════════════════════════════════════════
+   Design-spec views: paste-in CSS from the Console.html mockup.
+   All references use the bridged --bg / --ink / --accent / ...
+   vars defined on [data-testid="meerkat-console"] above.
+   ══════════════════════════════════════════════════════════════ */
+
+.mono { font-family: var(--mono); }
+.dim  { color: var(--ink-dim); }
+.warn { color: var(--warn); }
+.bad  { color: var(--crit); }
+
+/* ══════════════════════════════════════════════════════════════
+   Scrollbar polish
+   ══════════════════════════════════════════════════════════════ */
+
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: color-mix(in oklch, var(--ink-faint) 40%, transparent);
+  border: 2px solid transparent;
+  background-clip: padding-box;
+  border-radius: 5px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in oklch, var(--ink-dim) 60%, transparent);
+  background-clip: padding-box;
+}
+

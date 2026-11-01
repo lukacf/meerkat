@@ -1,0 +1,528 @@
+/* Memory panel.
+   Split from console-host.css (imported there, in this order). */
+
+/* === Memory panel (holdings, records, knowledge, pipeline, dreams) ===
+   Built from the panel kit (cc-panel, cc-row, cc-tile, cc-chip...); these
+   rules only place the panel's own pieces. Flat rows and 1px rules, tone
+   text only through the kit's chips and notices. */
+
+/* Tab content. The first section sits close under the status row. */
+.memory-tab { min-width: 0; }
+.memory-tab > .cc-section:first-child > .cc-section-head { padding-top: 8px; }
+.memory-tab > .cc-notice { margin: 8px var(--_cc-panel-pad-x); }
+.memory-caption {
+  margin: 0;
+  padding: 2px var(--_cc-panel-pad-x) 8px;
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--ink-meta);
+}
+.memory-footnote { padding-top: 16px; }
+.memory-section-meta {
+  font-size: 11px;
+  color: var(--ink-meta);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* One-release redirect alias for the folded quarantine tab (open Q6):
+   addressable by automation (keeps a bounding box, so driver clicks still
+   land), invisible and out of the layout. */
+.memory-tab-alias {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  opacity: 0;
+  white-space: nowrap;
+  border: 0;
+}
+
+/* A record title that opens its Biography. Reads as the title it stands
+   for; underlined on hover. */
+.memory-link {
+  display: inline-block;
+  max-width: 100%;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  vertical-align: bottom;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+.memory-link:hover { text-decoration: underline; text-underline-offset: 2px; }
+.memory-link:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+  border-radius: var(--r-xs);
+}
+
+/* Record facts: kind in words, then trust and status chips. Inline so a
+   narrow row ellipsizes instead of wrapping. */
+.memory-facts > * + * { margin-left: 6px; }
+.memory-facts__kind { color: var(--ink-muted); }
+.memory-facts .memory-link { color: var(--info-ink); }
+
+/* Second lines under a row: a quarantine reason, a rationale, usefulness. */
+.memory-panel .cc-row__extra {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 2px;
+}
+.memory-row-note {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11.5px;
+  color: var(--ink-meta);
+}
+
+/* ── Holdings: checks ─────────────────────────────────────────────── */
+
+.memory-checks {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+/* Label over the status word over a two-line summary: every tile in a row
+   has the same height whatever its summary says, so a refresh that changes
+   one never moves the tiles around it. */
+.memory-tile:not(.cc-tile--muted) .cc-tile__head {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+}
+.memory-tile:not(.cc-tile--muted) .cc-tile__summary {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  min-height: calc(2 * 1.45em);
+}
+/* A re-check runs on every refresh with changed records. It sits over the
+   tile's corner, out of the text flow, so the tile row keeps its height. */
+.memory-tile__recheck {
+  position: absolute;
+  top: 12px;
+  right: 14px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--ink-meta);
+  pointer-events: none;
+}
+.memory-tile .cc-tile__links { gap: 4px; }
+.memory-tile__evidence {
+  font-size: 12px;
+  color: var(--ink-muted);
+}
+.memory-tile__evidence:hover { color: var(--ink); }
+.memory-tile__more {
+  font-size: 11.5px;
+  color: var(--ink-meta);
+}
+/* The checks this console cannot run: one quiet line each, after the rest. */
+.memory-tiles-quiet {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 0 var(--_cc-panel-pad-x);
+}
+.memory-tile--quiet { flex: 0 1 auto; gap: 4px 10px; }
+
+/* ── Holdings: scopes, progress, retired agents ───────────────────── */
+
+.memory-scope-mark { width: 18px; height: 18px; }
+.memory-scope-lock { width: 14px; height: 14px; color: var(--ink-meta); }
+.memory-scope-meter,
+.memory-share-meter { width: 88px; flex: none; }
+.memory-size,
+.memory-count {
+  font-size: 11px;
+  color: var(--ink-meta);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.memory-size { min-width: 52px; font-family: var(--mono); }
+.memory-count { min-width: 64px; }
+.memory-progress__value {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+}
+
+/* ── Records list and filters ─────────────────────────────────────── */
+
+.memory-load-more {
+  display: flex;
+  justify-content: center;
+  padding: 12px var(--_cc-panel-pad-x);
+}
+
+/* ── Biography ────────────────────────────────────────────────────── */
+
+.memory-detail {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.memory-detail__bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px var(--_cc-panel-pad-x) 0;
+}
+.memory-back-mark {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin: 0 1px 0 3px;
+  border-left: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: rotate(45deg);
+}
+.memory-detail__head {
+  min-width: 0;
+  padding: 10px var(--_cc-panel-pad-x) 0;
+}
+.memory-detail__title {
+  margin: 0;
+  font-family: var(--disp);
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.35;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+.memory-detail__facts {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 12px;
+  margin-top: 6px;
+  font-size: 12px;
+}
+.memory-detail__owner {
+  font-size: 11.5px;
+  color: var(--ink-meta);
+}
+.memory-detail__description {
+  margin: 10px var(--_cc-panel-pad-x) 0;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--ink-muted);
+}
+/* The body reads as prose on a sunken well, not as code. */
+.memory-detail__body {
+  margin: 12px var(--_cc-panel-pad-x) 0;
+  padding: 12px 14px;
+  border-radius: var(--r-md);
+  background: var(--bg-sunken);
+  color: var(--ink);
+  font-size: 13px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.memory-detail__notice,
+.memory-detail__tags { margin: 12px var(--_cc-panel-pad-x) 0; }
+.memory-detail__section { min-width: 0; }
+.memory-detail__content {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  padding: 0 var(--_cc-panel-pad-x);
+}
+.memory-detail__content > .memory-caption { padding: 0; }
+.memory-detail__tech { margin: 16px var(--_cc-panel-pad-x) 0; }
+.memory-tech-list {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  min-width: 0;
+  max-width: 100%;
+}
+.memory-tech-note { font-size: 11px; color: var(--ink-meta); }
+
+/* Evidence: a conversation to open; its session ID is in the technical
+   details. */
+.memory-evidence {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  min-width: 0;
+}
+.memory-evidence__ref {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  max-width: 100%;
+  min-width: 0;
+  padding: 6px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.memory-evidence__ref:hover:not(:disabled) {
+  border-color: var(--line-strong);
+  background: var(--bg-elev-2);
+}
+.memory-evidence__ref:disabled { cursor: default; }
+.memory-evidence__ref:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+.memory-evidence__label {
+  font-size: 12.5px;
+  color: var(--info-ink);
+}
+.memory-evidence__ref:disabled .memory-evidence__label { color: var(--ink); }
+.memory-excerpt {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  border-radius: var(--r-md);
+  background: var(--bg-sunken);
+}
+.memory-excerpt__note {
+  margin: 0 0 2px;
+  font-size: 11px;
+  color: var(--ink-meta);
+}
+.memory-excerpt__line {
+  display: flex;
+  gap: 8px;
+  min-width: 0;
+  font-size: 12px;
+  line-height: 1.45;
+}
+.memory-excerpt__speaker {
+  flex: none;
+  font-weight: 600;
+  color: var(--ink-muted);
+}
+.memory-excerpt__text {
+  min-width: 0;
+  color: var(--ink);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* History: the current version marked, older ones quieter. */
+.memory-chain__marker {
+  box-sizing: border-box;
+  width: 8px;
+  height: 8px;
+  border: 1.5px solid var(--ink-dim);
+  border-radius: var(--r-round);
+}
+.memory-chain__row[data-current="true"] .memory-chain__marker {
+  border-color: var(--accent);
+  background: var(--accent);
+}
+.memory-chain__row[data-current="true"] { cursor: default; }
+.memory-chain__row[data-dimmed="true"] .cc-row__title { color: var(--ink-muted); }
+.memory-chain__current { font-size: 11px; color: var(--ink-meta); }
+
+.memory-usage {
+  margin: 0;
+  padding: 0 var(--_cc-panel-pad-x) 8px;
+  font-size: 12.5px;
+  color: var(--ink-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Quarantine review. */
+.memory-review__label {
+  font-size: 11.5px;
+  color: var(--ink-meta);
+}
+.memory-quarantine__rationale { width: 100%; max-width: 520px; }
+.memory-notice-ids {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  margin-top: 6px;
+}
+.memory-notice-ids__item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  max-width: 100%;
+}
+.memory-notice-ids__label {
+  font-size: 11px;
+  color: var(--ink-meta);
+  white-space: nowrap;
+}
+
+/* ── Pipeline ─────────────────────────────────────────────────────── */
+
+/* Proposed, waiting for approval, quarantined: three steps on one line,
+   joined by a rule. */
+.memory-stepper {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 0;
+  margin: 0;
+  padding: 12px var(--_cc-panel-pad-x) 4px;
+  list-style: none;
+}
+.memory-stepper__step {
+  display: block;
+  font-size: 12px;
+  color: var(--ink-muted);
+  white-space: nowrap;
+}
+.memory-stepper__step + .memory-stepper__step::before {
+  content: "";
+  display: inline-block;
+  width: 18px;
+  height: 1px;
+  margin: 0 10px;
+  vertical-align: middle;
+  background: var(--line-strong);
+}
+.memory-stepper__count {
+  font-weight: 600;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+/* The decision is the row's one action: always shown. */
+.memory-pending-row .cc-row__actions { opacity: 1; }
+
+/* Live events: a short scroll of their own, so the strip never grows the
+   tab without bound. The list is the scroll container the live-follow
+   logic watches. */
+.memory-live__list {
+  max-height: 240px;
+  min-width: 0;
+  overflow-y: auto;
+}
+.memory-live__row .cc-row__title {
+  font-size: 12.5px;
+  font-weight: 400;
+}
+.memory-live__seam {
+  padding: 8px var(--_cc-panel-pad-x) 4px;
+  text-align: center;
+  font-size: 11px;
+  color: var(--ink-meta);
+}
+
+/* ── Dreams ───────────────────────────────────────────────────────── */
+
+.memory-dream-run { border-bottom: 1px solid var(--line); }
+.memory-dream-run > .cc-row { border-bottom: 0; }
+.memory-disclosure {
+  width: 0;
+  height: 0;
+  border-top: 4px solid transparent;
+  border-bottom: 4px solid transparent;
+  border-left: 6px solid var(--ink-meta);
+  transition: transform 120ms ease;
+}
+.memory-disclosure[data-open="true"] { transform: rotate(90deg); }
+.memory-dream-run__detail {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  padding: 0 var(--_cc-panel-pad-x) 12px calc(var(--_cc-panel-pad-x) + 28px);
+}
+.memory-dream-run__detail > .memory-caption { padding: 0; }
+.memory-phases {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.memory-phases__step {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  font-size: 12.5px;
+  color: var(--ink);
+}
+.memory-phases__mark {
+  align-self: center;
+  width: 12px;
+  height: 12px;
+  color: var(--ok-ink);
+}
+.memory-phases__note {
+  min-width: 0;
+  font-size: 11.5px;
+  color: var(--ink-meta);
+  overflow-wrap: anywhere;
+}
+.memory-touched {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 6px;
+  min-width: 0;
+  margin-top: 2px;
+}
+.memory-touched__label {
+  margin-right: 2px;
+  font-size: 11px;
+  color: var(--ink-meta);
+}
+.memory-touched__record {
+  max-width: 36ch;
+  padding: 0 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-pill);
+  background: var(--bg-sunken);
+  font-size: 11.5px;
+  line-height: 18px;
+  color: var(--ink-muted);
+}
+.memory-touched__record:hover {
+  border-color: var(--line-strong);
+  color: var(--ink);
+  text-decoration: none;
+}
+
+/* ── Narrow panes ─────────────────────────────────────────────────── */
+
+@container cc-panel (max-width: 479px) {
+  /* Keep the size and the limit chip, drop the composition bar. */
+  .memory-scope-row.cc-row .cc-row__meta > .memory-scope-meter,
+  .memory-segment-row.cc-row .cc-row__meta > .memory-share-meter { display: none; }
+  .memory-scope-row.cc-row .cc-row__meta > .memory-size,
+  .memory-segment-row.cc-row .cc-row__meta > .memory-count { display: inline; }
+  .memory-dream-run__detail { padding-left: var(--_cc-panel-pad-x); }
+}
+

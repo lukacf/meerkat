@@ -384,6 +384,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   a role, a label or another agent applies to the memory read or view
   action, instead of being decided by its bare name, which such a deny
   cannot match.
+- The quarantine queue (`meta/memory/panel/quarantine`) lists a pending
+  gated promotion only to a caller who may read both its target scope and
+  its source record, whose content the promotion would publish and which
+  still holds it. Before, a promotion was judged by its target scope alone,
+  so a reviewer denied the source scope still read the source record's id
+  and the steward's rationale for promoting it. An applied promotion leaves
+  the queue, and its content is a record of the target scope, judged there.
 - Dream history (`meta/memory/panel/dreams` and `dream_runs`) spans a
   realm's scopes and can describe quarantined content, so it now lists a
   realm's runs only to a caller who may read every memory scope the realm

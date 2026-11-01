@@ -5065,7 +5065,9 @@ fn memory_panel_record_is_quarantine_evidence(
 /// promotions carry the scope key and steward rationale, so they leak the
 /// same cross-scope metadata as record rows. `memory.quarantine.review` is
 /// the queue's entry gate but is deliberately not sufficient per row.
-/// Unknown scope kinds are denied.
+/// Unknown scope kinds are denied. The queue also requires the promotion's
+/// source record ([`memory_panel_retain_readable_records`]), whose content a
+/// pending promotion would publish.
 fn memory_panel_promotion_visible(
     caller: MemoryPanelCaller<'_>,
     scope_kind: &str,
@@ -5346,32 +5348,37 @@ async fn handle_memory_panel_quarantine(
             Ok(rows) => records.extend(rows),
             Err(err) => return memory_panel_store_error(response_id, err),
         }
-        match store.pending_promotions(realm).await {
-            Ok(rows) => pending.extend(
-                rows.into_iter()
-                    .filter(|promotion| {
-                        memory_panel_promotion_visible(
-                            caller,
-                            &promotion.scope_kind,
-                            &promotion.scope_key,
-                        )
-                    })
-                    .map(|promotion| {
-                        // stage_token is a commit capability — never surfaced.
-                        json!({
-                            "realm": realm,
-                            "pending_id": promotion.pending_id,
-                            "record_id": promotion.record_id,
-                            "scope_kind": promotion.scope_kind,
-                            "scope_key": promotion.scope_key,
-                            "rationale": promotion.rationale,
-                            "status": promotion.status,
-                            "created_at_ms": promotion.created_at_ms,
-                        })
-                    }),
-            ),
+        let mut promotions = match store.pending_promotions(realm).await {
+            Ok(rows) => rows,
             Err(err) => return memory_panel_store_error(response_id, err),
+        };
+        // A pending promotion would publish content that still lives only in
+        // its source record, so it needs the source record's rule as well as
+        // its target scope's. Once applied it leaves this queue, and its
+        // content is a record of the target scope, judged there.
+        promotions.retain(|promotion| {
+            memory_panel_promotion_visible(caller, &promotion.scope_kind, &promotion.scope_key)
+        });
+        let readable =
+            memory_panel_retain_readable_records(store, caller, realm, &mut promotions, |row| {
+                row.record_id.as_str()
+            });
+        if let Err(err) = readable.await {
+            return memory_panel_store_error(response_id, err);
         }
+        pending.extend(promotions.into_iter().map(|promotion| {
+            // stage_token is a commit capability: never surfaced.
+            json!({
+                "realm": realm,
+                "pending_id": promotion.pending_id,
+                "record_id": promotion.record_id,
+                "scope_kind": promotion.scope_kind,
+                "scope_key": promotion.scope_key,
+                "rationale": promotion.rationale,
+                "status": promotion.status,
+                "created_at_ms": promotion.created_at_ms,
+            })
+        }));
     }
     // The reviewer entry gate is necessary but not sufficient: each queue row
     // still needs the caller's per-scope read grant, and hidden rows must not

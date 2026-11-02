@@ -123,11 +123,12 @@
 # name, say) has the coverage check as its witness. The runner also requires
 # every witness reached (a step goal's negation violated), and --mutants
 # seeds the defects listed at its end, each of which TLC must refuse with
-# the named violation: the created entries' invariants and properties and
-# the new guards a reachable state needs, each with at least one mutant but
-# where a comment there says otherwise; the created_custody_local_kept and
-# recovered_removal_unmarked mutants instead require a witness unreachable
-# (their runs end without an error). An anchor this script expects but
+# the named violation: defects of the created entries' invariants and
+# properties and of the new guards a reachable state needs. The list names
+# what each defect breaks; not every invariant or property has a mutant of
+# its own. The created_custody_local_kept and recovered_removal_unmarked
+# mutants instead require a witness unreachable (their runs end without an
+# error). An anchor this script expects but
 # cannot find fails the run. Each TLC run is held to the canonical lane's
 # per-run cap (tlc_run_cap.sh) and fails closed as TLC INCOMPLETE.
 set -euo pipefail

@@ -324,6 +324,16 @@ class DispatchTests(unittest.TestCase):
     def test_main_must_be_the_merged_commit(self):
         self.refused("main's head is", main_head="d" * 40)
 
+    def test_git_reads_name_the_candidate_commit_under_meta(self):
+        # The monorepo's one path rule: git_bytes takes a path under Meta's directory and reads it
+        # at the candidate commit by its repository path, meta/<path>. The other tests replace
+        # git_bytes with a checkout read; this one calls the real git_bytes, and rc.run only
+        # records the command, so none runs.
+        calls = []
+        with mock.patch.object(forge.rc, "run", lambda argv, **_: calls.append(argv) or b"x"):
+            self.assertEqual(tool.git_bytes(SHA, forge.INPUTS), b"x")
+        self.assertEqual(calls, [["git", "-C", str(tool.ROOT), "show", f"{SHA}:meta/{forge.INPUTS}"]])
+
 
 if __name__ == "__main__":
     unittest.main()

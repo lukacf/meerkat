@@ -1493,7 +1493,8 @@ async fn unarchiving_seats_it_dormant_on_its_archived_session_with_its_history()
             ),
             allow,
         )
-        .await;
+        .await
+        .map(|created| created.change);
     assert!(
         matches!(created, Ok(IdentityChangeOutcome::Committed { .. })),
         "{created:?}"

@@ -387,6 +387,16 @@ pub struct IdentityUpdateOutcome {
     pub applied: Option<super::DeclaredEntryOutcome>,
 }
 
+/// What a store-owned create answers: the change (committed now, with its
+/// receipt, or replayed), and the spawn of each identity whose spec owes a
+/// kickoff, spawned once the change committed.
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct IdentityCreateOutcome {
+    pub change: IdentityChangeOutcome,
+    pub embodied: BTreeMap<AgentIdentity, super::DeclaredEntryOutcome>,
+}
+
 /// A roster-owned identity's change, written by its host's roster writer
 /// and applied by a partial declared apply
 /// ([`super::DeclaredRoster::with_change`]): the apply writes the change's
@@ -1005,6 +1015,44 @@ pub(super) async fn pass_change_step_hold_for_test(mob_id: &MobId, step: &'stati
     if let Some((_, _, entered, release)) = hold {
         let _ = entered.send(());
         let _ = release.await;
+    }
+}
+
+/// Test seam: the identities whose next post-commit kickoff spawn of a
+/// create fails, by mob, each consumed once.
+#[cfg(test)]
+static KICKOFF_SPAWN_FAILURES_FOR_TEST: std::sync::Mutex<Vec<(MobId, AgentIdentity)>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// Fail `identity`'s next post-commit kickoff spawn in `mob_id`'s create,
+/// consumed once.
+#[cfg(test)]
+pub(in crate::runtime) fn fail_next_kickoff_spawn_for_test(
+    mob_id: &MobId,
+    identity: &AgentIdentity,
+) {
+    KICKOFF_SPAWN_FAILURES_FOR_TEST
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .push((mob_id.clone(), identity.clone()));
+}
+
+/// Whether `identity`'s kickoff spawn in `mob_id` fails now (consuming the
+/// armed failure).
+#[cfg(test)]
+fn take_kickoff_spawn_failure_for_test(mob_id: &MobId, identity: &AgentIdentity) -> bool {
+    let mut failures = KICKOFF_SPAWN_FAILURES_FOR_TEST
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    match failures
+        .iter()
+        .position(|(armed, failing)| armed == mob_id && failing == identity)
+    {
+        Some(index) => {
+            failures.remove(index);
+            true
+        }
+        None => false,
     }
 }
 
@@ -2598,7 +2646,7 @@ impl super::MobHandle {
         &self,
         create: StoreOwnedIdentityCreate,
         consent: IdentityChangeConsentInput<'_>,
-    ) -> Result<IdentityChangeOutcome, MobError> {
+    ) -> Result<IdentityCreateOutcome, MobError> {
         use super::dormant_seat::prepare_dormant_seat;
         use futures::StreamExt as _;
 
@@ -2661,7 +2709,10 @@ impl super::MobHandle {
             endpoint_source,
         } = match answer {
             CreatePlanAnswer::Replayed(receipt) => {
-                return Ok(IdentityChangeOutcome::Replayed { receipt });
+                return Ok(IdentityCreateOutcome {
+                    change: IdentityChangeOutcome::Replayed { receipt },
+                    embodied: BTreeMap::new(),
+                });
             }
             CreatePlanAnswer::Planned(plan) => plan,
         };
@@ -2724,7 +2775,10 @@ impl super::MobHandle {
             .await??;
         let receipt = match committed {
             CreateCommitted::Replayed(receipt) => {
-                return Ok(IdentityChangeOutcome::Replayed { receipt });
+                return Ok(IdentityCreateOutcome {
+                    change: IdentityChangeOutcome::Replayed { receipt },
+                    embodied: BTreeMap::new(),
+                });
             }
             CreateCommitted::Committed(receipt) => receipt,
         };
@@ -2734,7 +2788,17 @@ impl super::MobHandle {
         // the mob's next start seats from its row.
         for spec in embody {
             let agent_identity = spec.identity.clone();
-            if let Err(error) = Box::pin(self.spawn_spec_internal(spec)).await {
+            #[cfg(test)]
+            let spawned = if take_kickoff_spawn_failure_for_test(self.mob_id(), &agent_identity) {
+                Err(MobError::Internal(
+                    "the test seam failed the kickoff spawn".to_string(),
+                ))
+            } else {
+                Box::pin(self.spawn_spec_internal(spec)).await
+            };
+            #[cfg(not(test))]
+            let spawned = Box::pin(self.spawn_spec_internal(spec)).await;
+            if let Err(error) = spawned {
                 tracing::warn!(
                     mob_id = %self.definition.id,
                     agent_identity = %agent_identity,
@@ -2743,7 +2807,10 @@ impl super::MobHandle {
                 );
             }
         }
-        Ok(IdentityChangeOutcome::Committed { receipt })
+        Ok(IdentityCreateOutcome {
+            change: IdentityChangeOutcome::Committed { receipt },
+            embodied: BTreeMap::new(),
+        })
     }
 
     /// Hold or release this mob's identity changes: while they are held,

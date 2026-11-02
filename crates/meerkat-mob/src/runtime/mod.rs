@@ -249,10 +249,10 @@ mod held_spawn;
 mod identity_change;
 pub use identity_change::{
     CreatedIdentityRequest, IdentityArchiveChange, IdentityChangeConsentInput, IdentityChangeGrant,
-    IdentityChangeOutcome, IdentityChangeRefusal, IdentityChangeRequesterInput, IdentityGrantEntry,
-    IdentityGrantRequest, IdentityNameHolder, IdentityOperation, IdentityRemoval,
-    IdentityRosterChange, IdentityUpdateOutcome, MemberGrantMint, MemberGrantMintRequest,
-    StoreOwnedIdentityCreate, StoreOwnedIdentityUpdate,
+    IdentityChangeOutcome, IdentityChangeRefusal, IdentityChangeRequesterInput,
+    IdentityCreateOutcome, IdentityGrantEntry, IdentityGrantRequest, IdentityNameHolder,
+    IdentityOperation, IdentityRemoval, IdentityRosterChange, IdentityUpdateOutcome,
+    MemberGrantMint, MemberGrantMintRequest, StoreOwnedIdentityCreate, StoreOwnedIdentityUpdate,
 };
 mod identity_entry;
 mod identity_preparation;

@@ -180,6 +180,18 @@ impl StoreOwnedMob {
         create: StoreOwnedIdentityCreate,
         consent: IdentityChangeConsentInput<'_>,
     ) -> Result<IdentityChangeOutcome, MobError> {
+        self.create_outcome(create, consent)
+            .await
+            .map(|created| created.change)
+    }
+
+    /// [`Self::create`], answering the whole outcome: the change and each
+    /// post-commit kickoff spawn.
+    async fn create_outcome(
+        &self,
+        create: StoreOwnedIdentityCreate,
+        consent: IdentityChangeConsentInput<'_>,
+    ) -> Result<crate::runtime::IdentityCreateOutcome, MobError> {
         tokio::time::timeout(
             STEP,
             self.handle.create_store_owned_identities(create, consent),
@@ -528,6 +540,114 @@ async fn a_commit_wakes_nothing() {
             "{name} is Dormant"
         );
     }
+}
+
+/// The number of turns `mob`'s session service started on `session` with
+/// the prompt `prompt`.
+async fn turns_with_prompt(mob: &StoreOwnedMob, session: &SessionId, prompt: &str) -> usize {
+    mob.service
+        .recorded_start_turn_prompts()
+        .await
+        .into_iter()
+        .filter(|(ran_on, ran)| ran_on == session && ran == prompt)
+        .count()
+}
+
+/// Wait, within one step, until `name` is a member whose session ran a turn
+/// with `prompt`: its kickoff. Answers its session.
+async fn kicked_off(mob: &StoreOwnedMob, name: &str, prompt: &str) -> SessionId {
+    let deadline = tokio::time::Instant::now() + STEP;
+    loop {
+        if let Some(session) = mob.handle.resolve_bridge_session_id(&id(name)).await
+            && turns_with_prompt(mob, &session, prompt).await > 0
+        {
+            return session;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "{name}'s kickoff never ran"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// Row (RED): a create whose spec owes a kickoff (an initial message)
+/// answers its spawn per identity: spawned once after the commit, it is
+/// answered embodied on its session, and its kickoff runs once. A spawn
+/// that fails is answered failed, the identity owed its seat with no
+/// member, and the mob's next start embodies it once, its kickoff then
+/// running once.
+///
+/// RED on the old tree: the create answers no spawn (a failed one is only
+/// logged).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_create_with_an_initial_message_answers_its_spawn_and_a_failed_spawn_is_owed_its_seat() {
+    let mut mob = StoreOwnedMob::new("create-kickoff").await;
+    mob.service.set_keep_alive_turns_complete_immediately(true);
+    let kicked = |name: &str, prompt: &str| {
+        spec(name, "worker")
+            .with_runtime_mode_override(crate::MobRuntimeMode::AutonomousHost)
+            .with_initial_message(meerkat_core::types::ContentInput::from(prompt))
+    };
+    let create = |operation_id: &str, identity_spec: CreatedIdentitySpec| {
+        StoreOwnedIdentityCreate::new(
+            operation(operation_id),
+            IdentityChangeRequesterInput::host("console"),
+            vec![CreatedIdentityRequest::new(identity_spec)],
+        )
+    };
+
+    let created = mob
+        .create_outcome(create("create-greeter", kicked("greeter", "Begin.")), ALLOW)
+        .await
+        .expect("the create commits");
+    assert!(matches!(
+        created.change,
+        IdentityChangeOutcome::Committed { .. }
+    ));
+    let session = match created.embodied.get(&id("greeter")) {
+        Some(crate::runtime::DeclaredEntryOutcome::Embodied { session_id, .. }) => {
+            session_id.clone()
+        }
+        other => panic!("the greeter's spawn is answered embodied: {other:?}"),
+    };
+    assert_eq!(created.embodied.len(), 1);
+    assert_eq!(kicked_off(&mob, "greeter", "Begin.").await, session);
+    assert_eq!(
+        turns_with_prompt(&mob, &session, "Begin.").await,
+        1,
+        "the kickoff runs once"
+    );
+
+    super::super::identity_change::fail_next_kickoff_spawn_for_test(&mob.mob_id(), &id("waiter"));
+    let created = mob
+        .create_outcome(create("create-waiter", kicked("waiter", "Wait.")), ALLOW)
+        .await
+        .expect("the create commits");
+    assert!(matches!(
+        created.change,
+        IdentityChangeOutcome::Committed { .. }
+    ));
+    assert!(
+        matches!(
+            created.embodied.get(&id("waiter")),
+            Some(crate::runtime::DeclaredEntryOutcome::Failed { .. })
+        ),
+        "{:?}",
+        created.embodied
+    );
+    mob.unseated_for("waiter", UnseatedEntryCause::SeatOwed)
+        .await;
+    assert!(!mob.is_member("waiter").await);
+
+    mob.restart_as(MobCompositionAuthority::Authoritative).await;
+    mob.service.set_keep_alive_turns_complete_immediately(true);
+    let session = kicked_off(&mob, "waiter", "Wait.").await;
+    assert_eq!(
+        turns_with_prompt(&mob, &session, "Wait.").await,
+        1,
+        "the next start embodies it once"
+    );
 }
 
 /// Row: a create of more identities than one change commits is refused
@@ -3798,7 +3918,8 @@ async fn a_held_store_owned_identity_is_created_by_the_held_protocol_and_never_s
             ),
         )
         .await
-        .expect("the create answers"),
+        .expect("the create answers")
+        .map(|created| created.change),
     );
     let awaiting = Some(EntryStanding::Unseated(UnseatedEntryCause::HeldCreation));
     assert_eq!(
@@ -4149,7 +4270,8 @@ impl HeldMob {
                 ),
             )
             .await
-            .expect("the create answers"),
+            .expect("the create answers")
+            .map(|created| created.change),
         );
     }
 
@@ -4861,7 +4983,8 @@ async fn rb_cl2_1_pending_preparation_fixture() {
                         ),
                         ALLOW,
                     )
-                    .await,
+                    .await
+                    .map(|created| created.change),
             );
         },
     )
@@ -4947,7 +5070,8 @@ async fn rb_cl2_4a_store_owned_member_fixture() {
                         ),
                         ALLOW,
                     )
-                    .await,
+                    .await
+                    .map(|created| created.change),
             );
         },
     )
@@ -5030,7 +5154,8 @@ async fn rb_cl2_4b_stale_seat_fixture() {
                         ),
                         ALLOW,
                     )
-                    .await,
+                    .await
+                    .map(|created| created.change),
             );
             handle
                 .update_store_owned_identity(
@@ -5205,7 +5330,8 @@ async fn rb_cl2_4b_apply_now_fixture() {
                         ),
                         ALLOW,
                     )
-                    .await,
+                    .await
+                    .map(|created| created.change),
             );
             let labels = BTreeMap::from([("team".to_string(), "beta".to_string())]);
             handle
@@ -5318,7 +5444,8 @@ async fn rb_cl2_5_held_construction_fixture() {
                 ),
                 ALLOW,
             )
-            .await,
+            .await
+            .map(|created| created.change),
     );
     handle
         .construct_identity(crate::runtime::IdentityConstructionRequest::new(

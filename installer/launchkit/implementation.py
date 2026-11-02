@@ -1909,17 +1909,21 @@ class ImplementationService:
                 if frozen.get("organization") is not None:
                     initial["organization_hash"] = fingerprint(frozen["organization"])
                 latest_state = await self._guide(guide_id)
-                latest_proposal = latest_state.get("proposal") or latest_state.get("blueprint")
-                if (latest_state["version"] != version or latest_state.get("operation", {}).get("status") == "running"
-                        or fingerprint(latest_proposal) != fingerprint(state.get("proposal") or state.get("blueprint"))
-                        or latest_state.get("brief", {}) != frozen["brief"]
-                        or latest_state.get("messages", []) != frozen["messages"]
-                        or fingerprint(latest_state.get("organization")) != fingerprint(frozen.get("organization"))):
-                    raise DraftConflict("The setup changed while preparing this build. Reload before starting the application builder.")
+
+                def require_guide_unchanged(current):
+                    current_proposal = current.get("proposal") or current.get("blueprint")
+                    if (current["id"] != guide_id or current["version"] != version
+                            or current.get("operation", {}).get("status") == "running"
+                            or fingerprint(current_proposal) != fingerprint(state.get("proposal") or state.get("blueprint"))
+                            or current.get("brief", {}) != frozen["brief"]
+                            or current.get("messages", []) != frozen["messages"]
+                            or fingerprint(current.get("organization")) != fingerprint(frozen.get("organization"))):
+                        raise DraftConflict("The setup changed while preparing this build. Reload before starting the application builder.")
+
+                require_guide_unchanged(latest_state)
 
                 def publish_admission():
                     # No awaits separate the final fences from worker publication.
-                    self._require_prebuild_service_checks(latest_state)
                     workspace.require_preparation_current()
                     if runtime_target is not None:
                         from .runtime_selection import implementation_candidate_selection
@@ -1929,13 +1933,22 @@ class ImplementationService:
                             raise DraftConflict("The selected candidate changed before builder admission.")
                     self._fence_selected(guide_id, expected_selected_build_id,
                         _preparing_build_id=identity if previous is None else None)
-                    write_private(directory / "receipt.json", initial)
-                    write_private(directory.parent / "latest.json", {"build_id": identity})
-                    from .implementation_timing import ImplementationTiming
-                    ImplementationTiming(directory, started_ns=preparation_started).preparation()
-                    task = asyncio.create_task(self._run(directory))
-                    self.tasks[identity] = task
-                    task.add_done_callback(lambda done: self._task_finished(directory, done))
+                    reader = getattr(self.guide, "build_admission", None)
+                    if not callable(reader):
+                        raise ImplementationPrerequisiteNotAdmitted("The guide cannot verify its saved setup before building. No builder was started.")
+                    # The asynchronous display read may precede a saved change.
+                    # Hold the original store through the final check and local
+                    # task publication; the worker cannot run until we yield.
+                    with reader(guide_id) as current_state:
+                        require_guide_unchanged(current_state)
+                        self._require_prebuild_service_checks(current_state)
+                        write_private(directory / "receipt.json", initial)
+                        write_private(directory.parent / "latest.json", {"build_id": identity})
+                        from .implementation_timing import ImplementationTiming
+                        ImplementationTiming(directory, started_ns=preparation_started).preparation()
+                        task = asyncio.create_task(self._run(directory))
+                        self.tasks[identity] = task
+                        task.add_done_callback(lambda done: self._task_finished(directory, done))
 
                 if previous:
                     old = ImplementationWorkspace(previous / "workspace", previous_input["blueprint"])

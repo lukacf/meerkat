@@ -362,5 +362,7 @@ async def test_restore_background_checks_the_installation_folder(selected_restor
         return original(paths, **options)
     monkeypatch.setattr(services, "launchd_folder_refusal", record, raising=False)
     assert (await capability(f))["available"] is True
+    assert checked and all(f.destination in paths for paths in checked)
+    checked.clear()
     await start(f)
-    assert len(checked) == 2 and all(f.destination in paths for paths in checked)
+    assert checked and all(f.destination in paths for paths in checked)

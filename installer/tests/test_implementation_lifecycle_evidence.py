@@ -1,5 +1,6 @@
 """Guide lifecycle eligibility checked against offline production service controls."""
 import asyncio
+from contextlib import contextmanager
 from copy import deepcopy
 import json
 from types import SimpleNamespace
@@ -28,7 +29,12 @@ async def build(tmp_path, monkeypatch):
         assert identity == state["id"]
         return deepcopy(state)
 
-    service = ImplementationService(tmp_path, SimpleNamespace(get=get))
+    @contextmanager
+    def build_admission(identity):
+        assert identity == state["id"]
+        yield deepcopy(state)
+
+    service = ImplementationService(tmp_path, SimpleNamespace(get=get, build_admission=build_admission))
     identity = str(uuid.uuid4())
     directory = service._directory(state["id"], identity)
     directory.mkdir(parents=True)

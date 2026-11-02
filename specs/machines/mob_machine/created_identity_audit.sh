@@ -1149,11 +1149,25 @@ PY
 drop_guard("DeclareIdentityEntrySeatOwed", "identity_entry_tombstones) = FALSE)")
 PY
 
+  # A removal marks an unseated entry's ending as a seated one's (the
+  # verdict's seated branch taken for every removal), so no retirement ever
+  # ends it.
+  mutate removal removal_marks_an_unseated_entry "Invariant entry_ending_marks_are_seated_and_disjoint" <<'PY'
+replace_text('(IF (seated = TRUE) THEN "Retiring" ELSE "Removed")', '"Retiring"')
+PY
+
   # An archive frees the name: a record takes a name an entry holds (the
   # held_by_identity argument of its verdict read as FALSE), so a new entry
   # replaces the archived one.
   mutate archive archive_frees_the_name "Action property AuditArchivedKeepsItsName" <<'PY'
 replace_in_arm("RecordCreatedIdentityEntryRecorded", "((agent_identity \\in DOMAIN identity_entry_origins) = TRUE)", "FALSE")
+PY
+
+  # A roster-owned identity is archived as a store-owned one: the archive
+  # of an unseated entry reads any entry as store-owned (its Created check
+  # takes any entry).
+  mutate archive archive_takes_a_roster_entry "Invariant archived_entry_is_store_owned" <<'PY'
+replace_in_arm("ArchiveIdentityEntryArchived", '= Some("Created"))', '# None)')
 PY
 
   # An archived entry is seated without its unarchive: created custody takes

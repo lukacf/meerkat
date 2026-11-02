@@ -940,10 +940,11 @@ fi
 # first use. They require every listed arm to fire, a floor of distinct
 # states and their witnesses reached, and --mutants refuses the seeded
 # defects: one per invariant and property and one per new guard a reachable
-# state needs (a removal's end that leaves no tombstone, a store-owned update
-# that skips its declared migration, an archive that frees its name, an
-# archived entry seated, a tombstoned name seated, a created custody kept
-# local, which leaves the placed witness unreachable).
+# state needs (a removal's end that leaves no tombstone, a removal that
+# marks an unseated entry, a store-owned update that skips its declared
+# migration, an archive that frees its name, a roster-owned identity
+# archived, an archived entry seated, a tombstoned name seated, a created
+# custody kept local, which leaves the placed witness unreachable).
 created_identity_audit="${workspace_root}/specs/machines/mob_machine/created_identity_audit.sh"
 if [[ ! -x "${created_identity_audit}" ]]; then
   echo "error: created identity audit runner is missing from workspace runfiles: ${created_identity_audit}" >&2
@@ -1238,7 +1239,7 @@ run_machine_verify() {
 # alone. Its recovery part's four whole-space runs, 18 witnesses and 29
 # mutants took 225 s locally with 4 TLC workers (2026-10-31), 51 TLC runs
 # whose JVM start and model parse are most of it; its changes part (0.9.9)
-# adds six whole-space runs, 29 witnesses and 12 mutants, 47 more TLC runs
+# adds six whole-space runs, 29 witnesses and 14 mutants, 49 more TLC runs
 # of about the same cost, not measured yet. To keep it there its
 # reseat run spawns member 1 without custody only, gives a revival record
 # only to member 2's Present row and reconciles both members or none, its

@@ -2536,14 +2536,16 @@ impl CopilotAuthorizer {
         .await
         {
             Ok(identity) => identity,
-            Err(refusal) => return Err(self.operator_refusal(refusal)),
+            Err(refusal) => {
+                return Err(self.operator_refusal(refusal, &material.token, material.generation));
+            }
         };
         *self.state.pacing.identity_retry_at.lock() = None;
         let models_result = self.fetch_models(&identity.api_base, &material.token).await;
         if let Err(error) = &models_result
             && let Some(refusal) = models_refusal(error, identity.installation)
         {
-            return Err(self.operator_refusal(refusal));
+            return Err(self.operator_refusal(refusal, &material.token, material.generation));
         }
         let discovery_now = (self.env.now)();
         let (models, model_discovery_refresh_at) = match models_result {
@@ -2655,37 +2657,51 @@ impl CopilotAuthorizer {
             let material = self.load_operator_token().await?;
             return self.discover_operator_account(material).await;
         }
-        Err(self.operator_refusal(refusal))
+        Err(self.operator_refusal(refusal, &cached.token, generation))
     }
 
-    /// Publish GitHub's refusal of the operator token to the account lease,
-    /// and return the lease generation the refusal applies to.
-    /// The mark has nothing to do when the lease already left `valid`
-    /// another way while the request was in flight: another account state
-    /// published the same refusal (`reauth_required`), or a logout released
-    /// the lease. The AuthMachine's credential-use verdict says which, and
-    /// the refusal then surfaces as `user_reauth_required` all the same.
-    fn mark_operator_token_refused(&self) -> Result<u64, ProviderAuthError> {
+    /// Publish GitHub's refusal of `token`, admitted at lease `generation`,
+    /// to the account lease (`MarkPublicationRefused`), and return the lease
+    /// generation the lease withdraws, or `None` when it carries a newer
+    /// publication. The refusal names the publication the token was
+    /// admitted under: that generation and, for a source this route
+    /// publishes itself, the token's fingerprint (a managed store publishes
+    /// without naming a value). The AuthMachine withdraws the lease only
+    /// while it carries that publication, so a refusal that arrives after
+    /// another account state published a newer token leaves the newer one
+    /// valid. Its credential-use verdict after the refusal says which it
+    /// was: `reauth_required` or `lease_absent` (this refusal, another
+    /// account state's refusal of the same publication, or a logout)
+    /// withdraws the token; any other verdict is a newer publication.
+    fn mark_operator_token_refused(
+        &self,
+        token: &str,
+        generation: u64,
+    ) -> Result<Option<u64>, ProviderAuthError> {
         let auth_lease = self.auth_lease()?;
         let lease_key = self.lease_key();
-        if let Err(error) = auth_lease.mark_reauth_required(&lease_key) {
-            match auth_lease
-                .resolve_credential_use_admission(&lease_key, CredentialUseIntent::UseCredential)
-                .map_err(credential_use_admission_error)?
-            {
-                CredentialUseDisposition::ReauthRequired
-                | CredentialUseDisposition::LeaseAbsent => {}
-                CredentialUseDisposition::Authorized
-                | CredentialUseDisposition::RefreshRequired
-                | CredentialUseDisposition::RefreshDisallowed
-                | CredentialUseDisposition::AlreadyRefreshing => {
-                    return Err(ProviderAuthError::SourceResolutionFailed(format!(
-                        "Copilot token refusal could not be published to AuthMachine: {error}"
-                    )));
-                }
+        let fingerprint =
+            (!simple_secret_source_publishes_lifecycle(&self.binding.auth_profile().source))
+                .then(|| CredentialFingerprint::of_secret(token));
+        auth_lease
+            .mark_publication_refused(&lease_key, generation, fingerprint.as_ref())
+            .map_err(|error| {
+                ProviderAuthError::SourceResolutionFailed(format!(
+                    "Copilot token refusal could not be published to AuthMachine: {error}"
+                ))
+            })?;
+        match auth_lease
+            .resolve_credential_use_admission(&lease_key, CredentialUseIntent::UseCredential)
+            .map_err(credential_use_admission_error)?
+        {
+            CredentialUseDisposition::ReauthRequired | CredentialUseDisposition::LeaseAbsent => {
+                Ok(Some(auth_lease.snapshot(&lease_key).generation))
             }
+            CredentialUseDisposition::Authorized
+            | CredentialUseDisposition::RefreshRequired
+            | CredentialUseDisposition::RefreshDisallowed
+            | CredentialUseDisposition::AlreadyRefreshing => Ok(None),
         }
-        Ok(auth_lease.snapshot(&lease_key).generation)
     }
 
     /// Pace the next read of the source of a token the lease withdrew at
@@ -2767,12 +2783,21 @@ impl CopilotAuthorizer {
         Ok(None)
     }
 
-    /// Apply a refusal: a token GitHub refused is published to the account
-    /// lease (`MarkReauthRequired`), the account state built for an earlier
-    /// token is dropped and a source that runs something is paced, and a
-    /// rate limit pauses the identity lookup until GitHub's stated time.
+    /// Apply a refusal of `token`, admitted at lease `generation`: a token
+    /// GitHub refused is published to the account lease as the refusal of
+    /// that publication (`MarkPublicationRefused`), the account state built
+    /// for an earlier token is dropped and, when the lease withdraws the
+    /// token, a source that runs something is paced; a refusal of a token
+    /// the lease no longer carries (a newer one was published since) fails
+    /// this request as `stale_credential` and leaves the newer token valid.
+    /// A rate limit pauses the identity lookup until GitHub's stated time.
     /// Logged without the token.
-    fn operator_refusal(&self, refusal: OperatorRefusal) -> ProviderAuthError {
+    fn operator_refusal(
+        &self,
+        refusal: OperatorRefusal,
+        token: &str,
+        generation: u64,
+    ) -> ProviderAuthError {
         tracing::warn!(
             credential_identity = %self.binding.credential_identity(),
             refusal = %refusal.detail(),
@@ -2787,8 +2812,12 @@ impl CopilotAuthorizer {
                 // and a new value, such as the next token a command mints, is
                 // published and heals the account.
                 *self.state.cache.write() = None;
-                match self.mark_operator_token_refused() {
-                    Ok(generation) => self.pace_withdrawn_source(generation),
+                match self.mark_operator_token_refused(token, generation) {
+                    Ok(Some(withdrawn)) => self.pace_withdrawn_source(withdrawn),
+                    // The lease carries a newer publication, which the
+                    // refusal leaves valid: only this request's token is
+                    // stale, and the next request reads the source again.
+                    Ok(None) => return ProviderAuthError::Auth(AuthError::StaleCredential),
                     Err(error) => return error,
                 }
             }

@@ -1513,11 +1513,16 @@ them.
   lookup answers 403 or 404 (it may not answer a fine-grained personal
   access token), the route uses the default API host
   `https://api.githubcopilot.com` with no login or plan, and only once the
-  account's model list loads there; a 401 from that list refuses the token,
-  and `CopilotAccountIdentity::looked_up` says whether the lookup answered.
-  A GitHub secondary rate limit (a 403 whose message says so, with or
-  without `Retry-After`) pauses the lookup like any rate limit, at least a
-  minute, and a command or resolver source is not run meanwhile. GitHub's
+  account's model list loads there; `CopilotAccountIdentity::looked_up`
+  says whether the lookup answered. For a user token, a 401 or 403 from the
+  model list is Copilot refusing the token (`refresh_failed`, the lease
+  untouched; after an unanswered lookup the same token is asked about again
+  after a minute), and only the identity lookup's own 401 marks a token
+  revoked. The routes of one account read the token from one credential
+  source: a route over another source is refused. A GitHub secondary rate
+  limit (a 403 whose message says so, with or without `Retry-After`)
+  pauses the lookup like any rate limit, at least a minute, and a command
+  or resolver source is not run meanwhile. GitHub's
   refusal of a token withdraws the account only while its lease carries the
   publication the token was admitted under (for a stored token, the stored
   record's own publication; see Breaking): a refusal that arrives after a

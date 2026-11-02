@@ -2,6 +2,33 @@ use crate::error::LlmError;
 use crate::types::{LlmDoneOutcome, LlmEvent, LlmStream};
 use futures::StreamExt;
 
+/// `stream` with the error it ends with (an `Err` item, or a `Done` whose
+/// outcome is an error) passed through `authorizer`'s
+/// [`meerkat_core::HttpAuthorizer::redact_response_diagnostic`]
+/// ([`LlmError::redact_diagnostics`]): the error keeps its class and loses
+/// any credential the provider echoed. Successful content is left as it is.
+/// Without an authorizer, `stream` is returned unchanged.
+pub fn redact_stream_diagnostics<'a>(
+    stream: LlmStream<'a>,
+    authorizer: Option<&'a dyn meerkat_core::HttpAuthorizer>,
+) -> LlmStream<'a> {
+    let Some(authorizer) = authorizer else {
+        return stream;
+    };
+    Box::pin(stream.map(move |mut item| {
+        match &mut item {
+            Err(error)
+            | Ok(LlmEvent::Done {
+                outcome: LlmDoneOutcome::Error { error },
+            }) => {
+                error.redact_diagnostics(|message| authorizer.redact_response_diagnostic(message));
+            }
+            Ok(_) => {}
+        }
+        item
+    }))
+}
+
 pub fn ensure_terminal_done(mut stream: LlmStream<'_>) -> LlmStream<'_> {
     Box::pin(async_stream::stream! {
         while let Some(item) = stream.next().await {

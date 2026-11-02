@@ -1072,15 +1072,19 @@ impl OpenAiClient {
                 .await
                 .map_err(LlmError::from_authorizer)?;
             for (name, value) in extra {
-                request_builder = request_builder.header(name, value);
+                request_builder =
+                    request_builder.header(name, http::sensitive_header_value(&value)?);
             }
             receipt
         } else if let Some(api_key) = &self.api_key {
             if self.azure_openai_wire_config().is_some() {
-                request_builder = request_builder.header("api-key", api_key);
-            } else {
                 request_builder =
-                    request_builder.header("Authorization", format!("Bearer {api_key}"));
+                    request_builder.header("api-key", http::sensitive_header_value(api_key)?);
+            } else {
+                request_builder = request_builder.header(
+                    "Authorization",
+                    http::sensitive_header_value(&format!("Bearer {api_key}"))?,
+                );
             }
             meerkat_core::HttpAuthorizationReceipt::untracked()
         } else {
@@ -1104,6 +1108,30 @@ impl OpenAiClient {
         self.apply_request_headers_with_receipt(request_builder, endpoint, request_extra_headers)
             .await
             .map(|(request, _)| request)
+    }
+
+    /// Remove from `diagnostic`, text a response carried, any credential the
+    /// authorizer signed the request with: a provider, proxy or gateway can
+    /// echo the request's headers in an error.
+    fn redact_diagnostic(&self, diagnostic: &mut String) {
+        if let Some(authorizer) = &self.authorizer {
+            authorizer.redact_response_diagnostic(diagnostic);
+        }
+    }
+
+    /// `diagnostic` redacted as [`Self::redact_diagnostic`] does, for a log
+    /// field.
+    fn redacted(&self, diagnostic: &str) -> String {
+        let mut diagnostic = diagnostic.to_owned();
+        self.redact_diagnostic(&mut diagnostic);
+        diagnostic
+    }
+
+    /// `error` with every field that can carry provider text redacted as
+    /// [`Self::redact_diagnostic`] does; its class is kept.
+    fn redacted_error(&self, mut error: LlmError) -> LlmError {
+        error.redact_diagnostics(|message| self.redact_diagnostic(message));
+        error
     }
 
     fn responses_endpoint(&self) -> String {
@@ -1624,13 +1652,18 @@ impl OpenAiClient {
                 return Ok(response);
             }
             let headers = response.headers().clone();
-            let text = response
+            let mut text = response
                 .text()
                 .await
                 .map_err(|error| LlmError::StreamParseError {
                     message: format!("cannot read Responses rejection body: {error}"),
                 })?;
-            let rejection = LlmError::from_http_response(status, text.clone(), &headers);
+            // The body is redacted before it is classified, and the decoded
+            // error again: a JSON escape can hide an echoed credential from
+            // the first pass and decoding reveals it.
+            self.redact_diagnostic(&mut text);
+            let rejection =
+                self.redacted_error(LlmError::from_http_response(status, text.clone(), &headers));
             // A policy stop must reach the recovery owner before auth refresh
             // or stateless continuation fallback can issue another request.
             if matches!(rejection, LlmError::PolicyStop { .. }) {
@@ -3068,7 +3101,8 @@ impl OpenAiClient {
                                                         continue;
                                                     }
                                                     let Some(name) = item.get("name").and_then(|n| n.as_str()) else {
-                                                        tracing::warn!(call_id, "function_call missing name");
+                                                        let call_id = self.redacted(call_id);
+                                                        tracing::warn!(call_id = call_id.as_str(), "function_call missing name");
                                                         continue;
                                                     };
                                                     // arguments is a JSON string. Missing arguments
@@ -3335,7 +3369,8 @@ impl OpenAiClient {
                                     continue;
                                 }
                                 let Some(name) = item.get("name").and_then(Value::as_str) else {
-                                    tracing::warn!(call_id, "function_call output item missing name");
+                                    let call_id = self.redacted(call_id);
+                                    tracing::warn!(call_id = call_id.as_str(), "function_call output item missing name");
                                     continue;
                                 };
                                 let (_, args_value) = match item
@@ -3461,9 +3496,11 @@ impl OpenAiClient {
                                 .and_then(|c| c.as_str())
                                 .unwrap_or("server_error");
 
+                            let logged_code = self.redacted(error_code);
+                            let logged_message = self.redacted(error_msg);
                             tracing::error!(
-                                code = error_code,
-                                message = error_msg,
+                                code = logged_code.as_str(),
+                                message = logged_message.as_str(),
                                 "OpenAI response failed"
                             );
 
@@ -3490,9 +3527,11 @@ impl OpenAiClient {
                                 .or(event.code.as_deref())
                                 .unwrap_or("unknown");
 
+                            let logged_code = self.redacted(error_code);
+                            let logged_message = self.redacted(error_msg);
                             tracing::error!(
-                                code = error_code,
-                                message = error_msg,
+                                code = logged_code.as_str(),
+                                message = logged_message.as_str(),
                                 "OpenAI streaming error"
                             );
 
@@ -3516,7 +3555,12 @@ impl OpenAiClient {
             }
         });
 
-        streaming::ensure_terminal_done(inner)
+        // Every error the stream ends with is redacted here, whichever path
+        // built it (a rejection body, an error event, a parse failure).
+        streaming::redact_stream_diagnostics(
+            streaming::ensure_terminal_done(inner),
+            self.authorizer.as_deref(),
+        )
     }
 }
 
@@ -4988,6 +5032,350 @@ mod tests {
             );
             server.abort();
         }
+    }
+
+    /// Every Authorization value the canary authorizer signs with carries
+    /// this canary.
+    const AUTHORIZATION_CANARY: &str = "c4n4ryProviderBearer";
+
+    /// Signs every request with `Authorization: Bearer <canary>`, as a
+    /// dynamic authorizer (a GitHub Copilot operator token, a cloud bearer)
+    /// does.
+    struct CanaryBearerAuthorizer;
+
+    #[async_trait::async_trait]
+    impl meerkat_core::HttpAuthorizer for CanaryBearerAuthorizer {
+        async fn authorize(
+            &self,
+            request: &mut meerkat_core::HttpAuthorizationRequest<'_>,
+        ) -> Result<(), meerkat_core::AuthError> {
+            request.headers.push((
+                "Authorization".to_string(),
+                format!("Bearer {AUTHORIZATION_CANARY}"),
+            ));
+            Ok(())
+        }
+
+        fn redact_response_diagnostic(&self, diagnostic: &mut String) {
+            *diagnostic = diagnostic.replace(AUTHORIZATION_CANARY, "<redacted>");
+        }
+
+        fn label(&self) -> &'static str {
+            "canary-bearer-test"
+        }
+    }
+
+    /// The Authorization value an authorizer supplies is marked sensitive on
+    /// the request the Responses client builds, so the request's `Debug`
+    /// (and HTTP/2 header compression) never keeps the credential.
+    #[tokio::test]
+    async fn authorizer_authorization_header_is_sensitive() {
+        let client =
+            OpenAiClient::new_with_base_url("unused".to_string(), "http://127.0.0.1:9".to_string())
+                .with_authorizer(Arc::new(CanaryBearerAuthorizer));
+        let endpoint = client.responses_endpoint();
+        let (builder, _) = client
+            .apply_request_headers_with_receipt(
+                reqwest::Client::new().post(&endpoint),
+                &endpoint,
+                &[],
+            )
+            .await
+            .expect("the authorizer signs the request");
+        let request = builder.build().expect("the request builds");
+        let authorization = request
+            .headers()
+            .get(reqwest::header::AUTHORIZATION)
+            .expect("an Authorization header");
+        assert_eq!(
+            authorization.to_str().ok(),
+            Some(format!("Bearer {AUTHORIZATION_CANARY}").as_str())
+        );
+        assert!(
+            authorization.is_sensitive(),
+            "the authorizer's Authorization value must be marked sensitive"
+        );
+        assert!(
+            !format!("{request:?}").contains(AUTHORIZATION_CANARY),
+            "{request:?}"
+        );
+    }
+
+    /// A static API key travels in a header value marked sensitive: the
+    /// `Authorization` bearer of the public API and Azure OpenAI's `api-key`,
+    /// so the request's `Debug` (and HTTP/2 header compression) never keeps
+    /// the key.
+    #[tokio::test]
+    async fn static_api_key_headers_are_sensitive() {
+        const KEY_CANARY: &str = "c4n4ryStaticApiKey";
+        for (azure, header) in [(false, "authorization"), (true, "api-key")] {
+            let client = OpenAiClient::new_with_base_url(
+                KEY_CANARY.to_string(),
+                "http://127.0.0.1:9".to_string(),
+            );
+            let client = if azure {
+                client.with_azure_openai_wire(AzureOpenAiWireConfig::default())
+            } else {
+                client
+            };
+            let endpoint = client.responses_endpoint();
+            let (builder, _) = client
+                .apply_request_headers_with_receipt(
+                    reqwest::Client::new().post(&endpoint),
+                    &endpoint,
+                    &[],
+                )
+                .await
+                .expect("the key signs the request");
+            let request = builder.build().expect("the request builds");
+            let value = request
+                .headers()
+                .get(header)
+                .unwrap_or_else(|| panic!("a {header} header"));
+            assert!(
+                value.to_str().is_ok_and(|value| value.contains(KEY_CANARY)),
+                "{header}"
+            );
+            assert!(
+                value.is_sensitive(),
+                "the static key's {header} value must be marked sensitive"
+            );
+            assert!(!format!("{request:?}").contains(KEY_CANARY), "{request:?}");
+        }
+    }
+
+    /// Records the fields of every Meerkat event and span as text.
+    #[derive(Clone, Default)]
+    struct LogCapture(Arc<Mutex<String>>);
+
+    impl LogCapture {
+        fn text(&self) -> String {
+            self.0.lock().unwrap().clone()
+        }
+    }
+
+    struct CaptureVisitor<'a>(&'a mut String);
+
+    impl tracing::field::Visit for CaptureVisitor<'_> {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            use std::fmt::Write as _;
+            let _ = write!(self.0, " {}={value:?}", field.name());
+        }
+    }
+
+    struct CaptureSubscriber {
+        log: LogCapture,
+        next_span: std::sync::atomic::AtomicU64,
+    }
+
+    impl CaptureSubscriber {
+        fn dispatch(log: LogCapture) -> tracing::Dispatch {
+            tracing::Dispatch::new(Self {
+                log,
+                next_span: std::sync::atomic::AtomicU64::new(1),
+            })
+        }
+    }
+
+    impl tracing::Subscriber for CaptureSubscriber {
+        fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+            metadata.target().starts_with("meerkat")
+        }
+
+        fn new_span(&self, span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            span.record(&mut CaptureVisitor(&mut self.log.0.lock().unwrap()));
+            tracing::span::Id::from_u64(
+                self.next_span
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            )
+        }
+
+        fn record(&self, _span: &tracing::span::Id, values: &tracing::span::Record<'_>) {
+            values.record(&mut CaptureVisitor(&mut self.log.0.lock().unwrap()));
+        }
+
+        fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
+
+        fn event(&self, event: &tracing::Event<'_>) {
+            let mut log = self.log.0.lock().unwrap();
+            event.record(&mut CaptureVisitor(&mut log));
+            log.push('\n');
+        }
+
+        fn enter(&self, _span: &tracing::span::Id) {}
+
+        fn exit(&self, _span: &tracing::span::Id) {}
+    }
+
+    /// How the echoing upstream answers. Every answer carries the request's
+    /// Authorization value, as a proxy or gateway that echoes the request's
+    /// headers in an error does.
+    #[derive(Debug, Clone, Copy)]
+    enum Echo {
+        /// HTTP 500 whose error message carries the value.
+        RejectionBody,
+        /// HTTP 400 policy stop whose message carries the value with its
+        /// first character JSON-escaped: only the decoded message holds it.
+        EscapedPolicyStop,
+        /// HTTP 200 stream whose `error` event carries the value.
+        StreamErrorEvent,
+        /// HTTP 200 stream whose `response.failed` event carries the value.
+        StreamFailedEvent,
+    }
+
+    /// The upstream's echo of an Authorization value.
+    fn echoed(authorization: &str) -> String {
+        format!("upstream echo: {authorization}")
+    }
+
+    async fn spawn_echoing_responses_server(echo: Echo) -> (String, tokio::task::JoinHandle<()>) {
+        let app = Router::new().route(
+            "/v1/responses",
+            post(move |headers: HeaderMap| async move {
+                let authorization = headers
+                    .get("authorization")
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or_default()
+                    .to_string();
+                let message = echoed(&authorization);
+                match echo {
+                    Echo::RejectionBody => (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(serde_json::json!({"error": {"message": message}})),
+                    )
+                        .into_response(),
+                    Echo::EscapedPolicyStop => {
+                        let escaped = message.replacen(
+                            AUTHORIZATION_CANARY,
+                            &format!(
+                                "\\u{:04x}{}",
+                                AUTHORIZATION_CANARY.as_bytes()[0],
+                                &AUTHORIZATION_CANARY[1..]
+                            ),
+                            1,
+                        );
+                        (
+                            StatusCode::BAD_REQUEST,
+                            [("content-type", "application/json")],
+                            format!(
+                                r#"{{"error":{{"code":"misalignment_policy_violation","message":"{escaped}"}}}}"#
+                            ),
+                        )
+                            .into_response()
+                    }
+                    Echo::StreamErrorEvent => {
+                        let event = serde_json::json!({
+                            "type": "error",
+                            "code": "server_error",
+                            "message": message,
+                        });
+                        (
+                            [("content-type", "text/event-stream")],
+                            format!("data: {event}\n\n"),
+                        )
+                            .into_response()
+                    }
+                    Echo::StreamFailedEvent => {
+                        let event = serde_json::json!({
+                            "type": "response.failed",
+                            "response": {"error": {"code": "server_error", "message": message}},
+                        });
+                        (
+                            [("content-type", "text/event-stream")],
+                            format!("data: {event}\n\n"),
+                        )
+                            .into_response()
+                    }
+                }
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind echoing server");
+        let addr = listener.local_addr().expect("local addr");
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve echoing server");
+        });
+        (format!("http://{addr}"), handle)
+    }
+
+    /// A provider that echoes the request's Authorization value in a
+    /// rejection body, a policy stop, a stream `error` event or a
+    /// `response.failed` event never puts the authorizer's credential in the
+    /// error the Responses client returns (its `Display`, `Debug` or wire
+    /// JSON) or in a field it logs. The echo itself still reaches the error,
+    /// and each error keeps its class.
+    #[tokio::test]
+    async fn echoed_authorization_stays_out_of_responses_errors_and_logs() {
+        let log = LogCapture::default();
+        let capture = CaptureSubscriber::dispatch(log.clone());
+        // A second registered dispatcher makes callsite interest come from
+        // every dispatcher, so a callsite first reached under no subscriber
+        // still reaches this one.
+        let _anchor = CaptureSubscriber::dispatch(LogCapture::default());
+        let _guard = tracing::dispatcher::set_default(&capture);
+
+        for echo in [
+            Echo::RejectionBody,
+            Echo::EscapedPolicyStop,
+            Echo::StreamErrorEvent,
+            Echo::StreamFailedEvent,
+        ] {
+            let (base_url, server) = spawn_echoing_responses_server(echo).await;
+            let client = OpenAiClient::new_with_base_url("unused".to_string(), base_url)
+                .with_authorizer(Arc::new(CanaryBearerAuthorizer));
+            let request =
+                LlmRequest::new("gpt-5.4", vec![Message::User(UserMessage::text("hello"))]);
+            let events = client.stream(&request).collect::<Vec<_>>().await;
+            server.abort();
+            let error = events
+                .into_iter()
+                .find_map(|event| match event {
+                    Err(error)
+                    | Ok(LlmEvent::Done {
+                        outcome: LlmDoneOutcome::Error { error },
+                    }) => Some(error),
+                    Ok(_) => None,
+                })
+                .unwrap_or_else(|| panic!("{echo:?}: the stream ends in an error"));
+            let rendered = format!(
+                "{error} {error:?} {}",
+                serde_json::to_string(&error).expect("error JSON")
+            );
+            assert!(
+                !rendered.contains(AUTHORIZATION_CANARY),
+                "{echo:?} leaked the credential: {rendered}"
+            );
+            assert!(
+                rendered.contains("upstream echo"),
+                "{echo:?}: the provider's message reached the error: {rendered}"
+            );
+            match echo {
+                Echo::EscapedPolicyStop => assert!(
+                    matches!(&error, LlmError::PolicyStop { code, .. }
+                        if code == "misalignment_policy_violation"),
+                    "{echo:?}: {error:?}"
+                ),
+                Echo::RejectionBody | Echo::StreamErrorEvent | Echo::StreamFailedEvent => {
+                    assert!(
+                        matches!(error, LlmError::ServerError { status: 500, .. }),
+                        "{echo:?}: {error:?}"
+                    );
+                }
+            }
+        }
+
+        let logged = log.text();
+        assert!(
+            logged.contains("upstream echo"),
+            "the capture saw the client's error log fields: {logged}"
+        );
+        assert!(
+            !logged.contains(AUTHORIZATION_CANARY),
+            "a log field leaked the credential: {logged}"
+        );
     }
 
     /// Serves each element of `chunks` as a separate paced HTTP body chunk so

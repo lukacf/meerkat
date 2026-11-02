@@ -478,6 +478,46 @@ impl LlmError {
         meerkat_core::AgentError::llm(provider, self.failure_reason(), self.to_string())
     }
 
+    /// Pass every field of this error that can carry text a provider sent
+    /// back through `redact`, keeping the error's class. A provider, proxy
+    /// or gateway can echo a request's headers, its credential included, in
+    /// that text; provider clients redact it with their authorizer's
+    /// [`meerkat_core::HttpAuthorizer::redact_response_diagnostic`]. The
+    /// match is exhaustive, so a new variant has to decide whether it
+    /// carries such text.
+    pub fn redact_diagnostics(&mut self, mut redact: impl FnMut(&mut String)) {
+        match self {
+            Self::ServerError { message, .. }
+            | Self::InvalidRequest { message }
+            | Self::RequestTooLarge { message, .. }
+            | Self::InvalidInputShape { message }
+            | Self::InvalidConfig { message }
+            | Self::AuthenticationFailed { message }
+            | Self::AuthorizationRouteChanged { message }
+            | Self::QuotaExhausted { message }
+            | Self::Unknown { message }
+            | Self::StreamParseError { message }
+            | Self::IncompleteResponse { message } => redact(message),
+            Self::PolicyStop { code, message } => {
+                redact(code);
+                redact(message);
+            }
+            Self::ContentFiltered { reason } => redact(reason),
+            Self::ModelNotFound { model } => redact(model),
+            Self::OperationRefused { .. }
+            | Self::OperationObservationUnavailable
+            | Self::OperationAuthorizationUnavailable
+            | Self::OperationReviewRefused { .. }
+            | Self::RateLimited { .. }
+            | Self::ServerOverloaded
+            | Self::NetworkTimeout { .. }
+            | Self::ConnectionReset
+            | Self::ContextLengthExceeded { .. }
+            | Self::InvalidApiKey
+            | Self::ToolChoiceUnsupported { .. } => {}
+        }
+    }
+
     pub fn from_authorizer(error: meerkat_core::AuthError) -> Self {
         match error {
             meerkat_core::AuthError::ResolveRequired(message) => {

@@ -593,14 +593,18 @@ fi
 # same generated model explores every AuthMachine action over two values,
 # OAuth flow membership left out, under every generated invariant plus an
 # action property (a refused or logged-out value is never published again
-# while the lease records it) and an invariant (the classifier's verdict is
-# Publish exactly when an Acquire arm naming the value is enabled). It
-# requires its five witnesses reached (a refusal and a logout healed by
-# another value, a run-out window renewing the same value, a refused and a
-# logged-out value whose Acquire is disabled while another's is enabled).
-# Its --mutants mode (by hand) refuses the Acquire guard removed and the
-# renewal arms AcquireFromExpiring and AcquireFromExpired disabled. 3 steps
-# reach every witness.
+# while the lease records it) and two invariants (the classifier's verdict is
+# Publish exactly when an Acquire arm naming the value is enabled; a
+# MarkPublicationRefused arm withdraws the lease exactly when the refusal
+# names the publication the lease carries in a live phase). It requires its
+# seven witnesses reached (a refusal and a logout healed by another value, a
+# run-out window renewing the same value, a refused and a logged-out value
+# whose Acquire is disabled while another's is enabled, a newer publication a
+# late refusal of the earlier one leaves valid, a refusal of the current
+# publication withdrawing it). Its --mutants mode (by hand) refuses the
+# Acquire guard removed, the renewal arms AcquireFromExpiring and
+# AcquireFromExpired disabled, and the refusal's correlation guard removed.
+# 3 steps reach every witness.
 source_credential_publication_audit="${workspace_root}/specs/machines/auth/source_credential_publication_audit.sh"
 if [[ ! -x "${source_credential_publication_audit}" ]]; then
   echo "error: source-credential publication audit runner is missing from workspace runfiles: ${source_credential_publication_audit}" >&2

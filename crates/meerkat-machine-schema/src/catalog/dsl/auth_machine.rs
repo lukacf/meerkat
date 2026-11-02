@@ -20,6 +20,9 @@ use super::OptionValueExt;
 //     (an environment variable, a command, an external resolver): a value
 //     that was refused or logged out is never published again until a
 //     different value appears
+//   * which publication a consumer's refusal withdraws: only the one it
+//     names, so a late refusal of an earlier credential never withdraws a
+//     newer one
 //   * short-lived OAuth login-flow membership for the same binding:
 //     browser PKCE states, admitted device codes, and active device
 //     poll leases
@@ -300,6 +303,19 @@ macro_rules! auth_catalog_machine_dsl {
                 // Each transition self-loops in its phase (classification
                 // never mutates state).
                 ResolveSourceCredentialPublication { #[redacted] credential_material_fingerprint: String },
+                // A consumer refused the credential of one publication (a
+                // provider answered that it is revoked or invalid). The
+                // refusal names that publication: the credential generation
+                // it was admitted under, and the fingerprint the publication
+                // recorded (None for a publisher that names no value). The
+                // lease is withdrawn only while it still carries that
+                // publication; any other refusal is a benign no-op, so a
+                // refusal that arrives after a newer value was published
+                // never withdraws the newer one.
+                MarkPublicationRefused {
+                    refused_credential_generation: u64,
+                    #[redacted] refused_credential_material_fingerprint: Option<String>,
+                },
             }
 
             effect AuthMachineEffect {
@@ -2109,6 +2125,114 @@ macro_rules! auth_catalog_machine_dsl {
                     self.credential_published_at_millis = Some(credential_published_at_millis);
                     self.credential_material_fingerprint = credential_material_fingerprint;
                 }
+                to Valid
+                emit EmitLifecycleEvent {
+                    new_state: self.lifecycle_phase,
+                    expires_at: self.expires_at,
+                    credential_generation: self.credential_generation,
+                    credential_published_at_millis: self.credential_published_at_millis,
+                }
+            }
+
+            // --- A consumer's refusal of one publication ---
+            //
+            // MarkPublicationRefused withdraws the lease (ReauthRequired, as
+            // MarkReauthRequired does) only when it names the publication the
+            // lease carries: the same credential generation and the same
+            // recorded fingerprint. A refusal is observation-shaped and can
+            // arrive late, after another session or machine published a
+            // newer value: it then names a superseded publication and
+            // changes nothing, so the newer value stays valid. A lease that
+            // was already refused or released is left as it is too. The
+            // guards partition every phase; the refusing arms are split by
+            // phase like MarkReauthRequired's, and the no-op arms are
+            // per-phase self-loops. Every arm emits the lifecycle event, as
+            // the freshness self-loops do.
+            transition MarkPublicationRefusedFromValid {
+                on input MarkPublicationRefused { refused_credential_generation, refused_credential_material_fingerprint }
+                guard { self.lifecycle_phase == Phase::Valid }
+                guard "refused_publication_current" {
+                    self.credential_generation == refused_credential_generation
+                    && self.credential_material_fingerprint == refused_credential_material_fingerprint
+                }
+                to ReauthRequired
+                emit EmitLifecycleEvent {
+                    new_state: self.lifecycle_phase,
+                    expires_at: self.expires_at,
+                    credential_generation: self.credential_generation,
+                    credential_published_at_millis: self.credential_published_at_millis,
+                }
+            }
+
+            transition MarkPublicationRefusedFromExpiring {
+                on input MarkPublicationRefused { refused_credential_generation, refused_credential_material_fingerprint }
+                guard { self.lifecycle_phase == Phase::Expiring }
+                guard "refused_publication_current" {
+                    self.credential_generation == refused_credential_generation
+                    && self.credential_material_fingerprint == refused_credential_material_fingerprint
+                }
+                to ReauthRequired
+                emit EmitLifecycleEvent {
+                    new_state: self.lifecycle_phase,
+                    expires_at: self.expires_at,
+                    credential_generation: self.credential_generation,
+                    credential_published_at_millis: self.credential_published_at_millis,
+                }
+            }
+
+            transition MarkPublicationRefusedFromExpired {
+                on input MarkPublicationRefused { refused_credential_generation, refused_credential_material_fingerprint }
+                guard { self.lifecycle_phase == Phase::Expired }
+                guard "refused_publication_current" {
+                    self.credential_generation == refused_credential_generation
+                    && self.credential_material_fingerprint == refused_credential_material_fingerprint
+                }
+                to ReauthRequired
+                emit EmitLifecycleEvent {
+                    new_state: self.lifecycle_phase,
+                    expires_at: self.expires_at,
+                    credential_generation: self.credential_generation,
+                    credential_published_at_millis: self.credential_published_at_millis,
+                }
+            }
+
+            transition MarkPublicationRefusedFromRefreshing {
+                on input MarkPublicationRefused { refused_credential_generation, refused_credential_material_fingerprint }
+                guard { self.lifecycle_phase == Phase::Refreshing }
+                guard "refused_publication_current" {
+                    self.credential_generation == refused_credential_generation
+                    && self.credential_material_fingerprint == refused_credential_material_fingerprint
+                }
+                to ReauthRequired
+                emit EmitLifecycleEvent {
+                    new_state: self.lifecycle_phase,
+                    expires_at: self.expires_at,
+                    credential_generation: self.credential_generation,
+                    credential_published_at_millis: self.credential_published_at_millis,
+                }
+            }
+
+            transition MarkPublicationRefusedSuperseded {
+                per_phase [Valid, Expiring, Expired, Refreshing]
+                on input MarkPublicationRefused { refused_credential_generation, refused_credential_material_fingerprint }
+                guard "refused_publication_superseded" {
+                    self.credential_generation != refused_credential_generation
+                    || self.credential_material_fingerprint != refused_credential_material_fingerprint
+                }
+                update {}
+                to Valid
+                emit EmitLifecycleEvent {
+                    new_state: self.lifecycle_phase,
+                    expires_at: self.expires_at,
+                    credential_generation: self.credential_generation,
+                    credential_published_at_millis: self.credential_published_at_millis,
+                }
+            }
+
+            transition MarkPublicationRefusedWithdrawn {
+                per_phase [ReauthRequired, Released]
+                on input MarkPublicationRefused { refused_credential_generation, refused_credential_material_fingerprint }
+                update {}
                 to Valid
                 emit EmitLifecycleEvent {
                     new_state: self.lifecycle_phase,

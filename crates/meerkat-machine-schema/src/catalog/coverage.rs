@@ -1344,7 +1344,7 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                     "auth_lease_handle",
                     "AuthMachine",
                     "crates/meerkat-runtime/src/handles/auth_lease.rs",
-                    "per-binding AuthMachine registry; AuthLeaseHandle trait impl drives acquire, observe credential freshness, expiring, expired, refresh, reauth, release, source-credential publication, lifecycle event, and wake loop DSL transitions through it",
+                    "per-binding AuthMachine registry; AuthLeaseHandle trait impl drives acquire, observe credential freshness, expiring, expired, refresh, reauth, publication refusal, release, source-credential publication, lifecycle event, and wake loop DSL transitions through it",
                     CoverageClaims::none()
                         .transitions(&[
                             "Acquire",
@@ -1353,6 +1353,16 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                             "ObserveCredentialFreshnessExpiring",
                             "ObserveCredentialFreshnessExpired",
                             "Release",
+                            "MarkPublicationRefusedFromValid",
+                            "MarkPublicationRefusedFromExpiring",
+                            "MarkPublicationRefusedFromExpired",
+                            "MarkPublicationRefusedFromRefreshing",
+                            "MarkPublicationRefusedSupersededValid",
+                            "MarkPublicationRefusedSupersededExpiring",
+                            "MarkPublicationRefusedSupersededExpired",
+                            "MarkPublicationRefusedSupersededRefreshing",
+                            "MarkPublicationRefusedWithdrawnReauthRequired",
+                            "MarkPublicationRefusedWithdrawnReleased",
                             "ResolveSourceCredentialPublicationNewMaterialValid",
                             "ResolveSourceCredentialPublicationNewMaterialExpiring",
                             "ResolveSourceCredentialPublicationNewMaterialExpired",
@@ -1460,6 +1470,24 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                     "oauth_device_flow_lifecycle",
                     "OAuth device flow admit, verify, begin poll, finish poll, consume, and expire operations stay under the per-binding AuthMachine lifecycle authority",
                     CoverageClaims::none(),
+                ),
+                scenario(
+                    "publication_refusal",
+                    "a consumer's refusal names the publication it refuses by credential generation and recorded fingerprint: it withdraws the lease to reauth required only while the lease carries that publication, and a late refusal of an earlier or another value, or of a lease already refused or released, changes nothing",
+                    CoverageClaims::none()
+                        .transitions(&[
+                            "MarkPublicationRefusedFromValid",
+                            "MarkPublicationRefusedFromExpiring",
+                            "MarkPublicationRefusedFromExpired",
+                            "MarkPublicationRefusedFromRefreshing",
+                            "MarkPublicationRefusedSupersededValid",
+                            "MarkPublicationRefusedSupersededExpiring",
+                            "MarkPublicationRefusedSupersededExpired",
+                            "MarkPublicationRefusedSupersededRefreshing",
+                            "MarkPublicationRefusedWithdrawnReauthRequired",
+                            "MarkPublicationRefusedWithdrawnReleased",
+                        ])
+                        .effects(&["EmitLifecycleEvent"]),
                 ),
                 scenario(
                     "source_credential_publication",

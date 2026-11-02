@@ -8,15 +8,21 @@
 //! the tests (nextest's process per test, or plain `cargo test`'s threads in
 //! one process). A file lock needs no such isolation: its holders unlock it
 //! before they close it, and a copy keeps nothing unlocked.
+//!
+//! The child-process runner compiles on Linux only, where every test that
+//! runs alone lives; elsewhere it would be dead code.
 
 /// Set in the child process a test runs alone in.
+#[cfg(target_os = "linux")]
 const ALONE_CHILD: &str = "MEERKAT_CORE_TEST_ALONE";
 /// Printed by that child once the test's body has passed.
+#[cfg(target_os = "linux")]
 const ALONE_CHILD_DONE: &str = "meerkat-core test passed alone";
 
 /// Run `body`, the body of the test `test` (its path in this binary, such as
 /// `confinement::tests::a_row`), alone in a child process of this test
 /// binary, and require it to pass there.
+#[cfg(target_os = "linux")]
 pub(crate) fn alone_in_child_process(test: &str, body: impl FnOnce()) {
     if std::env::var_os(ALONE_CHILD).is_some() {
         body();
@@ -26,6 +32,7 @@ pub(crate) fn alone_in_child_process(test: &str, body: impl FnOnce()) {
     run_in_child_process(test);
 }
 
+#[cfg(target_os = "linux")]
 fn run_in_child_process(test: &str) {
     #[allow(clippy::disallowed_methods)] // the test re-runs its own binary
     let output = std::process::Command::new(

@@ -3776,6 +3776,235 @@ mod tests {
             reauth(true).await;
         }
     }
+
+    /// Turns on a Copilot route through the actual runtime, authorizer and
+    /// routed client. `ScriptedTransport` stands in for the token exchange
+    /// and `/models`; a test client stands in for the provider adapter.
+    mod route_turns {
+        use super::*;
+
+        /// Resolve one session on `runtime` (its own authorizer on the shared
+        /// account) and build its routed client over `factory`'s adapter.
+        async fn routed_session(
+            runtime: &Arc<CopilotRuntime>,
+            binding: &ValidatedBinding,
+            env: &ResolverEnvironment,
+            factory: CopilotRouteClientFactory,
+        ) -> Arc<dyn meerkat_llm_core::LlmClient> {
+            let resolved = runtime.resolve(binding, env).await.unwrap();
+            let connection = meerkat_llm_core::provider_runtime::ResolvedConnection {
+                provider: Provider::OpenAI,
+                backend: binding.backend(),
+                backend_profile: binding.backend_profile().clone(),
+                credential_identity: binding.credential_identity().clone(),
+                auth_lease: Arc::new(
+                    meerkat_llm_core::provider_runtime::DynamicLease::from_authorizer(
+                        resolved.authorizer(),
+                        resolved.metadata().clone(),
+                        crate::GITHUB_COPILOT_AUTHORIZER_LABEL,
+                    ),
+                ),
+            };
+            routed_client(
+                Arc::clone(runtime),
+                connection,
+                Provider::OpenAI,
+                "gpt-test".to_string(),
+                factory,
+            )
+            .unwrap()
+        }
+
+        /// Which entry of the route's adapter a request reached.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        enum AdapterEntry {
+            /// `stream`: the request arrived without its prepared form.
+            Raw,
+            /// `stream_prepared`, with what the prepared request carried.
+            Prepared {
+                authorized: bool,
+                route_witness: bool,
+            },
+        }
+
+        struct EntryRecordingClient {
+            entries: Arc<Mutex<Vec<AdapterEntry>>>,
+        }
+
+        #[async_trait]
+        impl meerkat_llm_core::LlmClient for EntryRecordingClient {
+            fn project_replay_messages(
+                &self,
+                messages: &[meerkat_core::Message],
+            ) -> Result<Vec<meerkat_core::Message>, meerkat_llm_core::LlmError> {
+                Ok(messages.to_vec())
+            }
+
+            fn stream<'a>(
+                &'a self,
+                _request: &'a meerkat_llm_core::LlmRequest,
+            ) -> meerkat_llm_core::LlmStream<'a> {
+                self.entries.lock().push(AdapterEntry::Raw);
+                Box::pin(futures::stream::empty())
+            }
+
+            fn stream_prepared<'a>(
+                &'a self,
+                request: &'a meerkat_llm_core::PreparedLlmRequest,
+            ) -> meerkat_llm_core::LlmStream<'a> {
+                self.entries.lock().push(AdapterEntry::Prepared {
+                    authorized: request.authorization().is_some(),
+                    route_witness: request.route_witness::<PreparedCopilotRoute>().is_some(),
+                });
+                Box::pin(futures::stream::empty())
+            }
+
+            fn provider(&self) -> Provider {
+                Provider::OpenAI
+            }
+
+            async fn health_check(&self) -> Result<(), meerkat_llm_core::LlmError> {
+                Ok(())
+            }
+        }
+
+        /// The work policy of a governed turn. The stand-in adapter never
+        /// prepares an operation, so it is never asked.
+        struct UnaskedWorkPolicy;
+
+        impl meerkat_core::authorization::WorkAuthorization for UnaskedWorkPolicy {
+            fn prepare(
+                &self,
+                _binding: &meerkat_core::authorization::PreparedAuthorizationBinding,
+            ) -> Result<
+                Arc<dyn meerkat_core::authorization::PreparedOperationAuthorization>,
+                meerkat_core::OperationAuthorizationError,
+            > {
+                Err(meerkat_core::authorization::OperationRefused::new(
+                    meerkat_core::authorization::OperationRefusalKind::Denied,
+                )
+                .into())
+            }
+        }
+
+        /// A route whose account model is known (so the account capability
+        /// gate stands in front of the adapter) and allows 16 output tokens.
+        async fn gated_route(
+            entries: &Arc<Mutex<Vec<AdapterEntry>>>,
+        ) -> Arc<dyn meerkat_llm_core::LlmClient> {
+            let (auth_binding, binding) = validated_binding();
+            let (env, _) = resolver_environment(&auth_binding).await;
+            let runtime = Arc::new(CopilotRuntime {
+                accounts: Mutex::new(BTreeMap::new()),
+                transport: Arc::new(ScriptedTransport::new([
+                    token_response("derived"),
+                    json_response(
+                        200,
+                        serde_json::json!({
+                            "data": [{
+                                "id": "gpt-test",
+                                "supported_endpoints": ["/responses"],
+                                "capabilities": {"limits": {"max_output_tokens": 16}}
+                            }]
+                        }),
+                    ),
+                ])),
+            });
+            let recorded = Arc::clone(entries);
+            let factory: CopilotRouteClientFactory = Arc::new(move |_, _| {
+                Ok(Arc::new(EntryRecordingClient {
+                    entries: Arc::clone(&recorded),
+                }))
+            });
+            routed_session(&runtime, &binding, &env, factory).await
+        }
+
+        /// A request projected through `client`, as the agent loop prepares
+        /// one, optionally carrying the work authorization of a governed turn.
+        fn prepared_request(
+            client: &Arc<dyn meerkat_llm_core::LlmClient>,
+            max_tokens: u32,
+            authorized: bool,
+        ) -> meerkat_llm_core::PreparedLlmRequest {
+            let projection = client.project_replay_request(&[]).unwrap();
+            let request = meerkat_llm_core::PreparedLlmRequest::from_projection(
+                meerkat_llm_core::LlmRequest::new("gpt-test", Vec::new())
+                    .with_max_tokens(max_tokens),
+                projection,
+            );
+            if !authorized {
+                return request;
+            }
+            request.with_authorization(Some(meerkat_core::LlmRequestAuthorization::new(
+                meerkat_core::authorization::WorkAuthorizationContext::new(
+                    Arc::new(UnaskedWorkPolicy),
+                    meerkat_core::exact_operation::OperationExecutionScope::Domain,
+                ),
+                meerkat_core::OperationId::new(),
+                meerkat_core::ModelAuthorizationUse::Inference,
+            )))
+        }
+
+        #[tokio::test]
+        async fn account_capability_gate_forwards_authorized_prepared_requests() {
+            let entries = Arc::new(Mutex::new(Vec::new()));
+            let client = gated_route(&entries).await;
+
+            let events = client
+                .stream_prepared(&prepared_request(&client, 16, true))
+                .collect::<Vec<_>>()
+                .await;
+            assert!(
+                events.is_empty(),
+                "a governed request the account model admits must reach the route's adapter: {events:?}"
+            );
+            assert_eq!(
+                entries.lock().as_slice(),
+                [AdapterEntry::Prepared {
+                    authorized: true,
+                    route_witness: true,
+                }],
+                "the adapter receives the prepared request with its work authorization"
+            );
+
+            let events = client
+                .stream_prepared(&prepared_request(&client, 17, true))
+                .collect::<Vec<_>>()
+                .await;
+            assert!(
+                matches!(
+                    events.as_slice(),
+                    [Err(meerkat_llm_core::LlmError::InvalidRequest { .. })]
+                ),
+                "the gate still refuses what the account model does not admit: {events:?}"
+            );
+            assert_eq!(
+                entries.lock().len(),
+                1,
+                "a request the gate refuses never reaches the adapter"
+            );
+        }
+
+        #[tokio::test]
+        async fn account_capability_gate_keeps_the_route_witness_of_unauthorized_requests() {
+            let entries = Arc::new(Mutex::new(Vec::new()));
+            let client = gated_route(&entries).await;
+
+            let events = client
+                .stream_prepared(&prepared_request(&client, 16, false))
+                .collect::<Vec<_>>()
+                .await;
+            assert!(events.is_empty(), "{events:?}");
+            assert_eq!(
+                entries.lock().as_slice(),
+                [AdapterEntry::Prepared {
+                    authorized: false,
+                    route_witness: true,
+                }],
+                "the adapter receives the request in its prepared form"
+            );
+        }
+    }
 }
 
 #[cfg(test)]

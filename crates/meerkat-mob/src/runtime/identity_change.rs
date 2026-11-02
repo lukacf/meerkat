@@ -389,11 +389,19 @@ pub struct IdentityUpdateOutcome {
 
 /// What a store-owned create answers: the change (committed now, with its
 /// receipt, or replayed), and the spawn of each identity whose spec owes a
-/// kickoff, spawned once the change committed.
+/// kickoff (an initial message, or an autonomous host's kickoff turn),
+/// spawned once the change committed, as the declared apply answers a
+/// roster-owned identity's embodiment of the same spec.
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct IdentityCreateOutcome {
     pub change: IdentityChangeOutcome,
+    /// Per identity whose spec owes a kickoff:
+    /// [`super::DeclaredEntryOutcome::Embodied`] with the member's session,
+    /// its kickoff running once; or [`super::DeclaredEntryOutcome::Failed`]
+    /// with the spawn's error, the identity then owed its seat, with no
+    /// member, which the mob's next start embodies once. Empty for a replay
+    /// and for a create whose identities owe no kickoff.
     pub embodied: BTreeMap<AgentIdentity, super::DeclaredEntryOutcome>,
 }
 
@@ -2621,11 +2629,14 @@ impl super::MobHandle {
     /// identity whose spec owes a kickoff (an initial message, or an
     /// autonomous host's kickoff turn) is spawned once the change is
     /// committed, as the dormant seat spawns such a spec, and runs its
-    /// kickoff once. An identity whose host prepares it first waits unseated
-    /// for its preparation. A placed or externally bound identity is hosted
-    /// on its first use, and one whose host holds its creation
-    /// ([`CreatedIdentityRequest::held_creation`]) awaits it: neither is
-    /// seated, and its host's spawn holding its created custody
+    /// kickoff once. Each such spawn is answered per identity
+    /// ([`IdentityCreateOutcome::embodied`]): embodied, or failed, the
+    /// identity then owed its seat (the change stays committed), which the
+    /// mob's next start embodies once. An identity whose host prepares it
+    /// first waits unseated for its preparation. A placed or externally bound
+    /// identity is hosted on its first use, and one whose host holds its
+    /// creation ([`CreatedIdentityRequest::held_creation`]) awaits it:
+    /// neither is seated, and its host's spawn holding its created custody
     /// ([`super::SpawnMemberSpec::with_created_custody`]) creates it.
     ///
     /// Refused typed, with nothing written: more than
@@ -2784,8 +2795,10 @@ impl super::MobHandle {
         };
         // The identities whose specs owe a kickoff, spawned under created
         // custody now that their rows and entries are committed: each runs
-        // its kickoff once. One whose spawn fails stays owed its seat, which
-        // the mob's next start seats from its row.
+        // its kickoff once, and each spawn is answered. One whose spawn fails
+        // stays owed its seat, which the mob's next start embodies from its
+        // row.
+        let mut embodied = BTreeMap::new();
         for spec in embody {
             let agent_identity = spec.identity.clone();
             #[cfg(test)]
@@ -2798,18 +2811,36 @@ impl super::MobHandle {
             };
             #[cfg(not(test))]
             let spawned = Box::pin(self.spawn_spec_internal(spec)).await;
-            if let Err(error) = spawned {
-                tracing::warn!(
-                    mob_id = %self.definition.id,
-                    agent_identity = %agent_identity,
-                    error = %error,
-                    "a store-owned identity that owes a kickoff was not spawned"
-                );
-            }
+            let answer = match spawned {
+                Ok(member) => match member.bridge_session_id() {
+                    Some(session_id) => super::DeclaredEntryOutcome::Embodied {
+                        session_id: session_id.clone(),
+                        history_unavailable: None,
+                    },
+                    // A create embodies only a local identity, whose member
+                    // is session-backed.
+                    None => super::DeclaredEntryOutcome::Failed {
+                        error: MobError::Internal(format!(
+                            "the embodied store-owned identity '{agent_identity}' has no session"
+                        )),
+                    },
+                },
+                Err(error) => {
+                    tracing::warn!(
+                        mob_id = %self.definition.id,
+                        agent_identity = %agent_identity,
+                        error = %error,
+                        "a store-owned identity that owes a kickoff was not spawned: it is \
+                         owed its seat"
+                    );
+                    super::DeclaredEntryOutcome::Failed { error }
+                }
+            };
+            embodied.insert(agent_identity, answer);
         }
         Ok(IdentityCreateOutcome {
             change: IdentityChangeOutcome::Committed { receipt },
-            embodied: BTreeMap::new(),
+            embodied,
         })
     }
 

@@ -4799,6 +4799,74 @@ mod tests {
                     ))
                     .phase
             }
+
+            /// An account whose builds admit a token exchange outage, as the
+            /// factory's builds whose output budget is known before
+            /// resolution do.
+            async fn admitting_pending_limits(
+                transport: Arc<dyn CopilotHttpTransport>,
+                clock: &TestClock,
+            ) -> Self {
+                let account = Self::new(transport, clock).await;
+                Self {
+                    env: account.env.admitting_pending_account_limits(),
+                    ..account
+                }
+            }
+
+            /// The retryable class of the outage the account recorded.
+            fn recorded_outage(&self) -> Option<meerkat_llm_core::LlmError> {
+                let state = self
+                    .runtime
+                    .accounts
+                    .lock()
+                    .values()
+                    .find_map(Weak::upgrade)?;
+                let cache = state.cache.read();
+                cache
+                    .as_ref()?
+                    .exchange_unavailable
+                    .as_ref()
+                    .map(|unavailable| unavailable.retryable.clone())
+            }
+
+            /// A new sign-in on the account: another GitHub token, expiring
+            /// at `expires_at`, published through AuthMachine and stored, as
+            /// a new login does.
+            async fn sign_in_again(&self, github_token: &str, expires_at: DateTime<Utc>) {
+                let identity = account_identity();
+                let tokens = PersistedTokens {
+                    auth_mode: PersistedAuthMode::GithubCopilotOauth,
+                    primary_secret: Some(github_token.to_string()),
+                    refresh_token: None,
+                    id_token: None,
+                    expires_at: Some(expires_at),
+                    last_refresh: Some(Utc::now()),
+                    scopes: vec!["read:user".to_string()],
+                    account_id: None,
+                    metadata: serde_json::Value::Null,
+                };
+                let transition = meerkat_core::publish_token_lifecycle_acquired_for_identity(
+                    &self.auth_lease,
+                    &identity,
+                    &tokens,
+                )
+                .expect("publish the new sign-in");
+                let key = meerkat_core::auth::TokenKey::from_credential_identity(&identity);
+                let marked = meerkat_core::mark_tokens_lifecycle_published_for_transition(
+                    &key,
+                    &tokens,
+                    &transition,
+                )
+                .expect("mark the new sign-in");
+                self.env
+                    .provider_auth_persistence()
+                    .expect("test persistence")
+                    .token_store()
+                    .save(&key, &marked)
+                    .await
+                    .expect("store the new sign-in");
+            }
         }
 
         /// Whether the agent loop's retry policy retries this turn failure.
@@ -5280,7 +5348,7 @@ mod tests {
                 503,
                 serde_json::json!({"message": "unavailable"}),
             )]));
-            let account = RouteAccount::new(transport.clone(), &clock).await;
+            let account = RouteAccount::admitting_pending_limits(transport.clone(), &clock).await;
 
             let session = account.try_session([]).await;
             assert!(
@@ -5304,7 +5372,7 @@ mod tests {
                 models_response(),
                 json_response(503, serde_json::json!({"message": "unavailable"})),
             ]));
-            let account = RouteAccount::new(transport.clone(), &clock).await;
+            let account = RouteAccount::admitting_pending_limits(transport.clone(), &clock).await;
             let _first = account.session([]).await;
 
             // The account's token has expired and the exchange is down.
@@ -5325,7 +5393,7 @@ mod tests {
                 401,
                 serde_json::json!({"message": "Bad credentials"}),
             )]));
-            let account = RouteAccount::new(transport.clone(), &clock).await;
+            let account = RouteAccount::admitting_pending_limits(transport.clone(), &clock).await;
 
             let Err(error) = account.try_session([]).await else {
                 panic!("an exchange refusal must fail the build");
@@ -5353,7 +5421,7 @@ mod tests {
                 token_at("derived-one", clock.at(3600), 200),
                 models_response(),
             ]));
-            let account = RouteAccount::new(transport.clone(), &clock).await;
+            let account = RouteAccount::admitting_pending_limits(transport.clone(), &clock).await;
             let session = account.try_session([]).await;
             assert!(
                 session.is_ok(),
@@ -5375,6 +5443,192 @@ mod tests {
             let events = session.turn_across_a_route_change().await;
             assert!(events.is_empty(), "{events:?}");
             assert_eq!(session.bearers(), ["Bearer derived-one"]);
+            assert_eq!(transport.request_count(), 4);
+        }
+
+        #[tokio::test]
+        async fn a_build_that_needs_the_account_limits_still_fails_during_an_outage() {
+            let clock = TestClock::new();
+            let transport = Arc::new(ScriptedTransport::new([json_response(
+                503,
+                serde_json::json!({"message": "unavailable"}),
+            )]));
+            // A resolution that does not admit pending account limits, as a
+            // new session whose output budget comes from the account's model
+            // limit resolves.
+            let account = RouteAccount::new(transport.clone(), &clock).await;
+
+            let Err(error) = account.try_session([]).await else {
+                panic!(
+                    "a build that needs the account's limits must fail while the exchange is down"
+                );
+            };
+            assert!(
+                matches!(
+                    &error,
+                    ProviderAuthError::SourceResolutionFailed(message)
+                        if message.contains("returned 503")
+                ),
+                "{error:?}"
+            );
+            assert_eq!(transport.request_count(), 1);
+            assert_eq!(
+                account.source_phase(),
+                Some(meerkat_core::handles::AuthLeasePhase::Valid),
+                "an outage marks nothing on the sign-in"
+            );
+        }
+
+        #[tokio::test]
+        async fn an_exchange_refusal_after_an_outage_fails_the_build_and_ends_the_outage() {
+            let clock = TestClock::new();
+            let transport = Arc::new(ScriptedTransport::new([
+                json_response(503, serde_json::json!({"message": "unavailable"})),
+                json_response(401, serde_json::json!({"message": "Bad credentials"})),
+            ]));
+            let account = RouteAccount::admitting_pending_limits(transport.clone(), &clock).await;
+            let first = account.session([]).await;
+            assert!(account.recorded_outage().is_some());
+
+            let Err(error) = account.try_session([]).await else {
+                panic!("an exchange refusal after an outage must fail the build");
+            };
+            assert!(
+                matches!(
+                    error,
+                    ProviderAuthError::Auth(AuthError::UserReauthRequired)
+                ),
+                "{error:?}"
+            );
+            assert_eq!(
+                account.source_phase(),
+                Some(meerkat_core::handles::AuthLeasePhase::ReauthRequired)
+            );
+            assert!(
+                account.recorded_outage().is_none(),
+                "the refusal ends the recorded outage"
+            );
+
+            let events = first.turn().await;
+            let [Err(error)] = events.as_slice() else {
+                panic!("the turn fails once: {events:?}");
+            };
+            assert!(
+                matches!(
+                    error,
+                    meerkat_llm_core::LlmError::AuthenticationFailed { .. }
+                ) && !retried(error),
+                "a turn after the refusal must fail as an authentication failure, not as the earlier outage: {error:?}"
+            );
+            assert_eq!(transport.request_count(), 2);
+        }
+
+        #[tokio::test]
+        async fn a_non_transient_exchange_failure_after_an_outage_fails_the_build() {
+            let clock = TestClock::new();
+            let transport = Arc::new(ScriptedTransport::new([
+                json_response(503, serde_json::json!({"message": "unavailable"})),
+                json_response(404, serde_json::json!({"message": "Not Found"})),
+            ]));
+            let account = RouteAccount::admitting_pending_limits(transport.clone(), &clock).await;
+            let _first = account.session([]).await;
+            assert!(account.recorded_outage().is_some());
+
+            let Err(error) = account.try_session([]).await else {
+                panic!("an exchange failure that is not transient must fail the build");
+            };
+            assert!(
+                matches!(
+                    &error,
+                    ProviderAuthError::SourceResolutionFailed(message)
+                        if message.contains("returned 404")
+                ),
+                "{error:?}"
+            );
+            assert!(
+                account.recorded_outage().is_none(),
+                "a failure that is not transient ends the recorded outage"
+            );
+            assert_eq!(transport.request_count(), 2);
+        }
+
+        #[tokio::test]
+        async fn concurrent_builds_share_one_failed_exchange_and_both_build() {
+            let clock = TestClock::new();
+            let transport = Arc::new(HeldTransport {
+                inner: ScriptedTransport::new([json_response(
+                    503,
+                    serde_json::json!({"message": "unavailable"}),
+                )]),
+                // The first build's token exchange.
+                hold_at: 0,
+                calls: AtomicU64::new(0),
+                held: tokio::sync::Notify::new(),
+                release: tokio::sync::Notify::new(),
+            });
+            let account = RouteAccount::admitting_pending_limits(transport.clone(), &clock).await;
+
+            let second_build = async {
+                transport.held.notified().await;
+                // The first build's exchange is in flight: the second build
+                // waits for it instead of starting its own.
+                let mut build = std::pin::pin!(account.try_session([]));
+                assert!(futures::poll!(build.as_mut()).is_pending());
+                transport.release.notify_one();
+                build.await
+            };
+            let (first, second) = tokio::join!(account.try_session([]), second_build);
+
+            assert!(first.is_ok(), "{:?}", first.as_ref().err());
+            assert!(
+                second.is_ok(),
+                "a build that shares the failed exchange must build too: {:?}",
+                second.as_ref().err()
+            );
+            assert_eq!(
+                transport.inner.request_count(),
+                1,
+                "both builds share one exchange"
+            );
+        }
+
+        #[tokio::test]
+        async fn an_outage_after_a_new_sign_in_publishes_the_new_sign_ins_expiry() {
+            let clock = TestClock::new();
+            let transport = Arc::new(ScriptedTransport::new([
+                token_at("derived-one", clock.at(3600), 200),
+                models_response(),
+                json_response(503, serde_json::json!({"message": "unavailable"})),
+                json_response(503, serde_json::json!({"message": "unavailable"})),
+            ]));
+            let account = RouteAccount::admitting_pending_limits(transport.clone(), &clock).await;
+            let first = account.session([]).await;
+
+            // A new sign-in while the exchange is down: the account's token
+            // was minted from the earlier one.
+            let new_expiry =
+                DateTime::from_timestamp(clock.at(86_400).timestamp(), 0).expect("a whole second");
+            account.sign_in_again("github-new-token", new_expiry).await;
+            let resolved = account
+                .runtime
+                .resolve(&account.binding, &account.env)
+                .await
+                .expect("a build that knows its output budget is admitted during the outage");
+            assert_eq!(
+                resolved.authorizer().expires_at(),
+                Some(new_expiry),
+                "the build must publish the expiry of the sign-in it resolved, not the earlier one's"
+            );
+            assert_eq!(transport.request_count(), 3);
+
+            // The earlier sign-in's token serves none of the new sign-in's
+            // requests.
+            let events = first.turn().await;
+            let [Err(error)] = events.as_slice() else {
+                panic!("the turn fails once: {events:?}");
+            };
+            assert!(retried(error), "{error:?}");
+            assert!(first.bearers().is_empty(), "{:?}", first.bearers());
             assert_eq!(transport.request_count(), 4);
         }
     }

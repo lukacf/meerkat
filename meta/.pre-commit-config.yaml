@@ -29,13 +29,13 @@ repos:
       - id: trailing-whitespace
         stages: [pre-push]
         # Byte-lossless corpus fixtures (release-minted realms, forensic
-        # bundles with checksum manifests) and vendored upstream files (each
-        # console or Forge font family's files and license text) must never
-        # be text-normalized.
-        exclude: ^(crates/meerkat-meta/tests/fixtures/|installer/tests/fixtures/|installer/launchkit/templates_v2/toolkit-ui/vendor/|console/src/fonts/[^/]+/|installer/web/fonts/[^/]+/)
+        # bundles with checksum manifests), vendored upstream files (each
+        # console or Forge font family's files and license text) and the
+        # pinned original Forge release inputs must never be text-normalized.
+        exclude: ^(crates/meerkat-meta/tests/fixtures/|installer/tests/fixtures/|installer/release/inputs/product/|installer/launchkit/templates_v2/toolkit-ui/vendor/|console/src/fonts/[^/]+/|installer/web/fonts/[^/]+/)
       - id: end-of-file-fixer
         stages: [pre-push]
-        exclude: ^(crates/meerkat-meta/tests/fixtures/|installer/tests/fixtures/|installer/launchkit/templates_v2/toolkit-ui/vendor/|console/src/fonts/[^/]+/|installer/web/fonts/[^/]+/)
+        exclude: ^(crates/meerkat-meta/tests/fixtures/|installer/tests/fixtures/|installer/release/inputs/product/|installer/launchkit/templates_v2/toolkit-ui/vendor/|console/src/fonts/[^/]+/|installer/web/fonts/[^/]+/)
       - id: check-yaml
         stages: [pre-push]
       - id: check-toml

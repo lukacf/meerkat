@@ -1,0 +1,37 @@
+{
+  "argv": [
+    "/usr/bin/x86_64-linux-gnu-objcopy",
+    "--strip-debug",
+    "/mnt/connect-release/a1/parent/20261031T215548Z/binary/toolkit_gateway",
+    "/mnt/connect-release/a1/out/derived-gateway/toolkit_gateway"
+  ],
+  "binary_kind": "toolkit_gateway",
+  "derivation": "strip_debug",
+  "derived": {
+    "path": "/mnt/connect-release/a1/out/derived-gateway/toolkit_gateway",
+    "sha256": "b9b2205afb95c1c9aebb20e2bdf0ccd8040de1f54b737f3acfa13cf8f574d13b",
+    "size": 898696272
+  },
+  "kind": "meerkat_connect_derived_gateway",
+  "original": {
+    "path": "/mnt/connect-release/a1/parent/20261031T215548Z/binary/toolkit_gateway",
+    "sha256": "938c232480c0b1f3dbd13f07ccf511dd0b339f15193927e275ae2a222cb9cb8a",
+    "size": 2544390736
+  },
+  "schema_version": 1,
+  "tool": {
+    "path": "/usr/bin/x86_64-linux-gnu-objcopy",
+    "sha256": "9276e918e3c26d3aa7ef9dd2232cd8ac692f03d3c1f270bfa5144a2b5492b713",
+    "version": "GNU objcopy (GNU Binutils for Ubuntu) 2.42"
+  },
+  "transformation": {
+    "result": {
+      "path": "/mnt/connect-release/a1/out/derived-gateway/RESULT.json",
+      "sha256": "22df464f70793379cfb2630cf1a2fe7477de68685564babd4ddb1068020c07d7"
+    },
+    "start": {
+      "path": "/mnt/connect-release/a1/out/derived-gateway/START.json",
+      "sha256": "d7c2449ea4abe3d13ba2ed450a99ffd685a773690b269625c0a89c26a989a4ec"
+    }
+  }
+}

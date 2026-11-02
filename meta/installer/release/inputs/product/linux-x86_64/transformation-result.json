@@ -1,0 +1,34 @@
+{
+  "class": "ok",
+  "exit_code": 0,
+  "finished_at": "2026-10-31T22:57:03.963750Z",
+  "input": {
+    "path": "/mnt/connect-release/a1/parent/20261031T215548Z/binary/toolkit_gateway",
+    "sha256": "938c232480c0b1f3dbd13f07ccf511dd0b339f15193927e275ae2a222cb9cb8a",
+    "size": 2544390736
+  },
+  "kind": "meerkat_connect_strip_debug_result",
+  "output": {
+    "path": "/mnt/connect-release/a1/out/derived-gateway/toolkit_gateway",
+    "sha256": "b9b2205afb95c1c9aebb20e2bdf0ccd8040de1f54b737f3acfa13cf8f574d13b",
+    "size": 898696272
+  },
+  "output_mode": "0o555",
+  "schema_version": 1,
+  "seconds": 4.17,
+  "start_sha256": "d7c2449ea4abe3d13ba2ed450a99ffd685a773690b269625c0a89c26a989a4ec",
+  "stderr": {
+    "bytes": 0,
+    "path": "/mnt/connect-release/a1/out/derived-gateway/stderr",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "stdout": {
+    "bytes": 0,
+    "path": "/mnt/connect-release/a1/out/derived-gateway/stdout",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "tool": {
+    "path": "/usr/bin/x86_64-linux-gnu-objcopy",
+    "sha256": "9276e918e3c26d3aa7ef9dd2232cd8ac692f03d3c1f270bfa5144a2b5492b713"
+  }
+}

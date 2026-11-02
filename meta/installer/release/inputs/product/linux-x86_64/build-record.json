@@ -1,0 +1,56 @@
+{
+ "binary": {
+  "path": "/mnt/connect-release/a1/parent/20261031T215548Z/binary/toolkit_gateway",
+  "sha256": "938c232480c0b1f3dbd13f07ccf511dd0b339f15193927e275ae2a222cb9cb8a",
+  "size": 2544390736
+ },
+ "binary_kind": "toolkit_gateway",
+ "cargo": {
+  "argv": [
+   "/home/luka/src/wt/099-connect-linux-build/src/scripts/repo-cargo",
+   "build",
+   "--locked",
+   "--offline",
+   "--manifest-path",
+   "/home/luka/src/wt/099-connect-linux-build/src/native-candidate/Cargo.toml",
+   "-p",
+   "meerkat-connect",
+   "--features",
+   "meerkat-connect/console,toolkit-mobkit/native-host",
+   "--bin",
+   "toolkit_gateway",
+   "--message-format=json-render-diagnostics"
+  ],
+  "env": {
+   "MEERKAT_CONNECT_RESOURCES_SHA256": "aba32d4a5bf2a2238cae8aa5993ea83ce5fb8c2c79167cd05d30675d6c0fd8ae"
+  },
+  "exit_code": 0,
+  "result_record": {
+   "path": "/mnt/connect-release/a1/parent/20261031T215548Z/build.RESULT.json",
+   "sha256": "87a22c7b8e131252086395e4b8d295fc54830c1a406340ded20e4e61b7aa8751",
+   "size": 2301
+  },
+  "start_record": {
+   "path": "/mnt/connect-release/a1/parent/20261031T215548Z/build.START.json",
+   "sha256": "4873b71aa668fff7a4cf8ab9f7b8c93c6737f7fe93d27ad7659d37eafaf79040",
+   "size": 1900
+  }
+ },
+ "provenance": {
+  "gateway_artifact_record": {
+   "path": "/mnt/connect-release/a1/parent/20261031T215548Z/GATEWAY-ARTIFACT.json",
+   "sha256": "e8e60dbc3d0628052d9e5c195b473827fd41e1837efaf248eb21192b0147432d",
+   "size": 16079
+  },
+  "note": "projection of the admitted executor records; the executor records are the original evidence",
+  "run_dir": "/mnt/connect-release/a1/parent/20261031T215548Z"
+ },
+ "resource_build_record_sha256": "d0cbde86f22e68b40b0303de4605b3744399bfb52350131982604fdf330beaaf",
+ "resources_sha256": "aba32d4a5bf2a2238cae8aa5993ea83ce5fb8c2c79167cd05d30675d6c0fd8ae",
+ "schema_version": 1,
+ "source_manifest": {
+  "path": "/mnt/connect-release/a1/inputs/source/CURRENT-SOURCE-FILES.json",
+  "sha256": "11176a73ce4e376cbce906d4133cbbcd8685ec2e06ab789944d83f85587d44b7"
+ },
+ "target": "linux-x86_64"
+}

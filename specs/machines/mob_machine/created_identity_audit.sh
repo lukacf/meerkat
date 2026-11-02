@@ -16,10 +16,12 @@
 # as a CI shard does). Its recovery part (--part recovery):
 #
 # - scan: member 1 recovered and bound, its Declared entry row replayed or
-#   not, member 2 with no member, and the boot scan of a row of either with
-#   every presence and revival record, in a running and a stopped mob, until
-#   the boot plan's seal. Exactly one arm answers every row while the replay
-#   runs and none after the seal (AuditRecoverExactlyOne).
+#   not, before or after the scan of its rows, member 2 with no member, and
+#   the boot scan of a row of either with every presence and revival record,
+#   in a running and a stopped mob, until the boot plan's seal. Exactly one
+#   arm answers every row while the replay runs and none after the seal
+#   (AuditRecoverExactlyOne), and no step changes an entry's origin
+#   (AuditEntryKeepsItsOrigin; the names run checks it too).
 # - reseat: the scan of rows of two identities without a member (without a
 #   revival record, but member 2's Present row), a ladder without custody
 #   for member 1 and one with each pair of custodies for member 2, seated on
@@ -588,8 +590,6 @@ recovered_covered_actions=(
 # name. A closed table of <run>:<wrapper>:<arm>; never a match on a
 # coverage line's location.
 covered_aliases=(
-  "scan:C1Declared:RecoverIdentityEntrySeatedRunning"
-  "names:C1Declared:RecoverIdentityEntrySeatedRunning"
   "archive:ArchiveRetireReleasing:RetireRunningReleasingArchiveOnly"
   "recovered:RecoveredRetireReleasing:RetireRunningReleasingArchiveOnly"
 )
@@ -669,7 +669,8 @@ write_cfg() {
   case "${run}" in
     scan)
       spec="ScanSpec"
-      run_properties=""
+      run_properties="
+  AuditEntryKeepsItsOrigin"
       run_invariants="
   AuditRecoverExactlyOne"
       run_safety="
@@ -689,7 +690,8 @@ write_cfg() {
     names)
       spec="NamesSpec"
       run_properties="
-  AuditSealNeverTouchesCreated"
+  AuditSealNeverTouchesCreated
+  AuditEntryKeepsItsOrigin"
       run_invariants="
   AuditNamesDeclareExactlyOne
   AuditSealExactlyOne
@@ -1217,6 +1219,13 @@ PY
   # roster replay's name_not_tombstoned guard dropped).
   mutate scan replay_ignores_tombstone "Invariant tombstone_is_never_an_entry" <<'PY'
 drop_guard("RecoverRosterMemberRunning", "identity_entry_tombstones) = FALSE)")
+PY
+
+  # The replay of a Declared entry row replaces the Created entry the scan
+  # recorded first (the entry replay's entry_of_the_rows_origin guard
+  # dropped): the entry's custody changes.
+  mutate scan replay_replaces_a_created_entry "Action property AuditEntryKeepsItsOrigin" <<'PY'
+drop_guard("RecoverIdentityEntrySeatedRunning", "= Some(origin)))")
 PY
 
   # A removal's row after an archive's row of the same seated identity marks

@@ -4,7 +4,7 @@ description: "JSON-RPC 2.0 protocol for Meta runtime operations: gating, memory,
 icon: "plug"
 ---
 
-*Mirrored from MobKit main at [81bb0dddf498](https://github.com/lukacf/meerkat/commit/81bb0dddf4985b55e7d8ffad292a86e4984e1bbf) on 2026-11-01; MobKit version 0.9.7 at that commit.*
+*Mirrored from MobKit main at [022e8f75aa71](https://github.com/lukacf/meerkat/commit/022e8f75aa7181edf5c6698c077a8d68addd8431) on 2026-11-02; MobKit version 0.9.7 at that commit.*
 
 Meta exposes its operational API over JSON-RPC 2.0. SDK gateways use JSON lines over stdio, while the embedded console uses `POST /console/rpc` for console-specific methods and explicitly implemented runtime operations. The HTTP dispatcher is not a general stdio passthrough; check `meta/capabilities` on the surface you use.
 
@@ -2313,14 +2313,23 @@ construction and agent tool calls are scope-pinned to it.
 
 | Method | Params | Result |
 |--------|--------|--------|
-| `meta/workgraph/snapshot` | `{namespace?, all_namespaces?, statuses?: string[], labels?: string[], include_terminal?, limit?}` | `WorkGraphSnapshot` (`items`, `edges`, `attention`, `ready_item_ids`, `event_high_water_mark`, `captured_at`, `total_items`, `truncated`); items most recently updated first |
-| `meta/workgraph/list` | same filter | `{items: WorkItem[], total_items, truncated}`; items most recently updated first |
+| `meta/workgraph/snapshot` | `{namespace?, all_namespaces?, statuses?: string[], labels?: string[], include_terminal?, limit?, cursor?}` | `WorkGraphSnapshot` (`items`, `edges`, `attention`, `ready_item_ids`, `event_high_water_mark`, `captured_at`, `total_items`, `truncated`, `next_cursor?`, `anchor_event_seq?`, `changed_since_anchor`); items most recently updated first |
+| `meta/workgraph/list` | same filter | `{items: WorkItem[], total_items, truncated, next_cursor?, anchor_event_seq?, changed_since_anchor}`; items most recently updated first |
 | `meta/workgraph/get` | `{id, namespace?}` | `{item: WorkItem}` |
-| `meta/workgraph/ready` | `{namespace?, labels?, limit?}` | `{items: WorkItem[], total_items, truncated}`; `total_items` counts the ready items |
-| `meta/workgraph/events` | `{namespace?, all_namespaces?, after_seq?, limit?}` | `{events: WorkGraphEvent[]}` |
+| `meta/workgraph/ready` | `{namespace?, labels?, limit?, cursor?}` | `{items: WorkItem[], total_items, truncated, next_cursor?, anchor_event_seq?, changed_since_anchor}`; `total_items` counts the ready items |
+| `meta/workgraph/events` | `{namespace?, all_namespaces?, after_seq?, limit?}` | `{events: WorkGraphEvent[], truncated, next_after_seq?, event_high_water_mark?}` |
 | `meta/workgraph/facts` | `{after_seq?, limit?}` (default 256, clamped to 1..=1000) | `{facts, next_after_seq?, more_may_be_pending, events_without_seq}`; the cursor-tail projection behind the SSE wake stream |
 | `meta/workgraph/attention/list` | `{namespace?, status?}`; `status` accepts `active`, `paused`, `superseded`, `stopped`, or the tagged `{state}` form | `{attention: WorkAttentionBinding[]}` |
 | `meta/workgraph/goal/status` | `{binding_id, namespace?}` | `{item, attention}` |
+
+A list, ready or snapshot page that ended early has `truncated: true` and a
+`next_cursor`; pass it back as `cursor` (same method) for the next page. A
+cursor of another method, of another version, or one that does not decode is
+`-32602`. `anchor_event_seq` is the ledger's high-water mark when the walk
+began, and `changed_since_anchor` is true once the ledger moved past it:
+`meta/workgraph/events` with `after_seq` set to it names what changed. An
+events page that ended early names `next_after_seq` to pass as `after_seq`.
+The paging rules are Meerkat's (`docs/api/rpc.mdx`, `workgraph/list`).
 
 ### Mutating methods (ABAC `workgraph.manage`; console also requires `can_mutate`)
 

@@ -15984,7 +15984,7 @@ mod tests {
         }
     }
 
-    /// No journal replay replaces an entry of another origin, whatever order
+    /// No journal replay turns a Created entry Declared, whatever order
     /// MobMachine meets the replay of a member's entry row and the scan of its
     /// created entry row in. The boot replays first: the Declared entry
     /// stands, and the scan's Present row contradicts it, reserving the name
@@ -15992,7 +15992,7 @@ mod tests {
     /// of a Declared row is refused. A replay of the entry's own origin
     /// records it again (the control).
     #[test]
-    fn no_replay_replaces_an_entry_of_another_origin() {
+    fn no_replay_turns_a_created_entry_declared() {
         let mut authority = MobMachineAuthority::new();
         let seat = |authority: &mut MobMachineAuthority, identity: &AgentIdentity| {
             authority
@@ -16056,7 +16056,7 @@ mod tests {
             authority
                 .apply_signal(replay(&scanned_first, IdentityEntryOrigin::Declared))
                 .is_err(),
-            "no replay replaces the Created entry with a Declared one"
+            "no replay turns the Created entry Declared"
         );
         assert_eq!(
             authority.state().identity_entry_origins.get(&scanned_first),

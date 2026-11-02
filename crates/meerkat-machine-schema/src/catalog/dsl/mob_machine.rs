@@ -30734,16 +30734,21 @@ macro_rules! mob_catalog_machine_dsl {
             on signal RecoverIdentityEntry { agent_identity, agent_runtime_id, origin }
             guard "replay_not_sealed" { self.boot_plan_sealed == false }
             guard "identity_runtime_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
-            // A replay never replaces an entry of another origin: an entry's
-            // custody never changes. The replay runs before the created
-            // entries' scan, so the entry it meets is one an earlier row of
-            // the same origin recorded; a Declared row's replay after the scan
-            // recorded the member a Created entry is refused, and the Created
-            // entry stays (replayed first, the scan's row of the Declared
-            // entry is the contradiction that reserves the name).
+            // A Declared row's replay never replaces a Created entry, so a
+            // store-owned identity never turns roster-owned by a replay. The
+            // replay runs before the created entries' scan; a Declared row
+            // replayed after the scan recorded the member a Created entry is
+            // refused, and the Created entry stays (replayed first, the
+            // scan's row of the Declared entry is the contradiction that
+            // reserves the name). A Created row may replay over a Declared
+            // origin: the journal records no end of an entry that ends
+            // unseated (the seal's or a one-entry unlist's), so a later
+            // store-owned incarnation's row takes over the stale origin of a
+            // roster-owned identity whose entry ended (live, a Created entry
+            // takes only a free name).
             guard "entry_of_the_rows_origin" {
-                self.identity_entry_origins.contains_key(agent_identity) == false
-                || self.identity_entry_origins.get_cloned(agent_identity) == Some(origin)
+                self.identity_entry_origins.get_cloned(agent_identity) != Some(IdentityEntryOrigin::Created)
+                || origin == IdentityEntryOrigin::Created
             }
             update {
                 self.identity_entry_origins.insert(agent_identity, origin);

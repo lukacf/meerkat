@@ -288,10 +288,14 @@ The store holds an archive's row beside its member's roster row while the
 archive's retirement runs: the replay, which comes first, seats that member
 and the scan then marks the archive in flight; a replay that came after the
 scan recorded the entry archived is refused, so MobMachine does not depend
-on that order. Nor does a replay replace an entry of another origin (an
-entry's custody never changes): replayed first, a Declared entry stands and
-the scan's row of it reserves the name; scanned first, the replay of a
-Declared row over the Created entry is refused. The replay
+on that order. Nor does a Declared row's replay replace a Created entry (a
+store-owned identity never turns roster-owned): replayed first, a Declared
+entry stands and the scan's row of it reserves the name; scanned first, the
+replay of a Declared row over the Created entry is refused. A Created row
+may replay over a Declared origin: the journal records no end of an entry
+that ends unseated (the seal's or a one-entry unlist's), so a later
+store-owned incarnation's row takes over the stale origin of a roster-owned
+identity whose entry ended. The replay
 reserves the name of a member row whose origin token this build does not
 know the same way. A removed entry's name is never an entry or a member
 again; an unreadable name keeps what the replay recorded for it (a

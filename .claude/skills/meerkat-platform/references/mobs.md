@@ -531,9 +531,15 @@ are answered `RequeuedAcrossStop`), and a wake that fails after the successor
 is committed is reported on the receipt (`MemberRespawnReceipt::wake_error`).
 A member it cannot serve (placed, fork-derived, without a durable session of
 its own) is refused `UnsupportedForMode` before anything starts. `respawn` of
-an identity entry's member respawns it this way. Every rotation is durable
-from its start: a restarted mob finishes it, and `redrive_retirement`
-re-drives one that stands. `release_member_at_scope(scope)` releases a
+an identity entry's member respawns it this way. Every rotation, a
+`rotate_member` onto a fresh session as well as a respawn's, is durable from
+its start: a restarted mob finishes it with no host record, and
+`redrive_retirement` re-drives one that stands; a host that keeps its own
+record of a `rotate_member` marks the identity host-pending
+(`MobBuilder::with_host_pending_members`) and calls it again after a restart.
+A dormant seat on in-process comms takes the members' comms identity root
+from the mob's session service when the host declares none (members on TCP
+or UDS still need `MobBuilder::with_network_member_comms`). `release_member_at_scope(scope)` releases a
 member's materialization only when the scope names its current incarnation
 on its current session (`ReleaseOutcome::Stale` otherwise).
 `SpawnMemberSpec::with_definition_wiring(DefinitionWiring::Exempt)` keeps a

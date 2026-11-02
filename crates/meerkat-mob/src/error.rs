@@ -970,10 +970,12 @@ pub enum MobError {
 
     /// The mob's startup recovery could not restore member `member_id`'s
     /// session `session_id`, so the mob actor stopped before it admitted any
-    /// command. `cause` is the typed failure, for example
-    /// `SessionError::ServedElsewhere` while another runtime owner on the
-    /// realm hosts the session. Recovery wrote nothing for that session;
-    /// start the mob again once the cause clears.
+    /// command. `cause` is the typed failure: one the start cannot defer for
+    /// that member alone (a failure scoped to the member and met before any
+    /// effect defers the member instead, see
+    /// [`MobError::MemberCustodyDeferred`]), for example a failure after the
+    /// restore prepared the session's registration. Start the mob again once
+    /// the cause clears.
     #[error("mob startup could not restore member {member_id} session {session_id}: {cause}")]
     MemberStartupRecoveryFailed {
         member_id: AgentIdentity,
@@ -1875,26 +1877,6 @@ pub enum MobError {
         incarnation: meerkat_core::service::MobIncarnationId,
     },
 
-    /// Mob `mob_id`'s persisted store is quarantined: the restore of the
-    /// host's persisted mobs could not restore it, so the mob has no actor,
-    /// its store is kept as found, and every other mob restores and serves.
-    /// `class` says why ([`MobQuarantineClass`]): a store that could not
-    /// serve a read now (`store_unavailable`, retryable: a verb that
-    /// addresses the mob by id re-attempts its restore once, and the next
-    /// start does too), a store or stored state that cannot be read
-    /// (`store_unreadable`), or another typed refusal of its resume
-    /// (`resume_refused`). `cause` is the failure the last restore attempt
-    /// met. An explicit retry re-attempts any class, for example after a
-    /// repair. Structured data: `kind` `mob_quarantined`, `class`,
-    /// `retryable`, `code`, `cause` and, when the cause has some,
-    /// `cause_data`.
-    #[error("mob '{mob_id}' is quarantined ({class}): {cause}")]
-    MobQuarantined {
-        mob_id: MobId,
-        class: MobQuarantineClass,
-        cause: Arc<MobError>,
-    },
-
     /// A create by a caller session was refused because the hosted rosters
     /// that could name that session could not all be read, so its provenance
     /// is not known (see `meerkat_mob::MobProvenance`). `mob_id` names the
@@ -1995,10 +1977,12 @@ pub enum MobError {
     /// failing the whole start, and an operation that acts on the member
     /// re-attempted it first. `cause` is the typed failure of that
     /// re-attempt, and every typed classifier answers as for the cause.
-    /// Nothing acted on the member's session. The mob re-attempts the restore
-    /// on its own backoff, and the operation can pass once the cause clears
-    /// (for a session another runtime owner hosts, once that owner stops or
-    /// releases it).
+    /// Nothing acted on the member's session. MobMachine records the
+    /// deferral, and the member's status shows it (`custody_deferred`). A
+    /// restore that owes work (a retiring member's cleanup, a member's
+    /// operation binding) is re-attempted on the mob's own backoff too, and
+    /// the operation can pass once the cause clears (a store that serves
+    /// again, or another runtime owner that stops or releases the session).
     #[error(
         "member {member_id} session {session_id} has its {restore} deferred until it can be restored: {cause}"
     )]
@@ -2036,6 +2020,26 @@ pub enum MobError {
         "identity adoption of member {member_id} needs a mob runtime with a store: reconciliation would retire the member and could not resume its session; build the mob over the persistent session service (a memory realm works)"
     )]
     IdentityAdoptionRequiresPersistentRuntime { member_id: AgentIdentity },
+
+    /// Mob `mob_id`'s persisted store is quarantined: the restore of the
+    /// host's persisted mobs could not restore it, so the mob has no actor,
+    /// its store is kept as found, and every other mob restores and serves.
+    /// `class` says why ([`MobQuarantineClass`]): a store that could not
+    /// serve a read now (`store_unavailable`, retryable: a verb that
+    /// addresses the mob by id re-attempts its restore once, and the next
+    /// start does too), a store or stored state that cannot be read
+    /// (`store_unreadable`), or another typed refusal of its resume
+    /// (`resume_refused`). `cause` is the failure the last restore attempt
+    /// met. An explicit retry re-attempts any class, for example after a
+    /// repair. Structured data: `kind` `mob_quarantined`, `class`,
+    /// `retryable`, `code`, `cause` and, when the cause has some,
+    /// `cause_data`.
+    #[error("mob '{mob_id}' is quarantined ({class}): {cause}")]
+    MobQuarantined {
+        mob_id: MobId,
+        class: MobQuarantineClass,
+        cause: Arc<MobError>,
+    },
 }
 
 /// Why a member's operator authority ceiling was refused
@@ -4578,6 +4582,30 @@ mod tests {
             ),
             None,
             "a divergence of the mob's own authority stays fatal"
+        );
+        // A host store realm's runtime store read keeps its typed error: an
+        // outage reads unavailable, data that does not decode unreadable.
+        let runtime_unavailable =
+            MobError::SessionError(meerkat_core::service::SessionError::Store(Box::new(
+                meerkat_runtime::store::RuntimeStoreError::Unavailable("down".to_string()),
+            )));
+        let runtime_corrupt =
+            MobError::SessionError(meerkat_core::service::SessionError::Store(Box::new(
+                meerkat_runtime::store::RuntimeStoreError::Corrupt("checksum".to_string()),
+            )));
+        assert_eq!(
+            MemberCustodyDeferralCause::of_restore(
+                MemberCustodyRestore::CleanupDelivery,
+                &runtime_unavailable
+            ),
+            Some(MemberCustodyDeferralCause::StoreUnavailable)
+        );
+        assert_eq!(
+            MemberCustodyDeferralCause::of_restore(
+                MemberCustodyRestore::CleanupDelivery,
+                &runtime_corrupt
+            ),
+            Some(MemberCustodyDeferralCause::StoreUnreadable)
         );
         assert_eq!(
             MemberCustodyDeferralCause::StoreUnavailable.as_str(),

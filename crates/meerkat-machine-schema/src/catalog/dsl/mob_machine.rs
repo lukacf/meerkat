@@ -2187,13 +2187,6 @@ macro_rules! mob_catalog_machine_dsl {
             RecoverCompletedWithCleanupCustody,
             RecoverOwnerBridgeSession { bridge_session_id: SessionId, destroy_on_owner_archive: bool, implicit_delegation_mob: bool },
             RecoverMemberRestoreFailure { agent_identity: AgentIdentity, reason: String },
-            // A start, or a re-attempt, could not restore a seated member's
-            // custody for a cause scoped to that member, before any effect:
-            // the member keeps its seat with that custody unrestored, and the
-            // mob goes on in its phase.
-            RecordMemberCustodyUnrestored { agent_identity: AgentIdentity, restore: Enum<MemberCustodyRestoreKind>, cause: Enum<MemberCustodyCauseKind> },
-            // A re-attempt restored the member's custody.
-            ResolveMemberCustodyRestored { agent_identity: AgentIdentity },
             RecoverPendingPlacedSpawn { spawn_id: PlacedSpawnId, agent_identity: AgentIdentity, generation: Generation, fence_token: FenceToken, host_id: HostId, host_binding_generation: u64, spec_digest: String, runtime_mode: Enum<SpawnPolicyRuntimeMode>, provision_operation_id: String, operation_owner_session_id: SessionId },
             RecoverCommittedPlacedSpawn { spawn_id: PlacedSpawnId, agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, generation: Generation, fence_token: FenceToken, host_id: HostId, host_binding_generation: u64, member_session_id: SessionId, member_peer_endpoint: MemberPeerEndpoint, profile_name: String, runtime_mode: Enum<SpawnPolicyRuntimeMode>, external_addressable: bool, provision_operation_id: String, operation_owner_session_id: SessionId },
             RecoverPlacedCarrierCleanup { obligation: PlacedCarrierCleanupObligation },
@@ -2317,6 +2310,13 @@ macro_rules! mob_catalog_machine_dsl {
             // retires from (its bound session, or the session a releasing
             // retire moved to the runtime's pending retirement).
             ResolveMemberInstructionRelease { agent_identity: AgentIdentity, session_id: SessionId, disposal: Enum<MemberSessionDisposal> },
+            // A start, or a re-attempt, could not restore a seated member's
+            // custody for a cause scoped to that member, before any effect:
+            // the member keeps its seat with that custody unrestored, and the
+            // mob goes on in its phase.
+            RecordMemberCustodyUnrestored { agent_identity: AgentIdentity, restore: Enum<MemberCustodyRestoreKind>, cause: Enum<MemberCustodyCauseKind> },
+            // A re-attempt restored the member's custody.
+            ResolveMemberCustodyRestored { agent_identity: AgentIdentity },
         }
 
         effect MobMachineEffect {
@@ -15510,66 +15510,6 @@ macro_rules! mob_catalog_machine_dsl {
                 self.topology_epoch += 1;
                 self.member_restore_failure_codes.remove(agent_identity);
             }
-            to Running
-        }
-
-        // A seated member's custody restore failed for a cause scoped to that
-        // member, before any effect (a store read, a hosting refusal, a held
-        // durable tail): the machine records which restore is unrestored and
-        // why. The member keeps its seat and its lifecycle (degraded is not
-        // Broken: no residency, wake or topology fact changes), and the mob
-        // goes on in its phase. A later record for the same member replaces
-        // the cause its last attempt met.
-        transition RecordMemberCustodyUnrestoredSeated {
-            per_phase [Running, Stopped, Completed]
-            on signal RecordMemberCustodyUnrestored { agent_identity, restore, cause }
-            guard "member_seated" { self.identity_to_runtime.contains_key(agent_identity) == true }
-            update {
-                self.member_custody_unrestored.insert(agent_identity, restore);
-                self.member_custody_unrestored_causes.insert(agent_identity, cause);
-            }
-            to Running
-        }
-
-        // A record for an identity the mob does not seat changes nothing:
-        // there is no custody left to restore for it.
-        transition RecordMemberCustodyUnrestoredNotSeated {
-            per_phase [Running, Stopped, Completed]
-            on signal RecordMemberCustodyUnrestored { agent_identity, restore, cause }
-            guard "member_not_seated" { self.identity_to_runtime.contains_key(agent_identity) == false }
-            update {}
-            to Running
-        }
-
-        // A destroyed mob holds no member lifecycle: a late record changes
-        // nothing.
-        transition RecordMemberCustodyUnrestoredDestroyed {
-            on signal RecordMemberCustodyUnrestored { agent_identity, restore, cause }
-            guard { self.lifecycle_phase == Phase::Destroyed }
-            update {}
-            to Destroyed
-        }
-
-        // A re-attempt restored the member's custody: its record goes.
-        transition ResolveMemberCustodyRestoredRecorded {
-            per_phase [Running, Stopped, Completed]
-            on signal ResolveMemberCustodyRestored { agent_identity }
-            guard "custody_recorded" { self.member_custody_unrestored.contains_key(agent_identity) == true }
-            update {
-                self.member_custody_unrestored.remove(agent_identity);
-                self.member_custody_unrestored_causes.remove(agent_identity);
-            }
-            to Running
-        }
-
-        // Nothing is recorded for the member (a seat that ended took its
-        // record with it, or a destroy cleared every record): nothing
-        // changes.
-        transition ResolveMemberCustodyRestoredUnrecorded {
-            per_phase [Running, Stopped, Completed, Destroyed]
-            on signal ResolveMemberCustodyRestored { agent_identity }
-            guard "custody_not_recorded" { self.member_custody_unrestored.contains_key(agent_identity) == false }
-            update {}
             to Running
         }
 
@@ -31930,6 +31870,66 @@ macro_rules! mob_catalog_machine_dsl {
             update {}
             to Running
             emit MemberInstructionReleaseNotNeeded { agent_identity: agent_identity }
+        }
+
+        // A seated member's custody restore failed for a cause scoped to that
+        // member, before any effect (a store read, a hosting refusal, a held
+        // durable tail): the machine records which restore is unrestored and
+        // why. The member keeps its seat and its lifecycle (degraded is not
+        // Broken: no residency, wake or topology fact changes), and the mob
+        // goes on in its phase. A later record for the same member replaces
+        // the cause its last attempt met.
+        transition RecordMemberCustodyUnrestoredSeated {
+            per_phase [Running, Stopped, Completed]
+            on signal RecordMemberCustodyUnrestored { agent_identity, restore, cause }
+            guard "member_seated" { self.identity_to_runtime.contains_key(agent_identity) == true }
+            update {
+                self.member_custody_unrestored.insert(agent_identity, restore);
+                self.member_custody_unrestored_causes.insert(agent_identity, cause);
+            }
+            to Running
+        }
+
+        // A record for an identity the mob does not seat changes nothing:
+        // there is no custody left to restore for it.
+        transition RecordMemberCustodyUnrestoredNotSeated {
+            per_phase [Running, Stopped, Completed]
+            on signal RecordMemberCustodyUnrestored { agent_identity, restore, cause }
+            guard "member_not_seated" { self.identity_to_runtime.contains_key(agent_identity) == false }
+            update {}
+            to Running
+        }
+
+        // A destroyed mob holds no member lifecycle: a late record changes
+        // nothing.
+        transition RecordMemberCustodyUnrestoredDestroyed {
+            on signal RecordMemberCustodyUnrestored { agent_identity, restore, cause }
+            guard { self.lifecycle_phase == Phase::Destroyed }
+            update {}
+            to Destroyed
+        }
+
+        // A re-attempt restored the member's custody: its record goes.
+        transition ResolveMemberCustodyRestoredRecorded {
+            per_phase [Running, Stopped, Completed]
+            on signal ResolveMemberCustodyRestored { agent_identity }
+            guard "custody_recorded" { self.member_custody_unrestored.contains_key(agent_identity) == true }
+            update {
+                self.member_custody_unrestored.remove(agent_identity);
+                self.member_custody_unrestored_causes.remove(agent_identity);
+            }
+            to Running
+        }
+
+        // Nothing is recorded for the member (a seat that ended took its
+        // record with it, or a destroy cleared every record): nothing
+        // changes.
+        transition ResolveMemberCustodyRestoredUnrecorded {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on signal ResolveMemberCustodyRestored { agent_identity }
+            guard "custody_not_recorded" { self.member_custody_unrestored.contains_key(agent_identity) == false }
+            update {}
+            to Running
         }
     }
         }

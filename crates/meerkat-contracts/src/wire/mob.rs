@@ -2990,12 +2990,12 @@ pub enum WireMemberCustodyDeferralCause {
     /// The member's durable tail could not be proven, and its recovery kept
     /// it.
     DurableTailUnprovable,
+    /// A cause this version does not know, as it was sent.
+    Unknown(String),
     /// The store could not serve a read of the member's state now.
     StoreUnavailable,
     /// The member's persisted state cannot be read or decoded.
     StoreUnreadable,
-    /// A cause this version does not know, as it was sent.
-    Unknown(String),
 }
 
 impl WireMemberCustodyDeferralCause {

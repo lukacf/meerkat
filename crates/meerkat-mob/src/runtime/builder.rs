@@ -7774,9 +7774,6 @@ struct RuntimeWiring {
     reachability_observations: Arc<super::handle::ReachabilityObservations>,
     restore_diagnostics:
         Arc<RwLock<HashMap<AgentIdentity, super::handle::RestoreFailureDiagnostic>>>,
-    /// The custody restores the actor defers, as member status reads see
-    /// them: shared by the handles and the actor's deferral registry.
-    custody_deferrals: super::handle::MemberCustodyDeferrals,
     runtime_metadata: Arc<dyn crate::store::MobRuntimeMetadataStore>,
     identity: Arc<dyn crate::store::MobIdentityStore>,
     identity_member: Option<Arc<dyn crate::store::MobIdentityMemberStore>>,
@@ -9444,7 +9441,6 @@ impl MobBuilder {
             // projection below after applying any recovered binding events.
             let roster_state = Arc::new(RwLock::new(RosterAuthority::from_roster(roster.clone())));
             let restore_diagnostics = Arc::new(RwLock::new(seeded_restore_diagnostics));
-            let custody_deferrals = super::handle::MemberCustodyDeferrals::default();
             let (machine_state_watch_tx, machine_state_watch_rx) =
                 tokio::sync::watch::channel(initial_dsl_authority.state().clone());
             let reachability_observations =
@@ -9471,7 +9467,6 @@ impl MobBuilder {
                 phase_watch_tx,
                 reachability_observations: Arc::clone(&reachability_observations),
                 restore_diagnostics: restore_diagnostics.clone(),
-                custody_deferrals: custody_deferrals.clone(),
                 runtime_metadata: storage.runtime_metadata.clone(),
                 identity: storage.identity.clone(),
                 identity_member: storage.identity_member.clone(),
@@ -9507,7 +9502,6 @@ impl MobBuilder {
                 session_service: session_service.clone(),
                 runtime_adapter: runtime_adapter.clone(),
                 restore_diagnostics,
-                custody_deferrals,
                 supervisor_bridge: supervisor_bridge.clone(),
                 machine_state_watch_rx,
                 operator_instruction_delivery:
@@ -10997,7 +10991,6 @@ impl MobBuilder {
                     super::handle::ReachabilityObservations::default(),
                 ),
                 restore_diagnostics,
-                custody_deferrals: super::handle::MemberCustodyDeferrals::default(),
                 runtime_metadata,
                 identity,
                 identity_member,
@@ -11146,7 +11139,6 @@ impl MobBuilder {
                 phase_watch_tx: phase_watch_tx_actor,
                 reachability_observations,
                 restore_diagnostics,
-                custody_deferrals,
                 runtime_metadata,
                 identity,
                 identity_member,
@@ -11201,7 +11193,6 @@ impl MobBuilder {
                 session_service: handle_session_service.clone(),
                 runtime_adapter: runtime_adapter.clone(),
                 restore_diagnostics: restore_diagnostics.clone(),
-                custody_deferrals: custody_deferrals.clone(),
                 supervisor_bridge: supervisor_bridge.clone(),
                 machine_state_watch_rx: machine_state_watch_tx.subscribe(),
                 operator_instruction_delivery: Arc::clone(&operator_instruction_delivery),
@@ -11532,9 +11523,7 @@ impl MobBuilder {
                 identity_reconcile_safety_cursor: None,
                 identity_reconcile_failures: Arc::new(RwLock::new(BTreeMap::new())),
                 identity_reconcile_backoff: BTreeMap::new(),
-                deferred_member_custody: super::actor::DeferredMemberCustodyRegistry::publishing(
-                    custody_deferrals,
-                ),
+                deferred_member_custody: super::actor::DeferredMemberCustodyRegistry::default(),
                 #[cfg(feature = "runtime-adapter")]
                 startup_member_recoveries: BTreeMap::new(),
                 member_wakes,

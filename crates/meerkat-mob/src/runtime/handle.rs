@@ -6391,9 +6391,6 @@ pub struct MobHandle {
     #[cfg(feature = "runtime-adapter")]
     pub(super) runtime_adapter: Option<Arc<meerkat_runtime::MeerkatMachine>>,
     pub(super) restore_diagnostics: Arc<RwLock<HashMap<AgentIdentity, RestoreFailureDiagnostic>>>,
-    /// The member custody restores a start deferred, as the actor publishes
-    /// them; member status reads show a member's entry.
-    pub(super) custody_deferrals: MemberCustodyDeferrals,
     pub(super) supervisor_bridge: Arc<MobSupervisorBridge>,
     /// Read-only projection of the actor-owned MobMachine state. The actor is
     /// the sole writer; handles use this only for non-blocking status/list
@@ -6683,12 +6680,6 @@ impl MobHandle {
         .await?
     }
 }
-
-/// The member custody restores a start deferred, keyed by member: the
-/// actor's deferral registry publishes each entry's restore and last cause
-/// here, and member status reads show them. Volatile, as the registry is.
-pub(crate) type MemberCustodyDeferrals =
-    Arc<std::sync::RwLock<BTreeMap<AgentIdentity, crate::MemberCustodyDeferral>>>;
 
 #[derive(Debug, Clone)]
 pub(crate) struct RestoreFailureDiagnostic {
@@ -7945,17 +7936,19 @@ impl MobHandle {
             .cloned()
     }
 
-    /// The custody restore a start deferred for `agent_identity`, as the
-    /// actor's deferral registry published it.
+    /// The custody restore a start deferred for `agent_identity`, as
+    /// MobMachine records it in the state the actor last published.
     fn custody_deferral_for(
         &self,
         agent_identity: &AgentIdentity,
     ) -> Option<crate::MemberCustodyDeferral> {
-        let view = match self.custody_deferrals.read() {
-            Ok(view) => view,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        view.get(agent_identity).copied()
+        let machine_identity = mob_dsl::AgentIdentity::from_domain(agent_identity);
+        let state = self.machine_state_watch_rx.borrow();
+        let restore = state.member_custody_unrestored.get(&machine_identity)?;
+        let cause = state
+            .member_custody_unrestored_causes
+            .get(&machine_identity)?;
+        Some(crate::MemberCustodyDeferral::from_machine(*restore, *cause))
     }
 
     fn restore_failure_error(

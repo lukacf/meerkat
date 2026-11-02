@@ -3600,6 +3600,18 @@ them.
   grant gate no grant could honour: the create succeeds, and the refused
   build is only logged.
 
+- Meerkat Connect: its provider setup and first-target setup read a
+  realm's explicit tables only, so they do not yet list the routes a
+  `[realm.<realm>.copilot]` section declares (see Added), and a realm whose
+  Copilot account is configured only by the section can look unconfigured
+  there. Use the explicit Copilot tables with Connect until a later
+  release. With the explicit tables, Connect can offer each of the three
+  Copilot routes as a target for a model of one provider family, and the
+  session runs on the account's route of the model's family whichever is
+  chosen, on the same credential (see Breaking): choosing `copilot_openai`
+  for an Anthropic model runs on `copilot_anthropic`, so the chosen
+  target's name is not the route the session runs on.
+
 ## [0.9.8] - 2026-10-30
 
 ### Breaking

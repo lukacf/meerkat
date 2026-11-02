@@ -3906,6 +3906,174 @@ mod tests {
         assert!(!rendered.contains(LOCATION_CANARY) && !rendered.contains(BODY_CANARY));
         assert_eq!(target_hits.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
+    /// GitHub's answer to a request over its secondary rate limit, as GitHub
+    /// documents and clients observe it: a 403 whose message says so, which
+    /// may carry no `Retry-After` and no rate-limit header.
+    const SECONDARY_RATE_LIMIT_BODY: &str = r#"{"documentation_url":"https://docs.github.com/rest/using-the-rest-api/rate-limits-for-the-rest-api#about-secondary-rate-limits","message":"You have exceeded a secondary rate limit. Please wait a few minutes before you try again."}"#;
+
+    /// A raw HTTP/1.1 answer with `status`, the extra header lines `headers`
+    /// (each ending in CRLF) and the JSON `body`.
+    fn github_answer(status: u16, headers: &str, body: &str) -> String {
+        let reason = match status {
+            200 => "OK",
+            403 => "Forbidden",
+            429 => "Too Many Requests",
+            _ => "Answer",
+        };
+        format!(
+            "HTTP/1.1 {status} {reason}\r\ncontent-type: application/json; charset=utf-8\r\n{headers}content-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        )
+    }
+
+    /// A local server that answers its `n`th request with `answers[n]` and
+    /// counts the requests it reads.
+    async fn spawn_github_answers(
+        answers: Vec<String>,
+    ) -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind a local GitHub");
+        let address = listener.local_addr().expect("local GitHub address");
+        let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = Arc::clone(&hits);
+        tokio::spawn(async move {
+            let mut answers = VecDeque::from(answers);
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let mut head = Vec::new();
+                let mut chunk = [0_u8; 1024];
+                while !head.windows(4).any(|window| window == b"\r\n\r\n") {
+                    match stream.read(&mut chunk).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(read) => head.extend_from_slice(&chunk[..read]),
+                    }
+                }
+                counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let answer = answers
+                    .pop_front()
+                    .unwrap_or_else(|| github_answer(500, "", r#"{"message":"no answer left"}"#));
+                let _ = stream.write_all(answer.as_bytes()).await;
+            }
+        });
+        (format!("http://{address}"), hits)
+    }
+
+    /// The production transport, aimed at a local server that answers as
+    /// GitHub and the Copilot API do: every request keeps its path and
+    /// headers, so real status lines, headers and bodies go through the
+    /// production parse.
+    #[cfg(unix)]
+    struct LocalGitHub {
+        inner: ReqwestCopilotHttpTransport,
+        base: String,
+    }
+
+    #[cfg(unix)]
+    #[async_trait]
+    impl CopilotHttpTransport for LocalGitHub {
+        async fn get(
+            &self,
+            url: &str,
+            headers: HeaderMap,
+        ) -> Result<CopilotHttpResponse, CopilotHttpTransportError> {
+            let path = url::Url::parse(url)
+                .map(|url| url.path().to_string())
+                .unwrap_or_default();
+            self.inner
+                .get(&format!("{}{path}", self.base), headers)
+                .await
+        }
+    }
+
+    /// GitHub's rate limits as the production transport reads them from real
+    /// answers: a 403 with `Retry-After`, a 403 whose primary limit is spent
+    /// (`x-ratelimit-remaining: 0` with `x-ratelimit-reset`), a 429 with no
+    /// header, and the secondary rate limit, a 403 whose message says so
+    /// with no header at all or a blank `Retry-After` (octokit's rule: GitHub
+    /// may send it without `Retry-After`). A 403 that names no limit is no
+    /// rate limit.
+    #[tokio::test]
+    async fn github_rate_limits_are_read_from_real_answers() {
+        let reset = Utc::now().timestamp() + 300;
+        let cases: Vec<(&str, String, bool)> = vec![
+            (
+                "403 with Retry-After",
+                github_answer(
+                    403,
+                    "retry-after: 30\r\n",
+                    r#"{"message":"API rate limit exceeded for user ID 1."}"#,
+                ),
+                true,
+            ),
+            (
+                "403 with a spent primary limit",
+                github_answer(
+                    403,
+                    &format!("x-ratelimit-remaining: 0\r\nx-ratelimit-reset: {reset}\r\n"),
+                    r#"{"message":"API rate limit exceeded for user ID 1."}"#,
+                ),
+                true,
+            ),
+            (
+                "429 with no header",
+                github_answer(429, "", r#"{"message":"Too many requests"}"#),
+                true,
+            ),
+            (
+                "403 secondary limit with no header",
+                github_answer(403, "", SECONDARY_RATE_LIMIT_BODY),
+                true,
+            ),
+            (
+                "403 secondary limit with a blank Retry-After",
+                github_answer(403, "retry-after: \r\n", SECONDARY_RATE_LIMIT_BODY),
+                true,
+            ),
+            (
+                "403 that names no limit",
+                github_answer(
+                    403,
+                    "x-ratelimit-remaining: 4999\r\n",
+                    r#"{"message":"Resource not accessible by personal access token"}"#,
+                ),
+                false,
+            ),
+        ];
+        let (base, hits) =
+            spawn_github_answers(cases.iter().map(|(_, answer, _)| answer.clone()).collect()).await;
+        let transport = ReqwestCopilotHttpTransport::new();
+
+        let mut read = Vec::new();
+        for (label, _, _) in &cases {
+            let response = transport
+                .get(&format!("{base}/copilot_internal/user"), HeaderMap::new())
+                .await
+                .unwrap_or_else(|error| panic!("{label}: {error}"));
+            read.push((
+                *label,
+                response.rate_limited,
+                response.retry_after,
+                response.rate_limit_reset,
+            ));
+        }
+
+        let reset = u64::try_from(reset).expect("a positive reset");
+        assert_eq!(
+            read,
+            vec![
+                (cases[0].0, true, Some(StdDuration::from_secs(30)), None),
+                (cases[1].0, true, None, Some(reset)),
+                (cases[2].0, true, None, None),
+                (cases[3].0, true, None, None),
+                (cases[4].0, true, None, None),
+                (cases[5].0, false, None, None),
+            ]
+        );
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), cases.len());
+    }
+
     use meerkat_core::auth::TokenStore;
     use meerkat_core::provider_matrix::openai::{OpenAiAuthMethod, OpenAiBackendKind};
     use meerkat_core::{
@@ -7091,6 +7259,80 @@ mod tests {
                 .expect("the lookup runs again after the wait");
             assert_eq!(command_runs(directory.path()), 2);
             assert_eq!(harness.transport.request_count(), 3);
+        }
+
+        /// GitHub's secondary rate limit, a 403 whose message says so and that
+        /// may carry no `Retry-After` and no rate-limit header, pauses the
+        /// account's identity lookup like any rate limit, read through the
+        /// production transport: requests fail as `refresh_failed` without
+        /// asking GitHub again or running the token's command, for the minute
+        /// GitHub asks for at least, and the lookup runs again after it. It
+        /// is no refusal of the token.
+        #[cfg(unix)]
+        #[tokio::test]
+        async fn a_secondary_rate_limit_pauses_the_identity_lookup() {
+            let directory = tempfile::tempdir().expect("command directory");
+            std::fs::write(
+                directory.path().join("token"),
+                user_token("secondary-limit"),
+            )
+            .expect("write the token");
+            let user = String::from_utf8(svc_bot().body).expect("a JSON identity");
+            let models = String::from_utf8(models_response().body).expect("a JSON model list");
+            let (base, hits) = spawn_github_answers(vec![
+                github_answer(403, "", SECONDARY_RATE_LIMIT_BODY),
+                github_answer(200, "", &user),
+                github_answer(200, "", &models),
+            ])
+            .await;
+            let runtime = CopilotRuntime::with_transport(Arc::new(LocalGitHub {
+                inner: ReqwestCopilotHttpTransport::new(),
+                base,
+            }));
+            let operator = OperatorEnv::new();
+            let binding = token_binding(
+                CopilotProviderRoute::OpenAi,
+                token_file_command(directory.path()),
+            );
+            let resolve = || runtime.resolve(&binding, &operator.env);
+
+            let detail = refresh_failure(
+                resolve()
+                    .await
+                    .err()
+                    .expect("GitHub's secondary rate limit"),
+            );
+            assert!(detail.contains("rate limited"), "{detail}");
+            assert_eq!(command_runs(directory.path()), 1);
+            assert_eq!(operator.lease().phase, Some(AuthLeasePhase::Valid));
+
+            operator.advance(59);
+            for _ in 0..3 {
+                let detail = refresh_failure(
+                    resolve()
+                        .await
+                        .err()
+                        .expect("the account still waits for GitHub's minute"),
+                );
+                assert!(detail.contains("rate limited"), "{detail}");
+            }
+            assert_eq!(
+                hits.load(std::sync::atomic::Ordering::SeqCst),
+                1,
+                "no request inside GitHub's minute"
+            );
+            assert_eq!(
+                command_runs(directory.path()),
+                1,
+                "no command run inside GitHub's minute"
+            );
+
+            operator.advance(2);
+            resolve()
+                .await
+                .expect("the lookup runs again after the wait");
+            assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 3);
+            assert_eq!(command_runs(directory.path()), 2);
         }
 
         /// A logout during GitHub's rate-limit window keeps its own error:

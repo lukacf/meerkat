@@ -346,7 +346,7 @@ def candidate_review():
     the projection's exact bytes (base64) and their separately given SHA-256. This proves only
     that the dispatch carried accepted projection bytes naming this candidate. The original join
     records behind joins and outcomes are read and checked by the dispatcher
-    (scripts/forge-publish-dispatch.py); a dispatch made by hand carries only what its caller
+    (meta/scripts/installer-publish-dispatch.py); a dispatch made by hand carries only what its caller
     supplied."""
     expected = rc.digest(os.environ.get("CANDIDATE_REVIEW_SHA256", ""), "candidate review SHA-256")
     encoded = os.environ.get("CANDIDATE_REVIEW", "")

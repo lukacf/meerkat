@@ -895,8 +895,8 @@ fi
 # opposed to one the host declared) are recorded by the boot's scan of the
 # identity store's created entry rows, which the ci profile cannot reach
 # either. A hand-written audit over the same generated model
-# (created_identity_audit.tla) checks four runs over their whole reachable
-# space, its recovery part (--part recovery, shard audits-q). The scan run
+# (created_identity_audit.tla, shard audits-q) checks ten runs over their
+# whole reachable space, in two parts. Its recovery part's scan run
 # replays a seated member with or without its Declared entry's row beside an
 # identity without a member, then scans a row of either with every presence
 # and revival record, in a running and a stopped mob, until the boot plan's
@@ -926,10 +926,24 @@ fi
 # spawn ladder opens for a reserved name, and no ladder close seats a member
 # under one; a ladder's custody matches its name's origin, and a seat under
 # created custody binds the entry's revival record; the seal never touches a
-# Created entry or an unreadable name's). They require every listed arm to
-# fire, a floor of distinct states and their eighteen witnesses reached, and
-# --mutants refuses twenty-nine seeded defects: one per created entries'
-# invariant and property and one per new guard a reachable state needs.
+# Created entry or an unreadable name's). Its changes part (0.9.9) drives a
+# change's admission and a store-owned entry's record (exactly one arm
+# answering each, a new entry taking only a free name), a store-owned update
+# beside a roster's change of the same spec (the same verdict for the same
+# facts), the removal of either custody (every removal's end tombstoning its
+# name), the archive and unarchive (an archived identity keeping its name
+# and never seated), the host's preparation and its held constructions (an
+# entry awaiting its preparation seated only by its accepted activation, an
+# accepted activation ending only by its publication, a `constructed`
+# preparation never settled without an attempt, at most one attempt held or
+# activating) and the placed spawn of a store-owned identity hosted on its
+# first use. They require every listed arm to fire, a floor of distinct
+# states and their witnesses reached, and --mutants refuses the seeded
+# defects: one per invariant and property and one per new guard a reachable
+# state needs (a removal's end that leaves no tombstone, a store-owned update
+# that skips its declared migration, an archive that frees its name, an
+# archived entry seated, a tombstoned name seated, a created custody kept
+# local, which leaves the placed witness unreachable).
 created_identity_audit="${workspace_root}/specs/machines/mob_machine/created_identity_audit.sh"
 if [[ ! -x "${created_identity_audit}" ]]; then
   echo "error: created identity audit runner is missing from workspace runfiles: ${created_identity_audit}" >&2
@@ -937,7 +951,7 @@ if [[ ! -x "${created_identity_audit}" ]]; then
 fi
 if run_part audits-q; then
   echo "running bounded created identity TLC audit"
-  TLC_WORKERS="${tlc_workers}" "${created_identity_audit}" --mutants --part recovery
+  TLC_WORKERS="${tlc_workers}" "${created_identity_audit}" --mutants
 fi
 
 # The SessionDocumentMachine activation-body retirement region: a hand-written
@@ -1220,10 +1234,12 @@ run_machine_verify() {
 # declared apply's runs count their fifteen declaration arms, none of these
 # runs recording a created entry or a reserved name (created_identity_audit
 # counts every arm).
-# audits-q = the created identity audit's recovery part with --mutants
-# (--part recovery), alone: its four whole-space runs, 18 witnesses and 29
+# audits-q = the created identity audit with --mutants (both its parts),
+# alone. Its recovery part's four whole-space runs, 18 witnesses and 29
 # mutants took 225 s locally with 4 TLC workers (2026-10-31), 51 TLC runs
-# whose JVM start and model parse are most of it. To keep it there its
+# whose JVM start and model parse are most of it; its changes part (0.9.9)
+# adds six whole-space runs, 29 witnesses and 12 mutants, 47 more TLC runs
+# of about the same cost, not measured yet. To keep it there its
 # reseat run spawns member 1 without custody only, gives a revival record
 # only to member 2's Present row and reconciles both members or none, its
 # names run's rows carry no revival record, and the reseat run's row

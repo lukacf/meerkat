@@ -427,10 +427,12 @@ trap 'rm -rf "$tlc_env_tmp"' EXIT
 # witnesses violated, and with --mutants each seeded defect's target
 # invariant violated.
 # created_identity_audit.sh (mob_machine) requires a final distinct-state
-# count at or above each of its four runs' floors, a coverage block in which
-# each covered action of every run generated a state, its eighteen step
+# count at or above each of its ten runs' floors, a coverage block in which
+# each covered action of every run generated a state, its forty-seven step
 # witnesses violated, and with --mutants each seeded defect's generated
-# invariant, totality invariant or action property violated.
+# invariant, totality invariant or action property violated and its
+# created_custody_local_kept mutant's run to end without an error (the
+# success line below).
 # activation_body_retirement_audit.sh (session_document) requires its three
 # witnesses violated, and with --mutants each seeded defect's target
 # invariant violated.
@@ -968,6 +970,44 @@ printf '%s\n' \
   'echo "Error: Invariant AuditNamesAdoptionExactlyOne is violated."' \
   'echo "Error: Invariant AuditNamesLaneExactlyOne is violated."' \
   'echo "Error: Action property AuditNoSeatUnderReservedName is violated."' \
+  'for action in RecoverCreatedIdentityEntryRemovingRunning RecoverCreatedIdentityEntryRemovingStopped RecoverCreatedIdentityEntryArchivingRunning RecoverCreatedIdentityEntryArchivingStopped RecoverCreatedIdentityEntryArchivedRunning RecoverCreatedIdentityEntryArchivedStopped SetIdentityChangesHeldRunning SetIdentityChangesHeldStopped AdmitIdentityChangeAdmitted AdmitIdentityChangeReplayed AdmitIdentityChangeOperationReused AdmitIdentityChangeNonAuthoritative AdmitIdentityChangeChangesHeld AdmitIdentityChangeDecisionUnbound AdmitIdentityChangeDecisionExpired AdmitIdentityChangeImportedNotHostOperator AdmitIdentityChangeGrantRevoked AdmitIdentityChangeStaleSpec AdmitIdentityChangeMobNotRunningStopped RecordCreatedIdentityEntryRecorded RecordCreatedIdentityEntryNameHeldByIdentity RecordCreatedIdentityEntryNameHeldByWorker RecordCreatedIdentityEntryNameTombstoned RecordCreatedIdentityEntryNameUnreadable RecordCreatedIdentityEntryNonAuthoritative RecordCreatedIdentityEntryChangesHeld RecordCreatedIdentityEntryCauseRefused RecordCreatedIdentityEntryMobNotRunningStopped ArchiveIdentityEntryArchived RemoveIdentityEntryRetiring RemoveIdentityEntryRemoved RemoveIdentityEntryAlreadyRemoved RemoveIdentityEntryUnknown RemoveIdentityEntryInFlight RemoveIdentityEntryNameUnreadable RemoveIdentityEntryNonAuthoritative RemoveIdentityEntryChangesHeld RemoveIdentityEntryMobNotRunningStopped ArchiveIdentityEntryArchiving ArchiveIdentityEntryAlreadyArchived ArchiveIdentityEntryOwnedByRoster ArchiveIdentityEntryUnknown ArchiveIdentityEntryInFlight ArchiveIdentityEntryNameUnreadable ArchiveIdentityEntryNonAuthoritative ArchiveIdentityEntryChangesHeld ArchiveIdentityEntryMobNotRunningStopped UnarchiveIdentityEntryRestored UnarchiveIdentityEntryNotArchived UnarchiveIdentityEntryOwnedByRoster UnarchiveIdentityEntryUnknown UnarchiveIdentityEntryInFlight UnarchiveIdentityEntryNameUnreadable UnarchiveIdentityEntryNonAuthoritative UnarchiveIdentityEntryChangesHeld UnarchiveIdentityEntryMobNotRunningStopped DeclareIdentityEntryPreparationPending BeginPreparationConstructionHeld BeginPreparationConstructionNotPending BeginPreparationConstructionNotConstructed BeginPreparationConstructionConstructionOpen BeginPreparationConstructionNonAuthoritative BeginPreparationConstructionMobNotRunningStopped SettleHostPreparationSeat SettleHostPreparationActivationAccepted SettleHostPreparationNotPending SettleHostPreparationConstructionRequired SettleHostPreparationConstructionOpen SettleHostPreparationStaleAttempt SettleHostPreparationExpired SettleHostPreparationMismatch SettleHostPreparationActivationPending SettleHostPreparationNonAuthoritative SettleHostPreparationMobNotRunningStopped EndPreparationConstructionEndedRunning EndPreparationConstructionEndedStopped EndPreparationConstructionNotOpenRunning EndPreparationConstructionNotOpenStopped EndPreparationConstructionActivationPendingRunning EndPreparationConstructionActivationPendingStopped; do echo "<$action line 1, col 1 to line 1, col 2 of module model>: 1:1"; done' \
+  'echo "Error: Action property NotAuditWitnessCommitRecordedPending is violated."' \
+  'echo "Error: Action property NotAuditWitnessCommitRecordedHeld is violated."' \
+  'echo "Error: Action property NotAuditWitnessCommitStaleSpec is violated."' \
+  'echo "Error: Action property NotAuditWitnessCommitHeldRefused is violated."' \
+  'echo "Error: Action property NotAuditWitnessCommitWorkerRefused is violated."' \
+  'echo "Error: Action property NotAuditWitnessCommitCreatedSeat is violated."' \
+  'echo "Error: Action property NotAuditWitnessUpdateMigrates is violated."' \
+  'echo "Error: Action property NotAuditWitnessUpdateRestamps is violated."' \
+  'echo "Error: Action property NotAuditWitnessRemovalRetiring is violated."' \
+  'echo "Error: Action property NotAuditWitnessRemovalEndsAtTerminal is violated."' \
+  'echo "Error: Action property NotAuditWitnessRemovalAtOnce is violated."' \
+  'echo "Error: Action property NotAuditWitnessRemovalOfArchived is violated."' \
+  'echo "Error: Action property NotAuditWitnessRemovalAlreadyRemoved is violated."' \
+  'echo "Error: Action property NotAuditWitnessRemovalRefusesDeclaration is violated."' \
+  'echo "Error: Action property NotAuditWitnessArchiveRetires is violated."' \
+  'echo "Error: Action property NotAuditWitnessArchiveAtTerminal is violated."' \
+  'echo "Error: Action property NotAuditWitnessArchiveRestored is violated."' \
+  'echo "Error: Action property NotAuditWitnessArchiveReseated is violated."' \
+  'echo "Error: Action property NotAuditWitnessArchiveOwnedByRoster is violated."' \
+  'echo "Error: Action property NotAuditWitnessPrepRosterPending is violated."' \
+  'echo "Error: Action property NotAuditWitnessPrepRosterSettledByDeclaration is violated."' \
+  'echo "Error: Action property NotAuditWitnessPrepStoreSettleSeats is violated."' \
+  'echo "Error: Action property NotAuditWitnessPrepAccepted is violated."' \
+  'echo "Error: Action property NotAuditWitnessPrepPublished is violated."' \
+  'echo "Error: Action property NotAuditWitnessPrepRosterPublished is violated."' \
+  'echo "Error: Action property NotAuditWitnessPrepAbortRefusedWhileActivating is violated."' \
+  'echo "Error: Action property NotAuditWitnessPrepExpired is violated."' \
+  'echo "Error: Action property NotAuditWitnessPrepRemovalWaits is violated."' \
+  'echo "Error: Action property NotAuditWitnessPlacedCreated is violated."' \
+  'echo "Error: Invariant AuditUpdateExactlyOne is violated."' \
+  'echo "Error: Action property AuditRemovalTombstones is violated."' \
+  'echo "Error: Action property AuditArchivedKeepsItsName is violated."' \
+  'echo "Error: Action property AuditArchivedNeverSeated is violated."' \
+  'echo "Error: Action property AuditPendingSeatedOnlyByItsActivation is violated."' \
+  'echo "Error: Action property AuditAcceptedActivationIsFinal is violated."' \
+  'echo "Error: Action property AuditConstructedNeverSettledWithoutAttempt is violated."' \
+  'echo "Error: Invariant construction_is_held_or_activating is violated."' \
   'for action in SetOperatorInstructionNewRunning SetOperatorInstructionAdvanceRunning SetOperatorInstructionDuplicateRunning SetOperatorInstructionStaleRunning SetOperatorInstructionConflictRunning RevokeOperatorInstructionUnknownSlotRunning RevokeOperatorInstructionStaleRunning RevokeOperatorInstructionDuplicateRunning RevokeOperatorInstructionConflictRunning RevokeOperatorInstructionAdvanceRunning PrepareMemberInstructionDeliveryNotOwedRunning PrepareMemberInstructionDeliveryDeliverRunning PrepareMemberInstructionDeliveryUnbornRunning PrepareMemberInstructionDeliveryUnboundRunning RecordMemberInstructionTargetNotOwedRunning RecordMemberInstructionTargetStaleSessionRunning RecordMemberInstructionTargetSupersededRunning RecordMemberInstructionTargetCurrentRunning RecordMemberInstructionTargetUnmintedRunning RefuseMemberInstructionTargetNotOwedRunning RefuseMemberInstructionTargetStaleSessionRunning RefuseMemberInstructionTargetSupersededRunning RefuseMemberInstructionTargetBlockedRunning PrepareMemberInstructionDeliveryRetiringRunning RetireRunningReleasingArchiveOnly ResolveMemberInstructionReleaseAuthorizedRunning ResolveMemberInstructionReleaseNotNeededRunning; do echo "<$action line 1, col 1 to line 1, col 2 of module model>: 1:1"; done' \
   'echo "Error: Action property NotAuditWitnessProfileWriteOwesOne is violated."' \
   'echo "Error: Action property NotAuditWitnessRetargetOwesLeaver is violated."' \

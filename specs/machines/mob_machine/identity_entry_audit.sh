@@ -1574,9 +1574,11 @@ keep_var("CommitSpawnMembershipFresh", "identity_entry_unseated")
 PY
 
   # The placed ladder holds the custody of an entry not hosted on its first
-  # use (or of no entry): its placed custody guard dropped.
+  # use (or of no entry): its placed custody guard dropped (the one guard
+  # that names neither custody; the name guard's created custody clause
+  # names hosted entries too).
   mutate placed placed_custody_relaxed "Invariant placed_entry_custody_is_hosted_on_first_use" <<'PY'
-drop_guard("BeginSpawnExecRemote", 'Some("HostedOnFirstUse")')
+drop_guard("BeginSpawnExecRemote", "((entry_custody = FALSE) /\\ (created_custody = FALSE))")
 PY
 
   # The placed ladder takes an entry's name without its custody.

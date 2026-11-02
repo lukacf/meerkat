@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # TLC audit of MobMachine created identity entries.
 #
-# usage: created_identity_audit.sh [--mutants] [--part recovery|<run>]
+# usage: created_identity_audit.sh [--mutants] [--part recovery|changes|<run>]
 #                                  [extra tlc args...]
 #
 # Derives each run's TLC config from the generated ci.cfg next to this script
@@ -9,10 +9,10 @@
 # identity_entry_audit.sh does for the declared apply, with the VIEW of
 # member_residency_audit that leaves out the two counters no guard reads
 # (model_step_count and topology_epoch); the runner first checks that the
-# model reads neither anywhere else. It checks four runs of
-# created_identity_audit.tla, each over its whole space with TLC coverage:
-# its recovery part (--part recovery; every part by default; --part <run>
-# checks one run):
+# model reads neither anywhere else. It checks ten runs of
+# created_identity_audit.tla, each over its whole space with TLC coverage, in
+# two parts (every part by default; --part <run> checks one run). Its
+# recovery part (--part recovery):
 #
 # - scan: member 1 recovered and bound, its Declared entry row replayed or
 #   not, member 2 with no member, and the boot scan of a row of either with
@@ -43,6 +43,48 @@
 #   commit seats no member under a name reserved while its ladder was open
 #   (AuditNoSeatUnderReservedName).
 #
+# Its changes part (--part changes, 0.9.9):
+#
+# - commit: a worker member, a name reserved by its row or not, the
+#   admission of every change and the record of either name with every
+#   cause, the host's changes hold and a seat under created custody, in a
+#   running and a stopped mob: exactly one arm answers every admission and
+#   every record (AuditAdmitExactlyOne, AuditRecordExactlyOne), and a new
+#   store-owned entry takes only a free name (AuditRecordTakesFreeNames).
+# - update: a roster-owned and a store-owned identity seated under the same
+#   profile and runtime mode, and their declarations of the same change, the
+#   store-owned one's by its update: exactly one arm answers every update
+#   (AuditUpdateExactlyOne), and both answer the same verdict whenever their
+#   facts are the same (AuditUpdateParity).
+# - removal: a roster-owned identity seated and removed through its
+#   retirement, a store-owned one removed unseated with every cause or
+#   archived, a reserved name, the changes hold and the composition
+#   authority: exactly one arm answers every removal
+#   (AuditRemovalExactlyOne), and every removal's end tombstones its name
+#   (AuditRemovalTombstones).
+# - archive: a store-owned identity seated, archived through its
+#   retirement, unarchived and seated again on its archived session, its
+#   spawn ladder at any point, and a roster-owned identity's archive refused:
+#   exactly one arm answers every archive and unarchive
+#   (AuditArchiveExactlyOne), an archived identity keeps its name until its
+#   unarchive (AuditArchivedKeepsItsName) and no member is seated under it
+#   (AuditArchivedNeverSeated).
+# - preparation: a roster-owned identity whose rule requires its
+#   preparation and a store-owned one pending it, the start, settle and end
+#   of their held constructions with every fact, their ladders, seats,
+#   membership commits and removals: exactly one arm answers each
+#   (AuditPrepExactlyOne), an attempt is open only for an entry awaiting its
+#   preparation (AuditConstructionAwaitsPreparation), such an entry is
+#   seated only by its accepted activation's membership commit
+#   (AuditPendingSeatedOnlyByItsActivation), an accepted activation ends
+#   only by its publication (AuditAcceptedActivationIsFinal), and a
+#   `constructed` preparation is never settled without an attempt
+#   (AuditConstructedNeverSettledWithoutAttempt).
+# - placement: a store-owned identity hosted on its first use, seated by a
+#   placed spawn holding its created custody (the placed witness), and a
+#   placed ladder holds created custody only for such an identity
+#   (AuditPlacedCreatedCustodyHosted).
+#
 # Every run checks every generated invariant (the created entries' among
 # them: tombstone_is_never_an_entry, entry_custodies_are_disjoint,
 # worker_reconcile_spares_entries and destroyed_mob_holds_no_member_lifecycle),
@@ -57,9 +99,11 @@
 # every witness reached (a step goal's negation violated), and --mutants
 # seeds one defect per created entries' invariant and property and per new
 # guard a reachable state needs, each of which TLC must refuse with the
-# named violation. An anchor this script expects but cannot find fails the
-# run. Each TLC run is held to the canonical lane's per-run cap
-# (tlc_run_cap.sh) and fails closed as TLC INCOMPLETE.
+# named violation; the created_custody_local_kept mutant instead requires
+# the placed witness unreachable (its run ends without an error). An anchor
+# this script expects but cannot find fails the run. Each TLC run is held to
+# the canonical lane's per-run cap (tlc_run_cap.sh) and fails closed as TLC
+# INCOMPLETE.
 set -euo pipefail
 
 run_mutants=false
@@ -81,14 +125,15 @@ done
 part_of() {
   case "$1" in
     scan|reseat|names|placed) echo recovery ;;
+    commit|update|removal|archive|preparation|placement) echo changes ;;
     *) return 1 ;;
   esac
 }
 case "${run_part}" in
-  all|recovery) ;;
+  all|recovery|changes) ;;
   *)
     if ! part_of "${run_part}" > /dev/null; then
-      echo "error: unknown part '${run_part}' (recovery or a run)" >&2
+      echo "error: unknown part '${run_part}' (recovery, changes or a run)" >&2
       exit 2
     fi
     ;;
@@ -103,6 +148,15 @@ scan_states=1512
 reseat_states=3245
 names_states=1560
 placed_states=150
+# The changes part's runs (0.9.9) have not had a first green run yet: their
+# floors are 1 until the lane measures them, and each is then set to the
+# whole space that run found.
+commit_states=1
+update_states=1
+removal_states=1
+archive_states=1
+preparation_states=1
+placement_states=1
 
 # Every arm each run must fire. TLC names an arm after the generated
 # operator, since every audit wrapper here is a plain application.
@@ -120,6 +174,12 @@ scan_covered_actions=(
   RecoverCreatedIdentityEntryTombstoneStopped
   RecoverCreatedIdentityEntryUnreadableRunning
   RecoverCreatedIdentityEntryUnreadableStopped
+  RecoverCreatedIdentityEntryRemovingRunning
+  RecoverCreatedIdentityEntryRemovingStopped
+  RecoverCreatedIdentityEntryArchivingRunning
+  RecoverCreatedIdentityEntryArchivingStopped
+  RecoverCreatedIdentityEntryArchivedRunning
+  RecoverCreatedIdentityEntryArchivedStopped
   BeginPlacedCompletionLifecycleQuiesceFreshStop
   StopRunning
   ResumeStopped
@@ -209,6 +269,174 @@ placed_covered_actions=(
   RecoverCreatedIdentityEntryPendingRunning
   RecoverCreatedIdentityEntryTombstoneRunning
   RecoverCreatedIdentityEntryUnreadableRunning
+)
+
+commit_covered_actions=(
+  RecoverRosterMemberRunning
+  RecoverMemberSessionBindingFreshRunning
+  RecoverCreatedIdentityEntryTombstoneRunning
+  RecoverCreatedIdentityEntryUnreadableRunning
+  SeedMemberResidencyRunning
+  BeginPlacedCompletionLifecycleQuiesceFreshStop
+  StopRunning
+  ResumeStopped
+  SetIdentityChangesHeldRunning
+  SetIdentityChangesHeldStopped
+  AdmitIdentityChangeAdmitted
+  AdmitIdentityChangeReplayed
+  AdmitIdentityChangeOperationReused
+  AdmitIdentityChangeNonAuthoritative
+  AdmitIdentityChangeChangesHeld
+  AdmitIdentityChangeDecisionUnbound
+  AdmitIdentityChangeDecisionExpired
+  AdmitIdentityChangeImportedNotHostOperator
+  AdmitIdentityChangeGrantRevoked
+  AdmitIdentityChangeStaleSpec
+  AdmitIdentityChangeMobNotRunningStopped
+  RecordCreatedIdentityEntryRecorded
+  RecordCreatedIdentityEntryNameHeldByIdentity
+  RecordCreatedIdentityEntryNameHeldByWorker
+  RecordCreatedIdentityEntryNameTombstoned
+  RecordCreatedIdentityEntryNameUnreadable
+  RecordCreatedIdentityEntryNonAuthoritative
+  RecordCreatedIdentityEntryChangesHeld
+  RecordCreatedIdentityEntryCauseRefused
+  RecordCreatedIdentityEntryMobNotRunningStopped
+  AuthorizeSpawnProfileRunning
+  BeginSpawnExecFresh
+  CommitDormantSeatRunning
+  AbortSpawnExecActiveRunning
+  SealBootMaterializationPlan
+)
+
+update_covered_actions=(
+  DeclareIdentityEntryKept
+  DeclareIdentityEntrySeatOwed
+  DeclareIdentityEntryRuntimeModeRestamp
+  DeclareIdentityEntryRoleMigrate
+  DeclareIdentityEntryRoleMigrationHeld
+  DeclareIdentityEntryLifecycleInFlight
+  RecordCreatedIdentityEntryRecorded
+  AuthorizeSpawnProfileRunning
+  BeginSpawnExecFresh
+  CommitDormantSeatRunning
+)
+
+removal_covered_actions=(
+  SeedMemberResidencyRunning
+  SetIdentityChangesHeldRunning
+  BeginPlacedCompletionLifecycleQuiesceFreshStop
+  StopRunning
+  ResumeStopped
+  RecoverCreatedIdentityEntryUnreadableRunning
+  DeclareIdentityEntrySeatOwed
+  DeclareIdentityEntryRefusedNameTombstoned
+  AuthorizeSpawnProfileRunning
+  BeginSpawnExecFresh
+  CommitDormantSeatRunning
+  RetireRunningReleasingArchiveOnly
+  ObserveMemberRetirementArchivedLive
+  RecordCreatedIdentityEntryRecorded
+  ArchiveIdentityEntryArchived
+  RemoveIdentityEntryRetiring
+  RemoveIdentityEntryRemoved
+  RemoveIdentityEntryAlreadyRemoved
+  RemoveIdentityEntryUnknown
+  RemoveIdentityEntryInFlight
+  RemoveIdentityEntryNameUnreadable
+  RemoveIdentityEntryNonAuthoritative
+  RemoveIdentityEntryChangesHeld
+  RemoveIdentityEntryMobNotRunningStopped
+)
+
+archive_covered_actions=(
+  SeedMemberResidencyRunning
+  SetIdentityChangesHeldRunning
+  BeginPlacedCompletionLifecycleQuiesceFreshStop
+  StopRunning
+  ResumeStopped
+  RecoverCreatedIdentityEntryUnreadableRunning
+  DeclareIdentityEntrySeatOwed
+  RecordCreatedIdentityEntryRecorded
+  AuthorizeSpawnProfileRunning
+  BeginSpawnExecFresh
+  CommitDormantSeatRunning
+  CommitSpawnMembershipFresh
+  AbortSpawnExecActiveRunning
+  RetireRunningReleasingArchiveOnly
+  ObserveMemberRetirementArchivedLive
+  ArchiveIdentityEntryArchiving
+  ArchiveIdentityEntryArchived
+  ArchiveIdentityEntryAlreadyArchived
+  ArchiveIdentityEntryOwnedByRoster
+  ArchiveIdentityEntryUnknown
+  ArchiveIdentityEntryInFlight
+  ArchiveIdentityEntryNameUnreadable
+  ArchiveIdentityEntryNonAuthoritative
+  ArchiveIdentityEntryChangesHeld
+  ArchiveIdentityEntryMobNotRunningStopped
+  UnarchiveIdentityEntryRestored
+  UnarchiveIdentityEntryNotArchived
+  UnarchiveIdentityEntryOwnedByRoster
+  UnarchiveIdentityEntryUnknown
+  UnarchiveIdentityEntryInFlight
+  UnarchiveIdentityEntryNameUnreadable
+  UnarchiveIdentityEntryNonAuthoritative
+  UnarchiveIdentityEntryChangesHeld
+  UnarchiveIdentityEntryMobNotRunningStopped
+)
+
+preparation_covered_actions=(
+  SeedMemberResidencyRunning
+  DeclareIdentityEntryPreparationPending
+  DeclareIdentityEntrySeatOwed
+  DeclareIdentityEntryLifecycleInFlight
+  RecordCreatedIdentityEntryRecorded
+  BeginPreparationConstructionHeld
+  BeginPreparationConstructionNotPending
+  BeginPreparationConstructionNotConstructed
+  BeginPreparationConstructionConstructionOpen
+  BeginPreparationConstructionNonAuthoritative
+  BeginPreparationConstructionMobNotRunningStopped
+  SettleHostPreparationSeat
+  SettleHostPreparationActivationAccepted
+  SettleHostPreparationNotPending
+  SettleHostPreparationConstructionRequired
+  SettleHostPreparationConstructionOpen
+  SettleHostPreparationStaleAttempt
+  SettleHostPreparationExpired
+  SettleHostPreparationMismatch
+  SettleHostPreparationActivationPending
+  SettleHostPreparationNonAuthoritative
+  SettleHostPreparationMobNotRunningStopped
+  EndPreparationConstructionEndedRunning
+  EndPreparationConstructionEndedStopped
+  EndPreparationConstructionNotOpenRunning
+  EndPreparationConstructionNotOpenStopped
+  EndPreparationConstructionActivationPendingRunning
+  EndPreparationConstructionActivationPendingStopped
+  AuthorizeSpawnProfileRunning
+  BeginSpawnExecFresh
+  CommitDormantSeatRunning
+  CommitSpawnMembershipFresh
+  AbortSpawnExecActiveRunning
+  RemoveIdentityEntryRemoved
+  RemoveIdentityEntryInFlight
+  BeginPlacedCompletionLifecycleQuiesceFreshStop
+  StopRunning
+  ResumeStopped
+)
+
+placement_covered_actions=(
+  BindOwnerBridgeSessionRunning
+  BeginHostBindFreshUnplaced
+  CommitHostBind
+  RecordCreatedIdentityEntryRecorded
+  AuthorizeSpawnProfileRunning
+  BeginSpawnExecRemote
+  AbortSpawnExecMaterializePendingRunning
+  CommitSpawnMembershipRemote
+  CommitSpawnActivationFinalRunning
 )
 
 spec_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -317,6 +545,53 @@ write_cfg() {
   AuditNoSeatUnderReservedName"
       run_invariants="
   AuditRecoverExactlyOne"
+      ;;
+    commit)
+      spec="CommitSpec"
+      run_properties="
+  AuditRecordTakesFreeNames"
+      run_invariants="
+  AuditAdmitExactlyOne
+  AuditRecordExactlyOne"
+      ;;
+    update)
+      spec="UpdateSpec"
+      run_properties=""
+      run_invariants="
+  AuditUpdateExactlyOne
+  AuditUpdateParity"
+      ;;
+    removal)
+      spec="RemovalSpec"
+      run_properties="
+  AuditRemovalTombstones"
+      run_invariants="
+  AuditRemovalExactlyOne"
+      ;;
+    archive)
+      spec="ArchiveSpec"
+      run_properties="
+  AuditArchivedKeepsItsName
+  AuditArchivedNeverSeated"
+      run_invariants="
+  AuditArchiveExactlyOne"
+      ;;
+    preparation)
+      spec="PrepSpec"
+      run_properties="
+  AuditPendingSeatedOnlyByItsActivation
+  AuditAcceptedActivationIsFinal
+  AuditConstructedNeverSettledWithoutAttempt"
+      run_invariants="
+  AuditPrepExactlyOne"
+      run_safety="
+  AuditConstructionAwaitsPreparation"
+      ;;
+    placement)
+      spec="PlacementSpec"
+      run_properties="
+  AuditPlacedCreatedCustodyHosted"
+      run_invariants=""
       ;;
     *)
       echo "error: unknown audit run '${run}'" >&2
@@ -448,7 +723,7 @@ check_space() {
   done
 }
 
-for run in scan reseat names placed; do
+for run in scan reseat names placed commit update removal archive preparation placement; do
   if in_part "${run}"; then
     floor_var="${run}_states"
     arms_var="${run}_covered_actions[@]"
@@ -471,7 +746,23 @@ for witness in \
   "reseat:Action property:ReconcileSparesReserved" "reseat:Action property:DestroyClearsReserved" \
   "names:Action property:SealKeepsCreated" "names:Action property:SealSkipsUnreadable" \
   "names:Action property:ProbeOtherOrigin" \
-  "placed:Action property:ScanContradictedPlaced"; do
+  "placed:Action property:ScanContradictedPlaced" \
+  "commit:Action property:CommitRecordedPending" "commit:Action property:CommitRecordedHeld" \
+  "commit:Action property:CommitStaleSpec" "commit:Action property:CommitHeldRefused" \
+  "commit:Action property:CommitWorkerRefused" "commit:Action property:CommitCreatedSeat" \
+  "update:Action property:UpdateMigrates" "update:Action property:UpdateRestamps" \
+  "removal:Action property:RemovalRetiring" "removal:Action property:RemovalEndsAtTerminal" \
+  "removal:Action property:RemovalAtOnce" "removal:Action property:RemovalOfArchived" \
+  "removal:Action property:RemovalAlreadyRemoved" "removal:Action property:RemovalRefusesDeclaration" \
+  "archive:Action property:ArchiveRetires" "archive:Action property:ArchiveAtTerminal" \
+  "archive:Action property:ArchiveRestored" "archive:Action property:ArchiveReseated" \
+  "archive:Action property:ArchiveOwnedByRoster" \
+  "preparation:Action property:PrepRosterPending" "preparation:Action property:PrepRosterSettledByDeclaration" \
+  "preparation:Action property:PrepStoreSettleSeats" "preparation:Action property:PrepAccepted" \
+  "preparation:Action property:PrepPublished" "preparation:Action property:PrepRosterPublished" \
+  "preparation:Action property:PrepAbortRefusedWhileActivating" "preparation:Action property:PrepExpired" \
+  "preparation:Action property:PrepRemovalWaits" \
+  "placement:Action property:PlacedCreated"; do
   run="${witness%%:*}"
   if ! in_part "${run}"; then
     continue
@@ -610,6 +901,34 @@ PY
     echo "mutant ${name} refused by $(grep -oE "Error: (${violation}) is violated" "${log}" | head -1)"
   }
 
+  # usage: mutate_unreached <run> <name> <witness>; reads a python edit on
+  # stdin as mutate does. The mutant is refused when the witness's goal is
+  # no longer reachable: the witness run ends without an error.
+  mutate_unreached() {
+    local run="$1" name="$2" witness="$3"
+    if ! in_part "${run}"; then
+      cat > /dev/null
+      return 0
+    fi
+    local dir="${work_dir}/mutant-${name}"
+    mkdir -p "${dir}"
+    cp "${spec_dir}"/*.tla "${dir}/"
+    { printf '%s\n' "${mutant_prelude}"; cat; } | MODEL="${dir}/model.tla" python3 -
+    local cfg="${work_dir}/mutant-${name}.cfg"
+    write_cfg "${run}" "${cfg}" "" "
+  NotAuditWitness${witness}" without-totality
+    local status=0
+    (cd "${dir}" && run_tlc "mutant-${name}" "${cfg}" ${tlc_args[@]+"${tlc_args[@]}"}) || status=$?
+    local log="${work_dir}/mutant-${name}.log"
+    if [[ "${status}" != "0" ]] \
+      || ! grep -q "Model checking completed. No error has been found." "${log}"; then
+      cat "${log}"
+      echo "error: mutant ${name} left the witness ${witness} reachable (tlc exit ${status})" >&2
+      exit 1
+    fi
+    echo "mutant ${name} refused: the witness ${witness} is no longer reachable"
+  }
+
   # The scan answers a row after the boot plan's seal.
   mutate scan scan_after_seal "Invariant AuditRecoverExactlyOne" <<'PY'
 drop_guard("RecoverCreatedIdentityEntrySeatedRunning", "(boot_plan_sealed = FALSE)")
@@ -641,12 +960,13 @@ PY
 drop_guard("RecoverCreatedIdentityEntrySeatedRunning", "identity_entry_unreadable) = FALSE)")
 PY
 
-  # A row that says no member while the replay seated one is not reserved.
-  # The generated model lowers the guard's disjunction to a chain of
-  # (IF a THEN TRUE ELSE ...); the mutant makes that one condition FALSE.
+  # A row pending its preparation (no member) while the replay seated one is
+  # not reserved. The generated model lowers the guard's disjunction to a
+  # chain of (IF a THEN TRUE ELSE ...); the mutant makes that one condition
+  # FALSE, and no arm answers the row.
   mutate scan member_contradiction_ignored "Invariant AuditRecoverExactlyOne" <<'PY'
 replace_in_arm("RecoverCreatedIdentityEntryUnreadableRunning",
-               '(IF ((presence # "Present") /\\ ((agent_identity \\in DOMAIN identity_to_runtime) = TRUE)) THEN TRUE ELSE ',
+               '(IF ((presence = "PresentUnseated") /\\ ((agent_identity \\in DOMAIN identity_to_runtime) = TRUE)) THEN TRUE ELSE ',
                "(IF FALSE THEN TRUE ELSE ")
 PY
 
@@ -676,11 +996,11 @@ PY
 replace_in_arm("BeginSpawnExecFresh", '= Some("HeldCreation"))', '# None)')
 PY
 
-  # Entry custody takes a Created entry's name.
+  # Entry custody takes a Created entry's name: the Declared check of its
+  # custody clause (the arm's one comparison with Some("Declared")) takes
+  # any entry.
   mutate reseat entry_custody_takes_created "Action property AuditLadderCustodyMatchesOrigin" <<'PY'
-replace_in_arm("BeginSpawnExecFresh",
-               '((entry_custody = TRUE) /\\ (created_custody = FALSE) /\\ ((IF (agent_identity \\in DOMAIN identity_entry_origins) THEN Some((IF agent_identity \\in DOMAIN identity_entry_origins THEN identity_entry_origins[agent_identity] ELSE "None")) ELSE None) = Some("Declared")))',
-               "((entry_custody = TRUE) /\\ (created_custody = FALSE))")
+replace_in_arm("BeginSpawnExecFresh", '= Some("Declared"))', '# None)')
 PY
 
   # An abort keeps the created custody of the ladder it ends.
@@ -761,12 +1081,13 @@ replace_in_loops("SealDeclaredRosterSealed",
 PY
 
   # The seal acts on an unreadable name's Declared entry (the readable
-  # filter dropped from every one of its lowered loops).
+  # filter dropped from every one of its lowered loops; the removal's mark
+  # check follows it in the same conjunction).
   mutate names seal_takes_unreadable "Action property AuditSealNeverTouchesCreated" <<'PY'
 replace_in_loops("SealDeclaredRosterSealed",
                  ("identity_entry_origins", "identity_entry_unseated", "member_host_preparation_causes",
                   "identity_entry_retiring"),
-                 " /\\ ((id \\in identity_entry_unreadable) = FALSE))", ")")
+                 " /\\ ((id \\in identity_entry_unreadable) = FALSE)", "")
 PY
 
   # The legacy adoption adopts a reserved name (its name_not_reserved guard
@@ -798,6 +1119,86 @@ PY
   # ladder was open (its name_not_reserved guard dropped).
   mutate placed remote_commit_takes_reserved "Action property AuditNoSeatUnderReservedName" <<'PY'
 drop_guard("CommitSpawnMembershipRemote", "identity_entry_unreadable) = FALSE))")
+PY
+
+  # The changes part (0.9.9).
+
+  # A record takes a removed name (the name_tombstoned argument of its
+  # verdict read as FALSE).
+  mutate commit record_takes_tombstoned "Invariant tombstone_is_never_an_entry" <<'PY'
+replace_in_arm("RecordCreatedIdentityEntryRecorded", "((agent_identity \\in identity_entry_tombstones) = TRUE)", "FALSE")
+PY
+
+  # A store-owned update skips the declared migration: the migration arm
+  # refuses created custody, so a store-owned profile change with its
+  # migration declared answers no verdict.
+  mutate update store_update_skips_the_declared_migration "Invariant AuditUpdateExactlyOne" <<'PY'
+replace_in_arm("DeclareIdentityEntryRoleMigrate", '    /\\ phase = "Running"\n',
+               '    /\\ phase = "Running"\n    /\\ (created_custody = FALSE)\n')
+PY
+
+  # The end of a roster-owned identity's removal ends its entry without
+  # tombstoning its name.
+  mutate removal remove_roster_owned_without_tombstone "Action property AuditRemovalTombstones" <<'PY'
+keep_var("ObserveMemberRetirementArchivedLive", "identity_entry_tombstones")
+PY
+
+  # A removed roster-owned name is seated again by its roster's declaration
+  # (the declared apply's name_not_reserved guard dropped).
+  mutate removal tombstoned_name_seated "Invariant tombstone_is_never_an_entry" <<'PY'
+drop_guard("DeclareIdentityEntrySeatOwed", "identity_entry_tombstones) = FALSE)")
+PY
+
+  # An archive frees the name: a record takes a name an entry holds (the
+  # held_by_identity argument of its verdict read as FALSE), so a new entry
+  # replaces the archived one.
+  mutate archive archive_frees_the_name "Action property AuditArchivedKeepsItsName" <<'PY'
+replace_in_arm("RecordCreatedIdentityEntryRecorded", "((agent_identity \\in DOMAIN identity_entry_origins) = TRUE)", "FALSE")
+PY
+
+  # An archived entry is seated without its unarchive: created custody takes
+  # a Created entry with any unseated cause, and the membership commit of
+  # its ladder seats it.
+  mutate archive archived_entry_seated "Action property AuditArchivedNeverSeated" <<'PY'
+replace_in_arm("BeginSpawnExecFresh", '= Some("HeldCreation"))', '# None)')
+PY
+
+  # The dormant seat seats an entry awaiting its host's preparation (its
+  # unseated_entry_owed_its_seat guard dropped), before any activation.
+  mutate preparation dormant_seat_takes_pending "Action property AuditPendingSeatedOnlyByItsActivation" <<'PY'
+drop_guard("CommitDormantSeatRunning", '= Some("SeatOwed")))')
+PY
+
+  # The membership commit publishes a held construction whose activation no
+  # settle accepted (its pending_entry_publishes_its_accepted_activation
+  # guard dropped).
+  mutate preparation commit_publishes_unaccepted "Action property AuditPendingSeatedOnlyByItsActivation" <<'PY'
+drop_guard("CommitSpawnMembershipFresh", "identity_entry_constructions_activating) = TRUE))")
+PY
+
+  # An abort or an expiry ends an accepted activation.
+  mutate preparation accepted_attempt_aborted "Action property AuditAcceptedActivationIsFinal" <<'PY'
+replace_text('(IF (end = "PublicationFailed") THEN "Ended" ELSE "ActivationPending")', '"Ended"')
+PY
+
+  # A new attempt starts while one is open.
+  mutate preparation second_attempt_while_open "Invariant construction_is_held_or_activating" <<'PY'
+replace_text('(IF (construction_open = TRUE) THEN "ConstructionOpen" ELSE "Held")', '"Held"')
+PY
+
+  # A `constructed` preparation is settled without an attempt, seating its
+  # entry.
+  mutate preparation settle_seats_constructed "Action property AuditConstructedNeverSettledWithoutAttempt" <<'PY'
+replace_text('(IF (constructed = TRUE) THEN "ConstructionRequired" ELSE (IF (construction_open = TRUE) THEN "ConstructionOpen" ELSE "Seat"))',
+             '(IF (construction_open = TRUE) THEN "ConstructionOpen" ELSE "Seat")')
+PY
+
+  # Created custody stays local (the guard 0.9.9 dropped): the placed spawn
+  # of a store-owned identity hosted on its first use refuses its custody,
+  # and the placed witness is not reachable.
+  mutate_unreached placement created_custody_local_kept PlacedCreated <<'PY'
+replace_in_arm("BeginSpawnExecRemote", '    /\\ (placement # None)\n',
+               '    /\\ (placement # None)\n    /\\ (created_custody = FALSE)\n')
 PY
 fi
 echo "created identity audit passed"

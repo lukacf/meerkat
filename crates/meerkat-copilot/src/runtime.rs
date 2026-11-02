@@ -320,7 +320,7 @@ impl CopilotHttpTransport for ReqwestCopilotHttpTransport {
                 .map(StdDuration::from_secs);
             let rate_limit_reset = header_text(response.headers(), "x-ratelimit-reset")
                 .and_then(|value| value.parse::<u64>().ok());
-            let rate_limited = github_rate_limited(
+            let header_rate_limited = github_rate_limited(
                 status,
                 header_text(response.headers(), "x-ratelimit-remaining"),
                 retry_after.is_some(),
@@ -334,6 +334,10 @@ impl CopilotHttpTransport for ReqwestCopilotHttpTransport {
                 }
                 body.extend_from_slice(&chunk);
             }
+            // A secondary rate limit can show only in its message, so the
+            // answer is classified once the body is read.
+            let rate_limited =
+                header_rate_limited || (status == 403 && github_secondary_rate_limit(&body));
             Ok(CopilotHttpResponse {
                 status,
                 body,
@@ -354,11 +358,28 @@ fn header_text<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
         .map(str::trim)
 }
 
-/// GitHub's REST rate-limit rule: a 429, or a 403 whose primary limit is
-/// exhausted (`x-ratelimit-remaining: 0`) or that carries `Retry-After` (a
-/// secondary limit).
+/// GitHub's REST rate-limit rule by headers: a 429, or a 403 whose primary
+/// limit is exhausted (`x-ratelimit-remaining: 0`) or that carries
+/// `Retry-After` (a secondary limit). A secondary limit can also come without
+/// any of these headers ([`github_secondary_rate_limit`]).
 fn github_rate_limited(status: u16, remaining: Option<&str>, has_retry_after: bool) -> bool {
     status == 429 || (status == 403 && (remaining == Some("0") || has_retry_after))
+}
+
+/// Whether GitHub's answer says it exceeded a secondary rate limit: its
+/// `message` (or, for a body that is not GitHub's JSON, the body's text)
+/// names one, case-insensitively, as GitHub's own client recognises it
+/// (octokit's throttling rule), since GitHub can send it as a 403 with no
+/// `Retry-After` and no rate-limit header. With no stated time the wait is
+/// the minute GitHub asks for at least ([`rate_limit_until`]).
+fn github_secondary_rate_limit(body: &[u8]) -> bool {
+    let message = serde_json::from_slice::<GitHubErrorEnvelope>(body)
+        .ok()
+        .and_then(|envelope| envelope.message)
+        .unwrap_or_else(|| String::from_utf8_lossy(body).into_owned());
+    message
+        .to_ascii_lowercase()
+        .contains("secondary rate limit")
 }
 
 pub struct CopilotRuntime {

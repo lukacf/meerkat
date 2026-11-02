@@ -538,6 +538,42 @@ them.
   completed ones is still refused, and distinguishable items are still
   matched by content, never by position.
 
+- `meerkat-copilot`: a GitHub Copilot route no longer refuses governed
+  requests once the account's model list is known. The account capability
+  check in front of the route's provider client handled only plain
+  requests, so a request carrying work authorization (a governed turn, or
+  an operation review on a Copilot model) was refused as malformed, and
+  any other request lost its prepared form on the way to the provider
+  client. The check now validates the request as before and hands it on
+  as prepared.
+
+- `meerkat-copilot`: a temporary failure of the GitHub Copilot token
+  exchange no longer fails turns as an authentication error. A network
+  failure or timeout, HTTP 429, a 5xx, or a GitHub API rate limit (a 403
+  that asks for no account action) at the token's refresh point failed the
+  turn, and every turn waiting on the same refresh, with "Authentication
+  failed", although the current Copilot token was still valid. The current
+  token now keeps serving until it expires, and the exchange is tried
+  again after its `Retry-After`, or after 30 seconds without one. Once no
+  valid token is left, the turn fails with a retryable error (rate limited
+  with the exchange's `Retry-After`, server error, network timeout or
+  connection error), which the agent loop retries. An exchange 401, or a
+  403 that asks for an account action, is still an authentication failure
+  that needs a new login.
+
+- `meerkat-copilot`: a GitHub Copilot session no longer loses its route
+  when Copilot rejects its token. A 401 from a model request, or a 401 or
+  403 from the periodic account model discovery, dropped the account's API
+  base and model list together with the token. After two 401s in one
+  request, or a failed new token after a 401, every later turn of a
+  session on that account failed with "Copilot route is unavailable after
+  authorization refresh" without trying the network, and another session
+  on the account that started a turn while the token was being replaced
+  failed with an invalid request or an unknown model. The rejected token
+  is now replaced on its next use while the account's route stays
+  resolvable, and after a discovery 403 the next turn reports that the
+  account needs a new login.
+
 - `meerkat-session`: a turn in flight when an embedding host's runtime stops
   is now treated as ended with that runtime. The check a runtime loop uses
   for this (`session_task_ended_with_its_runtime`) also required the session

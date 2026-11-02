@@ -83,9 +83,10 @@ async fn concurrent_ensure_waits_for_a_first_spawn_still_preparing_off_loop() {
 
 /// Window 2: the first spawn has closed its pending admission (`CompleteSpawn`
 /// in `handle_spawn_provisioned_batch`) and is parked in its off-actor
-/// endpoint observation (the supervisor private-trust install), before
-/// `BeginSpawnExec` and `CommitSpawnMembership`. A second ensure that is
-/// already waiting on the staged spawn must keep waiting through this window.
+/// endpoint observation (the supervisor private-trust install), after
+/// `CompleteSpawn` and before `CommitSpawnMembership` (with the fix its
+/// spawn-exec ladder is already open here). A second ensure that is already
+/// waiting on the staged spawn must keep waiting through this window.
 #[tokio::test]
 async fn concurrent_ensure_waits_while_the_first_spawn_observes_its_endpoint() {
     let (handle, service) = create_test_mob(sample_definition()).await;

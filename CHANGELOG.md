@@ -534,23 +534,27 @@ them.
 
 ### Fixed
 
-- `meerkat-mob`: a concurrent `mob/ensure_member` or `mob/ingress_interaction`
-  for a member whose first spawn is still in flight no longer answers
-  `MemberNotFound`. The second call waited for the first spawn, but gave up
-  while that spawn was still being prepared, or while it was checking its
-  member's endpoint (the member's comms and the supervisor trust install),
-  and answered that the member did not exist, although the spawn seated it
-  moments later. The second call now waits until the member is seated and
-  answers with it; if the first spawn fails, it spawns the member itself.
+- `meerkat-mob`: `MobHandle::ensure_member` (and the `mob/ensure_member` and
+  `mob/ingress_interaction` RPC methods) no longer answers `MemberNotFound`
+  for a member whose first spawn is still in flight. A concurrent call that
+  arrived while that spawn was still being prepared answered `MemberNotFound`
+  at once, and a call that was already waiting for the spawn gave up while it
+  checked its member's endpoint (the member's comms and the supervisor trust
+  install), although the spawn seated the member moments later. The call now
+  waits until the member is seated and answers with it, within the existing
+  60 second ready-wait budget, after which it answers `ReadyWaitTimedOut`. If
+  the first spawn fails before its member is committed, the waiting call
+  spawns the member itself.
 
 - `meerkat-mob`: a second spawn of a member that races the first spawn's
   endpoint check no longer fail-stops the mob. While the first spawn was
   checking its member's endpoint, a second spawn of the same member (or a
-  second `mob/ensure_member` for it) was admitted and seated the member
-  first; the first spawn then stopped the whole mob ("spawn admission
-  observation lost its exact owner"), its caller got no answer, and its
-  session stayed behind. The second spawn is now refused with
-  `MemberAlreadyExists` until the first one settles.
+  second `ensure_member` for it) was admitted and seated the member first;
+  the first spawn then stopped the whole mob ("spawn admission observation
+  lost its exact owner"), its caller got `ActorReplyChannelClosed`, and its
+  session stayed behind. Until the first spawn settles, a second spawn is now
+  refused with `MemberAlreadyExists`, and a second `ensure_member` waits for
+  the member and answers with it.
 
 - `meerkat-openai`: on the GitHub Copilot Responses route, a response with
   two or more reasoning or message items that are identical apart from their

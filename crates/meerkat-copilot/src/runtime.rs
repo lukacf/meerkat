@@ -3782,6 +3782,7 @@ mod tests {
     /// and `/models`; a test client stands in for the provider adapter.
     mod route_turns {
         use super::*;
+        use std::sync::atomic::AtomicI64;
 
         /// Resolve one session on `runtime` (its own authorizer on the shared
         /// account) and build its routed client over `factory`'s adapter.
@@ -4003,6 +4004,447 @@ mod tests {
                 }],
                 "the adapter receives the request in its prepared form"
             );
+        }
+
+        /// A clock the test sets: the resolver environment reads `base` plus
+        /// the offset.
+        #[derive(Clone)]
+        struct TestClock {
+            base: DateTime<Utc>,
+            offset_seconds: Arc<AtomicI64>,
+        }
+
+        impl TestClock {
+            fn new() -> Self {
+                Self {
+                    base: Utc::now(),
+                    offset_seconds: Arc::new(AtomicI64::new(0)),
+                }
+            }
+
+            fn at(&self, seconds: i64) -> DateTime<Utc> {
+                self.base + Duration::seconds(seconds)
+            }
+
+            fn set(&self, seconds: i64) {
+                self.offset_seconds.store(seconds, Ordering::SeqCst);
+            }
+
+            fn now(&self) -> DateTime<Utc> {
+                self.at(self.offset_seconds.load(Ordering::SeqCst))
+            }
+        }
+
+        /// A token response whose expiry and refresh hint sit on the test
+        /// clock.
+        fn token_at(
+            token: &str,
+            expires_at: DateTime<Utc>,
+            refresh_in: u64,
+        ) -> CopilotHttpResponse {
+            json_response(
+                200,
+                serde_json::json!({
+                    "token": token,
+                    "expires_at": expires_at.timestamp(),
+                    "refresh_in": refresh_in,
+                    "endpoints": {"api": "https://copilot.example.test"}
+                }),
+            )
+        }
+
+        fn with_retry_after(response: CopilotHttpResponse, seconds: u64) -> CopilotHttpResponse {
+            CopilotHttpResponse {
+                retry_after: Some(StdDuration::from_secs(seconds)),
+                ..response
+            }
+        }
+
+        /// Stands in for a provider adapter on the route: signs each attempt
+        /// through the route's authorizer, as the built-in adapters do, and
+        /// answers it with the next scripted HTTP status (200 once the script
+        /// is empty). A 401 is reported to the authorizer and retried once
+        /// with fresh authorization; another 401 fails the call.
+        struct StatusScriptedClient {
+            authorizer: Arc<dyn HttpAuthorizer>,
+            url: String,
+            statuses: Arc<Mutex<VecDeque<u16>>>,
+            bearers: Arc<Mutex<Vec<String>>>,
+        }
+
+        impl StatusScriptedClient {
+            async fn call(&self) -> Result<(), meerkat_llm_core::LlmError> {
+                let mut refreshed = false;
+                loop {
+                    let mut headers = Vec::new();
+                    let receipt = self
+                        .authorizer
+                        .authorize_with_receipt(&mut HttpAuthorizationRequest {
+                            method: "POST",
+                            url: &self.url,
+                            headers: &mut headers,
+                        })
+                        .await
+                        .map_err(meerkat_llm_core::LlmError::from_authorizer)?;
+                    if let Some((_, bearer)) = headers
+                        .iter()
+                        .find(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+                    {
+                        self.bearers.lock().push(bearer.clone());
+                    }
+                    let status = self.statuses.lock().pop_front().unwrap_or(200);
+                    if status != 401 {
+                        return Ok(());
+                    }
+                    let action = self
+                        .authorizer
+                        .observe_response_with_receipt(
+                            receipt,
+                            &HttpAuthorizationResponse {
+                                method: "POST",
+                                url: &self.url,
+                                status,
+                            },
+                        )
+                        .await
+                        .map_err(meerkat_llm_core::LlmError::from_authorizer)?;
+                    if refreshed
+                        || action != HttpAuthorizationResponseAction::RetryWithFreshAuthorization
+                    {
+                        return Err(meerkat_llm_core::LlmError::AuthenticationFailed {
+                            message: "the provider answered 401".to_string(),
+                        });
+                    }
+                    refreshed = true;
+                }
+            }
+
+            fn turn(&self) -> meerkat_llm_core::LlmStream<'_> {
+                Box::pin(futures::stream::once(self.call()).filter_map(|outcome| {
+                    futures::future::ready(
+                        outcome
+                            .err()
+                            .map(Err::<meerkat_llm_core::LlmEvent, meerkat_llm_core::LlmError>),
+                    )
+                }))
+            }
+        }
+
+        #[async_trait]
+        impl meerkat_llm_core::LlmClient for StatusScriptedClient {
+            fn project_replay_messages(
+                &self,
+                messages: &[meerkat_core::Message],
+            ) -> Result<Vec<meerkat_core::Message>, meerkat_llm_core::LlmError> {
+                Ok(messages.to_vec())
+            }
+
+            fn stream<'a>(
+                &'a self,
+                _request: &'a meerkat_llm_core::LlmRequest,
+            ) -> meerkat_llm_core::LlmStream<'a> {
+                self.turn()
+            }
+
+            fn stream_prepared<'a>(
+                &'a self,
+                _request: &'a meerkat_llm_core::PreparedLlmRequest,
+            ) -> meerkat_llm_core::LlmStream<'a> {
+                self.turn()
+            }
+
+            fn provider(&self) -> Provider {
+                Provider::OpenAI
+            }
+
+            async fn health_check(&self) -> Result<(), meerkat_llm_core::LlmError> {
+                Ok(())
+            }
+        }
+
+        /// One session's routed client, and the bearers its stand-in adapter
+        /// signed with.
+        struct RouteSession {
+            client: Arc<dyn meerkat_llm_core::LlmClient>,
+            bearers: Arc<Mutex<Vec<String>>>,
+        }
+
+        impl RouteSession {
+            /// Prepare a turn's request as the agent loop does: the replay
+            /// projection, then pressure and cache lowering through its route
+            /// witness.
+            fn prepare(
+                &self,
+            ) -> Result<meerkat_llm_core::PreparedLlmRequest, meerkat_llm_core::LlmError>
+            {
+                let projection = self.client.project_replay_request(&[])?;
+                let request = meerkat_llm_core::PreparedLlmRequest::from_projection(
+                    meerkat_llm_core::LlmRequest::new("gpt-test", Vec::new()),
+                    projection,
+                );
+                self.client.prepared_request_pressure(&request)?;
+                self.client.prepared_cache_breakpoints(&request, &[])?;
+                Ok(request)
+            }
+
+            async fn turn(
+                &self,
+            ) -> Vec<Result<meerkat_llm_core::LlmEvent, meerkat_llm_core::LlmError>> {
+                match self.prepare() {
+                    Ok(request) => {
+                        self.client
+                            .stream_prepared(&request)
+                            .collect::<Vec<_>>()
+                            .await
+                    }
+                    Err(error) => vec![Err(error)],
+                }
+            }
+
+            fn bearers(&self) -> Vec<String> {
+                self.bearers.lock().clone()
+            }
+        }
+
+        /// One Copilot account: the runtime over a scripted transport, and
+        /// the binding and resolver environment (on the test clock) every
+        /// session on it resolves with.
+        struct RouteAccount {
+            runtime: Arc<CopilotRuntime>,
+            binding: ValidatedBinding,
+            env: ResolverEnvironment,
+            auth_lease: meerkat_core::handles::GeneratedAuthLeaseHandle,
+        }
+
+        impl RouteAccount {
+            async fn new(transport: Arc<dyn CopilotHttpTransport>, clock: &TestClock) -> Self {
+                let (auth_binding, binding) = validated_binding();
+                let (mut env, auth_lease) = resolver_environment(&auth_binding).await;
+                let clock = clock.clone();
+                env.now = Arc::new(move || clock.now());
+                Self {
+                    runtime: Arc::new(CopilotRuntime {
+                        accounts: Mutex::new(BTreeMap::new()),
+                        transport,
+                    }),
+                    binding,
+                    env,
+                    auth_lease,
+                }
+            }
+
+            /// Resolve a session whose stand-in adapter answers `statuses`.
+            async fn session(&self, statuses: impl IntoIterator<Item = u16>) -> RouteSession {
+                let statuses = Arc::new(Mutex::new(statuses.into_iter().collect::<VecDeque<_>>()));
+                let bearers = Arc::new(Mutex::new(Vec::new()));
+                let signed = Arc::clone(&bearers);
+                let factory: CopilotRouteClientFactory = Arc::new(move |route, connection| {
+                    let authorizer = connection
+                        .resolved_authorizer()
+                        .ok_or(ProviderClientError::NoCredentialMaterial)?;
+                    Ok(Arc::new(StatusScriptedClient {
+                        authorizer: route.bind_authorizer(authorizer),
+                        url: format!("{}/responses", route.api_base),
+                        statuses: Arc::clone(&statuses),
+                        bearers: Arc::clone(&signed),
+                    }))
+                });
+                RouteSession {
+                    client: routed_session(&self.runtime, &self.binding, &self.env, factory).await,
+                    bearers,
+                }
+            }
+
+            fn source_phase(&self) -> Option<meerkat_core::handles::AuthLeasePhase> {
+                self.auth_lease
+                    .snapshot(&meerkat_core::handles::LeaseKey::from_credential_identity(
+                        &account_identity(),
+                    ))
+                    .phase
+            }
+        }
+
+        /// Whether the agent loop's retry policy retries this turn failure.
+        fn retried(error: &meerkat_llm_core::LlmError) -> bool {
+            meerkat_core::retry::LlmRetryFailure::from_agent_error(
+                &error.clone().into_agent_error("openai"),
+            )
+            .is_some()
+        }
+
+        #[tokio::test]
+        async fn exchange_outage_before_expiry_keeps_serving_the_current_token() {
+            let clock = TestClock::new();
+            let transport = Arc::new(ScriptedTransport::new([
+                token_at("derived-one", clock.at(3600), 200),
+                models_response(),
+                with_retry_after(
+                    json_response(503, serde_json::json!({"message": "unavailable"})),
+                    60,
+                ),
+                token_at("derived-two", clock.at(311 + 3600), 200),
+                models_response(),
+            ]));
+            let account = RouteAccount::new(transport.clone(), &clock).await;
+            let session = account.session([]).await;
+            assert_eq!(transport.request_count(), 2);
+
+            // Past the token's refresh point (200 s), well before it expires
+            // (3600 s).
+            clock.set(250);
+            let events = session.turn().await;
+            assert!(
+                events.is_empty(),
+                "an exchange outage must not fail a turn the current token can still serve: {events:?}"
+            );
+            assert_eq!(
+                transport.request_count(),
+                3,
+                "the refresh point tried the exchange"
+            );
+
+            // Within the exchange's Retry-After (60 s).
+            clock.set(290);
+            let events = session.turn().await;
+            assert!(events.is_empty(), "{events:?}");
+            assert_eq!(
+                transport.request_count(),
+                3,
+                "the exchange is not tried again before its Retry-After"
+            );
+
+            clock.set(311);
+            let events = session.turn().await;
+            assert!(events.is_empty(), "{events:?}");
+            assert_eq!(
+                transport.request_count(),
+                5,
+                "after its Retry-After the exchange is tried again"
+            );
+            assert_eq!(
+                session.bearers(),
+                [
+                    "Bearer derived-one",
+                    "Bearer derived-one",
+                    "Bearer derived-two"
+                ]
+            );
+        }
+
+        #[tokio::test]
+        async fn exchange_outage_after_expiry_fails_the_turn_as_retryable() {
+            let outages = [
+                (
+                    "HTTP 503",
+                    Some(json_response(
+                        503,
+                        serde_json::json!({"message": "unavailable"}),
+                    )),
+                    None,
+                ),
+                (
+                    "HTTP 429",
+                    Some(with_retry_after(
+                        json_response(429, serde_json::json!({"message": "slow down"})),
+                        7,
+                    )),
+                    Some(StdDuration::from_secs(7)),
+                ),
+                (
+                    "GitHub API rate limit 403",
+                    Some(json_response(
+                        403,
+                        serde_json::json!({"message": "API rate limit exceeded for user"}),
+                    )),
+                    None,
+                ),
+                ("transport failure", None, None),
+            ];
+            for (case, outage, retry_after) in outages {
+                let clock = TestClock::new();
+                let mut script = vec![
+                    token_at("derived-one", clock.at(3600), 200),
+                    models_response(),
+                ];
+                script.extend(outage);
+                let transport = Arc::new(ScriptedTransport::new(script));
+                let account = RouteAccount::new(transport.clone(), &clock).await;
+                let session = account.session([]).await;
+
+                clock.set(3700);
+                let events = session.turn().await;
+                let [Err(error)] = events.as_slice() else {
+                    panic!("{case}: the turn fails once: {events:?}");
+                };
+                assert!(
+                    retried(error),
+                    "{case}: an exchange outage after expiry must fail the turn as retryable, not as {error:?}"
+                );
+                assert_eq!(
+                    error.retry_after(),
+                    retry_after,
+                    "{case}: the exchange's Retry-After reaches the retry policy"
+                );
+                assert_eq!(transport.request_count(), 3, "{case}");
+                assert!(
+                    session.bearers().is_empty(),
+                    "{case}: nothing is sent without a token"
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn exchange_refusal_at_the_refresh_point_stays_an_auth_failure() {
+            let clock = TestClock::new();
+            let transport = Arc::new(ScriptedTransport::new([
+                token_at("derived-one", clock.at(3600), 200),
+                models_response(),
+                json_response(401, serde_json::json!({"message": "Bad credentials"})),
+            ]));
+            let account = RouteAccount::new(transport.clone(), &clock).await;
+            let session = account.session([]).await;
+
+            clock.set(250);
+            let events = session.turn().await;
+            let [Err(error)] = events.as_slice() else {
+                panic!("the turn fails once: {events:?}");
+            };
+            assert!(
+                matches!(
+                    error.failure_reason(),
+                    meerkat_core::error::LlmFailureReason::AuthError
+                ) && !retried(error),
+                "an exchange 401 is an auth failure even while the current token is valid: {error:?}"
+            );
+            assert_eq!(
+                account.source_phase(),
+                Some(meerkat_core::handles::AuthLeasePhase::ReauthRequired)
+            );
+            assert_eq!(transport.request_count(), 3);
+            assert!(session.bearers().is_empty());
+        }
+
+        #[tokio::test]
+        async fn exchange_outage_after_a_model_401_fails_the_turn_as_retryable() {
+            let clock = TestClock::new();
+            let transport = Arc::new(ScriptedTransport::new([
+                token_at("derived-one", clock.at(3600), 200),
+                models_response(),
+                json_response(503, serde_json::json!({"message": "unavailable"})),
+            ]));
+            let account = RouteAccount::new(transport.clone(), &clock).await;
+            let session = account.session([401]).await;
+
+            let events = session.turn().await;
+            let [Err(error)] = events.as_slice() else {
+                panic!("the turn fails once: {events:?}");
+            };
+            assert!(
+                retried(error),
+                "a 401 whose new token meets an exchange outage must fail the turn as retryable, not as {error:?}"
+            );
+            assert_eq!(transport.request_count(), 3);
+            assert_eq!(session.bearers(), ["Bearer derived-one"]);
         }
     }
 }

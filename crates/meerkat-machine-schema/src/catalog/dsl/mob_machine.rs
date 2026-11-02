@@ -37882,8 +37882,8 @@ pub enum CreatedIdentityRecordVerdict {
     NonAuthoritative,
     /// The host holds the mob's identity changes.
     ChangesHeld,
-    /// The record's cause is not a new entry's (a seat owed, or a pending
-    /// host preparation).
+    /// The record's cause is not a new entry's: a new entry is never
+    /// archived.
     CauseRefused,
     /// The mob is not running.
     MobNotRunning,

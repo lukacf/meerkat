@@ -34879,7 +34879,8 @@ impl MobActor {
 
     /// [`Self::restore_member_local_cleanup_delivery`], with whether a
     /// failure came before the restore had any effect: the reads of the
-    /// member's session state, and a typed hosting refusal of its
+    /// member's session state (its session, and its runtime residue, whose
+    /// store failure stays typed), and a typed hosting refusal of its
     /// registration, which takes nothing.
     #[cfg(feature = "runtime-adapter")]
     async fn restore_member_local_cleanup_delivery_staged(
@@ -34902,7 +34903,14 @@ impl MobActor {
                 .adapter
                 .archive_runtime_residue_present(session)
                 .await
-                .map_err(|error| before_effect(MobError::Internal(error.to_string())))?
+                .map_err(|error| {
+                    // The store's typed read failure, classed like a failed
+                    // read of the member's session: a store that could not
+                    // serve now, or data that does not decode.
+                    before_effect(MobError::SessionError(
+                        meerkat_core::service::SessionError::Store(Box::new(error)),
+                    ))
+                })?
         {
             return Ok(());
         }

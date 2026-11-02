@@ -79,6 +79,11 @@ them.
   `SESSION_STORE_ERROR`) carrying the typed `RuntimeStoreError`, where it
   failed with `SessionError::Agent` (`AGENT_ERROR`). Other read failures are
   unchanged.
+- `meerkat-runtime`: `MeerkatMachine::archive_runtime_residue_present`
+  answers `Result<bool, RuntimeStoreError>`: its one failure, the read of the
+  runtime's machine lifecycle record, keeps the store's typed error, where it
+  answered `RuntimeDriverError::Internal` with the error's text. A caller that
+  only formats the error keeps compiling.
 - Behaviour-only (not measured by the gate): `meerkat-runtime`: a host store
   read that answers `HostStoreError::Unavailable` surfaces as
   `RuntimeStoreError::Unavailable`, and stored data that does not decode as
@@ -2235,10 +2240,10 @@ them.
   mob. A mob start that cannot restore the cleanup delivery of a retiring
   member (or of a member bound to a session of a Stopped or Completed mob)
   for a failure of that member's own, met before the restore had an effect
-  (a read of its session the store could not serve or decode, a hosting
-  refusal, a durable tail it could not prove), defers that member's
-  custody: MobMachine records it, the mob runs, and the member shows
-  `custody_deferred` until a re-attempt restores it. Before, any such
+  (a read of its session or of its runtime residue the store could not serve
+  or decode, a hosting refusal, a durable tail it could not prove), defers
+  that member's custody: MobMachine records it, the mob runs, and the member
+  shows `custody_deferred` until a re-attempt restores it. Before, any such
   failure other than a hosting refusal or an unprovable tail of a retiring
   member fail-stopped the whole mob with `MemberStartupRecoveryFailed`.
 - `meerkat-mob`: a resume that fails after its pre-activation hook ran marks

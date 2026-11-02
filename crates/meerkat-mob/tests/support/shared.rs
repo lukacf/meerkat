@@ -713,8 +713,8 @@ pub struct FailingOnceSessionService {
     session_loads: std::sync::Mutex<std::collections::BTreeMap<meerkat_core::SessionId, u64>>,
 }
 
-/// A typed read fault [`FailingOnceSessionService::fail_session_loads`]
-/// answers for every persisted read of one session.
+/// What [`FailingOnceSessionService::fail_session_loads`] answers for every
+/// persisted read of one session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionLoadFault {
     /// The store cannot serve the read now (a session store error the
@@ -723,17 +723,24 @@ pub enum SessionLoadFault {
     /// The session's stored state does not decode (one it classes
     /// malformed).
     Unreadable,
+    /// The session is not persisted (its archive ran): the read answers
+    /// none.
+    Absent,
 }
 
 impl SessionLoadFault {
-    fn error(self, session_id: &meerkat_core::SessionId) -> meerkat_core::service::SessionError {
+    fn answer(
+        self,
+        session_id: &meerkat_core::SessionId,
+    ) -> Result<Option<meerkat_core::Session>, meerkat_core::service::SessionError> {
         let store = match self {
             Self::Unavailable => meerkat_core::SessionStoreError::Internal(format!(
                 "injected: the session store cannot serve {session_id} now"
             )),
             Self::Unreadable => meerkat_core::SessionStoreError::Corrupted(session_id.clone()),
+            Self::Absent => return Ok(None),
         };
-        meerkat_core::service::SessionError::Store(Box::new(store))
+        Err(meerkat_core::service::SessionError::Store(Box::new(store)))
     }
 }
 
@@ -827,7 +834,7 @@ impl FailingOnceSessionService {
     fn session_load_fault(
         &self,
         session_id: &meerkat_core::SessionId,
-    ) -> Option<meerkat_core::service::SessionError> {
+    ) -> Option<Result<Option<meerkat_core::Session>, meerkat_core::service::SessionError>> {
         *self
             .session_loads
             .lock()
@@ -838,7 +845,7 @@ impl FailingOnceSessionService {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(session_id)
-            .map(|fault| fault.error(session_id))
+            .map(|fault| fault.answer(session_id))
     }
 
     /// Every member create received, in order.
@@ -1426,8 +1433,8 @@ impl meerkat_mob::MobSessionService for FailingOnceSessionService {
         &self,
         session_id: &meerkat_core::SessionId,
     ) -> Result<Option<meerkat_core::Session>, meerkat_core::service::SessionError> {
-        if let Some(fault) = self.session_load_fault(session_id) {
-            return Err(fault);
+        if let Some(answer) = self.session_load_fault(session_id) {
+            return answer;
         }
         self.inner.load_persisted_session(session_id).await
     }
@@ -1436,8 +1443,8 @@ impl meerkat_mob::MobSessionService for FailingOnceSessionService {
         &self,
         session_id: &meerkat_core::SessionId,
     ) -> Result<Option<meerkat_core::Session>, meerkat_core::service::SessionError> {
-        if let Some(fault) = self.session_load_fault(session_id) {
-            return Err(fault);
+        if let Some(answer) = self.session_load_fault(session_id) {
+            return answer;
         }
         self.inner
             .load_persisted_session_tolerating_tail(session_id)

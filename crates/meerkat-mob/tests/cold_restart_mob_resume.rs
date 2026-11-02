@@ -2720,6 +2720,9 @@ struct PowerCutRuntimeStore {
     /// store-owned durable-tail recovery holds every tail intact
     /// (`DurableTailRecoveryOutcome::Held`).
     hold_tail_recovery: std::sync::atomic::AtomicBool,
+    /// While set, every read of this runtime's machine lifecycle record
+    /// answers that the store cannot serve it now.
+    unavailable_lifecycle_reads: std::sync::Mutex<Option<meerkat_runtime::LogicalRuntimeId>>,
 }
 
 /// Where a held boundary commit is.
@@ -2784,7 +2787,28 @@ impl PowerCutRuntimeStore {
             boundary_hold: tokio::sync::watch::channel(BoundaryHold::Idle).0,
             forward_hosting: std::sync::atomic::AtomicBool::new(false),
             hold_tail_recovery: std::sync::atomic::AtomicBool::new(false),
+            unavailable_lifecycle_reads: std::sync::Mutex::new(None),
         }
+    }
+
+    /// Answer every read of `runtime_id`'s machine lifecycle record with the
+    /// typed failure of a store that cannot serve it now, until
+    /// [`Self::serve_lifecycle_reads`].
+    #[cfg(feature = "test-support")]
+    fn fail_lifecycle_reads_of(&self, runtime_id: meerkat_runtime::LogicalRuntimeId) {
+        *self
+            .unavailable_lifecycle_reads
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(runtime_id);
+    }
+
+    /// Serve every machine lifecycle read again.
+    #[cfg(feature = "test-support")]
+    fn serve_lifecycle_reads(&self) {
+        *self
+            .unavailable_lifecycle_reads
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
     }
 
     /// Report the inner store's hosting capability from now on (see
@@ -3520,6 +3544,17 @@ impl meerkat_runtime::RuntimeStore for PowerCutRuntimeStore {
         &self,
         runtime_id: &meerkat_runtime::LogicalRuntimeId,
     ) -> Result<Option<Vec<u8>>, meerkat_runtime::RuntimeStoreError> {
+        if self
+            .unavailable_lifecycle_reads
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            == Some(runtime_id)
+        {
+            return Err(meerkat_runtime::RuntimeStoreError::Unavailable(format!(
+                "injected: the store cannot serve the lifecycle of {runtime_id} now"
+            )));
+        }
         self.inner.load_machine_lifecycle_record(runtime_id).await
     }
 
@@ -6823,6 +6858,98 @@ async fn a_retiring_member_whose_session_does_not_decode_stays_degraded_and_visi
         .assert_retire_completes_once_the_store_serves(label)
         .await;
     let _ = started.handle.shutdown().await;
+}
+
+/// A retiring member whose session the start finds gone (its archive ran)
+/// and whose runtime residue the store cannot read now no longer stops the
+/// mob: the residue read keeps its typed store failure, so the start defers
+/// the member's cleanup delivery custody (`store_unavailable`) as it defers
+/// a failed read of the member's session. The mob runs, and another member
+/// runs a turn. Once the stores serve the reads again, a retire of the member
+/// completes.
+#[cfg(feature = "test-support")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_retiring_member_whose_runtime_residue_cannot_be_read_degrades_and_the_mob_runs() {
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::WARN)
+        .with_writer(std::io::stderr)
+        .try_init();
+    let temp = tempfile::tempdir().expect("temp dir");
+    let paths = Paths::new(temp.path());
+    let label = "residue-unavailable";
+    let power_store = Arc::new(PowerCutRuntimeStore::new(&paths.realm_db_path));
+    let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> = power_store.clone();
+    let session_id = retiring_member_after_a_crash(&paths, &power_store, false, label).await;
+    let (service, _store) = persistent_head_canonical_service(&paths, runtime_store);
+    let persistent_owner: Arc<dyn MobSessionService> = service.clone();
+    let faulting = FailingOnceSessionService::new(persistent_owner, None, None, 0, false);
+    // The member's archive ran: its session reads as gone...
+    faulting.fail_session_loads(session_id.clone(), support::SessionLoadFault::Absent);
+    // ...and the store cannot serve the read of its runtime residue now.
+    power_store
+        .fail_lifecycle_reads_of(meerkat_runtime::LogicalRuntimeId::for_session(&session_id));
+    let handle = MobBuilder::for_resume(
+        MobStorage::persistent(&paths.mob_db_path).expect("reopen mob storage"),
+    )
+    .with_session_service(faulting.clone())
+    .with_default_llm_client(openai_test_client())
+    .notify_orchestrator_on_resume(false)
+    .resume()
+    .await
+    .unwrap_or_else(|error| {
+        panic!(
+            "[{label}] a member whose runtime residue cannot be read does not stop the mob: {error}"
+        )
+    });
+    let status = handle.status().await;
+    assert!(
+        matches!(status, Ok(meerkat_mob::MobState::Running)),
+        "[{label}] the start runs instead of fail-stopping before admission: {status:?}"
+    );
+    let identity = AgentIdentity::from("w-1");
+    let member = handle
+        .member_status(&identity)
+        .await
+        .unwrap_or_else(|error| panic!("[{label}] the degraded member's status: {error}"));
+    let deferral = member
+        .custody_deferred
+        .unwrap_or_else(|| panic!("[{label}] the member's status shows its deferred custody"));
+    assert_eq!(
+        deferral.restore,
+        meerkat_mob::MemberCustodyRestore::CleanupDelivery,
+        "[{label}] the deferred restore"
+    );
+    assert_eq!(
+        deferral.cause.as_str(),
+        "store_unavailable",
+        "[{label}] the residue read's typed store failure classes the deferral"
+    );
+    // Another member serves: the lead runs a turn.
+    send_and_wait(
+        &handle,
+        service.as_ref(),
+        "lead-1",
+        "AFTER_DEGRADED_START token-beta",
+        label,
+    )
+    .await;
+
+    // Once the stores serve the reads again, a retire of the member restores
+    // its custody and completes.
+    power_store.serve_lifecycle_reads();
+    faulting.serve_session_loads();
+    handle
+        .retire(identity.clone())
+        .await
+        .unwrap_or_else(|error| {
+            panic!("[{label}] once the store serves, the retire restores the custody and completes: {error}")
+        });
+    let members = handle.list_members_including_retiring().await;
+    assert!(
+        !members.iter().any(|entry| entry.agent_identity == identity),
+        "[{label}] the member's retirement completed: {members:?}"
+    );
+    let _ = handle.shutdown().await;
 }
 
 /// A retiring member whose durable tail its recovery withholds from resume

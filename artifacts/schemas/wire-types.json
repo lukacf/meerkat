@@ -130089,6 +130089,79 @@
           "Destroyed"
         ],
         "type": "string"
+      },
+      "WireMobQuarantineClass": {
+        "description": "Why a persisted mob store is quarantined. The vocabulary may grow: a\nreader surfaces a class it does not know instead of refusing it.",
+        "oneOf": [
+          {
+            "const": "store_unavailable",
+            "description": "A store could not serve a read the restore needed now; a later\nattempt may pass with no repair.",
+            "type": "string"
+          },
+          {
+            "const": "store_unreadable",
+            "description": "The mob's store, or stored state its restore needs, cannot be\nopened, read or decoded.",
+            "type": "string"
+          },
+          {
+            "const": "resume_refused",
+            "description": "The restore refused the store for another typed reason.",
+            "type": "string"
+          }
+        ]
+      },
+      "WireQuarantinedMob": {
+        "description": "One quarantined persisted mob on `mob/list`: its store did not restore\nand is kept exactly as found, with no actor. A lookup of its id answers\nthe `mob_quarantined` refusal this row carries (`message`, `code`,\n`structured_data`); `mob/restore_retry` re-attempts its restore.",
+        "properties": {
+          "attempts": {
+            "default": 0,
+            "description": "Re-attempts of its restore that ended since the server quarantined\nit.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "class": {
+            "$ref": "#/$defs/WireMobQuarantineClass",
+            "description": "Why the store is quarantined."
+          },
+          "code": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ErrorCode"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The code a lookup of the mob answers."
+          },
+          "message": {
+            "description": "The refusal a lookup of the mob answers, with the failure its last\nrestore attempt met.",
+            "type": "string"
+          },
+          "mob_id": {
+            "type": "string"
+          },
+          "retryable": {
+            "description": "Whether a later attempt may restore it with no repair (a store that\ncould not serve now): the next call that addresses the mob by id\nre-attempts its restore.",
+            "type": "boolean"
+          },
+          "retrying": {
+            "default": false,
+            "description": "A re-attempt of its restore is in flight.",
+            "type": "boolean"
+          },
+          "structured_data": {
+            "description": "The structured data a lookup of the mob answers\n(`kind: \"mob_quarantined\"`)."
+          }
+        },
+        "required": [
+          "mob_id",
+          "class",
+          "retryable",
+          "message"
+        ],
+        "type": "object"
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -130097,6 +130170,13 @@
       "mobs": {
         "items": {
           "$ref": "#/$defs/MobStatusResult"
+        },
+        "type": "array"
+      },
+      "quarantined": {
+        "description": "The persisted mobs whose stores did not restore, kept quarantined.\nA mob id is in `mobs` or here, never in both. Absent when there are\nnone.",
+        "items": {
+          "$ref": "#/$defs/WireQuarantinedMob"
         },
         "type": "array"
       }
@@ -134008,6 +134088,16 @@
           {
             "const": "durable_tail_unprovable",
             "description": "The member's durable tail could not be proven, and its recovery kept\nit.",
+            "type": "string"
+          },
+          {
+            "const": "store_unavailable",
+            "description": "The store could not serve a read of the member's state now.",
+            "type": "string"
+          },
+          {
+            "const": "store_unreadable",
+            "description": "The member's persisted state cannot be read or decoded.",
             "type": "string"
           }
         ]
@@ -138170,6 +138260,52 @@
       "receipt"
     ],
     "title": "MobRespawnResult",
+    "type": "object"
+  },
+  "MobRestoreRetryResult": {
+    "$defs": {
+      "WireMobRestoreRetryOutcome": {
+        "description": "How a `mob/restore_retry` ended. A re-attempt that fails answers the\n`mob_quarantined` refusal instead.",
+        "oneOf": [
+          {
+            "const": "restored",
+            "description": "The mob resumed and is managed.",
+            "type": "string"
+          },
+          {
+            "const": "held",
+            "description": "The mob is a child held before activation until its owner resolves.",
+            "type": "string"
+          },
+          {
+            "const": "settled",
+            "description": "The store held no mob any more and was swept, or the child was torn\ndown with its archived owner.",
+            "type": "string"
+          },
+          {
+            "const": "not_quarantined",
+            "description": "The mob was not quarantined: it is managed or held.",
+            "type": "string"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Response payload for `mob/restore_retry`.",
+    "properties": {
+      "mob_id": {
+        "type": "string"
+      },
+      "outcome": {
+        "$ref": "#/$defs/WireMobRestoreRetryOutcome",
+        "description": "How the re-attempt of the mob's restore ended."
+      }
+    },
+    "required": [
+      "mob_id",
+      "outcome"
+    ],
+    "title": "MobRestoreRetryResult",
     "type": "object"
   },
   "MobRetireResult": {
@@ -184846,6 +184982,16 @@
             "const": "durable_tail_unprovable",
             "description": "The member's durable tail could not be proven, and its recovery kept\nit.",
             "type": "string"
+          },
+          {
+            "const": "store_unavailable",
+            "description": "The store could not serve a read of the member's state now.",
+            "type": "string"
+          },
+          {
+            "const": "store_unreadable",
+            "description": "The member's persisted state cannot be read or decoded.",
+            "type": "string"
           }
         ]
       },
@@ -184901,6 +185047,16 @@
       {
         "const": "durable_tail_unprovable",
         "description": "The member's durable tail could not be proven, and its recovery kept\nit.",
+        "type": "string"
+      },
+      {
+        "const": "store_unavailable",
+        "description": "The store could not serve a read of the member's state now.",
+        "type": "string"
+      },
+      {
+        "const": "store_unreadable",
+        "description": "The member's persisted state cannot be read or decoded.",
         "type": "string"
       }
     ],
@@ -190614,6 +190770,55 @@
     "title": "WireMobProfile",
     "type": "object"
   },
+  "WireMobQuarantineClass": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Why a persisted mob store is quarantined. The vocabulary may grow: a\nreader surfaces a class it does not know instead of refusing it.",
+    "oneOf": [
+      {
+        "const": "store_unavailable",
+        "description": "A store could not serve a read the restore needed now; a later\nattempt may pass with no repair.",
+        "type": "string"
+      },
+      {
+        "const": "store_unreadable",
+        "description": "The mob's store, or stored state its restore needs, cannot be\nopened, read or decoded.",
+        "type": "string"
+      },
+      {
+        "const": "resume_refused",
+        "description": "The restore refused the store for another typed reason.",
+        "type": "string"
+      }
+    ],
+    "title": "WireMobQuarantineClass"
+  },
+  "WireMobRestoreRetryOutcome": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "How a `mob/restore_retry` ended. A re-attempt that fails answers the\n`mob_quarantined` refusal instead.",
+    "oneOf": [
+      {
+        "const": "restored",
+        "description": "The mob resumed and is managed.",
+        "type": "string"
+      },
+      {
+        "const": "held",
+        "description": "The mob is a child held before activation until its owner resolves.",
+        "type": "string"
+      },
+      {
+        "const": "settled",
+        "description": "The store held no mob any more and was swept, or the child was torn\ndown with its archived owner.",
+        "type": "string"
+      },
+      {
+        "const": "not_quarantined",
+        "description": "The mob was not quarantined: it is managed or held.",
+        "type": "string"
+      }
+    ],
+    "title": "WireMobRestoreRetryOutcome"
+  },
   "WireMobRun": {
     "$defs": {
       "WireMobRunStatus": {
@@ -192332,6 +192537,174 @@
       "scopes"
     ],
     "title": "WireProvisionApiKeyResult",
+    "type": "object"
+  },
+  "WireQuarantinedMob": {
+    "$defs": {
+      "ErrorCode": {
+        "description": "Stable error codes for wire protocol.",
+        "oneOf": [
+          {
+            "enum": [
+              "SESSION_NOT_FOUND",
+              "SCHEDULE_NOT_FOUND",
+              "SESSION_BUSY",
+              "SESSION_NOT_RUNNING",
+              "REQUEST_CANCELLED",
+              "PROVIDER_ERROR",
+              "BUDGET_EXHAUSTED",
+              "HOOK_DENIED",
+              "AGENT_ERROR",
+              "CAPABILITY_UNAVAILABLE",
+              "SKILL_NOT_FOUND",
+              "SKILL_RESOLUTION_FAILED",
+              "INVALID_PARAMS",
+              "INTERNAL_ERROR",
+              "DUPLICATE_INPUT",
+              "SUPERVISOR_ROTATION_INCOMPLETE"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "SCOPE_DENIED",
+            "description": "Plane-(b) control-scope denial; wire detail carries\n`{ required, presented }`.",
+            "type": "string"
+          },
+          {
+            "const": "HOST_UNAVAILABLE",
+            "description": "Member host unreachable/timeout; observation degrades typed, never\nquiet.",
+            "type": "string"
+          },
+          {
+            "const": "STALE_CURSOR",
+            "description": "Event cursor overran an ephemeral host's buffer; reply carries the\ncurrent watermark.",
+            "type": "string"
+          },
+          {
+            "const": "STALE_FENCE",
+            "description": "Command carried a superseded `(generation, fence)` tuple.",
+            "type": "string"
+          },
+          {
+            "const": "MEMBER_RELOAD_REQUIRED",
+            "description": "A mob member's runtime registration is durability-degraded and\nrefuses ordinary work until an explicit registration-authorized cold\nreload replaces it (`MobError::MemberReloadRequired`). Deliberately\nits own code rather than [`Self::SessionBusy`]: the condition never\nclears on its own, so ordinary busy/backoff retry is never correct —\nonly the named `reload_member_registration` repair resolves it.",
+            "type": "string"
+          },
+          {
+            "const": "INPUT_REFUSED",
+            "description": "The native owner declined an unaccepted input. Details retain the\ncanonical refusal kind without private policy or principal data.",
+            "type": "string"
+          },
+          {
+            "const": "INPUT_NOT_READY",
+            "description": "Current native input readiness is unavailable. This is an operational\ncondition, not a permission verdict or a terminal result for prior work.",
+            "type": "string"
+          },
+          {
+            "const": "SESSION_RUNTIME_UNAVAILABLE",
+            "description": "Runtime authority is unavailable before a session operation starts.",
+            "type": "string"
+          },
+          {
+            "const": "APPROVAL_STORE_UNAVAILABLE",
+            "description": "The approval store committed nothing (unavailable or contended). An\nexplicitly attempted retry through fresh checks is valid.",
+            "type": "string"
+          },
+          {
+            "const": "APPROVAL_CONFLICT",
+            "description": "Another owner of the approval store changed the approval first; it\nis reconciled before reuse.",
+            "type": "string"
+          },
+          {
+            "const": "APPROVAL_COMMIT_UNKNOWN",
+            "description": "The approval store cannot confirm whether the commit happened; the\napproval is reconciled from the store before reuse, never resent.",
+            "type": "string"
+          },
+          {
+            "const": "STALE_DELIVERY_SCOPE",
+            "description": "A scope-bound mob submit named a member session that is no longer the\nmember's current session binding: the session rotated under a still\ncurrent runtime incarnation and fence. Distinct from\n[`Self::StaleFence`] (a superseded incarnation): the recovery is to\nre-capture the delivery scope, not to re-resolve the member.",
+            "type": "string"
+          },
+          {
+            "const": "FORK_INSTRUCTION_REFUSED",
+            "description": "A durable fork was refused before commit because of the activation\nrows its child would inherit, under the host's fork instruction\npolicy. No child exists; the typed cause and keys ride in the error\ndata. A fork request may set `inherited_instructions` to\n`reactivate_inherited` to carry the source's effective activations.",
+            "type": "string"
+          }
+        ]
+      },
+      "WireMobQuarantineClass": {
+        "description": "Why a persisted mob store is quarantined. The vocabulary may grow: a\nreader surfaces a class it does not know instead of refusing it.",
+        "oneOf": [
+          {
+            "const": "store_unavailable",
+            "description": "A store could not serve a read the restore needed now; a later\nattempt may pass with no repair.",
+            "type": "string"
+          },
+          {
+            "const": "store_unreadable",
+            "description": "The mob's store, or stored state its restore needs, cannot be\nopened, read or decoded.",
+            "type": "string"
+          },
+          {
+            "const": "resume_refused",
+            "description": "The restore refused the store for another typed reason.",
+            "type": "string"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "One quarantined persisted mob on `mob/list`: its store did not restore\nand is kept exactly as found, with no actor. A lookup of its id answers\nthe `mob_quarantined` refusal this row carries (`message`, `code`,\n`structured_data`); `mob/restore_retry` re-attempts its restore.",
+    "properties": {
+      "attempts": {
+        "default": 0,
+        "description": "Re-attempts of its restore that ended since the server quarantined\nit.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "class": {
+        "$ref": "#/$defs/WireMobQuarantineClass",
+        "description": "Why the store is quarantined."
+      },
+      "code": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/ErrorCode"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "The code a lookup of the mob answers."
+      },
+      "message": {
+        "description": "The refusal a lookup of the mob answers, with the failure its last\nrestore attempt met.",
+        "type": "string"
+      },
+      "mob_id": {
+        "type": "string"
+      },
+      "retryable": {
+        "description": "Whether a later attempt may restore it with no repair (a store that\ncould not serve now): the next call that addresses the mob by id\nre-attempts its restore.",
+        "type": "boolean"
+      },
+      "retrying": {
+        "default": false,
+        "description": "A re-attempt of its restore is in flight.",
+        "type": "boolean"
+      },
+      "structured_data": {
+        "description": "The structured data a lookup of the mob answers\n(`kind: \"mob_quarantined\"`)."
+      }
+    },
+    "required": [
+      "mob_id",
+      "class",
+      "retryable",
+      "message"
+    ],
+    "title": "WireQuarantinedMob",
     "type": "object"
   },
   "WireReachability": {

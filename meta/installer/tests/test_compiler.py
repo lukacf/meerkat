@@ -89,6 +89,29 @@ def test_deployment_and_rehearsal_resolve_newer_model_from_the_same_native_regis
     assert trial["flows"] == native["flows"]
 
 
+def test_readme_reads_resolved_tools_with_their_source():
+    # A member that is not built yet answers no_build_recorded with an empty
+    # tools list, so an empty list alone is not the member's catalog.
+    spec = starter_blueprint()
+    public = {item.path: item.content for item in generate_package(spec, public_runtime=True)}
+    for files in (generate_files(spec), public):
+        readme = " ".join(files["README.md"].split())
+        assert ("`context.runtime.mob_handle().identity_resolved_tools_detail(identity)` and read its "
+                "`tools_source`") in readme
+        assert "`no_build_recorded` with an empty tools list, which is no catalog" in readme
+        assert "Warm or wake that member first" in readme
+        assert "identity_resolved_tools(identity)`" not in readme
+
+
+def test_developer_readme_reads_resolved_tools_with_their_source():
+    readme = " ".join((Path(__file__).resolve().parents[1] / "README.md").read_text().split())
+    assert ("`context.runtime.mob_handle().identity_resolved_tools_detail(identity)` and read its "
+            "`tools_source`") in readme
+    assert "`no_build_recorded` with an empty tools list, which is no catalog" in readme
+    assert "Warm or wake that member first" in readme
+    assert "identity_resolved_tools(identity)`" not in readme
+
+
 def test_package_zip_hashes_modes_and_preview_match():
     spec = starter_blueprint()
     legacy = generate_files(spec)

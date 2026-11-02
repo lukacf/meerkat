@@ -189,6 +189,7 @@ import type {
   MobResolveIdentityConvergenceBlockResult,
   MobRespawnParams,
   MobRespawnResult,
+  MobRestoreRetryResult,
   MobRetireResult,
   MobRevokeHostParams,
   MobRevokeHostResult,
@@ -886,6 +887,10 @@ export interface RpcMethodContracts {
   "mob/rotate_supervisor": {
     params: MobIdParams;
     result: (MobRotateSupervisorResult) & Record<string, unknown>;
+  };
+  "mob/restore_retry": {
+    params: MobIdParams;
+    result: (MobRestoreRetryResult) & Record<string, unknown>;
   };
   "mob/claim_callback_route": {
     params: MobClaimCallbackRouteParams;

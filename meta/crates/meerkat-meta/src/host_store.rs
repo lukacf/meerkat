@@ -132,6 +132,11 @@ pub enum HostStoreOpenError {
     /// (non-persistent without saying so), or names a slot that is not
     /// supplied or that Meta keeps itself.
     Durability { domain: String },
+    /// The host store holds data for the realm that cannot be read as it
+    /// is: it does not decode, or it failed the store's own integrity check
+    /// (`HostStoreError::Corrupt`). A retry answers the same until the data
+    /// is repaired; this is not an outage to wait out.
+    Corrupt(String),
 }
 
 impl std::fmt::Display for HostStoreOpenError {
@@ -162,6 +167,11 @@ impl std::fmt::Display for HostStoreOpenError {
                  refused (non-persistent without an explicit declaration), or names a slot that \
                  is not supplied or that Meta keeps itself (fail-closed durability)"
             ),
+            Self::Corrupt(detail) => write!(
+                f,
+                "the host store holds realm data that cannot be read as it is ({detail}); \
+                 repair or restore that data before opening the realm again"
+            ),
         }
     }
 }
@@ -171,6 +181,11 @@ impl std::error::Error for HostStoreOpenError {}
 fn open_error(error: SpiError) -> HostStoreOpenError {
     match error {
         SpiError::Held { holder, remaining } => HostStoreOpenError::Held { holder, remaining },
+        // Data that does not decode, as the adapter or the host found it.
+        SpiError::Corrupt(detail)
+        | SpiError::Host(meerkat_core::host_store::HostStoreError::Corrupt(detail)) => {
+            HostStoreOpenError::Corrupt(detail)
+        }
         other => HostStoreOpenError::Host(other.to_string()),
     }
 }

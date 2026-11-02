@@ -104,9 +104,52 @@ class GuideStore:
             row = db.execute("SELECT body FROM guided_setups WHERE id=?", (identity,)).fetchone()
         return json.loads(row["body"]) if row else None
 
-    def list(self):
+    @contextmanager
+    def build_admission(self, identity: str):
+        """Hold the saved guide and operation unchanged through publication.
+
+        This final synchronous read never creates or migrates a store. Take
+        the writer reservation without waiting on the event loop, including
+        in WAL mode where a read transaction would not exclude new commits.
+        The caller must not await or start external work inside this context.
+        """
+        identity = self.identity(identity)
+        db = None
+        try:
+            path = (self.root / "guided-setups.sqlite3").absolute()
+            db = sqlite3.connect(path.as_uri() + "?mode=rw", uri=True, timeout=0,
+                                 isolation_level=None)
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT body FROM guided_setups WHERE id=?", (identity,)).fetchone()
+            if row is None:
+                raise DraftConflict("This setup changed. Reload before building the application.")
+            state = json.loads(row[0])
+            state.pop("operation", None)
+            table = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='guide_operations'").fetchone()
+            if table is not None:
+                operation = db.execute("SELECT body FROM guide_operations WHERE guide_id=?", (identity,)).fetchone()
+                if operation is not None:
+                    state["operation"] = json.loads(operation[0])
+        except (sqlite3.Error, ValueError, TypeError, AttributeError):
+            if db is not None:
+                db.close()
+            raise DraftConflict("The saved setup is unavailable or being updated. Reload before building the application.") from None
+        except BaseException:
+            if db is not None:
+                db.close()
+            raise
+        try:
+            yield state
+        finally:
+            try:
+                db.rollback()
+            finally:
+                db.close()
+
+    def list(self, *, include_all=False):
         with self._database() as db:
-            rows = db.execute("SELECT body FROM guided_setups ORDER BY rowid DESC LIMIT 100").fetchall()
+            rows = db.execute("SELECT body FROM guided_setups ORDER BY rowid DESC"
+                              + ("" if include_all else " LIMIT 100")).fetchall()
         result = []
         for row in rows:
             state = json.loads(row["body"])
@@ -147,7 +190,7 @@ class GuideStore:
             rows = db.execute("SELECT body FROM guide_interactions WHERE guide_id=? ORDER BY rowid", (identity,)).fetchall()
         return [json.loads(row["body"]) for row in rows]
 
-    def save(self, state: dict, expected_version: int):
+    def save(self, state: dict, expected_version: int, *, command=None):
         identity = self.identity(state.get("id"))
         if type(expected_version) is not int or expected_version < 1:
             raise ValueError("Use the current guided setup version when saving.")
@@ -156,7 +199,17 @@ class GuideStore:
         saved = {**state, "version": expected_version + 1}
         encoded = self._encode(saved)
         with self._database() as db:
+            db.execute("BEGIN IMMEDIATE")
+            table = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='guide_commands'").fetchone()
+            if table:
+                pending = db.execute("SELECT command_id FROM guide_commands WHERE guide_id=? AND closed=0", (identity,)).fetchone()
+                if pending and (command is None or command.command_id != pending["command_id"]):
+                    raise DraftConflict("Recover the previous guide command before changing this setup.")
             result = db.execute("UPDATE guided_setups SET version=?,body=? WHERE id=? AND version=?", (saved["version"], encoded, identity, expected_version))
             if result.rowcount != 1:
                 raise DraftConflict("This setup changed in another tab. Reload before continuing.")
+            if command is not None:
+                if command.store is not self:
+                    raise DraftConflict("The guide command belongs to another workspace.")
+                command.apply_in(db, saved)
         return json.loads(encoded)

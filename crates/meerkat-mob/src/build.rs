@@ -61,6 +61,52 @@ pub(crate) fn resolve_profile_mob_operator_access(
     )
 }
 
+/// The default spawn grant a `tools.mob` member's build composes over
+/// `authority_context`: every profile of the mob, bound to the incarnation
+/// the member is built in.
+fn default_spawn_grant(
+    definition: &MobDefinition,
+    mob_id: &crate::ids::MobId,
+    mob_incarnation: meerkat_core::service::LiveMobIncarnation,
+    authority_context: &MobToolAuthorityContext,
+) -> Result<MobToolAuthorityContext, MobError> {
+    let profile_names = definition
+        .profiles
+        .keys()
+        .map(|profile| profile.as_str().to_string())
+        .collect::<Vec<_>>();
+    meerkat_runtime::mob_operator_authority::grant_spawn_profiles_in_mob(
+        authority_context,
+        mob_id.as_str(),
+        mob_incarnation,
+        profile_names,
+    )
+    .map_err(|error| {
+        MobError::Internal(format!(
+            "generated mob operator authority rejected default spawn profiles: {error}"
+        ))
+    })
+}
+
+/// The mob operator authority the runtime composes for a member of a
+/// profile with mob tools, before a host's member build hook runs: what a
+/// build with no persisted authority carries (every profile of the mob,
+/// bound to `mob_incarnation`). The reads of an identity's current grant
+/// that build nothing take it from here, so they and the build never part.
+pub(crate) fn default_member_mob_operator_authority(
+    definition: &MobDefinition,
+    mob_id: &crate::ids::MobId,
+    mob_incarnation: meerkat_core::service::LiveMobIncarnation,
+) -> Result<Option<MobToolAuthorityContext>, MobError> {
+    let (_, authority) = meerkat_runtime::mob_operator_authority::resolve_mob_operator_access(
+        ToolCategoryOverride::Enable,
+        None,
+    );
+    authority
+        .map(|authority| default_spawn_grant(definition, mob_id, mob_incarnation, &authority))
+        .transpose()
+}
+
 /// Keys of the standard mob member labels.
 ///
 /// A member's build stamps each of these from the member's own typed
@@ -330,24 +376,12 @@ pub async fn build_agent_config(
         && let Some(mob_incarnation) = mob_incarnation
         && let Some(authority_context) = authority.take()
     {
-        let profile_names = definition
-            .profiles
-            .keys()
-            .map(|profile| profile.as_str().to_string())
-            .collect::<Vec<_>>();
-        authority = Some(
-            meerkat_runtime::mob_operator_authority::grant_spawn_profiles_in_mob(
-                &authority_context,
-                mob_id.as_str(),
-                mob_incarnation,
-                profile_names,
-            )
-            .map_err(|error| {
-                MobError::Internal(format!(
-                    "generated mob operator authority rejected default spawn profiles: {error}"
-                ))
-            })?,
-        );
+        authority = Some(default_spawn_grant(
+            definition,
+            mob_id,
+            mob_incarnation,
+            &authority_context,
+        )?);
     }
     config.override_mob = override_mob;
     config.mob_tool_authority_context = authority;

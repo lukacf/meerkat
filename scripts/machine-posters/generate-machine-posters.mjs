@@ -1080,6 +1080,7 @@ const POSTER_COVERAGE_KNOWN_GAPS = new Set([
   "dsl_work_item_admission_machine",
   "dsl_forked_participant_lifecycle_machine",
   "dsl_temporary_council_lifecycle_machine",
+  "dsl_mob_store_restore_lifecycle_machine",
 ]);
 
 // `--check` drift gate, part 1 (COVERAGE): every canonical machine must be

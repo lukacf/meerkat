@@ -912,7 +912,13 @@ async fn extension_native_delegate_cross_mob_fork_sharing_revocation_and_documen
         restored.status_observation_snapshot(),
         meerkat_mob::MobState::Stopped
     );
-    assert!(state.held_child_mobs().await.is_empty());
+    assert!(
+        state
+            .held_child_mobs()
+            .await
+            .expect("the held child mobs read")
+            .is_empty()
+    );
     for retired in ["cross-mob-helper", "cross-mob-fork"] {
         assert!(
             restored

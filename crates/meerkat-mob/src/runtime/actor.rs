@@ -19,7 +19,9 @@ mod dormant_wiring;
 pub(super) mod explicit_resume;
 #[cfg(feature = "runtime-adapter")]
 mod host_preparation_hold;
+mod identity_change;
 mod identity_entry_admission;
+mod identity_preparation;
 #[cfg(feature = "openai-live")]
 pub(super) mod live_durable_source_loads;
 pub(super) mod member_effect_lane;
@@ -510,11 +512,12 @@ async fn member_session_present(
 /// session read or restore failure reads a store failure through this one
 /// split ([`session_store_failure_class`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum SessionStoreFailureClass {
+pub(crate) enum SessionStoreFailureClass {
     /// The persisted state cannot be decoded or verified (`Serialization`,
-    /// `Corrupted`). `Corrupted` is deterministic for the same persisted state
-    /// and request by the `SessionStoreError::Corrupted` contract, never a
-    /// race with a concurrent writer.
+    /// `Corrupted`, or a runtime store's `Corrupt`, a host store realm's data
+    /// that does not decode). `Corrupted` is deterministic for the same
+    /// persisted state and request by the `SessionStoreError::Corrupted`
+    /// contract, never a race with a concurrent writer.
     Malformed,
     /// The persisted state does not hold what the request needs, or refuses
     /// it: the session is missing, or a save or rewrite breaks its
@@ -530,11 +533,22 @@ pub(super) enum SessionStoreFailureClass {
 
 /// Classify the source of a [`meerkat_core::service::SessionError::Store`]
 /// ([`SessionStoreFailureClass`]).
-pub(super) fn session_store_failure_class(
+pub(crate) fn session_store_failure_class(
     source: &(dyn std::error::Error + Send + Sync + 'static),
 ) -> SessionStoreFailureClass {
     use meerkat_core::SessionStoreError;
 
+    // A runtime store read a host store realm answers through: stored data
+    // that does not decode is malformed; any other (a store that could not
+    // serve now included) is unavailable, as an unknown source is.
+    if let Some(runtime) = source.downcast_ref::<meerkat_runtime::store::RuntimeStoreError>() {
+        return match runtime {
+            meerkat_runtime::store::RuntimeStoreError::Corrupt(_) => {
+                SessionStoreFailureClass::Malformed
+            }
+            _ => SessionStoreFailureClass::Unavailable,
+        };
+    }
     match source.downcast_ref::<SessionStoreError>() {
         Some(SessionStoreError::Serialization(_) | SessionStoreError::Corrupted(_)) => {
             SessionStoreFailureClass::Malformed
@@ -1029,127 +1043,91 @@ impl IdentityReconcileCompletionAuthority {
     }
 }
 
-/// One member's startup custody restore that the start deferred instead of
-/// failing the whole mob: the restore, the member session it restores, the
-/// typed cause of its last failed attempt, and when it is re-attempted next
-/// (the identity reconcile's backoff).
+/// The shell's schedule for one member's deferred custody restore. MobMachine
+/// owns the deferral itself (`member_custody_unrestored`: which restore, and
+/// the class of the cause its last attempt met); this entry holds only what
+/// re-attempting it needs: the member session it restores, the typed failure
+/// its last attempt met (the cause a refused operation answers with), and the
+/// identity reconcile's backoff. Only a restore that owes work has a backoff
+/// deadline: a retiring member's cleanup delivery and a member's operation
+/// binding. Any other (the cleanup delivery of a member that is not retiring)
+/// waits for an operation on the member, an explicit resume or the next start:
+/// no timer reads its state in the background.
 #[derive(Debug, Clone)]
 pub(super) struct DeferredMemberCustody {
     pub(super) session: SessionId,
-    pub(super) restore: crate::MemberCustodyRestore,
     pub(super) cause: Arc<MobError>,
     pub(super) attempts: u32,
-    pub(super) next_attempt: Instant,
+    pub(super) next_attempt: Option<Instant>,
 }
 
-/// The member custody restores a start deferred, keyed by member. Volatile:
-/// the durable fact behind each entry (a retiring member's started
-/// retirement, a member's failed restore) re-derives it at every start.
+/// The re-attempt schedules of the member custody restores a start deferred,
+/// keyed by member. Volatile like the MobMachine facts they follow: each
+/// start re-derives both.
 #[derive(Debug, Default)]
 pub(super) struct DeferredMemberCustodyRegistry {
     entries: BTreeMap<AgentIdentity, DeferredMemberCustody>,
-    /// What member status reads see of each entry: its restore and the
-    /// cause its last attempt met. Shared with the mob's handles; kept in
-    /// step with `entries` by every change below.
-    view: super::handle::MemberCustodyDeferrals,
 }
 
 impl DeferredMemberCustodyRegistry {
-    /// An empty registry that publishes its entries to `view`.
-    pub(super) fn publishing(view: super::handle::MemberCustodyDeferrals) -> Self {
-        Self {
-            entries: BTreeMap::new(),
-            view,
-        }
-    }
-
-    /// The view member status reads see this registry's entries through.
-    pub(super) fn view(&self) -> super::handle::MemberCustodyDeferrals {
-        Arc::clone(&self.view)
-    }
-
-    /// Publish `identity`'s deferral (or its absence) to member status reads.
-    fn publish(&self, identity: &AgentIdentity, deferral: Option<crate::MemberCustodyDeferral>) {
-        let mut view = match self.view.write() {
-            Ok(view) => view,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        match deferral {
-            Some(deferral) => {
-                view.insert(identity.clone(), deferral);
-            }
-            None => {
-                view.remove(identity);
-            }
-        }
-    }
-
-    /// Record `identity`'s deferred `restore` for `session` after its first
-    /// failed attempt; its next attempt is backed off from `now`.
+    /// Schedule `identity`'s deferred restore of its custody for `session`
+    /// after its first failed attempt met `cause`. With `owes_work`, its next
+    /// attempt is backed off from `now`; otherwise it has no deadline.
     pub(super) fn defer(
         &mut self,
         identity: AgentIdentity,
         session: SessionId,
-        restore: crate::MemberCustodyRestore,
         cause: MobError,
         now: Instant,
+        owes_work: bool,
     ) {
-        self.publish(
-            &identity,
-            crate::MemberCustodyDeferral::new(restore, &cause),
-        );
         self.entries.insert(
             identity,
             DeferredMemberCustody {
                 session,
-                restore,
                 cause: Arc::new(cause),
                 attempts: 1,
-                next_attempt: now
-                    .checked_add(identity_reconcile_backoff_delay(1))
-                    .unwrap_or(now),
+                next_attempt: owes_work.then(|| {
+                    now.checked_add(identity_reconcile_backoff_delay(1))
+                        .unwrap_or(now)
+                }),
             },
         );
     }
 
-    /// The restore deferred for `identity`, if any.
-    pub(super) fn pending(
-        &self,
-        identity: &AgentIdentity,
-    ) -> Option<(SessionId, crate::MemberCustodyRestore)> {
+    /// The member session `identity`'s deferred restore restores, if any.
+    pub(super) fn session(&self, identity: &AgentIdentity) -> Option<SessionId> {
         self.entries
             .get(identity)
-            .map(|entry| (entry.session.clone(), entry.restore))
-    }
-
-    pub(super) fn contains(&self, identity: &AgentIdentity) -> bool {
-        self.entries.contains_key(identity)
-    }
-
-    pub(super) fn identities(&self) -> Vec<AgentIdentity> {
-        self.entries.keys().cloned().collect()
+            .map(|entry| entry.session.clone())
     }
 
     pub(super) fn get(&self, identity: &AgentIdentity) -> Option<&DeferredMemberCustody> {
         self.entries.get(identity)
     }
 
-    /// Settle one re-attempt of `identity`'s deferred restore, at `now`.
-    /// Success removes the entry. A failure with a cause the start may defer
-    /// ([`MobError::is_deferrable_custody_cause`]) keeps it, backs off its
-    /// next attempt, and answers [`MobError::MemberCustodyDeferred`]; any
-    /// other failure is answered as it is, its next attempt backed off as
-    /// well.
+    /// Drop `identity`'s schedule: MobMachine holds no deferral for it (a
+    /// seat that ended took it, or the restore succeeded).
+    pub(super) fn forget(&mut self, identity: &AgentIdentity) {
+        self.entries.remove(identity);
+    }
+
+    /// Settle one re-attempt of `identity`'s deferred `restore`, at `now`.
+    /// Success removes the schedule. A failure with a cause that may defer
+    /// this restore ([`crate::MemberCustodyDeferralCause::of_restore`]) keeps
+    /// it, backs off its next attempt (when it has one), and answers
+    /// [`MobError::MemberCustodyDeferred`]; any other failure is answered as
+    /// it is, its next attempt backed off as well.
     pub(super) fn settle(
         &mut self,
         identity: &AgentIdentity,
+        restore: crate::MemberCustodyRestore,
         outcome: Result<(), MobError>,
         now: Instant,
     ) -> Result<(), MobError> {
         let error = match outcome {
             Ok(()) => {
                 self.entries.remove(identity);
-                self.publish(identity, None);
                 return Ok(());
             }
             Err(error) => error,
@@ -1158,38 +1136,40 @@ impl DeferredMemberCustodyRegistry {
             return Err(error);
         };
         entry.attempts = entry.attempts.saturating_add(1);
-        entry.next_attempt = now
-            .checked_add(identity_reconcile_backoff_delay(entry.attempts))
-            .unwrap_or(now);
-        if !error.is_deferrable_custody_cause() {
+        if entry.next_attempt.is_some() {
+            entry.next_attempt = Some(
+                now.checked_add(identity_reconcile_backoff_delay(entry.attempts))
+                    .unwrap_or(now),
+            );
+        }
+        if crate::MemberCustodyDeferralCause::of_restore(restore, &error).is_none() {
             return Err(error);
         }
         let cause = Arc::new(error);
         entry.cause = Arc::clone(&cause);
-        let deferred = MobError::MemberCustodyDeferred {
+        Err(MobError::MemberCustodyDeferred {
             member_id: identity.clone(),
             session_id: entry.session.clone(),
-            restore: entry.restore,
-            cause: Arc::clone(&cause),
-        };
-        let deferral = crate::MemberCustodyDeferral::new(entry.restore, cause.as_ref());
-        self.publish(identity, deferral);
-        Err(deferred)
+            restore,
+            cause,
+        })
     }
 
-    /// The time from `now` until the earliest entry is due, `None` with none.
+    /// The time from `now` until the earliest scheduled re-attempt is due,
+    /// `None` with none scheduled.
     pub(super) fn next_wait(&self, now: Instant) -> Option<Duration> {
         self.entries
             .values()
-            .map(|entry| entry.next_attempt.saturating_duration_since(now))
+            .filter_map(|entry| entry.next_attempt)
+            .map(|next_attempt| next_attempt.saturating_duration_since(now))
             .min()
     }
 
-    /// The members whose next attempt is due at `now`.
+    /// The members whose scheduled re-attempt is due at `now`.
     pub(super) fn due(&self, now: Instant) -> Vec<AgentIdentity> {
         self.entries
             .iter()
-            .filter(|(_, entry)| entry.next_attempt <= now)
+            .filter(|(_, entry)| entry.next_attempt.is_some_and(|next| next <= now))
             .map(|(identity, _)| identity.clone())
             .collect()
     }
@@ -1756,22 +1736,28 @@ mod deferred_member_custody_tests {
         })
     }
 
+    fn store_unavailable() -> MobError {
+        MobError::SessionError(meerkat_core::SessionError::Store(Box::new(
+            meerkat_core::SessionStoreError::Internal("host store unavailable".to_string()),
+        )))
+    }
+
     /// Without a deferred restore there is nothing to re-attempt and no wake.
     #[test]
     fn a_member_without_a_deferred_custody_restore_has_nothing_to_reattempt() {
         let registry = DeferredMemberCustodyRegistry::default();
         let member = AgentIdentity::from("member");
         let now = Instant::now();
-        assert_eq!(registry.pending(&member), None);
-        assert!(!registry.contains(&member));
+        assert_eq!(registry.session(&member), None);
+        assert!(registry.get(&member).is_none());
         assert_eq!(registry.next_wait(now), None);
         assert!(registry.due(now).is_empty());
     }
 
-    /// A re-attempt that fails with a cause the start may defer keeps the
-    /// entry, backs its next attempt off by the identity reconcile's backoff,
-    /// keeps the newest cause, and answers the typed deferral naming the
-    /// member, its session, the restore and the cause.
+    /// A re-attempt that fails with a cause the restore may defer keeps the
+    /// schedule, backs its next attempt off by the identity reconcile's
+    /// backoff, keeps the newest cause, and answers the typed deferral naming
+    /// the member, its session, the restore and the cause.
     #[test]
     fn a_deferred_restore_that_still_fails_skippably_stays_deferred_and_backs_off() {
         let mut registry = DeferredMemberCustodyRegistry::default();
@@ -1781,21 +1767,23 @@ mod deferred_member_custody_tests {
         registry.defer(
             member.clone(),
             session.clone(),
-            MemberCustodyRestore::CleanupDelivery,
             served_elsewhere(&session),
             start,
+            true,
         );
-        assert_eq!(
-            registry.pending(&member),
-            Some((session.clone(), MemberCustodyRestore::CleanupDelivery))
-        );
+        assert_eq!(registry.session(&member), Some(session.clone()));
         assert_eq!(
             registry.next_wait(start),
             Some(identity_reconcile_backoff_delay(1))
         );
 
         let retry = start + Duration::from_secs(1);
-        let answer = registry.settle(&member, Err(hosting_unavailable(&session)), retry);
+        let answer = registry.settle(
+            &member,
+            MemberCustodyRestore::CleanupDelivery,
+            Err(hosting_unavailable(&session)),
+            retry,
+        );
         match answer {
             Err(MobError::MemberCustodyDeferred {
                 member_id,
@@ -1813,11 +1801,11 @@ mod deferred_member_custody_tests {
             }
             other => panic!("a skippable failure answers the typed deferral: {other:?}"),
         }
-        let entry = registry.get(&member).expect("the entry stays");
+        let entry = registry.get(&member).expect("the schedule stays");
         assert_eq!(entry.attempts, 2);
         assert_eq!(
             entry.next_attempt,
-            retry + identity_reconcile_backoff_delay(2),
+            Some(retry + identity_reconcile_backoff_delay(2)),
             "the next attempt is backed off from the re-attempt"
         );
         assert!(matches!(
@@ -1828,10 +1816,11 @@ mod deferred_member_custody_tests {
         let due = retry + identity_reconcile_backoff_delay(2);
         assert_eq!(registry.due(due), vec![member.clone()]);
 
-        // A durable tail its recovery kept unprovable is a cause the start
+        // A durable tail its recovery kept unprovable is a cause the restore
         // may defer as well.
         let answer = registry.settle(
             &member,
+            MemberCustodyRestore::CleanupDelivery,
             Err(MobError::MemberDurableTailUnprovable {
                 member_id: member.clone(),
                 session_id: session.clone(),
@@ -1846,15 +1835,85 @@ mod deferred_member_custody_tests {
             ),
             "{answer:?}"
         );
-        let entry = registry.get(&member).expect("the entry stays");
+        let entry = registry.get(&member).expect("the schedule stays");
         assert_eq!(entry.attempts, 3);
         assert_eq!(
             entry.next_attempt,
-            due + identity_reconcile_backoff_delay(3)
+            Some(due + identity_reconcile_backoff_delay(3))
         );
     }
 
-    /// A re-attempt that restores the custody removes the entry.
+    /// A store that could not serve a read of the member's state defers a
+    /// cleanup delivery restore again, but is answered as its own error for
+    /// an operation binding restore.
+    #[test]
+    fn a_failed_store_read_stays_deferred_for_a_cleanup_delivery_restore_only() {
+        let mut registry = DeferredMemberCustodyRegistry::default();
+        let member = AgentIdentity::from("member");
+        let session = SessionId::new();
+        let now = Instant::now();
+        registry.defer(
+            member.clone(),
+            session.clone(),
+            store_unavailable(),
+            now,
+            false,
+        );
+        let answer = registry.settle(
+            &member,
+            MemberCustodyRestore::CleanupDelivery,
+            Err(store_unavailable()),
+            now,
+        );
+        assert!(
+            matches!(&answer, Err(MobError::MemberCustodyDeferred { .. })),
+            "{answer:?}"
+        );
+        let answer = registry.settle(
+            &member,
+            MemberCustodyRestore::StartupBinding,
+            Err(store_unavailable()),
+            now,
+        );
+        assert!(
+            matches!(&answer, Err(MobError::SessionError(_))),
+            "an operation binding restore does not defer a store read: {answer:?}"
+        );
+    }
+
+    /// A deferral that owes no work has no deadline: no backoff wake re-reads
+    /// the member's state, however often a re-attempt fails.
+    #[test]
+    fn a_deferral_that_owes_no_work_is_never_due() {
+        let mut registry = DeferredMemberCustodyRegistry::default();
+        let member = AgentIdentity::from("member");
+        let session = SessionId::new();
+        let now = Instant::now();
+        registry.defer(
+            member.clone(),
+            session.clone(),
+            store_unavailable(),
+            now,
+            false,
+        );
+        assert_eq!(registry.next_wait(now), None);
+        let _ = registry.settle(
+            &member,
+            MemberCustodyRestore::CleanupDelivery,
+            Err(store_unavailable()),
+            now,
+        );
+        let later = now + Duration::from_hours(1);
+        assert_eq!(registry.next_wait(later), None);
+        assert!(registry.due(later).is_empty());
+        assert_eq!(
+            registry.get(&member).map(|entry| entry.attempts),
+            Some(2),
+            "the attempt is counted"
+        );
+    }
+
+    /// A re-attempt that restores the custody removes the schedule.
     #[test]
     fn a_deferred_restore_that_succeeds_is_removed() {
         let mut registry = DeferredMemberCustodyRegistry::default();
@@ -1864,19 +1923,20 @@ mod deferred_member_custody_tests {
         registry.defer(
             member.clone(),
             session.clone(),
-            MemberCustodyRestore::StartupBinding,
             served_elsewhere(&session),
             now,
+            true,
         );
         registry
-            .settle(&member, Ok(()), now)
+            .settle(&member, MemberCustodyRestore::StartupBinding, Ok(()), now)
             .expect("a restored custody answers Ok");
-        assert_eq!(registry.pending(&member), None);
+        assert_eq!(registry.session(&member), None);
         assert_eq!(registry.next_wait(now), None);
     }
 
-    /// Any other failure is answered as it is, not as a deferral; the entry
-    /// stays with its next attempt backed off and its deferral cause kept.
+    /// Any other failure is answered as it is, not as a deferral; the
+    /// schedule stays with its next attempt backed off and its deferral cause
+    /// kept.
     #[test]
     fn a_deferred_restore_that_fails_otherwise_answers_its_own_error() {
         let mut registry = DeferredMemberCustodyRegistry::default();
@@ -1886,85 +1946,30 @@ mod deferred_member_custody_tests {
         registry.defer(
             member.clone(),
             session.clone(),
-            MemberCustodyRestore::CleanupDelivery,
             served_elsewhere(&session),
             now,
+            true,
         );
         let answer = registry.settle(
             &member,
-            Err(MobError::Internal("store read failed".to_string())),
+            MemberCustodyRestore::CleanupDelivery,
+            Err(MobError::Internal(
+                "prepare local cleanup delivery".to_string(),
+            )),
             now,
         );
         assert!(
-            matches!(&answer, Err(MobError::Internal(message)) if message == "store read failed"),
+            matches!(&answer, Err(MobError::Internal(message)) if message == "prepare local cleanup delivery"),
             "{answer:?}"
         );
-        let entry = registry.get(&member).expect("the entry stays");
+        let entry = registry.get(&member).expect("the schedule stays");
         assert_eq!(entry.attempts, 2);
         assert!(matches!(
             entry.cause.as_ref(),
             MobError::SessionError(meerkat_core::SessionError::ServedElsewhere { .. })
         ));
-    }
-
-    /// Member status reads see each deferral as the registry holds it: its
-    /// restore and the cause its last attempt met, the newest deferrable
-    /// cause after a re-attempt, the same deferral after a failure that
-    /// defers nothing, and nothing once the restore succeeds.
-    #[test]
-    fn the_published_deferral_follows_the_registry() {
-        let view = super::super::handle::MemberCustodyDeferrals::default();
-        let mut registry = DeferredMemberCustodyRegistry::publishing(view.clone());
-        let member = AgentIdentity::from("member");
-        let session = SessionId::new();
-        let now = Instant::now();
-        let published = || {
-            view.read()
-                .expect("the published view")
-                .get(&member)
-                .copied()
-        };
-        assert_eq!(published(), None);
-        registry.defer(
-            member.clone(),
-            session.clone(),
-            MemberCustodyRestore::StartupBinding,
-            served_elsewhere(&session),
-            now,
-        );
-        assert_eq!(
-            published(),
-            Some(crate::MemberCustodyDeferral {
-                restore: MemberCustodyRestore::StartupBinding,
-                cause: crate::MemberCustodyDeferralCause::ServedElsewhere,
-            })
-        );
-        let _ = registry.settle(&member, Err(hosting_unavailable(&session)), now);
-        assert_eq!(
-            published(),
-            Some(crate::MemberCustodyDeferral {
-                restore: MemberCustodyRestore::StartupBinding,
-                cause: crate::MemberCustodyDeferralCause::HostingUnavailable,
-            }),
-            "the newest deferrable cause is shown"
-        );
-        let _ = registry.settle(
-            &member,
-            Err(MobError::Internal("store read failed".to_string())),
-            now,
-        );
-        assert_eq!(
-            published(),
-            Some(crate::MemberCustodyDeferral {
-                restore: MemberCustodyRestore::StartupBinding,
-                cause: crate::MemberCustodyDeferralCause::HostingUnavailable,
-            }),
-            "a failure that defers nothing leaves the deferral as it was"
-        );
-        registry
-            .settle(&member, Ok(()), now)
-            .expect("a restored custody answers Ok");
-        assert_eq!(published(), None, "a restored custody clears the deferral");
+        registry.forget(&member);
+        assert!(registry.get(&member).is_none());
     }
 }
 
@@ -7053,6 +7058,9 @@ pub(super) struct PendingSpawn {
     /// Whether the spawn acts for the identity entry of its name
     /// (`SpawnMemberSpec::entry_custody`), carried to its ladder's open.
     pub(super) entry_custody: bool,
+    /// Whether the spawn acts for the store-owned entry of its name
+    /// (`SpawnMemberSpec::created_custody`), carried to its ladder's open.
+    pub(super) created_custody: bool,
     /// The notice a fresh seat embodied after the loss of the identity's
     /// archived session carries, for the spawn's row.
     pub(super) history_unavailable: Option<crate::runtime::HistoryUnavailable>,
@@ -7980,6 +7988,10 @@ struct SpawnFinalizeCtx {
     /// ladder's open carries it, and its membership commit records the
     /// member an entry (MobMachine's `spawn_exec_entry_custody`).
     entry_custody: bool,
+    /// Whether the spawn acts for the store-owned entry of its name: its
+    /// ladder's open carries it, and its membership commit keeps the member
+    /// that entry's (MobMachine's `spawn_exec_created_custody`).
+    created_custody: bool,
     /// The notice a fresh seat embodied after the loss of the identity's
     /// archived session carries: the spawn's row records it.
     history_unavailable: Option<crate::runtime::HistoryUnavailable>,
@@ -8101,6 +8113,7 @@ impl SpawnActivateState {
             fork_overlay,
             definition_wiring,
             entry_custody: _,
+            created_custody: _,
             // Recorded on the spawn's row at its admission.
             history_unavailable: _,
             fresh_life: _,
@@ -9105,6 +9118,52 @@ enum CompositionDeliveryRestore {
     HeldByRegistrationOwner,
 }
 
+/// A member's failed cleanup delivery restore, with whether it failed before
+/// the restore had any effect: only such a failure, scoped to the member,
+/// may defer the member's restore instead of failing the mob's start.
+#[cfg(feature = "runtime-adapter")]
+#[derive(Debug)]
+enum CleanupDeliveryRestoreFailure {
+    /// A read of the member's session state, or a typed hosting refusal of
+    /// its registration: nothing was registered or bound.
+    BeforeEffect(MobError),
+    /// The session's registration was prepared, so the failure may have left
+    /// an effect behind.
+    AfterEffect(MobError),
+}
+
+#[cfg(feature = "runtime-adapter")]
+impl CleanupDeliveryRestoreFailure {
+    fn into_error(self) -> MobError {
+        match self {
+            Self::BeforeEffect(error) | Self::AfterEffect(error) => error,
+        }
+    }
+}
+
+/// Where a failed load of a member's session that settles its durable tail
+/// first stopped (`MobActor::load_member_session_settling_durable_tail_staged`).
+#[cfg(feature = "runtime-adapter")]
+enum SettledSessionLoadFailure {
+    /// Nothing was written: a read of the member's session failed, or the
+    /// settle was refused before it applied anything (a hosting refusal: the
+    /// claim was not taken), or the recovery withholds the tail and keeps it
+    /// as it is (the unprovable tail).
+    BeforeEffect(MobError),
+    /// The settle of the durable tail failed, or the read after a settle that
+    /// ran: the settle is a write, so it may have left an effect behind.
+    AfterSettle(MobError),
+}
+
+#[cfg(feature = "runtime-adapter")]
+impl SettledSessionLoadFailure {
+    fn into_error(self) -> MobError {
+        match self {
+            Self::BeforeEffect(error) | Self::AfterSettle(error) => error,
+        }
+    }
+}
+
 /// Why a Running mob's startup restore left a member to be recovered right
 /// after the start instead of restoring its binding.
 #[cfg_attr(not(feature = "runtime-adapter"), allow(dead_code))]
@@ -9426,10 +9485,13 @@ pub(super) struct MobActor {
     /// Stuck retirements a resume handed back for re-drive, started one at a
     /// time from the actor loop.
     pub(super) pending_stuck_redrives: VecDeque<AgentIdentity>,
-    /// Startup restores of member custody deferred instead of failing the
-    /// whole start. An operation that acts on such a member's session passes
-    /// `reattempt_deferred_member_custody` first, and the identity reconcile's
-    /// backoff wake re-attempts each due entry.
+    /// The re-attempt schedules of the member custody restores a start
+    /// deferred instead of failing the whole start. MobMachine owns each
+    /// deferral (`member_custody_unrestored`); this holds the session each
+    /// restores, the typed cause its last attempt met and, for a restore
+    /// that owes work, its backoff deadline. An operation that acts on such
+    /// a member's session passes `reattempt_deferred_member_custody` first,
+    /// and the identity reconcile's backoff wake re-attempts each due entry.
     pub(super) deferred_member_custody: DeferredMemberCustodyRegistry,
     /// Members this incarnation's Running
     /// startup restore left to be recovered right after the start: a stopped
@@ -9738,6 +9800,11 @@ pub(super) struct MobActor {
     /// of publishing an undialable process-local endpoint.
     #[cfg(not(target_arch = "wasm32"))]
     pub(super) controlling_acceptor: Option<ControllingAcceptorState>,
+    /// The held constructions this mob owns (0.9.9): MobMachine's
+    /// held-construction record decides each attempt, and the registry keeps
+    /// what carrying out its decisions needs (see
+    /// [`super::identity_preparation`]).
+    pub(super) held_constructions: super::identity_preparation::HeldConstructions,
 }
 
 struct AuthorizedPeerOnlyBind {
@@ -16577,7 +16644,6 @@ impl MobActor {
             #[cfg(feature = "runtime-adapter")]
             runtime_adapter: self.runtime_adapter.clone(),
             restore_diagnostics: self.restore_diagnostics.clone(),
-            custody_deferrals: self.deferred_member_custody.view(),
             supervisor_bridge: self.supervisor_bridge.clone(),
             machine_state_watch_rx: self.machine_state_watch_tx.subscribe(),
             operator_instruction_delivery: Arc::clone(&self.operator_instructions.delivery),
@@ -16607,6 +16673,7 @@ impl MobActor {
                 .provisioner
                 .member_session_authorities()
                 .unwrap_or_default(),
+            member_grant_mint: self.member_residency.member_grant_mint.clone(),
         }
     }
 
@@ -17848,6 +17915,7 @@ impl MobActor {
         authorized_profile_material: &AuthorizedSpawnProfileMaterial,
         bridge_session_id: Option<&SessionId>,
         entry_custody: bool,
+        created_custody: bool,
     ) -> Result<(), MobError> {
         let domain_identity = AgentIdentity::from(agent_identity.as_str());
         let generation = self.mint_spawn_generation(agent_identity)?;
@@ -17902,7 +17970,7 @@ impl MobActor {
                 effective_profile_override_present: false,
                 effective_model_override_present: false,
                 entry_custody,
-                created_custody: false,
+                created_custody,
             },
             "spawn_command_admission",
         )
@@ -17914,25 +17982,26 @@ impl MobActor {
         &self,
         agent_identity: &AgentIdentity,
         entry_custody: bool,
+        created_custody: bool,
     ) -> Result<(), MobError> {
         self.require_member_operation_eligible()?;
-        self.probe_member_admission(agent_identity, entry_custody)
+        self.probe_member_admission(agent_identity, entry_custody, created_custody)
     }
 
     /// Read-only MobMachine probe for member-admission duplication. The machine
     /// guard covers live runtime bindings, session bindings, and in-flight
     /// pending spawns, so this fully replaces the former shell-side
     /// `pending_spawns.contains_member` prechecks. An identity entry's name,
-    /// probed without entry custody, a created entry's name probed with
-    /// entry custody, and a reserved name (a removed created entry's, or
-    /// one whose entry this build cannot read) are refused
-    /// [`MobError::IdentityMember`] before anything is created.
+    /// probed without the custody of its origin, and a reserved name (a
+    /// removed created entry's, or one whose entry this build cannot read)
+    /// are refused [`MobError::IdentityMember`] before anything is created.
     fn probe_member_admission(
         &self,
         agent_identity: &AgentIdentity,
         entry_custody: bool,
+        created_custody: bool,
     ) -> Result<(), MobError> {
-        match self.member_admission_verdict(agent_identity, entry_custody, false)? {
+        match self.member_admission_verdict(agent_identity, entry_custody, created_custody)? {
             mob_dsl::MemberAdmissionVerdictKind::Admitted => Ok(()),
             mob_dsl::MemberAdmissionVerdictKind::DuplicateRejected => {
                 Err(MobError::MemberAlreadyExists(agent_identity.clone()))
@@ -17971,9 +18040,10 @@ impl MobActor {
     /// MobMachine reserved, as its admission answers the name
     /// (`IdentityNameReserved`): `MobError::IdentityMember`. It types a spawn
     /// ladder's close for a name reserved after the ladder opened
-    /// (`name_not_reserved` on the close arms), and refuses a fresh-life
-    /// respawn whose successor the reservation would refuse. `None` for any
-    /// other name.
+    /// (`name_not_reserved` on the close arms) and a worker ensure of a
+    /// reserved name (`name_not_reserved` on EnsureMemberRunningMissing), and
+    /// refuses a fresh-life respawn whose successor the reservation would
+    /// refuse. `None` for any other name.
     fn reserved_name_refusal(&self, agent_identity: &AgentIdentity) -> Option<MobError> {
         matches!(
             self.member_admission_verdict(agent_identity, false, false),
@@ -30912,8 +30982,25 @@ impl MobActor {
                         let _ = reply_tx.send(Err(error));
                         return ActorLoopControl::SkipBoundary;
                     }
+                    // MobMachine refuses a worker ensure of a reserved name (a
+                    // removed identity's, or one this build cannot read:
+                    // `name_not_reserved` on EnsureMemberRunningMissing). The
+                    // refusal is the name's admission answer, typed in this
+                    // same step, as a spawn of the name is answered.
+                    let ensured = match &*input {
+                        mob_dsl::MobMachineInput::EnsureMember { agent_identity } => {
+                            Some(AgentIdentity::from(agent_identity.0.as_str()))
+                        }
+                        _ => None,
+                    };
                     let result =
                         self.apply_dsl_input_collect_effects(*input, "apply_machine_input_effects");
+                    let result = match (result, ensured) {
+                        (Err(error), Some(identity)) => {
+                            Err(self.reserved_name_refusal(&identity).unwrap_or(error))
+                        }
+                        (result, _) => result,
+                    };
                     let _ = reply_tx.send(result);
                 }
                 MobCommand::ValidateCommandAuthority { reply_tx } => {
@@ -31762,6 +31849,10 @@ impl MobActor {
                         member_prior_peer_endpoints: dsl.member_prior_peer_endpoints.clone(),
                         member_restore_failures: dsl.member_restore_failures.clone(),
                         member_restore_failure_codes: dsl.member_restore_failure_codes.clone(),
+                        member_custody_unrestored: dsl.member_custody_unrestored.clone(),
+                        member_custody_unrestored_causes: dsl
+                            .member_custody_unrestored_causes
+                            .clone(),
                         runtime_retire_refusal_codes: dsl.runtime_retire_refusal_codes.clone(),
                         runtime_retire_refusal_reasons: dsl.runtime_retire_refusal_reasons.clone(),
                         runtime_retire_pending_sessions: dsl
@@ -31943,11 +32034,16 @@ impl MobActor {
                     .await;
                     let _ = reply_tx.send(result);
                 }
+                MobCommand::IdentityChange(command) => {
+                    Box::pin(self.handle_identity_change_command(*command)).await;
+                }
                 MobCommand::DeclareIdentityEntries {
                     declarations,
+                    change,
                     reply_tx,
                 } => {
-                    let result = Box::pin(self.declare_identity_entries(declarations)).await;
+                    let result =
+                        Box::pin(self.declare_identity_entries(declarations, change)).await;
                     let _ = reply_tx.send(result);
                 }
                 MobCommand::SealDeclaredRoster { desired, reply_tx } => {
@@ -34753,15 +34849,21 @@ impl MobActor {
     /// This realizes existing generated tuples without recreating serving
     /// bindings or resuming the mob.
     ///
-    /// A retiring member whose restore fails for a cause that can clear
-    /// without this owner acting ([`MobError::is_deferrable_custody_cause`]:
-    /// another runtime owner hosts its session, the session's hosting claim
-    /// is unavailable, or its durable tail is kept unprovable) does not fail
-    /// the start. Its restore is deferred ([`Self::defer_member_custody`]):
-    /// the member stays Retiring with its tail untouched, every operation
-    /// that acts on it re-attempts the restore first, and the identity
-    /// reconcile's backoff wake re-attempts it too. Every other failure, and
-    /// any failure of a member that is not retiring, still fails the start.
+    /// One member's restore that fails before it had any effect, for a cause
+    /// scoped to that member
+    /// ([`crate::MemberCustodyDeferralCause::of_restore`]: another runtime
+    /// owner hosts its session, the session's hosting claim is unavailable,
+    /// its durable tail is kept unprovable, the store could not serve a read
+    /// of its state now, or its state cannot be read), does not fail the
+    /// start. Its restore is deferred ([`Self::defer_member_custody`]):
+    /// MobMachine records the member's custody unrestored, the member keeps
+    /// its seat, its lifecycle and its tail untouched, and every operation
+    /// that acts on it re-attempts the restore first. A retiring member owes
+    /// work, so the identity reconcile's backoff wake re-attempts it too; any
+    /// other member waits for an operation, an explicit resume or the next
+    /// start. A divergence of the mob's own authority, a failure after the
+    /// restore registered the session, and any other cause still fail the
+    /// start.
     #[cfg(feature = "runtime-adapter")]
     async fn restore_local_cleanup_composition_delivery(&mut self) -> Result<(), MobError> {
         let Some(io) = self.resume_operation_binding_io() else {
@@ -34848,28 +34950,35 @@ impl MobActor {
                 ));
             }
             match self
-                .restore_member_local_cleanup_delivery(&io, &entry, session)
+                .restore_member_local_cleanup_delivery_staged(&io, &entry, session)
                 .await
             {
                 Ok(()) => {}
-                // A retiring member's restore that can succeed later defers
-                // that member only; the start goes on.
-                Err(cause) if retiring && cause.is_deferrable_custody_cause() => {
+                // A failure scoped to this member and met before any effect
+                // defers that member's restore only; the start goes on.
+                Err(CleanupDeliveryRestoreFailure::BeforeEffect(cause))
+                    if crate::MemberCustodyDeferralCause::of_restore(
+                        crate::MemberCustodyRestore::CleanupDelivery,
+                        &cause,
+                    )
+                    .is_some() =>
+                {
                     self.defer_member_custody(
                         entry.agent_identity.clone(),
                         session.clone(),
                         crate::MemberCustodyRestore::CleanupDelivery,
                         cause,
+                        retiring,
                     );
                 }
                 // Otherwise the start fails before admission on the first
                 // member that fails, in roster (identity) order; name that
                 // member and its session for the caller.
-                Err(cause) => {
+                Err(failure) => {
                     return Err(MobError::MemberStartupRecoveryFailed {
                         member_id: entry.agent_identity.clone(),
                         session_id: session.clone(),
-                        cause: Arc::new(cause),
+                        cause: Arc::new(failure.into_error()),
                     });
                 }
             }
@@ -34936,15 +35045,57 @@ impl MobActor {
         entry: &RosterEntry,
         session: &SessionId,
     ) -> Result<(), MobError> {
-        if !io.session_service.has_live_session(session).await?
-            && Self::load_member_session_settling_durable_tail(io, &entry.agent_identity, session)
-                .await?
-                .is_none()
+        self.restore_member_local_cleanup_delivery_staged(io, entry, session)
+            .await
+            .map_err(CleanupDeliveryRestoreFailure::into_error)
+    }
+
+    /// [`Self::restore_member_local_cleanup_delivery`], with whether a
+    /// failure came before the restore had any effect: the reads of the
+    /// member's session state (its session, and its runtime residue, whose
+    /// store failure stays typed), a typed hosting refusal of its
+    /// registration or of its durable tail's settle, which takes nothing,
+    /// and a tail the recovery withholds as it is. A failed settle of the
+    /// durable tail is a failed write: it comes after an effect.
+    #[cfg(feature = "runtime-adapter")]
+    async fn restore_member_local_cleanup_delivery_staged(
+        &self,
+        io: &ResumeOperationBindingIo,
+        entry: &RosterEntry,
+        session: &SessionId,
+    ) -> Result<(), CleanupDeliveryRestoreFailure> {
+        let before_effect = CleanupDeliveryRestoreFailure::BeforeEffect;
+        if !io
+            .session_service
+            .has_live_session(session)
+            .await
+            .map_err(|error| before_effect(error.into()))?
+            && Self::load_member_session_settling_durable_tail_staged(
+                io,
+                &entry.agent_identity,
+                session,
+            )
+            .await
+            .map_err(|failure| match failure {
+                SettledSessionLoadFailure::BeforeEffect(error) => before_effect(error),
+                // A failed settle is a failed write: the start stops on it.
+                SettledSessionLoadFailure::AfterSettle(error) => {
+                    CleanupDeliveryRestoreFailure::AfterEffect(error)
+                }
+            })?
+            .is_none()
             && !io
                 .adapter
                 .archive_runtime_residue_present(session)
                 .await
-                .map_err(|error| MobError::Internal(error.to_string()))?
+                .map_err(|error| {
+                    // The store's typed read failure, classed like a failed
+                    // read of the member's session: a store that could not
+                    // serve now, or data that does not decode.
+                    before_effect(MobError::SessionError(
+                        meerkat_core::service::SessionError::Store(Box::new(error)),
+                    ))
+                })?
         {
             return Ok(());
         }
@@ -34955,10 +35106,13 @@ impl MobActor {
             .map_err(|error| match error {
                 // Another runtime owner hosts the session, or its claim cannot
                 // be taken: the typed hosting refusal, never an internal error.
+                // Nothing was registered.
                 meerkat_runtime::RuntimeBindingsError::Hosting(_, cause) => {
-                    MobError::SessionError(cause)
+                    before_effect(MobError::SessionError(cause))
                 }
-                error => MobError::Internal(format!("prepare local cleanup delivery: {error}")),
+                error => CleanupDeliveryRestoreFailure::AfterEffect(MobError::Internal(format!(
+                    "prepare local cleanup delivery: {error}"
+                ))),
             })?;
         // A cold start can re-register a session whose runtime already
         // stopped, which clears its member binding; the unbound endpoint
@@ -34968,7 +35122,9 @@ impl MobActor {
         // that retires or reloads this member takes it over; failing the
         // actor here would refuse every command for a condition that
         // needs no startup action.
-        if Self::restore_composition_delivery(io, entry, &bindings).await?
+        if Self::restore_composition_delivery(io, entry, &bindings)
+            .await
+            .map_err(CleanupDeliveryRestoreFailure::AfterEffect)?
             == CompositionDeliveryRestore::HeldByRegistrationOwner
         {
             tracing::debug!(
@@ -34988,6 +35144,7 @@ impl MobActor {
                 Arc::clone(bindings.ops_lifecycle()),
             )
             .await
+            .map_err(CleanupDeliveryRestoreFailure::AfterEffect)
     }
 
     #[cfg(not(feature = "runtime-adapter"))]
@@ -34996,58 +35153,161 @@ impl MobActor {
     }
 
     /// Defer `identity`'s startup `restore` of its custody for `session`
-    /// instead of failing the whole start: the member keeps its durable state
-    /// (Broken, or Retiring), the mob starts, and every operation that acts on
-    /// the member's session re-attempts the restore first
-    /// ([`Self::reattempt_deferred_member_custody`]), as does the identity
-    /// reconcile's backoff wake. `cause` is the typed failure the start met.
+    /// instead of failing the whole start: MobMachine records the member's
+    /// custody unrestored with the class of `cause` (the typed failure the
+    /// start met), the member keeps its seat and its durable state (Broken,
+    /// Retiring, or as the mob's phase left it), the mob starts, and every
+    /// operation that acts on the member's session re-attempts the restore
+    /// first ([`Self::reattempt_deferred_member_custody`]). With `owes_work`
+    /// (a retiring member's cleanup, a member's operation binding) the
+    /// identity reconcile's backoff wake re-attempts it too; otherwise no
+    /// timer reads the member's state in the background.
     pub(super) fn defer_member_custody(
         &mut self,
         identity: AgentIdentity,
         session: SessionId,
         restore: crate::MemberCustodyRestore,
         cause: MobError,
+        owes_work: bool,
     ) {
+        let Some(kind) = crate::MemberCustodyDeferralCause::of_restore(restore, &cause) else {
+            tracing::error!(
+                mob_id = %self.definition.id,
+                member = %identity,
+                session_id = %session,
+                restore = restore.as_str(),
+                cause = %cause,
+                "a member custody restore was deferred for a cause that does not defer it"
+            );
+            return;
+        };
+        if !self.record_member_custody_unrestored(&identity, restore, kind) {
+            return;
+        }
         tracing::warn!(
             mob_id = %self.definition.id,
             member = %identity,
             session_id = %session,
             restore = restore.as_str(),
             cause = %cause,
+            owes_work,
             "member custody restore deferred: the mob starts, and an operation on the member \
-             re-attempts the restore first; it succeeds once the cause clears, for a session \
-             another runtime owner hosts once that owner stops or releases the session"
+             re-attempts the restore first; it succeeds once the cause clears (a store that \
+             serves again, or another runtime owner that stops or releases the session)"
         );
         self.deferred_member_custody
-            .defer(identity, session, restore, cause, Instant::now());
+            .defer(identity, session, cause, Instant::now(), owes_work);
+    }
+
+    /// The custody restore MobMachine records unrestored for `identity`, with
+    /// the cause its last attempt met.
+    pub(super) fn member_custody_unrestored(
+        &self,
+        identity: &AgentIdentity,
+    ) -> Option<crate::MemberCustodyDeferral> {
+        let machine_identity = mob_dsl::AgentIdentity::from_domain(identity);
+        let state = self.dsl_authority.state();
+        let restore = state.member_custody_unrestored.get(&machine_identity)?;
+        let cause = state
+            .member_custody_unrestored_causes
+            .get(&machine_identity)?;
+        Some(crate::MemberCustodyDeferral::from_machine(*restore, *cause))
+    }
+
+    /// Every member MobMachine records with an unrestored custody restore.
+    pub(super) fn member_custody_unrestored_identities(&self) -> Vec<AgentIdentity> {
+        self.dsl_authority
+            .state()
+            .member_custody_unrestored
+            .keys()
+            .map(|identity| AgentIdentity::from(identity.0.as_str()))
+            .collect()
+    }
+
+    /// Record `identity`'s `restore` unrestored in MobMachine, with the class
+    /// of the cause its last attempt met. False when the machine refused the
+    /// record (logged).
+    fn record_member_custody_unrestored(
+        &mut self,
+        identity: &AgentIdentity,
+        restore: crate::MemberCustodyRestore,
+        cause: crate::MemberCustodyDeferralCause,
+    ) -> bool {
+        match self.apply_dsl_signal(
+            mob_dsl::MobMachineSignal::RecordMemberCustodyUnrestored {
+                agent_identity: mob_dsl::AgentIdentity::from_domain(identity),
+                restore: restore.machine_kind(),
+                cause: cause.machine_kind(),
+            },
+            "record_member_custody_unrestored",
+        ) {
+            Ok(()) => true,
+            Err(error) => {
+                tracing::error!(
+                    mob_id = %self.definition.id,
+                    member = %identity,
+                    restore = restore.as_str(),
+                    error = %error,
+                    "MobMachine rejected a member's unrestored custody"
+                );
+                false
+            }
+        }
     }
 
     /// Re-attempt the custody restore deferred for `identity` before an
     /// operation acts on the member's session.
     ///
-    /// Without an entry this answers Ok at once. When the restore succeeds,
-    /// the entry is removed and the caller proceeds. When it fails with a
-    /// cause the start may defer
-    /// ([`MobError::is_deferrable_custody_cause`]), the entry stays with its
-    /// next attempt backed off, and the caller gets
-    /// [`MobError::MemberCustodyDeferred`]: typed, scoped to this operation,
-    /// with nothing done to the member's session. Any other failure is
-    /// returned as it is, its next attempt backed off as well.
+    /// Without a deferral MobMachine records, this answers Ok at once. When
+    /// the restore succeeds, MobMachine resolves the deferral, its schedule
+    /// is removed and the caller proceeds. When it fails with a cause that
+    /// may defer the restore
+    /// ([`crate::MemberCustodyDeferralCause::of_restore`]), the deferral
+    /// stays (with that cause), its next attempt is backed off, and the
+    /// caller gets [`MobError::MemberCustodyDeferred`]: typed, scoped to this
+    /// operation, with nothing done to the member's session. Any other
+    /// failure is returned as it is, its next attempt backed off as well.
     pub(super) async fn reattempt_deferred_member_custody(
         &mut self,
         identity: &AgentIdentity,
     ) -> Result<(), MobError> {
-        let Some((session, restore)) = self.deferred_member_custody.pending(identity) else {
+        let Some(deferral) = self.member_custody_unrestored(identity) else {
+            // A seat that ended took its deferral with it.
+            self.deferred_member_custody.forget(identity);
+            return Ok(());
+        };
+        let restore = deferral.restore;
+        let Some(session) = self.deferred_member_custody.session(identity) else {
+            tracing::error!(
+                mob_id = %self.definition.id,
+                member = %identity,
+                restore = restore.as_str(),
+                "a member's unrestored custody has no re-attempt schedule; it is restored at \
+                 the next start"
+            );
             return Ok(());
         };
         let outcome = self
             .attempt_deferred_member_custody_restore(identity, &session, restore)
             .await;
         let restored = outcome.is_ok();
-        let settled = self
-            .deferred_member_custody
-            .settle(identity, outcome, Instant::now());
+        let settled =
+            self.deferred_member_custody
+                .settle(identity, restore, outcome, Instant::now());
         if restored {
+            if let Err(error) = self.apply_dsl_signal(
+                mob_dsl::MobMachineSignal::ResolveMemberCustodyRestored {
+                    agent_identity: mob_dsl::AgentIdentity::from_domain(identity),
+                },
+                "resolve_member_custody_restored",
+            ) {
+                tracing::error!(
+                    mob_id = %self.definition.id,
+                    member = %identity,
+                    error = %error,
+                    "MobMachine rejected a member's restored custody"
+                );
+            }
             tracing::info!(
                 mob_id = %self.definition.id,
                 member = %identity,
@@ -35055,6 +35315,11 @@ impl MobActor {
                 restore = restore.as_str(),
                 "deferred member custody restore succeeded"
             );
+        } else if let Err(MobError::MemberCustodyDeferred { cause, .. }) = &settled
+            && let Some(kind) = crate::MemberCustodyDeferralCause::of_restore(restore, cause)
+        {
+            // The deferral stays, with the cause this attempt met.
+            self.record_member_custody_unrestored(identity, restore, kind);
         }
         settled
     }
@@ -35108,7 +35373,7 @@ impl MobActor {
     async fn reattempt_deferred_member_custody_for_destroy(
         &mut self,
     ) -> Result<(), super::handle::MobDestroyError> {
-        for identity in self.deferred_member_custody.identities() {
+        for identity in self.member_custody_unrestored_identities() {
             self.reattempt_deferred_member_custody(&identity)
                 .await
                 .map_err(super::handle::MobDestroyError::from)?;
@@ -35126,11 +35391,18 @@ impl MobActor {
         &mut self,
         identity: &AgentIdentity,
     ) -> Result<(), MobError> {
-        let Some(deferred) = self.deferred_member_custody.get(identity) else {
+        let Some(deferral) = self.member_custody_unrestored(identity) else {
+            self.deferred_member_custody.forget(identity);
             return Ok(());
         };
-        let restore = deferred.restore;
-        let cause = Arc::clone(&deferred.cause);
+        let restore = deferral.restore;
+        let Some(cause) = self
+            .deferred_member_custody
+            .get(identity)
+            .map(|deferred| Arc::clone(&deferred.cause))
+        else {
+            return Ok(());
+        };
         self.reattempt_deferred_member_custody(identity).await?;
         if restore == crate::MemberCustodyRestore::CleanupDelivery {
             self.redrive_custody_restored_retirement(identity, cause)
@@ -35180,7 +35452,9 @@ impl MobActor {
                             mob_id = %self.definition.id,
                             member = %identity,
                             session_id = %entry.session,
-                            restore = entry.restore.as_str(),
+                            restore = self
+                                .member_custody_unrestored(&identity)
+                                .map_or("restored", |deferral| deferral.restore.as_str()),
                             attempts = entry.attempts,
                             cause = %entry.cause,
                             "member custody restore still deferred"
@@ -35240,6 +35514,23 @@ impl MobActor {
         member: &AgentIdentity,
         session: &SessionId,
     ) -> Result<Option<meerkat_core::Session>, MobError> {
+        Self::load_member_session_settling_durable_tail_staged(io, member, session)
+            .await
+            .map_err(SettledSessionLoadFailure::into_error)
+    }
+
+    /// [`Self::load_member_session_settling_durable_tail`], with where a
+    /// failure stopped: before anything was written (a read of the session,
+    /// a hosting refusal of the settle, a tail the recovery withholds), or at
+    /// or after the settle, which is a write.
+    #[cfg(feature = "runtime-adapter")]
+    async fn load_member_session_settling_durable_tail_staged(
+        io: &ResumeOperationBindingIo,
+        member: &AgentIdentity,
+        session: &SessionId,
+    ) -> Result<Option<meerkat_core::Session>, SettledSessionLoadFailure> {
+        let before_effect = SettledSessionLoadFailure::BeforeEffect;
+        let after_settle = SettledSessionLoadFailure::AfterSettle;
         match io.session_service.load_persisted_session(session).await {
             Err(error) if is_transcript_revision_conflict(&error) => {
                 tracing::info!(
@@ -35277,10 +35568,10 @@ impl MobActor {
                             "a member's durable tail is withheld from resume; the mob start \
                              refuses the member and keeps its tail for reconciliation"
                         );
-                        return Err(MobError::MemberDurableTailUnprovable {
+                        return Err(before_effect(MobError::MemberDurableTailUnprovable {
                             member_id: member.clone(),
                             session_id: session.clone(),
-                        });
+                        }));
                     }
                     Err(error) => {
                         if matches!(
@@ -35297,8 +35588,11 @@ impl MobActor {
                                  owner's tail. Stop the runtime owner that hosts the session, or \
                                  wait until it releases it, then start the mob again"
                             );
+                            // The settle's claim was not taken: nothing was
+                            // settled.
+                            return Err(before_effect(error.into()));
                         }
-                        return Err(error.into());
+                        return Err(after_settle(error.into()));
                     }
                 };
                 // The recovery continues the member's open run: its tail
@@ -35322,15 +35616,15 @@ impl MobActor {
                 // any other read keeps its own error.
                 match io.session_service.load_persisted_session(session).await {
                     Err(error) if is_transcript_revision_conflict(&error) => {
-                        Err(MobError::MemberDurableTailUnprovable {
+                        Err(before_effect(MobError::MemberDurableTailUnprovable {
                             member_id: member.clone(),
                             session_id: session.clone(),
-                        })
+                        }))
                     }
-                    loaded => Ok(loaded?),
+                    loaded => loaded.map_err(|error| after_settle(error.into())),
                 }
             }
-            loaded => Ok(loaded?),
+            loaded => loaded.map_err(|error| before_effect(error.into())),
         }
     }
 
@@ -35398,6 +35692,7 @@ impl MobActor {
                         session,
                         crate::MemberCustodyRestore::StartupBinding,
                         cause,
+                        true,
                     );
                 }
                 Err(error) => return Err(error),
@@ -35943,6 +36238,7 @@ impl MobActor {
             fork_overlay: entry.fork_overlay,
             definition_wiring: entry.definition_wiring,
             entry_custody: false,
+            created_custody: false,
             history_unavailable: None,
             fresh_life: false,
             objective_id: None,
@@ -36340,14 +36636,17 @@ impl MobActor {
             // A fresh life `rotate_member` embodies for an identity no member
             // held: its spawn row names the incarnation it follows.
             fresh_life,
-            // Read only by the dormant seat of a created entry owed its seat;
-            // a spawn ignores it.
-            created_custody: _,
+            // Whether the spawn acts for its name's store-owned entry: the
+            // spawn of a store-owned identity that owes a kickoff, and its
+            // seat's embodiment.
+            created_custody,
         } = spec;
         let agent_identity = AgentIdentity::from(identity.as_str());
         self.inline_step_watchdog
             .set_spawn_stage(SpawnInlineStage::CommandAdmission);
-        if let Err(error) = self.preview_spawn_command_admission(&agent_identity, entry_custody) {
+        if let Err(error) =
+            self.preview_spawn_command_admission(&agent_identity, entry_custody, created_custody)
+        {
             reject_spawn_before_custody!("command_admission", error);
         }
         // Normalize launch-mode resume/fork details for the provisioning path.
@@ -36582,6 +36881,7 @@ impl MobActor {
             fork_overlay,
             definition_wiring,
             entry_custody,
+            created_custody,
             history_unavailable,
             fresh_life,
             owner_bridge_session_id: owner_bridge_session_id.clone(),
@@ -37213,6 +37513,7 @@ impl MobActor {
             fork_overlay,
             definition_wiring,
             entry_custody,
+            created_custody,
             history_unavailable,
             fresh_life,
             owner_bridge_session_id,
@@ -37297,7 +37598,9 @@ impl MobActor {
             .set_spawn_stage(SpawnInlineStage::PreparedAdmission);
         // Actor state may have moved while the preparation ran: the mob may
         // have stopped, or the identity may have been admitted meanwhile.
-        if let Err(error) = self.preview_spawn_command_admission(&agent_identity, entry_custody) {
+        if let Err(error) =
+            self.preview_spawn_command_admission(&agent_identity, entry_custody, created_custody)
+        {
             reject_spawn_before_custody!("prepared_command_admission", error);
         }
         if self.roster.read().await.get(&agent_identity).is_some() {
@@ -37324,6 +37627,7 @@ impl MobActor {
                 &authorized_profile_material,
                 Some(&bridge_session_id),
                 entry_custody,
+                created_custody,
             ) {
                 reject_spawn_before_custody!("resume_admission", error);
             }
@@ -37426,6 +37730,7 @@ impl MobActor {
                 fork_overlay,
                 definition_wiring,
                 entry_custody,
+                created_custody,
                 history_unavailable,
                 fresh_life,
                 objective_id,
@@ -37490,6 +37795,7 @@ impl MobActor {
             &authorized_profile_material,
             spawn_bridge_session_id,
             entry_custody,
+            created_custody,
         ) {
             reject_spawn_before_custody!("spawn_admission", error);
         }
@@ -37644,6 +37950,7 @@ impl MobActor {
             fork_overlay,
             definition_wiring,
             entry_custody,
+            created_custody,
             history_unavailable,
             fresh_life,
             objective_id,
@@ -38669,9 +38976,7 @@ impl MobActor {
             fresh_session_id: _,
             history_unavailable: _,
             fresh_life: _,
-            // A placed spawn never acts for a created entry: only a dormant
-            // seat does.
-            created_custody: _,
+            created_custody,
         } = spec;
         let Some(host) = placement else {
             fail!(MobError::Internal(
@@ -38686,12 +38991,12 @@ impl MobActor {
                  definition's wiring rules is local"
             )));
         }
-        // A placed spawn acts for an identity entry only when the host
-        // declared the entry hosted on its first use (MobMachine's remote
-        // ladder refuses any other entry custody too,
+        // A placed spawn acts for an identity entry of either custody only
+        // when the entry is hosted on its first use (MobMachine's remote
+        // ladder refuses any other custody too,
         // placed_custody_hosted_on_first_use): any other is refused typed
         // here, before anything is created.
-        if entry_custody
+        if (entry_custody || created_custody)
             && self
                 .dsl_authority
                 .state()
@@ -38700,8 +39005,8 @@ impl MobActor {
                 != Some(&mob_dsl::UnseatedEntryCause::HostedOnFirstUse)
         {
             fail!(MobError::WiringError(format!(
-                "'{identity}' cannot be placed on a member host with entry custody: only an \
-                 identity entry the host declared hosted on its first use is placed"
+                "'{identity}' cannot be placed on a member host with its entry's custody: only \
+                 an identity entry hosted on its first use is placed"
             )));
         }
         if tool_dispatch_admission.is_some() {
@@ -38725,7 +39030,9 @@ impl MobActor {
             )));
         }
         let agent_identity = AgentIdentity::from(identity.as_str());
-        if let Err(error) = self.preview_spawn_command_admission(&agent_identity, entry_custody) {
+        if let Err(error) =
+            self.preview_spawn_command_admission(&agent_identity, entry_custody, created_custody)
+        {
             fail!(error);
         }
         if agent_identity.is_system_reserved() {
@@ -39080,7 +39387,7 @@ impl MobActor {
                 effective_profile_override_present: effective_profile_override.is_some(),
                 effective_model_override_present: effective_model_override.is_some(),
                 entry_custody,
-                created_custody: false,
+                created_custody,
             },
             "enqueue_spawn_remote_open",
         ) {
@@ -39581,8 +39888,11 @@ impl MobActor {
             fork_overlay: super::ForkOverlayOrigin::default(),
             // Refused above: a placed member is never exempt.
             definition_wiring: crate::DefinitionWiring::Applies,
-            // Refused above: a placed spawn never acts for an identity entry.
+            // The remote ladder's custody is MobMachine's, recorded at its
+            // open (spawn_exec_entry_custody, spawn_exec_created_custody):
+            // the pending record of a placed spawn carries none.
             entry_custody: false,
+            created_custody: false,
             history_unavailable: None,
             fresh_life: false,
             objective_id,
@@ -39880,6 +40190,7 @@ impl MobActor {
                 fork_overlay,
                 definition_wiring,
                 entry_custody,
+                created_custody,
                 history_unavailable,
                 fresh_life,
                 objective_id,
@@ -40086,6 +40397,7 @@ impl MobActor {
                                 fork_overlay,
                                 definition_wiring,
                                 entry_custody,
+                                created_custody,
                                 history_unavailable,
                                 fresh_life,
                                 objective_id,
@@ -40172,6 +40484,7 @@ impl MobActor {
                                 fork_overlay,
                                 definition_wiring,
                                 entry_custody,
+                                created_custody,
                                 history_unavailable,
                                 fresh_life,
                                 objective_id,
@@ -40333,7 +40646,7 @@ impl MobActor {
                 "meerkat id '{agent_identity}' uses reserved system identifier namespace"
             )));
         }
-        self.probe_member_admission(agent_identity, false)?;
+        self.probe_member_admission(agent_identity, false, false)?;
         {
             let roster = self.roster.read().await;
             if roster.get(agent_identity).is_some() {
@@ -40562,6 +40875,7 @@ impl MobActor {
             // Built from the definition: its wiring rules apply.
             definition_wiring: crate::DefinitionWiring::Applies,
             entry_custody: false,
+            created_custody: false,
             history_unavailable: None,
             fresh_life: false,
             objective_id: None,
@@ -40799,7 +41113,109 @@ impl MobActor {
         provision: PendingProvision,
         route: spawn_activation::SpawnActivationRoute,
     ) {
+        // Spawn ladder step 1 for a local spawn: open the spawn-exec phase in
+        // the actor command that closed its pending admission (or, for an
+        // adopted resume, admitted it), before the off-actor endpoint
+        // observation. MobMachine then holds the spawn in flight
+        // continuously, from `StageSpawn` (or this opening) through
+        // `CommitSpawnMembership`, so neither the member-admission probe nor
+        // `ensure_member` reads the identity as absent while its spawn runs.
+        // A remote spawn opened its ladder at enqueue (`BeginSpawnExecRemote`).
+        if ctx.remote.is_none()
+            && let Err(error) = self.open_local_spawn_exec(&ctx, &provision)
+        {
+            self.consume_spawn_provision_failure(
+                provision,
+                false,
+                &ctx.operation_id,
+                "spawn-exec open rejected",
+            )
+            .await;
+            Box::pin(self.settle_spawn_activation_route(route, Err(error))).await;
+            return;
+        }
         self.observe_spawn_admission(ctx, provision, route).await;
+    }
+
+    /// `BeginSpawnExec` for a local spawn: carries the spawn admission guards,
+    /// sets the per-identity phase to `Opened`, and emits nothing. Any failure
+    /// between here and `CommitSpawnMembership` fires `AbortSpawnExec` to
+    /// reset the phase.
+    fn open_local_spawn_exec(
+        &mut self,
+        ctx: &SpawnFinalizeCtx,
+        provision: &PendingProvision,
+    ) -> Result<(), MobError> {
+        let identity = crate::ids::AgentIdentity::from(ctx.agent_identity.as_str());
+        let agent_runtime_id = crate::ids::AgentRuntimeId::new(identity.clone(), ctx.generation);
+        let dsl_identity = mob_dsl::AgentIdentity::from_domain(&identity);
+        let bridge_session_id = provision
+            .member_ref()?
+            .bridge_session_id()
+            .map(mob_dsl::SessionId::from_domain);
+        let replacing = self
+            .dsl_authority
+            .state()
+            .member_session_bindings
+            .get(&dsl_identity)
+            .cloned();
+        let opened = self.apply_dsl_input(
+            mob_dsl::MobMachineInput::BeginSpawnExec {
+                agent_identity: dsl_identity,
+                agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(&agent_runtime_id),
+                fence_token: mob_dsl::FenceToken::from_domain(ctx.fence_token),
+                generation: mob_dsl::Generation::from_domain(ctx.generation),
+                profile_material_digest: ctx
+                    .authorized_profile_material
+                    .profile_material_digest
+                    .clone(),
+                external_addressable: ctx.authorized_profile_material.external_addressable,
+                runtime_mode: mob_dsl::SpawnPolicyRuntimeMode::from(ctx.runtime_mode),
+                bridge_session_id,
+                replacing,
+                // Local arm: placement is absent, so the multi-host denial
+                // guards are placement-gated vacuous; the observations bundle
+                // is nonetheless honest (captured at the spawn destructure and
+                // threaded here).
+                placement: None,
+                workgraph_required: ctx.observations.workgraph_required,
+                rust_bundles_present: ctx.observations.rust_bundles_present,
+                per_spawn_external_tools_present: ctx.observations.per_spawn_external_tools_present,
+                mob_default_external_tools_present: self.default_external_tools_provider.is_some(),
+                default_llm_client_override_present: self.default_llm_client.is_some(),
+                host_surface_mcp_allowlist_present: ctx
+                    .observations
+                    .host_surface_mcp_allowlist_present,
+                inherited_tool_filter_present: ctx.observations.inherited_tool_filter_present,
+                shell_env_present: ctx.observations.shell_env_present,
+                mcp_stdio_env_present: ctx.observations.mcp_stdio_env_present,
+                mcp_http_headers_present: ctx.observations.mcp_http_headers_present,
+                memory_required: ctx.observations.memory_required,
+                mcp_required: ctx.observations.mcp_required,
+                resume_session_id: ctx
+                    .observations
+                    .resume_session_id
+                    .as_ref()
+                    .map(mob_dsl::SessionId::from_domain),
+                placed_spawn_id: None,
+                placed_provision_operation_id: None,
+                placed_operation_owner_session_id: None,
+                effective_profile_override_present: false,
+                effective_model_override_present: false,
+                // The spawn acts for its name's identity entry exactly
+                // when its spec carried entry custody.
+                entry_custody: ctx.entry_custody,
+                created_custody: ctx.created_custody,
+            },
+            "start_spawn_activation_begin_spawn_exec",
+        );
+        // State injection, test builds only: a test may reserve the name
+        // here, under the open ladder, which no production path does.
+        #[cfg(test)]
+        if opened.is_ok() {
+            self.inject_armed_unreadable_name_at_ladder_open(&identity);
+        }
+        opened
     }
 
     async fn finish_spawn_admission(
@@ -40966,8 +41382,9 @@ impl MobActor {
         }
     }
 
-    /// Spawn ladder, pre-commit phase: `BeginSpawnExec` -> trust / overlay /
-    /// event append -> `CommitSpawnMembership` -> `provision.commit()`. On any
+    /// Spawn ladder, pre-commit phase (the local ladder was opened by
+    /// `start_spawn_activation_from_pending`): trust / overlay / event append
+    /// -> `CommitSpawnMembership` -> `provision.commit()`. On any
     /// pre-membership failure the opened spawn-exec phase is reset via
     /// `AbortSpawnExec` and the pending provision is archived, leaving the
     /// identity respawnable.
@@ -40981,6 +41398,20 @@ impl MobActor {
         let observed = match observed {
             Ok(observed) => observed,
             Err(error) => {
+                // A local spawn opened its ladder before the observation.
+                let error = if ctx.remote.is_none() {
+                    let dsl_identity = mob_dsl::AgentIdentity::from_domain(
+                        &crate::ids::AgentIdentity::from(ctx.agent_identity.as_str()),
+                    );
+                    self.fold_spawn_exec_abort(
+                        &dsl_identity,
+                        &ctx.agent_identity,
+                        error,
+                        "finalize_spawn_admit_observation",
+                    )
+                } else {
+                    error
+                };
                 return match provision.rollback().await {
                     Ok(()) => Err(error),
                     Err(cleanup) => Err(MobError::Internal(format!(
@@ -41065,79 +41496,6 @@ impl MobActor {
             agent_identity = %agent_identity,
             "MobActor::finalize_spawn_admit preparing DSL Spawn"
         );
-        // Spawn ladder step 1: open the spawn-exec phase. `BeginSpawnExec`
-        // carries the spawn admission guards, sets the per-identity phase to
-        // `Opened`, and emits nothing. Any failure between here and
-        // `CommitSpawnMembership` fires `AbortSpawnExec` to reset the phase.
-        if ctx.remote.is_none() {
-            let begin_result = self.apply_dsl_input(
-                mob_dsl::MobMachineInput::BeginSpawnExec {
-                    agent_identity: dsl_identity.clone(),
-                    agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(&agent_runtime_id),
-                    fence_token: mob_dsl::FenceToken::from_domain(fence_token),
-                    generation: mob_dsl::Generation::from_domain(generation),
-                    profile_material_digest: authorized_profile_material
-                        .profile_material_digest
-                        .clone(),
-                    external_addressable,
-                    runtime_mode: mob_dsl::SpawnPolicyRuntimeMode::from(runtime_mode),
-                    bridge_session_id: bridge_session_id.clone(),
-                    replacing: replacing.clone(),
-                    // Local arm: placement is absent, so the multi-host
-                    // denial guards are placement-gated vacuous; the
-                    // observations bundle is nonetheless HONEST (DEC-P3-10 —
-                    // captured at the spawn destructure and threaded here).
-                    placement: None,
-                    workgraph_required: ctx.observations.workgraph_required,
-                    rust_bundles_present: ctx.observations.rust_bundles_present,
-                    per_spawn_external_tools_present: ctx
-                        .observations
-                        .per_spawn_external_tools_present,
-                    mob_default_external_tools_present: self
-                        .default_external_tools_provider
-                        .is_some(),
-                    default_llm_client_override_present: self.default_llm_client.is_some(),
-                    host_surface_mcp_allowlist_present: ctx
-                        .observations
-                        .host_surface_mcp_allowlist_present,
-                    inherited_tool_filter_present: ctx.observations.inherited_tool_filter_present,
-                    shell_env_present: ctx.observations.shell_env_present,
-                    mcp_stdio_env_present: ctx.observations.mcp_stdio_env_present,
-                    mcp_http_headers_present: ctx.observations.mcp_http_headers_present,
-                    memory_required: ctx.observations.memory_required,
-                    mcp_required: ctx.observations.mcp_required,
-                    resume_session_id: ctx
-                        .observations
-                        .resume_session_id
-                        .as_ref()
-                        .map(mob_dsl::SessionId::from_domain),
-                    placed_spawn_id: None,
-                    placed_provision_operation_id: None,
-                    placed_operation_owner_session_id: None,
-                    effective_profile_override_present: false,
-                    effective_model_override_present: false,
-                    // The spawn acts for its name's identity entry exactly
-                    // when its spec carried entry custody.
-                    entry_custody: ctx.entry_custody,
-                    created_custody: false,
-                },
-                "finalize_spawn_admit_begin_spawn_exec",
-            );
-            if let Err(error) = begin_result {
-                self.consume_spawn_provision_failure(
-                    provision,
-                    false,
-                    &ctx.operation_id,
-                    "spawn-exec open rejected",
-                )
-                .await;
-                return Err(error);
-            }
-            // State injection, test builds only: a test may reserve the name
-            // here, under the open ladder, which no production path does.
-            #[cfg(test)]
-            self.inject_armed_unreadable_name_at_ladder_open(agent_identity);
-        }
         // Remote: the ladder was opened at enqueue (`BeginSpawnExecRemote`,
         // rung = MaterializePending); the member recipient trust window
         // opens BEFORE the membership commit so kickoff/wiring sends can

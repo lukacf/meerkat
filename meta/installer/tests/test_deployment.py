@@ -1793,3 +1793,23 @@ async def test_installed_source_evidence_leaves_the_event_loop_free(tmp_path, mo
         await probe
     assert evidence["source_verified"] is True and evidence["source_digest"] == "b" * 64
     assert stalls and max(stalls) < 0.5
+
+
+def test_local_selection_absence_is_distinct_from_corrupt_or_unreadable_selection(service, monkeypatch):
+    identity = service.guide.identity
+    selector = service.root / identity / "latest.json"
+    with pytest.raises(LookupError, match="No local deployment has been started"):
+        service._directory(identity)
+    selector.parent.mkdir(parents=True, exist_ok=True)
+    for value in ["{broken", "{}", "null", "[]"]:
+        selector.write_text(value)
+        with pytest.raises(DraftConflict, match="state is unknown"):
+            service._directory(identity)
+    original = Path.read_text
+    def unreadable(path, *args, **kwargs):
+        if path == selector:
+            raise PermissionError("fixture denied")
+        return original(path, *args, **kwargs)
+    monkeypatch.setattr(Path, "read_text", unreadable)
+    with pytest.raises(DraftConflict, match="state is unknown"):
+        service._directory(identity)

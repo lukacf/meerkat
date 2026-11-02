@@ -656,7 +656,7 @@
       "result_type": "MobCreateResult"
     },
     {
-      "description": "List active mobs",
+      "description": "List active mobs and the quarantined persisted mobs",
       "name": "mob/list",
       "result_type": "MobListResult"
     },
@@ -869,6 +869,12 @@
       "name": "mob/rotate_supervisor",
       "params_type": "MobIdParams",
       "result_type": "MobRotateSupervisorResult"
+    },
+    {
+      "description": "Re-attempt the restore of a quarantined persisted mob, for example after a repair",
+      "name": "mob/restore_retry",
+      "params_type": "MobIdParams",
+      "result_type": "MobRestoreRetryResult"
     },
     {
       "description": "Bind a mob's member callback route to this connection with the mob's claim token",

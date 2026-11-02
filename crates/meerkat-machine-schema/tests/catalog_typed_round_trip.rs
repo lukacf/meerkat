@@ -80,6 +80,7 @@ fn canonical_machine_slug_snapshot() {
             "GrantAuthorityMachine".to_string(),
             "MeerkatMachine".to_string(),
             "MobMachine".to_string(),
+            "MobStoreRestoreLifecycleMachine".to_string(),
             "OccurrenceLifecycleMachine".to_string(),
             "RuntimeDeliveryMachine".to_string(),
             "ScheduleLifecycleMachine".to_string(),

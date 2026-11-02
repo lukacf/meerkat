@@ -24,7 +24,7 @@ _NATIVE_PATHS = frozenset({
     "launchkit/__init__.py", "launchkit/connect_application_finalizer.py",
     "launchkit/connect_application_policy.py", "launchkit/connect_installer_caller.py",
     "launchkit/connect_policy_input.py", "launchkit/connect_application_startup.py",
-    "launchkit/connect_application_callbacks.py",
+    "launchkit/connect_application_callbacks.py", "launchkit/connect_member_class_requests.py",
     "console_connect.py", "console_binding.py", "console_presentation.py", "console_shell.py",
     "native_controller_review.py", "native_console_login.py",
     "console_setup.mjs", "console_setup.css", "console_shell.mjs", "console_shell.css",

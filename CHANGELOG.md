@@ -72,6 +72,97 @@ them.
 
 ### Breaking
 
+- `meerkat-mob-mcp`: a persisted mob store that does not restore is
+  quarantined instead of failing `MobMcpState`'s restore (see Fixed).
+  `MobMcpState::unrestored_mobs` is removed: `MobMcpState::quarantined_mobs`
+  lists the quarantined mobs (`QuarantinedMob`: the id, the class, whether a
+  re-attempt is in flight, the attempts and the failure its last attempt
+  met), and `MobMcpState::mob_inventory` reads the managed, held and
+  quarantined mobs in one read. `MobMcpState::held_child_mobs` returns
+  `Result<Vec<(MobId, SessionId)>, MobError>` and fails when the restore of
+  the persisted mobs failed, where it answered an empty list.
+- `meerkat-contracts`: `MobListResult` gains the public field
+  `quarantined: Vec<WireQuarantinedMob>` (see Added), so code that builds it
+  literally sets it (`Vec::new()` for none). Its wire form is unchanged
+  while it is empty.
+- `meerkat-machine-kernels`, `meerkat-machine-schema`, `meerkat-mob`: the mob
+  machine records a member's unrestored custody (see Fixed).
+  `MobMachineState` (meerkat-machine-schema and meerkat-mob) and the kernel
+  `generated::mob` `State` gain the public fields `member_custody_unrestored`
+  and `member_custody_unrestored_causes`, so code that builds either struct
+  literally must set them. `MobMachineSignal` and its variant enum and the
+  kernel `Signal` and `SignalKind` gain `RecordMemberCustodyUnrestored {
+  agent_identity, restore, cause }` and `ResolveMemberCustodyRestored {
+  agent_identity }`, appended last, so no existing variant's discriminant
+  moves. Exhaustive matches must add them. The kernel
+  `generated::mob::TransitionId` gains
+  `RecordMemberCustodyUnrestoredSeatedRunning`,
+  `RecordMemberCustodyUnrestoredSeatedStopped`,
+  `RecordMemberCustodyUnrestoredSeatedCompleted`,
+  `RecordMemberCustodyUnrestoredNotSeatedRunning`,
+  `RecordMemberCustodyUnrestoredNotSeatedStopped`,
+  `RecordMemberCustodyUnrestoredNotSeatedCompleted`,
+  `RecordMemberCustodyUnrestoredDestroyed`,
+  `ResolveMemberCustodyRestoredRecordedRunning`,
+  `ResolveMemberCustodyRestoredRecordedStopped`,
+  `ResolveMemberCustodyRestoredRecordedCompleted`,
+  `ResolveMemberCustodyRestoredUnrecordedRunning`,
+  `ResolveMemberCustodyRestoredUnrecordedStopped`,
+  `ResolveMemberCustodyRestoredUnrecordedCompleted` and
+  `ResolveMemberCustodyRestoredUnrecordedDestroyed`, inserted before
+  `RetireMemberArchiveOnly`, so the discriminants of
+  `RetireMemberArchiveOnly`, `AdmitDestroyMemberRetireArchiveOnlyRunning`,
+  `AdmitDestroyMemberRetireArchiveOnlyStopped`,
+  `WireExternalPeerDormantRunning`, `WireExternalPeerAlreadyWiredDormant`,
+  `UnwireExternalPeerDormantRunning`, `RetireRunningReleasingArchiveOnly`,
+  `RetireRunningPreservingBindingArchiveOnly`,
+  `RetireStoppedReleasingArchiveOnly`,
+  `RetireStoppedPreservingBindingArchiveOnly`,
+  `ResolveMemberRevivalSessionCreatedRunning`,
+  `ResolveMemberRevivalSessionCreatedStaleRunning`,
+  `ResolveMemberRevivalSessionCreatedStaleStopped`,
+  `ResolveMemberRevivalSessionCreatedStaleCompleted`,
+  `ResolveMemberRevivalSessionCreatedStaleDestroyed`,
+  `RecoverMemberSeatSessionUnbornRunning`,
+  `RecoverMemberSeatSessionBornRunning` and
+  `AuthorizeSpawnProfileSeatedRunning` move. `TransitionId` has no repr and
+  (de)serializes by variant name, so only an integer cast observes the moved
+  discriminants.
+- Behaviour-only (not measured by the gate): every mob surface and the
+  Python, TypeScript and Web SDKs: a call that addresses a quarantined
+  persisted mob by id (a create of that id included) fails with the new
+  refusal kind `mob_quarantined` (`MobError::MobQuarantined`), whose
+  structured data carries `mob_id`, `class`, `retryable`,
+  `content_retained`, `cause` and `code`. A store that could not serve now
+  answers `SESSION_RUNTIME_UNAVAILABLE` with `retryable: true`; any other
+  class answers the code of the failure its restore met. Before, such a
+  store failed every mob call of the realm with the restore error, and a
+  refused resume answered `IncarnationInconsistent`, `IncarnationDestroyed`
+  or `Internal`. The SDKs read it typed (`mob_quarantined`,
+  `mobQuarantined`; see Added); a client that branches on refusal kinds
+  handles the new kind.
+- Behaviour-only (not measured by the gate): `meerkat-session`: a committed
+  whole-blob session read over a host store that answers unavailable, or
+  holds data that does not decode, fails with `SessionError::Store` (code
+  `SESSION_STORE_ERROR`) carrying the typed `RuntimeStoreError`, where it
+  failed with `SessionError::Agent` (`AGENT_ERROR`). Other read failures are
+  unchanged.
+- `meerkat-mob`: `MobStoreError` gains `Unavailable(String)`, appended last:
+  a mob store over the host store interface answers it for a read the host
+  store could not serve now (`HostStoreError::Unavailable`), where it
+  answered `ReadFailed`, and a restore classes it `store_unavailable`. A
+  `match` over every variant adds an arm for it.
+- `meerkat-runtime`: `MeerkatMachine::archive_runtime_residue_present`
+  answers `Result<bool, RuntimeStoreError>`: its one failure, the read of the
+  runtime's machine lifecycle record, keeps the store's typed error, where it
+  answered `RuntimeDriverError::Internal` with the error's text. A caller that
+  only formats the error keeps compiling.
+- Behaviour-only (not measured by the gate): `meerkat-runtime`: a host store
+  read that answers `HostStoreError::Unavailable` surfaces as
+  `RuntimeStoreError::Unavailable`, and stored data that does not decode as
+  `RuntimeStoreError::Corrupt` (both new, see Added), where both surfaced as
+  `RuntimeStoreError::ReadFailed`. Writes are unchanged.
+
 - `meerkat-machine-kernels`, `meerkat-machine-schema`, `meerkat-mob`: the mob
   machine records identity entries (see Added). `MobMachineState`
   (meerkat-machine-schema and meerkat-mob) and the kernel `generated::mob`
@@ -340,6 +431,156 @@ them.
   `RecoverCreatedIdentityEntryUnreadableStopped`, so no existing variant's
   discriminant moves. Exhaustive matches must add the new variants.
 
+- `meerkat-machine-kernels`, `meerkat-machine-schema`, `meerkat-mob`: the mob
+  machine decides store-owned identity changes and the host's preparation of
+  an identity before its first seat (see Added). `MobMachineState`
+  (meerkat-machine-schema and meerkat-mob) and the kernel `generated::mob`
+  `State` gain the public fields `identity_changes_held`,
+  `identity_entry_removing`, `identity_entry_archiving`,
+  `identity_entry_constructions_held` and
+  `identity_entry_constructions_activating`, so code that builds either
+  struct literally must set them. The `MobMachineInput` variants
+  `DeclareIdentityEntry` and `ResolveSpawnMemberAdmission`
+  (meerkat-machine-schema and meerkat-mob) and the kernel
+  `generated::mob::inputs` structs of the same names gain public fields:
+  `DeclareIdentityEntry` gains `created_custody: bool` and
+  `preparation_required: bool`, and `ResolveSpawnMemberAdmission`
+  `privileged_binding_present: bool` and `privileged_placement_present:
+  bool`, so code that builds them literally must set them (`false` keeps the
+  previous behaviour), and a serialized kernel input without them no longer
+  deserializes. `MobMachineInput` (meerkat-machine-schema and meerkat-mob),
+  its variant enum `MobMachineInputVariant` (meerkat-machine-schema),
+  `MobMachineCatalogInput` (meerkat-mob) and the kernel `Input` and
+  `InputKind` gain `AdmitIdentityChange { receipt, consent, permit_binds,
+  permit_admits, host_operator, grant_current, spec_current }`,
+  `RecordCreatedIdentityEntry { agent_identity, preparation_required,
+  placement, held_creation }` (the machine derives the new entry's cause from
+  these facts), `SetIdentityChangesHeld { held }`, `RemoveIdentityEntry {
+  agent_identity }`, `ArchiveIdentityEntry { agent_identity }`,
+  `UnarchiveIdentityEntry { agent_identity }`, `UnlistIdentityEntry {
+  agent_identity }`, `BeginPreparationConstruction { agent_identity, attempt,
+  constructed }`, `SettleHostPreparation { agent_identity, attempt,
+  constructed, before_deadline, binding_matches }` and
+  `EndPreparationConstruction { agent_identity, attempt, end }`;
+  `MobMachineEffect`, its variant enum `MobMachineEffectVariant`
+  (meerkat-machine-schema), and the kernel `Effect` and `EffectKind` gain
+  `IdentityChangeAdmissionResolved`, `CreatedIdentityEntryRecorded`,
+  `IdentityEntryChangeResolved`, `IdentityEntryUnlisted`,
+  `PreparationConstructionResolved`, `PreparationSettleResolved` and
+  `PreparationConstructionEnded`; each appended last. The machine enums
+  `IdentityChangeReceiptKind`, `IdentityChangeConsentKind`,
+  `IdentityChangeAdmissionKind`, `CreatedIdentityRecordVerdict`,
+  `IdentityEntryChangeKind`, `IdentityEntryChangeVerdict`,
+  `UnlistEntryVerdict`, `PreparationConstructionVerdict`,
+  `PreparationSettleVerdict`, `ConstructionEndKind` and
+  `ConstructionEndVerdict` are new, and the machine enums new in this
+  release gain variants: `UnseatedEntryCause` gains `Archived`,
+  `RecoveredPresence` `PendingConstruction` and `Archived`, and
+  `IdentityEntryVerdict` `PreparationPending` and `RecordOnly` (a
+  store-owned update of an archived identity, or of one awaiting its host's
+  preparation, changes its row only). The invariant
+  `unseated_created_entry_is_preparing_or_owed` is retired (a store-owned
+  update records a created entry hosted on its first use or held), and
+  `archived_entry_is_store_owned`,
+  `entry_ending_marks_are_seated_and_disjoint` and
+  `construction_is_held_or_activating` are new. Created custody is no
+  longer local only: a placed spawn holds it for a created entry hosted on
+  its first use. The kernel `generated::mob::TransitionId` gains, appended
+  last, `AdmitIdentityChangeAdmitted`, `AdmitIdentityChangeReplayed`,
+  `AdmitIdentityChangeOperationReused`, `AdmitIdentityChangeNonAuthoritative`,
+  `AdmitIdentityChangeChangesHeld`, `AdmitIdentityChangeDecisionUnbound`,
+  `AdmitIdentityChangeDecisionExpired`,
+  `AdmitIdentityChangeImportedNotHostOperator`,
+  `AdmitIdentityChangeGrantRevoked`,
+  `AdmitIdentityChangeMobNotRunningStopped`,
+  `AdmitIdentityChangeMobNotRunningCompleted`,
+  `AdmitIdentityChangeMobNotRunningDestroyed`,
+  `RecordCreatedIdentityEntryRecorded`,
+  `RecordCreatedIdentityEntryNameHeldByIdentity`,
+  `RecordCreatedIdentityEntryNameHeldByWorker`,
+  `RecordCreatedIdentityEntryNameTombstoned`,
+  `RecordCreatedIdentityEntryNameUnreadable`,
+  `RecordCreatedIdentityEntryNonAuthoritative`,
+  `RecordCreatedIdentityEntryChangesHeld`,
+  `RecordCreatedIdentityEntryMobNotRunningStopped`,
+  `RecordCreatedIdentityEntryMobNotRunningCompleted`,
+  `RecordCreatedIdentityEntryMobNotRunningDestroyed`,
+  `SetIdentityChangesHeldRunning`, `SetIdentityChangesHeldStopped`,
+  `SetIdentityChangesHeldCompleted`, `SetIdentityChangesHeldDestroyed`,
+  `RemoveIdentityEntryRetiring`, `RemoveIdentityEntryRemoved`,
+  `RemoveIdentityEntryAlreadyRemoved`, `RemoveIdentityEntryUnknown`,
+  `RemoveIdentityEntryInFlight`, `RemoveIdentityEntryNameUnreadable`,
+  `RemoveIdentityEntryNonAuthoritative`, `RemoveIdentityEntryChangesHeld`,
+  `RemoveIdentityEntryMobNotRunningStopped`,
+  `RemoveIdentityEntryMobNotRunningCompleted`,
+  `RemoveIdentityEntryMobNotRunningDestroyed`,
+  `ArchiveIdentityEntryArchiving`, `ArchiveIdentityEntryArchived`,
+  `ArchiveIdentityEntryAlreadyArchived`, `ArchiveIdentityEntryOwnedByRoster`,
+  `ArchiveIdentityEntryUnknown`, `ArchiveIdentityEntryInFlight`,
+  `ArchiveIdentityEntryNameUnreadable`,
+  `ArchiveIdentityEntryNonAuthoritative`, `ArchiveIdentityEntryChangesHeld`,
+  `ArchiveIdentityEntryMobNotRunningStopped`,
+  `ArchiveIdentityEntryMobNotRunningCompleted`,
+  `ArchiveIdentityEntryMobNotRunningDestroyed`,
+  `UnarchiveIdentityEntryRestored`, `UnarchiveIdentityEntryNotArchived`,
+  `UnarchiveIdentityEntryOwnedByRoster`, `UnarchiveIdentityEntryUnknown`,
+  `UnarchiveIdentityEntryInFlight`, `UnarchiveIdentityEntryNameUnreadable`,
+  `UnarchiveIdentityEntryNonAuthoritative`,
+  `UnarchiveIdentityEntryChangesHeld`,
+  `UnarchiveIdentityEntryMobNotRunningStopped`,
+  `UnarchiveIdentityEntryMobNotRunningCompleted`,
+  `UnarchiveIdentityEntryMobNotRunningDestroyed`,
+  `AdmitIdentityChangeStaleSpec`, `BeginPreparationConstructionHeld`,
+  `BeginPreparationConstructionNotPending`,
+  `BeginPreparationConstructionNotConstructed`,
+  `BeginPreparationConstructionConstructionOpen`,
+  `BeginPreparationConstructionNonAuthoritative`,
+  `BeginPreparationConstructionMobNotRunningStopped`,
+  `BeginPreparationConstructionMobNotRunningCompleted`,
+  `BeginPreparationConstructionMobNotRunningDestroyed`,
+  `SettleHostPreparationSeat`, `SettleHostPreparationActivationAccepted`,
+  `SettleHostPreparationNotPending`,
+  `SettleHostPreparationConstructionRequired`,
+  `SettleHostPreparationConstructionOpen`,
+  `SettleHostPreparationStaleAttempt`, `SettleHostPreparationExpired`,
+  `SettleHostPreparationMismatch`, `SettleHostPreparationActivationPending`,
+  `SettleHostPreparationNonAuthoritative`,
+  `SettleHostPreparationMobNotRunningStopped`,
+  `SettleHostPreparationMobNotRunningCompleted`,
+  `SettleHostPreparationMobNotRunningDestroyed`,
+  `EndPreparationConstructionEndedRunning`,
+  `EndPreparationConstructionEndedStopped`,
+  `EndPreparationConstructionEndedCompleted`,
+  `EndPreparationConstructionEndedDestroyed`,
+  `EndPreparationConstructionNotOpenRunning`,
+  `EndPreparationConstructionNotOpenStopped`,
+  `EndPreparationConstructionNotOpenCompleted`,
+  `EndPreparationConstructionNotOpenDestroyed`,
+  `EndPreparationConstructionActivationPendingRunning`,
+  `EndPreparationConstructionActivationPendingStopped`,
+  `EndPreparationConstructionActivationPendingCompleted`,
+  `EndPreparationConstructionActivationPendingDestroyed`,
+  `ArchiveIdentityEntryPreparationPending`, `UnlistIdentityEntryRetiring`,
+  `UnlistIdentityEntryRemoved`, `UnlistIdentityEntryDeferred`,
+  `UnlistIdentityEntryNotADeclaredEntry`,
+  `UnlistIdentityEntryNonAuthoritative`,
+  `UnlistIdentityEntryMobNotRunningStopped`,
+  `UnlistIdentityEntryMobNotRunningCompleted`,
+  `UnlistIdentityEntryMobNotRunningDestroyed`,
+  `DeclareIdentityEntryPreparationPending`, `DeclareIdentityEntryRecordOnly`,
+  `RecoverCreatedIdentityEntryRemovingRunning`,
+  `RecoverCreatedIdentityEntryRemovingStopped`,
+  `RecoverCreatedIdentityEntryArchivingRunning`,
+  `RecoverCreatedIdentityEntryArchivingStopped`,
+  `RecoverCreatedIdentityEntryArchivedRunning` and
+  `RecoverCreatedIdentityEntryArchivedStopped`, so no existing variant's
+  discriminant moves. Exhaustive matches must add the new variants.
+- `meerkat-mob`: `SpawnMemberAdmissionObservations` gains the public fields
+  `binding_present` and `placement_present` (a runtime binding or a
+  placement on the request, which a grant with manage scope alone admits, as
+  MobMachine's spawn admission decides), so code that builds it literally
+  must set them (`false` keeps the previous answer) or end the literal with
+  `..Default::default()`.
 - `meerkat-machine-kernels`, `meerkat-machine-schema`, `meerkat-mob`: the mob
   machine answers the retire of an identity with no current incarnation
   (`RetireAbsent`) in a completed and in a destroyed mob too, and
@@ -1185,6 +1426,44 @@ them.
 
 ### Added
 
+- `meerkat-mob-mcp`, `meerkat-rpc`, `meerkat-contracts`: quarantined mobs
+  are visible and can be retried. `mob/list`, the MCP `meerkat_mob_list`
+  tool, the `mob_list` tool of `MobMcpDispatcher` and the browser runtime's
+  `mob_list` read one inventory and list each quarantined persisted mob
+  under `quarantined`
+  (`WireQuarantinedMob`: the id, the class in the tolerant
+  `WireMobQuarantineClass` vocabulary `store_unavailable`,
+  `store_unreadable` or `resume_refused`, `retryable`, `retrying`,
+  `attempts`, and the refusal a lookup of the mob answers). The new
+  `mob/restore_retry` (`MobIdParams` to `MobRestoreRetryResult`, outcome
+  `restored`, `held`, `settled` or `not_quarantined`;
+  `MobMcpState::mob_restore_retry` in Rust) re-attempts a quarantined mob's
+  restore, for example after a repair. The Python SDK adds
+  `list_quarantined_mobs`, `mob_restore_retry` and `mob_quarantined` (a
+  typed `MobQuarantinedRefusal`), the TypeScript SDK `listQuarantinedMobs`,
+  `mobRestoreRetry` and `mobQuarantined`, and the Web SDK `mobQuarantined`.
+  See the mobs guide's section on quarantined mobs and degraded members.
+- `meerkat-machine-schema`, `meerkat-mob`: `MobStoreRestoreLifecycleMachine`,
+  a record-scoped machine that owns one quarantined persisted mob store: its
+  class, which re-attempts it admits (`RequestRetry` names its
+  `MobStoreRetryTrigger`: an explicit re-attempt of any class, an on-demand
+  one only for `store_unavailable`, refused otherwise with `NotRetryable`),
+  the one re-attempt in flight, and how each re-attempt ended.
+  `MobError::MobQuarantined` and `MobQuarantineClass` are the typed answer
+  for such a mob, and `MobError::restore_quarantine_class` classes a failed
+  restore.
+- `meerkat-core`, `meerkat-runtime`, `meerkat-store-conformance`:
+  `HostStoreError::Corrupt` (stored data that does not decode or fails the
+  store's own integrity check), and `RuntimeStoreError::Unavailable` and
+  `RuntimeStoreError::Corrupt`, so a host store read keeps unavailability
+  and corruption typed. The reference host store answers a typed read fault
+  for one scope (`set_read_fault` with `HostStoreReadFault`), or for every
+  scope of a kind (`set_kind_read_fault`).
+- `meerkat-mob`, `meerkat-contracts`: the member custody deferral causes
+  `store_unavailable` and `store_unreadable` (`MemberCustodyDeferralCause`,
+  `WireMemberCustodyDeferralCause`) in the tolerant advisory vocabulary of
+  `custody_deferred`, which the SDKs read.
+
 - `meerkat-mob`, `meerkat-mob-mcp`: identity entries. A Rust host can tell
   its own durable identities from worker members: a spawn or a dormant seat
   whose `SpawnMemberSpec::entry_custody` is set (builder
@@ -1457,9 +1736,11 @@ them.
   never takes an entry of the other (`MobError::IdentityMember`); a fresh-life
   respawn of the member an unreadable name keeps is refused the same way,
   before that member is retired; a worker reconcile neither spawns nor retires
-  one; the declared apply refuses a created, removed or unreadable name for
-  that identity alone (`DeclaredEntryRefusal::NameOwnedByCreated`,
-  `NameTombstoned`, `NameUnreadable`); the legacy adoption answers
+  one; the declared apply answers a created entry's name with a typed note
+  (`DeclaredEntryOutcome::Noted`, `DeclaredEntryNote::OwnedByStore`: a quiet
+  steady state that changes and retires nothing) and refuses a removed or
+  unreadable one for that identity alone (`DeclaredEntryRefusal::NameTombstoned`,
+  `NameUnreadable`); the legacy adoption answers
   `NotAdoptable`; and the agent lane refuses an unreadable member as an
   identity member. The reads: `IdentityEntryRead::Unreadable { member }` and
   `Removed`, `IdentityEntryPage::unreadable`,
@@ -1468,6 +1749,150 @@ them.
   answers `MemberIdentityManagement::CreatedEntry` for a created entry's
   identity. A mob that holds no created entry row behaves as before.
   Rust-only; the wire contracts do not carry it.
+
+- `meerkat-mob`: store-owned identity changes. Core writes store-owned
+  identities itself, one change at a time, each committed as one store
+  transaction (the identities' rows, the journal rows of their seats and the
+  change's receipt), all or nothing:
+  `MobHandle::create_store_owned_identities` (`StoreOwnedIdentityCreate`, at
+  most `IDENTITY_CHANGE_BATCH_MAX` identities, each a
+  `CreatedIdentityRequest` with its `CreatedIdentitySpec`),
+  `update_store_owned_identity` (`StoreOwnedIdentityUpdate`,
+  `IdentityUpdateOutcome`), `archive_identity` and `unarchive_identity`
+  (`IdentityArchiveChange`), and `remove_identity` (`IdentityRemoval`) of an
+  identity of either custody. Each change names its operation
+  (`IdentityOperation`: an operation id and the request's digest), its
+  requester (`IdentityChangeRequesterInput`: the host on one of its surfaces,
+  a human principal, or an agent whose ordinary spawn grant admits the
+  change, `MobHandle::admit_identity_change_grant`, attributed from the
+  session that carries the request, never from its arguments) and its
+  consent (`IdentityChangeConsentInput`: a policy outcome, a decision whose
+  permit binds the change and admits its commit now, or an import, which
+  only the host operator carries). MobMachine decides the change's admission
+  in its commit step: a receipt of the same request answers
+  `IdentityChangeOutcome::Replayed` and writes nothing again, and a request
+  under an operation another request committed, a changes hold
+  (`MobHandle::set_identity_changes_held`, or
+  `MobBuilder::with_identity_changes_held` at a start; retryable, not
+  durable), a candidate composition, a permit that binds another change or
+  is past its deadline, imported consent from anyone but the host operator,
+  an agent requester whose grant no longer admits the change at the commit
+  (its prepared check is asked again there; `MobBuilder::with_member_grant_mint`
+  and `MemberGrantMint` give the reads the host's own grant rule), and a
+  store-owned update decided against a spec digest that is no longer the
+  identity's (`StaleSpec`, with the current digest and revision) are refused
+  typed with nothing written (`MobError::IdentityChangeRefused`,
+  `IdentityChangeRefusal` with a stable kind token, `IdentityNameHolder` for a
+  taken name). An agent's grant binds what its change commits: it keeps the
+  request its admission checked (`IdentityGrantRequest`, built with
+  `for_specs`, `for_update` or `for_identity`) and the operation's request
+  digest, and each commit step commits only what that request covers
+  (`IdentityGrantRequest::covers`: a create's specs, an update's new spec
+  and the identity's current profile, and the current profile of the
+  identity a removal, archive, unarchive or settle changes), refusing
+  anything else `InvalidRequest`. An executor admits a change that waited
+  across a restart again from its recorded requester identity
+  (`MobHandle::identity_change_grant_for`), reading no session and waking
+  nothing; a grant the identity no longer holds answers `GrantRevoked`. A
+  removal or an archive change can be decided against a spec
+  (`IdentityRemoval::with_expected_spec_digest`,
+  `IdentityArchiveChange::with_expected_spec_digest`): a store-owned
+  identity whose row's spec moved since refuses it `StaleSpec`. The receipt
+  (`IdentityChangeReceipt`, schema version
+  `IDENTITY_CHANGE_RECEIPT_SCHEMA_VERSION`) records the change's kind, its
+  requester and consent and each identity's outcome, spec digest and
+  revision; `MobHandle::identity_operation` reads it back (with the List
+  scope, as the record reads). A create seats each identity Dormant as a
+  roster-owned identity of the same spec is, and spawns one that owes a
+  kickoff once the change committed, answering each such spawn
+  (`IdentityCreateOutcome::embodied`: embodied, or failed with the identity
+  owed its seat, which the next start embodies once); a placed or
+  externally bound identity is hosted on its first use and one whose host
+  holds its creation awaits it, and their host's spawn holding the
+  identity's created custody (`SpawnMemberSpec::with_created_custody`)
+  creates them. An update is a declared apply of the identity under created
+  custody, so it answers the verdict a roster-owned identity's change of the
+  same spec answers (kept, restamped, role-migrated, held); MobMachine
+  routes it in its declaration step, so an archived identity's update, and
+  that of one awaiting its host's preparation, changes the row only and
+  its unarchive or settle seats the new spec; a role migration is kept in
+  the row until its restamp commits, and a crash before it is carried out
+  at the next start; a store-owned restamp seats the row's labels, and a
+  respawn can name the labels it seats (`MemberRespawn::with_labels`, the
+  "Apply now" of a stale seat). A removal retires a seated
+  identity's member (`MemberRetirementCause::Removed`) and tombstones its
+  name at the retirement's end, or at once for an identity no member holds;
+  the name is never an identity or a member again, for either custody, and
+  `MobHandle::identity_tombstones` pages the removed names
+  (`IdentityTombstonePage`). An archive retires a store-owned identity's
+  member (`MemberRetirementCause::Archived`) and keeps its entry unseated
+  (`UnseatedEntryCause::Archived`) on its archived session, refusing
+  deliveries to it with the new `MobError::IdentityArchived`; its unarchive
+  seats it Dormant there again. An identity awaiting its host's preparation
+  is not archived (`HostPreparationPending`, retryable, naming its open
+  attempt) until its preparation is settled, or the identity removed. A
+  roster-owned identity's archive is refused (`OwnerReadOnly`):
+  `MobHandle::unlist_declared_identity` unlists it alone, decided by
+  MobMachine on that identity alone, and listing it again restores it; its
+  archived session record holds its name meanwhile (a create of it is
+  refused `name_taken`). A roster's own change can carry a
+  receipt too (`DeclaredRoster::with_change`, `IdentityRosterChange`,
+  `DeclaredRosterOutcome::receipt`). The identity store's row (schema
+  version 2) now holds the identity's spec, its pending role migration, its
+  owned edges, its creation's full provenance (`IdentityEntered`, the
+  requester, the proposer, source evidence, the consent), an archived
+  presence with its session, and a removal's record; a start seats an entry
+  owed its seat from the row's spec. Reads: `MobHandle::identity_record`
+  (a name's row), `MobHandle::identity_record_census`
+  (`IdentityRecordCensus`: what a downgrade settles first), and the entry
+  read's `IdentityEntryView::archived_session`. The change types are
+  `#[non_exhaustive]`. Rust-only; the wire contracts do not carry them.
+
+- `meerkat-mob`: host preparation before an identity's first seat, for
+  either custody, and held constructions. A host's rule can require an
+  identity's preparation (`IdentityPreparationMode`: `Required` or
+  `Constructed`): a store-owned identity's create records it pending
+  (`CreatedIdentityRequest::with_preparation`), and a roster-owned
+  identity's declaration names it (`DeclaredEntry::with_preparation`,
+  answered `DeclaredEntryOutcome::PreparationPending`). Such an identity is
+  unseated (`UnseatedEntryCause::PreparationPending`), and a delivery to it is
+  refused retryable (`MemberWakeRefusal::HostPreparationPending`). A
+  `Required` preparation is settled by `MobHandle::settle_identity_preparation`
+  (`IdentityPreparationSettle`, `IdentityPreparationSettled`), which commits
+  its receipt and row and seats a store-owned identity from its spec, or by
+  a roster-owned identity's next declaration. A `Constructed` one is a held
+  construction its host activates: `MobHandle::construct_identity`
+  (`IdentityConstructionRequest`, answering the hold's witnesses,
+  `HeldPreparation`) holds the identity's member constructed and
+  unpublished under the entry's custody, starting no run; a settle naming
+  the attempt, decided before its deadline and binding the identity's
+  current spec, accepts the activation of exactly that construction, and
+  the settle's receipt journals the acceptance; the membership commit that
+  publishes the member ends the attempt. The mob owns each attempt: a dropped
+  observer or a lost reply ends nothing, and before an activation is
+  accepted an abort (`MobHandle::abort_identity_construction`), the
+  deadline, a refused construction, a crash or the identity's removal ends
+  it (`ConstructionEnd`) with the identity still pending; once accepted,
+  nothing replaces the activation until its publication ends; a failed
+  publication answers the error that ended it, typed
+  (`PreparationSettlement::PublicationEnded`'s `cause`, a
+  `ConstructionFailure`: the error's `MobFailureClass`, its wire
+  `ErrorCode` when it has one, and its text for diagnostics), and a retry
+  of the settle after a crash that interrupted it answers
+  `ConstructionEnd::PublicationInterrupted`. Refusals are typed
+  (`PreparationNotPending`, `NotConstructed`, `ConstructionRequired`,
+  `ConstructionOpen`, `StaleAttempt`, `PreparationMismatch`,
+  `ActivationPending`, `ConstructionRefused`). The census names the entries
+  awaiting their preparation apart from those owed a host preparation
+  (`IdentityCensus::host_preparations_owed`). Rust-only; the wire contracts
+  do not carry it.
+
+- `meerkat-core`: `PreparedOperationCheck::reprepared` is public. A final
+  sink that executes a change a held consent decision admitted calls it in
+  place of `current`: its owners prepare the exact retained operation afresh
+  also when the decision's own check refuses it, and past a real owner
+  deadline the fresh preparation refuses (the store-owned identity changes
+  of `meerkat-mob` call it).
 
 - `meerkat-core`: `AuthLeaseHandle::publish_source_credential` publishes a
   credential value its caller re-reads from a source (an environment
@@ -2370,6 +2795,39 @@ them.
 
 ### Fixed
 
+- `meerkat-mob-mcp`: one persisted mob store that does not restore no longer
+  aborts the restore of the realm. A store that cannot be opened, read or
+  decoded, or whose resume fails, is quarantined (kept exactly as found,
+  with no actor), and every other mob restores and serves; only a mob root
+  that cannot be created, read or listed still fails the restore. A store
+  that could not serve now (`store_unavailable`) is restored again by the
+  next call that addresses its mob (one attempt at a time: a call that meets
+  one in flight answers at once) and at the next start; one that needs a
+  repair (`store_unreadable`, `resume_refused`) at the next start or by
+  `mob/restore_retry`. A list never re-attempts. A re-attempt runs to its
+  end even when its caller goes away, and every lookup reads the managed,
+  held and quarantined mobs as one, so a mob a re-attempt restores is never
+  answered as not found. A create of the id of a restored child mob held
+  before activation is refused with the held answer, as a lookup of the id
+  is, before it opens that mob's store.
+- `meerkat-mob`: one member's failed cleanup restore no longer stops its
+  mob. A mob start that cannot restore the cleanup delivery of a retiring
+  member (or of a member bound to a session of a Stopped or Completed mob)
+  for a failure of that member's own, met before the restore had an effect
+  (a read of its session or of its runtime residue the store could not serve
+  or decode, a hosting refusal, a durable tail it could not prove), defers
+  that member's custody: MobMachine records it, the mob runs, and the member
+  shows `custody_deferred` until a re-attempt restores it. Before, any such
+  failure other than a hosting refusal or an unprovable tail of a retiring
+  member fail-stopped the whole mob with `MemberStartupRecoveryFailed`. A
+  failed settle of the member's durable tail is a write and still stops the
+  start; a mob destroy re-attempts every deferred restore first and is
+  refused while one cannot restore.
+- `meerkat-mob`: a resume that fails after its pre-activation hook ran marks
+  the handle the hook kept as stopped, so a host binding that refuses to
+  replace a live mob's binding admits a later resume of the same store in
+  the same process.
+
 - `meerkat-machine-schema`, `meerkat-mob`: the mob machine's forced destroy
   (`DestroyFromAny`) clears every member fact the mob destroy (`DestroyMob`)
   clears, so both leave the same state. It now drops every spawn ladder: a
@@ -2382,6 +2840,38 @@ them.
   these empty in a destroyed mob. A late activation or abort of a ladder
   takes the destroyed mob's own arm, as before, and a mob created again
   under the same id starts with none of these facts, as before.
+
+- `meerkat-mob`: `MobHandle::ensure_member` (and the `mob/ensure_member` and
+  `mob/ingress_interaction` RPC methods) no longer answers `MemberNotFound`
+  for a member whose first spawn is still in flight. A concurrent call that
+  arrived while that spawn was still being prepared answered `MemberNotFound`
+  at once, and a call that was already waiting for the spawn gave up while it
+  checked its member's endpoint (the member's comms and the supervisor trust
+  install), although the spawn seated the member moments later. The call now
+  waits until the member is seated and answers with it, within the existing
+  60 second ready-wait budget, after which it answers `ReadyWaitTimedOut`. If
+  the first spawn fails before its member is committed, the waiting call
+  spawns the member itself.
+
+- `meerkat-mob`: a second spawn of a member that races the first spawn's
+  endpoint check no longer fail-stops the mob. While the first spawn was
+  checking its member's endpoint, a second spawn of the same member (or a
+  second `ensure_member` for it) was admitted and seated the member first;
+  the first spawn then stopped the whole mob ("spawn admission observation
+  lost its exact owner"), its caller got `ActorReplyChannelClosed`, and its
+  session stayed behind. Until the first spawn settles, a second spawn is now
+  refused with `MemberAlreadyExists`, and a second `ensure_member` waits for
+  the member and answers with it.
+
+- `meerkat-machine-schema`, `meerkat-mob`: `MobHandle::ensure_member` (and
+  the RPC methods built on it) refuses the name of a removed identity, or a
+  name this build cannot read, with `IdentityMember` before anything is
+  recorded or created, as a spawn of the name is refused. The mob machine's
+  ensure checked only that the name held no member and was no identity
+  entry, so it recorded such a name for a spawn, against the machine's own
+  invariant `worker_reconcile_spares_entries`: a debug build failed that
+  check and stopped the mob, and a release build refused only the
+  follow-up spawn.
 
 - `meerkat-openai`: on the GitHub Copilot Responses route, a response with
   two or more reasoning or message items that are identical apart from their
@@ -3161,6 +3651,31 @@ them.
   and its `operator-instruction-mob-events` finding lists the mobs 0.9.8
   cannot restore (see the notes below).
 
+- Store-owned identities: a mob whose host created, archived or removed an
+  identity (a removed roster-owned identity's tombstone included) holds rows
+  of identity store schema 2, which 0.9.8 reads per identity on SQLite and
+  refuses as a whole on a host store. This release has no step that deletes
+  these rows: a removal writes its name's tombstone and an archive keeps its
+  row, so a mob that holds any (`IdentityRecordCensus::created_rows` above
+  zero) has no supported downgrade before the export and purge steps.
+  `MobHandle::identity_record_census()` counts the rows and what a downgrade
+  must settle first. A roster that still lists a removed identity is
+  answered `DeclaredEntryRefusal::NameTombstoned` for it: drop it from the
+  roster.
+
+- Quarantined mob stores: a host whose boot relied on a mob store that does
+  not restore failing its whole realm restore now gets a running realm with
+  that store quarantined. To keep failing the boot, read
+  `MobMcpState::quarantined_mobs` (or `mob/list`'s `quarantined`) after the
+  restore and refuse while it is not empty. No durable format changes: the
+  quarantine is derived again at every start, so a downgrade reads the
+  stores as before (and a store that does not restore fails the whole
+  restore of 0.9.8 again).
+- A host store implementation answers `HostStoreError::Corrupt` for stored
+  data that does not decode or fails its integrity check, and
+  `HostStoreError::Unavailable` for a read it cannot serve now, so a mob or
+  member over it is quarantined or degraded under the right class.
+
 - Operator instructions for a mob's members: a mob that recorded an
   operator instruction journals rows at mob event schema 10, which Core 0.9.7
   and 0.9.8 refuse ("unsupported stored mob event schema_version=10; expected
@@ -3310,6 +3825,11 @@ them.
   the turns that run on it, as a crash would (see Breaking).
 
 ### Known limitations
+
+- `meerkat-mob-mcp`: the agent-facing `mob_list` tool, which lists the mobs
+  the calling member may manage, does not list quarantined mobs: a
+  quarantined mob has no actor to read its grants from. The operator
+  surfaces list them.
 
 - `meerkat`: a host that supplies its own stores keeps durable decisions in
   `approval_decisions.sqlite3` under its store path, as it keeps

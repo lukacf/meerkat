@@ -170,6 +170,10 @@ for(const [status,narrow,mode] of [['failed',false,'answer'],['interrupted',true
       await flushReviewFrames(frames);
       const editor=document.querySelector('#setup-message'),button=reviewDraftButton(document);
       assert.ok(button && !button.disabled,'Every saved failure offers current-draft navigation');
+      const recoveryLink = document.querySelector('.setup-journey-now button');
+      assert.equal(recoveryLink?.textContent.trim(), 'Review saved request');
+      await act(async () => recoveryLink.click());
+      await flushReviewFrames(frames);
       assert.match(button.closest('.setup-operation-failure').querySelector('.setup-operation-failure-note').textContent,
         /Retry uses the saved answer\. Your current writing stays separate\./);
       if(narrow)await act(async()=>{[...document.querySelectorAll('.setup-mobile-tabs button')].find(node=>node.textContent.includes('Your team')).click();});
@@ -361,6 +365,8 @@ test('current-question navigation preserves the unsent note and selection withou
   await mountedGuide({value:durable},async(document,calls)=>{
     const navigation=document.querySelector('.setup-question-return');
     assert.ok(navigation,'The current saved question has a persistent return action');
+    assert.ok(navigation.closest('.setup-journey-now'),'The pending action has one stable location above the conversation');
+    assert.equal(document.querySelector('.setup-composer-area .setup-question-return') === null, true,'The composer does not duplicate the active widget');
     assert.equal(navigation.getAttribute('aria-label'),`Show current question: ${current.question.title}`);
     const before=values.get(input.key);
     assert.equal(document.querySelector('#setup-message').value,input.draft);
@@ -388,6 +394,7 @@ test('the current-question shortcut disappears in view and returns on history na
       scroll.dispatchEvent(new document.defaultView.Event('scroll',{bubbles:true}));
     });
     assert.equal(document.querySelector('.setup-question-return') === null,true,'The visible heading and first choice do not need duplicate navigation');
+    assert.match(document.querySelector('.setup-journey-now').textContent,/Your turn/,'The current-action area remains useful when the question is already visible');
     await act(async()=>{
       scroll.scrollTop=0;
       scroll.dispatchEvent(new document.defaultView.Event('scroll',{bubbles:true}));
@@ -452,7 +459,8 @@ test('busy following keeps current native activity visible above long saved setu
     const follow=()=>document.querySelector('.setup-guide-follow');
     assert.ok(document.querySelector('#setup-trial') && document.querySelector('.implementation-panel') &&
       document.querySelector('#setup-deployment'),'The actual saved Try/Build/Run panels remain below the conversation');
-    assert.match(native.textContent,/Using tools/);
+    assert.match(document.querySelector('.setup-journey-now').textContent,/Using tool: inspect blueprint/);
+    assert.equal(native.querySelector('.setup-native-phase') === null, true,'Running status has one stable owner above the transcript');
     assert.equal(scroll.scrollTop,416);
     assert.equal(follow() === null,true,'Following the live transcript needs no redundant navigation');
     assert.ok(movements.some(move=>move.behavior==='smooth' && move.top===416),'The initial busy reveal follows native activity');
@@ -476,7 +484,8 @@ test('busy following keeps current native activity visible above long saved setu
       await advance(gesture==='wheel'?1500:1700);
       assert.equal(scroll.scrollTop,100,`${gesture} releases following`);
       assert.equal(movements.length,count,'A new native update does not pull the reader away');
-      assert.equal(follow()?.textContent.trim(),'Follow live activity','A deliberate return action remains beside the composer');
+      assert.equal(follow()?.textContent.trim(),'Follow live activity','A deliberate return action remains in the current-step area');
+      assert.ok(follow().closest('.setup-journey-now'));
     }
     const requestsBeforeFollow=calls.length;
     asynchronousNavigation=true;
@@ -522,7 +531,7 @@ test('busy following keeps current native activity visible above long saved setu
         proto.getBoundingClientRect=function(){
           const scroll=dom.window.document.querySelector('.setup-chat-scroll');
           if(this===scroll)return {top:40,bottom:540,height:500};
-          if(this.matches('[data-native-console-chat]'))return {top:40-scroll.scrollTop,bottom:40+nativeTail-scroll.scrollTop,height:nativeTail};
+          if(this.matches('[data-native-console-chat], [data-current-guide-transcript]'))return {top:40-scroll.scrollTop,bottom:40+nativeTail-scroll.scrollTop,height:nativeTail};
           return {top:40+nativeTail+200-scroll?.scrollTop,bottom:5040-scroll?.scrollTop,height:3000};
         };
         proto.scrollTo=function(options){
@@ -583,15 +592,16 @@ test('an initial design question leads while optional build readiness stays in t
     storage.setItem(input.key, JSON.stringify(input));
     await mountedGuide({ value: storage }, async (document, calls) => {
       const question = document.querySelector('.setup-current-question');
-      const progress = document.querySelector('.setup-progress-card');
+      const progress = document.querySelector(build ? '.setup-current-status' : '.setup-progress-card');
       assert.ok(question && progress);
       const disclosure = document.querySelector('.setup-proposal-actions');
       if (!build) {
         assert.equal(disclosure.open, false);
         assert.equal(progress.closest('details') === disclosure, true);
         assert.equal(question.querySelector('h1')?.textContent, state.question.title);
-        assert.equal(document.querySelector('.setup-chat-top small')?.textContent, 'One decision at a time');
-        assert.deepEqual([...document.querySelectorAll('.setup-stage-shortcuts a')].map(link => link.textContent), ['Try, build and run']);
+        assert.match(document.querySelector('.setup-journey-now').textContent, /Your turn/);
+        assert.ok(document.querySelector('.setup-journey-now').textContent.includes(state.question.title));
+        assert.deepEqual([...document.querySelectorAll('.setup-stage-shortcuts a')].map(link => link.textContent), ['Try with sample data']);
       } else {
         assert.equal(progress.closest('details') === null, true, 'Actual owned work remains prominent');
         assert.match(progress.textContent, /being built and checked/);
@@ -788,6 +798,25 @@ function packageJourneyReads(first,second,read){
     return fallback(url,options);
   };
 }
+
+test('opening another saved conversation shows a loading step instead of the old pending question', async () => {
+  const first = structuredClone(saved), second = { ...structuredClone(saved), id: 'next-journey',
+    question: { ...saved.question, title: 'The next setup question' } };
+  const { storage, inputs } = packageJourneyStorage(first, second);
+  let release;
+  const pending = new Promise(resolve => { release = resolve; });
+  await mountedGuide({ value: storage }, async (document, calls) => {
+    await clickPackageNavigation(document, 'Your setups');
+    await clickPackageNavigation(document, 'Second package setup');
+    assert.match(document.querySelector('.setup-journey-now').textContent, /Opening saved conversation/);
+    assert.equal(document.querySelector('.setup-journey-now .setup-question-return') === null, true);
+    assert.equal(document.querySelector('.setup-journey-now .setup-guide-wait') === null, true);
+    await act(async () => { release(structuredClone(second)); await settle(); });
+    await waitPackage(() => document.querySelector('.setup-journey-now').textContent.includes(second.question.title));
+    assert.equal(document.querySelector('#setup-message').value, inputs[1].draft);
+    assert.equal(calls.some(call => call.method === 'POST'), false);
+  }, packageJourneyReads(first, second, url => url === `/api/guide/${second.id}` ? pending : undefined));
+});
 
 for(const route of ['native','inspect','checked'])for(const outcome of ['success','failure'])for(const navigation of ['running B','A-B-A'])
 test(`package ${route} delayed ${outcome} respects ${navigation} ownership`,async t=>{
@@ -1132,16 +1161,22 @@ const usePlan = document => [...document.querySelectorAll('button')].find(button
 test('a fully ready saved refinement offers explicit acceptance with one exact-version apply and no guide turn', async () => {
   const state = structuredClone(readyRefinement), apply = `/api/guide/${state.id}/apply`;
   const accepted = { ...state, version: state.version + 1, status: 'ready', blueprint: state.proposal, proposal: null };
+  let releaseApply;
+  const saving = new Promise(resolve => { releaseApply = resolve; });
   await mountedGuide({ value: packageStorage(state) }, async (document, calls) => {
     const button = usePlan(document);
     assert.ok(button && !button.disabled);
     assert.match(document.body.textContent, /PROPOSAL TO REVIEW/);
     assert.deepEqual(calls.filter(call => call.method === 'POST'), [], 'Displaying a ready refinement never automatically accepts it');
     await act(async () => { button.click(); await settle(); });
+    assert.match(document.querySelector('.setup-journey-now').textContent, /Saving your plan/);
+    assert.doesNotMatch(document.querySelector('.setup-journey-now').textContent, /Plan accepted|saved/);
+    assert.equal(document.querySelector('.setup-journey-now .setup-guide-wait') === null, true, 'A pending plan save is not a running guide request');
+    await act(async () => { releaseApply(structuredClone(accepted)); await settle(); });
     await waitPackage(() => document.body.textContent.includes('ACCEPTED PLAN'));
     assert.deepEqual(calls.filter(call => call.method === 'POST'), [{ url: apply, method: 'POST', body: { version: state.version } }]);
     assert.equal(state.status, 'refining');
-  }, packageReads(state, null, { [apply]: () => structuredClone(accepted) }), { allowedPosts: [apply] });
+  }, packageReads(state, null, { [apply]: () => saving }), { allowedPosts: [apply] });
 });
 
 test('accepting a complete plan preserves unfinished application work and offers Build without installation or checked download', async () => {

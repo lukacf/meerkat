@@ -1,0 +1,73 @@
+/* One orientation area above the continuous post-brief conversation. */
+.setup-journey-now {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  flex: 0 0 auto;
+  width: calc(100% - 48px);
+  max-width: 760px;
+  margin: 0 auto;
+  padding: 14px 0;
+  max-height: min(240px, 32dvh);
+  overflow: auto;
+  border-bottom: 1px solid var(--setup-line);
+}
+.setup-journey-label {
+  flex: 0 0 auto;
+  padding-top: 3px;
+  color: var(--setup-muted);
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: .1em;
+}
+.setup-journey-content { flex: 1; min-width: 0; }
+.setup-journey-active .setup-chat-scroll > :not(.setup-response-anchor) { max-width: 760px; margin-left: auto; margin-right: auto; }
+.setup-journey-active .setup-composer-area { align-self: center; width: 100%; max-width: 808px; box-sizing: border-box; }
+.setup-shell.setup-journey-active .setup-current-question h1,
+.setup-shell.setup-journey-active .setup-current-question h2 { font-family: inherit; font-size: 22px; font-weight: 600; line-height: 1.35; }
+.setup-shell.setup-journey-active .setup-current-question { padding-top: 16px; }
+.setup-shell.setup-journey-active .setup-interactive-answer { margin-top: 12px; }
+.setup-journey-question > span { display: block; margin-bottom: 3px; color: var(--setup-muted); font-size: 12px; }
+.setup-journey-question > strong,
+.setup-journey-summary > strong { display: block; font-size: 14px; font-weight: 600; line-height: 1.45; }
+.setup-journey-now .setup-question-return { margin: 0; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 10px; }
+.setup-journey-now .setup-question-return > strong { font-size: 14px; line-height: 1.45; }
+.setup-journey-now .setup-question-return > span { font-size: 11px; color: var(--setup-accent-dark); }
+.setup-journey-now .setup-question-return > svg { grid-column: 2; grid-row: 1 / 3; }
+.setup-journey-now .setup-journey-design-question { margin-top: 10px; }
+.setup-journey-summary > button {
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 5px 0 0; border: 0; background: none; color: var(--setup-accent-dark);
+  font: inherit; font-size: 12px; cursor: pointer;
+}
+.setup-shell .setup-journey-now .setup-current-status {
+  margin: 0; padding: 0; border: 0; border-radius: 0; background: none;
+  box-shadow: none; gap: 10px; align-items: center;
+}
+.setup-journey-now .setup-current-status .setup-eyebrow { display: none; }
+.setup-shell .setup-journey-now .setup-current-status h2 { margin: 0; font-size: 14px; }
+.setup-journey-now .setup-current-status-copy > p { margin-top: 4px; font-size: 12px; }
+.setup-journey-now .setup-status-options { flex-basis: 100%; padding: 0; font-size: 12px; }
+.setup-journey-now .setup-status-options > summary { cursor: pointer; color: var(--setup-muted); }
+.setup-journey-now .setup-guide-wait { margin: 0; padding: 0; border: 0; border-radius: 0; background: none; }
+.setup-journey-now .setup-guide-wait-heading { flex-wrap: wrap; }
+.setup-journey-now .setup-guide-wait-clock { white-space: nowrap; }
+.setup-journey-now .setup-response-notice { margin-top: 8px; }
+
+/* Prose remains visible and ordered. Only a turn's technical work folds away. */
+.setup-guide-turn + .setup-guide-turn { margin-top: 24px; }
+.setup-guide-turn[data-repeated-day="true"] > .cc-conversation-transcript > .cc-conversation-turn:first-child > .cc-conversation-day:first-child { display: none; }
+.setup-guide-turn > .setup-conversation-history { margin: 9px 0 0; padding-left: 12px; border-left: 1px solid var(--setup-line); }
+.setup-guide-turn > .setup-conversation-history > summary { font-size: 11px; }
+.setup-guide-turn > .setup-conversation-history[open] > summary { margin-bottom: 12px; }
+
+@media (max-width: 760px) {
+  .setup-journey-now { width: calc(100% - 28px); gap: 10px; padding: 11px 0; }
+  .setup-journey-label { font-size: 9px; }
+  .setup-shell.setup-journey-active .setup-composer-area .cc-composer__textarea { min-height: 64px; height: 64px; }
+  .setup-shell.setup-journey-active .setup-current-question .setup-question-bubble > p { font-size: 14px; line-height: 1.5; }
+  .setup-shell .setup-journey-now .setup-current-status { flex-wrap: wrap; }
+  .setup-shell .setup-journey-now .setup-current-status-copy { flex-basis: 100%; }
+  .setup-shell .setup-journey-now .setup-current-status > button,
+  .setup-shell .setup-journey-now .setup-current-status > a { min-height: 36px; }
+}

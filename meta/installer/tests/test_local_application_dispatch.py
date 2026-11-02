@@ -53,7 +53,7 @@ def disk_bytes(root):
 
 @pytest.fixture
 def dispatch(initial, tmp_path, monkeypatch):
-    guide = GuideService(initial.store, None)
+    guide = GuideService(initial.store, SimpleNamespace())
     implementation = ImplementationService(tmp_path / "dispatch-state", guide)
     deployment = DeploymentService(tmp_path / "dispatch-state", guide, implementation)
     calls = []

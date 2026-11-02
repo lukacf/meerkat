@@ -293,10 +293,15 @@ Fake SDK/domain tests do not prove destination materialization or restart contin
 If the frozen host lacks the hooks/map, or runtime=None trial lacks trusted dynamic
 lifecycle support, retain that exact limitation; no raw ensure_member shortcut,
 protected config rewrite or fake native creation should become accepted evidence.
-For private continuing contexts, inspect the frozen host's memory posture. The
-seeded host retains enabled native memory and own-identity-bound Recorder tools,
-with distiller/steward disabled and operator_scope off to avoid implicit promotion.
-Do not require disabling useful own-identity memory or credit these defaults as
+For private continuing contexts, inspect the frozen config/mob.toml and selected
+native host's memory posture. Requested Blueprint grants and enabled host storage
+do not establish that the compiled profile exposes an admitted Recorder tool.
+If required native memory is disabled or unsupported, record the missing outcome
+and exact native dependency. Conversation history, an application database or
+replacement callbacks do not establish the requested native recall.
+Where supported and granted, Recorder binds to its owning identity. The ordinary
+generated host disables distiller/steward and operator_scope to avoid implicit
+promotion. Do not require disabling useful own-identity memory or credit these defaults as
 blanket tenant isolation. Check deliberate application access and publication into
 an approved shared library. Preexisting or explicit shared Mob/Realm data and
 trusted host inspection, memory and Console APIs require deliberate access policy.

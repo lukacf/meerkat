@@ -86,6 +86,42 @@ async def restore(saved, choice, **changes):
     return await service.restore_saved_selection(service.guide.identity, **selected)
 
 
+@pytest.mark.parametrize("operation", ["write", "batch"])
+async def test_nested_source_written_with_group_umask_remains_recoverable(saved, operation):
+    service, directory, workspace, frozen, receipt = saved
+    name = "application/new-parent/nested/retained.py"
+    content = "# Retained inert source, never executed.\n"
+    previous_mask = os.umask(0o002)
+    try:
+        if operation == "write":
+            workspace.write_file(name, content)
+        else:
+            workspace.apply_batch([{"kind": "write", "path": name,
+                                    "content": content, "expected_sha256": None}])
+    finally:
+        os.umask(previous_mask)
+    receipt["files"] = workspace.list_files()
+    write_private(directory / "receipt.json", receipt)
+    before = disk_bytes(directory)
+    choice = await candidate(saved)
+    assert choice["build_id"] == directory.name
+    result = await restore(saved, choice)
+    assert result["build_id"] == directory.name
+    assert workspace.read_file(name) == content
+    assert disk_bytes(directory) == before
+
+
+async def test_saved_selection_still_refuses_group_writable_nested_source(saved):
+    service, directory, workspace, frozen, receipt = saved
+    workspace.write_file("application/new-parent/nested/retained.py", "# Inert source.\n")
+    parent = workspace.project / "application/new-parent"
+    parent.chmod(0o770)
+    result = await service.saved_selection(service.guide.identity)
+    assert result["candidates"] == [] and result["unavailable_count"] == 1
+    assert stat.S_IMODE(parent.stat().st_mode) == 0o770
+    assert not (directory.parent / "latest.json").exists()
+
+
 async def test_original_saved_source_can_be_selected_after_current_guide_changes_without_granting_cleanup(saved):
     service, directory, workspace, frozen, receipt = saved
     service.guide.state["version"] = 8

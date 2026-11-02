@@ -308,6 +308,60 @@ pub(crate) async fn broken_members_of(
         .collect()
 }
 
+/// The boot answer of a root mob whose stored state could not be restored.
+///
+/// A failure of the mob's store (a read the store could not serve now, or
+/// stored state that cannot be read or decoded) and records of the store
+/// that disagree among themselves become the typed quarantine Core gives a
+/// persisted mob store that does not restore ([`MobError::MobQuarantined`],
+/// with the class the failure met). The root mob is the gateway's own, so
+/// its quarantine still fails the boot, but a host and its supervisor tell a
+/// store that could not serve now (retryable: a restart may pass) from one
+/// that needs a repair. Every other failure is returned as it is.
+pub(crate) fn root_mob_restore_failure(
+    mob_id: &meerkat_mob::MobId,
+    error: MobRuntimeError,
+) -> MobRuntimeError {
+    let MobRuntimeError::Mob(error) = error else {
+        return error;
+    };
+    let class = error.restore_quarantine_class();
+    let store_fault = matches!(
+        class,
+        meerkat_mob::MobQuarantineClass::StoreUnavailable
+            | meerkat_mob::MobQuarantineClass::StoreUnreadable
+    ) || matches!(
+        error,
+        MobError::IncarnationInconsistent { .. } | MobError::IncarnationDestroyed { .. }
+    );
+    if !store_fault || matches!(error, MobError::MobQuarantined { .. }) {
+        return MobRuntimeError::Mob(error);
+    }
+    MobRuntimeError::Mob(MobError::MobQuarantined {
+        mob_id: mob_id.clone(),
+        class,
+        cause: Arc::new(error),
+    })
+}
+
+/// The persisted mobs an agent mob-tool state keeps quarantined, as the
+/// gateway status lists them: each row as `mob/list` names it (id, class,
+/// whether a later attempt may restore it with no repair, the attempts so
+/// far, and the refusal a lookup of the mob answers).
+pub(crate) fn quarantined_mobs_json(
+    quarantined: &[meerkat_mob_mcp::QuarantinedMob],
+) -> serde_json::Value {
+    serde_json::Value::Array(
+        quarantined
+            .iter()
+            .map(|row| {
+                serde_json::to_value(meerkat_mob_mcp::wire_quarantined_mob_row(row))
+                    .unwrap_or(serde_json::Value::Null)
+            })
+            .collect(),
+    )
+}
+
 /// Whether a mob runs as its handles observe it without asking its actor:
 /// the last phase its actor published is live (creating or running) and the
 /// actor has not stopped. An actor that fail-stopped keeps the live phase it
@@ -10458,11 +10512,9 @@ impl MobRuntime {
         // recorded on create and the one compared on resume are the same form.
         // Recording a pre-normalization definition would mismatch its own
         // first boot.
-        let event_log_empty = spec
-            .storage
-            .is_event_log_empty()
-            .await
-            .map_err(|err| MobRuntimeError::Mob(MobError::from(err)))?;
+        let event_log_empty = spec.storage.is_event_log_empty().await.map_err(|err| {
+            root_mob_restore_failure(&mob_id, MobRuntimeError::Mob(MobError::from(err)))
+        })?;
         let manifest_location = spec.mob_storage_provenance.manifest_location();
         // Health-visible record of a candidate that knowingly boots a stored
         // definition differing from the supplied one.
@@ -10491,11 +10543,16 @@ impl MobRuntime {
                 None => false,
             };
             if read_no_definition
-                && let Some(written) = spec
-                    .storage
-                    .created_definition_snapshot()
-                    .await
-                    .map_err(|err| MobRuntimeError::Mob(MobError::from(err)))?
+                && let Some(written) =
+                    spec.storage
+                        .created_definition_snapshot()
+                        .await
+                        .map_err(|err| {
+                            root_mob_restore_failure(
+                                &mob_id,
+                                MobRuntimeError::Mob(MobError::from(err)),
+                            )
+                        })?
             {
                 return Err(MobRuntimeError::Mob(
                     MobError::MobDefinitionAuthorityChanged {
@@ -10512,18 +10569,17 @@ impl MobRuntime {
                 // judgement, so what was resolved from its definition
                 // describes the mob that runs.
                 Some(LaunchDefinitionRead::Resume(judged)) => *judged,
-                Some(LaunchDefinitionRead::Fresh) | None => {
-                    judge_resume(
-                        &spec.storage,
-                        &spec.mob_storage_provenance,
-                        spec.composition_authority,
-                        spec.candidate_definition,
-                        &spec.definition,
-                        &raw_definition,
-                        false,
-                    )
-                    .await?
-                }
+                Some(LaunchDefinitionRead::Fresh) | None => judge_resume(
+                    &spec.storage,
+                    &spec.mob_storage_provenance,
+                    spec.composition_authority,
+                    spec.candidate_definition,
+                    &spec.definition,
+                    &raw_definition,
+                    false,
+                )
+                .await
+                .map_err(|error| root_mob_restore_failure(&mob_id, error))?,
             };
             if judged.record_supplied_composition
                 && let Some(location) = manifest_location.as_ref()
@@ -10694,7 +10750,9 @@ impl MobRuntime {
         let handle = if event_log_empty {
             crate::boxed_future::boxed(|| builder.create()).await?
         } else {
-            let handle = crate::boxed_future::boxed(|| builder.resume()).await?;
+            let handle = crate::boxed_future::boxed(|| builder.resume())
+                .await
+                .map_err(|error| root_mob_restore_failure(&mob_id, MobRuntimeError::Mob(error)))?;
             // A Stop an earlier process placed and never finished is a durable
             // barrier: resume hands back a handle that still reads Running, and
             // Core's recovery finishes that Stop afterwards. The phase is read
@@ -11428,6 +11486,20 @@ impl MobRuntime {
 
     pub fn agent_mob_mcp_state(&self) -> Option<Arc<meerkat_mob_mcp::MobMcpState>> {
         self.agent_mob_mcp_state.clone()
+    }
+
+    /// The persisted child mobs whose stores did not restore, kept
+    /// quarantined by the agent mob-tool state, each with its class and the
+    /// failure its last restore attempt met. Such a mob does not fail the
+    /// boot: it stays hosted (in the hosted set) but does not run, and
+    /// `meta/status` lists it. Empty without an agent mob-tool state; an
+    /// error, never an empty list, when the restore of the persisted child
+    /// mobs failed.
+    pub async fn quarantined_mobs(&self) -> Result<Vec<meerkat_mob_mcp::QuarantinedMob>, MobError> {
+        match &self.agent_mob_mcp_state {
+            Some(state) => state.quarantined_mobs().await,
+            None => Ok(Vec::new()),
+        }
     }
 
     /// The realm-scoped WorkGraph service the runtime was bootstrapped with.

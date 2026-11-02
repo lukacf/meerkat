@@ -5,6 +5,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -96,17 +97,17 @@ def test_only_the_declared_integer_schema_version_is_accepted(version):
 async def test_saved_setup_retains_organization_across_host_upgrade_and_recreation(tmp_path, monkeypatch):
     monkeypatch.setattr("launchkit.guide.planner_capability", lambda: {"available": False})
     first = example()
-    service = GuideService(GuideStore(tmp_path), object(), organization=first)
+    service = GuideService(GuideStore(tmp_path), SimpleNamespace(), organization=first)
     created = await service.create()
     first["starting_examples"].clear()
     assert created["organization"]["starting_examples"]
     assert created["brief"]["facts"] == {}
     assert created["proposal"] is None and created["blueprint"] is None
     second = example() | {"version": "2.0.0", "starting_examples": []}
-    restarted = GuideService(GuideStore(tmp_path), object(), organization=second)
+    restarted = GuideService(GuideStore(tmp_path), SimpleNamespace(), organization=second)
     assert restarted.store.get(created["id"])["organization"] == created["organization"]
     assert restarted.new()["organization"]["starting_examples"] == []
-    assert "organization" not in GuideService(GuideStore(tmp_path), object()).new()
+    assert "organization" not in GuideService(GuideStore(tmp_path), SimpleNamespace()).new()
     new = restarted.new()
     new["organization"]["label"] = "User edit"
     assert restarted.new()["organization"]["label"] == "Example workplace"

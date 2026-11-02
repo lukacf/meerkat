@@ -190,6 +190,7 @@ RPC_PUBLIC_WRAPPERS: dict[str, tuple[type, str]] = {
     "mob/snapshot": (MeerkatClient, "mob_snapshot"),
     "mob/destroy": (MeerkatClient, "mob_destroy"),
     "mob/rotate_supervisor": (MeerkatClient, "mob_rotate_supervisor"),
+    "mob/restore_retry": (MeerkatClient, "mob_restore_retry"),
     "mob/claim_callback_route": (MeerkatClient, "mob_claim_callback_route"),
     "mob/submit_work": (MeerkatClient, "mob_submit_work"),
     "mob/conclude_objective": (MeerkatClient, "mob_conclude_objective"),

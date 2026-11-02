@@ -347,7 +347,7 @@ class ConsoleConnectTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_all_completion_distinctions_preserved_without_payload_or_stopped_inference(self):
         kinds = ["completed", "completed_without_result", "callback_pending", "callback_batch_pending",
-                 "cancelled", "abandoned", "abandoned_with_error", "completed_with_finalization_failure", "runtime_terminated"]
+                 "cancelled", "abandoned", "abandoned_with_error", "completed_with_finalization_failure", "runtime_terminated", "outcome_unknown"]
         for kind in kinds:
             child = self.child(CONNECT_FIXTURE_COMPLETION=kind); await child.start()
             result = await child.send("An exact input")

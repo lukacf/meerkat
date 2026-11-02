@@ -1836,7 +1836,12 @@ pub enum RetiredIdentityCause {
     /// asked for.
     RoleMove,
     /// Core rotated the identity onto a fresh session under the same role,
-    /// in a step no Meta verb asked for (a host's own rotation).
+    /// in a step no Meta verb asked for (a host's own rotation). A host's
+    /// rotation that started before a reset, a delete or a role move began
+    /// asking Core for its own rotation, and ended while that step waited for
+    /// Core's answer (Core refuses the step while the rotation runs), is
+    /// `Rotated` too; a rotation that starts while such a step is asking may
+    /// still be heard as the step's.
     Rotated,
 }
 

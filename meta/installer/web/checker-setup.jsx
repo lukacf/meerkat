@@ -153,7 +153,7 @@ export function CheckerSetup({ onReadiness, onClose }) {
       {(posting && settings?.status !== "ready" || settings?.status === "preparing") && <p>{posting
         ? "The preparation response is still pending. Check its saved status without starting another preparation."
         : "Preparing app checks."} The download may continue if you close this card.</p>}
-      {settings?.status === "ready" && <p>App checks ready.</p>}
+      {settings?.status === "ready" && <p>Application checker configured.</p>}
       {settings?.status === "unavailable" && <p>This computer cannot build applications yet. You can continue designing and deploy a package built on a supported Mac.</p>}
       {settings?.status === "failed" && <p>App checks could not be prepared. Review the status before trying again.</p>}
       {settings?.detail && ["unavailable", "failed"].includes(settings.status) &&

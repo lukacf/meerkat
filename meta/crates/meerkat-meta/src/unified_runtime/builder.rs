@@ -3404,11 +3404,7 @@ impl UnifiedRuntimeBuilder {
                 host.realm.ensure_realm_record(&host.realm_id).await?;
                 crate::mob_composition_manifest::host_store_mob_storage(&host.realm)
                     .await
-                    .map_err(|error| {
-                        UnifiedRuntimeBuilderError::Io(format!(
-                            "failed to open the host store realm's mob storage: {error}"
-                        ))
-                    })?
+                    .map_err(|error| root_host_store_mob_storage_failure(&definition.id, error))?
             }
             (None, Some(supplied), _) => supplied,
             // A persistent build keeps its mob storage durable beside the
@@ -3692,6 +3688,31 @@ fn storage_resolution_builder_error(
         crate::storage_health::StorageResolutionError::Delivery(error) => {
             UnifiedRuntimeBuilderError::Delivery(error)
         }
+    }
+}
+
+/// The boot answer of a host store realm whose root mob storage could not be
+/// opened. The open reads the root mob's scopes, so its failure is the root
+/// mob's store not restoring: the typed quarantine
+/// ([`meerkat_mob::MobError::MobQuarantined`], through
+/// [`crate::mob_handle_runtime::root_mob_restore_failure`]) with the class the
+/// read met, so a host store that could not serve now (`store_unavailable`,
+/// retryable: a later boot may pass) is told from stored data that needs a
+/// repair. A failure that is not a store fault keeps its text.
+fn root_host_store_mob_storage_failure(
+    mob_id: &meerkat_mob::MobId,
+    error: meerkat_mob::store::MobStoreError,
+) -> UnifiedRuntimeBuilderError {
+    match crate::mob_handle_runtime::root_mob_restore_failure(
+        mob_id,
+        crate::mob_handle_runtime::MobRuntimeError::Mob(meerkat_mob::MobError::from(error)),
+    ) {
+        quarantined @ crate::mob_handle_runtime::MobRuntimeError::Mob(
+            meerkat_mob::MobError::MobQuarantined { .. },
+        ) => UnifiedRuntimeBuilderError::Bootstrap(UnifiedRuntimeBootstrapError::Mob(quarantined)),
+        other => UnifiedRuntimeBuilderError::Io(format!(
+            "failed to open the host store realm's mob storage: {other}"
+        )),
     }
 }
 

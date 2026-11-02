@@ -138,6 +138,7 @@ async def test_public_definition_modes_do_not_admit_unsafe_source(case, change):
     ('mob_config_path', '/another/mob.toml'), ('mob_config_inline', '[mob]'),
     ('prepared_application_bundle', b'inert'), ('prepared_application_digest', 'another'),
     ('application_tool_policies', ['another']), ('gateway_bin', '/another/gateway'),
+    ('gateway_transport', lambda: object()),
     ('persistent_state', '/another/state'), ('declare_spec_update_expected_revision', 2),
     ('roster_provider', object()), ('topology_provider', object()),
     ('meerkat_config_path', '/another/host-config'),
@@ -199,7 +200,7 @@ async def test_one_connected_owner_and_idempotent_joined_shutdown(case, monkeypa
     config = await configure(f)
     Runtime = runtime_fixture(f, monkeypatch)
     runtime = await f.owner.connect(config, f.app)
-    assert type(runtime) is Runtime and runtime is f.owner.runtime is f.app.context.runtime
+    assert isinstance(runtime, Runtime) and runtime is f.owner.runtime is f.app.context.runtime
     with pytest.raises(CustodyError, match='already entered'):
         await f.owner.connect(config, f.app)
     await f.owner.shutdown(runtime)
@@ -227,7 +228,8 @@ async def test_failed_start_settles_same_runtime_without_retry(case, monkeypatch
 @pytest.mark.asyncio
 @pytest.mark.parametrize('field,value', [
     ('session_builder', object()), ('runtime_store', object()), ('agent_customizer', object()),
-    ('auth_config', object()), ('http_listen', '0.0.0.0:9999'),
+    ('auth_config', object()), ('gateway_transport', lambda: object()),
+    ('http_listen', '0.0.0.0:9999'),
     ('console_require_app_auth', False), ('meerkat_config_path', '/another/config'),
 ])
 async def test_changed_config_cannot_replace_original_providers_or_http_selection(case, monkeypatch, field, value):
@@ -250,3 +252,66 @@ async def test_provider_change_during_startup_settles_the_original_runtime(case,
         await f.owner.connect(config, f.app)
     assert f.app.context.runtime is None
     assert f.events == ['construct', 'bind', 'connect', 'shutdown']
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('inherited_stack', [None, '8388608', '33554432'])
+async def test_ordinary_gateway_stack_budget_is_only_in_its_child_environment(case, monkeypatch, inherited_stack):
+    """Exercise the real SDK spawn boundary, intercepting before any child starts."""
+    import os
+    from meerkat_meta._transport import PersistentTransport
+    import meerkat_meta._transport as sdk_transport
+
+    monkeypatch.delenv('META_GATEWAY_STDERR_FILE', raising=False)
+    monkeypatch.delenv('META_GATEWAY_STDERR', raising=False)
+    if inherited_stack is None:
+        monkeypatch.delenv('RKAT_WORKER_STACK_BYTES', raising=False)
+    else:
+        monkeypatch.setenv('RKAT_WORKER_STACK_BYTES', inherited_stack)
+    monkeypatch.setenv('RUST_MIN_STACK', '2097152')
+    monkeypatch.setenv('FORGE_STACK_TEST_MARKER', 'preserved')
+    parent = dict(os.environ)
+    config = await configure(case)
+    selected = case.owner._new_runtime(config)._make_gateway_transport()
+    unrelated = PersistentTransport(str(case.gateway.path))
+    calls = []
+
+    class BeforeChildStart(RuntimeError):
+        pass
+
+    def capture(argv, **options):
+        calls.append((argv, options))
+        raise BeforeChildStart('inert interception before child creation')
+
+    monkeypatch.setattr(sdk_transport.subprocess, 'Popen', capture)
+    for transport in (selected, unrelated):
+        with pytest.raises(BeforeChildStart):
+            transport.start()
+    assert len(calls) == 2
+    assert calls[0][0] == [str(case.gateway.path), '--persistent']
+    assert calls[0][1]['env'].get('RKAT_WORKER_STACK_BYTES') == '16777216'
+    # Compare all inherited entries without printing environment values on failure.
+    selected_environment_matches = calls[0][1]['env'] == {**parent, 'RKAT_WORKER_STACK_BYTES': '16777216'}
+    unrelated_environment_matches = calls[1][1]['env'] == parent
+    parent_environment_unchanged = dict(os.environ) == parent
+    assert selected_environment_matches
+    assert unrelated_environment_matches
+    assert parent_environment_unchanged
+    assert case.owner.runtime is None and case.app.context.runtime is None
+
+
+@pytest.mark.asyncio
+async def test_optional_transport_factory_cannot_enter_ordinary_configuration(case):
+    with pytest.raises(CustodyError):
+        await configure(case, gateway_transport=None)
+    assert case.owner.config is None and case.owner.runtime is None
+
+
+@pytest.mark.asyncio
+async def test_changed_gateway_refuses_at_actual_native_factory(case):
+    config = await configure(case)
+    runtime = case.owner._new_runtime(config)
+    config.gateway_bin = '/another/gateway'
+    with pytest.raises(CustodyError, match='changed before native construction'):
+        runtime._make_gateway_transport()
+    assert case.owner.runtime is None and case.app.context.runtime is None

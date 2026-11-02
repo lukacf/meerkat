@@ -28,7 +28,13 @@ packager reads, per target (`linux-x86_64`, `macos-arm64`):
   URLs must be Meta or Connect release downloads (the monorepo's, or the
   standalone repositories' for releases made before it), or PyPI files.
 - `selection`: the product owner's `forge-meta-toolkit-runtime-selection-v1`
-  document. Its artifact sizes and SHA-256 values must equal the pins.
+  document. Its artifact sizes and SHA-256 values must equal the pins. Its
+  `artifact_root` is provenance only, since `relocate_selection` replaces it and
+  every artifact path with the fetched input directory before any read: name the
+  release job's own fetch root on the GitHub-hosted runner,
+  `/home/runner/work/_temp/installer-inputs/<paths.artifact_root>`, a generic
+  runner path rather than a private path or user name. The inputs carried over
+  from the standalone repository name its job's root, `forge-inputs`.
 - `paths`: where each selected artifact sits among `files`, under
   `artifact_root`, in the form `launchkit.packaged_runtime.relocate_selection` reads.
 - `gateway`: the pinned guide gateway, outside the product root.
@@ -102,8 +108,20 @@ candidate again.
    the remote:
    `git tag -a meta-installer-v<version> <source_sha> -m "Meta installer <version>"`, then
    `git push origin meta-installer-v<version>`.
-5. Publish:
-   `gh workflow run meta-installer-release.yml --ref main -f release_mode=publish -f artifact_selection='<selection JSON>'`.
+5. Publish with `meta/scripts/installer-publish-dispatch.py`. It reads Forge's
+   candidate review projection and Connect's A5, application and Guide join
+   records, each checked against the SHA-256 its owner reported. It checks every
+   join against the candidate and its release inputs, and builds the request
+   from those checked bytes only. While main's head is the merged commit, it
+   runs
+   `gh workflow run meta-installer-release.yml --ref main -f release_mode=publish -f artifact_selection='<selection JSON>' -f candidate_review=<base64> -f candidate_review_sha256=<sha256>`.
+   `candidate_review` carries the exact bytes of Forge's candidate review
+   projection (`forge-candidate-review-v1`), whose SHA-256 is given
+   separately. Before any tag or release write, publication hashes the
+   decoded bytes, parses them strictly and derives the accepted candidate
+   from them. It refuses another candidate run, attempt or manifest, other
+   package digests, and any outcome or verdict other than `accepted`. Only the
+   projection's SHA-256 is printed; the selection asset stays identity-only.
    Publication re-verifies every attestation against main and binds the draft
    to the selection first. It then publishes the draft as a prerelease and
    checks that the repository's latest release (Core's) has not changed.

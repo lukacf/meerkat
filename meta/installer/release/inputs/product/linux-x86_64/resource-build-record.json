@@ -1,0 +1,102 @@
+{
+  "scope": "linux_x86_64_product_resources_only_native_cli_supplied_separately",
+  "resources": "/Users/luka/.agentbus/handoffs/connect-native-mac/application-linux-resource-filesystem-_ur281ne/volume/stage/application-4d-resources-s52j3lg_/resources/meerkat-connect-linux-x86_64/libexec/meerkat-connect",
+  "resources_sha256": "aba32d4a5bf2a2238cae8aa5993ea83ce5fb8c2c79167cd05d30675d6c0fd8ae",
+  "entries": 18594,
+  "archive": "/Users/luka/.agentbus/handoffs/connect-native-mac/application-linux-resource-filesystem-_ur281ne/volume/stage/application-4d-resources-s52j3lg_/resources/meerkat-connect-resources-linux-x86_64.tar.gz",
+  "archive_sha256": "197b9f6c65fb5e7af4542d80e414123148633deb7e8dddadd04f410b4594d27c",
+  "archive_bytes": 328973596,
+  "prepare_source_sha256": "5a2aec2c5477a94c8d45adf62bbff20628b6c26e9c0f8f035bc29777eb59aff3",
+  "runtime_compatibility": {
+    "library_contents_sha256": "e4681ccde97339f01a7f57dfe8d25b93f8427553b36c2a9eb4baf33881c3c3aa",
+    "library_schema_version": 2,
+    "supported_host": {
+      "platform": "linux",
+      "machine": "x86_64",
+      "pointer_bits": 64,
+      "glibc": "glibc 2.39"
+    },
+    "runtime_metadata": {
+      "python": {
+        "implementation": "cpython",
+        "version": "3.11.16",
+        "platform": "linux",
+        "machine": "x86_64",
+        "pointer_bits": 64
+      },
+      "node": {
+        "version": "v22.23.2",
+        "platform": "linux",
+        "arch": "x64",
+        "npm_version": "10.9.8"
+      }
+    },
+    "scope": "hash_bound_archive_metadata_and_declared_host_only_not_runtime_qualification"
+  },
+  "schema_version": 1,
+  "target": "linux-x86_64",
+  "packager_source_sha256": "4bfdb4ba728183e32fa9e1c10cc1626735bd1bf0a32fefade5b880b95ca92bbe",
+  "input_selection": {
+    "kind": "explicit_pinned_connect_resource_inputs",
+    "library": {
+      "path": "/Users/luka/.agentbus/handoffs/connect-native-mac/application-linux-resource-filesystem-_ur281ne/volume/stage/application-4d-library-s52j3lg_/library/toolkit-library-20261031-application-4d519f-linux-inputs-linux-x86_64.tar.gz",
+      "sha256": "c56365c5cd39c3958f36c85c9fdf6a824dc00c3ad5fd70a62a84bc8ebf341b2b",
+      "bytes": 132374145
+    },
+    "starter": {
+      "path": "/Users/luka/.agentbus/handoffs/connect-native-mac/application-linux-resource-filesystem-_ur281ne/volume/stage/application-4d-resources-s52j3lg_/starter",
+      "manifest_sha256": "52b414e6abde2c83556d6e90db9ece4f17b709c217ed04f5b63dc1c372b95cf6",
+      "files": {
+        "README.md": {
+          "sha256": "da7c0f800676143e5de573142578f7841f79b511ab930105442a1dae04972a9f",
+          "bytes": 1557
+        },
+        "bootstrap_host.py": {
+          "sha256": "f669afb76366c09c60ae1378bb529f8c2a891174344d7cbaf71ca2cd43c1f7ee",
+          "bytes": 22725
+        },
+        "current-distribution.json": {
+          "sha256": "7d3d4963e17f84d2d580f10a857b39048f8cadd035347618f115f6982f48e0c4",
+          "bytes": 154
+        },
+        "prepare_host.py": {
+          "sha256": "24e8a8e3d1537983f9cd8bcf7d26ebeb773224ffa05bacf7dcb20be5aeea178e",
+          "bytes": 68008
+        },
+        "release-manifest.json": {
+          "sha256": "52b414e6abde2c83556d6e90db9ece4f17b709c217ed04f5b63dc1c372b95cf6",
+          "bytes": 267
+        },
+        "start.py": {
+          "sha256": "f542dabc4539b9ffaf456f58f0b2afb8df97086ba9011f58a7adf5ce6a68ce49",
+          "bytes": 20097
+        }
+      }
+    }
+  },
+  "npm_acquisition_inputs": {
+    "node_archive": {
+      "path": "/Users/luka/.agentbus/handoffs/connect-native-mac/application-current-linux-resources-source-s52j3lg_/resource-inputs/upstream/node-v24.19.0-linux-x64.tar.gz",
+      "sha256": "f625d97cd707df4ff96254916fbc5ff014f09c09effe5a1e0ca8f6d41a8789d4",
+      "bytes": 57409532
+    },
+    "npm_archive": {
+      "path": "/Users/luka/.agentbus/handoffs/connect-native-mac/application-current-linux-resources-source-s52j3lg_/resource-inputs/upstream/npm-12.2.0.tgz",
+      "sha256": "6666b48816b39b86c3febac7b51a4ee4de6c5ca589c382ad8004b6b113f86677",
+      "bytes": 3054025
+    },
+    "runtime_metadata": {
+      "version": "v24.19.0",
+      "platform": "linux",
+      "arch": "x64",
+      "npm_version": "11.17.0"
+    },
+    "scope": "captured_archive_metadata_only_not_runtime_qualification"
+  },
+  "node_prebuilt_policy_input": {
+    "path": "/Users/luka/.agentbus/handoffs/connect-native-mac/application-current-linux-resources-source-s52j3lg_/resource-inputs/node-prebuilt-policy.json",
+    "sha256": "008a6336d1cab2db145c9a9ddb07168b693edcdb25e91ce616356e6051d38ffd",
+    "bytes": 494,
+    "scope": "explicit_target_and_origins_host_binds_selected_python_during_preparation"
+  }
+}

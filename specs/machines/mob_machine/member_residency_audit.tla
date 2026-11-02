@@ -610,6 +610,25 @@ RDestroyMember ==
     \/ ObserveDestroyMemberRetirementArchivedLiveRunning(Id1, Rid1, 1, 0, Some(Sess1), AuditDisposal)
     \/ ObserveDestroyMemberRetirementArchivedRetiredRunning(Id1, Rid1, 1, 0, Some(Sess1), AuditDisposal)
 
+\* Member 1's custody restore left unrestored at a start, and its re-attempt:
+\* a cleanup delivery restore deferred on a store that could not serve, in a
+\* running or a stopped mob, and the re-attempt that restored it (the record
+\* goes). The runs that end seats (retire, rotate-same and terminal) drive
+\* them, so a record can be in place across every seat-ending arm those runs
+\* drive, and the generated invariant custody_unrestored_members_are_seated
+\* is checked with a record, not only over an empty map.
+CustodyRecordRunning ==
+    RecordMemberCustodyUnrestoredSeatedRunning(Id1, "CleanupDelivery", "StoreUnavailable")
+CustodyRecordStopped ==
+    RecordMemberCustodyUnrestoredSeatedStopped(Id1, "CleanupDelivery", "StoreUnavailable")
+CustodyResolveRunning == ResolveMemberCustodyRestoredRecordedRunning(Id1)
+CustodyResolveStopped == ResolveMemberCustodyRestoredRecordedStopped(Id1)
+CustodyArms ==
+    \/ CustodyRecordRunning
+    \/ CustodyRecordStopped
+    \/ CustodyResolveRunning
+    \/ CustodyResolveStopped
+
 AuditRetireNext ==
     \/ WRecover
     \/ WBind
@@ -632,6 +651,7 @@ AuditRetireNext ==
     \/ RReseatOpen
     \/ RReseat
     \/ RExempt
+    \/ CustodyArms
     \/ AuditQuiesceStop
     \/ StopRunning
     \/ ResumeStopped
@@ -685,6 +705,8 @@ AuditTerminalNext ==
            \/ ResolveRuntimeBindingRefusalStaleCompleted(Id1, Rid1, Sess1, AuditCode, AuditReason, Some(a))
            \/ ResolveRuntimeBindingRefusalStaleDestroyed(Id1, Rid1, Sess1, AuditCode, AuditReason, Some(a))
     \/ AuditStaleFeedbackTerminal(Id1, Rid1, 1, 0, Sess1)
+    \/ CustodyRecordRunning
+    \/ CustodyResolveRunning
     \/ AuditQuiesceComplete
     \/ CompleteRunning
     \/ MarkCompleted
@@ -1035,6 +1057,7 @@ AuditRotateSameNext ==
     \/ QBegin
     \/ QCommit
     \/ QReleaseVerdict
+    \/ CustodyArms
     \/ AuditQuiesceStop
     \/ StopRunning
     \/ ResumeStopped

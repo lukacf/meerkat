@@ -11,6 +11,7 @@ import pytest
 from launchkit import compiler
 from launchkit.architect import ArchitectService
 from launchkit.blueprint import Blueprint
+from launchkit.organization import organization_snapshot
 from launchkit.projects import fingerprint
 from test_guide import complete_brief, guide_client, start
 from test_guided_edit_publication import activate, context, edit_args
@@ -30,6 +31,11 @@ def inert_isolation_probe(monkeypatch):
     monkeypatch.setattr("launchkit.implementation_workspace._sandbox_executable", lambda: "/inert/sandbox")
 
 
+def handoff_guidance(authoring):
+    return next(row for row in authoring["requirements"]
+        if "find_and_install user_context" in row)
+
+
 def saved_plan(client, service, value):
     saved = start(client)
     saved.update(proposal=value, status="refining", stage="review", question=None,
@@ -45,6 +51,12 @@ def test_normal_clarification_authors_supported_caller_from_host_contract(
         guide_client, selected_runtime, declared_classes, helper_selected, tmp_path, monkeypatch):
     client, agent, service = guide_client
     service.package_runtime_provider = lambda state: selected_runtime
+    document = ("  Incident history is available through our workplace tools.\n"
+        "Use the setup instructions at https://tools.example.test/start.\n"
+        "Let Connect resolve the tool; retain this original wording.\n")
+    service.organization = organization_snapshot({"schema_version": 1,
+        "id": "workplace", "version": "1", "label": "Workplace",
+        "guide_context": document, "starting_examples": []})
     plan = setup_with_classes_spec() if declared_classes else setup_spec()
     plan["target"] = "linux" if selected_runtime.target == "linux-x86_64" else "mac"
     plan["agent_classes"][0]["tools"].pop("rust_bundles")
@@ -64,6 +76,7 @@ def test_normal_clarification_authors_supported_caller_from_host_contract(
         activate(author, guide_context)
         inspected = await author.inspect({})
         assert inspected["schema"] is None
+        assert inspected["guided_setup"]["organization"]["guide_context"] == document
         availability = inspected["guided_setup"]["package_availability"]
         assert availability["blueprint_hash"] == fingerprint(blueprint)
         # An ordinary package can be ready even though setup has not been
@@ -73,6 +86,11 @@ def test_normal_clarification_authors_supported_caller_from_host_contract(
         assert requirements["scope"] == "selected_runtime_source_authoring"
         assert requirements["candidate_supported"] is (not helper_selected)
         assert requirements["caller_bundle"]["operation"] == "find_and_install"
+        # The handoff recipe must survive selection of a helper, including a
+        # helper whose caller has not yet been repaired by this guide turn.
+        handoff = handoff_guidance(requirements)
+        assert "intact" in handoff and "Connect setup agent" in handoff
+        assert "No organization catalog, document parser" in handoff
         schema = (await author.inspect({"include_schema": True}))["schema"]
         assert "rust_bundles" in schema["$defs"]["ToolGrants"]["properties"]
         for topic in ("all", "capabilities"):
@@ -111,6 +129,11 @@ def test_normal_clarification_authors_supported_caller_from_host_contract(
     shown = client.get("/api/guide/" + saved["id"]).json()
     assert shown["package_availability"]["available"] is True
     assert shown["package_availability"]["source_authoring"]["candidate_supported"] is True
+    assert shown["organization"]["guide_context"] == document
+    assert shown["organization"] == before["organization"]
+    # This is the now-supported helper/caller plan after real atomic publication.
+    assert handoff_guidance(observed["requirements"]) == handoff_guidance(
+        shown["package_availability"]["source_authoring"])
     assert shown["package_availability"]["blueprint_hash"] == fingerprint(shown["proposal"])
     assert shown["proposal"]["agent_classes"][0]["tools"]["rust_bundles"] == [
         observed["requirements"]["caller_bundle"]["value"]]

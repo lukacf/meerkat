@@ -41,6 +41,7 @@ pub mod grant_authority;
 pub mod meerkat_machine;
 pub mod mob_host_binding_authority;
 pub mod mob_machine;
+pub mod mob_store_restore_lifecycle;
 pub mod occurrence_lifecycle;
 pub mod runtime_delivery;
 pub mod schedule_lifecycle;
@@ -182,6 +183,9 @@ pub const DETACHED_JOB_PRODUCTION_RUST_MODULE: &str = "machines::detached_job";
 pub const FORKED_PARTICIPANT_LIFECYCLE_PRODUCTION_RUST_CRATE: &str = "meerkat-mob";
 pub const FORKED_PARTICIPANT_LIFECYCLE_PRODUCTION_RUST_MODULE: &str =
     "machines::forked_participant_lifecycle";
+pub const MOB_STORE_RESTORE_LIFECYCLE_PRODUCTION_RUST_CRATE: &str = "meerkat-mob";
+pub const MOB_STORE_RESTORE_LIFECYCLE_PRODUCTION_RUST_MODULE: &str =
+    "machines::mob_store_restore_lifecycle";
 pub const TEMPORARY_COUNCIL_LIFECYCLE_PRODUCTION_RUST_CRATE: &str = "meerkat-mob";
 pub const TEMPORARY_COUNCIL_LIFECYCLE_PRODUCTION_RUST_MODULE: &str =
     "machines::temporary_council_lifecycle";
@@ -4241,6 +4245,20 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
                 ],
             ),
             NamedTypeBinding::string_enum(
+                "MemberCustodyRestoreKind",
+                &["StartupBinding", "CleanupDelivery"],
+            ),
+            NamedTypeBinding::string_enum(
+                "MemberCustodyCauseKind",
+                &[
+                    "ServedElsewhere",
+                    "HostingUnavailable",
+                    "DurableTailUnprovable",
+                    "StoreUnavailable",
+                    "StoreUnreadable",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
                 "MemberWakeAbandonKind",
                 &[
                     "NotCurrent",
@@ -4380,6 +4398,7 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
                     "HostedOnFirstUse",
                     "HeldCreation",
                     "PreparationPending",
+                    "Archived",
                 ],
             ),
             NamedTypeBinding::string_enum(
@@ -4398,6 +4417,7 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
                     "SeatOwed",
                     "HostedOnFirstUse",
                     "AwaitHeldCreation",
+                    "PreparationPending",
                     "RuntimeModeRestamp",
                     "RoleMigrate",
                     "RoleRotate",
@@ -4410,6 +4430,7 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
                     "RefusedNameOwnedByCreated",
                     "RefusedNameTombstoned",
                     "RefusedNameUnreadable",
+                    "RecordOnly",
                 ],
             ),
             NamedTypeBinding::string_enum(
@@ -4429,7 +4450,130 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
             // entry's row records, as the boot's scan read it.
             NamedTypeBinding::string_enum(
                 "RecoveredPresence",
-                &["Present", "PresentUnseated", "Tombstone", "Unreadable"],
+                &[
+                    "Present",
+                    "PresentUnseated",
+                    "PendingConstruction",
+                    "Tombstone",
+                    "Unreadable",
+                    "Archived",
+                ],
+            ),
+            // Identity changes (0.9.9): a change's receipt and consent as its
+            // commit step observed them, its admission verdict, and the
+            // verdict of a new store-owned entry's record.
+            NamedTypeBinding::string_enum(
+                "IdentityChangeReceiptKind",
+                &["Absent", "Same", "Other"],
+            ),
+            NamedTypeBinding::string_enum(
+                "IdentityChangeConsentKind",
+                &["Policy", "Decided", "Imported"],
+            ),
+            NamedTypeBinding::string_enum(
+                "IdentityChangeAdmissionKind",
+                &[
+                    "Admitted",
+                    "Replayed",
+                    "OperationReused",
+                    "NonAuthoritative",
+                    "ChangesHeld",
+                    "DecisionUnbound",
+                    "DecisionExpired",
+                    "ImportedNotHostOperator",
+                    "GrantRevoked",
+                    "MobNotRunning",
+                    "StaleSpec",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "CreatedIdentityRecordVerdict",
+                &[
+                    "Recorded",
+                    "NameHeldByIdentity",
+                    "NameHeldByWorker",
+                    "NameTombstoned",
+                    "NameUnreadable",
+                    "NonAuthoritative",
+                    "ChangesHeld",
+                    "MobNotRunning",
+                ],
+            ),
+            // One identity's removal, archive or unarchive, and its verdict.
+            NamedTypeBinding::string_enum(
+                "IdentityEntryChangeKind",
+                &["Remove", "Archive", "Unarchive"],
+            ),
+            NamedTypeBinding::string_enum(
+                "IdentityEntryChangeVerdict",
+                &[
+                    "Retiring",
+                    "Removed",
+                    "AlreadyRemoved",
+                    "Archiving",
+                    "Archived",
+                    "AlreadyArchived",
+                    "Restored",
+                    "NotArchived",
+                    "OwnedByRoster",
+                    "Unknown",
+                    "InFlight",
+                    "NameUnreadable",
+                    "NonAuthoritative",
+                    "ChangesHeld",
+                    "MobNotRunning",
+                    "PreparationPending",
+                ],
+            ),
+            // Held constructions (0.9.9): the verdicts of a construction's
+            // start, of a settle and of an attempt's end, and how an attempt
+            // ended.
+            NamedTypeBinding::string_enum(
+                "PreparationConstructionVerdict",
+                &[
+                    "Held",
+                    "NotPending",
+                    "NotConstructed",
+                    "ConstructionOpen",
+                    "NonAuthoritative",
+                    "MobNotRunning",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "PreparationSettleVerdict",
+                &[
+                    "Seat",
+                    "ActivationAccepted",
+                    "NotPending",
+                    "ConstructionRequired",
+                    "ConstructionOpen",
+                    "StaleAttempt",
+                    "Expired",
+                    "Mismatch",
+                    "ActivationPending",
+                    "NonAuthoritative",
+                    "MobNotRunning",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "ConstructionEndKind",
+                &["Aborted", "Expired", "Refused", "PublicationFailed"],
+            ),
+            NamedTypeBinding::string_enum(
+                "ConstructionEndVerdict",
+                &["Ended", "NotOpen", "ActivationPending"],
+            ),
+            // The one-entry unlist of a roster-owned identity (0.9.9).
+            NamedTypeBinding::string_enum(
+                "UnlistEntryVerdict",
+                &[
+                    "Retiring",
+                    "Removed",
+                    "Deferred",
+                    "NotADeclaredEntry",
+                    "NonAuthoritative",
+                    "MobNotRunning",
+                ],
             ),
             NamedTypeBinding::string("RuntimeEpochId"),
             NamedTypeBinding::string("ResumeAttemptId"),
@@ -5086,6 +5230,24 @@ runtime_internal_inputs!(
         // The reset's preflight admission, probed by the actor before the
         // reset's retirement batch. Not a surface command.
         AdmitReset,
+        // Identity changes: the actor's commit step decides a change's
+        // admission and records each new store-owned entry, and the handle
+        // holds or releases the mob's changes. None is a surface command.
+        AdmitIdentityChange,
+        RecordCreatedIdentityEntry,
+        SetIdentityChangesHeld,
+        RemoveIdentityEntry,
+        ArchiveIdentityEntry,
+        UnarchiveIdentityEntry,
+        // Host preparation: a held construction's start, a settle and an
+        // attempt's end, decided in the handle's and the actor's steps. None
+        // is a surface command.
+        BeginPreparationConstruction,
+        SettleHostPreparation,
+        EndPreparationConstruction,
+        // The one-entry unlist of a roster-owned identity, decided in the
+        // actor's step for the handle's unlist. Not a surface command.
+        UnlistIdentityEntry,
     ]
 );
 
@@ -5483,6 +5645,51 @@ pub fn forked_participant_lifecycle_schema_metadata() -> MachineSchemaMetadata {
 pub fn dsl_temporary_council_lifecycle_machine() -> MachineSchema {
     temporary_council_lifecycle_schema_metadata()
         .attach_to(temporary_council_lifecycle::TemporaryCouncilLifecycleMachineState::schema())
+}
+
+pub fn dsl_mob_store_restore_lifecycle_machine() -> MachineSchema {
+    mob_store_restore_lifecycle_schema_metadata()
+        .attach_to(mob_store_restore_lifecycle::MobStoreRestoreLifecycleMachineState::schema())
+}
+
+pub fn dsl_mob_store_restore_lifecycle_machine_production_schema() -> MachineSchema {
+    with_production_rust_binding(
+        dsl_mob_store_restore_lifecycle_machine(),
+        MOB_STORE_RESTORE_LIFECYCLE_PRODUCTION_RUST_CRATE,
+        MOB_STORE_RESTORE_LIFECYCLE_PRODUCTION_RUST_MODULE,
+    )
+}
+
+/// Named-type bindings for the quarantined mob store record machine.
+pub fn mob_store_restore_lifecycle_schema_metadata() -> MachineSchemaMetadata {
+    machine_schema_metadata(
+        vec![
+            NamedTypeBinding::string_enum(
+                "MobStoreRestoreLifecyclePhase",
+                &["Unclassified", "Quarantined", "Retrying", "Released"],
+            ),
+            NamedTypeBinding::string_enum(
+                "MobQuarantineClass",
+                &["StoreUnavailable", "StoreUnreadable", "ResumeRefused"],
+            ),
+            NamedTypeBinding::string_enum("MobStoreRetryTrigger", &["Explicit", "OnDemand"]),
+            NamedTypeBinding::string_enum(
+                "MobStoreRestoreOutcome",
+                &["Managed", "Held", "Settled", "Failed"],
+            ),
+            NamedTypeBinding::string_enum(
+                "MobStoreRestoreRefusal",
+                &[
+                    "RetryInFlight",
+                    "NotQuarantined",
+                    "AlreadyClassified",
+                    "NotRetrying",
+                    "NotRetryable",
+                ],
+            ),
+        ],
+        vec![],
+    )
 }
 
 pub fn dsl_temporary_council_lifecycle_machine_production_schema() -> MachineSchema {

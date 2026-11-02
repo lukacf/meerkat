@@ -22,8 +22,8 @@ use super::{
     dsl::{
         dsl_approval_lifecycle_machine, dsl_auth_machine, dsl_detached_job_machine,
         dsl_forked_participant_lifecycle_machine, dsl_meerkat_machine, dsl_mob_machine,
-        dsl_occurrence_lifecycle_machine, dsl_runtime_delivery_machine,
-        dsl_schedule_lifecycle_machine, dsl_session_document_machine,
+        dsl_mob_store_restore_lifecycle_machine, dsl_occurrence_lifecycle_machine,
+        dsl_runtime_delivery_machine, dsl_schedule_lifecycle_machine, dsl_session_document_machine,
         dsl_session_turn_admission_machine, dsl_temporary_council_lifecycle_machine,
         dsl_tool_grant_lifecycle_machine, dsl_work_attention_lifecycle_machine,
         dsl_work_execution_lifecycle_machine, dsl_work_item_admission_machine,
@@ -863,13 +863,14 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                     "mob_declared_apply_authority",
                     "MobMachine",
                     "crates/meerkat-mob/src/runtime/actor/declared_apply.rs",
-                    "MobMachine declared apply realized by the actor: decide one verdict per declared identity from the declaration and member facts and realize it (a Dormant seat, on the entry's archived session when it has one, a same-session restamp, a rotation, a role hold or a typed refusal), refusing every identity of a candidate composition; seal a complete declared roster, marking every unlisted Declared entry whose member is seated and removing every unseated one, leaving one whose spawn is in flight to a later seal, and retire each marked member with the cause Unlisted, whose start row records the mark for replay; let an archived session record go when the session is lost or the host asked for a fresh life; an unseated cause belongs to an entry no member holds, an unlisted mark to a seated Declared entry whose member has no spawn in flight, an archived session record to an identity no member holds, and an entry awaiting its held creation was never created, emitting the identity entry declared, declared roster sealed and archived session forgotten effects",
+                    "MobMachine declared apply realized by the actor: decide one verdict per declared identity from the declaration and member facts and realize it (a Dormant seat, on the entry's archived session when it has one, a same-session restamp, a rotation, a role hold or a typed refusal), refusing every identity of a candidate composition; seal a complete declared roster, marking every unlisted Declared entry whose member is seated and removing every unseated one, leaving one whose spawn is in flight to a later seal, and retire each marked member with the cause Unlisted, whose start row records the mark for replay; unlist one roster-owned identity alone the same way, reading and changing no other entry, and leave it to a later unlist while a spawn, retirement, removal or held construction of it is in flight; answer a store-owned update of an archived identity, or of one awaiting its host's preparation, record only; let an archived session record go when the session is lost or the host asked for a fresh life; an unseated cause belongs to an entry no member holds, an unlisted mark to a seated Declared entry whose member has no spawn in flight, an archived session record to an identity no member holds, and an entry awaiting its held creation was never created, emitting the identity entry declared, declared roster sealed, identity entry unlisted and archived session forgotten effects",
                     CoverageClaims::none()
                         .transitions(&[
                             "DeclareIdentityEntryKept",
                             "DeclareIdentityEntrySeatOwed",
                             "DeclareIdentityEntryHostedOnFirstUse",
                             "DeclareIdentityEntryAwaitHeldCreation",
+                            "DeclareIdentityEntryPreparationPending",
                             "DeclareIdentityEntryRuntimeModeRestamp",
                             "DeclareIdentityEntryRoleMigrate",
                             "DeclareIdentityEntryRoleRotate",
@@ -891,11 +892,18 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                             "SealDeclaredRosterMobNotRunningDestroyed",
                             "RecoverIdentityEntryRetiringMarkedRunning",
                             "ForgetArchivedSession",
+                            "DeclareIdentityEntryRecordOnly",
+                            "UnlistIdentityEntryRetiring",
+                            "UnlistIdentityEntryRemoved",
+                            "UnlistIdentityEntryDeferred",
+                            "UnlistIdentityEntryNotADeclaredEntry",
+                            "UnlistIdentityEntryNonAuthoritative",
                         ])
                         .effects(&[
                             "IdentityEntryDeclared",
                             "DeclaredRosterSealed",
                             "ArchivedSessionForgotten",
+                            "IdentityEntryUnlisted",
                         ])
                         .invariants(&[
                             "unseated_entry_is_not_a_member",
@@ -910,7 +918,7 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                     "mob_created_identity_entry_authority",
                     "MobMachine",
                     "crates/meerkat-mob/src/runtime/created_identity.rs",
-                    "MobMachine created identity entries realized by the shell at a start: recover each created entry row of the identity store from its presence and the replayed journal after the replay and before the boot plan (a present row of a seated local member records it a Created entry, a present row whose member the journal shows retired records the entry owed its seat with its member's last session as its revival record, a row pending its host's preparation records it unseated for that preparation, a removed row reserves the name as a tombstone, and an unreadable row, a row the replay contradicts or a member row whose origin token this build does not know reserves the name as unreadable), then seat a created entry owed its seat again, Dormant, on its archived session under created custody; no spawn takes a reserved name or the entry of another origin, a tombstoned name is never an entry or a member, an unseated created entry awaits its preparation or is owed its seat, and created custody belongs to an open local ladder of a Created entry, never beside entry custody",
+                    "MobMachine created identity entries realized by the shell at a start: recover each created entry row of the identity store from its presence and the replayed journal after the replay and before the boot plan (a present row of a seated local member records it a Created entry, a present row whose member the journal shows retired records the entry owed its seat with its member's last session as its revival record, a row pending its host's preparation records it unseated for that preparation unless the replay seats the published construction of a `constructed` one, a removed row reserves the name as a tombstone, and an unreadable row, a row the replay contradicts or a member row whose origin token this build does not know reserves the name as unreadable), then seat a created entry owed its seat again, Dormant, on its archived session under created custody, and settle the row of a published construction; no spawn takes a reserved name or the entry of another origin, a tombstoned name is never an entry or a member, and created custody belongs to an open ladder of a Created entry, never beside entry custody",
                     CoverageClaims::none()
                         .transitions(&[
                             "RecoverCreatedIdentityEntrySeatedRunning",
@@ -927,10 +935,82 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                             "ProbeMemberAdmissionIdentityNameReservedRunning",
                         ])
                         .invariants(&[
-                            "unseated_created_entry_is_preparing_or_owed",
                             "tombstone_is_never_an_entry",
                             "entry_custodies_are_disjoint",
                         ]),
+                ),
+                machine_anchor(
+                    "mob_identity_change_authority",
+                    "MobMachine",
+                    "crates/meerkat-mob/src/runtime/identity_change.rs",
+                    "MobMachine identity changes realized by the store-owned writer: a change's commit step decides its admission on its prepared authority from the facts the shell observed there (the store's receipt of the operation, the consent's form, whether a decision's permit binds the change and admits a commit now, whether the requester is the host operator, whether an agent requester's grant is current through its prepared check at this final sink, and whether a store-owned update's expected spec is its identity's current one), records each new store-owned entry (origin Created, unseated with the cause MobMachine derives from the request's facts: its host preparation pending, hosted on its first use, held for its host's creation or its seat owed) or refuses its name typed (an unlisted roster-owned identity's archived session record holds it), and only then stages the seats and writes the change's one store transaction; a refusal anywhere leaves the prepared authority unapplied and writes nothing; one identity's removal ends a held construction of it in the same step, and its archive is refused while it awaits its host's preparation; and the host holds or releases the mob's changes",
+                    CoverageClaims::none()
+                        .transitions(&[
+                            "AdmitIdentityChangeAdmitted",
+                            "AdmitIdentityChangeReplayed",
+                            "AdmitIdentityChangeOperationReused",
+                            "AdmitIdentityChangeNonAuthoritative",
+                            "AdmitIdentityChangeChangesHeld",
+                            "AdmitIdentityChangeDecisionUnbound",
+                            "AdmitIdentityChangeDecisionExpired",
+                            "AdmitIdentityChangeImportedNotHostOperator",
+                            "AdmitIdentityChangeGrantRevoked",
+                            "AdmitIdentityChangeStaleSpec",
+                            "RecordCreatedIdentityEntryRecorded",
+                            "RecordCreatedIdentityEntryNameHeldByIdentity",
+                            "RecordCreatedIdentityEntryNameHeldByWorker",
+                            "RecordCreatedIdentityEntryNameTombstoned",
+                            "RecordCreatedIdentityEntryNameUnreadable",
+                            "SetIdentityChangesHeldRunning",
+                            "RemoveIdentityEntryRetiring",
+                            "RemoveIdentityEntryRemoved",
+                            "ArchiveIdentityEntryArchiving",
+                            "ArchiveIdentityEntryArchived",
+                            "ArchiveIdentityEntryOwnedByRoster",
+                            "ArchiveIdentityEntryPreparationPending",
+                            "UnarchiveIdentityEntryRestored",
+                            "UnarchiveIdentityEntryNotArchived",
+                        ])
+                        .effects(&[
+                            "IdentityChangeAdmissionResolved",
+                            "CreatedIdentityEntryRecorded",
+                            "IdentityEntryChangeResolved",
+                        ])
+                        .invariants(&[
+                            "archived_entry_is_store_owned",
+                            "entry_ending_marks_are_seated_and_disjoint",
+                        ]),
+                ),
+                machine_anchor(
+                    "mob_identity_preparation_authority",
+                    "MobMachine",
+                    "crates/meerkat-mob/src/runtime/identity_preparation.rs",
+                    "MobMachine host preparation realized by the shell: an identity never seated whose host's rule requires its preparation is unseated for it (a roster-owned one by the declared apply, derived again at each apply, a store-owned one by its create, from its row at a start), and a delivery to it is refused retryable; a settle without a construction commits its receipt and its row and leaves the entry owed its seat, which the shell seats Dormant from its spec or embodies for an owed kickoff, and a `constructed` preparation refuses that settle; a host asks for a held construction of the identity, an attempt the mob owns whose spawn ladder alone may open for the entry, and a settle naming that attempt, decided before its deadline and binding the identity's spec, accepts its activation, journaled by the settle's receipt; from then on no abort, expiry or newer attempt replaces it, and only the membership commit that publishes the construction or its failed publication ends it; an abort, the deadline or a refused construction ends a held attempt with the entry still pending, and an identity holds at most one attempt, emitting the construction resolved, settle resolved and construction ended effects",
+                    CoverageClaims::none()
+                        .transitions(&[
+                            "BeginPreparationConstructionHeld",
+                            "BeginPreparationConstructionNotPending",
+                            "BeginPreparationConstructionNotConstructed",
+                            "BeginPreparationConstructionConstructionOpen",
+                            "SettleHostPreparationSeat",
+                            "SettleHostPreparationActivationAccepted",
+                            "SettleHostPreparationNotPending",
+                            "SettleHostPreparationConstructionRequired",
+                            "SettleHostPreparationConstructionOpen",
+                            "SettleHostPreparationStaleAttempt",
+                            "SettleHostPreparationExpired",
+                            "SettleHostPreparationMismatch",
+                            "SettleHostPreparationActivationPending",
+                            "EndPreparationConstructionEndedRunning",
+                            "EndPreparationConstructionNotOpenRunning",
+                            "EndPreparationConstructionActivationPendingRunning",
+                        ])
+                        .effects(&[
+                            "PreparationConstructionResolved",
+                            "PreparationSettleResolved",
+                            "PreparationConstructionEnded",
+                        ])
+                        .invariants(&["construction_is_held_or_activating"]),
                 ),
                 machine_anchor(
                     "mob_identity_entry_respawn_authority",
@@ -1038,6 +1118,28 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                         "RespawnIdentityEntryRefusedRunning",
                         "RespawnIdentityEntryRefusedStopped",
                     ]),
+                ),
+                scenario(
+                    "member-custody-degraded",
+                    "a mob start that cannot restore a seated member's custody for a cause of the member's own records the member degraded (the restore and its cause) in every live phase, a later record replaces the cause, a re-attempt that restores it resolves the record, a record for an unseated identity or in a destroyed mob changes nothing, and an ended seat or a destroy takes the record (crates/meerkat-machine-schema/tests/mob_machine_member_custody_region.rs)",
+                    CoverageClaims::none()
+                        .transitions(&[
+                            "RecordMemberCustodyUnrestoredSeatedRunning",
+                            "RecordMemberCustodyUnrestoredSeatedStopped",
+                            "RecordMemberCustodyUnrestoredSeatedCompleted",
+                            "RecordMemberCustodyUnrestoredNotSeatedRunning",
+                            "RecordMemberCustodyUnrestoredNotSeatedStopped",
+                            "RecordMemberCustodyUnrestoredNotSeatedCompleted",
+                            "RecordMemberCustodyUnrestoredDestroyed",
+                            "ResolveMemberCustodyRestoredRecordedRunning",
+                            "ResolveMemberCustodyRestoredRecordedStopped",
+                            "ResolveMemberCustodyRestoredRecordedCompleted",
+                            "ResolveMemberCustodyRestoredUnrecordedRunning",
+                            "ResolveMemberCustodyRestoredUnrecordedStopped",
+                            "ResolveMemberCustodyRestoredUnrecordedCompleted",
+                            "ResolveMemberCustodyRestoredUnrecordedDestroyed",
+                        ])
+                        .invariants(&["custody_unrestored_members_are_seated"]),
                 ),
                 scenario(
                     "wiring-and-session-binding",
@@ -3830,6 +3932,94 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                             "expiry_never_precedes_its_deadline",
                             "revocation_precedes_the_deadline",
                         ]),
+                ),
+            ],
+        ),
+        machine_manifest_from_schema(
+            &dsl_mob_store_restore_lifecycle_machine(),
+            &[machine_anchor(
+                "mob_store_restore_lifecycle",
+                "MobStoreRestoreLifecycleMachine",
+                "crates/meerkat-mob/src/machines/mob_store_restore_lifecycle.rs",
+                "MobStoreRestoreLifecycleMachine owns one quarantined persisted mob store: its class, the single re-attempt in flight, and whether a re-attempt released the store or left it quarantined under the class it met",
+                CoverageClaims::none()
+                    .transitions(&[
+                        "QuarantineUnclassified",
+                        "QuarantineQuarantined",
+                        "QuarantineRetrying",
+                        "QuarantineReleased",
+                        "RequestRetryUnclassified",
+                        "RequestRetryQuarantined",
+                        "RequestRetryQuarantinedNotRetryable",
+                        "RequestRetryRetrying",
+                        "RequestRetryReleased",
+                        "ResolveRetryFailed",
+                        "ResolveRetryRestored",
+                        "ResolveRetryUnclassified",
+                        "ResolveRetryQuarantined",
+                        "ResolveRetryReleased",
+                    ])
+                    .effects(&[
+                        "StoreQuarantined",
+                        "RetryAdmitted",
+                        "StoreReleased",
+                        "StoreStillQuarantined",
+                        "RequestRefused",
+                    ])
+                    .invariants(&[
+                        "unclassified_record_has_no_attempts",
+                        "released_record_was_attempted",
+                    ]),
+            )],
+            &[
+                scenario(
+                    "mob_store_quarantine_classification",
+                    "mob_store_restore_lifecycle_machine.rs::a_pass_classifies_a_store_once quarantines an unclassified store under its class and refuses a second classification in every later phase",
+                    CoverageClaims::none()
+                        .transitions(&[
+                            "QuarantineUnclassified",
+                            "QuarantineQuarantined",
+                            "QuarantineRetrying",
+                            "QuarantineReleased",
+                        ])
+                        .effects(&["StoreQuarantined", "RequestRefused"])
+                        .invariants(&["unclassified_record_has_no_attempts"]),
+                ),
+                scenario(
+                    "mob_store_single_flight_retry",
+                    "mob_store_restore_lifecycle_machine.rs::one_re_attempt_is_in_flight_at_a_time admits one re-attempt of a quarantined store, refuses a second request while it runs without waiting, and refuses a request for an unclassified or released store",
+                    CoverageClaims::none()
+                        .transitions(&[
+                            "RequestRetryUnclassified",
+                            "RequestRetryQuarantined",
+                            "RequestRetryRetrying",
+                            "RequestRetryReleased",
+                        ])
+                        .effects(&["RetryAdmitted", "RequestRefused"]),
+                ),
+                scenario(
+                    "mob_store_retry_eligibility",
+                    "mob_store_restore_lifecycle_machine.rs::an_on_demand_re_attempt_is_admitted_only_for_a_store_that_could_not_serve admits an on-demand re-attempt only for a store quarantined as store_unavailable, refuses it unchanged for store_unreadable and resume_refused, and admits an explicit re-attempt for every class",
+                    CoverageClaims::none()
+                        .transitions(&[
+                            "RequestRetryQuarantined",
+                            "RequestRetryQuarantinedNotRetryable",
+                        ])
+                        .effects(&["RetryAdmitted", "RequestRefused"]),
+                ),
+                scenario(
+                    "mob_store_retry_outcomes",
+                    "mob_store_restore_lifecycle_machine.rs::a_re_attempt_releases_the_store_or_keeps_it_quarantined releases the store on a managed, held or settled outcome, keeps it quarantined under the class a failed attempt met, counts every ended attempt, and refuses an outcome with no attempt in flight",
+                    CoverageClaims::none()
+                        .transitions(&[
+                            "ResolveRetryFailed",
+                            "ResolveRetryRestored",
+                            "ResolveRetryUnclassified",
+                            "ResolveRetryQuarantined",
+                            "ResolveRetryReleased",
+                        ])
+                        .effects(&["StoreReleased", "StoreStillQuarantined", "RequestRefused"])
+                        .invariants(&["released_record_was_attempted"]),
                 ),
             ],
         ),

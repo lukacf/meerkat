@@ -30,7 +30,7 @@ import time
 import uuid
 
 from .blueprint import Blueprint
-from .compiler import continuation_contract, generate_package, generate_runtime_refresh
+from .compiler import DECLARATIONS_PATH, continuation_contract, generate_package, generate_runtime_refresh
 from .projects import DraftConflict
 from .generator import PackageFile
 from .dom_check import is_dom_test, run_dom_tests
@@ -50,7 +50,7 @@ TERMINATION_WAIT_SECONDS = 1
 _STATE_VERSION = 1
 _RESULT_MARKER = "MOBKIT_HOST_TEST_RESULT="
 _COMPLETION_MARKER = "MOBKIT_HOST_COMPLETED="
-PROTECTED_APPLICATION_PATHS = frozenset({"application/tool-policy.json",
+PROTECTED_APPLICATION_PATHS = frozenset({DECLARATIONS_PATH, "application/tool-policy.json",
     "application/configuration.json", "application/console.json", "config/access.toml",
     "application/runtime-selection.json"})
 
@@ -167,6 +167,8 @@ def _regular(path):
 
 
 def _authorable(name, baseline):
+    if name.casefold() == DECLARATIONS_PATH.casefold():
+        raise WorkspaceError("Announcement declarations are protected native configuration. Use the host preparation owner for a new build; a source-only repair cannot change them.")
     if name.casefold() in {path.casefold() for path in baseline}:
         raise WorkspaceError("Compiled deployment files are read-only. Add application code or assets instead.")
     if name.casefold() in ("implementation-report.json", "acceptance-report.json") or name.split("/", 1)[0].casefold() == "acceptance-tests":
@@ -192,6 +194,16 @@ def _atomic_write(path, content, mode=0o600):
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)
+
+
+def _make_project_parents(project, name):
+    # Callers validate the relative source path before creating directories.
+    # pathlib's parents=True applies mode only to the final directory; each
+    # intermediate parent must also remain safe for saved-source recovery.
+    directory = project
+    for part in PurePosixPath(name).parts[:-1]:
+        directory = directory / part
+        directory.mkdir(mode=0o700, exist_ok=True)
 
 
 class ImplementationWorkspace:
@@ -336,6 +348,9 @@ class ImplementationWorkspace:
             before = self._files(state)
             prior_paths = self._protected_application_paths(state)
             baseline = dict(state["baseline"])
+            if (DECLARATIONS_PATH in sources and DECLARATIONS_PATH not in baseline
+                    and state["framework"].get("basis") in {"accepted-baseline", "runtime-refresh"}):
+                raise WorkspaceError("A retained-framework repair cannot add announcement declarations. Prepare a new build with its native configuration.")
             for item in files:
                 if any(entry.path.casefold() == item.path.casefold() and entry.path != item.path for entry in before):
                     raise WorkspaceError("Selected application source aliases an existing project path.")
@@ -523,7 +538,7 @@ class ImplementationWorkspace:
             for item in files:
                 name = _safe_name(item.path)
                 destination = self.project / name
-                destination.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+                _make_project_parents(self.project, name)
                 _atomic_write(destination, item.content, item.mode)
                 baseline[name] = {"sha256": _sha(item.content), "mode": item.mode}
             _atomic_write(self._key_path, os.urandom(32).hex() + "\n")
@@ -920,7 +935,7 @@ class ImplementationWorkspace:
                 raise WorkspaceError("The project changed while staging the batch. Read it before retrying.")
             for item in changes:
                 target = staged / item.path
-                target.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+                _make_project_parents(staged, item.path)
                 _atomic_write(target, item.content, item.mode)
             if self._digest(self._files(next_state, staged)) != after_digest:
                 raise WorkspaceError("The staged batch source does not match its validated changes.")
@@ -1050,7 +1065,7 @@ class ImplementationWorkspace:
         new_size = sum(_regular(self._target(item.path)).st_size for item in before if item.path != path) + size
         if new_size > MAX_PROJECT_BYTES or (previous is None and len(before) >= MAX_PROJECT_FILES):
             raise WorkspaceError("The project exceeds its file or total size limit.")
-        target.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+        _make_project_parents(self.project, path)
         mode = previous.mode if previous else (0o755 if path.endswith(".sh") else 0o644)
         _atomic_write(target, content, mode)
         state["changes"].append({"path": path, "before": _sha(previous.content) if previous else None,

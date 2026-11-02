@@ -3,6 +3,9 @@ from copy import deepcopy
 import hashlib
 import io
 import json
+import os
+from pathlib import Path
+import stat
 import threading
 import time
 import uuid
@@ -34,6 +37,16 @@ class Guide:
             raise LookupError("Unknown setup")
         return deepcopy(self.state)
 
+    def build_admission(self, identity):
+        from contextlib import contextmanager
+
+        @contextmanager
+        def current():
+            if identity != self.identity:
+                raise LookupError("Unknown setup")
+            yield deepcopy(self.state)
+        return current()
+
 
 class Service(ImplementationService):
     async def _run(self, directory):
@@ -55,6 +68,137 @@ def service(tmp_path, monkeypatch):
     monkeypatch.setattr("launchkit.implementation_workspace._sandbox_executable", lambda: sandbox or "/fictional/sandbox")
     monkeypatch.setattr("launchkit.planner.planner_capability", lambda: {"available": True, "provider": "openai"})
     return Service(tmp_path, Guide())
+
+
+@pytest.mark.parametrize("changed", ["version", "operation", "service_inventory"])
+async def test_build_rereads_guide_after_final_async_projection(service, monkeypatch, changed):
+    original = service.guide.get
+    reads = 0
+
+    async def projected(identity):
+        nonlocal reads
+        snapshot = await original(identity)
+        reads += 1
+        if reads == 2:
+            # The asynchronous projection returns a snapshot taken before a
+            # concurrent saved change. Publication must read the owner again.
+            if changed == "version":
+                service.guide.state["version"] += 1
+            elif changed == "operation":
+                service.guide.state["operation"] = {"status": "running"}
+            else:
+                service.guide.state["brief"]["service_requirements"] = [{
+                    "id": "new-service", "service": "Repository", "capability": "read",
+                    "operation": "Read changes", "resource": "another project"}]
+        return snapshot
+
+    monkeypatch.setattr(service.guide, "get", projected)
+    try:
+        with pytest.raises(DraftConflict, match="setup changed"):
+            await service.submit(service.guide.identity, 3)
+        assert reads == 2
+        assert not service.tasks and not service.processes
+        assert not (service.root / service.guide.identity / "latest.json").exists()
+    finally:
+        await service.shutdown()
+
+
+@pytest.mark.parametrize("changed", [None, "version", "operation"])
+async def test_real_guide_store_is_fenced_after_projection(service, monkeypatch, changed):
+    from types import SimpleNamespace
+    from launchkit.guide import GuideService
+    from launchkit.guide_store import GuideStore
+
+    store = GuideStore(service.root.parent / "guide")
+    created = store.create({**service.guide.state, "brief": decision_brief()})
+    guide = GuideService(store, SimpleNamespace())
+    service.guide = guide
+    projections = 0
+
+    async def project(snapshot):
+        nonlocal projections
+        projections += 1
+        if projections == 2 and changed == "version":
+            await asyncio.to_thread(store.save, {**created, "summary": "New saved revision"}, 1)
+        elif projections == 2 and changed == "operation":
+            await asyncio.to_thread(store.save_operation, created["id"], {"status": "running"})
+        return snapshot
+
+    monkeypatch.setattr(guide, "_with_implementation_evidence", project)
+    try:
+        if changed:
+            with pytest.raises(DraftConflict, match="setup changed"):
+                await service.submit(created["id"], 1)
+            assert not service.tasks and not service.processes
+            assert not (service.root / created["id"] / "latest.json").exists()
+        else:
+            admitted = await service.submit(created["id"], 1)
+            assert admitted["build_id"] in service.tasks
+            assert store.get(created["id"]) == created
+            # get() adds legacy display IDs; the final store read must use the
+            # same input normalization without persisting those projections.
+            assert "id" not in created["messages"][0]
+    finally:
+        await service.shutdown()
+
+
+async def test_build_requires_original_guide_publication_reader(service, monkeypatch):
+    from launchkit.implementation import ImplementationPrerequisiteNotAdmitted
+
+    monkeypatch.setattr(service.guide, "build_admission", None)
+    try:
+        with pytest.raises(ImplementationPrerequisiteNotAdmitted, match="guide cannot verify"):
+            await service.submit(service.guide.identity, 3)
+        assert not service.tasks and not service.processes
+        assert not (service.root / service.guide.identity / "latest.json").exists()
+    finally:
+        await service.shutdown()
+
+
+@pytest.mark.parametrize("mask", [0o002, 0o022])
+async def test_build_reservation_keeps_guide_history_private(service, monkeypatch, mask):
+    mkdir = Path.mkdir
+    parents = (service.root, service.root / service.guide.identity)
+    def create(path, *args, **kwargs):
+        if path not in parents:
+            return mkdir(path, *args, **kwargs)
+        previous = os.umask(mask)
+        try:
+            return mkdir(path, *args, **kwargs)
+        finally:
+            os.umask(previous)
+    # Apply the host mask only during synchronous history-parent creation;
+    # restore it before any await, worker or source preparation can run.
+    monkeypatch.setattr(Path, "mkdir", create)
+    try:
+        admitted = await service.submit(service.guide.identity, 3)
+        directory = service._directory(service.guide.identity, admitted["build_id"])
+        assert all(stat.S_IMODE(path.stat().st_mode) == 0o700
+            for path in (service.root, directory.parent, directory))
+    finally:
+        await service.shutdown()
+
+
+@pytest.mark.parametrize("mode", [0o750, 0o770])
+async def test_build_reservation_preserves_existing_history_modes_and_recovery_guards(service, mode):
+    from launchkit.connect_installer_caller import CustodyError
+    from launchkit.implementation_selection import candidates
+
+    parent = service.root / service.guide.identity
+    parent.mkdir(parents=True)
+    service.root.chmod(mode)
+    parent.chmod(mode)
+    try:
+        admitted = await service.submit(service.guide.identity, 3)
+        directory = service._directory(service.guide.identity, admitted["build_id"])
+        assert stat.S_IMODE(service.root.stat().st_mode) == mode
+        assert stat.S_IMODE(parent.stat().st_mode) == mode
+        assert stat.S_IMODE(directory.stat().st_mode) == 0o700
+        if mode == 0o770:
+            with pytest.raises(CustodyError):
+                candidates(service.root, service.guide.identity)
+    finally:
+        await service.shutdown()
 
 
 def decision_brief():

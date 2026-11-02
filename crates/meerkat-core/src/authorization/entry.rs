@@ -127,7 +127,11 @@ impl PreparedOperationCheck {
     /// included) is carried forward: past a real owner deadline the fresh
     /// preparation refuses. A failure of this decision's own check that is
     /// not a refusal is observed and returned, as on [`Self::current`].
-    pub(crate) fn reprepared(&self) -> Result<Self, OperationAuthorizationError> {
+    ///
+    /// A final sink that executes a change a decision held calls this in
+    /// place of [`Self::current`] (the store-owned identity changes of
+    /// `meerkat-mob` do).
+    pub fn reprepared(&self) -> Result<Self, OperationAuthorizationError> {
         match self.0.decision.check_current(&self.0.binding) {
             Ok(()) => Ok(self.clone()),
             Err(OperationAuthorizationError::Refused(_)) => {

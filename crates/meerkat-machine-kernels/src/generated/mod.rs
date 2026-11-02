@@ -7,6 +7,7 @@ pub mod forked_participant_lifecycle;
 pub mod grant_authority;
 pub mod meerkat;
 pub mod mob;
+pub mod mob_store_restore_lifecycle;
 pub mod occurrence_lifecycle;
 pub mod runtime_delivery;
 pub mod schedule_lifecycle;

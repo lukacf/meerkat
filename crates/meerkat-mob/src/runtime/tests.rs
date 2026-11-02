@@ -7,6 +7,7 @@ mod boot_obligation_rows;
 mod created_identity_rows;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 mod declared_apply_rows;
+mod ensure_convergence_rows;
 #[cfg(feature = "openai-live")]
 mod existing_live_delegation;
 mod historical_metadata;
@@ -44,6 +45,8 @@ mod seat_comms_key;
 mod seat_declared_wiring;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 mod startup_binding_release;
+#[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+mod store_owned_identity_rows;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 mod unborn_seat_wake;
 use crate::definition::{
@@ -89089,6 +89092,8 @@ struct MobRuntimeParitySnapshotSummary {
     member_prior_peer_endpoints: BTreeMap<String, BTreeSet<String>>,
     member_restore_failures: BTreeMap<String, String>,
     member_restore_failure_codes: BTreeMap<String, String>,
+    member_custody_unrestored: BTreeMap<String, String>,
+    member_custody_unrestored_causes: BTreeMap<String, String>,
     runtime_retire_refusal_codes: BTreeMap<String, String>,
     runtime_retire_refusal_reasons: BTreeMap<String, String>,
     runtime_retire_pending_sessions: BTreeMap<String, String>,
@@ -90105,6 +90110,24 @@ async fn mob_runtime_parity_snapshot_summary(
                         .collect::<BTreeMap<_, _>>(),
                 ),
             ),
+            (
+                "member_custody_unrestored",
+                serde_json::to_value(
+                    dsl.member_custody_unrestored
+                        .iter()
+                        .map(|(key, value)| (format!("{key:?}"), format!("{value:?}")))
+                        .collect::<BTreeMap<_, _>>(),
+                ),
+            ),
+            (
+                "member_custody_unrestored_causes",
+                serde_json::to_value(
+                    dsl.member_custody_unrestored_causes
+                        .iter()
+                        .map(|(key, value)| (format!("{key:?}"), format!("{value:?}")))
+                        .collect::<BTreeMap<_, _>>(),
+                ),
+            ),
         ] {
             formal_available_fields.insert(
                 name.to_string(),
@@ -90131,6 +90154,24 @@ async fn mob_runtime_parity_snapshot_summary(
             snap.member_restore_failure_codes
                 .iter()
                 .map(|(key, value)| (format!("{key:?}"), value.clone()))
+                .collect()
+        })
+        .unwrap_or_default();
+    let member_custody_unrestored = dsl_t2
+        .as_ref()
+        .map(|snap| {
+            snap.member_custody_unrestored
+                .iter()
+                .map(|(key, value)| (format!("{key:?}"), format!("{value:?}")))
+                .collect()
+        })
+        .unwrap_or_default();
+    let member_custody_unrestored_causes = dsl_t2
+        .as_ref()
+        .map(|snap| {
+            snap.member_custody_unrestored_causes
+                .iter()
+                .map(|(key, value)| (format!("{key:?}"), format!("{value:?}")))
                 .collect()
         })
         .unwrap_or_default();
@@ -90903,6 +90944,8 @@ async fn mob_runtime_parity_snapshot_summary(
         member_prior_peer_endpoints,
         member_restore_failures,
         member_restore_failure_codes,
+        member_custody_unrestored,
+        member_custody_unrestored_causes,
         runtime_retire_refusal_codes,
         runtime_retire_refusal_reasons,
         runtime_retire_pending_sessions,
@@ -91126,6 +91169,20 @@ fn mob_runtime_parity_field_value(
         "member_restore_failure_codes" => Some(MobRuntimeParityExprValue::Map(
             snapshot
                 .member_restore_failure_codes
+                .keys()
+                .map(|k| (k.clone(), 0u64))
+                .collect(),
+        )),
+        "member_custody_unrestored" => Some(MobRuntimeParityExprValue::Map(
+            snapshot
+                .member_custody_unrestored
+                .keys()
+                .map(|k| (k.clone(), 0u64))
+                .collect(),
+        )),
+        "member_custody_unrestored_causes" => Some(MobRuntimeParityExprValue::Map(
+            snapshot
+                .member_custody_unrestored_causes
                 .keys()
                 .map(|k| (k.clone(), 0u64))
                 .collect(),
@@ -91994,6 +92051,10 @@ fn summarize_mob_runtime_error(error: &MobError) -> String {
         }
         MobError::MemberAlreadyExists(_) => "meerkat_already_exists".to_string(),
         MobError::IdentityMember { .. } => "identity_member".to_string(),
+        MobError::IdentityChangeRefused { refusal } => {
+            format!("identity_change_refused:{}", refusal.kind())
+        }
+        MobError::IdentityArchived { .. } => "identity_archived".to_string(),
         MobError::SpawnCanceled { .. } => "spawn_canceled".to_string(),
         MobError::ResumeProviderParamsRequireResume { .. } => {
             "resume_provider_params_require_resume".to_string()
@@ -92096,6 +92157,7 @@ fn summarize_mob_runtime_error(error: &MobError) -> String {
             "member_durable_tail_unprovable".to_string()
         }
         MobError::MemberCustodyDeferred { .. } => "member_custody_deferred".to_string(),
+        MobError::MobQuarantined { class, .. } => format!("mob_quarantined:{class}"),
         MobError::SpawnMemberAdmissionDenied { .. } => "spawn_member_admission_denied".to_string(),
         MobError::BridgeRequestTimedOut { .. } => "bridge_request_timed_out".to_string(),
         MobError::ForkSourceUnavailable { .. } => "fork_source_unavailable".to_string(),

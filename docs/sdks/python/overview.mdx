@@ -294,6 +294,7 @@ degraded continuity. Zero is rejected by the server.
 
 - `await client.create_mob(...) -> Mob`
 - `await client.list_mobs()`
+- `await client.list_quarantined_mobs()` / `await client.mob_restore_retry(mob_id)`
 - `await mob.spawn(...)`
 - `await mob.spawn_many(...)`
 - `await mob.read_events(after_cursor=0, limit=100)`

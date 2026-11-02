@@ -349,7 +349,7 @@ for (const outcome of ['success', 'error']) test(`checker preparation response r
     await ui.flush(() => recovery.click());
     assert.equal(host.settled, false, 'GET readiness does not cancel or finish the original response promise.');
     assert.equal(ui.button('Build application').disabled, false);
-    assert.match(ui.dom.window.document.querySelector('.setup-checker').textContent, /App checks ready/);
+    assert.match(ui.dom.window.document.querySelector('.setup-checker').textContent, /Application checker configured/);
     assert.equal(ui.text(), latestDraft); assert.equal(ui.savedDraft(), latestDraft);
     const calls = ui.calls.length;
     await ui.flush(() => host.finish(outcome === 'success'
@@ -357,7 +357,7 @@ for (const outcome of ['success', 'error']) test(`checker preparation response r
       : new Error('OLD POST ERROR MUST NOT REPLACE READY')));
     assert.equal(host.settled, true);
     assert.equal(ui.button('Build application').disabled, false);
-    assert.match(ui.dom.window.document.querySelector('.setup-checker').textContent, /App checks ready/);
+    assert.match(ui.dom.window.document.querySelector('.setup-checker').textContent, /Application checker configured/);
     assert.doesNotMatch(ui.dom.window.document.body.textContent, /OLD POST|Preparation was not confirmed/);
     assert.equal(ui.dom.window.document.querySelector('.setup-checker [role="alert"]') === null, true);
     assert.equal(ui.text(), latestDraft); assert.equal(ui.savedDraft(), latestDraft);
@@ -432,7 +432,7 @@ test('checker preparation response recovery keeps visible uncertainty after fail
     assert.equal(ui.button('Check status').disabled, false);
     await ui.flush(() => prepare.click());
     assert.equal(host.posts, 1); assert.equal(ui.calls.length, calls);
-    assert.doesNotMatch(ui.dom.window.document.querySelector('.setup-checker').textContent, /App checks ready|STALE POST/);
+    assert.doesNotMatch(ui.dom.window.document.querySelector('.setup-checker').textContent, /Application checker configured|STALE POST/);
     host.value = { status: 'ready', can_prepare: false, detail: 'A fresh explicit read verifies current readiness.' };
     await ui.flush(() => ui.button('Check status').click());
     assert.equal(ui.button('Build application').disabled, false);
@@ -481,7 +481,7 @@ test('checker preparation response recovery cannot publish into a remounted chec
     await ui.edit(latestDraft);
     await ui.flush(() => host.finish({ status: 'ready', can_prepare: false, detail: 'RETIRED CHECKER CALLBACK' }));
     assert.equal(ui.button('Build application').disabled, true, 'The old mount cannot provide readiness to the new callback.');
-    assert.doesNotMatch(ui.dom.window.document.body.textContent, /RETIRED CHECKER CALLBACK|App checks ready/);
+    assert.doesNotMatch(ui.dom.window.document.body.textContent, /RETIRED CHECKER CALLBACK|Application checker configured/);
     await ui.flush(() => freshRead.resolve({ status: 'ready', can_prepare: false, detail: 'Fresh owner readback.' }));
     assert.equal(ui.button('Build application').disabled, false);
     assert.equal(ui.text(), latestDraft); assert.equal(ui.savedDraft(), latestDraft);

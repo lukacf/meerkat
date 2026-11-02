@@ -102,6 +102,8 @@ pub(super) struct SpawnPreparationCarry {
     pub(super) definition_wiring: crate::DefinitionWiring,
     /// Whether the spawn acts for the identity entry of its name.
     pub(super) entry_custody: bool,
+    /// Whether the spawn acts for the store-owned entry of its name.
+    pub(super) created_custody: bool,
     /// The notice a fresh seat embodied after the loss of the identity's
     /// archived session carries: the spawn's row records it.
     pub(super) history_unavailable: Option<crate::runtime::HistoryUnavailable>,

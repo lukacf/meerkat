@@ -342,7 +342,7 @@ async def test_candidate_artifact_drift_after_seed_refuses_before_worker_publica
             bundle.wheel_path.write_bytes(bundle.wheel_path.read_bytes() + b"drift")
         return result
     monkeypatch.setattr(ImplementationWorkspace, "seed", mutate_after_seed)
-    with pytest.raises(ValueError, match="bytes|wheel"):
+    with pytest.raises(ValueError, match="artifact|bytes|wheel"):
         await service.submit(service.guide.identity, 3, **refresh_options(first, bundle))
     assert service.selected_build_id(service.guide.identity) == first["build_id"]
     assert source_bytes(old) == before and not service.tasks

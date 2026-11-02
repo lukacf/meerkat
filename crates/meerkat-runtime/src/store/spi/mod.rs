@@ -153,9 +153,21 @@ impl SpiError {
         RuntimeStoreError::WriteFailed(self.to_string())
     }
 
-    /// The error a reading store call answers.
+    /// The error a reading store call answers. A host store that could not
+    /// serve now reads as [`RuntimeStoreError::Unavailable`], and data that
+    /// does not decode or fails the host's own integrity check as
+    /// [`RuntimeStoreError::Corrupt`], so a reader can tell an outage a later
+    /// read may get past from state that needs a repair.
     #[must_use]
     pub fn into_read(self) -> RuntimeStoreError {
-        RuntimeStoreError::ReadFailed(self.to_string())
+        match self {
+            Self::Host(HostStoreError::Unavailable(_)) => {
+                RuntimeStoreError::Unavailable(self.to_string())
+            }
+            Self::Corrupt(_) | Self::Host(HostStoreError::Corrupt(_)) => {
+                RuntimeStoreError::Corrupt(self.to_string())
+            }
+            other => RuntimeStoreError::ReadFailed(other.to_string()),
+        }
     }
 }

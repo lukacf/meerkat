@@ -404,7 +404,7 @@ export function EvolvingPlan({
                     {plan.connections.length
                       ? `${plan.connections.length} planned`
                       : stageKnown
-                        ? "Your sources"
+                        ? "Needs review"
                         : "Coming next"}
                   </span>
                 </div>
@@ -429,8 +429,8 @@ export function EvolvingPlan({
                   {!plan.connections.length && !workspace && (
                     <p className="ep-empty-detail">
                       {stageKnown
-                        ? "Start with conversation. Add services whenever you need them."
-                        : "Your guide will help choose useful sources and services."}
+                        ? "No service connections are declared yet. Review the services your application needs before building it."
+                        : "Identify required services before building. Their access and required operations need to be checked."}
                     </p>
                   )}
                 </div>

@@ -1468,6 +1468,77 @@ async fn lifecycle_facts_read_the_same_after_a_restart_on_a_host_store() {
     drop((mobs, realm));
 }
 
+/// A mob over a host store whose mob scope the store cannot serve when a
+/// restarted process opens the mob's storage: the open fails typed, and a
+/// restore classes it `store_unavailable` (a later attempt may pass, and the
+/// on-demand re-attempt runs), never `store_unreadable`. Stored data the host
+/// cannot serve as it is classes `store_unreadable`. Once the store serves
+/// again, the storage opens and the mob resumes with what it held.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_mob_storage_whose_host_store_cannot_serve_classes_unavailable() {
+    use meerkat_core::host_store::ScopeKind;
+    use meerkat_store_conformance::HostStoreReadFault;
+
+    let host = Arc::new(InMemoryHostStore::new());
+    let definition = with_unique_mob_id(sample_definition(), "host-unavailable");
+    let storage_key = definition.id.to_string();
+    let realm = open_realm(&host).await;
+    let mobs = SpiMobStoreHost::for_realm(&realm)
+        .await
+        .expect("claim the mob families");
+    let storage = mobs
+        .open(&storage_key)
+        .await
+        .expect("open the mob's storage")
+        .storage();
+    let mut mob = JournalMob::over(definition, storage).await;
+    let before = write_every_fact(&mob).await;
+    mob.crash().await;
+    drop((mobs, realm));
+
+    host.lapse_fence_leases();
+    let realm = open_realm(&host).await;
+    let mobs = SpiMobStoreHost::for_realm(&realm)
+        .await
+        .expect("claim the mob families again");
+    for (fault, class) in [
+        (
+            HostStoreReadFault::Unavailable,
+            crate::MobQuarantineClass::StoreUnavailable,
+        ),
+        (
+            HostStoreReadFault::Corrupt,
+            crate::MobQuarantineClass::StoreUnreadable,
+        ),
+    ] {
+        host.set_kind_read_fault(ScopeKind::Mob, Some(fault));
+        let error = match mobs.open(&storage_key).await {
+            Err(error) => error,
+            Ok(_) => panic!("{fault:?}: a storage whose mob scope cannot be read does not open"),
+        };
+        let error = MobError::from(error);
+        assert_eq!(
+            error.restore_quarantine_class(),
+            class,
+            "{fault:?}: {error}"
+        );
+        assert_eq!(
+            class.is_retryable(),
+            fault == HostStoreReadFault::Unavailable
+        );
+    }
+    host.set_kind_read_fault(ScopeKind::Mob, None);
+    let reopened = mobs
+        .open(&storage_key)
+        .await
+        .expect("the storage opens once the store serves")
+        .storage();
+    mob.resume(reopened).await;
+    assert_read_the_same(&mob, &before).await;
+    mob.crash().await;
+    drop((mobs, realm));
+}
+
 /// The constructions of a `MemberRetired` row in `code` (shipped code, its
 /// comments and literals blanked): each one's byte index and the text
 /// between its braces. A pattern is none: its braces end in `..`.

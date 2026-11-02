@@ -198,6 +198,16 @@ pub(crate) struct MobDslT2Snapshot {
         std::collections::BTreeMap<crate::machines::mob_machine::AgentIdentity, String>,
     pub member_restore_failure_codes:
         std::collections::BTreeMap<crate::machines::mob_machine::AgentIdentity, String>,
+    // A seated member's unrestored custody: which restore, and the cause its
+    // last attempt met.
+    pub member_custody_unrestored: std::collections::BTreeMap<
+        crate::machines::mob_machine::AgentIdentity,
+        crate::machines::mob_machine::MemberCustodyRestoreKind,
+    >,
+    pub member_custody_unrestored_causes: std::collections::BTreeMap<
+        crate::machines::mob_machine::AgentIdentity,
+        crate::machines::mob_machine::MemberCustodyCauseKind,
+    >,
     pub runtime_retire_refusal_codes:
         std::collections::BTreeMap<crate::machines::mob_machine::AgentRuntimeId, String>,
     pub runtime_retire_refusal_reasons:
@@ -1561,13 +1571,18 @@ pub(super) enum MobCommand {
         reply_tx:
             oneshot::Sender<Result<mob_dsl::LegacyIdentityEntryAdoptionKind, crate::MobError>>,
     },
+    /// One step of a store-owned identity change
+    /// (`MobHandle::create_store_owned_identities`, the changes hold): its
+    /// plan, its commit step, or the host's hold.
+    IdentityChange(Box<super::identity_change::IdentityChangeCommand>),
     /// Decide one chunk of a declared roster's identities in one MobMachine
-    /// step (`MobHandle::apply_declared_roster`): each identity's verdict.
+    /// step (`MobHandle::apply_declared_roster`): each identity's verdict,
+    /// and the change the chunk writes with them, when it carries one (a
+    /// roster-owned identity's change, or a store-owned identity's update).
     DeclareIdentityEntries {
         declarations: Vec<super::declared_apply::IdentityDeclaration>,
-        reply_tx: oneshot::Sender<
-            Result<Vec<super::declared_apply::DeclarationVerdict>, crate::MobError>,
-        >,
+        change: Option<Box<super::identity_change::DeclaredChangeWrite>>,
+        reply_tx: oneshot::Sender<Result<super::declared_apply::DeclarationStep, crate::MobError>>,
     },
     /// Seal a complete declared roster in one MobMachine step: `desired` is
     /// every identity the roster lists.
@@ -2403,6 +2418,7 @@ impl MobCommand {
             Self::StartMemberRotation { .. } => ShutdownAnswerClass::CallerRequest,
             Self::CommitDormantSeats { .. } => ShutdownAnswerClass::CallerRequest,
             Self::AdoptLegacyIdentityEntry { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::IdentityChange(_) => ShutdownAnswerClass::CallerRequest,
             Self::DeclareIdentityEntries { .. } => ShutdownAnswerClass::CallerRequest,
             Self::OpenDeclaredApply { .. } => ShutdownAnswerClass::CallerRequest,
             // The lease's close is retained through a Shutdown step: a
@@ -2652,6 +2668,7 @@ impl MobCommand {
             Self::StartMemberRotation { .. } => "StartMemberRotation",
             Self::CommitDormantSeats { .. } => "CommitDormantSeats",
             Self::AdoptLegacyIdentityEntry { .. } => "AdoptLegacyIdentityEntry",
+            Self::IdentityChange(_) => "IdentityChange",
             Self::DeclareIdentityEntries { .. } => "DeclareIdentityEntries",
             Self::OpenDeclaredApply { .. } => "OpenDeclaredApply",
             Self::CloseDeclaredApply { .. } => "CloseDeclaredApply",

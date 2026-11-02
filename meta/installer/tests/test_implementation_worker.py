@@ -1417,3 +1417,51 @@ async def test_builder_and_reviewer_can_read_helperless_factory_contract_without
     assert HELPERLESS_APPLICATION_CONTRACT.strip() in content
     assert '"factory":"application:project"' in content
     assert "seed policy can coexist with a dynamic roster" in content
+    assert page["reference_kind"] == "current_application_contract"
+
+
+@pytest.mark.parametrize("agent_index", (0, 1))
+async def test_application_reference_keeps_saved_contract_after_host_guidance_changes(team, agent_index, monkeypatch):
+    import hashlib
+
+    tools, _ = team
+    saved = "Saved application contract\n  Preserve the original organization text.\nOriginal role and callback rules.\n"
+    frozen = {**tools.input, "application_contract": saved}
+    write_private(tools.directory / "input.json", frozen)
+    # Reconstruct the actual tools as on worker restart, after the host's
+    # current contract changed. Both readers use this same frozen Build.
+    monkeypatch.setattr(worker, "APPLICATION_CONTRACT", "New host contract: different callback rules.")
+    restarted = BuildTools(tools.directory)
+    acceptance = SemanticAcceptance(tools.directory / "acceptance", restarted.workspace, restarted.input)
+    readers = [restarted, AcceptanceTools(tools.directory, acceptance, restarted.reference)]
+    def unavailable():
+        raise AssertionError("Saved application prose must not require SDK discovery.")
+    monkeypatch.setattr(restarted, "_selected_reference_sources", unavailable)
+    reader = readers[agent_index]
+    first = await reader.reference({"name": "application", "limit": 1})
+    rest = await reader.reference({"name": "application", "offset": first["next_offset"], "limit": 180})
+    text = "\n".join(line.split(": ", 1)[1] for page in (first, rest) for line in page["content"].splitlines())
+    assert text == saved.rstrip("\n")
+    assert first["reference_kind"] == rest["reference_kind"] == "frozen_application_contract"
+    digest = hashlib.sha256(saved.encode()).hexdigest()
+    assert first["source_files"] == [{"path": "input.json#application_contract", "sha256": digest}]
+    assert first["observed_destination"] is False
+    matches = await reader.reference({"name": "application", "query": "original organization"})
+    assert len(matches["matches"]) == 1
+    assert matches["matches"][0]["source_file"] == "input.json#application_contract"
+    assert matches["matches"][0]["source_sha256"] == digest
+    assert matches["matches"][0]["source_line"] == 2
+    assert (await reader.reference({"name": "application", "query": "New host contract"}))["matches"] == []
+
+
+@pytest.mark.parametrize("saved", (None, "", "   ", 7, {"text": "invalid"}))
+async def test_invalid_saved_application_contract_does_not_fall_back_to_current_host(team, saved):
+    tools, _ = team
+    write_private(tools.directory / "input.json", {**tools.input, "application_contract": saved})
+    restarted = BuildTools(tools.directory)
+    page = await restarted.reference({"name": "application"})
+    assert page["ok"] is False
+    assert "content" not in page
+    search = await restarted.reference({"name": "application", "query": "Application"})
+    assert search["matches"] == []
+    assert search["unavailable_references"] == ["application"]

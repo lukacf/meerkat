@@ -77,6 +77,13 @@ pub enum FactoryError {
     /// the far end answer `Unauthorized`.
     #[error("self-hosted server binding resolution failed: {0}")]
     SelfHostedBinding(#[from] meerkat_core::SelfHostedConnectionError),
+
+    /// The build's model is one the model registry does not define, and the
+    /// account behind the build's route, which was asked about it
+    /// ([`crate::provider_runtime::ProviderRuntime::account_model`]), cannot
+    /// serve it. No other route or credential is tried in its place.
+    #[error("account model refused: {0}")]
+    AccountModel(#[from] crate::provider_runtime::errors::AccountModelRefusal),
 }
 
 #[cfg(test)]

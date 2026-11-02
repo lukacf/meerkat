@@ -19,7 +19,7 @@ use crate::provider_runtime::catalog::ProviderRuntimeCatalog;
 use crate::provider_runtime::errors::{
     ProviderAuthError, ProviderBindingError, ProviderClientError,
 };
-use crate::provider_runtime::runtime::ProviderRuntime;
+use crate::provider_runtime::runtime::{AccountModelLookup, ProviderRuntime};
 use crate::{ImageGenerationExecutor, LlmClient};
 
 // Provider runtimes live in per-provider crates. Callers (typically the
@@ -331,6 +331,23 @@ impl ProviderRuntimeRegistry {
             .get(&validated.provider())
             .ok_or(ProviderAuthError::NoRuntimeRegistered(validated.provider()))?;
         runtime.observe_credential_readiness(&validated, env).await
+    }
+
+    /// What the account behind `connection` states about `model`, through
+    /// the runtime of the connection's provider
+    /// ([`ProviderRuntime::account_model`]):
+    /// [`AccountModelLookup::NotReported`] when no runtime is registered for
+    /// it.
+    pub fn account_model(
+        &self,
+        connection: &ResolvedConnection,
+        model: &str,
+    ) -> AccountModelLookup {
+        self.runtimes
+            .get(&connection.provider)
+            .map_or(AccountModelLookup::NotReported, |runtime| {
+                runtime.account_model(connection, model)
+            })
     }
 
     /// Build a client from a resolved connection through the matching

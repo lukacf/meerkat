@@ -301,6 +301,75 @@ them.
   `RecoverCreatedIdentityEntryUnreadableStopped`, so no existing variant's
   discriminant moves. Exhaustive matches must add the new variants.
 - `meerkat-machine-kernels`, `meerkat-machine-schema`, `meerkat-mob`: the mob
+  machine decides store-owned identity changes and the host's preparation of
+  an identity before its first seat (see Added). `MobMachineState`
+  (meerkat-machine-schema and meerkat-mob) and the kernel `generated::mob`
+  `State` gain the public fields `identity_changes_held`,
+  `identity_entry_removing`, `identity_entry_archiving`,
+  `identity_entry_constructions_held` and
+  `identity_entry_constructions_activating`, so code that builds either
+  struct literally must set them. The `MobMachineInput` variants
+  `DeclareIdentityEntry` and `ResolveSpawnMemberAdmission`
+  (meerkat-machine-schema and meerkat-mob) and the kernel
+  `generated::mob::inputs` structs of the same names gain public fields:
+  `DeclareIdentityEntry` gains `created_custody: bool` and
+  `preparation_required: bool`, and `ResolveSpawnMemberAdmission`
+  `privileged_binding_present: bool` and `privileged_placement_present:
+  bool`, so code that builds them literally must set them (`false` keeps the
+  previous behaviour), and a serialized kernel input without them no longer
+  deserializes. `MobMachineInput` (meerkat-machine-schema and meerkat-mob),
+  its variant enum `MobMachineInputVariant` (meerkat-machine-schema),
+  `MobMachineCatalogInput` (meerkat-mob) and the kernel `Input` and
+  `InputKind` gain `AdmitIdentityChange { receipt, consent, permit_binds,
+  permit_admits, host_operator, grant_current, spec_current }`,
+  `RecordCreatedIdentityEntry { agent_identity, cause }`,
+  `SetIdentityChangesHeld { held }`, `RemoveIdentityEntry { agent_identity }`,
+  `ArchiveIdentityEntry { agent_identity }`, `UnarchiveIdentityEntry {
+  agent_identity }`, `BeginPreparationConstruction { agent_identity, attempt,
+  constructed }`, `SettleHostPreparation { agent_identity, attempt,
+  constructed, before_deadline, binding_matches }` and
+  `EndPreparationConstruction { agent_identity, attempt, end }`;
+  `MobMachineEffect`, its variant enum `MobMachineEffectVariant`
+  (meerkat-machine-schema), and the kernel `Effect` and `EffectKind` gain
+  `IdentityChangeAdmissionResolved`, `CreatedIdentityEntryRecorded`,
+  `IdentityEntryChangeResolved`, `PreparationConstructionResolved`,
+  `PreparationSettleResolved` and `PreparationConstructionEnded`; each
+  appended last. The machine enums `IdentityChangeReceiptKind`,
+  `IdentityChangeConsentKind`, `IdentityChangeAdmissionKind`,
+  `CreatedIdentityRecordVerdict`, `IdentityEntryChangeKind`,
+  `IdentityEntryChangeVerdict`, `PreparationConstructionVerdict`,
+  `PreparationSettleVerdict`, `ConstructionEndKind` and
+  `ConstructionEndVerdict` are new, and the machine enums new in this
+  release gain variants: `UnseatedEntryCause` gains `Archived`,
+  `RecoveredPresence` `PendingConstruction` and `Archived`, and
+  `IdentityEntryVerdict` `PreparationPending`. The invariant
+  `unseated_created_entry_is_preparing_or_owed` is retired (a store-owned
+  update records a created entry hosted on its first use or held), and
+  `archived_entry_is_store_owned`,
+  `entry_ending_marks_are_seated_and_disjoint` and
+  `construction_is_held_or_activating` are new. Created custody is no
+  longer local only: a placed spawn holds it for a created entry hosted on
+  its first use. The kernel `generated::mob::TransitionId` gains, appended
+  last, every arm of the new inputs (the `AdmitIdentityChange`,
+  `RecordCreatedIdentityEntry`, `SetIdentityChangesHeld`,
+  `RemoveIdentityEntry`, `ArchiveIdentityEntry`, `UnarchiveIdentityEntry`,
+  `BeginPreparationConstruction`, `SettleHostPreparation` and
+  `EndPreparationConstruction` families, in the order of the codegen's late
+  tail), `DeclareIdentityEntryPreparationPending`,
+  `RecoverCreatedIdentityEntryRemovingRunning`,
+  `RecoverCreatedIdentityEntryRemovingStopped`,
+  `RecoverCreatedIdentityEntryArchivingRunning`,
+  `RecoverCreatedIdentityEntryArchivingStopped`,
+  `RecoverCreatedIdentityEntryArchivedRunning` and
+  `RecoverCreatedIdentityEntryArchivedStopped`, so no existing variant's
+  discriminant moves. Exhaustive matches must add the new variants.
+- `meerkat-mob`: `SpawnMemberAdmissionObservations` gains the public fields
+  `binding_present` and `placement_present` (a runtime binding or a
+  placement on the request, which a grant with manage scope alone admits, as
+  MobMachine's spawn admission decides), so code that builds it literally
+  must set them (`false` keeps the previous answer) or end the literal with
+  `..Default::default()`.
+- `meerkat-machine-kernels`, `meerkat-machine-schema`, `meerkat-mob`: the mob
   machine answers the retire of an identity with no current incarnation
   (`RetireAbsent`) in a completed and in a destroyed mob too, and
   `MobHandle::retire` asks it in every phase instead of answering the retire
@@ -1252,6 +1321,118 @@ them.
   answers `MemberIdentityManagement::CreatedEntry` for a created entry's
   identity. A mob that holds no created entry row behaves as before.
   Rust-only; the wire contracts do not carry it.
+
+- `meerkat-mob`: store-owned identity changes. Core writes store-owned
+  identities itself, one change at a time, each committed as one store
+  transaction (the identities' rows, the journal rows of their seats and the
+  change's receipt), all or nothing:
+  `MobHandle::create_store_owned_identities` (`StoreOwnedIdentityCreate`, at
+  most `IDENTITY_CHANGE_BATCH_MAX` identities, each a
+  `CreatedIdentityRequest` with its `CreatedIdentitySpec`),
+  `update_store_owned_identity` (`StoreOwnedIdentityUpdate`,
+  `IdentityUpdateOutcome`), `archive_identity` and `unarchive_identity`
+  (`IdentityArchiveChange`), and `remove_identity` (`IdentityRemoval`) of an
+  identity of either custody. Each change names its operation
+  (`IdentityOperation`: an operation id and the request's digest), its
+  requester (`IdentityChangeRequesterInput`: the host on one of its surfaces,
+  a human principal, or an agent whose ordinary spawn grant admits the
+  change, `MobHandle::admit_identity_change_grant`, attributed from the
+  session that carries the request, never from its arguments) and its
+  consent (`IdentityChangeConsentInput`: a policy outcome, a decision whose
+  permit binds the change and admits its commit now, or an import, which
+  only the host operator carries). MobMachine decides the change's admission
+  in its commit step: a receipt of the same request answers
+  `IdentityChangeOutcome::Replayed` and writes nothing again, and a request
+  under an operation another request committed, a changes hold
+  (`MobHandle::set_identity_changes_held`, or
+  `MobBuilder::with_identity_changes_held` at a start; retryable, not
+  durable), a candidate composition, a permit that binds another change or
+  is past its deadline, imported consent from anyone but the host operator,
+  an agent requester whose grant no longer admits the change at the commit
+  (its prepared check is asked again there; `MobBuilder::with_member_grant_mint`
+  and `MemberGrantMint` give the reads the host's own grant rule), and a
+  store-owned update decided against a spec digest that is no longer the
+  identity's (`StaleSpec`, with the current digest and revision) are refused
+  typed with nothing written (`MobError::IdentityChangeRefused`,
+  `IdentityChangeRefusal` with a stable kind token, `IdentityNameHolder` for a
+  taken name). The receipt (`IdentityChangeReceipt`, schema version
+  `IDENTITY_CHANGE_RECEIPT_SCHEMA_VERSION`) records the change's kind, its
+  requester and consent and each identity's outcome, spec digest and
+  revision; `MobHandle::identity_operation` reads it back. A create seats
+  each identity Dormant as a roster-owned identity of the same spec is, and
+  spawns one that owes a kickoff once the change committed; a placed or
+  externally bound identity is hosted on its first use and one whose host
+  holds its creation awaits it, and their host's spawn holding the
+  identity's created custody (`SpawnMemberSpec::with_created_custody`)
+  creates them. An update is a declared apply of the identity under created
+  custody, so it answers the verdict a roster-owned identity's change of the
+  same spec answers (kept, restamped, role-migrated, held); a role
+  migration is kept in the row until its restamp commits, and a crash
+  before it is carried out at the next start. A removal retires a seated
+  identity's member (`MemberRetirementCause::Removed`) and tombstones its
+  name at the retirement's end, or at once for an identity no member holds;
+  the name is never an identity or a member again, for either custody, and
+  `MobHandle::identity_tombstones` pages the removed names
+  (`IdentityTombstonePage`). An archive retires a store-owned identity's
+  member (`MemberRetirementCause::Archived`) and keeps its entry unseated
+  (`UnseatedEntryCause::Archived`) on its archived session, refusing
+  deliveries to it with the new `MobError::IdentityArchived`; its unarchive
+  seats it Dormant there again. A roster-owned identity's archive is refused
+  (`OwnerReadOnly`): `MobHandle::unlist_declared_identity` unlists it alone,
+  and listing it again restores it. A roster's own change can carry a
+  receipt too (`DeclaredRoster::with_change`, `IdentityRosterChange`,
+  `DeclaredRosterOutcome::receipt`). The identity store's row (schema
+  version 2) now holds the identity's spec, its pending role migration, its
+  owned edges, its creation's full provenance (`IdentityEntered`, the
+  requester, the proposer, source evidence, the consent), an archived
+  presence with its session, and a removal's record; a start seats an entry
+  owed its seat from the row's spec. Reads: `MobHandle::identity_record`
+  (a name's row), `MobHandle::identity_record_census`
+  (`IdentityRecordCensus`: what a downgrade settles first), and the entry
+  read's `IdentityEntryView::archived_session`. The change types are
+  `#[non_exhaustive]`. Rust-only; the wire contracts do not carry them.
+
+- `meerkat-mob`: host preparation before an identity's first seat, for
+  either custody, and held constructions. A host's rule can require an
+  identity's preparation (`IdentityPreparationMode`: `Required` or
+  `Constructed`): a store-owned identity's create records it pending
+  (`CreatedIdentityRequest::with_preparation`), and a roster-owned
+  identity's declaration names it (`DeclaredEntry::with_preparation`,
+  answered `DeclaredEntryOutcome::PreparationPending`). Such an identity is
+  unseated (`UnseatedEntryCause::PreparationPending`), and a delivery to it is
+  refused retryable (`MemberWakeRefusal::HostPreparationPending`). A
+  `Required` preparation is settled by `MobHandle::settle_identity_preparation`
+  (`IdentityPreparationSettle`, `IdentityPreparationSettled`), which commits
+  its receipt and row and seats a store-owned identity from its spec, or by
+  a roster-owned identity's next declaration. A `Constructed` one is a held
+  construction its host activates: `MobHandle::construct_identity`
+  (`IdentityConstructionRequest`, answering the hold's witnesses,
+  `HeldPreparation`) holds the identity's member constructed and
+  unpublished under the entry's custody, starting no run; a settle naming
+  the attempt, decided before its deadline and binding the identity's
+  current spec, accepts the activation of exactly that construction, and
+  the settle's receipt journals the acceptance; the membership commit that
+  publishes the member ends the attempt. The mob owns each attempt: a dropped
+  observer or a lost reply ends nothing, and before an activation is
+  accepted an abort (`MobHandle::abort_identity_construction`), the
+  deadline, a refused construction, a crash or the identity's removal ends
+  it (`ConstructionEnd`) with the identity still pending; once accepted,
+  nothing replaces the activation until its publication ends, and a retry of
+  the settle after a crash that interrupted it answers
+  `ConstructionEnd::PublicationInterrupted`. Refusals are typed
+  (`PreparationNotPending`, `NotConstructed`, `ConstructionRequired`,
+  `ConstructionOpen`, `StaleAttempt`, `PreparationMismatch`,
+  `ActivationPending`, `ConstructionRefused`). The census names the entries
+  awaiting their preparation apart from those owed a host preparation
+  (`IdentityCensus::host_preparations_owed`). Rust-only; the wire contracts
+  do not carry it.
+
+- `meerkat-core`: `PreparedOperationCheck::reprepared` is public. A final
+  sink that executes a change a held consent decision admitted calls it in
+  place of `current`: its owners prepare the exact retained operation afresh
+  also when the decision's own check refuses it, and past a real owner
+  deadline the fresh preparation refuses (the store-owned identity changes
+  of `meerkat-mob` call it).
 
 - `meerkat-core`: `AuthLeaseHandle::publish_source_credential` publishes a
   credential value its caller re-reads from a source (an environment
@@ -2353,6 +2534,17 @@ them.
   they log at most one warning per voice request, with the voice item count.
 
 ### Upgrade notes
+
+- Store-owned identities: a mob whose host created, archived or removed an
+  identity (a removed roster-owned identity's tombstone included) holds rows
+  of identity store schema 2, which 0.9.8 reads per identity on SQLite and
+  refuses as a whole on a host store. Before a downgrade, read
+  `MobHandle::identity_record_census()` on 0.9.9 and settle what it counts
+  first: identities awaiting their host's preparation, held constructions,
+  and seated store-owned identities whose last seat row predates their row
+  (see the upgrading guide). A roster that still lists a removed identity is
+  answered `DeclaredEntryRefusal::NameTombstoned` for it: drop it from the
+  roster.
 
 - Operator instructions for a mob's members: a mob that recorded an
   operator instruction journals rows at mob event schema 10, which Core 0.9.7

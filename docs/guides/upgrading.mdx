@@ -137,9 +137,10 @@ reserved, never free (see
 [Identity entries](/reference/mob-architecture#identity-entries)). The origin
 is provenance and the custody of the entry's desired record only: a created
 entry's member is built from its profile like any other member, with its own
-roster labels, tools, grants and wiring. A created entry is still local and
-created at once: nothing places one or holds its creation yet. A mob
-that holds no created entry row sees no change but the new read answers.
+roster labels, tools, grants and wiring. A created entry is a store-owned
+identity, which Core's own changes create, update, archive and remove (see
+below). A mob that holds no created entry row sees no change but the new
+read answers.
 
 - **The entry reads have new answers.** `identity_entry` answers
   `IdentityEntryRead::Unreadable` and `Removed`, the entries page lists
@@ -164,6 +165,44 @@ that holds no created entry row sees no change but the new read answers.
   reads the host-adopted intent rows alone, so a created entry's row no
   longer refuses the adoption of another identity, and the intent list
   leaves created rows out.
+
+### Store-owned identity changes
+
+0.9.9 adds Core's own identity changes (Rust only): a create of store-owned
+identities, their update, archive and unarchive, the removal of an identity
+of either custody, and the host's preparation of an identity before its first
+seat with its held constructions (see
+[Store-owned identity changes](/reference/mob-architecture#store-owned-identity-changes)
+and
+[Host preparation and held constructions](/reference/mob-architecture#host-preparation-and-held-constructions)).
+A host that calls none of them sees no change.
+
+- **A removal is for good, for either custody.** `MobHandle::remove_identity`
+  of a roster-owned identity writes its name's tombstone to the identity
+  store: the name is never an identity or a member again, and a roster that
+  still lists it is answered `DeclaredEntryRefusal::NameTombstoned` for that
+  identity. Drop the identity from the roster when you remove it. To take a
+  roster-owned identity out and keep its name and session for later, unlist
+  it (`MobHandle::unlist_declared_identity`, or a complete roster without
+  it) and list it again.
+- **An archived identity refuses deliveries.** A delivery to an archived
+  store-owned identity is refused `MobError::IdentityArchived` until its
+  unarchive, and one to an identity awaiting its host's preparation is
+  refused retryable (`MobError::MemberWakeRefused`, `HostPreparationPending`).
+- **A store-owned update names the spec it was decided against.**
+  `StoreOwnedIdentityUpdate` carries the identity's expected spec digest, and
+  a change decided against another spec is refused
+  `IdentityChangeRefusal::StaleSpec` with the identity's current digest and
+  revision: read the record again (`MobHandle::identity_record`) and decide
+  the change anew.
+- **`SpawnMemberAdmissionObservations` gains two fields.** The public fields
+  `binding_present` and `placement_present` (a runtime binding or a placement
+  on the request, which a grant with manage scope alone admits) are new, so a
+  struct literal outside `meerkat-mob` must set them (`false` keeps the
+  previous answer) or end with `..Default::default()`.
+
+**Do:** drop a removed identity from the host's roster; read the record again
+after a `StaleSpec` refusal before deciding the change anew.
 
 ### WorkGraph evidence refs (Rust)
 
@@ -252,6 +291,20 @@ re-seats the entry on the session that retirement archived. A host store is
 different: 0.9.8 decodes a mob's identity intents as a whole and does not
 open the mob's storage while one of them is a created entry's row. Before a
 downgrade, a mob on a host store must hold no created identity entry.
+
+A removal writes a row of the same schema for either custody (a removed
+roster-owned identity's tombstone included), and so do an archive and a
+store-owned identity's pending preparation, so the paragraph above applies to
+every mob that holds one. Read `MobHandle::identity_record_census()` on 0.9.9
+before a downgrade: it counts the mob's rows (`created_rows`, the archived
+ones, the tombstones and the unreadable ones), the identities awaiting their
+host's preparation (`preparations_open`, which a host settles or removes
+first), the held constructions (`constructions_held`, activated or aborted
+first) and the seated store-owned identities whose member's last seat row
+predates their row's labels or profile (`seats_stale`, restamped or removed
+first, since 0.9.8 rebuilds such a member from its seat row). Change receipts
+are rows of the identity store's receipts table under keys 0.9.8 never asks
+for.
 
 0.9.8 reads WorkGraph items whose evidence withdraws earlier evidence, but it
 ignores `withdraws` and drops the field when it rewrites such an item (any

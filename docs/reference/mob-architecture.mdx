@@ -215,11 +215,17 @@ declared entry, the identity store's row for a created one): it decides which
 recovery and writer use that record, the name guards and the name
 reservations below. The entry's member is built from its profile like any
 member, with its own labels, tools, grants and wiring, which custody never
-decides. A created entry is still local and created at once: nothing places
-one or holds its creation yet. A start reads every created entry row into
-MobMachine (`RecoverCreatedIdentityEntry`), after the journal replay and
-before the start's member plan, and MobMachine decides each row from its
-presence and the replayed facts:
+decides. A declared entry is a roster-owned identity and a created entry a
+store-owned one: Core's own changes create, update, archive and remove a
+store-owned identity (see
+[Store-owned identity changes](#store-owned-identity-changes)), and an
+identity of either custody can be placed, externally bound, held for its
+host's creation or prepared by its host before its first seat (see
+[Host preparation and held constructions](#host-preparation-and-held-constructions)).
+A start reads every created entry row into MobMachine
+(`RecoverCreatedIdentityEntry`), after the journal replay and before the
+start's member plan, and MobMachine decides each row from its presence and
+the replayed facts:
 
 - A present row of a seated local member records the member a `Created`
   entry. Whichever local member the journal seats under the name is the
@@ -227,15 +233,28 @@ presence and the replayed facts:
   a created entry's name (`NameOwnedByCreated`), so a member a predecessor
   seated under it, whose spawn row carries no origin, is that entry's.
 - A present row whose identity the replay left without a member (a build
-  that predates created entries retired it) records the entry unseated, owed
-  its seat (`SeatOwed`), with the session its member was last bound to as its
-  revival record. Once the mob runs (after the start, or a stopped mob's
-  resume), Core seats it again, Dormant, on that session, from its member's
-  last spawn row, its roster labels included, as any revive keeps its
-  member's spec. An entry it cannot seat stays owed its seat, and the
-  failure is logged.
+  that predates created entries retired it, or the spawn of a create's
+  kickoff failed) records the entry unseated, owed its seat (`SeatOwed`),
+  with the session its member was last bound to as its revival record. Once
+  the mob runs (after the start, or a stopped mob's resume), Core seats it
+  again, Dormant, under created custody, from the row's spec: on that
+  session, its history kept, on a fresh session with the `HistoryUnavailable`
+  notice when that session is gone from the store, or on a fresh one when it
+  has none; a spec that owes a kickoff is embodied. A row written before rows
+  carried their spec seats the entry from its member's last spawn row, its
+  roster labels included, as any revive keeps its member's spec, and only on
+  its archived session. An entry it cannot seat stays owed its seat, and the
+  failure is logged. The start also carries out what a row keeps owed: the
+  role migration of a store-owned update whose restamp a crash prevented.
 - A row pending its host's preparation records the entry unseated
-  (`PreparationPending`), and no dormant seat takes it.
+  (`PreparationPending`), and no dormant seat takes it. A row whose held
+  construction's activation was accepted and whose member the journal seats
+  (its publication committed before a crash) records the member a `Created`
+  entry, and the start makes the row present.
+- An archived row records the entry unseated (`Archived`), with the session
+  its member was bound to as its record. A removed or archived row whose
+  member's retirement the journal shows in flight records the removal or
+  the archive in flight, and the start retires the member again.
 - A removed entry's row reserves the name as removed: it is never an entry
   or a member again.
 - A row this build cannot read (a later build's format, a field it does not
@@ -269,16 +288,27 @@ The reads need no actor command and never wake a member:
 
 | Read | Answers |
 |------|---------|
-| `identity_entry(identity)` | `IdentityEntryRead::Entry` with the entry's origin, its member's standing (seated or retiring, with its generation, session, profile and runtime mode, or unseated, with its `UnseatedEntryCause`), whether it is Broken, the host preparation it owes (`HostPreparationCause`), if any, and the target of a rotation of it in flight (`RotationTarget`), if any; `NotAnEntry` with the worker that holds the identity, if any; `Unreadable`, with the standing of the member that holds the name, if any, for a name whose entry this build cannot read; or `Removed` for a removed created entry's name. |
+| `identity_entry(identity)` | `IdentityEntryRead::Entry` with the entry's origin, its member's standing (seated or retiring, with its generation, session, profile and runtime mode, or unseated, with its `UnseatedEntryCause`), whether it is Broken, the host preparation it owes (`HostPreparationCause`), if any, the target of a rotation of it in flight (`RotationTarget`), if any, and, while no member holds it, the session its retirement archived (`archived_session`), if any; `NotAnEntry` with the worker that holds the identity, if any; `Unreadable`, with the standing of the member that holds the name, if any, for a name whose entry this build cannot read; or `Removed` for a removed identity's name, of either custody. |
 | `identity_entries(after, limit)` | One page of the entries in identity order, at most `IDENTITY_ENTRY_PAGE_MAX`, and the identity to read the next page after. The page's unreadable names are listed apart (`IdentityEntryPage::unreadable`), in identity order, and count toward its limit. |
-| `identity_census()` | The entries declared and created, seated, retiring, unseated by cause (`UnseatedEntryCounts`), Broken, with host preparation pending and with a rotation in flight, and the removed and unreadable names. While a name is unreadable the census is incomplete (`IdentityCensus::is_complete`): its other counts cannot include what this build cannot read. |
+| `identity_census()` | The entries declared and created, seated, retiring, unseated by cause (`UnseatedEntryCounts`, the archived ones and those awaiting their host's preparation included), Broken, owed a host preparation (`host_preparations_owed`: a first-boot request, an undeclared role move, a build preparation to retry) and with a rotation in flight, and the removed and unreadable names. While a name is unreadable the census is incomplete (`IdentityCensus::is_complete`): its other counts cannot include what this build cannot read. |
+| `identity_tombstones(after, limit)` | One page of the removed names, of either custody, in identity order (`IdentityTombstonePage`), at most `IDENTITY_ENTRY_PAGE_MAX`. |
 | `member_lifecycle_events(after, limit)` | One page of the journal's member lifecycle facts after a `MobJournalCursor`: spawns and seats (with the session the incarnation was seated on, a placed member's included, the entry a row records, the `HistoryUnavailable` notice of a seat on a fresh session whose archived session was gone, and the rotation that seated it, `SeatRotation`), legacy adoptions, retirement starts (with the target of the rotation a start belongs to, and the cause `Unlisted` when the declared apply's seal started it), retirements (with the session the incarnation was bound to at its end, the entry it was the member of, the cause `Unlisted` when its end ended the entry the seal unlisted, and the rotation whose terminal step retired it, `RetiredRotation`), member resets and mob resets. |
 | `members_holding_run_starts(reason)` | The members whose run starts the host holds for `reason`, as `release_member_run_starts` releases them. |
 
 All but the journal read answer from the machine state the actor last
 published, as `member_unmaterialized` does: the answer can be stale by the time
 the host acts on it, and it never says whether a member is materialized. The
-journal read is a store read. They need `ControlScope::List`, and the journal
+journal read is a store read, and so are two reads of the identity store:
+`identity_record(identity)` answers a name's row (`CreatedIdentityObservation`:
+a store-owned identity's revision, spec, presence, pending role migration and
+provenance, a removed name's tombstone with its removal's record, or a row
+this build cannot read; `None` for a name the store holds no row of, such as a
+roster-owned identity, whose record is its host's roster), and
+`identity_record_census()` counts what a downgrade settles first
+(`IdentityRecordCensus`: the store's rows of the mob, the archived ones, the
+tombstones and the unreadable ones, the identities awaiting their host's
+preparation, the held constructions, and the seated store-owned identities
+whose member's last seat row predates their row's labels or profile). They need `ControlScope::List`, and the journal
 read `ControlScope::SubscribeEvents`. An entry read whose machine facts are
 incomplete answers `MobError::Internal` rather than a default. An entry's
 fields are internal to the stored event codec, so an older release reads an
@@ -354,6 +384,7 @@ seats); the agent lane is refused `MobError::ScopeDenied`.
 | Seated, another role, no migration declared | Held (`RoleMigrationHeld`): every wake refused `HostPreparationPending` (a host's, a peer's, the boot plan's), and a Live local member's run starts held (`HostRunStartHoldReason::HostPreparation`): its run in flight finishes, never preempted, no new run starts under its previous role, and the mob releases it when idle. A placed member's runs start on its member host, which these holds do not reach: a Live placed member keeps serving under its previous role until an apply ends the hold. The explicit resume leaves it alone: MobMachine answers it held before the resume acts on any member, so a Live one keeps its live actor. An apply that restores the role ends the hold; one that declares the move ends it in the step that commits the new role, so a deferred or refused restamp keeps it. The hold ends with its entry too (its member's retirement, the seal that removes the unseated entry, the reset, the destroy), so no member later seated under the name inherits it. The entry reads name `HostPreparationCause::RoleMigrationUndeclared`, and `members_holding_run_starts(HostPreparation)` lists a held member. A hold never blocks a retirement. |
 | Placed or externally bound, no member | Hosted on its first use (`HostedOnFirstUse`): its host creates the member with the entry's custody, a placed spawn or, for an externally bound one, the owner-bound spawn (`spawn_spec_with_generated_owner_context`, which keeps a host's entry custody). |
 | Held creation, never created | Awaits its held creation (`AwaitingHeldCreation`): the host's held protocol creates it. The host's current hold policy decides on every apply; nothing is kept of an earlier one. |
+| Never seated, its preparation `required` or `constructed` (`DeclaredEntry::with_preparation`, as the host's rule for its profile derives it at this apply) | Awaits its host's preparation (`PreparationPending`): not seated, and a delivery to it is refused retryable (`MobError::MemberWakeRefused`, `HostPreparationPending`). A later declaration with no preparation settles a `required` one; a `constructed` one is settled only by the activation of its held construction (see [Host preparation and held constructions](#host-preparation-and-held-constructions)). |
 | Spawn, wake or retirement in flight | Deferred to the next apply (`Deferred`). |
 | A worker holds the name, the identity store manages it (a host adoption), declared twice, or a first-boot request for an undeclared identity | Refused for that identity alone (`Refused`, `DeclaredEntryRefusal`). |
 | A created entry holds the name, or the name is removed or unreadable | Refused for that identity alone (`DeclaredEntryRefusal::NameOwnedByCreated`, `NameTombstoned`, `NameUnreadable`): the apply never declares over a created entry or a reserved name. |
@@ -432,12 +463,155 @@ The roster vocabulary keeps the residency words: a seated member is Dormant
 until its first delivery wakes it, whether the apply or a seat seated it; a
 held member is Dormant and refuses its wakes; an unseated entry is no member
 at all (`EntryStanding::Unseated`, with its `UnseatedEntryCause`: `SeatOwed`,
-`HostedOnFirstUse`, `HeldCreation` or, for a created entry its host's
-preparation holds, `PreparationPending`) and is listed by the entry reads
-only.
+`HostedOnFirstUse`, `HeldCreation`, `PreparationPending` for an entry its
+host's preparation holds, or `Archived` for an archived store-owned entry)
+and is listed by the entry reads only.
+
+A host that records its roster changes as Core's receipts names the change
+a partial apply carries out (`DeclaredRoster::with_change`, an
+`IdentityRosterChange` with its operation, requester and consent): the apply
+writes the change's receipt in its declaration step's store transaction
+(`DeclaredRosterOutcome::receipt`), and a retry of the same operation answers
+that receipt. `MobHandle::unlist_declared_identity(identity)` unlists one
+roster-owned identity as a complete roster that lists every other Declared
+entry would, writing no tombstone: it is a roster-owned identity's archive,
+and listing it again its unarchive.
 
 The apply's types are `#[non_exhaustive]`, and the apply is Rust-only: the
 wire contracts do not carry it.
+
+### Store-owned identity changes
+
+Since 0.9.9 Core writes store-owned identities itself, one change at a time:
+`MobHandle::create_store_owned_identities` (a batch of at most
+`IDENTITY_CHANGE_BATCH_MAX` identities, all or nothing),
+`update_store_owned_identity`, `archive_identity`, `unarchive_identity` and
+`remove_identity` (either custody). Each change names its operation
+(`IdentityOperation`: an operation id and the request's digest), its
+requester and its consent. The requester (`IdentityChangeRequesterInput`) is
+the host on one of its surfaces, a human principal, or an agent: an agent's
+change is admitted by its ordinary spawn grant
+(`admit_identity_change_grant`, from the session that carries the request,
+never from its arguments), whose prepared check is asked again at the commit,
+so a grant revoked meanwhile refuses the change (`GrantRevoked`). The consent
+(`IdentityChangeConsentInput`) is a policy outcome, a decision whose permit
+binds the change and admits its commit now, or an import, which only the
+host operator may carry. The requester and the consent are recorded, never
+authority.
+
+MobMachine decides every change's admission in the change's commit step
+(`AdmitIdentityChange`): a receipt of the same request answers
+`IdentityChangeOutcome::Replayed` and writes nothing again; another request
+under the same operation id is refused `OperationReused`; and a candidate
+composition, a changes hold, a decision's permit that binds another change or
+is past its deadline, imported consent from anyone but the host operator, a
+revoked grant, and a store-owned update decided against a spec that is no
+longer the identity's (`StaleSpec`, with the identity's current spec digest
+and revision) are refused typed (`MobError::IdentityChangeRefused`, an
+`IdentityChangeRefusal` with a stable kind token), with nothing written. Only
+the changes hold (`MobHandle::set_identity_changes_held`, or
+`MobBuilder::with_identity_changes_held` at a start; not durable) is
+retryable unchanged. An admitted change writes its identities' rows (schema
+version 2: the revision, the spec, the presence and the provenance with the
+requester and the consent), the journal rows of their seats and the change's
+receipt (`IdentityChangeReceipt`, read back with `identity_operation`) in one
+store transaction, before any member is seated or retired. A custom storage
+composition without the built-in identity and member store commits no change
+(`StorageUnsupported`).
+
+- **Create.** Each identity's name must be free: MobMachine records the new
+  entry (`RecordCreatedIdentityEntry`), and a name another identity, a
+  worker, a removed identity or an unreadable row holds is refused
+  `NameTaken` (`IdentityNameHolder`). Each identity is seated Dormant as a
+  roster-owned identity of the same spec is (its profile's tools, its labels,
+  the definition's wiring, its runtime mode), and nothing wakes; one that
+  owes a kickoff is spawned once the change committed and runs its kickoff
+  once. A placed or externally bound identity is hosted on its first use,
+  one whose creation its host holds (`CreatedIdentityRequest::held_creation`)
+  awaits it, and one whose host prepares it first waits unseated; their
+  host's spawn holding the identity's created custody
+  (`SpawnMemberSpec::with_created_custody`) creates them.
+- **Update.** `update_store_owned_identity` is a declared apply of the
+  identity under created custody: its declaration step decides the change's
+  admission and the identity's verdict with the declared apply's own arms
+  (`DeclareIdentityEntry`), so a store-owned identity and a roster-owned one
+  of the same spec answer the same verdict for the same change
+  (`IdentityUpdateOutcome::applied`). A descriptive change (display name,
+  labels, context, instructions) keeps the member, and its next build
+  applies it; a runtime-mode change restamps the member on its own session;
+  a profile change is the declared migration from the member's current role,
+  kept in the row until the restamp commits, so a crash before it is carried
+  out at the next start; a placement, binding or backend change is read only
+  while no member holds the identity. The update of an archived identity,
+  or of one awaiting its preparation, changes its row only. A retry of a
+  committed update answers `Replayed`, never a stale spec; a roster-owned
+  identity's update is refused `OwnerReadOnly`.
+- **Removal.** `remove_identity` removes an identity of either custody. A
+  seated identity's member retires, its retirement's start row recording
+  the cause `Removed` (`MemberRetirementCause`), and the end of the
+  retirement ends the entry and tombstones the name; an identity no member
+  holds is tombstoned at once. The call answers once the retirement ended.
+  The name is never an identity or a member again: a create, a declaration,
+  a spawn and an adoption of it are refused, and `identity_tombstones` lists
+  it. A retirement that fails leaves the removal marked: a retry of the same
+  operation, or the next start, retires the member again.
+- **Archive and unarchive.** A store-owned identity's archive retires its
+  member with the cause `Archived` and keeps its entry, unseated, with the
+  session the member was bound to; its row records presence `archived` and
+  its name stays reserved. Deliveries to an archived identity are refused
+  `MobError::IdentityArchived`, and it can be updated or removed. Its
+  unarchive seats it Dormant on its archived session, its history kept, or on
+  a fresh session with the notice when that session is gone from the store.
+  A roster-owned identity's archive is refused `OwnerReadOnly`: its host
+  unlists it (`unlist_declared_identity`) and lists it again.
+
+An update, removal, archive or unarchive of an identity whose spawn, wake or
+retirement is in flight is refused retryable
+(`MobError::LifecycleOperationPending`), and so is an update while another
+declared apply of the mob runs. The change
+types are `#[non_exhaustive]`, and the changes are Rust-only: the wire
+contracts do not carry them.
+
+### Host preparation and held constructions
+
+A host's rule for an identity's profile can require its preparation before
+the identity's first seat (`IdentityPreparationMode`: `None`, `Required` or
+`Constructed`), for either custody: a store-owned identity's create records
+it pending (`CreatedIdentityRequest::with_preparation`, presence
+`PendingPreparation`), and a roster-owned identity's declaration names the
+mode (`DeclaredEntry::with_preparation`), derived again at each apply. Such an
+identity is unseated (`PreparationPending`) and never runs: a delivery to it
+is refused retryable.
+
+A `Required` preparation ends with its settle: a store-owned identity's
+settle (`MobHandle::settle_identity_preparation` without an attempt) commits
+its receipt and its row, present again, and seats it Dormant from its row's
+spec, embodied when its spec owes a kickoff, which runs once. A roster-owned
+identity is settled by its host's next declaration, which names no
+preparation.
+
+A `Constructed` preparation is a held construction its host activates. The
+host asks for one (`MobHandle::construct_identity`): MobMachine holds a new
+attempt (`BeginPreparationConstruction`; a store-owned identity's row records
+the attempt), and the mob holds the identity's member constructed and
+unpublished under the entry's custody, starting no run. The host reads the
+hold's witnesses (`HeldPreparation`), then settles naming the attempt:
+decided before the attempt's deadline and binding the identity's current
+spec, the settle accepts the activation of exactly that construction
+(`SettleHostPreparation`), and its receipt journals the acceptance. The mob
+owns each attempt: a dropped observer or a lost reply ends nothing. Before an
+activation is accepted, an abort (`abort_identity_construction`), the
+attempt's deadline, a refused construction, a crash or a removal ends the
+attempt (`EndPreparationConstruction`), and the identity stays pending. Once
+accepted, nothing replaces the activation until its publication ends:
+published (the membership commit that seats the member ends the attempt, and
+a store-owned identity's row is present again), failed, or interrupted by a
+crash (a retry of the settle answers `ConstructionEnd::PublicationInterrupted`),
+after which the identity stays pending and a new attempt may follow. A
+`Constructed` preparation is never settled without an attempt
+(`ConstructionRequired`), and at most one attempt of an identity is open,
+held or activating. A roster-owned identity's attempts count within one
+process: no construction survives a restart.
 
 ### One-shot durable role migration
 

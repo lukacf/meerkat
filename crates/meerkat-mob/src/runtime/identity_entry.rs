@@ -522,7 +522,8 @@ pub struct IdentityCensus {
     pub host_preparations_owed: usize,
     /// Entries with a rotation in flight.
     pub rotation_in_flight: usize,
-    /// Names of removed created entries ([`IdentityEntryRead::Removed`]).
+    /// Names of removed identities, of either custody
+    /// ([`IdentityEntryRead::Removed`]).
     pub tombstoned: usize,
     /// Names whose entry this build cannot read
     /// ([`IdentityEntryRead::Unreadable`]). They are counted here alone,

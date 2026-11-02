@@ -63,7 +63,11 @@ API changes, error codes, SDKs, prebuilt binaries and Rust embedding:
   `session/input_status` shows `terminal_outcome: "abandoned"` (Rust
   `InputAbandonReason::MaxAttemptsExhausted {attempts}`). At the cap the whole
   refused batch ends this way, so other queued inputs can show it too.
-  Provider-level retries are separate (0.8.23).
+  Provider-level retries are separate (0.8.23). Since 0.9.9 a host store
+  fence gap suspends the run without spending attempts, a host runtime that
+  stops mid-turn leaves the inputs pending for the next start, and a kept
+  governed resume whose controller client the host cannot supply again ends
+  `InputAbandonReason::ResumeRefused` instead of exhausting its attempts.
 - Summaries (`message_count`, `total_tokens`, `last_assistant_text` in
   `session/read` and `session/list`) are seeded when the session actor is
   created: a new session reports `message_count` of at least 1 (its system

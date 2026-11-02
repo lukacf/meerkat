@@ -112,6 +112,13 @@ pub struct CopilotAccountIdentity {
     /// (server-to-server, billed to the organization that installed the
     /// App).
     pub installation: bool,
+    /// Whether GitHub's identity lookup (`copilot_internal/user`) answered
+    /// for the token. `false` for an installation token, which skips it, and
+    /// for a token it does not answer (a 403 or a 404, as a fine-grained
+    /// personal access token can get): the account's model list on the
+    /// default Copilot API host alone vouches for such a token, and a 401
+    /// from that list is GitHub refusing the token itself.
+    pub looked_up: bool,
 }
 
 /// How a Copilot route authenticates, chosen by its auth method.

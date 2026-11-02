@@ -6555,8 +6555,15 @@ async fn handle_auth_command(
                     let metadata = conn.auth_lease.metadata();
                     match metadata.account_id.as_deref() {
                         Some(account) => println!("account: {account}"),
+                        // GitHub names no account for a GitHub App
+                        // installation token, nor for a token its identity
+                        // lookup does not answer (the route then lists the
+                        // models on the default Copilot API host).
                         None if operator_token_route => {
-                            println!("account: GitHub App installation (server-to-server)");
+                            println!(
+                                "account: not named by GitHub (a GitHub App installation token, \
+                                 or a token GitHub's identity lookup does not answer)"
+                            );
                         }
                         None => {}
                     }

@@ -20,8 +20,8 @@
 #   the boot scan of a row of either with every presence and revival record,
 #   in a running and a stopped mob, until the boot plan's seal. Exactly one
 #   arm answers every row while the replay runs and none after the seal
-#   (AuditRecoverExactlyOne), and no step changes an entry's origin
-#   (AuditEntryKeepsItsOrigin; the names run checks it too).
+#   (AuditRecoverExactlyOne), and no step turns a Created entry Declared
+#   (AuditCreatedEntryNeverDeclared; the names run checks it too).
 # - reseat: the scan of rows of two identities without a member (without a
 #   revival record, but member 2's Present row), a ladder without custody
 #   for member 1 and one with each pair of custodies for member 2, seated on
@@ -670,7 +670,7 @@ write_cfg() {
     scan)
       spec="ScanSpec"
       run_properties="
-  AuditEntryKeepsItsOrigin"
+  AuditCreatedEntryNeverDeclared"
       run_invariants="
   AuditRecoverExactlyOne"
       run_safety="
@@ -691,7 +691,7 @@ write_cfg() {
       spec="NamesSpec"
       run_properties="
   AuditSealNeverTouchesCreated
-  AuditEntryKeepsItsOrigin"
+  AuditCreatedEntryNeverDeclared"
       run_invariants="
   AuditNamesDeclareExactlyOne
   AuditSealExactlyOne
@@ -1223,9 +1223,9 @@ PY
 
   # The replay of a Declared entry row replaces the Created entry the scan
   # recorded first (the entry replay's entry_of_the_rows_origin guard
-  # dropped): the entry's custody changes.
-  mutate scan replay_replaces_a_created_entry "Action property AuditEntryKeepsItsOrigin" <<'PY'
-drop_guard("RecoverIdentityEntrySeatedRunning", "= Some(origin)))")
+  # dropped): a store-owned identity turns roster-owned.
+  mutate scan replay_replaces_a_created_entry "Action property AuditCreatedEntryNeverDeclared" <<'PY'
+drop_guard("RecoverIdentityEntrySeatedRunning", '(origin = "Created"))')
 PY
 
   # A removal's row after an archive's row of the same seated identity marks

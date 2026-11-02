@@ -907,8 +907,8 @@ fi
 # fourteen runs over their whole reachable space, in two parts. Its
 # recovery part's scan run
 # replays a seated member with or without its Declared entry's row (before
-# or after the scan of its rows: no replay changes an entry's origin) beside
-# an identity without a member, and scans a row of either with every
+# or after the scan of its rows: no replay turns a Created entry Declared)
+# beside an identity without a member, and scans a row of either with every
 # presence and revival record, in a running and a stopped mob, until the
 # boot plan's seal: a Present row of a seated local member records a Created
 # entry, one of an identity without a member an entry owed its seat (with
@@ -970,7 +970,7 @@ fi
 # update that skips its declared migration or its RecordOnly or swaps two
 # verdicts, an archive that frees its name or takes a pending entry, a
 # roster-owned identity archived, an archived entry seated or replayed, a
-# tombstoned name seated, a replay over an entry of another origin, a
+# tombstoned name seated, a Declared row's replay over a Created entry, a
 # record over an entry's name, a new entry's cause out of precedence, an
 # unlist of a Created entry, a created custody kept local, which leaves the
 # placed witness unreachable).

@@ -59,9 +59,9 @@
 \*   scan and placed: AuditRecoverExactlyOne (invariant, ENABLED form:
 \*     exactly one arm answers every row while the replay runs, and none
 \*     once the boot plan is sealed).
-\*   scan and names: AuditEntryKeepsItsOrigin (action property: no step
-\*     changes an entry's origin, in either order of the replay and the
-\*     scan).
+\*   scan and names: AuditCreatedEntryNeverDeclared (action property: no
+\*     step turns a Created entry Declared, in either order of the replay
+\*     and the scan).
 \*   scan: AuditScanUnseatedCauses (invariant: the scan records a Created
 \*     entry unseated only owed its seat, awaiting its host's preparation
 \*     or archived; a store-owned update's declaration, which no recovery
@@ -155,11 +155,13 @@ RecoverExactlyOneOver(lasts) ==
             = IF boot_plan_sealed = FALSE /\ phase \in {"Running", "Stopped"} THEN 1 ELSE 0
 AuditRecoverExactlyOne == RecoverExactlyOneOver(Lasts)
 
-\* An entry's custody never changes in place: a step that keeps an
-\* identity's entry keeps its origin, whatever order the journal replay and
-\* the boot's scan come in.
-AuditEntryKeepsItsOrigin ==
-    [][\A id \in CreatedIds : Origin(id) # None => OriginNext(id) \in {None, Origin(id)}]_vars
+\* A store-owned identity never turns roster-owned: no step replaces a
+\* Created entry's origin with Declared, whatever order the journal replay
+\* and the boot's scan come in. A Created row may replay over a stale
+\* Declared origin (the journal records no end of an entry that ends
+\* unseated), so the property names this one direction.
+AuditCreatedEntryNeverDeclared ==
+    [][\A id \in CreatedIds : Origin(id) = Some("Created") => OriginNext(id) # Some("Declared")]_vars
 
 \* The causes the boot's scan records a Created entry unseated for: owed its
 \* seat (a Present row of an identity no member holds), awaiting its host's
@@ -202,8 +204,8 @@ C1Recover == RecoverRosterMemberRunning(Id1, Rid1, 1, 0, AuditProfile, AuditMode
 C1Bind == RecoverMemberSessionBindingFreshRunning(Id1, Rid1, Sess1, None)
 \* The replay of member 1's Declared entry row, before or after the scan of
 \* its created row (the boot replays first): the arm's own guard refuses it
-\* over the Created entry a scan recorded first, so an entry's custody never
-\* changes by a replay (AuditEntryKeepsItsOrigin).
+\* over the Created entry a scan recorded first, so a store-owned identity
+\* never turns roster-owned by a replay (AuditCreatedEntryNeverDeclared).
 C1Declared == RecoverIdentityEntrySeatedRunning(Id1, Rid1, "Declared")
 CStop == AuditQuiesceStop \/ StopRunning \/ ResumeStopped
 

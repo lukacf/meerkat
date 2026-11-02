@@ -280,13 +280,15 @@ AuditNoLadderForReservedName ==
       ]_vars
 
 \* A ladder holds entry custody only for a Declared entry's name or no
-\* entry's, and created custody only for a Created entry owed its seat.
+\* entry's, and created custody only for a Created entry no member holds
+\* that is owed its seat, hosted on its first use or held for its creation.
 AuditLadderCustodyMatchesOrigin ==
     [][\A id \in CreatedIds :
          /\ (id \notin spawn_exec_entry_custody /\ id \in spawn_exec_entry_custody')
               => Origin(id) \in {None, Some("Declared")}
          /\ (id \notin spawn_exec_created_custody /\ id \in spawn_exec_created_custody')
-              => (Created(id) /\ Unseated(id) = Some("SeatOwed"))
+              => (Created(id)
+                  /\ Unseated(id) \in {Some("SeatOwed"), Some("HostedOnFirstUse"), Some("HeldCreation")})
       ]_vars
 
 \* A seat under created custody binds the entry's revival record.

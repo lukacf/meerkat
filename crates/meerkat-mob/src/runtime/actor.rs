@@ -38593,9 +38593,7 @@ impl MobActor {
             fresh_session_id: _,
             history_unavailable: _,
             fresh_life: _,
-            // A placed spawn never acts for a created entry: only a dormant
-            // seat does.
-            created_custody: _,
+            created_custody,
         } = spec;
         let Some(host) = placement else {
             fail!(MobError::Internal(
@@ -38610,12 +38608,12 @@ impl MobActor {
                  definition's wiring rules is local"
             )));
         }
-        // A placed spawn acts for an identity entry only when the host
-        // declared the entry hosted on its first use (MobMachine's remote
-        // ladder refuses any other entry custody too,
+        // A placed spawn acts for an identity entry of either custody only
+        // when the entry is hosted on its first use (MobMachine's remote
+        // ladder refuses any other custody too,
         // placed_custody_hosted_on_first_use): any other is refused typed
         // here, before anything is created.
-        if entry_custody
+        if (entry_custody || created_custody)
             && self
                 .dsl_authority
                 .state()
@@ -38624,8 +38622,8 @@ impl MobActor {
                 != Some(&mob_dsl::UnseatedEntryCause::HostedOnFirstUse)
         {
             fail!(MobError::WiringError(format!(
-                "'{identity}' cannot be placed on a member host with entry custody: only an \
-                 identity entry the host declared hosted on its first use is placed"
+                "'{identity}' cannot be placed on a member host with its entry's custody: only \
+                 an identity entry hosted on its first use is placed"
             )));
         }
         if tool_dispatch_admission.is_some() {
@@ -38649,9 +38647,8 @@ impl MobActor {
             )));
         }
         let agent_identity = AgentIdentity::from(identity.as_str());
-        // A placed spawn carries no created custody yet.
         if let Err(error) =
-            self.preview_spawn_command_admission(&agent_identity, entry_custody, false)
+            self.preview_spawn_command_admission(&agent_identity, entry_custody, created_custody)
         {
             fail!(error);
         }
@@ -39007,7 +39004,7 @@ impl MobActor {
                 effective_profile_override_present: effective_profile_override.is_some(),
                 effective_model_override_present: effective_model_override.is_some(),
                 entry_custody,
-                created_custody: false,
+                created_custody,
             },
             "enqueue_spawn_remote_open",
         ) {
@@ -39508,7 +39505,9 @@ impl MobActor {
             fork_overlay: super::ForkOverlayOrigin::default(),
             // Refused above: a placed member is never exempt.
             definition_wiring: crate::DefinitionWiring::Applies,
-            // Refused above: a placed spawn never acts for an identity entry.
+            // The remote ladder's custody is MobMachine's, recorded at its
+            // open (spawn_exec_entry_custody, spawn_exec_created_custody):
+            // the pending record of a placed spawn carries none.
             entry_custody: false,
             created_custody: false,
             history_unavailable: None,

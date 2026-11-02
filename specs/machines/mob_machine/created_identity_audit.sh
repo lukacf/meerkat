@@ -668,11 +668,12 @@ PY
 drop_guard("BeginSpawnExecFresh", "identity_entry_tombstones) = FALSE)")
 PY
 
-  # Created custody takes a Created entry not owed its seat.
+  # Created custody takes a Created entry with any unseated cause (one
+  # awaiting its host's preparation, an archived one): the last of the
+  # causes it takes (owed its seat, hosted on its first use, held for its
+  # creation) becomes any cause.
   mutate reseat created_custody_any_created "Action property AuditLadderCustodyMatchesOrigin" <<'PY'
-replace_in_arm("BeginSpawnExecFresh",
-               ' /\\ ((IF (agent_identity \\in DOMAIN identity_entry_unseated) THEN Some((IF agent_identity \\in DOMAIN identity_entry_unseated THEN identity_entry_unseated[agent_identity] ELSE "None")) ELSE None) = Some("SeatOwed"))',
-               "")
+replace_in_arm("BeginSpawnExecFresh", '= Some("HeldCreation"))', '# None)')
 PY
 
   # Entry custody takes a Created entry's name.

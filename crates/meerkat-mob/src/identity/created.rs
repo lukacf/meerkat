@@ -594,8 +594,9 @@ impl IdentityRemovalRecord {
 /// ([`CreatedIdentityObservation::Unreadable`]).
 ///
 /// The row is complete with this release: spec, revision, presence, a
-/// pending role migration, owned edges, provenance and a removal record. A
-/// later change of its shape takes a new schema version.
+/// pending role migration, owned edges, provenance, a removal record and
+/// whether its host holds its creation. A later change of its shape takes a
+/// new schema version.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
@@ -620,6 +621,12 @@ pub struct CreatedIdentityRecord {
     /// The removal that tombstoned the identity, once one did.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub removal: Option<IdentityRemovalRecord>,
+    /// Whether the identity's host holds its creation for its held protocol:
+    /// no start seats it Dormant before its first creation, which its host's
+    /// held spawn makes. A later life (after its member's retirement) is
+    /// seated as any identity's.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub held_creation: bool,
     /// Digest of the complete store-sealed row, itself excluded.
     pub authority_digest: String,
 }
@@ -644,6 +651,7 @@ impl CreatedIdentityRecord {
             pending_role_migration: None,
             owned_edges: Vec::new(),
             removal: None,
+            held_creation: false,
             authority_digest: String::new(),
         }
         .resealed()
@@ -669,6 +677,7 @@ impl CreatedIdentityRecord {
             pending_role_migration: None,
             owned_edges: Vec::new(),
             removal: None,
+            held_creation: false,
             authority_digest: String::new(),
         }
         .resealed()
@@ -690,6 +699,13 @@ impl CreatedIdentityRecord {
         removal: IdentityRemovalRecord,
     ) -> Result<Self, IdentityIntentError> {
         self.removal = Some(removal);
+        self.resealed()
+    }
+
+    /// The row with its host's held creation recorded (or not), sealed
+    /// again.
+    pub fn with_held_creation(mut self, held_creation: bool) -> Result<Self, IdentityIntentError> {
+        self.held_creation = held_creation;
         self.resealed()
     }
 
@@ -813,6 +829,8 @@ impl CreatedIdentityRecord {
             owned_edges: &'a [OwnedIdentityEdge],
             #[serde(skip_serializing_if = "Option::is_none")]
             removal: Option<&'a IdentityRemovalRecord>,
+            #[serde(skip_serializing_if = "std::ops::Not::not")]
+            held_creation: bool,
         }
         let bytes = serde_json::to_vec(&AuthorityMaterial {
             domain: "meerkat.identity.created_authority.v2",
@@ -826,6 +844,7 @@ impl CreatedIdentityRecord {
             pending_role_migration: self.pending_role_migration.as_ref(),
             owned_edges: &self.owned_edges,
             removal: self.removal.as_ref(),
+            held_creation: self.held_creation,
         })
         .map_err(|error| IdentityIntentError::Serialization(error.to_string()))?;
         Ok(sha256_digest(&bytes))
@@ -1286,6 +1305,19 @@ mod tests {
                 "authority_digest":
                     "sha256:61295b263e58b28231f97de905d1b7da929ce3f0f415edf4b11d1292229703e5"
             })
+        );
+
+        // A row whose host holds its creation records it, and its seal
+        // covers it.
+        let held = alpha_row()
+            .with_held_creation(true)
+            .expect("a sealed held row");
+        let held_value = serde_json::to_value(&held).expect("encode the held row");
+        assert_eq!(held_value["held_creation"], serde_json::json!(true));
+        assert_ne!(
+            held.authority_digest,
+            alpha_row().authority_digest,
+            "the seal covers the held creation"
         );
 
         // The two other presences' forms.

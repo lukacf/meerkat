@@ -2168,8 +2168,10 @@ macro_rules! mob_catalog_machine_dsl {
             AdmitIdentityChange { receipt: Enum<IdentityChangeReceiptKind>, consent: Enum<IdentityChangeConsentKind>, permit_binds: bool, permit_admits: bool, host_operator: bool, grant_current: bool, spec_current: bool },
             // A store-owned identity's entry, recorded by its create's
             // commit step before its seat, in the same prepared step, with
-            // the cause it is unseated for until its seat (SeatOwed) or its
-            // host's preparation (PreparationPending).
+            // the cause it is unseated for until its seat (SeatOwed), its
+            // host's creation (HostedOnFirstUse for a placed or externally
+            // bound spec, HeldCreation for one its host's held protocol
+            // creates) or its host's preparation (PreparationPending).
             RecordCreatedIdentityEntry { agent_identity: AgentIdentity, cause: Enum<UnseatedEntryCause> },
             // The host holds or releases this mob's identity changes.
             SetIdentityChangesHeld { held: bool },
@@ -3497,8 +3499,9 @@ macro_rules! mob_catalog_machine_dsl {
         // candidate composition records nothing and a changes hold refuses
         // it; an unreadable name and a removed identity's name are reserved;
         // a name an identity entry of either custody holds, or a member or
-        // a spawn under way, is taken. Only a seat owed or a pending host
-        // preparation is a new entry's cause.
+        // a spawn under way, is taken. A new entry is owed its seat, hosted
+        // on its first use, held for its host's creation or awaiting its
+        // host's preparation; never archived.
         helper created_identity_record_verdict(
             composition_authoritative: bool,
             changes_held: bool,
@@ -3526,7 +3529,7 @@ macro_rules! mob_catalog_machine_dsl {
             if held_by_worker == true {
                 CreatedIdentityRecordVerdict::NameHeldByWorker
             } else {
-            if cause != UnseatedEntryCause::SeatOwed && cause != UnseatedEntryCause::PreparationPending {
+            if cause == UnseatedEntryCause::Archived {
                 CreatedIdentityRecordVerdict::CauseRefused
             } else {
                 CreatedIdentityRecordVerdict::Recorded
@@ -5150,14 +5153,17 @@ macro_rules! mob_catalog_machine_dsl {
                 || self.identity_entry_origins.contains_key(id) == true)
         }
 
-        // A placed spawn ladder acts for an identity entry only when the host
-        // declared the entry hosted on its first use: a ladder that holds an
-        // entry's custody is local, or placed for an entry unseated
-        // HostedOnFirstUse (BeginSpawnExecRemote's
+        // A placed spawn ladder acts for an identity entry of either custody
+        // only when the entry is hosted on its first use: a ladder that holds
+        // an entry's custody, entry or created, is local, or placed for an
+        // entry unseated HostedOnFirstUse (BeginSpawnExecRemote's
         // placed_custody_hosted_on_first_use guard). A placed entry's member
         // lives on its member host and is never seated Dormant here.
         invariant placed_entry_custody_is_hosted_on_first_use {
             for_all(id in self.spawn_exec_entry_custody,
+                self.member_placement.contains_key(id) == false
+                || self.identity_entry_unseated.get_cloned(id) == Some(UnseatedEntryCause::HostedOnFirstUse))
+            && for_all(id in self.spawn_exec_created_custody,
                 self.member_placement.contains_key(id) == false
                 || self.identity_entry_unseated.get_cloned(id) == Some(UnseatedEntryCause::HostedOnFirstUse))
         }
@@ -5206,12 +5212,14 @@ macro_rules! mob_catalog_machine_dsl {
         }
 
         // No name holds both custodies, and created custody belongs to an
-        // open local spawn ladder of a Created entry.
+        // open spawn ladder of a Created entry (a local one Opened, a placed
+        // one MaterializePending).
         invariant entry_custodies_are_disjoint {
             for_all(id in self.spawn_exec_created_custody,
                 self.spawn_exec_entry_custody.contains(id) == false
                 && self.identity_entry_origins.get_cloned(id) == Some(IdentityEntryOrigin::Created)
-                && self.spawn_exec_phase.get_cloned(id) == Some(SpawnExecPhase::Opened))
+                && (self.spawn_exec_phase.get_cloned(id) == Some(SpawnExecPhase::Opened)
+                    || self.spawn_exec_phase.get_cloned(id) == Some(SpawnExecPhase::MaterializePending)))
         }
 
         // Entry custody belongs to an open spawn ladder (a local one Opened,
@@ -8440,15 +8448,19 @@ macro_rules! mob_catalog_machine_dsl {
             guard "current_binding_absent" { self.identity_to_runtime.contains_key(agent_identity) == false }
             // No spawn without custody takes an identity entry's name, and a
             // custody takes only the entry of its own origin: entry custody a
-            // Declared entry's name, created custody a Created entry owed its
-            // seat. Never both custodies.
+            // Declared entry's name, created custody a Created entry no member
+            // holds that is owed its seat, hosted on its first use or held for
+            // its creation (never one archived or awaiting its host's
+            // preparation). Never both custodies.
             guard "entry_name_free" {
                 (self.identity_entry_origins.contains_key(agent_identity) == false && created_custody == false)
                 || (entry_custody == true && created_custody == false
                     && self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Declared))
                 || (created_custody == true && entry_custody == false
                     && self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Created)
-                    && self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::SeatOwed))
+                    && (self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::SeatOwed)
+                        || self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::HostedOnFirstUse)
+                        || self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::HeldCreation)))
             }
             // No spawn takes a reserved name: a removed created entry's, or
             // one whose created entry row this build cannot read.
@@ -8500,21 +8512,22 @@ macro_rules! mob_catalog_machine_dsl {
             guard "current_binding_absent" { self.identity_to_runtime.contains_key(agent_identity) == false }
             // No spawn without custody takes an identity entry's name, and a
             // custody takes only the entry of its own origin: entry custody a
-            // Declared entry's name, created custody a Created entry owed its
-            // seat. Never both custodies.
+            // Declared entry's name, created custody a Created entry no member
+            // holds that is owed its seat, hosted on its first use or held for
+            // its creation (never one archived or awaiting its host's
+            // preparation). Never both custodies.
             guard "entry_name_free" {
                 (self.identity_entry_origins.contains_key(agent_identity) == false && created_custody == false)
                 || (entry_custody == true && created_custody == false
                     && self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Declared))
                 || (created_custody == true && entry_custody == false
                     && self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Created)
-                    && self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::SeatOwed))
+                    && (self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::SeatOwed)
+                        || self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::HostedOnFirstUse)
+                        || self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::HeldCreation)))
             }
             // No spawn takes a reserved name: a removed created entry's, or
             // one whose created entry row this build cannot read.
-            // A created entry is local: no peer-only or placed spawn acts
-            // for one.
-            guard "created_custody_local" { created_custody == false }
             guard "name_not_reserved" {
                 self.identity_entry_tombstones.contains(agent_identity) == false
                 && self.identity_entry_unreadable.contains(agent_identity) == false
@@ -8532,6 +8545,12 @@ macro_rules! mob_catalog_machine_dsl {
                 // closes it records the member an entry.
                 if entry_custody {
                     self.spawn_exec_entry_custody.insert(agent_identity);
+                }
+                // The ladder acts for the Created entry of its name (an
+                // externally bound one hosted on its first use): the commit
+                // that closes it keeps the member a Created entry.
+                if created_custody {
+                    self.spawn_exec_created_custody.insert(agent_identity);
                 }
             }
             to Running
@@ -9073,30 +9092,31 @@ macro_rules! mob_catalog_machine_dsl {
             guard "placement_present" { placement != None }
             // No spawn without custody takes an identity entry's name, and a
             // custody takes only the entry of its own origin: entry custody a
-            // Declared entry's name, created custody a Created entry owed its
-            // seat. Never both custodies.
+            // Declared entry's name, created custody a Created entry no member
+            // holds that is owed its seat, hosted on its first use or held for
+            // its creation (never one archived or awaiting its host's
+            // preparation). Never both custodies.
             guard "entry_name_free" {
                 (self.identity_entry_origins.contains_key(agent_identity) == false && created_custody == false)
                 || (entry_custody == true && created_custody == false
                     && self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Declared))
                 || (created_custody == true && entry_custody == false
                     && self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Created)
-                    && self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::SeatOwed))
+                    && (self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::SeatOwed)
+                        || self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::HostedOnFirstUse)
+                        || self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::HeldCreation)))
             }
             // No spawn takes a reserved name: a removed created entry's, or
             // one whose created entry row this build cannot read.
-            // A created entry is local: no peer-only or placed spawn acts
-            // for one.
-            guard "created_custody_local" { created_custody == false }
             guard "name_not_reserved" {
                 self.identity_entry_tombstones.contains(agent_identity) == false
                 && self.identity_entry_unreadable.contains(agent_identity) == false
             }
-            // A placed spawn acts for an identity entry only when the host
-            // declared the entry hosted on its first use: its member lives on
+            // A placed spawn acts for an identity entry of either custody only
+            // when the entry is hosted on its first use: its member lives on
             // the member host and is never seated Dormant here.
             guard "placed_custody_hosted_on_first_use" {
-                entry_custody == false
+                (entry_custody == false && created_custody == false)
                 || self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::HostedOnFirstUse)
             }
             guard "placed_spawn_id_present" { placed_spawn_id != None }
@@ -9166,6 +9186,12 @@ macro_rules! mob_catalog_machine_dsl {
                 // commit that closes it records the member an entry.
                 if entry_custody {
                     self.spawn_exec_entry_custody.insert(agent_identity);
+                }
+                // The ladder acts for the Created entry of its name, hosted
+                // on its first use: the membership commit that closes it
+                // keeps the member a Created entry.
+                if created_custody {
+                    self.spawn_exec_created_custody.insert(agent_identity);
                 }
                 self.member_placement.insert(agent_identity, placement.get("value"));
                 self.pending_placed_spawn_ids.insert(agent_identity, placed_spawn_id.get("value"));
@@ -12211,7 +12237,9 @@ macro_rules! mob_catalog_machine_dsl {
                     && self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Declared))
                 || (created_custody == true && entry_custody == false
                     && self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Created)
-                    && self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::SeatOwed))
+                    && (self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::SeatOwed)
+                        || self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::HostedOnFirstUse)
+                        || self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::HeldCreation)))
             }
             guard "name_not_reserved" {
                 self.identity_entry_tombstones.contains(agent_identity) == false
@@ -12236,7 +12264,9 @@ macro_rules! mob_catalog_machine_dsl {
                     && self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Declared))
                 || (created_custody == true && entry_custody == false
                     && self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Created)
-                    && self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::SeatOwed))
+                    && (self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::SeatOwed)
+                        || self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::HostedOnFirstUse)
+                        || self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::HeldCreation)))
             }
             guard "name_not_reserved" {
                 self.identity_entry_tombstones.contains(agent_identity) == false
@@ -12269,8 +12299,9 @@ macro_rules! mob_catalog_machine_dsl {
 
         // A spawn whose custody does not act for the entry of its name: entry
         // custody for a Created entry's name, or created custody for a name
-        // that is not a Created entry owed its seat (both custodies at once
-        // included). Refused typed before anything is created.
+        // that is not a Created entry owed its seat, hosted on its first use
+        // or held for its creation (both custodies at once included).
+        // Refused typed before anything is created.
         transition ProbeMemberAdmissionIdentityMemberOfAnotherOrigin {
             per_phase [Running, Stopped, Completed, Destroyed]
             on input ProbeMemberAdmission { agent_identity, entry_custody, created_custody }
@@ -12280,7 +12311,9 @@ macro_rules! mob_catalog_machine_dsl {
                     && self.identity_entry_origins.get_cloned(agent_identity) != Some(IdentityEntryOrigin::Declared))
                 || (created_custody == true && entry_custody == false
                     && (self.identity_entry_origins.get_cloned(agent_identity) != Some(IdentityEntryOrigin::Created)
-                        || self.identity_entry_unseated.get_cloned(agent_identity) != Some(UnseatedEntryCause::SeatOwed)))
+                        || (self.identity_entry_unseated.get_cloned(agent_identity) != Some(UnseatedEntryCause::SeatOwed)
+                            && self.identity_entry_unseated.get_cloned(agent_identity) != Some(UnseatedEntryCause::HostedOnFirstUse)
+                            && self.identity_entry_unseated.get_cloned(agent_identity) != Some(UnseatedEntryCause::HeldCreation))))
                 || (entry_custody == true && created_custody == true)
             }
             guard "name_not_reserved" {
@@ -31996,7 +32029,9 @@ macro_rules! mob_catalog_machine_dsl {
         // commit step, after the change's admission and before its seat:
         // origin Created, unseated with the commit's cause (SeatOwed: the
         // step's seat, or a kickoff's spawn after the commit, takes it under
-        // created custody; PreparationPending: its host prepares it first).
+        // created custody; HostedOnFirstUse and HeldCreation: its host's
+        // spawn under created custody creates it; PreparationPending: its
+        // host prepares it first).
         // A record of the same name's archived session (an unlisted roster
         // entry's) is let go: the new identity starts on a fresh session.
         // The change's one store transaction writes the identity's row with
@@ -32161,7 +32196,7 @@ macro_rules! mob_catalog_machine_dsl {
             emit CreatedIdentityEntryRecorded { agent_identity: agent_identity, verdict: CreatedIdentityRecordVerdict::ChangesHeld }
         }
 
-        // Refused, typed, for this identity: a new entry is owed its seat or its host's preparation, nothing else.
+        // Refused, typed, for this identity: a new entry is never archived.
         transition RecordCreatedIdentityEntryCauseRefused {
             on input RecordCreatedIdentityEntry { agent_identity, cause }
             guard { self.lifecycle_phase == Phase::Running }

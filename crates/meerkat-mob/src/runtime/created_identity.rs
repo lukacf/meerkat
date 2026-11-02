@@ -315,7 +315,7 @@ impl super::MobHandle {
         let mut legacy = Vec::new();
         for (identity, archived) in owed {
             let spec = if self.identity_member.is_some() {
-                match self.store_owned_spec(&identity).await {
+                match self.store_owned_seat_facts(&identity).await {
                     Ok(spec) => spec,
                     Err(error) => {
                         tracing::warn!(
@@ -331,9 +331,10 @@ impl super::MobHandle {
                 None
             };
             match (spec, archived) {
-                (Some(spec), _) => {
+                (Some((spec, held_creation)), _) => {
                     if let Err(error) =
-                        Box::pin(owner.seat_store_owned_from_spec(&identity, &spec)).await
+                        Box::pin(owner.seat_store_owned_from_spec(&identity, &spec, held_creation))
+                            .await
                     {
                         tracing::warn!(
                             mob_id = %self.mob_id(),

@@ -232,8 +232,11 @@ impl MobActor {
         )?;
         let mut entries = Vec::with_capacity(items.len());
         for item in items {
-            if item.unseated_cause() == mob_dsl::UnseatedEntryCause::PreparationPending {
-                entries.push(CreatePlanEntry::Preparing);
+            // Only an entry owed its seat is seated by the commit step: one
+            // awaiting its host's preparation, hosted on its first use or
+            // held for its host's held protocol is created by its host.
+            if item.unseated_cause() != mob_dsl::UnseatedEntryCause::SeatOwed {
+                entries.push(CreatePlanEntry::Unseated);
                 continue;
             }
             // The seat's next generation and its admission under created

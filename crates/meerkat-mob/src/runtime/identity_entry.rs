@@ -56,8 +56,9 @@
 //! and the name reservations (tombstones and unreadable names). It decides
 //! nothing about the entry's member: a created entry's member is a member
 //! like any other, built from its profile, with its own labels, tools, grants
-//! and wiring. A created entry is still local and created at once: nothing
-//! places one or holds its creation yet.
+//! and wiring. A created entry may be placed or externally bound (hosted on
+//! its first use) or held for its host's held protocol, as a declared one
+//! may: its host's spawn holding its created custody creates it.
 //!
 //! The reads ([`super::MobHandle::identity_entry`],
 //! [`super::MobHandle::identity_entries`], [`super::MobHandle::identity_census`],
@@ -92,8 +93,8 @@ pub(crate) const LEGACY_IDENTITY_LABEL: &str = "agent_identity";
 /// custody of its desired record (see the module docs). Custody decides only
 /// where that record lives, which recovery and writer use it, and the name
 /// guards and reservations that follow; never the member's profile, labels,
-/// tools, grants or wiring. A created entry is still local and created at
-/// once: nothing places one or holds its creation yet.
+/// tools, grants or wiring. A created entry may be hosted on its first use or
+/// held for its host's held protocol, as a declared one may.
 ///
 /// The handle's entry reads and the journal's rows answer with this type.
 /// MobMachine's own state holds the generated machine enum of the same name

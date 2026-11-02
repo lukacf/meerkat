@@ -845,20 +845,34 @@ pub(super) fn lower_created_spec(
     Ok(seat)
 }
 
-/// One identity a create's plan takes: its seat spec, and its preparation.
+/// One identity a create's plan takes: its seat spec, and the cause its new
+/// entry is unseated for until its seat ([`created_entry_cause`]).
 pub(super) struct CreatedIdentityPlanItem {
     pub(super) spec: SpawnMemberSpec,
-    pub(super) preparation: IdentityPreparationMode,
+    pub(super) cause: mob_dsl::UnseatedEntryCause,
 }
 
 impl CreatedIdentityPlanItem {
     /// The cause a new entry of this identity is unseated for until its seat
-    /// or its host's preparation.
+    /// or its host's creation or preparation.
     pub(super) fn unseated_cause(&self) -> mob_dsl::UnseatedEntryCause {
-        match self.preparation {
-            IdentityPreparationMode::None => mob_dsl::UnseatedEntryCause::SeatOwed,
-            _ => mob_dsl::UnseatedEntryCause::PreparationPending,
-        }
+        self.cause
+    }
+}
+
+/// The cause a new store-owned entry is unseated for at its create's commit:
+/// awaiting its host's preparation; hosted on its first use (a placed or
+/// externally bound spec, its host's spawn creates it); held for its host's
+/// held protocol; or owed its seat, which the commit step takes.
+pub(super) fn created_entry_cause(request: &CreatedIdentityRequest) -> mob_dsl::UnseatedEntryCause {
+    if request.preparation != IdentityPreparationMode::None {
+        mob_dsl::UnseatedEntryCause::PreparationPending
+    } else if request.spec.is_hosted() {
+        mob_dsl::UnseatedEntryCause::HostedOnFirstUse
+    } else if request.held_creation {
+        mob_dsl::UnseatedEntryCause::HeldCreation
+    } else {
+        mob_dsl::UnseatedEntryCause::SeatOwed
     }
 }
 
@@ -1176,8 +1190,9 @@ pub(super) enum CreatePlanEntry {
     /// member that owes one is embodied by a spawn, as the dormant seat
     /// embodies one.
     Embody(Box<SpawnMemberSpec>),
-    /// Unseated until its host's preparation settles.
-    Preparing,
+    /// Unseated until its host's preparation settles, or its host creates
+    /// it (hosted on its first use, or held for its held protocol).
+    Unseated,
 }
 
 /// What a create's commit step takes.
@@ -2045,7 +2060,11 @@ impl super::MobHandle {
     /// autonomous host's kickoff turn) is spawned once the change is
     /// committed, as the dormant seat spawns such a spec, and runs its
     /// kickoff once. An identity whose host prepares it first waits unseated
-    /// for its preparation.
+    /// for its preparation. A placed or externally bound identity is hosted
+    /// on its first use, and one whose host holds its creation
+    /// ([`CreatedIdentityRequest::held_creation`]) awaits it: neither is
+    /// seated, and its host's spawn holding its created custody
+    /// ([`super::SpawnMemberSpec::with_created_custody`]) creates it.
     ///
     /// Refused typed, with nothing written: more than
     /// [`crate::identity::IDENTITY_CHANGE_BATCH_MAX`] identities, a malformed request, an
@@ -2084,14 +2103,9 @@ impl super::MobHandle {
                     profile: request.spec.profile.clone(),
                 }));
             }
-            if request.spec.is_hosted() {
-                return Err(refused(IdentityChangeRefusal::Unsupported {
-                    feature: "a placed or externally bound store-owned identity".to_string(),
-                }));
-            }
             items.push(CreatedIdentityPlanItem {
                 spec: lower_created_spec(&request.spec).map_err(refused)?,
-                preparation: request.preparation,
+                cause: created_entry_cause(request),
             });
         }
         let attribution_facts = ChangeAttribution::facts_of(
@@ -2139,7 +2153,7 @@ impl super::MobHandle {
             match entry {
                 CreatePlanEntry::Seat(candidate) => candidates.push(candidate),
                 CreatePlanEntry::Embody(spec) => embody.push(*spec),
-                CreatePlanEntry::Preparing => {}
+                CreatePlanEntry::Unseated => {}
             }
         }
         let session_service = self.session_service.as_ref();
@@ -2162,10 +2176,7 @@ impl super::MobHandle {
         let identities = identities
             .into_iter()
             .map(|request| {
-                let cause = match request.preparation {
-                    IdentityPreparationMode::None => mob_dsl::UnseatedEntryCause::SeatOwed,
-                    _ => mob_dsl::UnseatedEntryCause::PreparationPending,
-                };
+                let cause = created_entry_cause(&request);
                 (request, cause)
             })
             .collect::<Vec<_>>();
@@ -2280,6 +2291,18 @@ pub(super) fn create_rows_and_receipt(
         } else {
             CreatedIdentityPresence::Present
         };
+        let outcome = match cause {
+            mob_dsl::UnseatedEntryCause::PreparationPending => {
+                IdentityChangeEntryOutcome::PendingPreparation
+            }
+            mob_dsl::UnseatedEntryCause::HostedOnFirstUse => {
+                IdentityChangeEntryOutcome::HostedOnFirstUse
+            }
+            mob_dsl::UnseatedEntryCause::HeldCreation => {
+                IdentityChangeEntryOutcome::AwaitingHeldCreation
+            }
+            _ => IdentityChangeEntryOutcome::Committed,
+        };
         let mut provenance = CreatedIdentityProvenance::entered(
             IdentityEntered::Created,
             commit.operation.operation_id.clone(),
@@ -2300,18 +2323,12 @@ pub(super) fn create_rows_and_receipt(
             presence,
             provenance,
         )
+        .and_then(|record| record.with_held_creation(request.held_creation))
         .map_err(invalid)?;
         let spec_digest = request.spec.spec_digest().map_err(invalid)?;
         entries.push(
-            IdentityChangeReceiptEntry::new(
-                request.spec.identity.clone(),
-                if pending {
-                    IdentityChangeEntryOutcome::PendingPreparation
-                } else {
-                    IdentityChangeEntryOutcome::Committed
-                },
-            )
-            .with_spec(spec_digest, Some(1)),
+            IdentityChangeReceiptEntry::new(request.spec.identity.clone(), outcome)
+                .with_spec(spec_digest, Some(1)),
         );
         rows.push(CreatedIdentityRowWrite {
             record,
@@ -2497,6 +2514,19 @@ impl super::MobHandle {
             {
                 self.retire(identity.clone()).await?;
             }
+            // A replayed unarchive seats an identity its first seat left owed
+            // its seat (an apply that ran meanwhile, a session store that
+            // could not be read).
+            None if kind == mob_dsl::IdentityEntryChangeKind::Unarchive
+                && self
+                    .machine_state_watch_rx
+                    .borrow()
+                    .identity_entry_unseated
+                    .get(&mob_dsl::AgentIdentity::from_domain(&identity))
+                    == Some(&mob_dsl::UnseatedEntryCause::SeatOwed) =>
+            {
+                Box::pin(self.seat_restored_identity(&identity)).await?;
+            }
             _ => {}
         }
         Ok(if replayed {
@@ -2506,13 +2536,16 @@ impl super::MobHandle {
         })
     }
 
-    /// Seat an unarchived store-owned identity Dormant, from its row's spec
+    /// Seat an unarchived store-owned identity from its row's spec
     /// ([`Self::seat_store_owned_from_spec`]). An identity whose row holds
     /// no spec is seated from its last spawn row, as a start seats an entry
     /// owed its seat.
     async fn seat_restored_identity(&self, identity: &AgentIdentity) -> Result<(), MobError> {
-        match self.store_owned_spec(identity).await? {
-            Some(spec) => self.seat_store_owned_from_spec(identity, &spec).await,
+        match self.store_owned_seat_facts(identity).await? {
+            Some((spec, held_creation)) => {
+                self.seat_store_owned_from_spec(identity, &spec, held_creation)
+                    .await
+            }
             None => {
                 self.reseat_owed_created_entries().await;
                 Ok(())
@@ -2520,11 +2553,12 @@ impl super::MobHandle {
         }
     }
 
-    /// The spec `identity`'s store-owned row holds, if it holds one.
-    pub(super) async fn store_owned_spec(
+    /// The spec `identity`'s store-owned row holds, with whether its host
+    /// holds its creation; `None` for a row that holds no spec.
+    pub(super) async fn store_owned_seat_facts(
         &self,
         identity: &AgentIdentity,
-    ) -> Result<Option<CreatedIdentitySpec>, MobError> {
+    ) -> Result<Option<(CreatedIdentitySpec, bool)>, MobError> {
         let store = self
             .identity_member
             .as_ref()
@@ -2534,24 +2568,31 @@ impl super::MobHandle {
                 .observe_created_identity(self.mob_id(), identity)
                 .await?
             {
-                Some(crate::identity::CreatedIdentityObservation::Created(row)) => row.spec,
+                Some(crate::identity::CreatedIdentityObservation::Created(row)) => {
+                    row.spec.map(|spec| (spec, row.held_creation))
+                }
                 _ => None,
             },
         )
     }
 
-    /// Seat a store-owned identity no member holds Dormant from `spec`, its
-    /// row's spec (an unarchive, and a start's seat of an entry owed its
-    /// seat): on its archived session record, its history kept, declaring
-    /// the migration from the role that session was last built under when
-    /// the spec names another; on a fresh session with the notice when the
-    /// archived session is gone from the store; on a fresh session when it
-    /// has none. A spec that owes a kickoff is embodied. Once the member
-    /// holds the spec's profile, the row lets its role migration go.
+    /// Seat a store-owned identity no member holds from `spec`, its row's
+    /// spec (an unarchive, and a start's seat of an entry owed its seat),
+    /// through the declared apply's own verdicts under created custody: a
+    /// local identity is seated Dormant on its archived session record (its
+    /// history kept, declaring the migration from the role that session was
+    /// last built under when the spec names another), on a fresh session
+    /// with the notice when that session is gone from the store, or on a
+    /// fresh one when it has none, and a spec that owes a kickoff is
+    /// embodied; a placed or externally bound identity is hosted on its
+    /// first use; and one whose host holds its creation (`held_creation`)
+    /// awaits it while it was never created. Once the member holds the
+    /// spec's profile, the row lets its role migration go.
     pub(super) async fn seat_store_owned_from_spec(
         &self,
         identity: &AgentIdentity,
         spec: &CreatedIdentitySpec,
+        held_creation: bool,
     ) -> Result<(), MobError> {
         let archived = self
             .machine_state_watch_rx
@@ -2565,66 +2606,39 @@ impl super::MobHandle {
                     "'{identity}' holds an invalid archived session record: {error}"
                 ))
             })?;
-        let mut seat = lower_created_spec(spec).map_err(refused)?;
-        if let Some(session) = archived.clone() {
-            let moved_from = self
-                .resume_session_role(&session)
-                .await?
-                .filter(|role| *role != spec.profile);
-            seat = match moved_from {
-                Some(from) => seat.with_resume_bridge_session_id_from_role(session, from),
-                None => seat.with_resume_bridge_session_id(session),
-            };
+        let mut roster = super::DeclaredRoster::partial([super::DeclaredEntry::new(
+            lower_created_spec(spec).map_err(refused)?,
+        )
+        .with_held_creation(held_creation)]);
+        if let Some(session) = archived
+            && let Some(role) = self.resume_session_role(&session).await?
+            && role != spec.profile
+        {
+            roster = roster.with_role_migration(identity.clone(), role);
         }
-        let outcome = self
-            .seat_dormant_members(vec![seat.clone()])
-            .await?
-            .into_iter()
-            .next()
-            .ok_or_else(|| MobError::Internal("a store-owned seat was not answered".into()))?;
-        match outcome {
-            super::DormantSeatOutcome::Seated { .. }
-            | super::DormantSeatOutcome::AlreadySeated { .. }
-            | super::DormantSeatOutcome::Embodied { .. } => {}
-            // The archived session is gone from the store: the record is let
-            // go, and the identity is seated fresh with the notice.
-            super::DormantSeatOutcome::Refused {
-                error:
-                    MobError::SessionUnavailableForResume {
-                        session_id,
-                        reason: crate::error::SessionResumeUnavailableReason::Absent,
-                        ..
-                    },
-                ..
-            } if archived.as_ref() == Some(&session_id) => {
-                self.forget_archived_session(
-                    identity,
-                    &session_id,
-                    mob_dsl::ArchivedSessionForgetReason::SessionAbsent,
-                )
-                .await?;
-                seat.launch_mode = crate::launch::MemberLaunchMode::Fresh;
-                seat.history_unavailable = Some(super::HistoryUnavailable::new(session_id));
-                match self
-                    .seat_dormant_members(vec![seat])
-                    .await?
-                    .into_iter()
-                    .next()
-                {
-                    Some(
-                        super::DormantSeatOutcome::Seated { .. }
-                        | super::DormantSeatOutcome::AlreadySeated { .. }
-                        | super::DormantSeatOutcome::Embodied { .. },
-                    ) => {}
-                    Some(other) => return Err(other.into_unseated_error()),
-                    None => {
-                        return Err(MobError::Internal(
-                            "a store-owned identity's fresh seat was not answered".into(),
-                        ));
-                    }
-                }
+        let (mut outcome, _) = self.run_declared_apply(roster, None).await?;
+        match outcome.entries.remove(identity) {
+            Some(
+                super::DeclaredEntryOutcome::Seated { .. }
+                | super::DeclaredEntryOutcome::Embodied { .. }
+                | super::DeclaredEntryOutcome::Kept
+                | super::DeclaredEntryOutcome::HostedOnFirstUse
+                | super::DeclaredEntryOutcome::AwaitingHeldCreation,
+            ) => {}
+            Some(
+                super::DeclaredEntryOutcome::Failed { error }
+                | super::DeclaredEntryOutcome::Deferred { reason: error },
+            ) => return Err(error),
+            Some(other) => {
+                return Err(MobError::Internal(format!(
+                    "the seat of store-owned '{identity}' answered {other:?}"
+                )));
             }
-            other => return Err(other.into_unseated_error()),
+            None => {
+                return Err(MobError::Internal(format!(
+                    "the seat of store-owned '{identity}' was not answered"
+                )));
+            }
         }
         self.settle_store_owned_role_migration(identity).await
     }

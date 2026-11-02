@@ -14,9 +14,10 @@
 use super::super::dormant_seat::DormantSeatPlanEntry;
 use super::super::identity_change::{
     ChangeAdmissionFacts, CreateCommit, CreateCommitted, CreatePlan, CreatePlanAnswer,
-    CreatePlanEntry, CreatedIdentityPlanItem, IdentityChangeCommand, IdentityChangeGrant,
-    IdentityChangeRefusal, IdentityOperation, admission_refusal, create_rows_and_receipt,
-    grant_current_at_the_sink, now_ms, record_refusal, refused,
+    CreatePlanEntry, CreatedIdentityPlanItem, EntryChangeCommit, EntryChangeCommitted,
+    IdentityChangeCommand, IdentityChangeGrant, IdentityChangeRefusal, IdentityOperation,
+    admission_refusal, committed_change_events, create_rows_and_receipt, entry_change_answer,
+    entry_change_row, grant_current_at_the_sink, now_ms, record_refusal, refused,
 };
 use super::dormant_seat::{SeatCommitScope, SeatCommitWrite, SeatPlanMode};
 use super::*;
@@ -53,6 +54,10 @@ impl MobActor {
             }
             IdentityChangeCommand::CommitCreate { commit, reply_tx } => {
                 let result = Box::pin(self.commit_store_owned_create(*commit)).await;
+                let _ = reply_tx.send(result);
+            }
+            IdentityChangeCommand::CommitEntryChange { commit, reply_tx } => {
+                let result = Box::pin(self.commit_identity_entry_change(*commit)).await;
                 let _ = reply_tx.send(result);
             }
             IdentityChangeCommand::SetHeld { held, reply_tx } => {
@@ -336,5 +341,142 @@ impl MobActor {
         )
         .await?;
         Ok(CreateCommitted::Committed(receipt))
+    }
+
+    /// Commit one identity's removal, archive or unarchive in one actor
+    /// step: MobMachine decides the change's admission and its verdict on one
+    /// prepared authority; the change's store transaction writes its receipt
+    /// and the identity's row (the tombstone, the archived row, or the row
+    /// present again); and only then does the machine commit. The member's
+    /// retirement a Retiring or Archiving verdict owes runs after, on the
+    /// handle, and its start row records the mark's cause.
+    async fn commit_identity_entry_change(
+        &mut self,
+        commit: EntryChangeCommit,
+    ) -> Result<EntryChangeCommitted, MobError> {
+        let store = self
+            .identity_member
+            .clone()
+            .ok_or_else(|| refused(IdentityChangeRefusal::StorageUnsupported))?;
+        let mut authority = self.dsl_authority.prepare_authority();
+        match self
+            .decide_change_admission(
+                &mut authority,
+                &commit.operation,
+                commit.facts,
+                commit.grant.as_ref(),
+                commit.decided,
+            )
+            .await?
+        {
+            ChangeAdmission::Replayed(receipt) => {
+                return Ok(EntryChangeCommitted::Replayed(receipt));
+            }
+            ChangeAdmission::Admitted => {}
+        }
+        let agent_identity = mob_dsl::AgentIdentity::from_domain(&commit.identity);
+        let input = match commit.kind {
+            mob_dsl::IdentityEntryChangeKind::Remove => {
+                mob_dsl::MobMachineInput::RemoveIdentityEntry {
+                    agent_identity: agent_identity.clone(),
+                }
+            }
+            mob_dsl::IdentityEntryChangeKind::Archive => {
+                mob_dsl::MobMachineInput::ArchiveIdentityEntry {
+                    agent_identity: agent_identity.clone(),
+                }
+            }
+            mob_dsl::IdentityEntryChangeKind::Unarchive => {
+                mob_dsl::MobMachineInput::UnarchiveIdentityEntry {
+                    agent_identity: agent_identity.clone(),
+                }
+            }
+        };
+        let transition = authority
+            .apply(input)
+            .map_err(|error| MobError::MobMachineRejected {
+                context: "identity_entry_change",
+                reason: error.to_string(),
+            })?;
+        let verdict = transition
+            .effects()
+            .iter()
+            .find_map(|effect| match effect {
+                mob_dsl::MobMachineEffect::IdentityEntryChangeResolved { verdict, .. } => {
+                    Some(*verdict)
+                }
+                _ => None,
+            })
+            .ok_or_else(|| {
+                MobError::Internal("MobMachine changed an identity with no verdict".into())
+            })?;
+        let (change, outcome) = entry_change_answer(commit.kind, verdict, &commit.identity)?;
+        // The session an archive records: the seated member's, or the
+        // unseated entry's archived session record.
+        let archived_session = {
+            let state = authority.state();
+            state
+                .member_session_bindings
+                .get(&agent_identity)
+                .or_else(|| state.identity_entry_archived_sessions.get(&agent_identity))
+                .map(|session| SessionId::parse(&session.0))
+                .transpose()
+                .map_err(|error| {
+                    MobError::Internal(format!(
+                        "'{}' holds an invalid session: {error}",
+                        commit.identity
+                    ))
+                })?
+        };
+        let current = store
+            .observe_created_identity(&self.definition.id, &commit.identity)
+            .await?;
+        let at_ms = now_ms();
+        let row = entry_change_row(
+            &self.definition.id,
+            &commit,
+            verdict,
+            current,
+            archived_session,
+            at_ms,
+        )?;
+        let mut entry =
+            crate::identity::IdentityChangeReceiptEntry::new(commit.identity.clone(), outcome);
+        if let Some(record) = row.as_ref().map(|row| &row.record)
+            && let Ok(Some(digest)) = record.spec_digest()
+        {
+            entry = entry.with_spec(digest, Some(record.revision));
+        }
+        let receipt = IdentityChangeReceipt::sealed(
+            self.definition.id.clone(),
+            commit.operation.operation_id.clone(),
+            commit.operation.request_digest.clone(),
+            change,
+            vec![entry],
+            at_ms,
+        )
+        .and_then(|receipt| {
+            receipt.with_attribution(commit.requester.clone(), commit.consent.clone())
+        })
+        .map_err(|error| MobError::Internal(format!("an identity change's receipt: {error}")))?;
+        let prepared = PreparedDslInput {
+            authority,
+            effects: transition.into_effects(),
+            phase_changed: false,
+        };
+        let written = receipt.clone();
+        self.commit_prepared_dsl_input_after(prepared, move || async move {
+            let commit = store
+                .commit_identity_change(&crate::store::IdentityChangeWrite {
+                    receipt: written,
+                    rows: row.into_iter().collect(),
+                    events: Vec::new(),
+                })
+                .await
+                .map_err(MobError::from)?;
+            committed_change_events(commit).map(|_| ())
+        })
+        .await?;
+        Ok(EntryChangeCommitted::Committed { receipt, verdict })
     }
 }

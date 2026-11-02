@@ -755,6 +755,20 @@ macro_rules! mob_catalog_machine_dsl {
             // journaled, so a host that holds them holds them again at its
             // next start.
             identity_changes_held: bool,
+            // The identity entries whose removal retires their member
+            // (RemoveIdentityEntry on a seated entry, of either custody): the
+            // member's retirement start row records the cause removed, and
+            // the end of that retirement ends the entry and tombstones its
+            // name. Recovered at boot from the identity store's removed row of
+            // a name a member still holds (RecoverCreatedIdentityEntry); the
+            // destroy and the mob's reset drop it.
+            identity_entry_removing: Set<AgentIdentity>,
+            // The store-owned entries whose archive retires their member
+            // (ArchiveIdentityEntry on a seated Created entry): the end of
+            // that retirement leaves the entry unseated, Archived, with its
+            // member's session as its archived session record. Recovered at
+            // boot as the removal's mark is.
+            identity_entry_archiving: Set<AgentIdentity>,
             // Operator instructions (0.9.9). The mob's desired records, one
             // per slot (the JSON array [namespace, key]): the revision, the
             // effect, the body's digest (empty while Absent) and byte length
@@ -1098,6 +1112,8 @@ macro_rules! mob_catalog_machine_dsl {
             identity_entry_unreadable = EmptySet,
             spawn_exec_created_custody = EmptySet,
             identity_changes_held = false,
+            identity_entry_removing = EmptySet,
+            identity_entry_archiving = EmptySet,
             operator_instruction_revision = EmptyMap,
             operator_instruction_effect = EmptyMap,
             operator_instruction_digest = EmptyMap,
@@ -2144,6 +2160,12 @@ macro_rules! mob_catalog_machine_dsl {
             RecordCreatedIdentityEntry { agent_identity: AgentIdentity, cause: Enum<UnseatedEntryCause> },
             // The host holds or releases this mob's identity changes.
             SetIdentityChangesHeld { held: bool },
+            // One identity's removal, of either custody: a seated entry's
+            // member retires, an unseated entry is tombstoned at once.
+            RemoveIdentityEntry { agent_identity: AgentIdentity },
+            // One store-owned identity's archive, and its unarchive.
+            ArchiveIdentityEntry { agent_identity: AgentIdentity },
+            UnarchiveIdentityEntry { agent_identity: AgentIdentity },
         }
 
         surface_only [
@@ -2786,6 +2808,11 @@ macro_rules! mob_catalog_machine_dsl {
             // prepared step is Admitted and Recorded.
             IdentityChangeAdmissionResolved { verdict: Enum<IdentityChangeAdmissionKind> },
             CreatedIdentityEntryRecorded { agent_identity: AgentIdentity, verdict: Enum<CreatedIdentityRecordVerdict> },
+            // The verdict of one identity's removal, archive or unarchive.
+            // The shell writes the change's store transaction before the step
+            // commits, and retires the member of a Retiring or Archiving
+            // entry.
+            IdentityEntryChangeResolved { agent_identity: AgentIdentity, verdict: Enum<IdentityEntryChangeVerdict> },
         }
 
         // One total, pure classifier over desired authority, lease ownership,
@@ -3487,6 +3514,79 @@ macro_rules! mob_catalog_machine_dsl {
             }}}}}}}
         }
 
+        // The verdict of one identity's removal, archive or unarchive, over
+        // the name's facts only. A candidate composition and a changes hold
+        // change nothing; an unreadable name is reserved; a removed name
+        // answers a removal AlreadyRemoved and anything else Unknown, as a
+        // name no entry holds does; a member step in flight (a spawn, a
+        // wake, a retirement, or an entry's ending already marked) leaves
+        // the change to its retry. A removal retires a seated entry's member
+        // and tombstones an unseated entry at once. An archive and an
+        // unarchive are the store's writes for a store-owned entry only (a
+        // roster-owned identity's archive is its host's one-entry unlist):
+        // an archive retires a seated member or archives an unseated entry
+        // at once, and an unarchive owes an archived entry its seat again.
+        helper identity_entry_change_verdict(
+            kind: Enum<IdentityEntryChangeKind>,
+            composition_authoritative: bool,
+            changes_held: bool,
+            name_unreadable: bool,
+            name_tombstoned: bool,
+            entry_recorded: bool,
+            entry_store_owned: bool,
+            in_flight: bool,
+            seated: bool,
+            archived: bool
+        ) -> Enum<IdentityEntryChangeVerdict> {
+            if composition_authoritative == false {
+                IdentityEntryChangeVerdict::NonAuthoritative
+            } else {
+            if changes_held == true {
+                IdentityEntryChangeVerdict::ChangesHeld
+            } else {
+            if name_unreadable == true {
+                IdentityEntryChangeVerdict::NameUnreadable
+            } else {
+            if name_tombstoned == true {
+                if kind == IdentityEntryChangeKind::Remove {
+                    IdentityEntryChangeVerdict::AlreadyRemoved
+                } else {
+                    IdentityEntryChangeVerdict::Unknown
+                }
+            } else {
+            if entry_recorded == false {
+                IdentityEntryChangeVerdict::Unknown
+            } else {
+            if in_flight == true {
+                IdentityEntryChangeVerdict::InFlight
+            } else {
+            if kind == IdentityEntryChangeKind::Remove {
+                if seated == true {
+                    IdentityEntryChangeVerdict::Retiring
+                } else {
+                    IdentityEntryChangeVerdict::Removed
+                }
+            } else {
+            if entry_store_owned == false {
+                IdentityEntryChangeVerdict::OwnedByRoster
+            } else {
+            if kind == IdentityEntryChangeKind::Archive {
+                if archived == true {
+                    IdentityEntryChangeVerdict::AlreadyArchived
+                } else {
+                if seated == true {
+                    IdentityEntryChangeVerdict::Archiving
+                } else {
+                    IdentityEntryChangeVerdict::Archived
+                }}
+            } else {
+            if archived == true {
+                IdentityEntryChangeVerdict::Restored
+            } else {
+                IdentityEntryChangeVerdict::NotArchived
+            }}}}}}}}}}
+        }
+
         // The wake refusal for one member, over MEMBER facts only: no
         // lifecycle phase is passed; every lifecycle phase has its own
         // WakeMember arm. None means not refused: the member's phase then
@@ -3956,6 +4056,7 @@ macro_rules! mob_catalog_machine_dsl {
         // step, which writes nothing unless every one admits it.
         disposition IdentityChangeAdmissionResolved => local seam SurfaceResultAlignment,
         disposition CreatedIdentityEntryRecorded => local seam SurfaceResultAlignment,
+        disposition IdentityEntryChangeResolved => local seam SurfaceResultAlignment,
 
         // =====================================================================
         // Invariants
@@ -5063,7 +5164,31 @@ macro_rules! mob_catalog_machine_dsl {
             for_all(id in self.identity_entry_unseated.keys(),
                 self.identity_entry_origins.get_cloned(id) != Some(IdentityEntryOrigin::Created)
                 || self.identity_entry_unseated.get_cloned(id) == Some(UnseatedEntryCause::SeatOwed)
-                || self.identity_entry_unseated.get_cloned(id) == Some(UnseatedEntryCause::PreparationPending))
+                || self.identity_entry_unseated.get_cloned(id) == Some(UnseatedEntryCause::PreparationPending)
+                || self.identity_entry_unseated.get_cloned(id) == Some(UnseatedEntryCause::Archived))
+        }
+
+        // Only a store-owned entry is archived: the archive is the store's
+        // write, and a roster-owned identity's archive is its host's unlist.
+        invariant archived_entry_is_store_owned {
+            for_all(id in self.identity_entry_unseated.keys(),
+                self.identity_entry_unseated.get_cloned(id) != Some(UnseatedEntryCause::Archived)
+                || self.identity_entry_origins.get_cloned(id) == Some(IdentityEntryOrigin::Created))
+        }
+
+        // An entry's ending marks belong to a seated entry, and at most one
+        // marks it: the unlisting seal's, the removal's or the archive's.
+        // The end of the member's retirement consumes the mark it carries.
+        invariant entry_ending_marks_are_seated_and_disjoint {
+            for_all(id in self.identity_entry_removing,
+                self.identity_entry_origins.contains_key(id)
+                && self.identity_to_runtime.contains_key(id)
+                && self.identity_entry_retiring.contains(id) == false
+                && self.identity_entry_archiving.contains(id) == false)
+            && for_all(id in self.identity_entry_archiving,
+                self.identity_entry_origins.get_cloned(id) == Some(IdentityEntryOrigin::Created)
+                && self.identity_to_runtime.contains_key(id)
+                && self.identity_entry_retiring.contains(id) == false)
         }
 
         // A removed created entry's name is never an entry or a member again.
@@ -5125,6 +5250,8 @@ macro_rules! mob_catalog_machine_dsl {
                 && self.identity_entry_origins == EmptyMap
                 && self.identity_entry_unseated == EmptyMap
                 && self.identity_entry_retiring == EmptySet
+                && self.identity_entry_removing == EmptySet
+                && self.identity_entry_archiving == EmptySet
                 && self.identity_entry_archived_sessions == EmptyMap
                 && self.spawn_exec_entry_custody == EmptySet
                 && self.spawn_exec_created_custody == EmptySet
@@ -10553,10 +10680,29 @@ macro_rules! mob_catalog_machine_dsl {
                             self.member_host_preparation_causes.remove(agent_identity);
                         }
                     } else {
-                        if self.member_placement.contains_key(agent_identity) == true || hosted_incarnation == true {
-                            self.identity_entry_unseated.insert(agent_identity, UnseatedEntryCause::HostedOnFirstUse);
+                        if self.identity_entry_removing.contains(agent_identity) == true {
+                            // A removal's retirement ended: the entry ends, and its name
+                            // is tombstoned.
+                            self.identity_entry_origins.remove(agent_identity);
+                            self.identity_entry_removing.remove(agent_identity);
+                            self.identity_entry_archived_sessions.remove(agent_identity);
+                            self.identity_entry_tombstones.insert(agent_identity);
+                            if self.member_host_preparation_causes.get_cloned(agent_identity) == Some(HostPreparationCause::RoleMigrationUndeclared) {
+                                self.member_host_preparation_causes.remove(agent_identity);
+                            }
                         } else {
-                            self.identity_entry_unseated.insert(agent_identity, UnseatedEntryCause::SeatOwed);
+                            if self.identity_entry_archiving.contains(agent_identity) == true {
+                                // An archive's retirement ended: the entry stays,
+                                // unseated, Archived, on its archived session record.
+                                self.identity_entry_archiving.remove(agent_identity);
+                                self.identity_entry_unseated.insert(agent_identity, UnseatedEntryCause::Archived);
+                            } else {
+                                if self.member_placement.contains_key(agent_identity) == true || hosted_incarnation == true {
+                                    self.identity_entry_unseated.insert(agent_identity, UnseatedEntryCause::HostedOnFirstUse);
+                                } else {
+                                    self.identity_entry_unseated.insert(agent_identity, UnseatedEntryCause::SeatOwed);
+                                }
+                            }
                         }
                     }
                 }
@@ -10707,10 +10853,29 @@ macro_rules! mob_catalog_machine_dsl {
                             self.member_host_preparation_causes.remove(agent_identity);
                         }
                     } else {
-                        if self.member_placement.contains_key(agent_identity) == true || hosted_incarnation == true {
-                            self.identity_entry_unseated.insert(agent_identity, UnseatedEntryCause::HostedOnFirstUse);
+                        if self.identity_entry_removing.contains(agent_identity) == true {
+                            // A removal's retirement ended: the entry ends, and its name
+                            // is tombstoned.
+                            self.identity_entry_origins.remove(agent_identity);
+                            self.identity_entry_removing.remove(agent_identity);
+                            self.identity_entry_archived_sessions.remove(agent_identity);
+                            self.identity_entry_tombstones.insert(agent_identity);
+                            if self.member_host_preparation_causes.get_cloned(agent_identity) == Some(HostPreparationCause::RoleMigrationUndeclared) {
+                                self.member_host_preparation_causes.remove(agent_identity);
+                            }
                         } else {
-                            self.identity_entry_unseated.insert(agent_identity, UnseatedEntryCause::SeatOwed);
+                            if self.identity_entry_archiving.contains(agent_identity) == true {
+                                // An archive's retirement ended: the entry stays,
+                                // unseated, Archived, on its archived session record.
+                                self.identity_entry_archiving.remove(agent_identity);
+                                self.identity_entry_unseated.insert(agent_identity, UnseatedEntryCause::Archived);
+                            } else {
+                                if self.member_placement.contains_key(agent_identity) == true || hosted_incarnation == true {
+                                    self.identity_entry_unseated.insert(agent_identity, UnseatedEntryCause::HostedOnFirstUse);
+                                } else {
+                                    self.identity_entry_unseated.insert(agent_identity, UnseatedEntryCause::SeatOwed);
+                                }
+                            }
                         }
                     }
                 }
@@ -13829,7 +13994,26 @@ macro_rules! mob_catalog_machine_dsl {
                         self.identity_entry_origins.remove(agent_identity);
                         self.identity_entry_retiring.remove(agent_identity);
                     } else {
-                        self.identity_entry_unseated.insert(agent_identity, UnseatedEntryCause::HostedOnFirstUse);
+                        if self.identity_entry_removing.contains(agent_identity) == true {
+                            // A removal's retirement ended: the entry ends, and its name
+                            // is tombstoned.
+                            self.identity_entry_origins.remove(agent_identity);
+                            self.identity_entry_removing.remove(agent_identity);
+                            self.identity_entry_archived_sessions.remove(agent_identity);
+                            self.identity_entry_tombstones.insert(agent_identity);
+                            if self.member_host_preparation_causes.get_cloned(agent_identity) == Some(HostPreparationCause::RoleMigrationUndeclared) {
+                                self.member_host_preparation_causes.remove(agent_identity);
+                            }
+                        } else {
+                            if self.identity_entry_archiving.contains(agent_identity) == true {
+                                // An archive's retirement ended: the entry stays,
+                                // unseated, Archived, on its archived session record.
+                                self.identity_entry_archiving.remove(agent_identity);
+                                self.identity_entry_unseated.insert(agent_identity, UnseatedEntryCause::Archived);
+                            } else {
+                                self.identity_entry_unseated.insert(agent_identity, UnseatedEntryCause::HostedOnFirstUse);
+                            }
+                        }
                     }
                 }
                 self.member_host_preparation_causes.remove(agent_identity);
@@ -13962,7 +14146,26 @@ macro_rules! mob_catalog_machine_dsl {
                         self.identity_entry_origins.remove(agent_identity);
                         self.identity_entry_retiring.remove(agent_identity);
                     } else {
-                        self.identity_entry_unseated.insert(agent_identity, UnseatedEntryCause::SeatOwed);
+                        if self.identity_entry_removing.contains(agent_identity) == true {
+                            // A removal's retirement ended: the entry ends, and its name
+                            // is tombstoned.
+                            self.identity_entry_origins.remove(agent_identity);
+                            self.identity_entry_removing.remove(agent_identity);
+                            self.identity_entry_archived_sessions.remove(agent_identity);
+                            self.identity_entry_tombstones.insert(agent_identity);
+                            if self.member_host_preparation_causes.get_cloned(agent_identity) == Some(HostPreparationCause::RoleMigrationUndeclared) {
+                                self.member_host_preparation_causes.remove(agent_identity);
+                            }
+                        } else {
+                            if self.identity_entry_archiving.contains(agent_identity) == true {
+                                // An archive's retirement ended: the entry stays,
+                                // unseated, Archived, on its archived session record.
+                                self.identity_entry_archiving.remove(agent_identity);
+                                self.identity_entry_unseated.insert(agent_identity, UnseatedEntryCause::Archived);
+                            } else {
+                                self.identity_entry_unseated.insert(agent_identity, UnseatedEntryCause::SeatOwed);
+                            }
+                        }
                     }
                 }
                 // A seated member's role hold goes with it; a first-boot
@@ -14192,7 +14395,26 @@ macro_rules! mob_catalog_machine_dsl {
                         self.identity_entry_origins.remove(agent_identity);
                         self.identity_entry_retiring.remove(agent_identity);
                     } else {
-                        self.identity_entry_unseated.insert(agent_identity, UnseatedEntryCause::SeatOwed);
+                        if self.identity_entry_removing.contains(agent_identity) == true {
+                            // A removal's retirement ended: the entry ends, and its name
+                            // is tombstoned.
+                            self.identity_entry_origins.remove(agent_identity);
+                            self.identity_entry_removing.remove(agent_identity);
+                            self.identity_entry_archived_sessions.remove(agent_identity);
+                            self.identity_entry_tombstones.insert(agent_identity);
+                            if self.member_host_preparation_causes.get_cloned(agent_identity) == Some(HostPreparationCause::RoleMigrationUndeclared) {
+                                self.member_host_preparation_causes.remove(agent_identity);
+                            }
+                        } else {
+                            if self.identity_entry_archiving.contains(agent_identity) == true {
+                                // An archive's retirement ended: the entry stays,
+                                // unseated, Archived, on its archived session record.
+                                self.identity_entry_archiving.remove(agent_identity);
+                                self.identity_entry_unseated.insert(agent_identity, UnseatedEntryCause::Archived);
+                            } else {
+                                self.identity_entry_unseated.insert(agent_identity, UnseatedEntryCause::SeatOwed);
+                            }
+                        }
                     }
                 }
                 // A seated member's role hold goes with it; a first-boot
@@ -14307,7 +14529,26 @@ macro_rules! mob_catalog_machine_dsl {
                         self.identity_entry_origins.remove(agent_identity);
                         self.identity_entry_retiring.remove(agent_identity);
                     } else {
-                        self.identity_entry_unseated.insert(agent_identity, UnseatedEntryCause::SeatOwed);
+                        if self.identity_entry_removing.contains(agent_identity) == true {
+                            // A removal's retirement ended: the entry ends, and its name
+                            // is tombstoned.
+                            self.identity_entry_origins.remove(agent_identity);
+                            self.identity_entry_removing.remove(agent_identity);
+                            self.identity_entry_archived_sessions.remove(agent_identity);
+                            self.identity_entry_tombstones.insert(agent_identity);
+                            if self.member_host_preparation_causes.get_cloned(agent_identity) == Some(HostPreparationCause::RoleMigrationUndeclared) {
+                                self.member_host_preparation_causes.remove(agent_identity);
+                            }
+                        } else {
+                            if self.identity_entry_archiving.contains(agent_identity) == true {
+                                // An archive's retirement ended: the entry stays,
+                                // unseated, Archived, on its archived session record.
+                                self.identity_entry_archiving.remove(agent_identity);
+                                self.identity_entry_unseated.insert(agent_identity, UnseatedEntryCause::Archived);
+                            } else {
+                                self.identity_entry_unseated.insert(agent_identity, UnseatedEntryCause::SeatOwed);
+                            }
+                        }
                     }
                 }
                 // A seated member's role hold goes with it; a first-boot
@@ -14522,7 +14763,26 @@ macro_rules! mob_catalog_machine_dsl {
                         self.identity_entry_origins.remove(agent_identity);
                         self.identity_entry_retiring.remove(agent_identity);
                     } else {
-                        self.identity_entry_unseated.insert(agent_identity, UnseatedEntryCause::SeatOwed);
+                        if self.identity_entry_removing.contains(agent_identity) == true {
+                            // A removal's retirement ended: the entry ends, and its name
+                            // is tombstoned.
+                            self.identity_entry_origins.remove(agent_identity);
+                            self.identity_entry_removing.remove(agent_identity);
+                            self.identity_entry_archived_sessions.remove(agent_identity);
+                            self.identity_entry_tombstones.insert(agent_identity);
+                            if self.member_host_preparation_causes.get_cloned(agent_identity) == Some(HostPreparationCause::RoleMigrationUndeclared) {
+                                self.member_host_preparation_causes.remove(agent_identity);
+                            }
+                        } else {
+                            if self.identity_entry_archiving.contains(agent_identity) == true {
+                                // An archive's retirement ended: the entry stays,
+                                // unseated, Archived, on its archived session record.
+                                self.identity_entry_archiving.remove(agent_identity);
+                                self.identity_entry_unseated.insert(agent_identity, UnseatedEntryCause::Archived);
+                            } else {
+                                self.identity_entry_unseated.insert(agent_identity, UnseatedEntryCause::SeatOwed);
+                            }
+                        }
                     }
                 }
                 // A seated member's role hold goes with it; a first-boot
@@ -14629,7 +14889,26 @@ macro_rules! mob_catalog_machine_dsl {
                         self.identity_entry_origins.remove(agent_identity);
                         self.identity_entry_retiring.remove(agent_identity);
                     } else {
-                        self.identity_entry_unseated.insert(agent_identity, UnseatedEntryCause::HostedOnFirstUse);
+                        if self.identity_entry_removing.contains(agent_identity) == true {
+                            // A removal's retirement ended: the entry ends, and its name
+                            // is tombstoned.
+                            self.identity_entry_origins.remove(agent_identity);
+                            self.identity_entry_removing.remove(agent_identity);
+                            self.identity_entry_archived_sessions.remove(agent_identity);
+                            self.identity_entry_tombstones.insert(agent_identity);
+                            if self.member_host_preparation_causes.get_cloned(agent_identity) == Some(HostPreparationCause::RoleMigrationUndeclared) {
+                                self.member_host_preparation_causes.remove(agent_identity);
+                            }
+                        } else {
+                            if self.identity_entry_archiving.contains(agent_identity) == true {
+                                // An archive's retirement ended: the entry stays,
+                                // unseated, Archived, on its archived session record.
+                                self.identity_entry_archiving.remove(agent_identity);
+                                self.identity_entry_unseated.insert(agent_identity, UnseatedEntryCause::Archived);
+                            } else {
+                                self.identity_entry_unseated.insert(agent_identity, UnseatedEntryCause::HostedOnFirstUse);
+                            }
+                        }
                     }
                 }
                 self.member_host_preparation_causes.remove(agent_identity);
@@ -14752,7 +15031,26 @@ macro_rules! mob_catalog_machine_dsl {
                         self.identity_entry_origins.remove(agent_identity);
                         self.identity_entry_retiring.remove(agent_identity);
                     } else {
-                        self.identity_entry_unseated.insert(agent_identity, UnseatedEntryCause::HostedOnFirstUse);
+                        if self.identity_entry_removing.contains(agent_identity) == true {
+                            // A removal's retirement ended: the entry ends, and its name
+                            // is tombstoned.
+                            self.identity_entry_origins.remove(agent_identity);
+                            self.identity_entry_removing.remove(agent_identity);
+                            self.identity_entry_archived_sessions.remove(agent_identity);
+                            self.identity_entry_tombstones.insert(agent_identity);
+                            if self.member_host_preparation_causes.get_cloned(agent_identity) == Some(HostPreparationCause::RoleMigrationUndeclared) {
+                                self.member_host_preparation_causes.remove(agent_identity);
+                            }
+                        } else {
+                            if self.identity_entry_archiving.contains(agent_identity) == true {
+                                // An archive's retirement ended: the entry stays,
+                                // unseated, Archived, on its archived session record.
+                                self.identity_entry_archiving.remove(agent_identity);
+                                self.identity_entry_unseated.insert(agent_identity, UnseatedEntryCause::Archived);
+                            } else {
+                                self.identity_entry_unseated.insert(agent_identity, UnseatedEntryCause::HostedOnFirstUse);
+                            }
+                        }
                     }
                 }
                 self.member_host_preparation_causes.remove(agent_identity);
@@ -15969,6 +16267,8 @@ macro_rules! mob_catalog_machine_dsl {
                 self.identity_entry_origins = EmptyMap;
                 self.identity_entry_unseated = EmptyMap;
                 self.identity_entry_retiring = EmptySet;
+                self.identity_entry_removing = EmptySet;
+                self.identity_entry_archiving = EmptySet;
                 self.identity_entry_archived_sessions = EmptyMap;
                 self.member_definition_wiring_exempt = EmptySet;
                 self.identity_runtime_generations = EmptyMap;
@@ -16502,6 +16802,8 @@ macro_rules! mob_catalog_machine_dsl {
                 self.identity_entry_origins = EmptyMap;
                 self.identity_entry_unseated = EmptyMap;
                 self.identity_entry_retiring = EmptySet;
+                self.identity_entry_removing = EmptySet;
+                self.identity_entry_archiving = EmptySet;
                 self.identity_entry_archived_sessions = EmptyMap;
                 self.spawn_exec_entry_custody = EmptySet;
                 // The reset drops created custody: a spawn ladder still open
@@ -23474,6 +23776,8 @@ macro_rules! mob_catalog_machine_dsl {
                 self.identity_entry_origins = EmptyMap;
                 self.identity_entry_unseated = EmptyMap;
                 self.identity_entry_retiring = EmptySet;
+                self.identity_entry_removing = EmptySet;
+                self.identity_entry_archiving = EmptySet;
                 self.identity_entry_archived_sessions = EmptyMap;
                 // Spawn-exec phase ladder: total teardown, as DestroyMob's. The
                 // forced destroy drops every member, so no ladder survives into
@@ -30226,7 +30530,8 @@ macro_rules! mob_catalog_machine_dsl {
                     self.spawn_exec_phase.contains_key(agent_identity) == true
                         || self.member_wake_attempts.contains_key(agent_identity) == true
                         || (self.identity_to_runtime.contains_key(agent_identity) == true
-                            && self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value")) == Some(MobMemberState::Retiring)),
+                            && self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value")) == Some(MobMemberState::Retiring))
+                        || self.identity_entry_removing.contains(agent_identity) == true,
                     self.identity_to_runtime.contains_key(agent_identity),
                     self.identity_runtime_generations.contains_key(agent_identity),
                     placement,
@@ -30285,7 +30590,8 @@ macro_rules! mob_catalog_machine_dsl {
                     self.spawn_exec_phase.contains_key(agent_identity) == true
                         || self.member_wake_attempts.contains_key(agent_identity) == true
                         || (self.identity_to_runtime.contains_key(agent_identity) == true
-                            && self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value")) == Some(MobMemberState::Retiring)),
+                            && self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value")) == Some(MobMemberState::Retiring))
+                        || self.identity_entry_removing.contains(agent_identity) == true,
                     self.identity_to_runtime.contains_key(agent_identity),
                     self.identity_runtime_generations.contains_key(agent_identity),
                     placement,
@@ -30349,7 +30655,8 @@ macro_rules! mob_catalog_machine_dsl {
                     self.spawn_exec_phase.contains_key(agent_identity) == true
                         || self.member_wake_attempts.contains_key(agent_identity) == true
                         || (self.identity_to_runtime.contains_key(agent_identity) == true
-                            && self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value")) == Some(MobMemberState::Retiring)),
+                            && self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value")) == Some(MobMemberState::Retiring))
+                        || self.identity_entry_removing.contains(agent_identity) == true,
                     self.identity_to_runtime.contains_key(agent_identity),
                     self.identity_runtime_generations.contains_key(agent_identity),
                     placement,
@@ -30404,7 +30711,8 @@ macro_rules! mob_catalog_machine_dsl {
                     self.spawn_exec_phase.contains_key(agent_identity) == true
                         || self.member_wake_attempts.contains_key(agent_identity) == true
                         || (self.identity_to_runtime.contains_key(agent_identity) == true
-                            && self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value")) == Some(MobMemberState::Retiring)),
+                            && self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value")) == Some(MobMemberState::Retiring))
+                        || self.identity_entry_removing.contains(agent_identity) == true,
                     self.identity_to_runtime.contains_key(agent_identity),
                     self.identity_runtime_generations.contains_key(agent_identity),
                     placement,
@@ -30459,7 +30767,8 @@ macro_rules! mob_catalog_machine_dsl {
                     self.spawn_exec_phase.contains_key(agent_identity) == true
                         || self.member_wake_attempts.contains_key(agent_identity) == true
                         || (self.identity_to_runtime.contains_key(agent_identity) == true
-                            && self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value")) == Some(MobMemberState::Retiring)),
+                            && self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value")) == Some(MobMemberState::Retiring))
+                        || self.identity_entry_removing.contains(agent_identity) == true,
                     self.identity_to_runtime.contains_key(agent_identity),
                     self.identity_runtime_generations.contains_key(agent_identity),
                     placement,
@@ -30520,7 +30829,8 @@ macro_rules! mob_catalog_machine_dsl {
                     self.spawn_exec_phase.contains_key(agent_identity) == true
                         || self.member_wake_attempts.contains_key(agent_identity) == true
                         || (self.identity_to_runtime.contains_key(agent_identity) == true
-                            && self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value")) == Some(MobMemberState::Retiring)),
+                            && self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value")) == Some(MobMemberState::Retiring))
+                        || self.identity_entry_removing.contains(agent_identity) == true,
                     self.identity_to_runtime.contains_key(agent_identity),
                     self.identity_runtime_generations.contains_key(agent_identity),
                     placement,
@@ -30578,7 +30888,8 @@ macro_rules! mob_catalog_machine_dsl {
                     self.spawn_exec_phase.contains_key(agent_identity) == true
                         || self.member_wake_attempts.contains_key(agent_identity) == true
                         || (self.identity_to_runtime.contains_key(agent_identity) == true
-                            && self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value")) == Some(MobMemberState::Retiring)),
+                            && self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value")) == Some(MobMemberState::Retiring))
+                        || self.identity_entry_removing.contains(agent_identity) == true,
                     self.identity_to_runtime.contains_key(agent_identity),
                     self.identity_runtime_generations.contains_key(agent_identity),
                     placement,
@@ -30643,7 +30954,8 @@ macro_rules! mob_catalog_machine_dsl {
                     self.spawn_exec_phase.contains_key(agent_identity) == true
                         || self.member_wake_attempts.contains_key(agent_identity) == true
                         || (self.identity_to_runtime.contains_key(agent_identity) == true
-                            && self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value")) == Some(MobMemberState::Retiring)),
+                            && self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value")) == Some(MobMemberState::Retiring))
+                        || self.identity_entry_removing.contains(agent_identity) == true,
                     self.identity_to_runtime.contains_key(agent_identity),
                     self.identity_runtime_generations.contains_key(agent_identity),
                     placement,
@@ -30708,7 +31020,8 @@ macro_rules! mob_catalog_machine_dsl {
                     self.spawn_exec_phase.contains_key(agent_identity) == true
                         || self.member_wake_attempts.contains_key(agent_identity) == true
                         || (self.identity_to_runtime.contains_key(agent_identity) == true
-                            && self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value")) == Some(MobMemberState::Retiring)),
+                            && self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value")) == Some(MobMemberState::Retiring))
+                        || self.identity_entry_removing.contains(agent_identity) == true,
                     self.identity_to_runtime.contains_key(agent_identity),
                     self.identity_runtime_generations.contains_key(agent_identity),
                     placement,
@@ -30752,7 +31065,8 @@ macro_rules! mob_catalog_machine_dsl {
                     self.spawn_exec_phase.contains_key(agent_identity) == true
                         || self.member_wake_attempts.contains_key(agent_identity) == true
                         || (self.identity_to_runtime.contains_key(agent_identity) == true
-                            && self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value")) == Some(MobMemberState::Retiring)),
+                            && self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value")) == Some(MobMemberState::Retiring))
+                        || self.identity_entry_removing.contains(agent_identity) == true,
                     self.identity_to_runtime.contains_key(agent_identity),
                     self.identity_runtime_generations.contains_key(agent_identity),
                     placement,
@@ -30796,7 +31110,8 @@ macro_rules! mob_catalog_machine_dsl {
                     self.spawn_exec_phase.contains_key(agent_identity) == true
                         || self.member_wake_attempts.contains_key(agent_identity) == true
                         || (self.identity_to_runtime.contains_key(agent_identity) == true
-                            && self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value")) == Some(MobMemberState::Retiring)),
+                            && self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value")) == Some(MobMemberState::Retiring))
+                        || self.identity_entry_removing.contains(agent_identity) == true,
                     self.identity_to_runtime.contains_key(agent_identity),
                     self.identity_runtime_generations.contains_key(agent_identity),
                     placement,
@@ -30840,7 +31155,8 @@ macro_rules! mob_catalog_machine_dsl {
                     self.spawn_exec_phase.contains_key(agent_identity) == true
                         || self.member_wake_attempts.contains_key(agent_identity) == true
                         || (self.identity_to_runtime.contains_key(agent_identity) == true
-                            && self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value")) == Some(MobMemberState::Retiring)),
+                            && self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value")) == Some(MobMemberState::Retiring))
+                        || self.identity_entry_removing.contains(agent_identity) == true,
                     self.identity_to_runtime.contains_key(agent_identity),
                     self.identity_runtime_generations.contains_key(agent_identity),
                     placement,
@@ -30926,8 +31242,11 @@ macro_rules! mob_catalog_machine_dsl {
             guard "composition_authoritative" { self.composition_authority == CompositionAuthorityKind::Authoritative }
             update {
                 for id in self.identity_entry_origins.keys() {
+                    // A removal's entry is the removal's to end: the seal
+                    // never marks it.
                     if self.identity_entry_origins.get_cloned(id) == Some(IdentityEntryOrigin::Declared)
-                        && self.identity_entry_unreadable.contains(id) == false {
+                        && self.identity_entry_unreadable.contains(id) == false
+                        && self.identity_entry_removing.contains(id) == false {
                         if self.identity_to_runtime.contains_key(id) == true {
                             if self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(id).get("value")) != Some(MobMemberState::Retiring) {
                                 if desired.contains(id) == false {
@@ -31202,7 +31521,6 @@ macro_rules! mob_catalog_machine_dsl {
             guard "replay_not_sealed" { self.boot_plan_sealed == false }
             guard "row_removed" { presence == RecoveredPresence::Tombstone }
             guard "no_member" { self.identity_to_runtime.contains_key(agent_identity) == false }
-            guard "no_declared_entry" { self.identity_entry_origins.get_cloned(agent_identity) != Some(IdentityEntryOrigin::Declared) }
             guard "name_readable" { self.identity_entry_unreadable.contains(agent_identity) == false }
             guard "name_not_tombstoned" { self.identity_entry_tombstones.contains(agent_identity) == false }
             guard "no_spawn_ladder" { self.spawn_exec_phase.contains_key(agent_identity) == false }
@@ -31224,17 +31542,94 @@ macro_rules! mob_catalog_machine_dsl {
             guard "row_unreadable_or_contradicted" {
                 presence == RecoveredPresence::Unreadable
                 || self.identity_entry_unreadable.contains(agent_identity) == true
-                || self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Declared)
+                || (self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Declared)
+                    && presence != RecoveredPresence::Tombstone)
                 || (presence == RecoveredPresence::Present
                     && self.identity_to_runtime.contains_key(agent_identity) == true
                     && self.member_placement.contains_key(agent_identity) == true)
-                || (presence != RecoveredPresence::Present
+                || (presence == RecoveredPresence::PresentUnseated
                     && self.identity_to_runtime.contains_key(agent_identity) == true)
+                || (presence == RecoveredPresence::Tombstone
+                    && self.identity_to_runtime.contains_key(agent_identity) == true
+                    && self.identity_entry_origins.contains_key(agent_identity) == false)
+                || (presence == RecoveredPresence::Archived
+                    && self.identity_to_runtime.contains_key(agent_identity) == true
+                    && self.identity_entry_origins.get_cloned(agent_identity) != Some(IdentityEntryOrigin::Created))
                 || self.identity_entry_tombstones.contains(agent_identity) == true
                 || self.spawn_exec_phase.contains_key(agent_identity) == true
             }
             update {
                 self.identity_entry_unreadable.insert(agent_identity);
+                self.members_to_spawn.remove(agent_identity);
+                self.members_to_retire.remove(agent_identity);
+            }
+            to Running
+        }
+
+        // A removed row of a name a member still holds, of either custody:
+        // the removal's retirement had not ended when the mob stopped (its
+        // row is written with the removal's receipt, before the retirement
+        // starts). The entry is marked removing again; the shell finishes
+        // the retirement, whose end ends the entry and tombstones the name.
+        transition RecoverCreatedIdentityEntryRemoving {
+            per_phase [Running, Stopped]
+            on signal RecoverCreatedIdentityEntry { agent_identity, presence, last_session }
+            guard "replay_not_sealed" { self.boot_plan_sealed == false }
+            guard "row_removed" { presence == RecoveredPresence::Tombstone }
+            guard "member_seated" { self.identity_to_runtime.contains_key(agent_identity) == true }
+            guard "entry_recorded" { self.identity_entry_origins.contains_key(agent_identity) == true }
+            guard "name_readable" { self.identity_entry_unreadable.contains(agent_identity) == false }
+            guard "name_not_tombstoned" { self.identity_entry_tombstones.contains(agent_identity) == false }
+            guard "no_spawn_ladder" { self.spawn_exec_phase.contains_key(agent_identity) == false }
+            update {
+                self.identity_entry_retiring.remove(agent_identity);
+                self.identity_entry_removing.insert(agent_identity);
+                self.members_to_spawn.remove(agent_identity);
+                self.members_to_retire.remove(agent_identity);
+            }
+            to Running
+        }
+
+        // An archived row of a store-owned entry a member still holds: the
+        // archive's retirement had not ended. The entry is marked archiving
+        // again; the shell finishes the retirement.
+        transition RecoverCreatedIdentityEntryArchiving {
+            per_phase [Running, Stopped]
+            on signal RecoverCreatedIdentityEntry { agent_identity, presence, last_session }
+            guard "replay_not_sealed" { self.boot_plan_sealed == false }
+            guard "row_archived" { presence == RecoveredPresence::Archived }
+            guard "member_seated" { self.identity_to_runtime.contains_key(agent_identity) == true }
+            guard "store_owned_entry" { self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Created) }
+            guard "name_readable" { self.identity_entry_unreadable.contains(agent_identity) == false }
+            guard "name_not_tombstoned" { self.identity_entry_tombstones.contains(agent_identity) == false }
+            guard "no_spawn_ladder" { self.spawn_exec_phase.contains_key(agent_identity) == false }
+            update {
+                self.identity_entry_archiving.insert(agent_identity);
+                self.members_to_spawn.remove(agent_identity);
+                self.members_to_retire.remove(agent_identity);
+            }
+            to Running
+        }
+
+        // An archived row of a store-owned identity no member holds: the
+        // entry is recorded unseated, Archived, with the row's archived
+        // session as its archived session record when it has none.
+        transition RecoverCreatedIdentityEntryArchived {
+            per_phase [Running, Stopped]
+            on signal RecoverCreatedIdentityEntry { agent_identity, presence, last_session }
+            guard "replay_not_sealed" { self.boot_plan_sealed == false }
+            guard "row_archived" { presence == RecoveredPresence::Archived }
+            guard "no_member" { self.identity_to_runtime.contains_key(agent_identity) == false }
+            guard "no_declared_entry" { self.identity_entry_origins.get_cloned(agent_identity) != Some(IdentityEntryOrigin::Declared) }
+            guard "name_readable" { self.identity_entry_unreadable.contains(agent_identity) == false }
+            guard "name_not_tombstoned" { self.identity_entry_tombstones.contains(agent_identity) == false }
+            guard "no_spawn_ladder" { self.spawn_exec_phase.contains_key(agent_identity) == false }
+            update {
+                self.identity_entry_origins.insert(agent_identity, IdentityEntryOrigin::Created);
+                self.identity_entry_unseated.insert(agent_identity, UnseatedEntryCause::Archived);
+                if self.identity_entry_archived_sessions.contains_key(agent_identity) == false && last_session != None {
+                    self.identity_entry_archived_sessions.insert(agent_identity, last_session.get("value"));
+                }
                 self.members_to_spawn.remove(agent_identity);
                 self.members_to_retire.remove(agent_identity);
             }
@@ -31649,6 +32044,761 @@ macro_rules! mob_catalog_machine_dsl {
                 self.identity_changes_held = held;
             }
             to Running
+        }
+
+        // =====================================================================
+        // Identity changes (0.9.9): one identity's removal, of either
+        // custody, and one store-owned identity's archive and unarchive. The
+        // shell writes the change's store transaction (its receipt, and the
+        // identity's row: removed, or archived, or present again) before the
+        // step commits, and retires the member of a Retiring or Archiving
+        // entry. Appended after every published transition.
+        // =====================================================================
+
+        // A seated entry's removal: its member retires with the cause removed, and the end of the retirement ends the entry and tombstones its name.
+        transition RemoveIdentityEntryRetiring {
+            on input RemoveIdentityEntry { agent_identity }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "change_retiring" {
+                identity_entry_change_verdict(
+                    IdentityEntryChangeKind::Remove,
+                    self.composition_authority == CompositionAuthorityKind::Authoritative,
+                    self.identity_changes_held,
+                    self.identity_entry_unreadable.contains(agent_identity) == true,
+                    self.identity_entry_tombstones.contains(agent_identity) == true,
+                    self.identity_entry_origins.contains_key(agent_identity) == true,
+                    self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Created),
+                    self.spawn_exec_phase.contains_key(agent_identity) == true
+                        || self.member_wake_attempts.contains_key(agent_identity) == true
+                        || (self.identity_to_runtime.contains_key(agent_identity) == true
+                            && self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value")) == Some(MobMemberState::Retiring))
+                        || self.identity_entry_retiring.contains(agent_identity) == true
+                        || self.identity_entry_removing.contains(agent_identity) == true
+                        || self.identity_entry_archiving.contains(agent_identity) == true,
+                    self.identity_to_runtime.contains_key(agent_identity) == true,
+                    self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::Archived)) == IdentityEntryChangeVerdict::Retiring
+            }
+            update {
+                self.identity_entry_removing.insert(agent_identity);
+            }
+            to Running
+            emit IdentityEntryChangeResolved { agent_identity: agent_identity, verdict: IdentityEntryChangeVerdict::Retiring }
+        }
+
+        // An unseated entry's removal (owed its seat, archived, awaiting its preparation, hosted on its first use or awaiting its held creation): the entry ends and its name is tombstoned at once.
+        transition RemoveIdentityEntryRemoved {
+            on input RemoveIdentityEntry { agent_identity }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "change_removed" {
+                identity_entry_change_verdict(
+                    IdentityEntryChangeKind::Remove,
+                    self.composition_authority == CompositionAuthorityKind::Authoritative,
+                    self.identity_changes_held,
+                    self.identity_entry_unreadable.contains(agent_identity) == true,
+                    self.identity_entry_tombstones.contains(agent_identity) == true,
+                    self.identity_entry_origins.contains_key(agent_identity) == true,
+                    self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Created),
+                    self.spawn_exec_phase.contains_key(agent_identity) == true
+                        || self.member_wake_attempts.contains_key(agent_identity) == true
+                        || (self.identity_to_runtime.contains_key(agent_identity) == true
+                            && self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value")) == Some(MobMemberState::Retiring))
+                        || self.identity_entry_retiring.contains(agent_identity) == true
+                        || self.identity_entry_removing.contains(agent_identity) == true
+                        || self.identity_entry_archiving.contains(agent_identity) == true,
+                    self.identity_to_runtime.contains_key(agent_identity) == true,
+                    self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::Archived)) == IdentityEntryChangeVerdict::Removed
+            }
+            update {
+                self.identity_entry_origins.remove(agent_identity);
+                self.identity_entry_unseated.remove(agent_identity);
+                self.identity_entry_archived_sessions.remove(agent_identity);
+                self.identity_entry_tombstones.insert(agent_identity);
+                self.members_to_spawn.remove(agent_identity);
+                self.members_to_retire.remove(agent_identity);
+                // Its role hold ends with it.
+                if self.member_host_preparation_causes.get_cloned(agent_identity) == Some(HostPreparationCause::RoleMigrationUndeclared) {
+                    self.member_host_preparation_causes.remove(agent_identity);
+                }
+            }
+            to Running
+            emit IdentityEntryChangeResolved { agent_identity: agent_identity, verdict: IdentityEntryChangeVerdict::Removed }
+        }
+
+        // A removed name's removal: nothing changes.
+        transition RemoveIdentityEntryAlreadyRemoved {
+            on input RemoveIdentityEntry { agent_identity }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "change_already_removed" {
+                identity_entry_change_verdict(
+                    IdentityEntryChangeKind::Remove,
+                    self.composition_authority == CompositionAuthorityKind::Authoritative,
+                    self.identity_changes_held,
+                    self.identity_entry_unreadable.contains(agent_identity) == true,
+                    self.identity_entry_tombstones.contains(agent_identity) == true,
+                    self.identity_entry_origins.contains_key(agent_identity) == true,
+                    self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Created),
+                    self.spawn_exec_phase.contains_key(agent_identity) == true
+                        || self.member_wake_attempts.contains_key(agent_identity) == true
+                        || (self.identity_to_runtime.contains_key(agent_identity) == true
+                            && self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value")) == Some(MobMemberState::Retiring))
+                        || self.identity_entry_retiring.contains(agent_identity) == true
+                        || self.identity_entry_removing.contains(agent_identity) == true
+                        || self.identity_entry_archiving.contains(agent_identity) == true,
+                    self.identity_to_runtime.contains_key(agent_identity) == true,
+                    self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::Archived)) == IdentityEntryChangeVerdict::AlreadyRemoved
+            }
+            update {}
+            to Running
+            emit IdentityEntryChangeResolved { agent_identity: agent_identity, verdict: IdentityEntryChangeVerdict::AlreadyRemoved }
+        }
+
+        // No identity entry holds the name (a worker's, or nothing's): nothing changes.
+        transition RemoveIdentityEntryUnknown {
+            on input RemoveIdentityEntry { agent_identity }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "change_unknown" {
+                identity_entry_change_verdict(
+                    IdentityEntryChangeKind::Remove,
+                    self.composition_authority == CompositionAuthorityKind::Authoritative,
+                    self.identity_changes_held,
+                    self.identity_entry_unreadable.contains(agent_identity) == true,
+                    self.identity_entry_tombstones.contains(agent_identity) == true,
+                    self.identity_entry_origins.contains_key(agent_identity) == true,
+                    self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Created),
+                    self.spawn_exec_phase.contains_key(agent_identity) == true
+                        || self.member_wake_attempts.contains_key(agent_identity) == true
+                        || (self.identity_to_runtime.contains_key(agent_identity) == true
+                            && self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value")) == Some(MobMemberState::Retiring))
+                        || self.identity_entry_retiring.contains(agent_identity) == true
+                        || self.identity_entry_removing.contains(agent_identity) == true
+                        || self.identity_entry_archiving.contains(agent_identity) == true,
+                    self.identity_to_runtime.contains_key(agent_identity) == true,
+                    self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::Archived)) == IdentityEntryChangeVerdict::Unknown
+            }
+            update {}
+            to Running
+            emit IdentityEntryChangeResolved { agent_identity: agent_identity, verdict: IdentityEntryChangeVerdict::Unknown }
+        }
+
+        // A member step of the identity is in flight, or its ending is already marked: nothing changes, and a retry decides it.
+        transition RemoveIdentityEntryInFlight {
+            on input RemoveIdentityEntry { agent_identity }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "change_in_flight" {
+                identity_entry_change_verdict(
+                    IdentityEntryChangeKind::Remove,
+                    self.composition_authority == CompositionAuthorityKind::Authoritative,
+                    self.identity_changes_held,
+                    self.identity_entry_unreadable.contains(agent_identity) == true,
+                    self.identity_entry_tombstones.contains(agent_identity) == true,
+                    self.identity_entry_origins.contains_key(agent_identity) == true,
+                    self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Created),
+                    self.spawn_exec_phase.contains_key(agent_identity) == true
+                        || self.member_wake_attempts.contains_key(agent_identity) == true
+                        || (self.identity_to_runtime.contains_key(agent_identity) == true
+                            && self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value")) == Some(MobMemberState::Retiring))
+                        || self.identity_entry_retiring.contains(agent_identity) == true
+                        || self.identity_entry_removing.contains(agent_identity) == true
+                        || self.identity_entry_archiving.contains(agent_identity) == true,
+                    self.identity_to_runtime.contains_key(agent_identity) == true,
+                    self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::Archived)) == IdentityEntryChangeVerdict::InFlight
+            }
+            update {}
+            to Running
+            emit IdentityEntryChangeResolved { agent_identity: agent_identity, verdict: IdentityEntryChangeVerdict::InFlight }
+        }
+
+        // The name is reserved, unreadable: nothing changes.
+        transition RemoveIdentityEntryNameUnreadable {
+            on input RemoveIdentityEntry { agent_identity }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "change_name_unreadable" {
+                identity_entry_change_verdict(
+                    IdentityEntryChangeKind::Remove,
+                    self.composition_authority == CompositionAuthorityKind::Authoritative,
+                    self.identity_changes_held,
+                    self.identity_entry_unreadable.contains(agent_identity) == true,
+                    self.identity_entry_tombstones.contains(agent_identity) == true,
+                    self.identity_entry_origins.contains_key(agent_identity) == true,
+                    self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Created),
+                    self.spawn_exec_phase.contains_key(agent_identity) == true
+                        || self.member_wake_attempts.contains_key(agent_identity) == true
+                        || (self.identity_to_runtime.contains_key(agent_identity) == true
+                            && self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value")) == Some(MobMemberState::Retiring))
+                        || self.identity_entry_retiring.contains(agent_identity) == true
+                        || self.identity_entry_removing.contains(agent_identity) == true
+                        || self.identity_entry_archiving.contains(agent_identity) == true,
+                    self.identity_to_runtime.contains_key(agent_identity) == true,
+                    self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::Archived)) == IdentityEntryChangeVerdict::NameUnreadable
+            }
+            update {}
+            to Running
+            emit IdentityEntryChangeResolved { agent_identity: agent_identity, verdict: IdentityEntryChangeVerdict::NameUnreadable }
+        }
+
+        // A candidate composition changes nothing.
+        transition RemoveIdentityEntryNonAuthoritative {
+            on input RemoveIdentityEntry { agent_identity }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "change_non_authoritative" {
+                identity_entry_change_verdict(
+                    IdentityEntryChangeKind::Remove,
+                    self.composition_authority == CompositionAuthorityKind::Authoritative,
+                    self.identity_changes_held,
+                    self.identity_entry_unreadable.contains(agent_identity) == true,
+                    self.identity_entry_tombstones.contains(agent_identity) == true,
+                    self.identity_entry_origins.contains_key(agent_identity) == true,
+                    self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Created),
+                    self.spawn_exec_phase.contains_key(agent_identity) == true
+                        || self.member_wake_attempts.contains_key(agent_identity) == true
+                        || (self.identity_to_runtime.contains_key(agent_identity) == true
+                            && self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value")) == Some(MobMemberState::Retiring))
+                        || self.identity_entry_retiring.contains(agent_identity) == true
+                        || self.identity_entry_removing.contains(agent_identity) == true
+                        || self.identity_entry_archiving.contains(agent_identity) == true,
+                    self.identity_to_runtime.contains_key(agent_identity) == true,
+                    self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::Archived)) == IdentityEntryChangeVerdict::NonAuthoritative
+            }
+            update {}
+            to Running
+            emit IdentityEntryChangeResolved { agent_identity: agent_identity, verdict: IdentityEntryChangeVerdict::NonAuthoritative }
+        }
+
+        // The host holds the mob's identity changes: nothing changes, retryable.
+        transition RemoveIdentityEntryChangesHeld {
+            on input RemoveIdentityEntry { agent_identity }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "change_changes_held" {
+                identity_entry_change_verdict(
+                    IdentityEntryChangeKind::Remove,
+                    self.composition_authority == CompositionAuthorityKind::Authoritative,
+                    self.identity_changes_held,
+                    self.identity_entry_unreadable.contains(agent_identity) == true,
+                    self.identity_entry_tombstones.contains(agent_identity) == true,
+                    self.identity_entry_origins.contains_key(agent_identity) == true,
+                    self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Created),
+                    self.spawn_exec_phase.contains_key(agent_identity) == true
+                        || self.member_wake_attempts.contains_key(agent_identity) == true
+                        || (self.identity_to_runtime.contains_key(agent_identity) == true
+                            && self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value")) == Some(MobMemberState::Retiring))
+                        || self.identity_entry_retiring.contains(agent_identity) == true
+                        || self.identity_entry_removing.contains(agent_identity) == true
+                        || self.identity_entry_archiving.contains(agent_identity) == true,
+                    self.identity_to_runtime.contains_key(agent_identity) == true,
+                    self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::Archived)) == IdentityEntryChangeVerdict::ChangesHeld
+            }
+            update {}
+            to Running
+            emit IdentityEntryChangeResolved { agent_identity: agent_identity, verdict: IdentityEntryChangeVerdict::ChangesHeld }
+        }
+
+        // A mob that is not running changes no identity.
+        transition RemoveIdentityEntryMobNotRunning {
+            per_phase [Stopped, Completed, Destroyed]
+            on input RemoveIdentityEntry { agent_identity }
+            update {}
+            to Running
+            emit IdentityEntryChangeResolved { agent_identity: agent_identity, verdict: IdentityEntryChangeVerdict::MobNotRunning }
+        }
+
+        // A seated store-owned entry's archive: its member retires with the cause archived, and the end of the retirement leaves the entry unseated, Archived.
+        transition ArchiveIdentityEntryArchiving {
+            on input ArchiveIdentityEntry { agent_identity }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "change_archiving" {
+                identity_entry_change_verdict(
+                    IdentityEntryChangeKind::Archive,
+                    self.composition_authority == CompositionAuthorityKind::Authoritative,
+                    self.identity_changes_held,
+                    self.identity_entry_unreadable.contains(agent_identity) == true,
+                    self.identity_entry_tombstones.contains(agent_identity) == true,
+                    self.identity_entry_origins.contains_key(agent_identity) == true,
+                    self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Created),
+                    self.spawn_exec_phase.contains_key(agent_identity) == true
+                        || self.member_wake_attempts.contains_key(agent_identity) == true
+                        || (self.identity_to_runtime.contains_key(agent_identity) == true
+                            && self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value")) == Some(MobMemberState::Retiring))
+                        || self.identity_entry_retiring.contains(agent_identity) == true
+                        || self.identity_entry_removing.contains(agent_identity) == true
+                        || self.identity_entry_archiving.contains(agent_identity) == true,
+                    self.identity_to_runtime.contains_key(agent_identity) == true,
+                    self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::Archived)) == IdentityEntryChangeVerdict::Archiving
+            }
+            update {
+                self.identity_entry_archiving.insert(agent_identity);
+            }
+            to Running
+            emit IdentityEntryChangeResolved { agent_identity: agent_identity, verdict: IdentityEntryChangeVerdict::Archiving }
+        }
+
+        // An unseated store-owned entry's archive: it is unseated, Archived, at once, keeping its archived session record.
+        transition ArchiveIdentityEntryArchived {
+            on input ArchiveIdentityEntry { agent_identity }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "change_archived" {
+                identity_entry_change_verdict(
+                    IdentityEntryChangeKind::Archive,
+                    self.composition_authority == CompositionAuthorityKind::Authoritative,
+                    self.identity_changes_held,
+                    self.identity_entry_unreadable.contains(agent_identity) == true,
+                    self.identity_entry_tombstones.contains(agent_identity) == true,
+                    self.identity_entry_origins.contains_key(agent_identity) == true,
+                    self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Created),
+                    self.spawn_exec_phase.contains_key(agent_identity) == true
+                        || self.member_wake_attempts.contains_key(agent_identity) == true
+                        || (self.identity_to_runtime.contains_key(agent_identity) == true
+                            && self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value")) == Some(MobMemberState::Retiring))
+                        || self.identity_entry_retiring.contains(agent_identity) == true
+                        || self.identity_entry_removing.contains(agent_identity) == true
+                        || self.identity_entry_archiving.contains(agent_identity) == true,
+                    self.identity_to_runtime.contains_key(agent_identity) == true,
+                    self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::Archived)) == IdentityEntryChangeVerdict::Archived
+            }
+            update {
+                self.identity_entry_unseated.insert(agent_identity, UnseatedEntryCause::Archived);
+            }
+            to Running
+            emit IdentityEntryChangeResolved { agent_identity: agent_identity, verdict: IdentityEntryChangeVerdict::Archived }
+        }
+
+        // An archived entry's archive: nothing changes.
+        transition ArchiveIdentityEntryAlreadyArchived {
+            on input ArchiveIdentityEntry { agent_identity }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "change_already_archived" {
+                identity_entry_change_verdict(
+                    IdentityEntryChangeKind::Archive,
+                    self.composition_authority == CompositionAuthorityKind::Authoritative,
+                    self.identity_changes_held,
+                    self.identity_entry_unreadable.contains(agent_identity) == true,
+                    self.identity_entry_tombstones.contains(agent_identity) == true,
+                    self.identity_entry_origins.contains_key(agent_identity) == true,
+                    self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Created),
+                    self.spawn_exec_phase.contains_key(agent_identity) == true
+                        || self.member_wake_attempts.contains_key(agent_identity) == true
+                        || (self.identity_to_runtime.contains_key(agent_identity) == true
+                            && self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value")) == Some(MobMemberState::Retiring))
+                        || self.identity_entry_retiring.contains(agent_identity) == true
+                        || self.identity_entry_removing.contains(agent_identity) == true
+                        || self.identity_entry_archiving.contains(agent_identity) == true,
+                    self.identity_to_runtime.contains_key(agent_identity) == true,
+                    self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::Archived)) == IdentityEntryChangeVerdict::AlreadyArchived
+            }
+            update {}
+            to Running
+            emit IdentityEntryChangeResolved { agent_identity: agent_identity, verdict: IdentityEntryChangeVerdict::AlreadyArchived }
+        }
+
+        // A roster-owned identity's archive is its host's one-entry unlist: the store writes nothing.
+        transition ArchiveIdentityEntryOwnedByRoster {
+            on input ArchiveIdentityEntry { agent_identity }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "change_owned_by_roster" {
+                identity_entry_change_verdict(
+                    IdentityEntryChangeKind::Archive,
+                    self.composition_authority == CompositionAuthorityKind::Authoritative,
+                    self.identity_changes_held,
+                    self.identity_entry_unreadable.contains(agent_identity) == true,
+                    self.identity_entry_tombstones.contains(agent_identity) == true,
+                    self.identity_entry_origins.contains_key(agent_identity) == true,
+                    self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Created),
+                    self.spawn_exec_phase.contains_key(agent_identity) == true
+                        || self.member_wake_attempts.contains_key(agent_identity) == true
+                        || (self.identity_to_runtime.contains_key(agent_identity) == true
+                            && self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value")) == Some(MobMemberState::Retiring))
+                        || self.identity_entry_retiring.contains(agent_identity) == true
+                        || self.identity_entry_removing.contains(agent_identity) == true
+                        || self.identity_entry_archiving.contains(agent_identity) == true,
+                    self.identity_to_runtime.contains_key(agent_identity) == true,
+                    self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::Archived)) == IdentityEntryChangeVerdict::OwnedByRoster
+            }
+            update {}
+            to Running
+            emit IdentityEntryChangeResolved { agent_identity: agent_identity, verdict: IdentityEntryChangeVerdict::OwnedByRoster }
+        }
+
+        // No identity entry holds the name (a worker's, or nothing's): nothing changes.
+        transition ArchiveIdentityEntryUnknown {
+            on input ArchiveIdentityEntry { agent_identity }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "change_unknown" {
+                identity_entry_change_verdict(
+                    IdentityEntryChangeKind::Archive,
+                    self.composition_authority == CompositionAuthorityKind::Authoritative,
+                    self.identity_changes_held,
+                    self.identity_entry_unreadable.contains(agent_identity) == true,
+                    self.identity_entry_tombstones.contains(agent_identity) == true,
+                    self.identity_entry_origins.contains_key(agent_identity) == true,
+                    self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Created),
+                    self.spawn_exec_phase.contains_key(agent_identity) == true
+                        || self.member_wake_attempts.contains_key(agent_identity) == true
+                        || (self.identity_to_runtime.contains_key(agent_identity) == true
+                            && self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value")) == Some(MobMemberState::Retiring))
+                        || self.identity_entry_retiring.contains(agent_identity) == true
+                        || self.identity_entry_removing.contains(agent_identity) == true
+                        || self.identity_entry_archiving.contains(agent_identity) == true,
+                    self.identity_to_runtime.contains_key(agent_identity) == true,
+                    self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::Archived)) == IdentityEntryChangeVerdict::Unknown
+            }
+            update {}
+            to Running
+            emit IdentityEntryChangeResolved { agent_identity: agent_identity, verdict: IdentityEntryChangeVerdict::Unknown }
+        }
+
+        // A member step of the identity is in flight, or its ending is already marked: nothing changes, and a retry decides it.
+        transition ArchiveIdentityEntryInFlight {
+            on input ArchiveIdentityEntry { agent_identity }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "change_in_flight" {
+                identity_entry_change_verdict(
+                    IdentityEntryChangeKind::Archive,
+                    self.composition_authority == CompositionAuthorityKind::Authoritative,
+                    self.identity_changes_held,
+                    self.identity_entry_unreadable.contains(agent_identity) == true,
+                    self.identity_entry_tombstones.contains(agent_identity) == true,
+                    self.identity_entry_origins.contains_key(agent_identity) == true,
+                    self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Created),
+                    self.spawn_exec_phase.contains_key(agent_identity) == true
+                        || self.member_wake_attempts.contains_key(agent_identity) == true
+                        || (self.identity_to_runtime.contains_key(agent_identity) == true
+                            && self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value")) == Some(MobMemberState::Retiring))
+                        || self.identity_entry_retiring.contains(agent_identity) == true
+                        || self.identity_entry_removing.contains(agent_identity) == true
+                        || self.identity_entry_archiving.contains(agent_identity) == true,
+                    self.identity_to_runtime.contains_key(agent_identity) == true,
+                    self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::Archived)) == IdentityEntryChangeVerdict::InFlight
+            }
+            update {}
+            to Running
+            emit IdentityEntryChangeResolved { agent_identity: agent_identity, verdict: IdentityEntryChangeVerdict::InFlight }
+        }
+
+        // The name is reserved, unreadable: nothing changes.
+        transition ArchiveIdentityEntryNameUnreadable {
+            on input ArchiveIdentityEntry { agent_identity }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "change_name_unreadable" {
+                identity_entry_change_verdict(
+                    IdentityEntryChangeKind::Archive,
+                    self.composition_authority == CompositionAuthorityKind::Authoritative,
+                    self.identity_changes_held,
+                    self.identity_entry_unreadable.contains(agent_identity) == true,
+                    self.identity_entry_tombstones.contains(agent_identity) == true,
+                    self.identity_entry_origins.contains_key(agent_identity) == true,
+                    self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Created),
+                    self.spawn_exec_phase.contains_key(agent_identity) == true
+                        || self.member_wake_attempts.contains_key(agent_identity) == true
+                        || (self.identity_to_runtime.contains_key(agent_identity) == true
+                            && self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value")) == Some(MobMemberState::Retiring))
+                        || self.identity_entry_retiring.contains(agent_identity) == true
+                        || self.identity_entry_removing.contains(agent_identity) == true
+                        || self.identity_entry_archiving.contains(agent_identity) == true,
+                    self.identity_to_runtime.contains_key(agent_identity) == true,
+                    self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::Archived)) == IdentityEntryChangeVerdict::NameUnreadable
+            }
+            update {}
+            to Running
+            emit IdentityEntryChangeResolved { agent_identity: agent_identity, verdict: IdentityEntryChangeVerdict::NameUnreadable }
+        }
+
+        // A candidate composition changes nothing.
+        transition ArchiveIdentityEntryNonAuthoritative {
+            on input ArchiveIdentityEntry { agent_identity }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "change_non_authoritative" {
+                identity_entry_change_verdict(
+                    IdentityEntryChangeKind::Archive,
+                    self.composition_authority == CompositionAuthorityKind::Authoritative,
+                    self.identity_changes_held,
+                    self.identity_entry_unreadable.contains(agent_identity) == true,
+                    self.identity_entry_tombstones.contains(agent_identity) == true,
+                    self.identity_entry_origins.contains_key(agent_identity) == true,
+                    self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Created),
+                    self.spawn_exec_phase.contains_key(agent_identity) == true
+                        || self.member_wake_attempts.contains_key(agent_identity) == true
+                        || (self.identity_to_runtime.contains_key(agent_identity) == true
+                            && self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value")) == Some(MobMemberState::Retiring))
+                        || self.identity_entry_retiring.contains(agent_identity) == true
+                        || self.identity_entry_removing.contains(agent_identity) == true
+                        || self.identity_entry_archiving.contains(agent_identity) == true,
+                    self.identity_to_runtime.contains_key(agent_identity) == true,
+                    self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::Archived)) == IdentityEntryChangeVerdict::NonAuthoritative
+            }
+            update {}
+            to Running
+            emit IdentityEntryChangeResolved { agent_identity: agent_identity, verdict: IdentityEntryChangeVerdict::NonAuthoritative }
+        }
+
+        // The host holds the mob's identity changes: nothing changes, retryable.
+        transition ArchiveIdentityEntryChangesHeld {
+            on input ArchiveIdentityEntry { agent_identity }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "change_changes_held" {
+                identity_entry_change_verdict(
+                    IdentityEntryChangeKind::Archive,
+                    self.composition_authority == CompositionAuthorityKind::Authoritative,
+                    self.identity_changes_held,
+                    self.identity_entry_unreadable.contains(agent_identity) == true,
+                    self.identity_entry_tombstones.contains(agent_identity) == true,
+                    self.identity_entry_origins.contains_key(agent_identity) == true,
+                    self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Created),
+                    self.spawn_exec_phase.contains_key(agent_identity) == true
+                        || self.member_wake_attempts.contains_key(agent_identity) == true
+                        || (self.identity_to_runtime.contains_key(agent_identity) == true
+                            && self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value")) == Some(MobMemberState::Retiring))
+                        || self.identity_entry_retiring.contains(agent_identity) == true
+                        || self.identity_entry_removing.contains(agent_identity) == true
+                        || self.identity_entry_archiving.contains(agent_identity) == true,
+                    self.identity_to_runtime.contains_key(agent_identity) == true,
+                    self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::Archived)) == IdentityEntryChangeVerdict::ChangesHeld
+            }
+            update {}
+            to Running
+            emit IdentityEntryChangeResolved { agent_identity: agent_identity, verdict: IdentityEntryChangeVerdict::ChangesHeld }
+        }
+
+        // A mob that is not running changes no identity.
+        transition ArchiveIdentityEntryMobNotRunning {
+            per_phase [Stopped, Completed, Destroyed]
+            on input ArchiveIdentityEntry { agent_identity }
+            update {}
+            to Running
+            emit IdentityEntryChangeResolved { agent_identity: agent_identity, verdict: IdentityEntryChangeVerdict::MobNotRunning }
+        }
+
+        // An archived entry's unarchive: it is owed its seat again, on its archived session record; the shell seats it.
+        transition UnarchiveIdentityEntryRestored {
+            on input UnarchiveIdentityEntry { agent_identity }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "change_restored" {
+                identity_entry_change_verdict(
+                    IdentityEntryChangeKind::Unarchive,
+                    self.composition_authority == CompositionAuthorityKind::Authoritative,
+                    self.identity_changes_held,
+                    self.identity_entry_unreadable.contains(agent_identity) == true,
+                    self.identity_entry_tombstones.contains(agent_identity) == true,
+                    self.identity_entry_origins.contains_key(agent_identity) == true,
+                    self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Created),
+                    self.spawn_exec_phase.contains_key(agent_identity) == true
+                        || self.member_wake_attempts.contains_key(agent_identity) == true
+                        || (self.identity_to_runtime.contains_key(agent_identity) == true
+                            && self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value")) == Some(MobMemberState::Retiring))
+                        || self.identity_entry_retiring.contains(agent_identity) == true
+                        || self.identity_entry_removing.contains(agent_identity) == true
+                        || self.identity_entry_archiving.contains(agent_identity) == true,
+                    self.identity_to_runtime.contains_key(agent_identity) == true,
+                    self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::Archived)) == IdentityEntryChangeVerdict::Restored
+            }
+            update {
+                self.identity_entry_unseated.insert(agent_identity, UnseatedEntryCause::SeatOwed);
+            }
+            to Running
+            emit IdentityEntryChangeResolved { agent_identity: agent_identity, verdict: IdentityEntryChangeVerdict::Restored }
+        }
+
+        // An entry that is not archived: nothing to unarchive.
+        transition UnarchiveIdentityEntryNotArchived {
+            on input UnarchiveIdentityEntry { agent_identity }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "change_not_archived" {
+                identity_entry_change_verdict(
+                    IdentityEntryChangeKind::Unarchive,
+                    self.composition_authority == CompositionAuthorityKind::Authoritative,
+                    self.identity_changes_held,
+                    self.identity_entry_unreadable.contains(agent_identity) == true,
+                    self.identity_entry_tombstones.contains(agent_identity) == true,
+                    self.identity_entry_origins.contains_key(agent_identity) == true,
+                    self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Created),
+                    self.spawn_exec_phase.contains_key(agent_identity) == true
+                        || self.member_wake_attempts.contains_key(agent_identity) == true
+                        || (self.identity_to_runtime.contains_key(agent_identity) == true
+                            && self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value")) == Some(MobMemberState::Retiring))
+                        || self.identity_entry_retiring.contains(agent_identity) == true
+                        || self.identity_entry_removing.contains(agent_identity) == true
+                        || self.identity_entry_archiving.contains(agent_identity) == true,
+                    self.identity_to_runtime.contains_key(agent_identity) == true,
+                    self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::Archived)) == IdentityEntryChangeVerdict::NotArchived
+            }
+            update {}
+            to Running
+            emit IdentityEntryChangeResolved { agent_identity: agent_identity, verdict: IdentityEntryChangeVerdict::NotArchived }
+        }
+
+        // A roster-owned identity's archive is its host's one-entry unlist: the store writes nothing.
+        transition UnarchiveIdentityEntryOwnedByRoster {
+            on input UnarchiveIdentityEntry { agent_identity }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "change_owned_by_roster" {
+                identity_entry_change_verdict(
+                    IdentityEntryChangeKind::Unarchive,
+                    self.composition_authority == CompositionAuthorityKind::Authoritative,
+                    self.identity_changes_held,
+                    self.identity_entry_unreadable.contains(agent_identity) == true,
+                    self.identity_entry_tombstones.contains(agent_identity) == true,
+                    self.identity_entry_origins.contains_key(agent_identity) == true,
+                    self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Created),
+                    self.spawn_exec_phase.contains_key(agent_identity) == true
+                        || self.member_wake_attempts.contains_key(agent_identity) == true
+                        || (self.identity_to_runtime.contains_key(agent_identity) == true
+                            && self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value")) == Some(MobMemberState::Retiring))
+                        || self.identity_entry_retiring.contains(agent_identity) == true
+                        || self.identity_entry_removing.contains(agent_identity) == true
+                        || self.identity_entry_archiving.contains(agent_identity) == true,
+                    self.identity_to_runtime.contains_key(agent_identity) == true,
+                    self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::Archived)) == IdentityEntryChangeVerdict::OwnedByRoster
+            }
+            update {}
+            to Running
+            emit IdentityEntryChangeResolved { agent_identity: agent_identity, verdict: IdentityEntryChangeVerdict::OwnedByRoster }
+        }
+
+        // No identity entry holds the name (a worker's, or nothing's): nothing changes.
+        transition UnarchiveIdentityEntryUnknown {
+            on input UnarchiveIdentityEntry { agent_identity }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "change_unknown" {
+                identity_entry_change_verdict(
+                    IdentityEntryChangeKind::Unarchive,
+                    self.composition_authority == CompositionAuthorityKind::Authoritative,
+                    self.identity_changes_held,
+                    self.identity_entry_unreadable.contains(agent_identity) == true,
+                    self.identity_entry_tombstones.contains(agent_identity) == true,
+                    self.identity_entry_origins.contains_key(agent_identity) == true,
+                    self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Created),
+                    self.spawn_exec_phase.contains_key(agent_identity) == true
+                        || self.member_wake_attempts.contains_key(agent_identity) == true
+                        || (self.identity_to_runtime.contains_key(agent_identity) == true
+                            && self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value")) == Some(MobMemberState::Retiring))
+                        || self.identity_entry_retiring.contains(agent_identity) == true
+                        || self.identity_entry_removing.contains(agent_identity) == true
+                        || self.identity_entry_archiving.contains(agent_identity) == true,
+                    self.identity_to_runtime.contains_key(agent_identity) == true,
+                    self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::Archived)) == IdentityEntryChangeVerdict::Unknown
+            }
+            update {}
+            to Running
+            emit IdentityEntryChangeResolved { agent_identity: agent_identity, verdict: IdentityEntryChangeVerdict::Unknown }
+        }
+
+        // A member step of the identity is in flight, or its ending is already marked: nothing changes, and a retry decides it.
+        transition UnarchiveIdentityEntryInFlight {
+            on input UnarchiveIdentityEntry { agent_identity }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "change_in_flight" {
+                identity_entry_change_verdict(
+                    IdentityEntryChangeKind::Unarchive,
+                    self.composition_authority == CompositionAuthorityKind::Authoritative,
+                    self.identity_changes_held,
+                    self.identity_entry_unreadable.contains(agent_identity) == true,
+                    self.identity_entry_tombstones.contains(agent_identity) == true,
+                    self.identity_entry_origins.contains_key(agent_identity) == true,
+                    self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Created),
+                    self.spawn_exec_phase.contains_key(agent_identity) == true
+                        || self.member_wake_attempts.contains_key(agent_identity) == true
+                        || (self.identity_to_runtime.contains_key(agent_identity) == true
+                            && self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value")) == Some(MobMemberState::Retiring))
+                        || self.identity_entry_retiring.contains(agent_identity) == true
+                        || self.identity_entry_removing.contains(agent_identity) == true
+                        || self.identity_entry_archiving.contains(agent_identity) == true,
+                    self.identity_to_runtime.contains_key(agent_identity) == true,
+                    self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::Archived)) == IdentityEntryChangeVerdict::InFlight
+            }
+            update {}
+            to Running
+            emit IdentityEntryChangeResolved { agent_identity: agent_identity, verdict: IdentityEntryChangeVerdict::InFlight }
+        }
+
+        // The name is reserved, unreadable: nothing changes.
+        transition UnarchiveIdentityEntryNameUnreadable {
+            on input UnarchiveIdentityEntry { agent_identity }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "change_name_unreadable" {
+                identity_entry_change_verdict(
+                    IdentityEntryChangeKind::Unarchive,
+                    self.composition_authority == CompositionAuthorityKind::Authoritative,
+                    self.identity_changes_held,
+                    self.identity_entry_unreadable.contains(agent_identity) == true,
+                    self.identity_entry_tombstones.contains(agent_identity) == true,
+                    self.identity_entry_origins.contains_key(agent_identity) == true,
+                    self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Created),
+                    self.spawn_exec_phase.contains_key(agent_identity) == true
+                        || self.member_wake_attempts.contains_key(agent_identity) == true
+                        || (self.identity_to_runtime.contains_key(agent_identity) == true
+                            && self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value")) == Some(MobMemberState::Retiring))
+                        || self.identity_entry_retiring.contains(agent_identity) == true
+                        || self.identity_entry_removing.contains(agent_identity) == true
+                        || self.identity_entry_archiving.contains(agent_identity) == true,
+                    self.identity_to_runtime.contains_key(agent_identity) == true,
+                    self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::Archived)) == IdentityEntryChangeVerdict::NameUnreadable
+            }
+            update {}
+            to Running
+            emit IdentityEntryChangeResolved { agent_identity: agent_identity, verdict: IdentityEntryChangeVerdict::NameUnreadable }
+        }
+
+        // A candidate composition changes nothing.
+        transition UnarchiveIdentityEntryNonAuthoritative {
+            on input UnarchiveIdentityEntry { agent_identity }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "change_non_authoritative" {
+                identity_entry_change_verdict(
+                    IdentityEntryChangeKind::Unarchive,
+                    self.composition_authority == CompositionAuthorityKind::Authoritative,
+                    self.identity_changes_held,
+                    self.identity_entry_unreadable.contains(agent_identity) == true,
+                    self.identity_entry_tombstones.contains(agent_identity) == true,
+                    self.identity_entry_origins.contains_key(agent_identity) == true,
+                    self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Created),
+                    self.spawn_exec_phase.contains_key(agent_identity) == true
+                        || self.member_wake_attempts.contains_key(agent_identity) == true
+                        || (self.identity_to_runtime.contains_key(agent_identity) == true
+                            && self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value")) == Some(MobMemberState::Retiring))
+                        || self.identity_entry_retiring.contains(agent_identity) == true
+                        || self.identity_entry_removing.contains(agent_identity) == true
+                        || self.identity_entry_archiving.contains(agent_identity) == true,
+                    self.identity_to_runtime.contains_key(agent_identity) == true,
+                    self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::Archived)) == IdentityEntryChangeVerdict::NonAuthoritative
+            }
+            update {}
+            to Running
+            emit IdentityEntryChangeResolved { agent_identity: agent_identity, verdict: IdentityEntryChangeVerdict::NonAuthoritative }
+        }
+
+        // The host holds the mob's identity changes: nothing changes, retryable.
+        transition UnarchiveIdentityEntryChangesHeld {
+            on input UnarchiveIdentityEntry { agent_identity }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "change_changes_held" {
+                identity_entry_change_verdict(
+                    IdentityEntryChangeKind::Unarchive,
+                    self.composition_authority == CompositionAuthorityKind::Authoritative,
+                    self.identity_changes_held,
+                    self.identity_entry_unreadable.contains(agent_identity) == true,
+                    self.identity_entry_tombstones.contains(agent_identity) == true,
+                    self.identity_entry_origins.contains_key(agent_identity) == true,
+                    self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Created),
+                    self.spawn_exec_phase.contains_key(agent_identity) == true
+                        || self.member_wake_attempts.contains_key(agent_identity) == true
+                        || (self.identity_to_runtime.contains_key(agent_identity) == true
+                            && self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value")) == Some(MobMemberState::Retiring))
+                        || self.identity_entry_retiring.contains(agent_identity) == true
+                        || self.identity_entry_removing.contains(agent_identity) == true
+                        || self.identity_entry_archiving.contains(agent_identity) == true,
+                    self.identity_to_runtime.contains_key(agent_identity) == true,
+                    self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::Archived)) == IdentityEntryChangeVerdict::ChangesHeld
+            }
+            update {}
+            to Running
+            emit IdentityEntryChangeResolved { agent_identity: agent_identity, verdict: IdentityEntryChangeVerdict::ChangesHeld }
+        }
+
+        // A mob that is not running changes no identity.
+        transition UnarchiveIdentityEntryMobNotRunning {
+            per_phase [Stopped, Completed, Destroyed]
+            on input UnarchiveIdentityEntry { agent_identity }
+            update {}
+            to Running
+            emit IdentityEntryChangeResolved { agent_identity: agent_identity, verdict: IdentityEntryChangeVerdict::MobNotRunning }
         }
 
         // =====================================================================
@@ -35608,6 +36758,9 @@ pub enum UnseatedEntryCause {
     /// A created entry whose host preparation is pending: no member exists
     /// until its host settles the preparation.
     PreparationPending,
+    /// An archived store-owned entry: no member exists until its unarchive,
+    /// which owes it its seat again on its archived session record.
+    Archived,
 }
 
 /// The presence a created entry's row in the identity store records, as the
@@ -35626,6 +36779,9 @@ pub enum RecoveredPresence {
     Tombstone,
     /// The row cannot be read by this build.
     Unreadable,
+    /// The store-owned entry is archived: it has no member, or its member's
+    /// archive retirement is in flight.
+    Archived,
 }
 
 /// The store's receipt of an identity change's operation, as the change's
@@ -35704,6 +36860,55 @@ pub enum CreatedIdentityRecordVerdict {
     /// The record's cause is not a new entry's (a seat owed, or a pending
     /// host preparation).
     CauseRefused,
+    /// The mob is not running.
+    MobNotRunning,
+}
+
+/// Which identity change an [`MobMachineInput::RemoveIdentityEntry`],
+/// [`MobMachineInput::ArchiveIdentityEntry`] or
+/// [`MobMachineInput::UnarchiveIdentityEntry`] asks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum IdentityEntryChangeKind {
+    #[default]
+    Remove,
+    Archive,
+    Unarchive,
+}
+
+/// The verdict of one identity's removal, archive or unarchive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum IdentityEntryChangeVerdict {
+    /// The seated entry's member retires; the end of its retirement ends the
+    /// entry and tombstones its name.
+    #[default]
+    Retiring,
+    /// The unseated entry ended, and its name is tombstoned.
+    Removed,
+    /// The name was removed already.
+    AlreadyRemoved,
+    /// The seated store-owned entry's member retires; the end of its
+    /// retirement leaves the entry archived.
+    Archiving,
+    /// The unseated store-owned entry is archived.
+    Archived,
+    /// The entry was archived already.
+    AlreadyArchived,
+    /// The archived entry is owed its seat again.
+    Restored,
+    /// The entry is not archived.
+    NotArchived,
+    /// The identity is roster-owned: its host writes the change.
+    OwnedByRoster,
+    /// No identity entry holds the name.
+    Unknown,
+    /// A member step of the identity is in flight: retry.
+    InFlight,
+    /// The name is reserved, unreadable.
+    NameUnreadable,
+    /// A candidate composition changes nothing.
+    NonAuthoritative,
+    /// The host holds the mob's identity changes: retry.
+    ChangesHeld,
     /// The mob is not running.
     MobNotRunning,
 }

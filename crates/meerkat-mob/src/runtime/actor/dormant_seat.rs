@@ -420,6 +420,11 @@ impl MobActor {
                          awaits its host's preparation"
                     )));
                 }
+                mob_dsl::UnseatedEntryCause::Archived => {
+                    return Err(MobError::IdentityArchived {
+                        member_id: agent_identity,
+                    });
+                }
                 mob_dsl::UnseatedEntryCause::SeatOwed => {}
             }
         }

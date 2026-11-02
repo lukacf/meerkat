@@ -4379,6 +4379,7 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
                     "HostedOnFirstUse",
                     "HeldCreation",
                     "PreparationPending",
+                    "Archived",
                 ],
             ),
             NamedTypeBinding::string_enum(
@@ -4428,7 +4429,13 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
             // entry's row records, as the boot's scan read it.
             NamedTypeBinding::string_enum(
                 "RecoveredPresence",
-                &["Present", "PresentUnseated", "Tombstone", "Unreadable"],
+                &[
+                    "Present",
+                    "PresentUnseated",
+                    "Tombstone",
+                    "Unreadable",
+                    "Archived",
+                ],
             ),
             // Identity changes (0.9.9): a change's receipt and consent as its
             // commit step observed them, its admission verdict, and the
@@ -4467,6 +4474,31 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
                     "NonAuthoritative",
                     "ChangesHeld",
                     "CauseRefused",
+                    "MobNotRunning",
+                ],
+            ),
+            // One identity's removal, archive or unarchive, and its verdict.
+            NamedTypeBinding::string_enum(
+                "IdentityEntryChangeKind",
+                &["Remove", "Archive", "Unarchive"],
+            ),
+            NamedTypeBinding::string_enum(
+                "IdentityEntryChangeVerdict",
+                &[
+                    "Retiring",
+                    "Removed",
+                    "AlreadyRemoved",
+                    "Archiving",
+                    "Archived",
+                    "AlreadyArchived",
+                    "Restored",
+                    "NotArchived",
+                    "OwnedByRoster",
+                    "Unknown",
+                    "InFlight",
+                    "NameUnreadable",
+                    "NonAuthoritative",
+                    "ChangesHeld",
                     "MobNotRunning",
                 ],
             ),
@@ -5131,6 +5163,9 @@ runtime_internal_inputs!(
         AdmitIdentityChange,
         RecordCreatedIdentityEntry,
         SetIdentityChangesHeld,
+        RemoveIdentityEntry,
+        ArchiveIdentityEntry,
+        UnarchiveIdentityEntry,
     ]
 );
 

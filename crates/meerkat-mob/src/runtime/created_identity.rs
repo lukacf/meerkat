@@ -42,9 +42,7 @@ fn recovered_presence(observation: &CreatedIdentityObservation) -> mob_dsl::Reco
                 mob_dsl::RecoveredPresence::PresentUnseated
             }
             CreatedIdentityPresence::Removed => mob_dsl::RecoveredPresence::Tombstone,
-            // No machine arm recovers an archived identity yet: its name is
-            // reserved, and nothing acts on it.
-            CreatedIdentityPresence::Archived { .. } => mob_dsl::RecoveredPresence::Unreadable,
+            CreatedIdentityPresence::Archived { .. } => mob_dsl::RecoveredPresence::Archived,
         },
         CreatedIdentityObservation::Unreadable { .. } => mob_dsl::RecoveredPresence::Unreadable,
     }
@@ -108,10 +106,23 @@ pub(super) async fn recover_created_identity_entries(
             )
             .await?;
         for (identity, observation) in &page.observations {
-            let last_session = last_sessions
-                .get_or_insert_with(|| last_bound_sessions(mob_id, epoch_events))
-                .get(identity)
-                .map(mob_dsl::SessionId::from_domain);
+            // An archived row names its archived session itself; any other
+            // row's revival record is its member's last bound session.
+            let archived_session = match observation {
+                CreatedIdentityObservation::Created(record) => match &record.presence {
+                    CreatedIdentityPresence::Archived {
+                        archived_session: Some(session),
+                    } => Some(mob_dsl::SessionId::from_domain(session)),
+                    _ => None,
+                },
+                CreatedIdentityObservation::Unreadable { .. } => None,
+            };
+            let last_session = archived_session.or_else(|| {
+                last_sessions
+                    .get_or_insert_with(|| last_bound_sessions(mob_id, epoch_events))
+                    .get(identity)
+                    .map(mob_dsl::SessionId::from_domain)
+            });
             super::builder::apply_seeded_mob_signal(
                 authority,
                 mob_dsl::MobMachineSignal::RecoverCreatedIdentityEntry {
@@ -218,6 +229,7 @@ impl super::MobHandle {
     /// fails its caller: an entry it cannot seat stays owed its seat, and
     /// the failure is logged.
     pub(super) async fn reseat_owed_created_entries(&self) {
+        self.redrive_owed_entry_endings();
         let owed = owed_created_seats(&self.machine_state_watch_rx.borrow());
         if owed.is_empty() {
             return;
@@ -274,6 +286,34 @@ impl super::MobHandle {
                 error = %error,
                 "created entries owed their seat: the seat failed"
             ),
+        }
+    }
+
+    /// Finish the removals and archives MobMachine holds owed (recovered at
+    /// a start from the identities' rows, or left by a removal whose
+    /// retirement did not run): retire the member of each, with the mark's
+    /// cause, off the caller's path, each retirement in its own task to its
+    /// end. A retirement that fails leaves the mark, and the next start, or
+    /// a retry of the change, retires the member again.
+    pub(super) fn redrive_owed_entry_endings(&self) {
+        let owed = super::identity_entry::owed_entry_endings(&self.machine_state_watch_rx.borrow());
+        for identity in owed {
+            // The mob's own obligation, whoever started it.
+            let owner = self.non_owning().with_command_authority(
+                crate::control_policy::CommandAuthority::principal(
+                    crate::control_policy::MobControlPrincipal::Owner,
+                ),
+            );
+            crate::tokio::spawn(async move {
+                if let Err(error) = owner.retire(identity.clone()).await {
+                    tracing::warn!(
+                        mob_id = %owner.mob_id(),
+                        agent_identity = %identity,
+                        error = %error,
+                        "an identity's owed ending did not retire its member"
+                    );
+                }
+            });
         }
     }
 
@@ -336,6 +376,12 @@ mod tests {
             (
                 record(CreatedIdentityPresence::Removed),
                 mob_dsl::RecoveredPresence::Tombstone,
+            ),
+            (
+                record(CreatedIdentityPresence::Archived {
+                    archived_session: None,
+                }),
+                mob_dsl::RecoveredPresence::Archived,
             ),
             (
                 CreatedIdentityObservation::Unreadable {

@@ -954,10 +954,22 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                             "RecordCreatedIdentityEntryNameTombstoned",
                             "RecordCreatedIdentityEntryNameUnreadable",
                             "SetIdentityChangesHeldRunning",
+                            "RemoveIdentityEntryRetiring",
+                            "RemoveIdentityEntryRemoved",
+                            "ArchiveIdentityEntryArchiving",
+                            "ArchiveIdentityEntryArchived",
+                            "ArchiveIdentityEntryOwnedByRoster",
+                            "UnarchiveIdentityEntryRestored",
+                            "UnarchiveIdentityEntryNotArchived",
                         ])
                         .effects(&[
                             "IdentityChangeAdmissionResolved",
                             "CreatedIdentityEntryRecorded",
+                            "IdentityEntryChangeResolved",
+                        ])
+                        .invariants(&[
+                            "archived_entry_is_store_owned",
+                            "entry_ending_marks_are_seated_and_disjoint",
                         ]),
                 ),
                 machine_anchor(

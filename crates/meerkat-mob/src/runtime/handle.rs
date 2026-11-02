@@ -20673,10 +20673,14 @@ impl MobHandle {
         identity: &AgentIdentity,
         cause: mob_dsl::MemberWakeCause,
     ) -> Result<(), MobError> {
-        let session_id = self
-            .resolve_bridge_session_id(identity)
-            .await
-            .ok_or_else(|| MobError::MemberNotFound(identity.clone()))?;
+        // No member holds the identity: an archived identity and one
+        // awaiting its host's preparation answer typed.
+        let Some(session_id) = self.resolve_bridge_session_id(identity).await else {
+            return Err(super::identity_entry::unseated_delivery_refusal(
+                &self.machine_state_watch_rx.borrow(),
+                identity,
+            ));
+        };
         let observed_missing = match self
             .session_service
             .live_session_actor_registered(&session_id)

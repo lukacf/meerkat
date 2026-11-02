@@ -68,6 +68,7 @@
 //! can be stale by the time the caller acts on it, and it never says whether a
 //! member is materialized.
 
+use std::collections::BTreeSet;
 use std::ops::Bound;
 
 use meerkat_core::types::SessionId;
@@ -186,6 +187,7 @@ impl UnseatedEntryCause {
             mob_dsl::UnseatedEntryCause::HostedOnFirstUse => Self::HostedOnFirstUse,
             mob_dsl::UnseatedEntryCause::HeldCreation => Self::HeldCreation,
             mob_dsl::UnseatedEntryCause::PreparationPending => Self::PreparationPending,
+            mob_dsl::UnseatedEntryCause::Archived => Self::Archived,
         }
     }
 }
@@ -1268,10 +1270,83 @@ pub(crate) fn stored_retirement_cause(
     state: &mob_dsl::MobMachineState,
     identity: &AgentIdentity,
 ) -> Option<MemberRetirementCause> {
+    let identity = mob_dsl::AgentIdentity::from_domain(identity);
+    if state.identity_entry_retiring.contains(&identity) {
+        Some(MemberRetirementCause::Unlisted)
+    } else if state.identity_entry_removing.contains(&identity) {
+        Some(MemberRetirementCause::Removed)
+    } else if state.identity_entry_archiving.contains(&identity) {
+        Some(MemberRetirementCause::Archived)
+    } else {
+        None
+    }
+}
+
+/// Whether `identity`'s ending is owed and its member's retirement has not
+/// started: a removal or an archive MobMachine marked (live, or recovered at
+/// a start from the identity's row) whose member is seated and not retiring.
+/// The shell then retires the member, with the mark's cause.
+pub(crate) fn entry_ending_owed(
+    state: &mob_dsl::MobMachineState,
+    identity: &AgentIdentity,
+) -> bool {
+    let dsl_identity = mob_dsl::AgentIdentity::from_domain(identity);
+    (state.identity_entry_removing.contains(&dsl_identity)
+        || state.identity_entry_archiving.contains(&dsl_identity))
+        && state
+            .identity_to_runtime
+            .get(&dsl_identity)
+            .is_some_and(|runtime| {
+                state.member_state_markers.get(runtime) != Some(&mob_dsl::MobMemberState::Retiring)
+            })
+}
+
+/// Every identity whose ending is owed ([`entry_ending_owed`]), in identity
+/// order.
+pub(crate) fn owed_entry_endings(state: &mob_dsl::MobMachineState) -> Vec<AgentIdentity> {
     state
-        .identity_entry_retiring
-        .contains(&mob_dsl::AgentIdentity::from_domain(identity))
-        .then_some(MemberRetirementCause::Unlisted)
+        .identity_entry_removing
+        .iter()
+        .chain(state.identity_entry_archiving.iter())
+        .map(|identity| AgentIdentity::from(identity.0.as_str()))
+        .filter(|identity| entry_ending_owed(state, identity))
+        .collect()
+}
+
+/// The roster-owned entries of `state`: every Declared entry, readable or
+/// not, in identity order. The one-entry unlist seals the roster with all of
+/// them but the one it unlists.
+pub(crate) fn declared_entries(state: &mob_dsl::MobMachineState) -> BTreeSet<AgentIdentity> {
+    state
+        .identity_entry_origins
+        .iter()
+        .filter(|(_, origin)| **origin == mob_dsl::IdentityEntryOrigin::Declared)
+        .map(|(identity, _)| AgentIdentity::from(identity.0.as_str()))
+        .collect()
+}
+
+/// The refusal of a delivery to `identity` when no member holds it: an
+/// archived identity's ([`MobError::IdentityArchived`]), one awaiting its
+/// host's preparation (retryable,
+/// [`crate::MemberWakeRefusal::HostPreparationPending`]), and otherwise no
+/// such member.
+pub(crate) fn unseated_delivery_refusal(
+    state: &mob_dsl::MobMachineState,
+    identity: &AgentIdentity,
+) -> MobError {
+    match state
+        .identity_entry_unseated
+        .get(&mob_dsl::AgentIdentity::from_domain(identity))
+    {
+        Some(mob_dsl::UnseatedEntryCause::Archived) => MobError::IdentityArchived {
+            member_id: identity.clone(),
+        },
+        Some(mob_dsl::UnseatedEntryCause::PreparationPending) => MobError::MemberWakeRefused {
+            member_id: identity.clone(),
+            refusal: crate::MemberWakeRefusal::HostPreparationPending,
+        },
+        _ => MobError::MemberNotFound(identity.clone()),
+    }
 }
 
 /// The session a retirement's `MemberRetired` journal effect names, as its

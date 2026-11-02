@@ -878,6 +878,148 @@ pub(super) fn grant_current_at_the_sink(
 }
 
 // ---------------------------------------------------------------------------
+// A change's requester and consent, as its commit takes them
+// ---------------------------------------------------------------------------
+
+/// A change's requester and consent, as its records seal them, with the
+/// grant an agent's change carries.
+pub(super) struct ChangeAttribution {
+    pub(super) requester: IdentityChangeRequester,
+    pub(super) grant: Option<IdentityChangeGrant>,
+    /// Whether a human decision held the change (its grant is re-prepared at
+    /// the commit).
+    pub(super) decided: bool,
+    pub(super) consent: IdentityChangeConsent,
+}
+
+/// The admission facts of a change's consent, before the clock reading the
+/// permit's deadline is taken.
+#[derive(Clone, Copy)]
+pub(super) struct ConsentFacts<'a> {
+    consent: mob_dsl::IdentityChangeConsentKind,
+    permit: Option<&'a DecisionExecutionPermit>,
+    permit_binds: bool,
+    host_operator: bool,
+}
+
+impl ConsentFacts<'_> {
+    /// The change's admission facts at the clock reading `now_ms`.
+    pub(super) fn at(&self, now_ms: u64) -> ChangeAdmissionFacts {
+        ChangeAdmissionFacts {
+            consent: self.consent,
+            permit_binds: self.permit_binds,
+            permit_admits: self
+                .permit
+                .is_some_and(|permit| permit.admits_commit_at(now_ms)),
+            host_operator: self.host_operator,
+        }
+    }
+}
+
+impl ChangeAttribution {
+    /// The attribution of a change of `operation` by `requester` under
+    /// `consent`; an agent's grant must admit this very operation.
+    pub(super) fn of(
+        requester: IdentityChangeRequesterInput,
+        consent: IdentityChangeConsentInput<'_>,
+        operation: &IdentityOperation,
+    ) -> Result<Self, MobError> {
+        let (requester, grant) = match requester {
+            IdentityChangeRequesterInput::Agent { grant } => {
+                if grant.operation_id() != operation.operation_id {
+                    return Err(refused(IdentityChangeRefusal::InvalidRequest {
+                        problem: "the requester's grant admits another operation".to_string(),
+                    }));
+                }
+                (
+                    IdentityChangeRequester::Agent {
+                        identity: grant.requester().clone(),
+                    },
+                    Some(grant),
+                )
+            }
+            IdentityChangeRequesterInput::Host { surface, .. } => {
+                (IdentityChangeRequester::Host { surface }, None)
+            }
+            IdentityChangeRequesterInput::Human { principal } => {
+                (IdentityChangeRequester::Human { principal }, None)
+            }
+        };
+        let (consent, decided) = match consent {
+            IdentityChangeConsentInput::Policy(outcome) => {
+                (IdentityChangeConsent::Policy { outcome }, false)
+            }
+            IdentityChangeConsentInput::Decided(permit) => (
+                IdentityChangeConsent::Decided {
+                    provenance: permit.consent().clone(),
+                },
+                true,
+            ),
+            IdentityChangeConsentInput::Imported(provenance) => (
+                IdentityChangeConsent::Imported {
+                    provenance: provenance.clone(),
+                },
+                false,
+            ),
+        };
+        Ok(Self {
+            requester,
+            grant,
+            decided,
+            consent,
+        })
+    }
+
+    /// Whether `requester` is the host operator.
+    pub(super) fn is_host_operator(requester: &IdentityChangeRequesterInput) -> bool {
+        matches!(
+            requester,
+            IdentityChangeRequesterInput::Host {
+                host_operator: true,
+                ..
+            }
+        )
+    }
+
+    /// The consent facts of a change of `operation` under `consent`, by a
+    /// requester that is the host operator or not.
+    pub(super) fn facts_of<'a>(
+        consent: IdentityChangeConsentInput<'a>,
+        operation: &IdentityOperation,
+        host_operator: bool,
+    ) -> ConsentFacts<'a> {
+        let (kind, permit) = match consent {
+            IdentityChangeConsentInput::Policy(_) => {
+                (mob_dsl::IdentityChangeConsentKind::Policy, None)
+            }
+            IdentityChangeConsentInput::Decided(permit) => {
+                (mob_dsl::IdentityChangeConsentKind::Decided, Some(permit))
+            }
+            IdentityChangeConsentInput::Imported(_) => {
+                (mob_dsl::IdentityChangeConsentKind::Imported, None)
+            }
+        };
+        let permit_binds = permit.is_some_and(|permit| {
+            match (
+                DecisionOperationId::new(operation.operation_id.clone()),
+                Sha256Digest::new(operation.request_digest.clone()),
+            ) {
+                (Ok(operation_id), Ok(request_digest)) => {
+                    permit.binds(&operation_id, &request_digest)
+                }
+                _ => false,
+            }
+        });
+        ConsentFacts {
+            consent: kind,
+            permit,
+            permit_binds,
+            host_operator,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // The commands the actor serves
 // ---------------------------------------------------------------------------
 
@@ -955,6 +1097,182 @@ pub(super) enum IdentityChangeCommand {
         held: bool,
         reply_tx: oneshot::Sender<Result<(), MobError>>,
     },
+    /// Commit one identity's removal, archive or unarchive.
+    CommitEntryChange {
+        commit: Box<EntryChangeCommit>,
+        reply_tx: oneshot::Sender<Result<EntryChangeCommitted, MobError>>,
+    },
+}
+
+/// What one identity's removal, archive or unarchive commit step takes.
+pub(super) struct EntryChangeCommit {
+    pub(super) kind: mob_dsl::IdentityEntryChangeKind,
+    pub(super) identity: AgentIdentity,
+    pub(super) operation: IdentityOperation,
+    pub(super) facts: ChangeAdmissionFacts,
+    pub(super) grant: Option<IdentityChangeGrant>,
+    pub(super) decided: bool,
+    pub(super) requester: IdentityChangeRequester,
+    pub(super) consent: IdentityChangeConsent,
+}
+
+/// What an entry change's commit step answers.
+pub(super) enum EntryChangeCommitted {
+    Committed {
+        receipt: IdentityChangeReceipt,
+        verdict: mob_dsl::IdentityEntryChangeVerdict,
+    },
+    Replayed(IdentityChangeReceipt),
+}
+
+/// The change kind, the receipt's outcome for the identity, and the row a
+/// verdict writes; a verdict that writes nothing answers a refusal.
+pub(super) fn entry_change_answer(
+    kind: mob_dsl::IdentityEntryChangeKind,
+    verdict: mob_dsl::IdentityEntryChangeVerdict,
+    identity: &AgentIdentity,
+) -> Result<(IdentityChangeKind, IdentityChangeEntryOutcome), MobError> {
+    use mob_dsl::IdentityEntryChangeVerdict as Verdict;
+    let change = match kind {
+        mob_dsl::IdentityEntryChangeKind::Remove => IdentityChangeKind::Remove,
+        mob_dsl::IdentityEntryChangeKind::Archive => IdentityChangeKind::Archive,
+        mob_dsl::IdentityEntryChangeKind::Unarchive => IdentityChangeKind::Unarchive,
+    };
+    let outcome = match verdict {
+        Verdict::Retiring => IdentityChangeEntryOutcome::Retiring,
+        Verdict::Removed | Verdict::AlreadyRemoved => IdentityChangeEntryOutcome::Removed,
+        Verdict::Archiving => IdentityChangeEntryOutcome::Archiving,
+        Verdict::Archived | Verdict::AlreadyArchived => IdentityChangeEntryOutcome::Archived,
+        Verdict::Restored => IdentityChangeEntryOutcome::Restored,
+        Verdict::NotArchived => {
+            return Err(refused(IdentityChangeRefusal::NotArchived {
+                identity: identity.clone(),
+            }));
+        }
+        Verdict::OwnedByRoster => {
+            return Err(refused(IdentityChangeRefusal::OwnerReadOnly {
+                owner: "roster",
+            }));
+        }
+        Verdict::Unknown => {
+            return Err(refused(IdentityChangeRefusal::IdentityUnknown {
+                identity: identity.clone(),
+            }));
+        }
+        Verdict::NameUnreadable => {
+            return Err(refused(IdentityChangeRefusal::NameTaken {
+                identity: identity.clone(),
+                by: IdentityNameHolder::Unreadable,
+            }));
+        }
+        Verdict::InFlight => {
+            return Err(MobError::LifecycleOperationPending {
+                intent: format!(
+                    "an identity change of '{identity}' while a member step of it runs"
+                ),
+            });
+        }
+        Verdict::NonAuthoritative => return Err(refused(IdentityChangeRefusal::CandidateLaunch)),
+        Verdict::ChangesHeld => return Err(refused(IdentityChangeRefusal::ChangesHeld)),
+        Verdict::MobNotRunning => return Err(refused(IdentityChangeRefusal::MobNotRunning)),
+    };
+    Ok((change, outcome))
+}
+
+/// The row an entry change writes, from the identity's current row (`None`
+/// when the store holds none: a roster-owned identity's): a removal writes
+/// the tombstone (the store-owned row, removed, with the removal's record,
+/// or a roster-owned identity's first row), an archive the row archived on
+/// `archived_session`, an unarchive the row present again. A verdict that
+/// changes nothing writes none.
+pub(super) fn entry_change_row(
+    mob_id: &MobId,
+    commit: &EntryChangeCommit,
+    verdict: mob_dsl::IdentityEntryChangeVerdict,
+    current: Option<crate::identity::CreatedIdentityObservation>,
+    archived_session: Option<SessionId>,
+    at_ms: u64,
+) -> Result<Option<CreatedIdentityRowWrite>, MobError> {
+    use mob_dsl::IdentityEntryChangeVerdict as Verdict;
+    let invalid = |error: crate::identity::IdentityIntentError| {
+        MobError::Internal(format!("an identity change's row: {error}"))
+    };
+    let current = match current {
+        Some(crate::identity::CreatedIdentityObservation::Created(row)) => Some(row),
+        Some(crate::identity::CreatedIdentityObservation::Unreadable { .. }) => {
+            return Err(refused(IdentityChangeRefusal::NameTaken {
+                identity: commit.identity.clone(),
+                by: IdentityNameHolder::Unreadable,
+            }));
+        }
+        None => None,
+    };
+    let updated =
+        |row: CreatedIdentityRecord, written: CreatedIdentityRecord| CreatedIdentityRowWrite {
+            expected: CreatedIdentityRowExpectation::Current {
+                authority_digest: row.authority_digest,
+            },
+            record: written,
+        };
+    let removal = || {
+        crate::identity::IdentityRemovalRecord::new(
+            commit.operation.operation_id.clone(),
+            at_ms,
+            commit.requester.clone(),
+            commit.consent.clone(),
+        )
+    };
+    Ok(match (verdict, current) {
+        (Verdict::Retiring | Verdict::Removed, Some(row)) => {
+            let written = row
+                .clone()
+                .with_presence(CreatedIdentityPresence::Removed)
+                .and_then(|written| written.with_removal(removal()))
+                .map_err(invalid)?;
+            Some(updated(row, written))
+        }
+        // A roster-owned identity's removal: the store's first row of its
+        // name is its tombstone.
+        (Verdict::Retiring | Verdict::Removed, None) => Some(CreatedIdentityRowWrite {
+            record: CreatedIdentityRecord::sealed(
+                mob_id.clone(),
+                commit.identity.clone(),
+                1,
+                CreatedIdentityPresence::Removed,
+                CreatedIdentityProvenance::entered(
+                    IdentityEntered::RosterRemoval,
+                    commit.operation.operation_id.clone(),
+                    at_ms,
+                    commit.requester.clone(),
+                    commit.consent.clone(),
+                ),
+            )
+            .and_then(|record| record.with_removal(removal()))
+            .map_err(invalid)?,
+            expected: CreatedIdentityRowExpectation::Absent,
+        }),
+        (Verdict::Archiving | Verdict::Archived, Some(row)) => {
+            let written = row
+                .clone()
+                .with_presence(CreatedIdentityPresence::Archived { archived_session })
+                .map_err(invalid)?;
+            Some(updated(row, written))
+        }
+        (Verdict::Restored, Some(row)) => {
+            let written = row
+                .clone()
+                .with_presence(CreatedIdentityPresence::Present)
+                .map_err(invalid)?;
+            Some(updated(row, written))
+        }
+        (Verdict::Archiving | Verdict::Archived | Verdict::Restored, None) => {
+            return Err(MobError::Internal(format!(
+                "the store-owned identity '{}' has no row",
+                commit.identity
+            )));
+        }
+        _ => None,
+    })
 }
 
 impl IdentityChangeCommand {
@@ -968,6 +1286,9 @@ impl IdentityChangeCommand {
                 let _ = reply_tx.send(Err(error));
             }
             Self::SetHeld { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(error));
+            }
+            Self::CommitEntryChange { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(error));
             }
         }
@@ -1464,75 +1785,18 @@ impl super::MobHandle {
                 preparation: request.preparation,
             });
         }
-        let (requester_record, host_operator, grant) = match requester {
-            IdentityChangeRequesterInput::Agent { grant } => {
-                if grant.operation_id() != operation.operation_id {
-                    return Err(refused(IdentityChangeRefusal::InvalidRequest {
-                        problem: "the requester's grant admits another operation".to_string(),
-                    }));
-                }
-                (
-                    IdentityChangeRequester::Agent {
-                        identity: grant.requester().clone(),
-                    },
-                    false,
-                    Some(grant),
-                )
-            }
-            IdentityChangeRequesterInput::Host {
-                surface,
-                host_operator,
-            } => (
-                IdentityChangeRequester::Host { surface },
-                host_operator,
-                None,
-            ),
-            IdentityChangeRequesterInput::Human { principal } => {
-                (IdentityChangeRequester::Human { principal }, false, None)
-            }
-        };
-        let (consent_record, consent_kind, decided) = match consent {
-            IdentityChangeConsentInput::Policy(outcome) => (
-                IdentityChangeConsent::Policy { outcome },
-                mob_dsl::IdentityChangeConsentKind::Policy,
-                false,
-            ),
-            IdentityChangeConsentInput::Decided(permit) => (
-                IdentityChangeConsent::Decided {
-                    provenance: permit.consent().clone(),
-                },
-                mob_dsl::IdentityChangeConsentKind::Decided,
-                true,
-            ),
-            IdentityChangeConsentInput::Imported(provenance) => (
-                IdentityChangeConsent::Imported {
-                    provenance: provenance.clone(),
-                },
-                mob_dsl::IdentityChangeConsentKind::Imported,
-                false,
-            ),
-        };
-        let permit = match consent {
-            IdentityChangeConsentInput::Decided(permit) => Some(permit),
-            _ => None,
-        };
-        let permit_binds = permit.is_some_and(|permit| {
-            match (
-                DecisionOperationId::new(operation.operation_id.clone()),
-                Sha256Digest::new(operation.request_digest.clone()),
-            ) {
-                (Ok(operation_id), Ok(request_digest)) => {
-                    permit.binds(&operation_id, &request_digest)
-                }
-                _ => false,
-            }
-        });
-        let facts = |now_ms: u64| ChangeAdmissionFacts {
-            consent: consent_kind,
-            permit_binds,
-            permit_admits: permit.is_some_and(|permit| permit.admits_commit_at(now_ms)),
-            host_operator,
-        };
+        let attribution_facts = ChangeAttribution::facts_of(
+            consent,
+            &operation,
+            ChangeAttribution::is_host_operator(&requester),
+        );
+        let ChangeAttribution {
+            requester: requester_record,
+            grant,
+            decided,
+            consent: consent_record,
+        } = ChangeAttribution::of(requester, consent, &operation)?;
+        let facts = |now_ms: u64| attribution_facts.at(now_ms);
 
         // The plan: the change's admission and its entries' records probed,
         // and each identity's seat planned.
@@ -1772,6 +2036,11 @@ impl super::MobHandle {
     /// and an adoption of it are refused. Meanwhile the declared apply defers
     /// the identity, and afterwards refuses its name.
     ///
+    /// Answers once the member's retirement ended. A retirement that fails
+    /// leaves the removal marked: a retry of the same operation (which
+    /// answers [`IdentityChangeOutcome::Replayed`]) or the mob's next start
+    /// retires the member again.
+    ///
     /// Refused typed, with nothing written: no identity of this mob holds the
     /// name ([`IdentityChangeRefusal::IdentityUnknown`]), and every refusal of
     /// [`Self::create_store_owned_identities`] that applies to a change.
@@ -1780,10 +2049,19 @@ impl super::MobHandle {
         removal: IdentityRemoval,
         consent: IdentityChangeConsentInput<'_>,
     ) -> Result<IdentityChangeOutcome, MobError> {
-        let _ = (removal, consent);
-        Err(MobError::Internal(
-            "identity removals are not built yet".to_string(),
-        ))
+        let IdentityRemoval {
+            operation,
+            requester,
+            identity,
+        } = removal;
+        self.change_identity_entry(
+            mob_dsl::IdentityEntryChangeKind::Remove,
+            identity,
+            operation,
+            requester,
+            consent,
+        )
+        .await
     }
 
     /// Archive one store-owned identity as one change: its member retires
@@ -1792,31 +2070,220 @@ impl super::MobHandle {
     /// presence `archived` and its name stays reserved. Deliveries to it are
     /// refused ([`MobError::IdentityArchived`]) until its unarchive; updates
     /// of it are allowed. A roster-owned identity's archive is refused
-    /// [`IdentityChangeRefusal::OwnerReadOnly`]: its host unlists it.
+    /// [`IdentityChangeRefusal::OwnerReadOnly`]: its host unlists it
+    /// ([`Self::unlist_declared_identity`]). Answers once the member's
+    /// retirement ended, as a removal does.
     pub async fn archive_identity(
         &self,
         change: IdentityArchiveChange,
         consent: IdentityChangeConsentInput<'_>,
     ) -> Result<IdentityChangeOutcome, MobError> {
-        let _ = (change, consent);
-        Err(MobError::Internal(
-            "identity archives are not built yet".to_string(),
-        ))
+        let IdentityArchiveChange {
+            operation,
+            requester,
+            identity,
+        } = change;
+        self.change_identity_entry(
+            mob_dsl::IdentityEntryChangeKind::Archive,
+            identity,
+            operation,
+            requester,
+            consent,
+        )
+        .await
     }
 
-    /// Unarchive one archived store-owned identity as one change: it is
-    /// seated Dormant again on its archived session, its history kept, or on
-    /// a fresh session with the notice when that session is gone from the
-    /// store. Refused [`IdentityChangeRefusal::NotArchived`] for an identity
-    /// that is not archived.
+    /// Unarchive one archived store-owned identity as one change: its row is
+    /// present again, and it is seated Dormant on its archived session, its
+    /// history kept, or on a fresh session with the notice when that session
+    /// is gone from the store. Refused [`IdentityChangeRefusal::NotArchived`]
+    /// for an identity that is not archived. A seat that fails leaves the
+    /// identity owed its seat, which the mob's next start seats.
     pub async fn unarchive_identity(
         &self,
         change: IdentityArchiveChange,
         consent: IdentityChangeConsentInput<'_>,
     ) -> Result<IdentityChangeOutcome, MobError> {
-        let _ = (change, consent);
-        Err(MobError::Internal(
-            "identity archives are not built yet".to_string(),
-        ))
+        let IdentityArchiveChange {
+            operation,
+            requester,
+            identity,
+        } = change;
+        self.change_identity_entry(
+            mob_dsl::IdentityEntryChangeKind::Unarchive,
+            identity,
+            operation,
+            requester,
+            consent,
+        )
+        .await
+    }
+
+    /// One identity's removal, archive or unarchive: its commit step on the
+    /// actor, then the member's retirement it owes, or the seat it owes.
+    async fn change_identity_entry(
+        &self,
+        kind: mob_dsl::IdentityEntryChangeKind,
+        identity: AgentIdentity,
+        operation: IdentityOperation,
+        requester: IdentityChangeRequesterInput,
+        consent: IdentityChangeConsentInput<'_>,
+    ) -> Result<IdentityChangeOutcome, MobError> {
+        if self.identity_member.is_none() {
+            return Err(refused(IdentityChangeRefusal::StorageUnsupported));
+        }
+        if operation.operation_id.trim().is_empty() || operation.request_digest.trim().is_empty() {
+            return Err(refused(IdentityChangeRefusal::InvalidRequest {
+                problem: "a change needs an operation id and a request digest".to_string(),
+            }));
+        }
+        let consent_facts = ChangeAttribution::facts_of(
+            consent,
+            &operation,
+            ChangeAttribution::is_host_operator(&requester),
+        );
+        let ChangeAttribution {
+            requester,
+            grant,
+            decided,
+            consent,
+        } = ChangeAttribution::of(requester, consent, &operation)?;
+        let committed = self
+            .send_actor_command(|reply_tx| {
+                super::MobCommand::IdentityChange(Box::new(
+                    IdentityChangeCommand::CommitEntryChange {
+                        commit: Box::new(EntryChangeCommit {
+                            kind,
+                            identity: identity.clone(),
+                            operation,
+                            facts: consent_facts.at(now_ms()),
+                            grant,
+                            decided,
+                            requester,
+                            consent,
+                        }),
+                        reply_tx,
+                    },
+                ))
+            })
+            .await??;
+        let (receipt, verdict, replayed) = match committed {
+            EntryChangeCommitted::Committed { receipt, verdict } => (receipt, Some(verdict), false),
+            EntryChangeCommitted::Replayed(receipt) => (receipt, None, true),
+        };
+        match verdict {
+            // The member's retirement the change owes, with the mark's cause.
+            Some(
+                mob_dsl::IdentityEntryChangeVerdict::Retiring
+                | mob_dsl::IdentityEntryChangeVerdict::Archiving,
+            ) => self.retire(identity.clone()).await?,
+            Some(mob_dsl::IdentityEntryChangeVerdict::Restored) => {
+                Box::pin(self.seat_restored_identity(&identity)).await?;
+            }
+            // A replay finishes an ending a retirement did not carry out.
+            None if super::identity_entry::entry_ending_owed(
+                &self.machine_state_watch_rx.borrow(),
+                &identity,
+            ) =>
+            {
+                self.retire(identity.clone()).await?;
+            }
+            _ => {}
+        }
+        Ok(if replayed {
+            IdentityChangeOutcome::Replayed { receipt }
+        } else {
+            IdentityChangeOutcome::Committed { receipt }
+        })
+    }
+
+    /// Seat an unarchived store-owned identity Dormant, from its row's spec,
+    /// on its archived session record: its history kept, or a fresh session
+    /// with the notice when the archived session is gone from the store. An
+    /// identity whose row holds no spec is seated from its last spawn row, as
+    /// a start seats an entry owed its seat.
+    async fn seat_restored_identity(&self, identity: &AgentIdentity) -> Result<(), MobError> {
+        let store = self
+            .identity_member
+            .as_ref()
+            .ok_or_else(|| refused(IdentityChangeRefusal::StorageUnsupported))?;
+        let spec = match store
+            .observe_created_identity(self.mob_id(), identity)
+            .await?
+        {
+            Some(crate::identity::CreatedIdentityObservation::Created(row)) => row.spec,
+            _ => None,
+        };
+        let Some(spec) = spec else {
+            self.reseat_owed_created_entries().await;
+            return Ok(());
+        };
+        let archived = self
+            .machine_state_watch_rx
+            .borrow()
+            .identity_entry_archived_sessions
+            .get(&mob_dsl::AgentIdentity::from_domain(identity))
+            .map(|session| SessionId::parse(&session.0))
+            .transpose()
+            .map_err(|error| {
+                MobError::Internal(format!(
+                    "'{identity}' holds an invalid archived session record: {error}"
+                ))
+            })?;
+        let mut seat = lower_created_spec(&spec).map_err(refused)?;
+        if let Some(session) = archived.clone() {
+            seat.launch_mode = crate::launch::MemberLaunchMode::Resume {
+                bridge_session_id: session,
+                resume_from_role: None,
+            };
+        }
+        let outcome = self
+            .seat_dormant_members(vec![seat.clone()])
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| MobError::Internal("an unarchive's seat was not answered".into()))?;
+        match outcome {
+            super::DormantSeatOutcome::Seated { .. }
+            | super::DormantSeatOutcome::AlreadySeated { .. }
+            | super::DormantSeatOutcome::Embodied { .. } => Ok(()),
+            // The archived session is gone from the store: the record is let
+            // go, and the identity is seated fresh with the notice.
+            super::DormantSeatOutcome::Refused {
+                error:
+                    MobError::SessionUnavailableForResume {
+                        session_id,
+                        reason: crate::error::SessionResumeUnavailableReason::Absent,
+                        ..
+                    },
+                ..
+            } if archived.as_ref() == Some(&session_id) => {
+                self.forget_archived_session(
+                    identity,
+                    &session_id,
+                    mob_dsl::ArchivedSessionForgetReason::SessionAbsent,
+                )
+                .await?;
+                seat.launch_mode = crate::launch::MemberLaunchMode::Fresh;
+                seat.history_unavailable = Some(super::HistoryUnavailable::new(session_id));
+                match self
+                    .seat_dormant_members(vec![seat])
+                    .await?
+                    .into_iter()
+                    .next()
+                {
+                    Some(
+                        super::DormantSeatOutcome::Seated { .. }
+                        | super::DormantSeatOutcome::AlreadySeated { .. }
+                        | super::DormantSeatOutcome::Embodied { .. },
+                    ) => Ok(()),
+                    Some(other) => Err(other.into_unseated_error()),
+                    None => Err(MobError::Internal(
+                        "an unarchive's fresh seat was not answered".into(),
+                    )),
+                }
+            }
+            other => Err(other.into_unseated_error()),
+        }
     }
 }

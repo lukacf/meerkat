@@ -678,9 +678,12 @@ async fn a_spawn_never_takes_a_tombstoned_or_unreadable_name() {
 }
 
 /// The declared apply never declares over a created entry, a removed one or
-/// an unreadable one: each listing is refused typed for that identity
-/// alone, and the pass goes on and seats the other identity. The created
-/// entry keeps its seat, session and generation.
+/// an unreadable one: the created entry's listing is left as it is with a
+/// typed note (CL-2: a store-owned name's listing is a quiet steady state,
+/// no longer a refusal), the removed and unreadable names' listings are
+/// refused typed for that identity alone, and the pass goes on and seats
+/// the other identity. The created entry keeps its seat, session and
+/// generation.
 ///
 /// RED: drop `DeclareIdentityEntryRefusedNameOwnedByCreated` and the
 /// declared apply's origin guard (`declared_entry_or_no_entry` on the
@@ -707,8 +710,16 @@ async fn a_declared_listing_of_a_created_name_is_refused_for_that_identity_alone
             declared("plain"),
         ]))
         .await;
+    assert!(
+        matches!(
+            outcome.entries.get(&id("owner")),
+            Some(DeclaredEntryOutcome::Noted {
+                note: crate::runtime::DeclaredEntryNote::OwnedByStore
+            })
+        ),
+        "owner: {outcome:?}"
+    );
     for (name, expected) in [
-        ("owner", DeclaredEntryRefusal::NameOwnedByCreated),
         ("removed", DeclaredEntryRefusal::NameTombstoned),
         ("unreadable", DeclaredEntryRefusal::NameUnreadable),
     ] {

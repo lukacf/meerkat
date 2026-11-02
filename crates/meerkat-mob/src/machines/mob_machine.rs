@@ -48,7 +48,7 @@ pub use meerkat_machine_schema::catalog::dsl::mob_machine::{
 // both instantiations of the machine.
 pub use meerkat_machine_schema::catalog::dsl::mob_machine::{
     CreatedIdentityRecordVerdict, IdentityChangeAdmissionKind, IdentityChangeConsentKind,
-    IdentityChangeReceiptKind,
+    IdentityChangeReceiptKind, IdentityEntryChangeKind, IdentityEntryChangeVerdict,
 };
 // Rotation targets and the refusal reason of a fresh-life respawn: the
 // schema's own types, one definition for both instantiations of the machine.

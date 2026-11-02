@@ -229,10 +229,6 @@ pub enum DeclaredEntryRefusal {
     /// The roster carries a first-boot request for an identity it does not
     /// declare.
     UndeclaredFirstBootRequest,
-    /// A created identity entry holds the name
-    /// ([`super::IdentityEntryOrigin::Created`]): the declared apply never
-    /// declares over it.
-    NameOwnedByCreated,
     /// The name is a removed created entry's
     /// ([`super::IdentityEntryRead::Removed`]): it is never an entry or a
     /// member again.
@@ -654,10 +650,12 @@ impl super::MobHandle {
     /// - A legacy member listed under its own name is adopted as an entry
     ///   first ([`Self::adopt_legacy_identity_entry`]); a worker holding a
     ///   listed name refuses that identity alone.
-    /// - A created identity entry's name, a removed created entry's name and
-    ///   a name whose entry this build cannot read are refused for that
-    ///   identity alone ([`DeclaredEntryRefusal::NameOwnedByCreated`],
-    ///   [`DeclaredEntryRefusal::NameTombstoned`],
+    /// - A store-owned identity's name is left as it is, with a typed note
+    ///   ([`DeclaredEntryOutcome::Noted`] with
+    ///   [`DeclaredEntryNote::OwnedByStore`]): a quiet steady state that
+    ///   retires nothing. A removed identity's name and a name whose entry
+    ///   this build cannot read are refused for that identity alone
+    ///   ([`DeclaredEntryRefusal::NameTombstoned`],
     ///   [`DeclaredEntryRefusal::NameUnreadable`]).
     /// - A candidate composition answers every identity refused and writes
     ///   nothing.
@@ -730,10 +728,37 @@ impl super::MobHandle {
         &self,
         identity: &AgentIdentity,
     ) -> Result<DeclaredRosterOutcome, MobError> {
-        let _ = identity;
-        Err(MobError::Internal(
-            "the one-entry unlist is not built yet".to_string(),
-        ))
+        self.admit_control_scope_for(
+            mob_dsl::ControlScope::Retire,
+            ScopeAdmissionSubject::DeclaredApply,
+        )
+        .await?;
+        // One apply of the mob at a time, as a complete roster's.
+        let opening = self
+            .send_actor_command(|reply_tx| MobCommand::OpenDeclaredApply { reply_tx })
+            .await??;
+        let lease = match opening {
+            DeclaredApplyOpening::Opened(lease) => lease,
+            DeclaredApplyOpening::Busy => {
+                return Err(MobError::LifecycleOperationPending {
+                    intent: "unlist a declared identity while another apply of this mob runs"
+                        .to_string(),
+                });
+            }
+        };
+        // Every Declared entry but this one is listed: the seal unlists this
+        // one alone. No other apply runs while the lease is held, and only an
+        // apply records a Declared entry.
+        let mut listed =
+            super::identity_entry::declared_entries(&self.machine_state_watch_rx.borrow());
+        let mut outcome = DeclaredRosterOutcome::default();
+        let result = if listed.remove(identity) {
+            self.seal_declared_roster(listed, &mut outcome).await
+        } else {
+            Ok(())
+        };
+        lease.close().await;
+        result.map(|()| outcome)
     }
 
     /// The body of [`Self::apply_declared_roster`], under its open fact.
@@ -1336,7 +1361,7 @@ impl super::MobHandle {
 
     /// Let an unseated identity's archived session record go
     /// (`ForgetArchivedSession`).
-    async fn forget_archived_session(
+    pub(super) async fn forget_archived_session(
         &self,
         identity: &AgentIdentity,
         session_id: &SessionId,
@@ -1492,9 +1517,11 @@ impl super::MobHandle {
                     refusal: DeclaredEntryRefusal::NonAuthoritative,
                 }
             }
+            // A store-owned identity's name: the roster's listing of it is a
+            // quiet steady state (the store is its owner), not a refusal.
             mob_dsl::IdentityEntryVerdict::RefusedNameOwnedByCreated => {
-                DeclaredEntryOutcome::Refused {
-                    refusal: DeclaredEntryRefusal::NameOwnedByCreated,
+                DeclaredEntryOutcome::Noted {
+                    note: DeclaredEntryNote::OwnedByStore,
                 }
             }
             mob_dsl::IdentityEntryVerdict::RefusedNameTombstoned => DeclaredEntryOutcome::Refused {

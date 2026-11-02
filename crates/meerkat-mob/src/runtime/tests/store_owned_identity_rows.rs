@@ -1435,12 +1435,19 @@ const ORIGIN_GUARD_TRANSITIONS: &[&str] = &[
     "RecoverIdentityEntry",
     "AdoptLegacyIdentityEntry",
     "RecordCreatedIdentityEntry",
+    // The store's writes of an archive and an unarchive: a roster-owned
+    // identity's are its host's.
+    "ArchiveIdentityEntry",
+    "UnarchiveIdentityEntry",
+    "RemoveIdentityEntry",
 ];
 
 const ORIGIN_GUARD_INVARIANTS: &[&str] = &[
     "entry_custodies_are_disjoint",
     "retiring_entry_is_a_declared_entry",
     "unseated_created_entry_is_preparing_or_owed",
+    "archived_entry_is_store_owned",
+    "entry_ending_marks_are_seated_and_disjoint",
 ];
 
 /// The byte offsets of every read of an origin value

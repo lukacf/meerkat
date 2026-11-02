@@ -113,6 +113,9 @@ const IDENTITY_ENTRY_ARM_PREFIXES: &[&str] = &[
     "AdmitIdentityChange",
     "RecordCreatedIdentityEntry",
     "SetIdentityChangesHeld",
+    "RemoveIdentityEntry",
+    "ArchiveIdentityEntry",
+    "UnarchiveIdentityEntry",
 ];
 
 /// Identity-entry families that must each name at least one arm.
@@ -140,6 +143,12 @@ const REQUIRED_IDENTITY_ENTRY_ARM_FAMILIES: &[&str] = &[
     "RecordCreatedIdentityEntryRecorded",
     "RecordCreatedIdentityEntryMobNotRunning",
     "SetIdentityChangesHeld",
+    "RemoveIdentityEntryRetiring",
+    "RemoveIdentityEntryRemoved",
+    "ArchiveIdentityEntryArchiving",
+    "UnarchiveIdentityEntryRestored",
+    "RecoverCreatedIdentityEntryRemoving",
+    "RecoverCreatedIdentityEntryArchived",
 ];
 
 /// Transition-name prefixes of the `MeerkatMachine` arms that serve member

@@ -35,8 +35,11 @@
 #   Stopped (owing a kickoff or not), a host-pending seed, the identity seated
 #   again on its first seat's session, its exemption from the definition's
 #   wiring rules (from its reseat's or rotation's own input, or the replay of
-#   its row) in Running and Stopped, and the mob's destroy;
-# - terminal (AuditTerminalSpec): the Completed and Destroyed phases;
+#   its row) in Running and Stopped, its custody restore recorded
+#   unrestored and restored again in Running and Stopped, and the mob's
+#   destroy;
+# - terminal (AuditTerminalSpec): the Completed and Destroyed phases, with
+#   member 1's custody record and its restore in Running;
 # - resume (AuditResumeSpec): one identity through an explicit resume, its
 #   readiness before Resume (while Stopped) included;
 # - edge (AuditEdgeSpec): two identities and one wiring edge and its
@@ -51,8 +54,9 @@
 #   any residency, its terminal owing a kickoff or not in Running and in
 #   Stopped, the host's seat step that ends the mark, the
 #   archive-only retirement starts and re-drives beside it, the plain
-#   archives, the next incarnation's wake, the scoped release verdict and the
-#   mob's destroy;
+#   archives, the next incarnation's wake, the scoped release verdict, its
+#   custody restore recorded unrestored and restored again in Running and
+#   Stopped, and the mob's destroy;
 # - recover-rotation (AuditRecoverRotationSpec): one identity whose
 #   retirement start and rotation (FreshSession or SameSession) are
 #   replayed, re-driven and finished by the rotation's own terminal, owing a
@@ -160,13 +164,13 @@ done
 # run found, so a guard that silently disables arms fails the lane.
 seed_states=3078
 wake_states=3198
-retire_states=11318
-terminal_states=238
+retire_states=22492
+terminal_states=422
 resume_states=4004
 edge_states=1148
 seat_states=46248
 wake2_states=1425
-rotate_same_states=5962
+rotate_same_states=11898
 recover_rotation_states=973
 replay_same_states=1400
 
@@ -304,6 +308,10 @@ retire_covered_actions=(
   ObserveDestroyMemberRetirementArchivedLiveRunning
   ObserveDestroyMemberRetirementArchivedRetiredRunning
   DestroyMob
+  RecordMemberCustodyUnrestoredSeatedRunning
+  RecordMemberCustodyUnrestoredSeatedStopped
+  ResolveMemberCustodyRestoredRecordedRunning
+  ResolveMemberCustodyRestoredRecordedStopped
 )
 
 terminal_covered_actions=(
@@ -340,6 +348,8 @@ terminal_covered_actions=(
   CompleteRunning
   MarkCompleted
   ShutdownRunning
+  RecordMemberCustodyUnrestoredSeatedRunning
+  ResolveMemberCustodyRestoredRecordedRunning
 )
 
 resume_covered_actions=(
@@ -405,6 +415,10 @@ rotate_same_covered_actions=(
   ResolveMemberRevivalSucceededRunningLocal
   AdmitDestroyMemberRetireAlreadyRetiringSessionRunning
   ObserveDestroyMemberRetirementArchivedLiveRunning
+  RecordMemberCustodyUnrestoredSeatedRunning
+  RecordMemberCustodyUnrestoredSeatedStopped
+  ResolveMemberCustodyRestoredRecordedRunning
+  ResolveMemberCustodyRestoredRecordedStopped
 )
 
 recover_rotation_covered_actions=(
@@ -982,6 +996,12 @@ PY
     "Error: Invariant retiring_incarnation_never_waking is violated" \
     'for var in ("member_materialization", "member_wake_attempts", "member_wake_bound", "member_materialization_epoch", "member_boot_obligation_owed"):
     keep_var("RetireRunningPreservingBindingArchiveOnly", var)' "$@"
+  # The archive that ends a member's seat keeps its custody record: the
+  # record arms the retire run drives put one in place, so the seat
+  # invariant refuses it (it holds over a real record, not an empty map).
+  mutate retire archive_keeps_custody_record \
+    "Error: Invariant custody_unrestored_members_are_seated is violated" \
+    'keep_var("ObserveMemberRetirementArchivedLive", "member_custody_unrestored")' "$@"
   # The build seed turns the composition non-authoritative over an open
   # attempt.
   mutate seed seed_over_open_attempt \

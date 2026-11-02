@@ -429,11 +429,12 @@ trap 'rm -rf "$tlc_env_tmp"' EXIT
 # created_identity_audit.sh (mob_machine) requires a final distinct-state
 # count for each of its twelve runs (at or above the floor of each measured
 # one), a coverage block in which each covered action of every run
-# generated a state, its sixty-eight step witnesses violated, and with
+# generated a state, its seventy step witnesses violated, and with
 # --mutants each seeded defect's generated invariant, audit invariant,
 # totality invariant or action property violated and its
-# created_custody_local_kept and recovered_removal_unmarked mutants' runs to
-# end without an error (the success line below).
+# created_custody_local_kept, recovered_removal_unmarked and
+# accepted_ladder_refused mutants' runs to end without an error (the success
+# line below).
 # activation_body_retirement_audit.sh (session_document) requires its three
 # witnesses violated, and with --mutants each seeded defect's target
 # invariant violated.
@@ -1012,6 +1013,8 @@ printf '%s\n' \
   'echo "Error: Action property NotAuditWitnessPrepRemovalWaits is violated."' \
   'echo "Error: Action property NotAuditWitnessPrepArchiveRefusedWhileHeld is violated."' \
   'echo "Error: Action property NotAuditWitnessPrepUpdateRecordOnly is violated."' \
+  'echo "Error: Action property NotAuditWitnessPrepLadderOpensAfterAcceptance is violated."' \
+  'echo "Error: Action property NotAuditWitnessPrepRosterLadderOpensAfterAcceptance is violated."' \
   'echo "Error: Action property NotAuditWitnessPlacedCreated is violated."' \
   'echo "Error: Action property NotAuditWitnessPeerOnlyCreated is violated."' \
   'echo "Error: Action property NotAuditWitnessUnlistMarksSeated is violated."' \

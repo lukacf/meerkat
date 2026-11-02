@@ -1259,7 +1259,7 @@ run_machine_verify() {
 # mutants took 225 s locally with 4 TLC workers (2026-10-31), 51 TLC runs
 # whose JVM start and model parse are most of it, and one mutant joined it
 # since. audits-r = its changes part with --mutants (--part changes), alone:
-# eight whole-space runs, 50 witnesses and 34 mutants, 92 TLC runs of about
+# eight whole-space runs, 52 witnesses and 35 mutants, 95 TLC runs of about
 # the same cost (about 400 s locally, 640-920 s hosted at the 1.6-2.3x
 # runner factor), not measured yet. Together, about 630 s locally, they
 # would take a hosted shard past 900 s, so they run as two. To keep the

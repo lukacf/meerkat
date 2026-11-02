@@ -412,11 +412,12 @@ Its changes part (0.9.9) has eight:
   preparation is never archived, and a roster-owned identity's archive is
   refused.
 - The preparation run drives the start, settle and end of held
-  constructions of either custody with their ladders, seats, membership
-  commits, archives and removals: an entry awaiting its preparation is
-  seated only by its accepted activation, no end of an accepted activation
-  but its failed publication is enabled, and a `constructed` preparation is
-  never settled without an attempt.
+  constructions of either custody with their ladders (the construction's
+  own ladder opening after its activation was accepted included), seats,
+  membership commits, archives and removals: an entry awaiting its
+  preparation is seated only by its accepted activation, no end of an
+  accepted activation but its failed publication is enabled, and a
+  `constructed` preparation is never settled without an attempt.
 - The placement run seats a store-owned identity hosted on its first use by
   a placed or peer-only spawn holding its created custody.
 - The unlist run unlists a roster-owned identity through its retirement
@@ -429,9 +430,10 @@ Its changes part (0.9.9) has eight:
 
 The audit seeds defects of the invariants above, the action properties and
 the guards a reachable state needs, and refuses each with the violation it
-names (not every invariant has a mutant of its own); two mutants (created
-custody kept local, a recovered removal left unmarked) are refused by
-making a witness unreachable.
+names (not every invariant has a mutant of its own); three mutants (created
+custody kept local, a recovered removal left unmarked, an accepted
+activation's own ladder refused) are refused by making a witness
+unreachable.
 
 Member rotations are `MobMachine` facts. A pending rotation records its
 identity's next session (`member_rotation_session_ids`), the endpoint it

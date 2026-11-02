@@ -1319,6 +1319,15 @@ AuditWitnessPrepArchiveRefusedWhileHeld ==
     /\ Held(Id2) # None
     /\ ArchiveIdentityEntryPreparationPending(Id2)
     /\ Held(Id2) = (IF Id2 \in DOMAIN identity_entry_constructions_held' THEN Some(identity_entry_constructions_held'[Id2]) ELSE None)
+\* A construction's own spawn opens its ladder at its publication, after
+\* the settle accepted its activation (the shell opens a spawn's ladder once
+\* its provision returned), under either custody.
+AuditWitnessPrepLadderOpensAfterAcceptance ==
+    /\ Activating(Id2) # None
+    /\ COpenAt(<<Rid2, 2, 0>>, FALSE, TRUE)
+AuditWitnessPrepRosterLadderOpensAfterAcceptance ==
+    /\ Activating(Id1) # None
+    /\ AOpen(AFirst)
 \* A store-owned update of an identity awaiting its preparation, with no
 \* attempt open, is record only.
 AuditWitnessPrepUpdateRecordOnly ==
@@ -1339,6 +1348,8 @@ NotAuditWitnessPrepRemovalEndsHeld == [][~AuditWitnessPrepRemovalEndsHeld]_vars
 NotAuditWitnessPrepRemovalWaits == [][~AuditWitnessPrepRemovalWaits]_vars
 NotAuditWitnessPrepArchiveRefusedWhileHeld == [][~AuditWitnessPrepArchiveRefusedWhileHeld]_vars
 NotAuditWitnessPrepUpdateRecordOnly == [][~AuditWitnessPrepUpdateRecordOnly]_vars
+NotAuditWitnessPrepLadderOpensAfterAcceptance == [][~AuditWitnessPrepLadderOpensAfterAcceptance]_vars
+NotAuditWitnessPrepRosterLadderOpensAfterAcceptance == [][~AuditWitnessPrepRosterLadderOpensAfterAcceptance]_vars
 
 (***************************************************************************)
 (* The placement run.                                                      *)

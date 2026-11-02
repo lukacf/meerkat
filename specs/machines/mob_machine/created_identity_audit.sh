@@ -80,8 +80,10 @@
 #   awaiting its preparation is never archived (AuditPendingNeverArchived).
 # - preparation: a roster-owned identity whose rule requires its
 #   preparation and a store-owned one pending it, the start, settle and end
-#   of their held constructions with every fact, their ladders, seats,
-#   membership commits, archives and removals, and the store-owned one's
+#   of their held constructions with every fact, their ladders (each
+#   construction's own ladder opening after its activation was accepted, as
+#   the shell opens it at the publication), seats, membership commits,
+#   archives and removals, and the store-owned one's
 #   update: exactly one arm answers each (AuditPrepExactlyOne), an attempt
 #   is open only for an entry awaiting its preparation
 #   (AuditConstructionAwaitsPreparation), while an activation is accepted no
@@ -127,9 +129,9 @@
 # the named violation: defects of the created entries' invariants and
 # properties and of the new guards a reachable state needs. The list names
 # what each defect breaks; not every invariant or property has a mutant of
-# its own. The created_custody_local_kept and recovered_removal_unmarked
-# mutants instead require a witness unreachable (their runs end without an
-# error). An anchor this script expects but
+# its own. The created_custody_local_kept, recovered_removal_unmarked and
+# accepted_ladder_refused mutants instead require a witness unreachable
+# (their runs end without an error). An anchor this script expects but
 # cannot find fails the run. Each TLC run is held to the canonical lane's
 # per-run cap (tlc_run_cap.sh) and fails closed as TLC INCOMPLETE.
 set -euo pipefail
@@ -887,6 +889,8 @@ for witness in \
   "preparation:Action property:PrepAbortRefusedWhileActivating" "preparation:Action property:PrepExpired" \
   "preparation:Action property:PrepRemovalEndsHeld" "preparation:Action property:PrepRemovalWaits" \
   "preparation:Action property:PrepArchiveRefusedWhileHeld" "preparation:Action property:PrepUpdateRecordOnly" \
+  "preparation:Action property:PrepLadderOpensAfterAcceptance" \
+  "preparation:Action property:PrepRosterLadderOpensAfterAcceptance" \
   "placement:Action property:PlacedCreated" "placement:Action property:PeerOnlyCreated" \
   "unlist:Action property:UnlistMarksSeated" "unlist:Action property:UnlistRemovesUnseated" \
   "unlist:Action property:UnlistDefersLadder" "unlist:Action property:UnlistEndsAtTerminal" \
@@ -1474,6 +1478,14 @@ PY
   # (its verdict guard dropped).
   mutate unlist unlist_two_answers "Invariant AuditUnlistExactlyOne" <<'PY'
 drop_guard("UnlistIdentityEntryNonAuthoritative", '"NonAuthoritative")')
+PY
+
+  # A ladder takes an entry awaiting its preparation only while its attempt
+  # is held, as before the fix: the construction's own spawn, which opens
+  # its ladder at its publication, after the settle accepted its
+  # activation, is refused, and its publication fails.
+  mutate_unreached preparation accepted_ladder_refused PrepLadderOpensAfterAcceptance <<'PY'
+replace_in_arm("BeginSpawnExecFresh", '(IF ((agent_identity \\in DOMAIN identity_entry_constructions_held) = TRUE) THEN TRUE ELSE ((agent_identity \\in DOMAIN identity_entry_constructions_activating) = TRUE))', '((agent_identity \\in DOMAIN identity_entry_constructions_held) = TRUE)', 2)
 PY
 
   # The replay of a removal's row marks no removal, in a running or a

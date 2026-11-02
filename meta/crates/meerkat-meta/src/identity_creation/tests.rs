@@ -170,6 +170,20 @@ fn agent(identity: &str) -> RequesterFacts {
     RequesterFacts::agent(identity, BTreeMap::new())
 }
 
+/// The labels `entries`.
+fn labels_of(entries: &[(&str, &str)]) -> BTreeMap<String, String> {
+    entries
+        .iter()
+        .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+        .collect()
+}
+
+/// An agent requester of `profile` with the authority labels `labels`.
+fn agent_of(identity: &str, profile: &str, labels: &[(&str, &str)]) -> RequesterFacts {
+    let _ = profile;
+    RequesterFacts::agent(identity, labels_of(labels))
+}
+
 fn create(
     policy: &IdentityCreationPolicy,
     requester: &RequesterFacts,
@@ -493,6 +507,55 @@ fn resolve(
     resolve_launch_policy(host_policy, option, persistent)
 }
 
+/// The preparation the policy gives a new identity of `profile`.
+fn preparation_of(policy: &IdentityCreationPolicy, profile: &str) -> PreparationMode {
+    let _ = profile;
+    policy.preparation()
+}
+
+/// The setup deadline of a held construction of `profile`, in milliseconds.
+fn deadline_of(policy: &IdentityCreationPolicy, profile: &str) -> Option<u64> {
+    let _ = profile;
+    policy.construction_deadline_ms()
+}
+
+/// The digest of the fixture identity's declared spec.
+fn helper_spec_digest() -> Sha256Digest {
+    Sha256Digest::of(b"the spec of helper")
+}
+
+/// The spec digest `entry` has now, as its owner reads it.
+fn spec_digest_of(entry: &IdentityEntryFacts) -> String {
+    let _ = entry;
+    helper_spec_digest().to_string()
+}
+
+/// `spec`, asked of a spec the identity no longer has.
+fn stale_update(spec: &UpdateIdentitySpec) -> UpdateIdentitySpec {
+    UpdateIdentitySpec {
+        expected_revision: spec.expected_revision - 1,
+        ..spec.clone()
+    }
+}
+
+/// A removal of `entry` by `requester`, asked of a spec it no longer has.
+fn stale_removal(
+    requester: &RequesterFacts,
+    entry: &IdentityEntryFacts,
+) -> Result<NormalizedRequest, IdentityRefusal> {
+    let spec = RemoveIdentitySpec {
+        identity: entry.identity.clone(),
+        expected_revision: entry.revision - 1,
+    };
+    normalize_remove(
+        &policy(),
+        requester,
+        RequestEnvelope::default(),
+        entry,
+        &spec,
+    )
+}
+
 // ---------------------------------------------------------------------------
 // Policy validation rows
 // ---------------------------------------------------------------------------
@@ -505,6 +568,10 @@ fn policy_case(
     kind: PolicyRefusalKind,
 ) -> (PolicyChange, &'static str, PolicyRefusalKind) {
     (change, path, kind)
+}
+
+fn path_case(change: PolicyChange, path: &'static str) -> (PolicyChange, &'static str) {
+    (change, path)
 }
 
 #[test]
@@ -520,7 +587,7 @@ fn policy_validation_refuses_typed() {
     assert_eq!(timeouts.capability, 14_400_000);
     assert_eq!(timeouts.profile, 14_400_000);
     assert_eq!(timeouts.max, MAX_DECISION_TIMEOUT_MS);
-    assert_eq!(bare.preparation(), PreparationMode::None);
+    assert_eq!(preparation_of(&bare, "assistant"), PreparationMode::None);
     assert!(bare.authority_fields().is_empty());
     let policy = policy();
     assert!(policy.is_reserved_label("team"));
@@ -541,7 +608,7 @@ fn policy_validation_refuses_typed() {
     // changes with the policy.
     assert_eq!(policy.revision(), parse(&policy_json()).revision());
     let mut explicit = policy_json();
-    explicit["preparation"] = json!("none");
+    explicit["preparation"] = json!({});
     assert_eq!(
         parse(&explicit).revision(),
         policy.revision(),
@@ -555,8 +622,11 @@ fn policy_validation_refuses_typed() {
     let mut disabled = policy_json();
     disabled["enabled"] = json!(false);
     assert_eq!(IdentityCreationPolicy::parse(&disabled).unwrap(), None);
-    disabled["preparation"] = json!("constructed");
-    assert_eq!(refusal_of(&disabled).path, "construction_deadline_ms");
+    disabled["preparation"] = json!({"analyst": {"mode": "constructed"}});
+    assert_eq!(
+        refusal_of(&disabled).path,
+        "preparation.analyst.construction_deadline_ms"
+    );
 
     let cases = [
         policy_case(
@@ -632,10 +702,23 @@ fn policy_validation_refuses_typed() {
             PolicyRefusalKind::AuthorityChangeNeedsHumanDecision,
         ),
         policy_case(
-            |value| value["approval"]["rules"][0]["requester"] = json!(["agent", "agent"]),
-            "approval.rules[0].requester",
+            |value| {
+                value["approval"]["rules"][0]["requester"] =
+                    json!({"kind": "agent", "identity": ["lead-1", "lead-1"]});
+            },
+            "approval.rules[0].requester.identity[1]",
             PolicyRefusalKind::Duplicate {
-                value: "agent".to_owned(),
+                value: "lead-1".to_owned(),
+            },
+        ),
+        policy_case(
+            |value| {
+                value["approval"]["rules"][1]["requester"] =
+                    json!({"kind": "host", "surface": "the console"});
+            },
+            "approval.rules[1].requester.surface",
+            PolicyRefusalKind::Invalid {
+                value: "the console".to_owned(),
             },
         ),
         policy_case(
@@ -678,13 +761,16 @@ fn policy_validation_refuses_typed() {
             },
         ),
         policy_case(
-            |value| value["preparation"] = json!("constructed"),
-            "construction_deadline_ms",
+            |value| value["preparation"] = json!({"analyst": {"mode": "constructed"}}),
+            "preparation.analyst.construction_deadline_ms",
             PolicyRefusalKind::Empty,
         ),
         policy_case(
-            |value| value["construction_deadline_ms"] = json!(5000),
-            "construction_deadline_ms",
+            |value| {
+                value["preparation"] =
+                    json!({"analyst": {"mode": "required", "construction_deadline_ms": 5000}});
+            },
+            "preparation.analyst.construction_deadline_ms",
             PolicyRefusalKind::Invalid {
                 value: "5000".to_owned(),
             },
@@ -696,6 +782,26 @@ fn policy_validation_refuses_typed() {
         let refusal = refusal_of(&value);
         assert_eq!(refusal.path, path, "{refusal}");
         assert_eq!(refusal.kind, kind, "{refusal}");
+    }
+
+    // Meta's own label keys are Meta's: a policy neither reserves one nor
+    // declares it an authority field, so no request ever sets one.
+    let meta_keys = [
+        path_case(
+            |value| value["reserved_keys"]["labels"] = json!(["team", "role"]),
+            "reserved_keys.labels[1]",
+        ),
+        path_case(
+            |value| value["authority_fields"] = json!({"agent_identity": {"values": ["x"]}}),
+            "authority_fields.agent_identity",
+        ),
+    ];
+    for (change, path) in meta_keys {
+        let mut value = policy_json();
+        change(&mut value);
+        let refusal = refusal_of(&value);
+        assert_eq!(refusal.path, path, "{refusal}");
+        assert!(refusal.kind.to_string().contains("Meta's own"), "{refusal}");
     }
 
     // A member that does not parse is refused malformed at its path, and so
@@ -742,6 +848,26 @@ fn policy_validation_refuses_typed() {
             "reserved_keys",
             "context",
         ),
+        (
+            json!({"enabled": true, "construction_deadline_ms": 60_000}),
+            "",
+            "construction_deadline_ms",
+        ),
+        (
+            json!({"enabled": true, "preparation": "constructed"}),
+            "preparation",
+            "map",
+        ),
+        (
+            json!({"enabled": true, "preparation": {"analyst": {"mode": "required", "deadline": 1}}}),
+            "preparation.analyst",
+            "deadline",
+        ),
+        (
+            json!({"enabled": true, "approval": {"rules": [{"change": ["create"], "requester": ["agent"]}]}}),
+            "approval.rules[0]",
+            "sequence",
+        ),
     ];
     for (value, path, detail) in malformed {
         let refusal = refusal_of(&value);
@@ -779,23 +905,37 @@ fn a_batch_above_cores_transaction_maximum_is_refused() {
 
 #[test]
 fn a_constructed_preparation_needs_its_deadline_and_a_native_host() {
+    // Preparation is the profile's: each profile the policy names has its
+    // mode, and a profile it does not name needs none.
     let mut value = policy_json();
-    value["preparation"] = json!("constructed");
-    value["construction_deadline_ms"] = json!(60_000);
+    value["preparation"] = json!({
+        "analyst": {"mode": "constructed", "construction_deadline_ms": 60_000},
+        "lead": {"mode": "required"}
+    });
     let policy = parse(&value);
     assert!(policy.needs_native_host());
-    assert_eq!(policy.preparation(), PreparationMode::Constructed);
-    assert_eq!(policy.construction_deadline_ms(), Some(60_000));
-    let refusal = resolve_launch_policy(
+    assert_eq!(
+        preparation_of(&policy, "analyst"),
+        PreparationMode::Constructed
+    );
+    assert_eq!(deadline_of(&policy, "analyst"), Some(60_000));
+    assert_eq!(preparation_of(&policy, "lead"), PreparationMode::Required);
+    assert_eq!(deadline_of(&policy, "lead"), None);
+    assert_eq!(
+        preparation_of(&policy, "assistant"),
+        PreparationMode::None,
+        "a profile the policy does not name needs no preparation"
+    );
+    let refusal = resolve(
         None,
         RuntimeOptionPolicy::Enabled(Box::new(policy.clone())),
         true,
     )
     .expect_err("no native host");
-    assert_eq!(refusal.path, "preparation");
+    assert_eq!(refusal.path, "preparation.analyst");
     assert_eq!(refusal.kind, PolicyRefusalKind::NeedsNativeHost);
     assert!(
-        resolve_launch_policy(
+        resolve(
             Some(Ok(None)),
             RuntimeOptionPolicy::Enabled(Box::new(policy)),
             true,
@@ -803,9 +943,19 @@ fn a_constructed_preparation_needs_its_deadline_and_a_native_host() {
         .unwrap()
         .is_some()
     );
-    value["construction_deadline_ms"] = json!(10);
+    // Only a constructed preparation needs a native host.
+    value["preparation"] = json!({"analyst": {"mode": "required"}});
+    let required = parse(&value);
+    assert!(!required.needs_native_host());
+    assert!(
+        resolve(None, RuntimeOptionPolicy::Enabled(Box::new(required)), true)
+            .unwrap()
+            .is_some()
+    );
+    value["preparation"] =
+        json!({"analyst": {"mode": "constructed", "construction_deadline_ms": 10}});
     let refusal = refusal_of(&value);
-    assert_eq!(refusal.path, "construction_deadline_ms");
+    assert_eq!(refusal.path, "preparation.analyst.construction_deadline_ms");
     assert!(matches!(refusal.kind, PolicyRefusalKind::OutOfRange { .. }));
 }
 
@@ -895,6 +1045,63 @@ fn the_policy_comes_from_the_option_or_the_host_never_both() {
     }
 }
 
+#[test]
+fn the_launch_refuses_a_profile_the_mob_does_not_define() {
+    // A preparation key or a selector profile that names no profile of the
+    // mob is refused at launch: a misspelled one would seat that profile's
+    // identities unprepared, or leave a host's deny rule matching nothing.
+    let cases = [
+        path_case(
+            |value| value["approval"]["rules"][1]["target"] = json!({"profile": ["ghost"]}),
+            "approval.rules[1].target.profile",
+        ),
+        path_case(
+            |value| value["peers"]["rules"][0]["target"] = json!({"profile": ["ghost"]}),
+            "peers.rules[0].target.profile",
+        ),
+        path_case(
+            |value| {
+                value["approval"]["rules"][0]["requester"] =
+                    json!({"kind": "agent", "profile": ["ghost"]});
+            },
+            "approval.rules[0].requester.profile",
+        ),
+        path_case(
+            |value| value["preparation"] = json!({"ghost": {"mode": "required"}}),
+            "preparation.ghost",
+        ),
+    ];
+    for (change, path) in cases {
+        let mut value = policy_json();
+        change(&mut value);
+        let option = RuntimeOptionPolicy::parse(&value).expect("a valid policy");
+        let refusal = resolve(None, option, true).expect_err("a profile the mob lacks");
+        assert_eq!(refusal.path, path, "{refusal}");
+        assert!(
+            refusal
+                .to_string()
+                .ends_with("profile \"ghost\" is not in the mob definition"),
+            "{refusal}"
+        );
+    }
+    // A native host's policy is checked the same way.
+    let mut value = policy_json();
+    value["approval"]["rules"][1]["target"] = json!({"profile": ["ghost"]});
+    let refusal = resolve(
+        Some(Ok(Some(parse(&value)))),
+        RuntimeOptionPolicy::Absent,
+        true,
+    )
+    .expect_err("the host's policy is checked too");
+    assert_eq!(refusal.path, "approval.rules[1].target.profile");
+    // Every profile of the mob may be named.
+    let mut known = policy_json();
+    known["preparation"] = json!({"lead": {"mode": "required"}});
+    known["approval"]["rules"][1]["target"] = json!({"profile": ["assistant", "analyst", "lead"]});
+    let option = RuntimeOptionPolicy::parse(&known).expect("a valid policy");
+    assert!(resolve(None, option, true).unwrap().is_some());
+}
+
 // ---------------------------------------------------------------------------
 // Normalization rows
 // ---------------------------------------------------------------------------
@@ -957,11 +1164,19 @@ fn normalization_refuses_typed() {
         create(&policy(), &lead(), &[free_context]).is_ok(),
         "context keys are free"
     );
+    // A label value has no length limit of its own: the request body's bound
+    // is the only one.
+    let mut long_value = spec("helper");
+    set_labels(&mut long_value, &[("note", "x".repeat(4096).as_str())]);
+    assert!(
+        create(&policy(), &lead(), &[long_value]).is_ok(),
+        "a long label value is a label like any other"
+    );
 
     let cases = [
         spec_case(
             |spec| set_profile(spec, "ghost"),
-            json!({"kind": "profile_not_allowed", "profile": "ghost",
+            json!({"kind": "profile_unknown", "profile": "ghost",
                    "field": "identities[0].spec.profile"}),
         ),
         spec_case(
@@ -990,11 +1205,6 @@ fn normalization_refuses_typed() {
         spec_case(
             |spec| set_labels(spec, &[("note", "a\nb")]),
             json!({"kind": "invalid_request", "problem": "malformed",
-                   "field": "identities[0].spec.labels.note"}),
-        ),
-        spec_case(
-            |spec| set_labels(spec, &[("note", "x".repeat(257).as_str())]),
-            json!({"kind": "text_too_large", "limit": 256,
                    "field": "identities[0].spec.labels.note"}),
         ),
         spec_case(
@@ -1073,6 +1283,35 @@ fn normalization_refuses_typed() {
         json!({"kind": "change_denied", "change": "create"}),
         "no governing rule gets the default, deny"
     );
+
+    // Meta's own label keys are set by no request: not as a label, and not
+    // as an authority field, before any authority field is looked up.
+    let entry = entry();
+    let meta_key = update_of(&entry, json!({"authority_fields": {"role": "admin"}}));
+    assert_eq!(
+        update(&RequesterFacts::host("gateway"), &entry, &meta_key)
+            .unwrap_err()
+            .to_data(),
+        json!({"kind": "reserved_key", "key": "role", "field": "set.authority_fields"})
+    );
+}
+
+#[test]
+fn a_create_spec_with_a_member_the_declared_spec_lacks_is_refused() {
+    // The declared spec is closed on the request side: a member it does not
+    // have (a tool list, a template, a model, a misspelled field) is refused
+    // before the request is normalized, never dropped.
+    let value = serde_json::to_value(spec("helper")).expect("a request");
+    let read: CreateIdentitySpec =
+        serde_json::from_value(value.clone()).expect("every member of the declared spec");
+    assert_eq!(read, spec("helper"));
+    for member in ["tools", "template", "model", "labls"] {
+        let mut changed = value.clone();
+        changed["spec"][member] = json!("x");
+        let error = serde_json::from_value::<CreateIdentitySpec>(changed)
+            .expect_err("a member the declared spec lacks");
+        assert!(error.to_string().contains(member), "{error}");
+    }
 }
 
 #[test]
@@ -1195,6 +1434,198 @@ fn authority_fields_need_a_human_decision() {
 }
 
 #[test]
+fn a_label_key_a_selector_reads_is_reserved() {
+    // The host reserves no key here, yet every key a selector reads is
+    // reserved: an approval rule's target, a peer rule's target and a label
+    // approver. A request sets one only as an authority field, under a human
+    // decision, so selectors read authority labels only.
+    let policy = parse(&json!({
+        "enabled": true,
+        "peers": {"rules": [
+            {"id": "north", "target": {"labels": {"site": "north"}}, "outcome": "allow"}
+        ]},
+        "approval": {"rules": [
+            {"change": ["create", "descriptive"], "outcome": {"kind": "allow"}},
+            {"change": ["create", "descriptive"], "target": {"labels": {"tier": "prod"}},
+             "outcome": {"kind": "deny"}},
+            {"change": ["remove"],
+             "outcome": {"kind": "notify", "approver": {"label": "manager"}}}
+        ]}
+    }));
+    let host = RequesterFacts::host("gateway");
+    let entry = entry();
+    for key in ["tier", "site", "manager"] {
+        assert!(policy.is_reserved_label(key), "{key}");
+        let mut request = spec("helper");
+        set_labels(&mut request, &[(key, "x")]);
+        assert_eq!(
+            create(&policy, &host, &[request]).unwrap_err().to_data(),
+            json!({"kind": "reserved_key", "key": key, "field": "identities[0].spec.labels"}),
+            "{key}"
+        );
+        let mut set = json!({"descriptive_labels": {}});
+        set["descriptive_labels"][key] = json!("x");
+        let relabel = update_of(&entry, set);
+        assert_eq!(
+            update_with(&policy, &host, &entry, &relabel)
+                .unwrap_err()
+                .to_data(),
+            json!({"kind": "reserved_key", "key": key, "field": "set.descriptive_labels"}),
+            "{key}"
+        );
+    }
+    let mut free = spec("helper");
+    set_labels(&mut free, &[("color", "blue")]);
+    assert!(
+        create(&policy, &host, &[free]).is_ok(),
+        "a key no selector reads is free"
+    );
+    // The deny rule reads the key from the authority labels the identity's
+    // owner holds: an identity that carries it is denied, another is not.
+    let prod = entry_with("assistant", &[("tier", "prod")]);
+    let rename = update_of(&prod, json!({"display_name": "Helper two"}));
+    assert_eq!(
+        update_with(&policy, &host, &prod, &rename)
+            .unwrap_err()
+            .to_data(),
+        json!({"kind": "change_denied", "change": "descriptive"})
+    );
+    let rename = update_of(&entry, json!({"display_name": "Helper two"}));
+    assert_eq!(
+        update_with(&policy, &host, &entry, &rename)
+            .expect("no selector reads this identity's labels")
+            .plan
+            .kind(),
+        ApprovalKind::Allow
+    );
+}
+
+#[test]
+fn the_requester_selector_reads_kind_surface_identity_profile_and_labels() {
+    // A rule selects who asks by kind, host surface, agent identity, profile
+    // and authority labels: a host rule for the console surface governs the
+    // console and no other surface of the host.
+    let policy = parse(&json!({
+        "enabled": true,
+        "approval": {"rules": [
+            {"change": ["descriptive"], "requester": {"kind": "host", "surface": "console"},
+             "outcome": {"kind": "notify", "approver": {"id": "owner"}}},
+            {"change": ["descriptive"], "requester": {"kind": "host", "surface": "gateway"},
+             "outcome": {"kind": "allow"}},
+            {"change": ["descriptive"], "requester": {"kind": "agent", "profile": ["lead"]},
+             "outcome": {"kind": "allow"}},
+            {"change": ["descriptive"], "requester": {"identity": ["analyst-1"]},
+             "outcome": {"kind": "allow"}},
+            {"change": ["descriptive"], "requester": {"labels": {"desk": "ops"}},
+             "outcome": {"kind": "require_approval", "approver": {"id": "security"}}}
+        ]}
+    }));
+    let entry = entry();
+    let rename = update_of(&entry, json!({"display_name": "Helper two"}));
+    let planned = |requester: &RequesterFacts| {
+        update_with(&policy, requester, &entry, &rename).map(|normalized| normalized.plan.outcome)
+    };
+    let denied = json!({"kind": "change_denied", "change": "descriptive"});
+    assert_eq!(
+        planned(&RequesterFacts::console()),
+        Ok(PlannedOutcome::Notify {
+            approver_id: "owner".to_owned()
+        })
+    );
+    assert_eq!(
+        planned(&RequesterFacts::host("gateway")),
+        Ok(PlannedOutcome::Allow)
+    );
+    assert_eq!(
+        planned(&RequesterFacts::host("scheduler"))
+            .unwrap_err()
+            .to_data(),
+        denied
+    );
+    assert_eq!(
+        planned(&agent_of("lead-2", "lead", &[])),
+        Ok(PlannedOutcome::Allow)
+    );
+    assert_eq!(
+        planned(&agent_of("helper-2", "assistant", &[]))
+            .unwrap_err()
+            .to_data(),
+        denied
+    );
+    assert_eq!(
+        planned(&agent_of("analyst-1", "analyst", &[])),
+        Ok(PlannedOutcome::Allow)
+    );
+    assert_eq!(
+        planned(&agent_of("lead-3", "lead", &[("desk", "ops")])),
+        Ok(PlannedOutcome::RequireApproval {
+            approver_id: "security".to_owned()
+        })
+    );
+    // A label key a requester selector reads is reserved like any other.
+    assert!(policy.is_reserved_label("desk"));
+}
+
+#[test]
+fn tied_decisions_with_different_approvers_are_refused_before_anything_is_held() {
+    // Two rules give equally strict decisions to different approvers. A
+    // request under both has no one approver who may decide all of it, so it
+    // is refused before anything is held, and the requester splits it; each
+    // part alone is decided by its own rule's approver.
+    let policy = parse(&json!({
+        "enabled": true,
+        "reserved_keys": {"labels": ["clearance"]},
+        "authority_fields": {"clearance": {"values": ["basic", "elevated"]}},
+        "approval": {"rules": [
+            {"change": ["descriptive"],
+             "outcome": {"kind": "require_approval", "approver": {"id": "owner"}}},
+            {"change": ["authority"],
+             "outcome": {"kind": "require_approval", "approver": {"id": "security"}}},
+            {"change": ["create"], "target": {"profile": ["assistant"]},
+             "outcome": {"kind": "require_approval", "approver": {"id": "owner"}}},
+            {"change": ["create"], "target": {"profile": ["analyst"]},
+             "outcome": {"kind": "require_approval", "approver": {"id": "security"}}}
+        ]}
+    }));
+    let host = RequesterFacts::host("gateway");
+    let entry = entry();
+    let owner = PlannedOutcome::RequireApproval {
+        approver_id: "owner".to_owned(),
+    };
+    let security = PlannedOutcome::RequireApproval {
+        approver_id: "security".to_owned(),
+    };
+    let unavailable = json!({"kind": "approval_unavailable"});
+    let rename = update_of(&entry, json!({"display_name": "Helper two"}));
+    let planned = update_with(&policy, &host, &entry, &rename).expect("a rename");
+    assert_eq!(planned.plan.outcome, owner);
+    let elevate = update_of(
+        &entry,
+        json!({"authority_fields": {"clearance": "elevated"}}),
+    );
+    let planned = update_with(&policy, &host, &entry, &elevate).expect("an authority change");
+    assert_eq!(planned.plan.outcome, security);
+    let both = update_of(
+        &entry,
+        json!({"display_name": "Helper two", "authority_fields": {"clearance": "elevated"}}),
+    );
+    let refusal = update_with(&policy, &host, &entry, &both)
+        .expect_err("no one approver decides both changes");
+    assert_eq!(refusal.to_data(), unavailable);
+
+    // A create batch under two such rules is refused the same way.
+    let mut scout = spec("scout");
+    set_profile(&mut scout, "analyst");
+    let planned = create(&policy, &host, &[spec("helper")]).expect("one identity");
+    assert_eq!(planned.plan.outcome, owner);
+    let planned = create(&policy, &host, &[scout.clone()]).expect("one identity");
+    assert_eq!(planned.plan.outcome, security);
+    let refusal =
+        create(&policy, &host, &[spec("helper"), scout]).expect_err("two approvers, one batch");
+    assert_eq!(refusal.to_data(), unavailable);
+}
+
+#[test]
 fn the_request_digest_is_stable_across_input_order() {
     let mut first = spec("helper");
     set_profile(&mut first, "analyst");
@@ -1280,7 +1711,7 @@ fn the_console_updates_and_removes_any_identity_under_the_approval_rules() {
 }
 
 #[test]
-fn update_and_remove_check_self_change_revision_and_change_classes() {
+fn update_and_remove_check_self_change_spec_digest_and_change_classes() {
     let entry = entry();
     let rename = update_of(&entry, json!({"display_name": "Helper two"}));
     // Any agent's update goes to the rules of its change classes: who
@@ -1298,14 +1729,20 @@ fn update_and_remove_check_self_change_revision_and_change_classes() {
         update(&agent("helper"), &entry, &rename).unwrap_err().kind,
         IdentityRefusalKind::SelfChangeRefused
     );
-    let stale = UpdateIdentitySpec {
-        expected_revision: 2,
-        ..rename
-    };
-    let refusal = update(&lead(), &entry, &stale).unwrap_err();
+    // A change names the spec its requester read by its digest, since the
+    // identity's owner may keep no revision; a store-owned identity's
+    // revision is reported beside it.
+    let refusal = update(&lead(), &entry, &stale_update(&rename)).unwrap_err();
+    let stale_spec = json!({
+        "kind": "stale_spec",
+        "current_digest": spec_digest_of(&entry),
+        "current_revision": 3,
+        "field": "expected_spec_digest"
+    });
+    assert_eq!(refusal.to_data(), stale_spec);
     assert_eq!(
-        refusal.to_data(),
-        json!({"kind": "stale_spec", "current": 3, "field": "expected_revision"})
+        stale_removal(&lead(), &entry).unwrap_err().to_data(),
+        stale_spec
     );
     assert_eq!(
         update(&lead(), &entry, &update_of(&entry, json!({})))
@@ -1365,7 +1802,7 @@ fn update_and_remove_check_self_change_revision_and_change_classes() {
     let ghost = update_of(&entry, json!({"profile": "ghost"}));
     assert_eq!(
         update(&host, &entry, &ghost).unwrap_err().to_data(),
-        json!({"kind": "profile_not_allowed", "profile": "ghost", "field": "set.profile"})
+        json!({"kind": "profile_unknown", "profile": "ghost", "field": "set.profile"})
     );
     let current = update_of(&entry, json!({"profile": "assistant"}));
     assert_eq!(
@@ -1482,7 +1919,7 @@ Requester: agent "lead-1"
 Proposer: none
 Source evidence: none
 Identity: "helper"
-Expected revision: 3
+Expected spec digest: sha256:f492d9d2daff15216fd985868a9d8de35c95ab45cfffbc22e9415834da650d7f
 Changes: descriptive capability peers profile
 
 Update of: "helper"
@@ -1517,7 +1954,7 @@ Source subject: "user-9"
 Source reference: "event:42"
 Source observed at ms: 1730000000000
 Identity: "helper"
-Expected revision: 3
+Expected spec digest: sha256:f492d9d2daff15216fd985868a9d8de35c95ab45cfffbc22e9415834da650d7f
 
 Consequences (0):
 
@@ -2768,8 +3205,10 @@ fn every_refusal_token_is_the_closed_vocabulary() {
     assert_eq!(
         tokens,
         [
-            // Request data.
+            // Profile.
+            "profile_unknown",
             "profile_not_allowed",
+            // Request data.
             "reserved_key",
             "authority_field_needs_approval",
             "authority_field_invalid",
@@ -2793,7 +3232,6 @@ fn every_refusal_token_is_the_closed_vocabulary() {
             "stale_spec",
             "operation_reused",
             "admission_unsettled",
-            "not_transferring",
             "predecessor_mismatch",
             "import_refused",
             "preparation_not_pending",
@@ -2801,9 +3239,6 @@ fn every_refusal_token_is_the_closed_vocabulary() {
             "construction_open",
             "stale_attempt",
             "not_constructed",
-            "identity_transferring",
-            "transfer_in_flight",
-            "observation_mismatch",
             "construction_required",
             "activation_pending",
             // Decisions.
@@ -2830,7 +3265,7 @@ fn every_refusal_token_is_the_closed_vocabulary() {
         "one vocabulary for every identity: no template, creator or limit kind"
     );
     let distinct: BTreeSet<&str> = tokens.iter().copied().collect();
-    assert_eq!(distinct.len(), 50);
+    assert_eq!(distinct.len(), 47);
     let retryable: BTreeSet<&str> = kinds
         .iter()
         .filter(|kind| kind.is_retryable())

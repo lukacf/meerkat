@@ -26303,6 +26303,39 @@ mod identity_creation_launch_tests {
         assert!(error.contains("context"), "{error}");
     }
 
+    /// The launch checks the policy against the mob definition: a selector
+    /// profile or a preparation key that names no profile of the mob refuses
+    /// init, and the mob's own profiles launch.
+    #[test]
+    fn the_launch_checks_the_policy_profiles_against_the_mob_definition() {
+        let mut ghost = policy_value();
+        ghost["approval"]["rules"][0]["target"] = json!({"profile": ["ghost"]});
+        let refused = launch(
+            None,
+            RuntimeOptionPolicy::parse(&ghost).expect("a policy"),
+            true,
+        )
+        .err()
+        .unwrap_or_default();
+        assert!(
+            refused.starts_with("identity_creation.approval.rules[0].target.profile"),
+            "{refused}"
+        );
+        assert!(refused.contains("\"ghost\""), "{refused}");
+        let mut known = policy_value();
+        known["approval"]["rules"][0]["target"] = json!({"profile": ["default"]});
+        known["preparation"] = json!({"default": {"mode": "required"}});
+        assert!(
+            launch(
+                None,
+                RuntimeOptionPolicy::parse(&known).expect("a policy"),
+                true
+            )
+            .expect("the mob's own profile")
+            .is_some()
+        );
+    }
+
     /// The identity records and decisions a policy governs are durable: a
     /// launch without persistence refuses an `identity_creation` option at
     /// init, a disabled one included, and a policy from the native host,

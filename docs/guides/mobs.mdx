@@ -1311,9 +1311,12 @@ quarantined.
 - **What quarantined means.** The store is kept exactly as found and no actor
   runs for the mob. Every other mob restores and serves. `mob/list` lists the
   mob under `quarantined`, not under `mobs` (so do the MCP `meerkat_mob_list`
-  and `mob_list` tools, and `MobMcpState::mob_inventory` in Rust), and every
-  call that addresses its id, a create of that id included, answers the
-  `mob_quarantined` refusal. Its structured data carries `kind:
+  tool, the `mob_list` tool of the Rust `MobMcpDispatcher`, and
+  `MobMcpState::mob_inventory`), and every call that addresses its id, a
+  create of that id included, answers the `mob_quarantined` refusal. The
+  agent-side `mob_list` tool lists only the mobs the calling agent may
+  manage, and only a mob's actor can answer that, so it never lists a
+  quarantined mob: it fails closed. Its structured data carries `kind:
   "mob_quarantined"`, `mob_id`, `class`, `retryable`, `content_retained`,
   `cause` (the failure the last restore attempt met) and `code`. Only a mob
   root that cannot be created, read or listed still fails the whole restore.

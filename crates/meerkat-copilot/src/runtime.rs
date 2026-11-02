@@ -8,7 +8,7 @@ use chrono::{DateTime, Duration, Utc};
 use futures::StreamExt;
 use meerkat_auth_core::auth_oauth::{exchange_refresh_token, oauth_refresh_error};
 use meerkat_auth_core::resolver::{
-    LockedManagedStoreOAuthRefresh, ManagedStoreOAuthRefreshPreparationSlot,
+    LockedManagedStoreOAuthRefresh, ManagedStoreLifecycle, ManagedStoreOAuthRefreshPreparationSlot,
     OAuthLoginCredentialAdmission, load_managed_store_tokens_with_lifecycle,
     prepare_managed_store_oauth_refresh_under_lock, resolve_oauth_login_credential_disposition,
     resolve_simple_secret, simple_secret_source_publishes_lifecycle,
@@ -2457,7 +2457,31 @@ impl CopilotAuthorizer {
         {
             return Err(OperatorRefusal::RateLimited { until }.into_provider_error());
         }
-        let resolved = resolve_simple_secret(source, &self.env, &self.binding).await?;
+        let (resolved, stored_generation) = match source {
+            // A stored token names the publication it was stored under: its
+            // record's durable marker. A store write publishes before it
+            // saves, so a lease snapshot read after the value can already
+            // carry a newer token's publication.
+            CredentialSourceSpec::ManagedStore => {
+                let managed =
+                    load_managed_store_tokens_with_lifecycle(&self.env, &self.binding).await?;
+                if managed.lifecycle == ManagedStoreLifecycle::RefreshRequired {
+                    return Err(ProviderAuthError::Auth(AuthError::RefreshRequired));
+                }
+                let generation =
+                    meerkat_core::tokens_lifecycle_published_generation(&managed.tokens);
+                let secret = managed.tokens.primary_secret.ok_or_else(|| {
+                    ProviderAuthError::SourceResolutionFailed(
+                        "managed_store credential has no primary_secret".to_string(),
+                    )
+                })?;
+                (secret, generation)
+            }
+            _ => (
+                resolve_simple_secret(source, &self.env, &self.binding).await?,
+                None,
+            ),
+        };
         let token = resolved.trim_matches(|character: char| character.is_ascii_whitespace());
         if token.is_empty() {
             return Err(ProviderAuthError::Auth(AuthError::MissingSecret));
@@ -2496,11 +2520,15 @@ impl CopilotAuthorizer {
                 return Err(ProviderAuthError::Auth(AuthError::LeaseAbsent));
             }
         }
+        // A refusal of the token names this generation: the stored record's
+        // publication for a managed store, else the publication the lease
+        // carries now (a source this route reads publishes the value it read
+        // above, and the refusal also names the value's fingerprint).
         let publication = auth_lease.snapshot(&lease_key);
         Ok(OperatorTokenMaterial {
             token: token.to_string(),
             kind,
-            generation: publication.generation,
+            generation: stored_generation.unwrap_or(publication.generation),
             expires_at: publication.expires_at,
         })
     }

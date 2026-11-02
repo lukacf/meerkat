@@ -681,6 +681,14 @@ pub(super) async fn provision_held(
                     let _ = entered_tx.send(());
                     let _ = release_rx.await;
                 }
+                if take_held_publication_failure_for_test(member) {
+                    return Err(match held_provision.abort().await {
+                        Ok(()) => MobError::Internal(HELD_PUBLICATION_FAILURE_FOR_TEST.to_string()),
+                        Err(cleanup) => MobError::Internal(format!(
+                            "{HELD_PUBLICATION_FAILURE_FOR_TEST}; cleanup failed: {cleanup}"
+                        )),
+                    });
+                }
             }
             return held_provision.publish().await;
         }
@@ -718,6 +726,43 @@ pub(crate) fn arm_held_ready_delivery_for_test(
             .is_none()
     );
     (entered_rx, release_tx)
+}
+
+/// The error the publication failure seam fails a held member's publication
+/// with ([`fail_next_held_publication_for_test`]).
+#[cfg(all(test, feature = "runtime-adapter", not(target_arch = "wasm32")))]
+pub(crate) const HELD_PUBLICATION_FAILURE_FOR_TEST: &str =
+    "the test seam failed the held publication";
+
+/// Test seam: the members whose next accepted activation fails its
+/// publication (the held member aborted), each consumed once.
+#[cfg(all(test, feature = "runtime-adapter", not(target_arch = "wasm32")))]
+static HELD_PUBLICATION_FAILURES_FOR_TEST: std::sync::Mutex<Vec<String>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// Fail `member`'s next publication of an accepted activation, consumed
+/// once.
+#[cfg(all(test, feature = "runtime-adapter", not(target_arch = "wasm32")))]
+pub(crate) fn fail_next_held_publication_for_test(member: &str) {
+    HELD_PUBLICATION_FAILURES_FOR_TEST
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .push(member.to_string());
+}
+
+/// Whether `member`'s publication fails now (consuming the armed failure).
+#[cfg(all(test, feature = "runtime-adapter", not(target_arch = "wasm32")))]
+fn take_held_publication_failure_for_test(member: &str) -> bool {
+    let mut failures = HELD_PUBLICATION_FAILURES_FOR_TEST
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    match failures.iter().position(|armed| armed == member) {
+        Some(index) => {
+            failures.remove(index);
+            true
+        }
+        None => false,
+    }
 }
 
 /// Test seam: parks a held setup whose activation was accepted, before its

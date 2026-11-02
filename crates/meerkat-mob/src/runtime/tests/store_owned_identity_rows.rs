@@ -5167,6 +5167,49 @@ async fn a_crash_between_acceptance_and_commit_ends_the_attempt_publication_inte
     drop(release);
 }
 
+/// Row (RED): an accepted activation whose publication fails answers the
+/// error that ended it: the settle answers the failed publication with its
+/// cause, and the identity stays pending.
+///
+/// RED on the old tree: the end's cause is discarded, and the settle
+/// answers none.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_publication_answers_the_error_that_ended_it() {
+    let mob = HeldMob::new("construct-publication-fails").await;
+    // The publication failure is keyed by name across the test process.
+    let name = unique("failing");
+    mob.create_constructed(&name).await;
+    let held = mob
+        .construct("construct-failing", &name)
+        .await
+        .expect("the construction is held");
+    crate::runtime::held_spawn::fail_next_held_publication_for_test(&name);
+    let settled = settle(&mob.handle, "settle-failing", &name, Some(held.attempt()))
+        .await
+        .expect("the settle commits its acceptance");
+    match settled.settlement {
+        Some(crate::runtime::PreparationSettlement::PublicationEnded {
+            attempt,
+            end: crate::runtime::ConstructionEnd::PublicationFailed,
+            cause: Some(cause),
+        }) => {
+            assert_eq!(attempt, held.attempt());
+            assert!(
+                cause.contains(crate::runtime::held_spawn::HELD_PUBLICATION_FAILURE_FOR_TEST),
+                "the cause names the error that ended the publication: {cause}"
+            );
+        }
+        other => panic!("the failed publication answers its cause: {other:?}"),
+    }
+    assert_eq!(
+        mob.standing(&name),
+        Some(EntryStanding::Unseated(
+            UnseatedEntryCause::PreparationPending
+        )),
+        "the identity stays pending"
+    );
+}
+
 /// Row (RED): a removal of an identity whose construction is held aborts
 /// the construction and tombstones the name: no member is published, the
 /// name reads removed, and the held attempt settles nothing.

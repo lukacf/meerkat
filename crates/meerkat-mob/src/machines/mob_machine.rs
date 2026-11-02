@@ -16884,6 +16884,187 @@ mod tests {
         );
     }
 
+    /// Whether a ladder of `member` at `generation` opens holding the given
+    /// custodies (`BeginSpawnExec`), its profile authorized first.
+    fn try_open_seat_ladder(
+        authority: &mut MobMachineAuthority,
+        member: &SeatedMember,
+        generation: Generation,
+        entry_custody: bool,
+        created_custody: bool,
+    ) -> bool {
+        let profile_material_digest = "declared-seat-profile-digest".to_string();
+        MobMachineMutator::apply(
+            authority,
+            MobMachineInput::AuthorizeSpawnProfile {
+                agent_identity: member.identity.clone(),
+                profile_name: "test".to_string(),
+                model: "test-model".to_string(),
+                profile_material_digest: profile_material_digest.clone(),
+                tool_config_digest: "test-tool-config-digest".to_string(),
+                skills_digest: "test-skills-digest".to_string(),
+                provider_params_digest: None,
+                output_schema_digest: None,
+                external_addressable: false,
+                resolved_spec_digest: None,
+            },
+        )
+        .expect("the seat's profile is authorized");
+        MobMachineMutator::apply(
+            authority,
+            MobMachineInput::BeginSpawnExec {
+                agent_identity: member.identity.clone(),
+                agent_runtime_id: member.runtime_id.clone(),
+                fence_token: member.fence_token,
+                generation,
+                profile_material_digest,
+                external_addressable: false,
+                runtime_mode: SpawnPolicyRuntimeMode::AutonomousHost,
+                bridge_session_id: Some(member.session_id.clone()),
+                replacing: None,
+                placement: None,
+                workgraph_required: false,
+                rust_bundles_present: false,
+                per_spawn_external_tools_present: false,
+                mob_default_external_tools_present: false,
+                default_llm_client_override_present: false,
+                host_surface_mcp_allowlist_present: false,
+                inherited_tool_filter_present: false,
+                shell_env_present: false,
+                mcp_stdio_env_present: false,
+                mcp_http_headers_present: false,
+                memory_required: false,
+                mcp_required: false,
+                resume_session_id: None,
+                placed_spawn_id: None,
+                placed_provision_operation_id: None,
+                placed_operation_owner_session_id: None,
+                effective_profile_override_present: false,
+                effective_model_override_present: false,
+                entry_custody,
+                created_custody,
+            },
+        )
+        .is_ok()
+    }
+
+    /// Row (RED): a construction's own spawn opens its ladder at its
+    /// publication, after the settle accepted its activation: the shell
+    /// opens a spawn's ladder once its provision returned, and a held
+    /// construction's provision returns only once its accepted activation
+    /// published the member. The ladder opens holding the entry's custody
+    /// while the attempt is activating, and its membership commit seats the
+    /// entry and ends the attempt, for either custody.
+    ///
+    /// RED on the old tree: a ladder takes an entry awaiting its preparation
+    /// only while its attempt is held, so the accepted activation's own
+    /// ladder is refused and its publication fails.
+    #[test]
+    fn an_accepted_activations_construction_opens_its_ladder_at_its_publication() {
+        let mut authority = MobMachineAuthority::new();
+        let roster = AgentIdentity::from("roster-built");
+        assert_eq!(
+            declare(
+                &mut authority,
+                &roster,
+                Declaration {
+                    preparation_required: true,
+                    ..Declaration::default()
+                }
+            ),
+            IdentityEntryVerdict::PreparationPending
+        );
+        let created = AgentIdentity::from("store-built");
+        let recorded = MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::RecordCreatedIdentityEntry {
+                agent_identity: created.clone(),
+                preparation_required: true,
+                placement: EntryPlacementKind::Local,
+                held_creation: false,
+            },
+        )
+        .expect("the record answers");
+        assert!(recorded.effects().iter().any(|effect| matches!(
+            effect,
+            MobMachineEffect::CreatedIdentityEntryRecorded {
+                verdict: CreatedIdentityRecordVerdict::Recorded,
+                ..
+            }
+        )));
+        for (
+            identity,
+            runtime_id,
+            session_id,
+            fence_token,
+            entry_custody,
+            created_custody,
+            origin,
+        ) in [
+            (
+                &roster,
+                "roster-built:0",
+                "session-roster-built",
+                11,
+                true,
+                false,
+                IdentityEntryOrigin::Declared,
+            ),
+            (
+                &created,
+                "store-built:0",
+                "session-store-built",
+                12,
+                false,
+                true,
+                IdentityEntryOrigin::Created,
+            ),
+        ] {
+            let member = SeatedMember {
+                identity: identity.clone(),
+                runtime_id: AgentRuntimeId(runtime_id.to_string()),
+                session_id: SessionId::from(session_id.to_string()),
+                fence_token: FenceToken(fence_token),
+            };
+            assert_eq!(
+                begin_construction(&mut authority, identity, 1, true),
+                PreparationConstructionVerdict::Held
+            );
+            assert_eq!(
+                settle_preparation(&mut authority, identity, Some(1), true, true),
+                PreparationSettleVerdict::ActivationAccepted
+            );
+            assert!(
+                try_open_seat_ladder(
+                    &mut authority,
+                    &member,
+                    Generation(0),
+                    entry_custody,
+                    created_custody
+                ),
+                "{identity:?}: the accepted activation's own ladder opens"
+            );
+            MobMachineMutator::apply(&mut authority, publish_construction(&member, Generation(0)))
+                .expect("the accepted activation's publication commits its membership");
+            let state = authority.state();
+            assert!(
+                state.identity_to_runtime.contains_key(identity),
+                "{identity:?}"
+            );
+            assert!(
+                !state.identity_entry_unseated.contains_key(identity),
+                "{identity:?}"
+            );
+            assert!(
+                !state
+                    .identity_entry_constructions_activating
+                    .contains_key(identity),
+                "{identity:?}: the publication ends the attempt"
+            );
+            assert_eq!(state.identity_entry_origins.get(identity), Some(&origin));
+        }
+    }
+
     /// Row: an attempt ended before its activation leaves the entry pending,
     /// and a new attempt may follow; a failed publication ends an accepted
     /// one the same way; an entry awaiting no preparation takes no

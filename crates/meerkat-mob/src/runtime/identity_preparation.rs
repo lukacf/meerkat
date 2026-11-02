@@ -269,8 +269,13 @@ pub enum PreparationSettlement {
     /// flight.
     ActivationPending { attempt: u64 },
     /// The accepted activation of `attempt` ended without its publication:
-    /// the identity stays pending.
-    PublicationEnded { attempt: u64, end: ConstructionEnd },
+    /// the identity stays pending. `cause` is the error that ended it, when
+    /// this process saw it end.
+    PublicationEnded {
+        attempt: u64,
+        end: ConstructionEnd,
+        cause: Option<String>,
+    },
 }
 
 /// What a settle answers: the change (committed now, with its receipt, or
@@ -347,10 +352,12 @@ pub(super) enum ConstructionOutcome {
     /// The accepted activation published the member.
     Published,
     /// The attempt ended without a publication; `cleanup` is the error of a
-    /// hold's cleanup its abort could not confirm.
+    /// hold's cleanup its abort could not confirm, and `cause` the error
+    /// that ended the attempt.
     Ended {
         end: ConstructionEnd,
         cleanup: Option<String>,
+        cause: Option<String>,
     },
 }
 
@@ -380,6 +387,7 @@ pub(super) async fn construction_outcome(
                 .unwrap_or(ConstructionOutcome::Ended {
                     end: ConstructionEnd::PublicationInterrupted,
                     cleanup: None,
+                    cause: None,
                 });
         }
     }
@@ -945,7 +953,11 @@ impl super::MobHandle {
                 let settlement = match construction_outcome(outcome).await {
                     ConstructionOutcome::Published => PreparationSettlement::Activated { attempt },
                     ConstructionOutcome::Ended { end, .. } => {
-                        PreparationSettlement::PublicationEnded { attempt, end }
+                        PreparationSettlement::PublicationEnded {
+                            attempt,
+                            end,
+                            cause: None,
+                        }
                     }
                 };
                 Ok(IdentityPreparationSettled {

@@ -118,7 +118,11 @@ impl MobActor {
                     Some((ended, end)) if ended == attempt => end,
                     _ => ConstructionEnd::PublicationInterrupted,
                 };
-                PreparationSettlement::PublicationEnded { attempt, end }
+                PreparationSettlement::PublicationEnded {
+                    attempt,
+                    end,
+                    cause: None,
+                }
             },
         )
     }
@@ -602,7 +606,11 @@ impl MobActor {
                     self.publish_machine_state_projection();
                 }
                 self.held_constructions.record_end(&identity, attempt, end);
-                ConstructionOutcome::Ended { end, cleanup }
+                ConstructionOutcome::Ended {
+                    end,
+                    cleanup,
+                    cause: None,
+                }
             }
         };
         if let Some(held) = held {
@@ -634,6 +642,7 @@ impl MobActor {
                     crate::tokio::sync::watch::channel(Some(ConstructionOutcome::Ended {
                         end: ConstructionEnd::Aborted,
                         cleanup: None,
+                        cause: None,
                     }));
                 report
             }

@@ -249,6 +249,10 @@ CROSS_AREA_READS = {
     # A dependency's examples/* workspace metadata in Forge's lockfile names
     # examples but does not load this repository's example applications.
     ("installer/", "examples/"): set(),
+    # installer/tests/test_runtime_candidates.py names release workflows as
+    # candidate attestation identities (the standalone repository's and
+    # Core's release.yml); it reads no workflow file (FORGE_NAMED_NOT_READ).
+    ("installer/", ".github/workflows/release.yml"): set(),
     # installer/tests/test_gateway_shutdown_horizon.py pins the shutdown
     # horizon crates/meerkat-meta/src/rpc_gateway.rs advertises. Forge's
     # workflow runs it, and its path filters name that source, so a pull
@@ -511,10 +515,11 @@ def embedded_files(root: Path) -> set[tuple[str, str]]:
 
 INSTALLER_WORKFLOW = ".github/workflows/meta-installer.yml"
 # Installer files that name another area's files without reading this
-# repository's copies: the web lockfile's examples/* workspace metadata, and
-# the .gitignore every generated application package carries (compiler.py
-# writes it; the deployment source and update lists name it).
-FORGE_NAMED_NOT_READ = ("examples/", ".gitignore")
+# repository's copies: the web lockfile's examples/* workspace metadata, the
+# .gitignore every generated application package carries (compiler.py
+# writes it; the deployment source and update lists name it), and the
+# release workflow paths the candidate tests use as attestation identities.
+FORGE_NAMED_NOT_READ = ("examples/", ".gitignore", ".github/workflows/release.yml")
 
 
 def forge_pull_request_paths(root: Path) -> list[str]:

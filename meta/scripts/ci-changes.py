@@ -251,6 +251,7 @@ LANE_INPUTS = (
     ("crates/meerkat-meta/src/mcp_apps_sandbox.rs", {"console"}),
     ("crates/meerkat-meta/src/rpc/topology_methods.rs", {"console"}),
     ("crates/meerkat-meta/src/rpc/workgraph_methods.rs", {"console"}),
+    ("crates/meerkat-meta/src/runtime/console_ingress.rs", {"console"}),
     ("crates/meerkat-meta/src/unified_runtime/http.rs", {"flow_editor"}),
     # Data the inputs above or feature-gated code embed or load, and the
     # fixtures the console's voice session tests and the Python SDK tests read.

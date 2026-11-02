@@ -1393,7 +1393,7 @@ async fn a_create_of_a_taken_name_is_refused_and_writes_nothing() {
     assert!(!mob.is_member("fresh").await, "the change wrote nothing");
 }
 
-/// Row (R2.9): consent decided outside Meerkat commits only on the host
+/// Row: consent decided outside Meerkat commits only on the host
 /// operator's import: a host surface that is not the operator is refused
 /// `import_refused` with nothing written; the operator's change commits,
 /// its row's provenance and its receipt sealing the imported consent.
@@ -2256,7 +2256,7 @@ async fn the_operation_read_is_refused_without_the_list_scope() {
 /// and the reservations) and the reads that show it. Each item is named by
 /// the start of its signature, and only its body may read the origin. A
 /// file with no shipped read has no entry: a whole-file entry would
-/// authorize in advance exactly the branch on custody R2.4 forbids.
+/// authorize in advance exactly the branch on custody this guard forbids.
 const ORIGIN_READERS: &[(&str, &[&str], &str)] = &[
     (
         "runtime/identity_entry.rs",
@@ -2393,7 +2393,7 @@ fn origin_value_reads(code: &str) -> Vec<usize> {
 /// custody guards and the reads that show it. Custody decides the recovery
 /// source, the writer, the name guards and the reservations, nothing else.
 ///
-/// Hardened (P2-9e): readers are listed per item, not per file; the files
+/// Hardened: readers are listed per item, not per file; the files
 /// with no shipped read (the journal codec, the store-owned writer and the
 /// machine's own module) have no entry; renamed, brace and glob imports,
 /// `Self::` variants and stored-token comparisons count as reads; and a DSL
@@ -2478,7 +2478,7 @@ fn identity_entry_origin_is_read_only_by_the_custody_guards() {
 /// change's check, whose owner reads the requester identity, never its
 /// session.
 ///
-/// Updated with the re-admission (P1-5): the grant's mint sites and the
+/// Updated with the re-admission: the grant's mint sites and the
 /// owner's one construction are now listed.
 #[test]
 fn the_recheck_runs_through_the_prepared_check_at_the_final_sink() {
@@ -2848,7 +2848,7 @@ async fn a_crash_during_a_removal_finishes_it_after_restart() {
     );
 }
 
-/// Row (R2.6, ruling 41): while a roster-owned identity's removal retires
+/// Row: while a roster-owned identity's removal retires
 /// its member, the name's tombstone is already written (the removal's start
 /// transaction), and a declared apply that lists the identity defers it,
 /// seating and retiring nothing; once the removal ended, the roster's
@@ -3237,7 +3237,7 @@ async fn a_create_of_an_unlisted_roster_identitys_name_is_refused_name_taken() {
     );
 }
 
-/// Row (R2.15): an unarchive whose archived session is gone from the store
+/// Row: an unarchive whose archived session is gone from the store
 /// seats the identity on a fresh session with the notice: the seat's row
 /// carries `history_unavailable` naming the lost session, and the entry
 /// lets its archived session record go.
@@ -3273,7 +3273,7 @@ async fn an_unarchive_whose_archived_session_is_gone_seats_a_fresh_session_with_
     }
 }
 
-/// Row (R2.15): an update of an archived identity changes its row only, and
+/// Row: an update of an archived identity changes its row only, and
 /// its unarchive seats the identity from the updated spec: the seat carries
 /// the update's labels.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3503,7 +3503,7 @@ fn answer_kind(outcome: &crate::runtime::DeclaredEntryOutcome) -> &'static str {
 ///
 /// RED on the old tree: no store-owned update exists.
 ///
-/// The kinds are pinned per change (P2-9c): two equal failures no longer
+/// The kinds are pinned per change: two equal failures no longer
 /// pass.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn store_and_roster_updates_of_the_same_change_answer_the_same_verdict() {
@@ -4077,7 +4077,7 @@ async fn a_present_store_owned_entry_retired_by_an_older_build_is_reseated_with_
     labels.insert("tier".to_string(), "gold".to_string());
     let second = first.clone().with_labels(labels.clone());
     // The label update's transaction, written as its commit step writes it
-    // (P2-9g: the row's RED leg then fails at the recovery it tests, not at
+    // (the row's RED leg then fails at the recovery it tests, not at
     // an update stub).
     mob.commit_update_transaction("update-phoenix", second)
         .await;
@@ -4900,7 +4900,7 @@ impl crate::store::MobIdentityMemberStore for FailingChangeCommit {
     }
 }
 
-/// Row (ruling 44): a store write that fails after the activation was sent
+/// Row: a store write that fails after the activation was sent
 /// ends the attempt as a failed publication and commits nothing. The settle
 /// answers the failure; MobMachine still holds the attempt unaccepted, so
 /// the publication's membership commit is refused, and the hold's end (a
@@ -5009,7 +5009,7 @@ async fn a_store_write_failing_after_the_activation_send_ends_a_failed_publicati
     );
 }
 
-/// Row (P2-9d): a create whose store transaction fails writes nothing and
+/// Row: a create whose store transaction fails writes nothing and
 /// seats nothing: the change answers the store's failure, and no row, no
 /// receipt, no journal row, no entry and no member exist. Once the store
 /// serves again, the same create commits and seats both identities.
@@ -5074,7 +5074,7 @@ async fn a_create_whose_store_write_fails_writes_nothing_and_seats_nothing() {
 ///
 /// RED on the old tree: no settle exists.
 ///
-/// Staged with a real crash (P2-9h): the settle's own step writes the
+/// Staged with a real crash: the settle's own step writes the
 /// receipt, and the row waits until the receipt read answers it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_crash_between_acceptance_and_commit_ends_the_attempt_publication_interrupted_and_keeps_the_entry_pending()
@@ -5471,7 +5471,7 @@ async fn an_activation_accepted_before_the_deadline_publishes_after_it_and_nothi
 /// create wrote, and its archived presence; a name with no row reads none;
 /// and the reads build no member. The entry view is a read of the published
 /// machine state: revision and provenance are the row's, read from the
-/// record (P2-9i; renamed from the entry read's name).
+/// record (renamed from the entry read's name).
 ///
 /// RED on the old tree: the entry view names no archived session and the
 /// handle reads no record.

@@ -981,7 +981,10 @@ async fn the_census_reports_incomplete_over_an_unreadable_created_entry() {
         .await;
     mob.put_created(
         "preparing",
-        CreatedIdentityPresence::PendingPreparation { attempt: 1 },
+        CreatedIdentityPresence::PendingPreparation {
+            attempt: 1,
+            constructed: false,
+        },
     )
     .await;
     mob.put_created("removed", CreatedIdentityPresence::Removed)
@@ -1080,7 +1083,10 @@ async fn a_sqlite_resume_recovers_every_created_row_among_host_adopted_intents()
             ("d-removed", CreatedIdentityPresence::Removed),
             (
                 "f-preparing",
-                CreatedIdentityPresence::PendingPreparation { attempt: 1 },
+                CreatedIdentityPresence::PendingPreparation {
+                    attempt: 1,
+                    constructed: false,
+                },
             ),
         ] {
             store

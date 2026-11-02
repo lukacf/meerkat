@@ -42,6 +42,9 @@ fn recovered_presence(observation: &CreatedIdentityObservation) -> mob_dsl::Reco
                 mob_dsl::RecoveredPresence::PresentUnseated
             }
             CreatedIdentityPresence::Removed => mob_dsl::RecoveredPresence::Tombstone,
+            // No machine arm recovers an archived identity yet: its name is
+            // reserved, and nothing acts on it.
+            CreatedIdentityPresence::Archived { .. } => mob_dsl::RecoveredPresence::Unreadable,
         },
         CreatedIdentityObservation::Unreadable { .. } => mob_dsl::RecoveredPresence::Unreadable,
     }
@@ -324,7 +327,10 @@ mod tests {
                 mob_dsl::RecoveredPresence::Present,
             ),
             (
-                record(CreatedIdentityPresence::PendingPreparation { attempt: 3 }),
+                record(CreatedIdentityPresence::PendingPreparation {
+                    attempt: 3,
+                    constructed: false,
+                }),
                 mob_dsl::RecoveredPresence::PresentUnseated,
             ),
             (

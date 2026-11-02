@@ -89099,6 +89099,8 @@ struct MobRuntimeParitySnapshotSummary {
     member_prior_peer_endpoints: BTreeMap<String, BTreeSet<String>>,
     member_restore_failures: BTreeMap<String, String>,
     member_restore_failure_codes: BTreeMap<String, String>,
+    member_custody_unrestored: BTreeMap<String, String>,
+    member_custody_unrestored_causes: BTreeMap<String, String>,
     runtime_retire_refusal_codes: BTreeMap<String, String>,
     runtime_retire_refusal_reasons: BTreeMap<String, String>,
     runtime_retire_pending_sessions: BTreeMap<String, String>,
@@ -90041,6 +90043,24 @@ async fn mob_runtime_parity_snapshot_summary(
                         .collect::<BTreeMap<_, _>>(),
                 ),
             ),
+            (
+                "member_custody_unrestored",
+                serde_json::to_value(
+                    dsl.member_custody_unrestored
+                        .iter()
+                        .map(|(key, value)| (format!("{key:?}"), format!("{value:?}")))
+                        .collect::<BTreeMap<_, _>>(),
+                ),
+            ),
+            (
+                "member_custody_unrestored_causes",
+                serde_json::to_value(
+                    dsl.member_custody_unrestored_causes
+                        .iter()
+                        .map(|(key, value)| (format!("{key:?}"), format!("{value:?}")))
+                        .collect::<BTreeMap<_, _>>(),
+                ),
+            ),
         ] {
             formal_available_fields.insert(
                 name.to_string(),
@@ -90067,6 +90087,24 @@ async fn mob_runtime_parity_snapshot_summary(
             snap.member_restore_failure_codes
                 .iter()
                 .map(|(key, value)| (format!("{key:?}"), value.clone()))
+                .collect()
+        })
+        .unwrap_or_default();
+    let member_custody_unrestored = dsl_t2
+        .as_ref()
+        .map(|snap| {
+            snap.member_custody_unrestored
+                .iter()
+                .map(|(key, value)| (format!("{key:?}"), format!("{value:?}")))
+                .collect()
+        })
+        .unwrap_or_default();
+    let member_custody_unrestored_causes = dsl_t2
+        .as_ref()
+        .map(|snap| {
+            snap.member_custody_unrestored_causes
+                .iter()
+                .map(|(key, value)| (format!("{key:?}"), format!("{value:?}")))
                 .collect()
         })
         .unwrap_or_default();
@@ -90840,6 +90878,8 @@ async fn mob_runtime_parity_snapshot_summary(
         member_prior_peer_endpoints,
         member_restore_failures,
         member_restore_failure_codes,
+        member_custody_unrestored,
+        member_custody_unrestored_causes,
         runtime_retire_refusal_codes,
         runtime_retire_refusal_reasons,
         runtime_retire_pending_sessions,
@@ -91066,6 +91106,20 @@ fn mob_runtime_parity_field_value(
         "member_restore_failure_codes" => Some(MobRuntimeParityExprValue::Map(
             snapshot
                 .member_restore_failure_codes
+                .keys()
+                .map(|k| (k.clone(), 0u64))
+                .collect(),
+        )),
+        "member_custody_unrestored" => Some(MobRuntimeParityExprValue::Map(
+            snapshot
+                .member_custody_unrestored
+                .keys()
+                .map(|k| (k.clone(), 0u64))
+                .collect(),
+        )),
+        "member_custody_unrestored_causes" => Some(MobRuntimeParityExprValue::Map(
+            snapshot
+                .member_custody_unrestored_causes
                 .keys()
                 .map(|k| (k.clone(), 0u64))
                 .collect(),

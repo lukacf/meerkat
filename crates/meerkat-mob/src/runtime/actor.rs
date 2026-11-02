@@ -31708,6 +31708,10 @@ impl MobActor {
                         member_prior_peer_endpoints: dsl.member_prior_peer_endpoints.clone(),
                         member_restore_failures: dsl.member_restore_failures.clone(),
                         member_restore_failure_codes: dsl.member_restore_failure_codes.clone(),
+                        member_custody_unrestored: dsl.member_custody_unrestored.clone(),
+                        member_custody_unrestored_causes: dsl
+                            .member_custody_unrestored_causes
+                            .clone(),
                         runtime_retire_refusal_codes: dsl.runtime_retire_refusal_codes.clone(),
                         runtime_retire_refusal_reasons: dsl.runtime_retire_refusal_reasons.clone(),
                         runtime_retire_pending_sessions: dsl

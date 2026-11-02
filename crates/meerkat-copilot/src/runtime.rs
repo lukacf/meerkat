@@ -7965,6 +7965,151 @@ mod tests {
             }
         }
 
+        /// A GitHub answer whose JSON `message` quotes the request's
+        /// Authorization value, as a proxy or gateway that echoes the request's
+        /// headers can produce.
+        fn message_echo(status: u16, authorization: &str) -> CopilotHttpResponse {
+            json_response(
+                status,
+                serde_json::json!({"message": format!("echoed by GitHub: {authorization}")}),
+            )
+        }
+
+        /// The operator token never reaches an error, its `Display` or
+        /// `Debug`, or a log line through GitHub's quoted `message`: an
+        /// identity lookup refused (403), rejected (401) or failing (500), a
+        /// model listing failing (500) or refused (403), the CLI's check, and
+        /// the device sign-in's token exchange, each answering with a
+        /// `message` that echoes the request's Authorization value. The
+        /// message itself is still quoted.
+        #[tokio::test]
+        async fn githubs_quoted_message_never_carries_the_token() {
+            let log = LogCapture::default();
+            let capture = CaptureSubscriber::dispatch(log.clone());
+            // A second registered dispatcher makes callsite interest come from
+            // every dispatcher, so a callsite first reached under no
+            // subscriber still reaches this one.
+            let _anchor = CaptureSubscriber::dispatch(LogCapture::default());
+            let _guard = tracing::dispatcher::set_default(&capture);
+
+            let token = user_token("quoted");
+            let bearer = format!("Bearer {token}");
+            let paths: Vec<(&str, Vec<Outcome>)> = vec![
+                ("identity 403", vec![Ok(message_echo(403, &bearer))]),
+                ("identity 401", vec![Ok(message_echo(401, &bearer))]),
+                ("identity 500", vec![Ok(message_echo(500, &bearer))]),
+                (
+                    "models 500",
+                    vec![Ok(svc_bot()), Ok(message_echo(500, &bearer))],
+                ),
+                (
+                    "models 403",
+                    vec![Ok(svc_bot()), Ok(message_echo(403, &bearer))],
+                ),
+            ];
+            let mut rendered = String::new();
+            for (path, outcomes) in paths {
+                let harness = Harness::new(outcomes);
+                harness.operator.set("COPILOT_GITHUB_TOKEN", &token);
+                match harness.resolve(CopilotProviderRoute::OpenAi).await {
+                    Ok(resolved) => {
+                        let authorizer = resolved.concrete_authorizer();
+                        rendered.push_str(&format!(
+                            "{path}: {:?}",
+                            authorizer.state.cache.read().as_ref()
+                        ));
+                    }
+                    Err(error) => {
+                        rendered.push_str(&format!("{path}: {error} {error:?}\n"));
+                    }
+                }
+            }
+            let checked = verify_operator_token_with(
+                &*OutcomeTransport::new([Ok(svc_bot()), Ok(message_echo(500, &bearer))]),
+                &token,
+                &CopilotBackendConfig::default(),
+                Utc::now(),
+            )
+            .await
+            .expect_err("the model listing failed");
+            rendered.push_str(&format!("check: {checked} {checked:?}\n"));
+            let (auth_binding, device_binding) = validated_binding();
+            let (device_env, _device_lease) =
+                resolver_environment_with_token(&auth_binding, &token).await;
+            let device = CopilotAuthorizer {
+                state: Arc::new(CopilotAccountState::new(
+                    CopilotBackendConfig::default(),
+                    CopilotCredentialMode::DeviceSignIn,
+                )),
+                binding: device_binding,
+                env: device_env,
+                transport: Arc::new(ScriptedTransport::new([message_echo(
+                    500,
+                    &format!("token {token}"),
+                )])),
+            };
+            let exchanged = device.prime().await.expect_err("the token exchange failed");
+            rendered.push_str(&format!("device: {exchanged} {exchanged:?}\n"));
+            rendered.push_str(&log.0.lock());
+
+            assert!(
+                rendered.contains("GitHub Copilot refused this token (403): echoed by GitHub"),
+                "GitHub's message is still quoted: {rendered}"
+            );
+            assert!(
+                rendered.contains("model discovery returned HTTP 500: echoed by GitHub"),
+                "the capture saw the model listing failure: {rendered}"
+            );
+            assert!(
+                rendered.contains("token exchange returned 500: echoed by GitHub"),
+                "the capture saw the token exchange failure: {rendered}"
+            );
+            assert!(!rendered.contains(CANARY), "{rendered}");
+        }
+
+        /// The route's authorizer, which provider clients ask to redact what
+        /// they read from a response, removes every operator token the
+        /// account signed requests with: the current one, and the one a
+        /// rotation replaced, whose request can still be answered. The rest
+        /// of the diagnostic is kept.
+        #[tokio::test]
+        async fn signed_operator_tokens_are_redacted_from_response_diagnostics() {
+            let earlier = user_token("earlier");
+            let current = user_token("current");
+            let harness = Harness::new([
+                Ok(svc_bot()),
+                Ok(models_response()),
+                Ok(svc_bot()),
+                Ok(models_response()),
+            ]);
+            harness.operator.set("COPILOT_GITHUB_TOKEN", &earlier);
+            let resolved = harness
+                .resolve(CopilotProviderRoute::OpenAi)
+                .await
+                .expect("the earlier token resolves");
+            let concrete = resolved.concrete_authorizer();
+            let route = resolve_route_for_state(&concrete.state, Provider::OpenAI, "gpt-test")
+                .expect("the account's route");
+            let authorizer = route.bind_authorizer(resolved.authorizer());
+            let url = format!("{BUSINESS_API}/responses");
+
+            let (receipt, bearer) = authorize_once(&concrete, &url).await;
+            assert_eq!(bearer, format!("Bearer {earlier}"));
+            // The operator rotates the token, and Copilot refuses the earlier
+            // one: the next request signs with the current one.
+            harness.operator.set("COPILOT_GITHUB_TOKEN", &current);
+            refuse_with_401(&concrete, &url, receipt).await;
+            let (_, bearer) = authorize_once(&concrete, &url).await;
+            assert_eq!(bearer, format!("Bearer {current}"));
+
+            let mut diagnostic = format!("upstream echo: Bearer {earlier}, then Bearer {current}");
+            authorizer.redact_response_diagnostic(&mut diagnostic);
+            assert_eq!(
+                diagnostic,
+                "upstream echo: Bearer <redacted>, then Bearer <redacted>"
+            );
+        }
+
         /// T11: no token in any variable, or only whitespace, is
         /// `missing_secret` with no request and no lease.
         #[tokio::test]

@@ -258,8 +258,47 @@ settings before the turn, so REST can change build settings that RPC refuses.
   rewrite and compaction cannot mint prompt versions.
 - `session/activate_instruction` activates one immutable instruction revision
   at a safe boundary; `session/instruction_activations` reads the records
-  (0.8.30). Once durable instruction activations are effective, system-prompt
-  replacement for that target is refused.
+  (0.8.30). Since 0.9.9 a keyed system-prompt update, a transcript rewrite and
+  a revision restore keep each activation row at its place among the
+  conversation rows, so a later prompt version commits after an activation
+  too (0.9.8 refused it once an activation followed the prompt's current
+  version); moving an activation across a conversation row, or minting,
+  altering, erasing or reordering one, is still refused.
+- A compaction retires the body of every activation row that a later
+  activation of its key superseded (0.9.9): the row keeps its identity and
+  place, its content becomes the `[meerkat-retired-instruction-v1]` header
+  (`status=superseded`), and the newest row of each key keeps its body. The
+  1 MiB activation budget counts live bodies only.
+- Operator instructions (0.9.9, Rust API, no wire method): standing
+  instructions by slot (namespace and key), revision and body.
+  `SessionServiceInstructionExt::set_session_instruction` and
+  `read_session_instructions` (the persistent service; the ephemeral one
+  refuses `durability_unavailable`) record a session-owned write without
+  waking anything; the pending changes apply at the session's next fresh run
+  start as one System entry before the run's input, and a compaction folds
+  the entries into one snapshot. Limits: 64 slots, 256 KiB a body, 1 MiB of
+  Active bodies; a stale or conflicting revision is refused typed
+  (`InstructionSetErrorCode`). A model that lowers System rows only in its
+  leading prompt defers them (`leading_prefix_only`), and a backend whose
+  wire carries one leading System row keeps them pending
+  (`lowering_unavailable`). A mob member's session belongs to its mob
+  (`MobHandle::set_operator_instruction`), and its own host's writes are
+  refused `owned_by_mob`.
+- System-row prune (0.9.9, Rust API):
+  `SessionServiceTranscriptEditExt::prune_system_rows` removes ordinary
+  System rows a host names (each by its 0-based index and the `sha256:`
+  digest of its content) from an idle session in one audited rewrite
+  (reason kind `system-row-prune`), optionally retiring superseded activation
+  bodies (`retire_superseded_activation_bodies`); a stale digest or any
+  refused row refuses the whole prune, and a running session answers `Busy`.
+- A session that holds operator-instruction facts, a retired activation body
+  or a rewrite that moved an activation row is written at session envelope 5,
+  which a release before 0.9.9 refuses; every other session stays at
+  envelope 4 (`rkat storage doctor` lists them, finding
+  `operator-instruction-envelope`).
+- A resume whose explicit system prompt is exactly the newest System row the
+  model reads as a prompt appends nothing (0.9.9); a different prompt still
+  appends one.
 - `session/inject_context {session_id, content, source?, idempotency_key?}`
   (REST `POST /sessions/{id}/system_context`) appends one ordinary durable
   System message at the admitted boundary; plain text content is accepted.

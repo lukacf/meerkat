@@ -465,6 +465,68 @@ never creates or migrates the store and refuses with
 `MemberBindingHistoryReadError::StoreMissing` or `ForeignSchema` (`Read` for
 a failed read).
 
+Identity entries (since 0.9.9, Rust only; the wire contracts do not carry
+them): a spawn or dormant seat with `SpawnMemberSpec::with_entry_custody(true)`
+seats the member of an identity entry, a host's own durable identity. No
+worker reconcile (`reconcile`, `ensure_member`) spawns or retires one, no
+spawn without entry custody takes its name (`MobError::IdentityMember`), and
+the agent lane and the agent mob tools refuse to act on it. A respawn keeps
+the entry; a retirement keeps it, unseated and owed its seat.
+`adopt_legacy_identity_entry` adopts, once, a member a host seated before
+entries existed. Reads that wake nothing: `identity_entry`,
+`identity_entries` (paged), `identity_census`, `member_lifecycle_events` (the
+journal's member lifecycle facts after a `MobJournalCursor`) and
+`members_holding_run_starts`. An entry's origin is `Declared`, or `Created`
+(a row Core keeps in the identity store); the origin is provenance and the
+custody of the entry's record only, and either member is built from its
+profile like any other member. A removed or unreadable name is reserved,
+never free.
+
+The declared apply (since 0.9.9): `apply_declared_roster(DeclaredRoster)`
+applies a host's roster of `DeclaredEntry` specs, each identity answered on
+its own (`DeclaredEntryOutcome`). An unchanged roster writes nothing and wakes
+nothing; an identity no member holds is seated Dormant; a runtime-mode change,
+or a role change with a migration declared from the member's current role,
+restamps the member on its own session at its next generation; a role change
+with none declared holds the member (wakes refused `HostPreparationPending`,
+run starts held). A complete roster unlists every Declared entry it leaves
+out: its member retires and the entry ends, and listed again it comes back on
+the session its retirement archived. Applies of one mob run one at a time
+(`MobError::LifecycleOperationPending`). Apply the complete roster after every
+start, before the host wakes or seats its identities.
+
+Same-session respawn (since 0.9.9): `respawn_member(identity, MemberRespawn)`
+retires the member's incarnation and seats its next one Dormant at the next
+generation on the same session, keeping its conversation, comms key and
+edges; queued durable prompts stay queued for the successor (their waiters
+are answered `RequeuedAcrossStop`), and a wake that fails after the successor
+is committed is reported on the receipt (`MemberRespawnReceipt::wake_error`).
+A member it cannot serve (placed, fork-derived, without a durable session of
+its own) is refused `UnsupportedForMode` before anything starts. `respawn` of
+an identity entry's member respawns it this way. Every rotation is durable
+from its start: a restarted mob finishes it, and `redrive_retirement`
+re-drives one that stands. `release_member_at_scope(scope)` releases a
+member's materialization only when the scope names its current incarnation
+on its current session (`ReleaseOutcome::Stale` otherwise).
+`SpawnMemberSpec::with_definition_wiring(DefinitionWiring::Exempt)` keeps a
+member out of `auto_wire_orchestrator` and `role_wiring` (not for a placed
+member).
+
+Operator instructions (since 0.9.9, Rust only; writes need `AdminHost` and
+are never an agent tool): `set_operator_instruction` writes a slot's body at
+a revision for every member, one profile's members or one member (a predicate
+over the roster, so a member added later receives it);
+`revoke_operator_instruction` revokes it at a higher revision; and
+`operator_instruction_status` (`ReadHistory`) reads each member's delivery
+state (`Current`, `Owed`, `Blocked`) without waking anyone. The mob records
+each member's whole snapshot in its session, through the session while it is
+live and store-only while it is dormant, never waking a member (at most
+`MobBuilder::with_member_instruction_delivery_concurrency` dormant deliveries
+at a time, 16 by default), and a member born on a new session carries the
+snapshot from its first build. A placed member is reported blocked. A mob
+that recorded one journals at mob event schema 10, which 0.9.8 and 0.9.7
+refuse (`rkat storage doctor`: `operator-instruction-mob-events`).
+
 Scratch `task_create` / `task_update` / `task_list` / `task_get` are separately
 enabled agent tools, not `MobHandle` methods. Durable shared commitments belong
 to WorkGraph, not that scratch-task surface.

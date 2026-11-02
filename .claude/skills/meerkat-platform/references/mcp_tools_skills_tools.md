@@ -107,7 +107,10 @@ run continues. Codes: `tool_not_found`, `tool_unavailable`,
 `policy_indeterminate`, `callback_pending`, `tool_error`. Since 0.9.4 an
 `operation_refused` result also carries `data: {"kind": "reprepare_required"
 | "denied" | "malformed_facts", "tool_invoked": false | "unknown"}`; neither
-field permits a retry, and a new call is a new operation.
+field permits a retry, and a new call is a new operation. Since 0.9.9 a
+`policy_denied` result's message reads `Tool call denied (<code>): <message>`
+from the denial itself, for an application policy and a scoped tool grant
+gate alike.
 
 ## Tool modes, filters and overlays
 
@@ -176,6 +179,48 @@ may run. A refused call is an ordinary `access_denied` tool error.
 - Profiles supplied by a model through agent mob tools cannot set
   `mcp_servers`, `rust_bundles` or host-path skills.
 
+## Scoped tool grants (0.9.9)
+
+A build can gate built-in tool families and tool names behind scoped grants:
+the gated names are mounted (a gated family as if enabled) but hidden from the
+model and refused at dispatch until a live grant opens them. A grant opens
+only names the build gated; every other policy, governed authority, review
+and confinement still applies to a call it opens.
+
+- Gate a build with `grant_gated_tools` on `SessionBuildOptions` or
+  `AgentBuildConfig` (`GrantGatedTools::default().with_family("shell")
+  .with_tool("deploy")`), or `{"families": [...], "tools": [...]}` on RPC
+  `session/create` (Python `grant_gated_tools=`, TypeScript
+  `grantGatedTools`). The session records its gate, and a resume that names
+  none restores it. A gate no grant could honour (an unknown or disabled
+  family, a name nothing mounts, a name the tool policy refuses, a build
+  without the runtime's grant service) fails the build with
+  `BuildAgentError::GrantGate` (RPC: invalid params,
+  `data.kind = "tool_grant_gate_refused"`). A gate that covers `web_search`
+  turns the provider's native tools off, so the gated tool is the only search.
+- Grant with `MeerkatMachine::grant_tool` (and `revoke_tool_grant`,
+  `list_tool_grants`, `read_tool_grant_audit`; `ToolGrantService` over any
+  `RuntimeStore`), or `tool_grants/*` over JSON-RPC. A window is at most the
+  host policy's maximum lifetime (`ToolGrantPolicy`, 24 hours by default);
+  `meerkat::tool_family_names` answers the names a family can provide.
+- Every model-request boundary opens the gated names a live grant admits, and
+  each gated call is adjudicated again right before its tool runs, so a call
+  at or after the deadline is refused even when the tool was shown. A refusal
+  is `policy_denied` with the code `tool_grant_required`,
+  `tool_grant_expired`, `tool_grant_revoked` or `tool_grant_unavailable`; a
+  gate that cannot read its grants stays closed.
+- `ToolGrantLifecycleMachine` owns each grant (issued, then expired or
+  revoked, both terminal). Grants and their audit rows live in the runtime
+  store: on SQLite the `runtime-tool-grants` schema domain, created by the
+  first grant or audit row; with the in-memory store, for the process. A
+  binary older than 0.9.9 resumes a gated session with its gated tools
+  ungated, so upgrade every host that serves gated sessions first.
+- A dispatcher wrapper forwards `adjudicates_tool_grants`, and a
+  `RuntimeStore` decorator the six grant methods (`load_tool_grant`,
+  `list_tool_grants`, `put_tool_grant_if_absent`,
+  `compare_and_put_tool_grant`, `append_tool_grant_audit`,
+  `read_tool_grant_audit`), whose defaults leave every gate closed.
+
 ## WorkGraph tools
 
 `workgraph_create`, `workgraph_get`, `workgraph_list`, `workgraph_ready`,
@@ -204,6 +249,18 @@ may run. A refused call is an ordinary `access_denied` tool error.
   `cancelled` explicitly. `workgraph_list` and `workgraph_snapshot` hide
   terminal items unless `include_terminal: true`; a `labels` filter matches
   items carrying every listed label.
+- Reads are pages (0.9.9): `workgraph_list`, `workgraph_ready` and
+  `workgraph_snapshot` return at most `limit` items (default 100, at most
+  1,000), list and snapshot most recently updated first, ready by priority,
+  then age. A result reports `total_items` and `truncated`, and one that ended
+  early names a `next_cursor` to pass back as `cursor`; `anchor_event_seq` and
+  `changed_since_anchor` say whether the graph moved during a walk.
+  `workgraph_events` pages with `after_seq` (`truncated`, `next_after_seq`,
+  `event_high_water_mark`).
+- To withdraw evidence (0.9.9), add a ref whose `withdraws` lists the ids of
+  earlier refs on the same item. Nothing is removed: a ref a later ref
+  withdraws stays on the item and reads as withdrawn. Confirmation and
+  execution evidence cannot be withdrawn.
 
 ## Streaming tools (Rust host)
 

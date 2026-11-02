@@ -5,7 +5,8 @@
 > `CHANGELOG.md` (`### Breaking`, `### Changed`, `### Known issues`); read it
 > for the full list. Coming from 0.8.50 or earlier, also follow the per-release
 > sections of `docs/guides/upgrading.mdx` first.
-> The last section covers moving a 0.9.3 system to 0.9.4.
+> The last two sections cover moving a 0.9.3 system to 0.9.4 and a 0.9.8
+> system to 0.9.9; the releases between them are in `docs/guides/upgrading.mdx`.
 
 ## Before you upgrade
 
@@ -499,3 +500,84 @@ are in `docs/guides/upgrading.mdx` ("Upgrading to 0.9.4").
 9. Mobs: back up the mob stores (schema 12), pass `live_incarnation()` to the
    operator grant functions, and call `declare_mob_set_restored` when the host
    restores mobs by inserting handles.
+
+## 0.9.8 -> 0.9.9
+
+The source is the `## [0.9.9]` section of `CHANGELOG.md`; the operator steps
+are in `docs/guides/upgrading.mdx` ("Upgrading to 0.9.9").
+
+### Before you upgrade
+
+- Rust 1.97.0 or newer: every crate declares `rust-version = "1.97.0"` (0.9.8
+  declared 1.94.0). Pin every `meerkat*` crate at `=0.9.9`; Meta 0.9.7 pins
+  Core `=0.9.8`, so a host that embeds Meta stays on Core 0.9.8 until a Meta
+  release pins `=0.9.9`.
+- No storage migration step: 0.9.9 opens 0.9.8 stores as they are and creates
+  the `runtime-tool-grants` and `approval-decisions` schema domains on first
+  use. What 0.9.8 cannot read back: a session written at session envelope 5
+  (it holds operator-instruction facts, a retired instruction activation body
+  or a rewrite that moved an activation row; a session with superseded
+  activations gets there at its first 0.9.9 compaction), and a mob that
+  journaled an operator instruction (mob event schema 10, which stops 0.9.8
+  and 0.9.7 from restoring every mob of the realm). Run `rkat storage doctor`
+  on 0.9.9 before a rollback: `operator-instruction-envelope` and
+  `operator-instruction-mob-events` list them.
+- Upgrade the SDKs with `rkat-rpc`: a 0.9.8 SDK refuses the new
+  `tool_results_bounded_for_request` event type.
+
+### Breaking changes
+
+- Agent schedule tools (and `schedule/call`, `POST /schedule/call`, the MCP
+  server's schedule tools, `call_schedule_tool`, `callScheduleTool`):
+  `meerkat_schedule_list` returns one page of summaries (50 by default, at
+  most 200, `page.next_cursor`), a tool that returns one schedule returns the
+  public `schedule/get` shape without `machine_state`, and
+  `meerkat_schedule_occurrences` pages summaries (`view: "full"` for whole
+  occurrences). The host listings are unchanged.
+- WorkGraph list and snapshot return the newest items first, no read refuses
+  a namespace past 1,000 live items, and results carry `total_items`,
+  `truncated` and `next_cursor` (events: `truncated`, `next_after_seq`,
+  `event_high_water_mark`).
+- `rkat run` with the default `--stdin auto` skips stdin input that has not
+  started within 2 s; a late producer passes `--stdin blob`.
+- Scoped tool grant gates (`grant_gated_tools`): a binary older than 0.9.9
+  resumes a gated session ungated, and an older `rkat-rpc` ignores the field.
+- Mob members' turns, and those of the sessions an RPC `SessionRuntime`
+  serves, run on the host's runtime: size its worker stacks for your tools,
+  and build the `SessionRuntime` inside the Tokio runtime its sessions should
+  run on. A host runtime that stops mid-turn ends the turn as a crash would.
+- Rust: `SessionBuildOptions` and `AgentBuildConfig` gain `grant_gated_tools`
+  and `mob_incarnation`; `AgentErrorReason` gains `ToolGrantGateRefused` and
+  `BuildAgentError` `GrantGate`; `SystemMessage` gains `instruction_entry`
+  and `retired_instruction_body`; `CompactionContext` and
+  `SessionCompactionCadence` gain fields and `build_compaction_context` a
+  third parameter; `TranscriptEditError` is `#[non_exhaustive]`;
+  `ForkInstructionRefusalCause` gains `HeadBodyRetired`; the Copilot auth
+  methods gain `GitHubCopilotToken`; `SessionAgentBuilder` and
+  `MobSessionService` require `session_comms_identity_root`; the machine
+  types gain appended variants.
+- Text: a `policy_denied` tool error reads
+  `Tool call denied (<code>): <message>`, and the compaction summary request
+  names omitted media as
+  `[image (<media type>) omitted from this summary request]`.
+- Governed hosts: approval reads and decisions run the host's authorization
+  code on the caller's thread (hold no owner lock across them),
+  `decide_consent` can answer a retryable `StoreUnavailable`, consent
+  withdrawal reasons follow the new rules, and contention on a work's
+  authorization publication answers a refusal to rebuild
+  (`ReprepareRequired`) where it answered unavailable.
+
+### Checklist
+
+1. Install Rust 1.97.0, pin `=0.9.9`, upgrade every process and the SDKs
+   together, and back up the state root.
+2. Move bulk schedule reads to the host listings and follow page cursors in
+   schedule and WorkGraph readers.
+3. Pass `--stdin blob` to `rkat run` where a producer starts writing late.
+4. Size the worker stacks of the runtime your mobs and RPC session runtimes
+   run on; build an RPC `SessionRuntime` inside it.
+5. Rust: add the new fields and arms, implement
+   `session_comms_identity_root` in wrappers, and forward the new provided
+   methods (see "Wrappers and decorators" in the upgrade guide).
+6. Before any rollback, run `rkat storage doctor` and settle what it lists
+   under `operator-instruction-envelope` and `operator-instruction-mob-events`.

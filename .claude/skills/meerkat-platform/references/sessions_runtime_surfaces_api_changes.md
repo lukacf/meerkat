@@ -327,13 +327,24 @@ CARGO_BUILD_JOBS=2 CARGO_PROFILE_RELEASE_OPT_LEVEL=1 cargo install rkat --locked
   overrides it for diagnosis only. They start one worker per available CPU;
   `RKAT_WORKER_THREADS` (then Tokio's `TOKIO_WORKER_THREADS`) sets the count,
   which a container whose pids limit is below its CPU count needs.
+- Since 0.9.9 the turns of mob members and of the sessions an RPC
+  `SessionRuntime` serves run on the host's runtime (a member's on the
+  runtime of the task that provisions it, an RPC session's on the runtime the
+  `SessionRuntime` is built on), as directly created sessions' turns did, so
+  size that runtime's worker stacks for the tools you compose (a default
+  Tokio runtime gives 2 MiB). Core's two process-wide runtimes
+  (`meerkat-machine-cleanup`, `meerkat-runtime-serving`) keep the cleanup and
+  runtime-loop work, on 16 MiB threads when `RKAT_WORKER_STACK_BYTES` is
+  unset. A host runtime that stops mid-turn ends the turn as a crash would:
+  its inputs stay pending and the next start resumes them.
 
 ## Embedding the Rust crates
 
 - Since 0.8.42 every workspace crate lives under `crates/<name>`, and test
   crates and fixtures under `tests/`. Directory names equal package names
-  except `crates/meerkat-cli`, which publishes as `rkat`. `xtask`,
-  `meerkat-machine-codegen` and `meerkat-web-runtime` are not published.
+  except `crates/meerkat-cli`, which publishes as `rkat`. `xtask` and
+  `meerkat-web-runtime` are not published; `meerkat-machine-codegen` is
+  published since 0.9.9.
 - Pin every `meerkat*` crate to the same exact version as your binaries and
   SDKs (`meerkat = "=0.9.0"`); the family is released and tested as one set.
 - To build against a checkout, point path dependencies or `[patch.crates-io]`

@@ -404,7 +404,7 @@
                 "pages": [
                   "connect/examples/remembered-tool",
                   "connect/examples/slack-summary",
-                  "connect/examples/reachy-extension",
+                  "connect/examples/device-extension",
                   "connect/examples/organizational-host"
                 ]
               }

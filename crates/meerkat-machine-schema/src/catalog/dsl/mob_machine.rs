@@ -633,8 +633,11 @@ macro_rules! mob_catalog_machine_dsl {
             // is recorded by the membership commit of a spawn or the dormant
             // seat that carried entry custody, by the adoption of a legacy
             // member (AdoptLegacyIdentityEntry), by the declared apply
-            // (DeclareIdentityEntry) and by the replay of a seat or adoption
-            // row (RecoverIdentityEntry); a rotation keeps it. An entry is
+            // (DeclareIdentityEntry), by a store-owned create's commit step
+            // (RecordCreatedIdentityEntry), by the replay of a seat or
+            // adoption row (RecoverIdentityEntry) and by the recovery of a
+            // store-owned row (RecoverCreatedIdentityEntry); a rotation keeps
+            // it. An entry is
             // seated, or unseated with a typed cause (identity_entry_unseated,
             // entry_is_seated_or_has_an_unseated_cause): the end of its
             // member's retirement keeps it unseated, owed a seat, unless the
@@ -743,6 +746,15 @@ macro_rules! mob_catalog_machine_dsl {
             // destroy drop it. Never beside entry custody
             // (entry_custodies_are_disjoint).
             spawn_exec_created_custody: Set<AgentIdentity>,
+            // Whether the host holds this mob's identity changes (0.9.9):
+            // while it does, every change's admission (AdmitIdentityChange)
+            // and every new store-owned entry's record
+            // (RecordCreatedIdentityEntry) is refused, typed and retryable,
+            // and nothing of the change is written. Set by the host at its
+            // start and at any time after (SetIdentityChangesHeld); never
+            // journaled, so a host that holds them holds them again at its
+            // next start.
+            identity_changes_held: bool,
             // Operator instructions (0.9.9). The mob's desired records, one
             // per slot (the JSON array [namespace, key]): the revision, the
             // effect, the body's digest (empty while Absent) and byte length
@@ -1085,6 +1097,7 @@ macro_rules! mob_catalog_machine_dsl {
             identity_entry_tombstones = EmptySet,
             identity_entry_unreadable = EmptySet,
             spawn_exec_created_custody = EmptySet,
+            identity_changes_held = false,
             operator_instruction_revision = EmptyMap,
             operator_instruction_effect = EmptyMap,
             operator_instruction_digest = EmptyMap,
@@ -1353,6 +1366,10 @@ macro_rules! mob_catalog_machine_dsl {
                 privileged_tool_access_policy_present: bool,
                 privileged_tooling_present: bool,
                 privileged_auth_binding_present: bool,
+                // An identity spec's runtime binding and its placement on a
+                // member host (0.9.9): privileged as a spawn's.
+                privileged_binding_present: bool,
+                privileged_placement_present: bool,
             },
             // Per-mob operator admission for current-mob-scoped tools. The tool
             // shell extracts a single pure observation — whether the operator
@@ -2111,6 +2128,22 @@ macro_rules! mob_catalog_machine_dsl {
             // The reset's preflight (MobHandle::reset probes it before its
             // retirement batch empties the roster): a pure verdict.
             AdmitReset,
+            // Identity changes (0.9.9): the admission of one change of
+            // store-owned identities at its commit step, from the facts the
+            // shell observed for it there: the store's receipt of its
+            // operation, its consent's form, whether a decision's permit
+            // binds the change and admits a commit now, whether the
+            // requester is the host operator, and whether an agent
+            // requester's grant is current at this final sink (its prepared
+            // check). A pure verdict.
+            AdmitIdentityChange { receipt: Enum<IdentityChangeReceiptKind>, consent: Enum<IdentityChangeConsentKind>, permit_binds: bool, permit_admits: bool, host_operator: bool, grant_current: bool },
+            // A store-owned identity's entry, recorded by its create's
+            // commit step before its seat, in the same prepared step, with
+            // the cause it is unseated for until its seat (SeatOwed) or its
+            // host's preparation (PreparationPending).
+            RecordCreatedIdentityEntry { agent_identity: AgentIdentity, cause: Enum<UnseatedEntryCause> },
+            // The host holds or releases this mob's identity changes.
+            SetIdentityChangesHeld { held: bool },
         }
 
         surface_only [
@@ -2746,6 +2779,13 @@ macro_rules! mob_catalog_machine_dsl {
             MemberInstructionTargetBlocked { agent_identity: AgentIdentity, generation: u64, block: Enum<MemberInstructionBlock> },
             MemberInstructionReleaseAuthorized { agent_identity: AgentIdentity, session_id: SessionId },
             MemberInstructionReleaseNotNeeded { agent_identity: AgentIdentity },
+            // Identity changes (0.9.9): the admission verdict of one change
+            // (AdmitIdentityChange), and the verdict of one new store-owned
+            // entry's record (RecordCreatedIdentityEntry). The shell commits
+            // the change's store transaction only after every verdict of its
+            // prepared step is Admitted and Recorded.
+            IdentityChangeAdmissionResolved { verdict: Enum<IdentityChangeAdmissionKind> },
+            CreatedIdentityEntryRecorded { agent_identity: AgentIdentity, verdict: Enum<CreatedIdentityRecordVerdict> },
         }
 
         // One total, pure classifier over desired authority, lease ownership,
@@ -3359,6 +3399,94 @@ macro_rules! mob_catalog_machine_dsl {
             }}}}}}}
         }
 
+        // The admission verdict of one identity change (AdmitIdentityChange),
+        // over the change's facts only: no lifecycle phase is passed, and
+        // each verdict is its own arm. A candidate composition writes
+        // nothing; a receipt of the same request answers the change
+        // replayed, and one of another request refuses it; a changes hold
+        // refuses it, retryable; a decided change needs its permit to bind
+        // the change and admit a commit now; imported consent comes only
+        // with the host operator; and an agent requester's grant must be
+        // current at this final sink. Otherwise the change is admitted.
+        helper identity_change_admission(
+            composition_authoritative: bool,
+            receipt: Enum<IdentityChangeReceiptKind>,
+            changes_held: bool,
+            consent: Enum<IdentityChangeConsentKind>,
+            permit_binds: bool,
+            permit_admits: bool,
+            host_operator: bool,
+            grant_current: bool
+        ) -> Enum<IdentityChangeAdmissionKind> {
+            if composition_authoritative == false {
+                IdentityChangeAdmissionKind::NonAuthoritative
+            } else {
+            if receipt == IdentityChangeReceiptKind::Same {
+                IdentityChangeAdmissionKind::Replayed
+            } else {
+            if receipt == IdentityChangeReceiptKind::Other {
+                IdentityChangeAdmissionKind::OperationReused
+            } else {
+            if changes_held == true {
+                IdentityChangeAdmissionKind::ChangesHeld
+            } else {
+            if consent == IdentityChangeConsentKind::Decided && permit_binds == false {
+                IdentityChangeAdmissionKind::DecisionUnbound
+            } else {
+            if consent == IdentityChangeConsentKind::Decided && permit_admits == false {
+                IdentityChangeAdmissionKind::DecisionExpired
+            } else {
+            if consent == IdentityChangeConsentKind::Imported && host_operator == false {
+                IdentityChangeAdmissionKind::ImportedNotHostOperator
+            } else {
+            if grant_current == false {
+                IdentityChangeAdmissionKind::GrantRevoked
+            } else {
+                IdentityChangeAdmissionKind::Admitted
+            }}}}}}}}
+        }
+
+        // The verdict of one new store-owned entry's record
+        // (RecordCreatedIdentityEntry), over the name's facts only. A
+        // candidate composition records nothing and a changes hold refuses
+        // it; an unreadable name and a removed identity's name are reserved;
+        // a name an identity entry of either custody holds, or a member or
+        // a spawn under way, is taken. Only a seat owed or a pending host
+        // preparation is a new entry's cause.
+        helper created_identity_record_verdict(
+            composition_authoritative: bool,
+            changes_held: bool,
+            name_unreadable: bool,
+            name_tombstoned: bool,
+            held_by_identity: bool,
+            held_by_worker: bool,
+            cause: Enum<UnseatedEntryCause>
+        ) -> Enum<CreatedIdentityRecordVerdict> {
+            if composition_authoritative == false {
+                CreatedIdentityRecordVerdict::NonAuthoritative
+            } else {
+            if changes_held == true {
+                CreatedIdentityRecordVerdict::ChangesHeld
+            } else {
+            if name_unreadable == true {
+                CreatedIdentityRecordVerdict::NameUnreadable
+            } else {
+            if name_tombstoned == true {
+                CreatedIdentityRecordVerdict::NameTombstoned
+            } else {
+            if held_by_identity == true {
+                CreatedIdentityRecordVerdict::NameHeldByIdentity
+            } else {
+            if held_by_worker == true {
+                CreatedIdentityRecordVerdict::NameHeldByWorker
+            } else {
+            if cause != UnseatedEntryCause::SeatOwed && cause != UnseatedEntryCause::PreparationPending {
+                CreatedIdentityRecordVerdict::CauseRefused
+            } else {
+                CreatedIdentityRecordVerdict::Recorded
+            }}}}}}}
+        }
+
         // The wake refusal for one member, over MEMBER facts only: no
         // lifecycle phase is passed; every lifecycle phase has its own
         // WakeMember arm. None means not refused: the member's phase then
@@ -3824,6 +3952,10 @@ macro_rules! mob_catalog_machine_dsl {
         disposition MemberInstructionTargetBlocked => local seam SurfaceResultAlignment,
         disposition MemberInstructionReleaseAuthorized => local seam OwnerRealizationOnly,
         disposition MemberInstructionReleaseNotNeeded => local seam SurfaceResultAlignment,
+        // Identity changes (0.9.9): both verdicts answer the change's commit
+        // step, which writes nothing unless every one admits it.
+        disposition IdentityChangeAdmissionResolved => local seam SurfaceResultAlignment,
+        disposition CreatedIdentityEntryRecorded => local seam SurfaceResultAlignment,
 
         // =====================================================================
         // Invariants
@@ -5928,7 +6060,9 @@ macro_rules! mob_catalog_machine_dsl {
                 privileged_launch_mode_present,
                 privileged_tool_access_policy_present,
                 privileged_tooling_present,
-                privileged_auth_binding_present
+                privileged_auth_binding_present,
+                privileged_binding_present,
+                privileged_placement_present
             }
             guard "manage_scope_allows" { manage_scope_present == true }
             update {}
@@ -5948,7 +6082,9 @@ macro_rules! mob_catalog_machine_dsl {
                 privileged_launch_mode_present,
                 privileged_tool_access_policy_present,
                 privileged_tooling_present,
-                privileged_auth_binding_present
+                privileged_auth_binding_present,
+                privileged_binding_present,
+                privileged_placement_present
             }
             guard "privileged_args_without_manage_scope" {
                 manage_scope_present == false
@@ -5961,6 +6097,8 @@ macro_rules! mob_catalog_machine_dsl {
                     || privileged_tool_access_policy_present == true
                     || privileged_tooling_present == true
                     || privileged_auth_binding_present == true
+                    || privileged_binding_present == true
+                    || privileged_placement_present == true
                 )
             }
             update {}
@@ -5980,7 +6118,9 @@ macro_rules! mob_catalog_machine_dsl {
                 privileged_launch_mode_present,
                 privileged_tool_access_policy_present,
                 privileged_tooling_present,
-                privileged_auth_binding_present
+                privileged_auth_binding_present,
+                privileged_binding_present,
+                privileged_placement_present
             }
             guard "profile_scope_allows" {
                 manage_scope_present == false
@@ -5992,6 +6132,8 @@ macro_rules! mob_catalog_machine_dsl {
                 && privileged_tool_access_policy_present == false
                 && privileged_tooling_present == false
                 && privileged_auth_binding_present == false
+                && privileged_binding_present == false
+                && privileged_placement_present == false
                 && profile_scope_contains == true
             }
             update {}
@@ -6011,7 +6153,9 @@ macro_rules! mob_catalog_machine_dsl {
                 privileged_launch_mode_present,
                 privileged_tool_access_policy_present,
                 privileged_tooling_present,
-                privileged_auth_binding_present
+                privileged_auth_binding_present,
+                privileged_binding_present,
+                privileged_placement_present
             }
             guard "no_scope_denies" {
                 manage_scope_present == false
@@ -6023,6 +6167,8 @@ macro_rules! mob_catalog_machine_dsl {
                 && privileged_tool_access_policy_present == false
                 && privileged_tooling_present == false
                 && privileged_auth_binding_present == false
+                && privileged_binding_present == false
+                && privileged_placement_present == false
                 && profile_scope_contains == false
             }
             update {}
@@ -31096,6 +31242,416 @@ macro_rules! mob_catalog_machine_dsl {
         }
 
         // =====================================================================
+        // Identity changes (0.9.9): the admission of one change of store-owned
+        // identities and the record of each new store-owned entry, decided in
+        // the change's commit step on its prepared authority, before its
+        // seats; the shell writes the change's store transaction only when
+        // every verdict of the step admits it, and a refusal leaves the
+        // prepared authority unapplied. Appended after every published
+        // transition.
+        // =====================================================================
+
+        // An admitted change: the commit step goes on to its records and seats.
+        transition AdmitIdentityChangeAdmitted {
+            on input AdmitIdentityChange { receipt, consent, permit_binds, permit_admits, host_operator, grant_current }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "admission_admitted" {
+                identity_change_admission(
+                    self.composition_authority == CompositionAuthorityKind::Authoritative,
+                    receipt,
+                    self.identity_changes_held,
+                    consent,
+                    permit_binds,
+                    permit_admits,
+                    host_operator,
+                    grant_current) == IdentityChangeAdmissionKind::Admitted
+            }
+            update {}
+            to Running
+            emit IdentityChangeAdmissionResolved { verdict: IdentityChangeAdmissionKind::Admitted }
+        }
+
+        // A receipt of the same request: the change committed before, and nothing is written again.
+        transition AdmitIdentityChangeReplayed {
+            on input AdmitIdentityChange { receipt, consent, permit_binds, permit_admits, host_operator, grant_current }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "admission_replayed" {
+                identity_change_admission(
+                    self.composition_authority == CompositionAuthorityKind::Authoritative,
+                    receipt,
+                    self.identity_changes_held,
+                    consent,
+                    permit_binds,
+                    permit_admits,
+                    host_operator,
+                    grant_current) == IdentityChangeAdmissionKind::Replayed
+            }
+            update {}
+            to Running
+            emit IdentityChangeAdmissionResolved { verdict: IdentityChangeAdmissionKind::Replayed }
+        }
+
+        // A receipt of another request under the operation id: refused.
+        transition AdmitIdentityChangeOperationReused {
+            on input AdmitIdentityChange { receipt, consent, permit_binds, permit_admits, host_operator, grant_current }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "admission_operation_reused" {
+                identity_change_admission(
+                    self.composition_authority == CompositionAuthorityKind::Authoritative,
+                    receipt,
+                    self.identity_changes_held,
+                    consent,
+                    permit_binds,
+                    permit_admits,
+                    host_operator,
+                    grant_current) == IdentityChangeAdmissionKind::OperationReused
+            }
+            update {}
+            to Running
+            emit IdentityChangeAdmissionResolved { verdict: IdentityChangeAdmissionKind::OperationReused }
+        }
+
+        // A candidate composition: refused, nothing is written.
+        transition AdmitIdentityChangeNonAuthoritative {
+            on input AdmitIdentityChange { receipt, consent, permit_binds, permit_admits, host_operator, grant_current }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "admission_non_authoritative" {
+                identity_change_admission(
+                    self.composition_authority == CompositionAuthorityKind::Authoritative,
+                    receipt,
+                    self.identity_changes_held,
+                    consent,
+                    permit_binds,
+                    permit_admits,
+                    host_operator,
+                    grant_current) == IdentityChangeAdmissionKind::NonAuthoritative
+            }
+            update {}
+            to Running
+            emit IdentityChangeAdmissionResolved { verdict: IdentityChangeAdmissionKind::NonAuthoritative }
+        }
+
+        // The host holds the mob's identity changes: refused, retryable.
+        transition AdmitIdentityChangeChangesHeld {
+            on input AdmitIdentityChange { receipt, consent, permit_binds, permit_admits, host_operator, grant_current }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "admission_changes_held" {
+                identity_change_admission(
+                    self.composition_authority == CompositionAuthorityKind::Authoritative,
+                    receipt,
+                    self.identity_changes_held,
+                    consent,
+                    permit_binds,
+                    permit_admits,
+                    host_operator,
+                    grant_current) == IdentityChangeAdmissionKind::ChangesHeld
+            }
+            update {}
+            to Running
+            emit IdentityChangeAdmissionResolved { verdict: IdentityChangeAdmissionKind::ChangesHeld }
+        }
+
+        // A decided change whose permit binds another operation or request: refused.
+        transition AdmitIdentityChangeDecisionUnbound {
+            on input AdmitIdentityChange { receipt, consent, permit_binds, permit_admits, host_operator, grant_current }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "admission_decision_unbound" {
+                identity_change_admission(
+                    self.composition_authority == CompositionAuthorityKind::Authoritative,
+                    receipt,
+                    self.identity_changes_held,
+                    consent,
+                    permit_binds,
+                    permit_admits,
+                    host_operator,
+                    grant_current) == IdentityChangeAdmissionKind::DecisionUnbound
+            }
+            update {}
+            to Running
+            emit IdentityChangeAdmissionResolved { verdict: IdentityChangeAdmissionKind::DecisionUnbound }
+        }
+
+        // A decided change whose permit is past its deadline: refused.
+        transition AdmitIdentityChangeDecisionExpired {
+            on input AdmitIdentityChange { receipt, consent, permit_binds, permit_admits, host_operator, grant_current }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "admission_decision_expired" {
+                identity_change_admission(
+                    self.composition_authority == CompositionAuthorityKind::Authoritative,
+                    receipt,
+                    self.identity_changes_held,
+                    consent,
+                    permit_binds,
+                    permit_admits,
+                    host_operator,
+                    grant_current) == IdentityChangeAdmissionKind::DecisionExpired
+            }
+            update {}
+            to Running
+            emit IdentityChangeAdmissionResolved { verdict: IdentityChangeAdmissionKind::DecisionExpired }
+        }
+
+        // Imported consent from anyone but the host operator: refused.
+        transition AdmitIdentityChangeImportedNotHostOperator {
+            on input AdmitIdentityChange { receipt, consent, permit_binds, permit_admits, host_operator, grant_current }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "admission_imported_not_host_operator" {
+                identity_change_admission(
+                    self.composition_authority == CompositionAuthorityKind::Authoritative,
+                    receipt,
+                    self.identity_changes_held,
+                    consent,
+                    permit_binds,
+                    permit_admits,
+                    host_operator,
+                    grant_current) == IdentityChangeAdmissionKind::ImportedNotHostOperator
+            }
+            update {}
+            to Running
+            emit IdentityChangeAdmissionResolved { verdict: IdentityChangeAdmissionKind::ImportedNotHostOperator }
+        }
+
+        // An agent requester's grant no longer admits the change at this final sink: refused.
+        transition AdmitIdentityChangeGrantRevoked {
+            on input AdmitIdentityChange { receipt, consent, permit_binds, permit_admits, host_operator, grant_current }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "admission_grant_revoked" {
+                identity_change_admission(
+                    self.composition_authority == CompositionAuthorityKind::Authoritative,
+                    receipt,
+                    self.identity_changes_held,
+                    consent,
+                    permit_binds,
+                    permit_admits,
+                    host_operator,
+                    grant_current) == IdentityChangeAdmissionKind::GrantRevoked
+            }
+            update {}
+            to Running
+            emit IdentityChangeAdmissionResolved { verdict: IdentityChangeAdmissionKind::GrantRevoked }
+        }
+
+        // A mob that is not running admits no change.
+        transition AdmitIdentityChangeMobNotRunning {
+            per_phase [Stopped, Completed, Destroyed]
+            on input AdmitIdentityChange { receipt, consent, permit_binds, permit_admits, host_operator, grant_current }
+            update {}
+            to Running
+            emit IdentityChangeAdmissionResolved { verdict: IdentityChangeAdmissionKind::MobNotRunning }
+        }
+
+        // A new store-owned identity's entry, recorded in its create's
+        // commit step, after the change's admission and before its seat:
+        // origin Created, unseated with the commit's cause (SeatOwed: the
+        // step's seat, or a kickoff's spawn after the commit, takes it under
+        // created custody; PreparationPending: its host prepares it first).
+        // A record of the same name's archived session (an unlisted roster
+        // entry's) is let go: the new identity starts on a fresh session.
+        // The change's one store transaction writes the identity's row with
+        // the step's journal rows, so the entry is durable exactly when its
+        // row is.
+        transition RecordCreatedIdentityEntryRecorded {
+            on input RecordCreatedIdentityEntry { agent_identity, cause }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "record_recorded" {
+                created_identity_record_verdict(
+                    self.composition_authority == CompositionAuthorityKind::Authoritative,
+                    self.identity_changes_held,
+                    self.identity_entry_unreadable.contains(agent_identity) == true,
+                    self.identity_entry_tombstones.contains(agent_identity) == true,
+                    self.identity_entry_origins.contains_key(agent_identity) == true,
+                    self.identity_to_runtime.contains_key(agent_identity) == true
+                        || self.member_session_bindings.contains_key(agent_identity) == true
+                        || self.pending_spawn_sessions.contains_key(agent_identity) == true
+                        || self.spawn_exec_phase.contains_key(agent_identity) == true,
+                    cause) == CreatedIdentityRecordVerdict::Recorded
+            }
+            update {
+                self.identity_entry_origins.insert(agent_identity, IdentityEntryOrigin::Created);
+                self.identity_entry_unseated.insert(agent_identity, cause);
+                self.identity_entry_archived_sessions.remove(agent_identity);
+                self.members_to_spawn.remove(agent_identity);
+                self.members_to_retire.remove(agent_identity);
+            }
+            to Running
+            emit CreatedIdentityEntryRecorded { agent_identity: agent_identity, verdict: CreatedIdentityRecordVerdict::Recorded }
+        }
+
+        // Refused, typed, for this identity: an identity entry of either custody holds the name.
+        transition RecordCreatedIdentityEntryNameHeldByIdentity {
+            on input RecordCreatedIdentityEntry { agent_identity, cause }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "record_name_held_by_identity" {
+                created_identity_record_verdict(
+                    self.composition_authority == CompositionAuthorityKind::Authoritative,
+                    self.identity_changes_held,
+                    self.identity_entry_unreadable.contains(agent_identity) == true,
+                    self.identity_entry_tombstones.contains(agent_identity) == true,
+                    self.identity_entry_origins.contains_key(agent_identity) == true,
+                    self.identity_to_runtime.contains_key(agent_identity) == true
+                        || self.member_session_bindings.contains_key(agent_identity) == true
+                        || self.pending_spawn_sessions.contains_key(agent_identity) == true
+                        || self.spawn_exec_phase.contains_key(agent_identity) == true,
+                    cause) == CreatedIdentityRecordVerdict::NameHeldByIdentity
+            }
+            update {}
+            to Running
+            emit CreatedIdentityEntryRecorded { agent_identity: agent_identity, verdict: CreatedIdentityRecordVerdict::NameHeldByIdentity }
+        }
+
+        // Refused, typed, for this identity: a member or a spawn under way holds the name.
+        transition RecordCreatedIdentityEntryNameHeldByWorker {
+            on input RecordCreatedIdentityEntry { agent_identity, cause }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "record_name_held_by_worker" {
+                created_identity_record_verdict(
+                    self.composition_authority == CompositionAuthorityKind::Authoritative,
+                    self.identity_changes_held,
+                    self.identity_entry_unreadable.contains(agent_identity) == true,
+                    self.identity_entry_tombstones.contains(agent_identity) == true,
+                    self.identity_entry_origins.contains_key(agent_identity) == true,
+                    self.identity_to_runtime.contains_key(agent_identity) == true
+                        || self.member_session_bindings.contains_key(agent_identity) == true
+                        || self.pending_spawn_sessions.contains_key(agent_identity) == true
+                        || self.spawn_exec_phase.contains_key(agent_identity) == true,
+                    cause) == CreatedIdentityRecordVerdict::NameHeldByWorker
+            }
+            update {}
+            to Running
+            emit CreatedIdentityEntryRecorded { agent_identity: agent_identity, verdict: CreatedIdentityRecordVerdict::NameHeldByWorker }
+        }
+
+        // Refused, typed, for this identity: the name is a removed identity's tombstone.
+        transition RecordCreatedIdentityEntryNameTombstoned {
+            on input RecordCreatedIdentityEntry { agent_identity, cause }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "record_name_tombstoned" {
+                created_identity_record_verdict(
+                    self.composition_authority == CompositionAuthorityKind::Authoritative,
+                    self.identity_changes_held,
+                    self.identity_entry_unreadable.contains(agent_identity) == true,
+                    self.identity_entry_tombstones.contains(agent_identity) == true,
+                    self.identity_entry_origins.contains_key(agent_identity) == true,
+                    self.identity_to_runtime.contains_key(agent_identity) == true
+                        || self.member_session_bindings.contains_key(agent_identity) == true
+                        || self.pending_spawn_sessions.contains_key(agent_identity) == true
+                        || self.spawn_exec_phase.contains_key(agent_identity) == true,
+                    cause) == CreatedIdentityRecordVerdict::NameTombstoned
+            }
+            update {}
+            to Running
+            emit CreatedIdentityEntryRecorded { agent_identity: agent_identity, verdict: CreatedIdentityRecordVerdict::NameTombstoned }
+        }
+
+        // Refused, typed, for this identity: the name's row cannot be read: it is reserved.
+        transition RecordCreatedIdentityEntryNameUnreadable {
+            on input RecordCreatedIdentityEntry { agent_identity, cause }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "record_name_unreadable" {
+                created_identity_record_verdict(
+                    self.composition_authority == CompositionAuthorityKind::Authoritative,
+                    self.identity_changes_held,
+                    self.identity_entry_unreadable.contains(agent_identity) == true,
+                    self.identity_entry_tombstones.contains(agent_identity) == true,
+                    self.identity_entry_origins.contains_key(agent_identity) == true,
+                    self.identity_to_runtime.contains_key(agent_identity) == true
+                        || self.member_session_bindings.contains_key(agent_identity) == true
+                        || self.pending_spawn_sessions.contains_key(agent_identity) == true
+                        || self.spawn_exec_phase.contains_key(agent_identity) == true,
+                    cause) == CreatedIdentityRecordVerdict::NameUnreadable
+            }
+            update {}
+            to Running
+            emit CreatedIdentityEntryRecorded { agent_identity: agent_identity, verdict: CreatedIdentityRecordVerdict::NameUnreadable }
+        }
+
+        // Refused, typed, for this identity: a candidate composition records nothing.
+        transition RecordCreatedIdentityEntryNonAuthoritative {
+            on input RecordCreatedIdentityEntry { agent_identity, cause }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "record_non_authoritative" {
+                created_identity_record_verdict(
+                    self.composition_authority == CompositionAuthorityKind::Authoritative,
+                    self.identity_changes_held,
+                    self.identity_entry_unreadable.contains(agent_identity) == true,
+                    self.identity_entry_tombstones.contains(agent_identity) == true,
+                    self.identity_entry_origins.contains_key(agent_identity) == true,
+                    self.identity_to_runtime.contains_key(agent_identity) == true
+                        || self.member_session_bindings.contains_key(agent_identity) == true
+                        || self.pending_spawn_sessions.contains_key(agent_identity) == true
+                        || self.spawn_exec_phase.contains_key(agent_identity) == true,
+                    cause) == CreatedIdentityRecordVerdict::NonAuthoritative
+            }
+            update {}
+            to Running
+            emit CreatedIdentityEntryRecorded { agent_identity: agent_identity, verdict: CreatedIdentityRecordVerdict::NonAuthoritative }
+        }
+
+        // Refused, typed, for this identity: the host holds the mob's identity changes.
+        transition RecordCreatedIdentityEntryChangesHeld {
+            on input RecordCreatedIdentityEntry { agent_identity, cause }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "record_changes_held" {
+                created_identity_record_verdict(
+                    self.composition_authority == CompositionAuthorityKind::Authoritative,
+                    self.identity_changes_held,
+                    self.identity_entry_unreadable.contains(agent_identity) == true,
+                    self.identity_entry_tombstones.contains(agent_identity) == true,
+                    self.identity_entry_origins.contains_key(agent_identity) == true,
+                    self.identity_to_runtime.contains_key(agent_identity) == true
+                        || self.member_session_bindings.contains_key(agent_identity) == true
+                        || self.pending_spawn_sessions.contains_key(agent_identity) == true
+                        || self.spawn_exec_phase.contains_key(agent_identity) == true,
+                    cause) == CreatedIdentityRecordVerdict::ChangesHeld
+            }
+            update {}
+            to Running
+            emit CreatedIdentityEntryRecorded { agent_identity: agent_identity, verdict: CreatedIdentityRecordVerdict::ChangesHeld }
+        }
+
+        // Refused, typed, for this identity: a new entry is owed its seat or its host's preparation, nothing else.
+        transition RecordCreatedIdentityEntryCauseRefused {
+            on input RecordCreatedIdentityEntry { agent_identity, cause }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "record_cause_refused" {
+                created_identity_record_verdict(
+                    self.composition_authority == CompositionAuthorityKind::Authoritative,
+                    self.identity_changes_held,
+                    self.identity_entry_unreadable.contains(agent_identity) == true,
+                    self.identity_entry_tombstones.contains(agent_identity) == true,
+                    self.identity_entry_origins.contains_key(agent_identity) == true,
+                    self.identity_to_runtime.contains_key(agent_identity) == true
+                        || self.member_session_bindings.contains_key(agent_identity) == true
+                        || self.pending_spawn_sessions.contains_key(agent_identity) == true
+                        || self.spawn_exec_phase.contains_key(agent_identity) == true,
+                    cause) == CreatedIdentityRecordVerdict::CauseRefused
+            }
+            update {}
+            to Running
+            emit CreatedIdentityEntryRecorded { agent_identity: agent_identity, verdict: CreatedIdentityRecordVerdict::CauseRefused }
+        }
+
+        // A mob that is not running records no entry.
+        transition RecordCreatedIdentityEntryMobNotRunning {
+            per_phase [Stopped, Completed, Destroyed]
+            on input RecordCreatedIdentityEntry { agent_identity, cause }
+            update {}
+            to Running
+            emit CreatedIdentityEntryRecorded { agent_identity: agent_identity, verdict: CreatedIdentityRecordVerdict::MobNotRunning }
+        }
+
+        // The host holds or releases the mob's identity changes, in every
+        // phase.
+        transition SetIdentityChangesHeld {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input SetIdentityChangesHeld { held }
+            update {
+                self.identity_changes_held = held;
+            }
+            to Running
+        }
+
+        // =====================================================================
         // Operator instructions (0.9.9)
         // =====================================================================
         //
@@ -35070,6 +35626,86 @@ pub enum RecoveredPresence {
     Tombstone,
     /// The row cannot be read by this build.
     Unreadable,
+}
+
+/// The store's receipt of an identity change's operation, as the change's
+/// commit step observed it ([`MobMachineInput::AdmitIdentityChange`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum IdentityChangeReceiptKind {
+    /// No change committed under the operation id.
+    #[default]
+    Absent,
+    /// The change committed under the id with the same request digest.
+    Same,
+    /// Another request committed under the id.
+    Other,
+}
+
+/// The form of an identity change's consent
+/// ([`MobMachineInput::AdmitIdentityChange`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum IdentityChangeConsentKind {
+    /// The host's change rule committed it without a decision.
+    #[default]
+    Policy,
+    /// A human decision, through its execution permit.
+    Decided,
+    /// Consent decided outside Meerkat, carried by an import.
+    Imported,
+}
+
+/// The admission verdict of one identity change
+/// ([`MobMachineInput::AdmitIdentityChange`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum IdentityChangeAdmissionKind {
+    /// The change is admitted: its commit step goes on.
+    #[default]
+    Admitted,
+    /// The change committed before with the same request: nothing is
+    /// written again.
+    Replayed,
+    /// Another request committed under the operation id.
+    OperationReused,
+    /// A candidate composition writes nothing.
+    NonAuthoritative,
+    /// The host holds the mob's identity changes: retryable.
+    ChangesHeld,
+    /// The decision's permit binds another operation or request.
+    DecisionUnbound,
+    /// The decision's permit is past its deadline.
+    DecisionExpired,
+    /// Imported consent from anyone but the host operator.
+    ImportedNotHostOperator,
+    /// An agent requester's grant no longer admits the change.
+    GrantRevoked,
+    /// The mob is not running.
+    MobNotRunning,
+}
+
+/// The verdict of one new store-owned entry's record
+/// ([`MobMachineInput::RecordCreatedIdentityEntry`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum CreatedIdentityRecordVerdict {
+    /// The entry is recorded, unseated with the record's cause.
+    #[default]
+    Recorded,
+    /// An identity entry of either custody holds the name.
+    NameHeldByIdentity,
+    /// A member, or a spawn under way, holds the name.
+    NameHeldByWorker,
+    /// The name is a removed identity's tombstone.
+    NameTombstoned,
+    /// The name's row cannot be read: it is reserved.
+    NameUnreadable,
+    /// A candidate composition records nothing.
+    NonAuthoritative,
+    /// The host holds the mob's identity changes.
+    ChangesHeld,
+    /// The record's cause is not a new entry's (a seat owed, or a pending
+    /// host preparation).
+    CauseRefused,
+    /// The mob is not running.
+    MobNotRunning,
 }
 
 /// Why an identity's host preparation is owed

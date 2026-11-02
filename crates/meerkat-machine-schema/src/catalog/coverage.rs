@@ -933,6 +933,34 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                         ]),
                 ),
                 machine_anchor(
+                    "mob_identity_change_authority",
+                    "MobMachine",
+                    "crates/meerkat-mob/src/runtime/identity_change.rs",
+                    "MobMachine identity changes realized by the store-owned writer: a change's commit step decides its admission on its prepared authority from the facts the shell observed there (the store's receipt of the operation, the consent's form, whether a decision's permit binds the change and admits a commit now, whether the requester is the host operator, and whether an agent requester's grant is current through its prepared check at this final sink), records each new store-owned entry (origin Created, unseated with its seat owed or its host preparation pending) or refuses its name typed, and only then stages the seats and writes the change's one store transaction; a refusal anywhere leaves the prepared authority unapplied and writes nothing; and the host holds or releases the mob's changes",
+                    CoverageClaims::none()
+                        .transitions(&[
+                            "AdmitIdentityChangeAdmitted",
+                            "AdmitIdentityChangeReplayed",
+                            "AdmitIdentityChangeOperationReused",
+                            "AdmitIdentityChangeNonAuthoritative",
+                            "AdmitIdentityChangeChangesHeld",
+                            "AdmitIdentityChangeDecisionUnbound",
+                            "AdmitIdentityChangeDecisionExpired",
+                            "AdmitIdentityChangeImportedNotHostOperator",
+                            "AdmitIdentityChangeGrantRevoked",
+                            "RecordCreatedIdentityEntryRecorded",
+                            "RecordCreatedIdentityEntryNameHeldByIdentity",
+                            "RecordCreatedIdentityEntryNameHeldByWorker",
+                            "RecordCreatedIdentityEntryNameTombstoned",
+                            "RecordCreatedIdentityEntryNameUnreadable",
+                            "SetIdentityChangesHeldRunning",
+                        ])
+                        .effects(&[
+                            "IdentityChangeAdmissionResolved",
+                            "CreatedIdentityEntryRecorded",
+                        ]),
+                ),
+                machine_anchor(
                     "mob_identity_entry_respawn_authority",
                     "MobMachine",
                     "crates/meerkat-mob/src/runtime/actor.rs",

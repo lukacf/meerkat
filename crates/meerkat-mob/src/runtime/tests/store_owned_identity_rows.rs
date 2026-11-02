@@ -307,48 +307,92 @@ impl StoreOwnedMob {
     }
 }
 
-/// The host's member build hook of `service`: each listed member's spawn
-/// grant narrowed to `profiles`, and manage scope over the mob when
-/// `manage` is set.
-fn narrow_grants(
-    service: &MockSessionService,
-    grants: Vec<(&'static str, Vec<&'static str>, bool)>,
-) {
-    service.set_member_build_hook(Arc::new(move |req: &mut CreateSessionRequest| {
-        let Some(build) = req.build.as_mut() else {
-            return;
-        };
-        let Some(member) = build.mob_member_binding.clone() else {
-            return;
-        };
-        let Some((_, profiles, manage)) = grants
-            .iter()
-            .find(|(name, _, _)| *name == member.member.as_str())
-        else {
-            return;
-        };
-        let Some(authority) = build.mob_tool_authority_context.as_ref() else {
-            return;
-        };
+/// The grants a row's host mints: each listed member's spawn grant narrowed
+/// to its profiles, with manage scope over the mob when its flag is set.
+type MemberGrants = Vec<(&'static str, Vec<&'static str>, bool)>;
+
+/// A host that mints [`MemberGrants`] in its member build hook and, for the
+/// reads of a grant that build nothing, in its grant mint: the same rule in
+/// both, as a host passes it.
+struct HostGrants(MemberGrants);
+
+impl HostGrants {
+    /// `member`'s grant over `authority`, when the host narrows it.
+    fn narrow(
+        &self,
+        mob_id: &str,
+        member: &str,
+        incarnation: meerkat_core::service::LiveMobIncarnation,
+        authority: &MobToolAuthorityContext,
+    ) -> Option<MobToolAuthorityContext> {
+        let (_, profiles, manage) = self.0.iter().find(|(name, _, _)| *name == member)?;
         let mut grant = meerkat_runtime::mob_operator_authority::restrict_spawn_profiles_in_mob(
             authority,
-            &member.mob_id,
+            mob_id,
             profiles.iter().copied(),
         )
         .expect("narrow the member's spawn grant");
         if *manage {
-            let witness = build
-                .mob_incarnation
-                .expect("the build carries the runtime's witness");
             grant = meerkat_runtime::mob_operator_authority::grant_manage_mob(
                 &grant,
-                member.mob_id.clone(),
-                witness,
+                mob_id.to_string(),
+                incarnation,
             )
             .expect("grant manage scope");
         }
-        build.mob_tool_authority_context = Some(grant);
-    }));
+        Some(grant)
+    }
+}
+
+impl MemberGrantMint for HostGrants {
+    fn mint(&self, request: &MemberGrantMintRequest<'_>) -> Option<MobToolAuthorityContext> {
+        let composed = request.composed?;
+        Some(
+            self.narrow(
+                request.mob_id.as_str(),
+                request.agent_identity.as_str(),
+                request.incarnation,
+                composed,
+            )
+            .unwrap_or_else(|| composed.clone()),
+        )
+    }
+}
+
+impl StoreOwnedMob {
+    /// [`Self::new`] over a host that mints `grants` (its member build hook,
+    /// and its grant mint).
+    async fn with_grants(label: &str, grants: MemberGrants) -> Self {
+        let host = Arc::new(HostGrants(grants));
+        let mint: Arc<dyn MemberGrantMint> = host.clone();
+        let mob = Self::build(
+            store_owned_definition(label),
+            MobStorage::in_memory(),
+            move |builder| builder.with_member_grant_mint(mint),
+        )
+        .await;
+        mob.service
+            .set_member_build_hook(Arc::new(move |req: &mut CreateSessionRequest| {
+                let Some(build) = req.build.as_mut() else {
+                    return;
+                };
+                let Some(member) = build.mob_member_binding.clone() else {
+                    return;
+                };
+                let (Some(authority), Some(witness)) = (
+                    build.mob_tool_authority_context.as_ref(),
+                    build.mob_incarnation,
+                ) else {
+                    return;
+                };
+                if let Some(grant) =
+                    host.narrow(&member.mob_id, member.member.as_str(), witness, authority)
+                {
+                    build.mob_tool_authority_context = Some(grant);
+                }
+            }));
+        mob
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -622,8 +666,11 @@ async fn a_create_wires_no_peer_it_does_not_list() {
 /// RED on the old tree: no admission exists.
 #[tokio::test]
 async fn an_agent_without_the_spawn_grant_for_the_profile_is_refused_profile_not_allowed() {
-    let mob = StoreOwnedMob::new("grant-profile-refused").await;
-    narrow_grants(&mob.service, vec![("requester", vec!["worker"], false)]);
+    let mob = StoreOwnedMob::with_grants(
+        "grant-profile-refused",
+        vec![("requester", vec!["worker"], false)],
+    )
+    .await;
     let session = mob.spawn_requester("requester").await;
     assert_eq!(
         refusal(
@@ -643,8 +690,11 @@ async fn an_agent_without_the_spawn_grant_for_the_profile_is_refused_profile_not
 /// RED on the old tree: no admission exists.
 #[tokio::test]
 async fn an_agent_with_a_spawn_profile_scope_creates_that_profile_only() {
-    let mob = StoreOwnedMob::new("grant-profile-scope").await;
-    narrow_grants(&mob.service, vec![("requester", vec!["worker"], false)]);
+    let mob = StoreOwnedMob::with_grants(
+        "grant-profile-scope",
+        vec![("requester", vec!["worker"], false)],
+    )
+    .await;
     let session = mob.spawn_requester("requester").await;
     let child = spec("child", "worker");
     let grant = mob
@@ -677,8 +727,8 @@ async fn an_agent_with_a_spawn_profile_scope_creates_that_profile_only() {
 /// RED on the old tree: no admission exists.
 #[tokio::test]
 async fn an_agent_with_manage_scope_creates_any_profile() {
-    let mob = StoreOwnedMob::new("grant-manage-scope").await;
-    narrow_grants(&mob.service, vec![("requester", vec![], true)]);
+    let mob =
+        StoreOwnedMob::with_grants("grant-manage-scope", vec![("requester", vec![], true)]).await;
     let session = mob.spawn_requester("requester").await;
     let boss = spec("boss", "lead");
     let grant = mob
@@ -703,14 +753,14 @@ async fn an_agent_with_manage_scope_creates_any_profile() {
 /// observed neither field.
 #[tokio::test]
 async fn a_binding_or_placement_in_the_spec_needs_manage_scope() {
-    let mob = StoreOwnedMob::new("grant-privileged").await;
-    narrow_grants(
-        &mob.service,
+    let mob = StoreOwnedMob::with_grants(
+        "grant-privileged",
         vec![
             ("requester", vec!["worker"], false),
             ("manager", vec![], true),
         ],
-    );
+    )
+    .await;
     let requester = mob.spawn_requester("requester").await;
     let manager = mob.spawn_requester("manager").await;
     let bound =

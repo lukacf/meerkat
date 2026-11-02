@@ -19,6 +19,7 @@ mod dormant_wiring;
 pub(super) mod explicit_resume;
 #[cfg(feature = "runtime-adapter")]
 mod host_preparation_hold;
+mod identity_change;
 mod identity_entry_admission;
 #[cfg(feature = "openai-live")]
 pub(super) mod live_durable_source_loads;
@@ -7012,6 +7013,9 @@ pub(super) struct PendingSpawn {
     /// Whether the spawn acts for the identity entry of its name
     /// (`SpawnMemberSpec::entry_custody`), carried to its ladder's open.
     pub(super) entry_custody: bool,
+    /// Whether the spawn acts for the store-owned entry of its name
+    /// (`SpawnMemberSpec::created_custody`), carried to its ladder's open.
+    pub(super) created_custody: bool,
     /// The notice a fresh seat embodied after the loss of the identity's
     /// archived session carries, for the spawn's row.
     pub(super) history_unavailable: Option<crate::runtime::HistoryUnavailable>,
@@ -7939,6 +7943,10 @@ struct SpawnFinalizeCtx {
     /// ladder's open carries it, and its membership commit records the
     /// member an entry (MobMachine's `spawn_exec_entry_custody`).
     entry_custody: bool,
+    /// Whether the spawn acts for the store-owned entry of its name: its
+    /// ladder's open carries it, and its membership commit keeps the member
+    /// that entry's (MobMachine's `spawn_exec_created_custody`).
+    created_custody: bool,
     /// The notice a fresh seat embodied after the loss of the identity's
     /// archived session carries: the spawn's row records it.
     history_unavailable: Option<crate::runtime::HistoryUnavailable>,
@@ -8060,6 +8068,7 @@ impl SpawnActivateState {
             fork_overlay,
             definition_wiring,
             entry_custody: _,
+            created_custody: _,
             // Recorded on the spawn's row at its admission.
             history_unavailable: _,
             fresh_life: _,
@@ -16502,6 +16511,7 @@ impl MobActor {
                 .provisioner
                 .member_session_authorities()
                 .unwrap_or_default(),
+            member_grant_mint: self.member_residency.member_grant_mint.clone(),
         }
     }
 
@@ -17743,6 +17753,7 @@ impl MobActor {
         authorized_profile_material: &AuthorizedSpawnProfileMaterial,
         bridge_session_id: Option<&SessionId>,
         entry_custody: bool,
+        created_custody: bool,
     ) -> Result<(), MobError> {
         let domain_identity = AgentIdentity::from(agent_identity.as_str());
         let generation = self.mint_spawn_generation(agent_identity)?;
@@ -17797,7 +17808,7 @@ impl MobActor {
                 effective_profile_override_present: false,
                 effective_model_override_present: false,
                 entry_custody,
-                created_custody: false,
+                created_custody,
             },
             "spawn_command_admission",
         )
@@ -17809,25 +17820,26 @@ impl MobActor {
         &self,
         agent_identity: &AgentIdentity,
         entry_custody: bool,
+        created_custody: bool,
     ) -> Result<(), MobError> {
         self.require_member_operation_eligible()?;
-        self.probe_member_admission(agent_identity, entry_custody)
+        self.probe_member_admission(agent_identity, entry_custody, created_custody)
     }
 
     /// Read-only MobMachine probe for member-admission duplication. The machine
     /// guard covers live runtime bindings, session bindings, and in-flight
     /// pending spawns, so this fully replaces the former shell-side
     /// `pending_spawns.contains_member` prechecks. An identity entry's name,
-    /// probed without entry custody, a created entry's name probed with
-    /// entry custody, and a reserved name (a removed created entry's, or
-    /// one whose entry this build cannot read) are refused
-    /// [`MobError::IdentityMember`] before anything is created.
+    /// probed without the custody of its origin, and a reserved name (a
+    /// removed created entry's, or one whose entry this build cannot read)
+    /// are refused [`MobError::IdentityMember`] before anything is created.
     fn probe_member_admission(
         &self,
         agent_identity: &AgentIdentity,
         entry_custody: bool,
+        created_custody: bool,
     ) -> Result<(), MobError> {
-        match self.member_admission_verdict(agent_identity, entry_custody, false)? {
+        match self.member_admission_verdict(agent_identity, entry_custody, created_custody)? {
             mob_dsl::MemberAdmissionVerdictKind::Admitted => Ok(()),
             mob_dsl::MemberAdmissionVerdictKind::DuplicateRejected => {
                 Err(MobError::MemberAlreadyExists(agent_identity.clone()))
@@ -31838,6 +31850,9 @@ impl MobActor {
                     .await;
                     let _ = reply_tx.send(result);
                 }
+                MobCommand::IdentityChange(command) => {
+                    Box::pin(self.handle_identity_change_command(*command)).await;
+                }
                 MobCommand::DeclareIdentityEntries {
                     declarations,
                     reply_tx,
@@ -35838,6 +35853,7 @@ impl MobActor {
             fork_overlay: entry.fork_overlay,
             definition_wiring: entry.definition_wiring,
             entry_custody: false,
+            created_custody: false,
             history_unavailable: None,
             fresh_life: false,
             objective_id: None,
@@ -36235,14 +36251,17 @@ impl MobActor {
             // A fresh life `rotate_member` embodies for an identity no member
             // held: its spawn row names the incarnation it follows.
             fresh_life,
-            // Read only by the dormant seat of a created entry owed its seat;
-            // a spawn ignores it.
-            created_custody: _,
+            // Whether the spawn acts for its name's store-owned entry: the
+            // spawn of a store-owned identity that owes a kickoff, and its
+            // seat's embodiment.
+            created_custody,
         } = spec;
         let agent_identity = AgentIdentity::from(identity.as_str());
         self.inline_step_watchdog
             .set_spawn_stage(SpawnInlineStage::CommandAdmission);
-        if let Err(error) = self.preview_spawn_command_admission(&agent_identity, entry_custody) {
+        if let Err(error) =
+            self.preview_spawn_command_admission(&agent_identity, entry_custody, created_custody)
+        {
             reject_spawn_before_custody!("command_admission", error);
         }
         // Normalize launch-mode resume/fork details for the provisioning path.
@@ -36477,6 +36496,7 @@ impl MobActor {
             fork_overlay,
             definition_wiring,
             entry_custody,
+            created_custody,
             history_unavailable,
             fresh_life,
             owner_bridge_session_id: owner_bridge_session_id.clone(),
@@ -37108,6 +37128,7 @@ impl MobActor {
             fork_overlay,
             definition_wiring,
             entry_custody,
+            created_custody,
             history_unavailable,
             fresh_life,
             owner_bridge_session_id,
@@ -37192,7 +37213,9 @@ impl MobActor {
             .set_spawn_stage(SpawnInlineStage::PreparedAdmission);
         // Actor state may have moved while the preparation ran: the mob may
         // have stopped, or the identity may have been admitted meanwhile.
-        if let Err(error) = self.preview_spawn_command_admission(&agent_identity, entry_custody) {
+        if let Err(error) =
+            self.preview_spawn_command_admission(&agent_identity, entry_custody, created_custody)
+        {
             reject_spawn_before_custody!("prepared_command_admission", error);
         }
         if self.roster.read().await.get(&agent_identity).is_some() {
@@ -37219,6 +37242,7 @@ impl MobActor {
                 &authorized_profile_material,
                 Some(&bridge_session_id),
                 entry_custody,
+                created_custody,
             ) {
                 reject_spawn_before_custody!("resume_admission", error);
             }
@@ -37321,6 +37345,7 @@ impl MobActor {
                 fork_overlay,
                 definition_wiring,
                 entry_custody,
+                created_custody,
                 history_unavailable,
                 fresh_life,
                 objective_id,
@@ -37385,6 +37410,7 @@ impl MobActor {
             &authorized_profile_material,
             spawn_bridge_session_id,
             entry_custody,
+            created_custody,
         ) {
             reject_spawn_before_custody!("spawn_admission", error);
         }
@@ -37539,6 +37565,7 @@ impl MobActor {
             fork_overlay,
             definition_wiring,
             entry_custody,
+            created_custody,
             history_unavailable,
             fresh_life,
             objective_id,
@@ -38620,7 +38647,10 @@ impl MobActor {
             )));
         }
         let agent_identity = AgentIdentity::from(identity.as_str());
-        if let Err(error) = self.preview_spawn_command_admission(&agent_identity, entry_custody) {
+        // A placed spawn carries no created custody yet.
+        if let Err(error) =
+            self.preview_spawn_command_admission(&agent_identity, entry_custody, false)
+        {
             fail!(error);
         }
         if agent_identity.is_system_reserved() {
@@ -39478,6 +39508,7 @@ impl MobActor {
             definition_wiring: crate::DefinitionWiring::Applies,
             // Refused above: a placed spawn never acts for an identity entry.
             entry_custody: false,
+            created_custody: false,
             history_unavailable: None,
             fresh_life: false,
             objective_id,
@@ -39775,6 +39806,7 @@ impl MobActor {
                 fork_overlay,
                 definition_wiring,
                 entry_custody,
+                created_custody,
                 history_unavailable,
                 fresh_life,
                 objective_id,
@@ -39981,6 +40013,7 @@ impl MobActor {
                                 fork_overlay,
                                 definition_wiring,
                                 entry_custody,
+                                created_custody,
                                 history_unavailable,
                                 fresh_life,
                                 objective_id,
@@ -40067,6 +40100,7 @@ impl MobActor {
                                 fork_overlay,
                                 definition_wiring,
                                 entry_custody,
+                                created_custody,
                                 history_unavailable,
                                 fresh_life,
                                 objective_id,
@@ -40228,7 +40262,7 @@ impl MobActor {
                 "meerkat id '{agent_identity}' uses reserved system identifier namespace"
             )));
         }
-        self.probe_member_admission(agent_identity, false)?;
+        self.probe_member_admission(agent_identity, false, false)?;
         {
             let roster = self.roster.read().await;
             if roster.get(agent_identity).is_some() {
@@ -40457,6 +40491,7 @@ impl MobActor {
             // Built from the definition: its wiring rules apply.
             definition_wiring: crate::DefinitionWiring::Applies,
             entry_custody: false,
+            created_custody: false,
             history_unavailable: None,
             fresh_life: false,
             objective_id: None,
@@ -41014,7 +41049,7 @@ impl MobActor {
                     // The spawn acts for its name's identity entry exactly
                     // when its spec carried entry custody.
                     entry_custody: ctx.entry_custody,
-                    created_custody: false,
+                    created_custody: ctx.created_custody,
                 },
                 "finalize_spawn_admit_begin_spawn_exec",
             );

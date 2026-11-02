@@ -4430,6 +4430,46 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
                 "RecoveredPresence",
                 &["Present", "PresentUnseated", "Tombstone", "Unreadable"],
             ),
+            // Identity changes (0.9.9): a change's receipt and consent as its
+            // commit step observed them, its admission verdict, and the
+            // verdict of a new store-owned entry's record.
+            NamedTypeBinding::string_enum(
+                "IdentityChangeReceiptKind",
+                &["Absent", "Same", "Other"],
+            ),
+            NamedTypeBinding::string_enum(
+                "IdentityChangeConsentKind",
+                &["Policy", "Decided", "Imported"],
+            ),
+            NamedTypeBinding::string_enum(
+                "IdentityChangeAdmissionKind",
+                &[
+                    "Admitted",
+                    "Replayed",
+                    "OperationReused",
+                    "NonAuthoritative",
+                    "ChangesHeld",
+                    "DecisionUnbound",
+                    "DecisionExpired",
+                    "ImportedNotHostOperator",
+                    "GrantRevoked",
+                    "MobNotRunning",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "CreatedIdentityRecordVerdict",
+                &[
+                    "Recorded",
+                    "NameHeldByIdentity",
+                    "NameHeldByWorker",
+                    "NameTombstoned",
+                    "NameUnreadable",
+                    "NonAuthoritative",
+                    "ChangesHeld",
+                    "CauseRefused",
+                    "MobNotRunning",
+                ],
+            ),
             NamedTypeBinding::string("RuntimeEpochId"),
             NamedTypeBinding::string("ResumeAttemptId"),
             NamedTypeBinding::u64("MobDefinitionEpoch"),
@@ -5085,6 +5125,12 @@ runtime_internal_inputs!(
         // The reset's preflight admission, probed by the actor before the
         // reset's retirement batch. Not a surface command.
         AdmitReset,
+        // Identity changes: the actor's commit step decides a change's
+        // admission and records each new store-owned entry, and the handle
+        // holds or releases the mob's changes. None is a surface command.
+        AdmitIdentityChange,
+        RecordCreatedIdentityEntry,
+        SetIdentityChangesHeld,
     ]
 );
 

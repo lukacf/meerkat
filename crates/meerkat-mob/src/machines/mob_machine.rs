@@ -42,6 +42,14 @@ pub use meerkat_machine_schema::catalog::dsl::mob_machine::{
     AgentLaneMemberAdmissionKind, IdentityEntryOrigin, LegacyIdentityEntryAdoptionKind,
     RecoveredPresence,
 };
+// Identity changes (0.9.9): a change's receipt and consent as its commit
+// step observed them, its admission verdict, and the verdict of a new
+// store-owned entry's record. The schema's own types, one definition for
+// both instantiations of the machine.
+pub use meerkat_machine_schema::catalog::dsl::mob_machine::{
+    CreatedIdentityRecordVerdict, IdentityChangeAdmissionKind, IdentityChangeConsentKind,
+    IdentityChangeReceiptKind,
+};
 // Rotation targets and the refusal reason of a fresh-life respawn: the
 // schema's own types, one definition for both instantiations of the machine.
 pub use meerkat_machine_schema::catalog::dsl::mob_machine::{RespawnRefusalReason, RotationTarget};
@@ -3686,6 +3694,8 @@ mod tests {
                 privileged_tool_access_policy_present: false,
                 privileged_tooling_present: false,
                 privileged_auth_binding_present: false,
+                privileged_binding_present: false,
+                privileged_placement_present: false,
             };
             set_privileged(&mut input);
             input
@@ -3723,7 +3733,7 @@ mod tests {
 
         // No manage scope + ANY privileged arg present -> Denied. Exercise EACH
         // privileged field independently to prove the machine ORs the full SET.
-        let privileged_setters: [(&str, fn(&mut MobMachineInput)); 8] = [
+        let privileged_setters: [(&str, fn(&mut MobMachineInput)); 10] = [
             ("resume_bridge_session", |i| {
                 if let MobMachineInput::ResolveSpawnMemberAdmission {
                     privileged_resume_bridge_session_present,
@@ -3794,6 +3804,25 @@ mod tests {
                 } = i
                 {
                     *privileged_auth_binding_present = true;
+                }
+            }),
+            // An identity spec's runtime binding and placement (0.9.9).
+            ("binding", |i| {
+                if let MobMachineInput::ResolveSpawnMemberAdmission {
+                    privileged_binding_present,
+                    ..
+                } = i
+                {
+                    *privileged_binding_present = true;
+                }
+            }),
+            ("placement", |i| {
+                if let MobMachineInput::ResolveSpawnMemberAdmission {
+                    privileged_placement_present,
+                    ..
+                } = i
+                {
+                    *privileged_placement_present = true;
                 }
             }),
         ];

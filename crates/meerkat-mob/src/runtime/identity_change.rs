@@ -40,18 +40,37 @@
 //! revoke nothing: the check reads its identity, never its session. Host and
 //! human requests carry no grant.
 
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
+
+use crate::tokio::sync::{RwLock, oneshot, watch};
 use meerkat_core::SessionId;
-use meerkat_core::approval::decision::ConsentProvenance;
+use meerkat_core::approval::decision::{ConsentProvenance, DecisionOperationId, Sha256Digest};
 use meerkat_core::authorization::PreparedOperationCheck;
 use meerkat_core::service::{LiveMobIncarnation, MobToolAuthorityContext};
+use meerkat_core::{
+    AuthorizationOperation, OperationAuthorizationError, OperationAuthorizationFacts,
+    OperationExecutionScope, OperationId, OperationRefusalKind, OperationRefused,
+    OperationReviewTier, OwnerQualifiedTarget, PreparedAuthorizationBinding,
+    PreparedOperationAuthorization, PrincipalKind, PrincipalRef, SourceAuthorizationFacts,
+    SourceAuthorizationTarget, SourceAuthorizationUse, WorkAuthorization, WorkAuthorizationContext,
+};
 use meerkat_runtime::decision::DecisionExecutionPermit;
 
+use super::handle::SpawnMemberSpec;
+use super::roster_authority::RosterAuthority;
 use crate::MobError;
+use crate::definition::MobDefinition;
+use crate::event::MobEvent;
 use crate::identity::{
-    CreatedIdentitySpec, IdentityChangeReceipt, IdentityPolicyOutcome, IdentityPreparationMode,
-    IdentitySourceEvidence,
+    CreatedIdentityPresence, CreatedIdentityProvenance, CreatedIdentityRecord, CreatedIdentitySpec,
+    IDENTITY_CHANGE_BATCH_MAX, IdentityChangeConsent, IdentityChangeEntryOutcome,
+    IdentityChangeKind, IdentityChangeReceipt, IdentityChangeReceiptEntry, IdentityChangeRequester,
+    IdentityEntered, IdentityPolicyOutcome, IdentityPreparationMode, IdentitySourceEvidence,
 };
 use crate::ids::{AgentIdentity, MobId, ProfileName};
+use crate::machines::mob_machine as mob_dsl;
+use crate::store::{CreatedIdentityRowExpectation, CreatedIdentityRowWrite, IdentityChangeCommit};
 
 /// One identity change's operation: the id its caller chose and the
 /// canonical digest of its normalized request. A retry with the same id and
@@ -443,7 +462,7 @@ pub struct IdentityChangeGrant {
 }
 
 impl IdentityChangeGrant {
-    pub(crate) fn new(
+    pub(super) fn new(
         requester: AgentIdentity,
         operation_id: String,
         check: PreparedOperationCheck,
@@ -520,7 +539,670 @@ pub trait MemberGrantMint: Send + Sync {
     }
 }
 
+/// The error of a refused identity change.
+pub(super) fn refused(refusal: IdentityChangeRefusal) -> MobError {
+    MobError::IdentityChangeRefused { refusal }
+}
+
+/// The current time in UNIX milliseconds.
+pub(super) fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|elapsed| u64::try_from(elapsed.as_millis()).ok())
+        .unwrap_or(u64::MAX)
+}
+
+// ---------------------------------------------------------------------------
+// The request: its shape, and each identity's seat spec
+// ---------------------------------------------------------------------------
+
+/// Refuse a create whose shape no commit can take: no identity, more than
+/// one change commits, an identity named twice, an invalid spec, operation
+/// id or request digest.
+fn validate_create(create: &StoreOwnedIdentityCreate) -> Result<(), IdentityChangeRefusal> {
+    let invalid = |problem: String| IdentityChangeRefusal::InvalidRequest { problem };
+    if create.identities.len() > IDENTITY_CHANGE_BATCH_MAX {
+        return Err(IdentityChangeRefusal::BatchTooLarge {
+            max: IDENTITY_CHANGE_BATCH_MAX,
+        });
+    }
+    if create.identities.is_empty() {
+        return Err(invalid("a create names no identity".to_string()));
+    }
+    if create.operation.operation_id.trim().is_empty()
+        || create.operation.request_digest.trim().is_empty()
+    {
+        return Err(invalid(
+            "a change needs an operation id and a request digest".to_string(),
+        ));
+    }
+    let mut named = BTreeSet::new();
+    for request in &create.identities {
+        request
+            .spec
+            .validate()
+            .map_err(|error| invalid(error.to_string()))?;
+        if !named.insert(&request.spec.identity) {
+            return Err(invalid(format!(
+                "'{}' is named twice in one change",
+                request.spec.identity
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// The runtime binding a spec's wire binding names.
+fn runtime_binding_from_wire(
+    binding: meerkat_contracts::WireRuntimeBinding,
+) -> Result<crate::RuntimeBinding, IdentityChangeRefusal> {
+    match binding {
+        meerkat_contracts::WireRuntimeBinding::Session => Ok(crate::RuntimeBinding::Session),
+        meerkat_contracts::WireRuntimeBinding::External {
+            address,
+            bootstrap_token,
+            identity,
+        } => {
+            let resolved =
+                identity
+                    .resolve()
+                    .map_err(|error| IdentityChangeRefusal::InvalidRequest {
+                        problem: format!("the spec's external binding: {error}"),
+                    })?;
+            Ok(crate::RuntimeBinding::External {
+                peer_id: resolved.peer_id.to_string(),
+                address,
+                bootstrap_token,
+                pubkey: resolved.pubkey,
+            })
+        }
+    }
+}
+
+/// The seat spec of a store-owned identity's declared spec: exactly what a
+/// roster-owned identity of the same spec is seated with (its profile, its
+/// runtime mode, its labels, its context and instructions, its initial
+/// message, its binding and placement), as a host root, under created
+/// custody. The spec's display name and addressability are the host's
+/// reads; nothing of the seat holds them.
+pub(super) fn lower_created_spec(
+    spec: &CreatedIdentitySpec,
+) -> Result<SpawnMemberSpec, IdentityChangeRefusal> {
+    let mut seat = SpawnMemberSpec::host_root(spec.profile.clone(), spec.identity.clone());
+    seat.runtime_mode = spec.runtime_mode_override;
+    seat.backend = spec.backend;
+    seat.binding = spec
+        .binding
+        .clone()
+        .map(runtime_binding_from_wire)
+        .transpose()?;
+    seat.placement = spec
+        .placement
+        .as_ref()
+        .map(|host| mob_dsl::HostId(host.0.clone()));
+    seat.context = spec.context.clone();
+    seat.labels = Some(spec.labels.clone());
+    seat.additional_instructions = Some(spec.additional_instructions.clone());
+    seat.initial_message = spec.initial_message.clone();
+    seat.created_custody = true;
+    Ok(seat)
+}
+
+/// One identity a create's plan takes: its seat spec, and its preparation.
+pub(super) struct CreatedIdentityPlanItem {
+    pub(super) spec: SpawnMemberSpec,
+    pub(super) preparation: IdentityPreparationMode,
+}
+
+impl CreatedIdentityPlanItem {
+    /// The cause a new entry of this identity is unseated for until its seat
+    /// or its host's preparation.
+    pub(super) fn unseated_cause(&self) -> mob_dsl::UnseatedEntryCause {
+        match self.preparation {
+            IdentityPreparationMode::None => mob_dsl::UnseatedEntryCause::SeatOwed,
+            _ => mob_dsl::UnseatedEntryCause::PreparationPending,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Admission facts and the machine's verdicts
+// ---------------------------------------------------------------------------
+
+/// The facts of a change's admission the handle observes: its consent's form,
+/// whether a decision's permit binds the change and admits a commit now, and
+/// whether the requester is the host operator. The actor observes the
+/// store's receipt and the grant itself.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct ChangeAdmissionFacts {
+    pub(super) consent: mob_dsl::IdentityChangeConsentKind,
+    pub(super) permit_binds: bool,
+    pub(super) permit_admits: bool,
+    pub(super) host_operator: bool,
+}
+
+/// The refusal a non-admitting admission verdict answers; `None` for
+/// `Admitted` and `Replayed`.
+pub(super) fn admission_refusal(
+    verdict: mob_dsl::IdentityChangeAdmissionKind,
+    operation_id: &str,
+) -> Option<IdentityChangeRefusal> {
+    use mob_dsl::IdentityChangeAdmissionKind as Verdict;
+    match verdict {
+        Verdict::Admitted | Verdict::Replayed => None,
+        Verdict::OperationReused => Some(IdentityChangeRefusal::OperationReused {
+            operation_id: operation_id.to_string(),
+        }),
+        Verdict::NonAuthoritative => Some(IdentityChangeRefusal::CandidateLaunch),
+        Verdict::ChangesHeld => Some(IdentityChangeRefusal::ChangesHeld),
+        Verdict::DecisionUnbound => Some(IdentityChangeRefusal::SubjectWidened),
+        Verdict::DecisionExpired => {
+            Some(IdentityChangeRefusal::DecisionClosed { state: "expired" })
+        }
+        Verdict::ImportedNotHostOperator => Some(IdentityChangeRefusal::ImportRefused),
+        Verdict::GrantRevoked => Some(IdentityChangeRefusal::GrantRevoked),
+        Verdict::MobNotRunning => Some(IdentityChangeRefusal::MobNotRunning),
+    }
+}
+
+/// The refusal a new entry's record verdict answers; `None` for
+/// `Recorded`.
+pub(super) fn record_refusal(
+    verdict: mob_dsl::CreatedIdentityRecordVerdict,
+    identity: &AgentIdentity,
+) -> Option<Result<IdentityChangeRefusal, MobError>> {
+    use mob_dsl::CreatedIdentityRecordVerdict as Verdict;
+    let taken = |by| {
+        Some(Ok(IdentityChangeRefusal::NameTaken {
+            identity: identity.clone(),
+            by,
+        }))
+    };
+    match verdict {
+        Verdict::Recorded => None,
+        Verdict::NameHeldByIdentity => taken(IdentityNameHolder::Identity),
+        Verdict::NameHeldByWorker => taken(IdentityNameHolder::Worker),
+        Verdict::NameTombstoned => taken(IdentityNameHolder::Removed),
+        Verdict::NameUnreadable => taken(IdentityNameHolder::Unreadable),
+        Verdict::NonAuthoritative => Some(Ok(IdentityChangeRefusal::CandidateLaunch)),
+        Verdict::ChangesHeld => Some(Ok(IdentityChangeRefusal::ChangesHeld)),
+        Verdict::MobNotRunning => Some(Ok(IdentityChangeRefusal::MobNotRunning)),
+        Verdict::CauseRefused => Some(Err(MobError::Internal(format!(
+            "MobMachine refused the cause of '{identity}'s new entry"
+        )))),
+    }
+}
+
+/// The journal rows a change's store transaction committed, or the typed
+/// answer of one it did not.
+pub(super) fn committed_change_events(
+    commit: IdentityChangeCommit,
+) -> Result<Vec<MobEvent>, MobError> {
+    match commit {
+        IdentityChangeCommit::Committed { events } => Ok(events),
+        IdentityChangeCommit::OperationReused { receipt } => {
+            Err(refused(IdentityChangeRefusal::OperationReused {
+                operation_id: receipt.operation_id,
+            }))
+        }
+        IdentityChangeCommit::RowConflict { identity, current } => {
+            let by = match current {
+                Some(crate::identity::CreatedIdentityObservation::Created(row))
+                    if row.presence == CreatedIdentityPresence::Removed =>
+                {
+                    IdentityNameHolder::Removed
+                }
+                Some(crate::identity::CreatedIdentityObservation::Unreadable { .. }) => {
+                    IdentityNameHolder::Unreadable
+                }
+                _ => IdentityNameHolder::Identity,
+            };
+            Err(refused(IdentityChangeRefusal::NameTaken { identity, by }))
+        }
+        IdentityChangeCommit::Replayed { .. } => Err(MobError::Internal(
+            "a change's receipt was committed during its own commit step".to_string(),
+        )),
+    }
+}
+
+/// Whether the change's grant is current at its commit, the final sink: its
+/// prepared check, current, or prepared afresh for a decided change, which
+/// waited for its decision (its owners answer from the requester identity's
+/// current grant either way). A refusal is a revoked grant; an owner that
+/// cannot answer fails the step, retryable.
+pub(super) fn grant_current_at_the_sink(
+    grant: &IdentityChangeGrant,
+    decided: bool,
+) -> Result<bool, MobError> {
+    let checked = if decided {
+        grant.check().reprepared()
+    } else {
+        grant.check().current()
+    };
+    match checked {
+        Ok(_) => Ok(true),
+        Err(OperationAuthorizationError::Refused(refusal))
+            if refusal.kind() == OperationRefusalKind::ReprepareRequired =>
+        {
+            // The owner's facts moved again while it prepared: one more
+            // preparation decides.
+            match grant.check().current() {
+                Ok(_) => Ok(true),
+                Err(OperationAuthorizationError::Refused(_)) => Ok(false),
+                Err(error) => Err(MobError::Internal(format!(
+                    "the identity change's grant could not be read: {error}"
+                ))),
+            }
+        }
+        Err(OperationAuthorizationError::Refused(_)) => Ok(false),
+        Err(error) => Err(MobError::Internal(format!(
+            "the identity change's grant could not be read: {error}"
+        ))),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The commands the actor serves
+// ---------------------------------------------------------------------------
+
+/// What a create's plan answers.
+pub(super) enum CreatePlanAnswer {
+    /// The operation committed before with the same request.
+    Replayed(IdentityChangeReceipt),
+    /// What each identity's commit needs, in request order.
+    Planned(CreatePlan),
+}
+
+/// A create's plan: each identity's seat, spawn or wait, and where the seats
+/// take their members' endpoints from.
+pub(super) struct CreatePlan {
+    pub(super) entries: Vec<CreatePlanEntry>,
+    pub(super) endpoint_source: Result<
+        super::dormant_seat::MemberSeatEndpointSource,
+        super::dormant_seat::MemberSeatEndpointsUnavailable,
+    >,
+}
+
+/// One identity of a create's plan.
+pub(super) enum CreatePlanEntry {
+    /// Seated Dormant by the commit step: what its seat needs.
+    Seat(Box<super::dormant_seat::DormantSeatCandidate>),
+    /// Spawned once the change is committed: its spec owes a kickoff (an
+    /// initial message, or an autonomous host's kickoff turn), and a fresh
+    /// member that owes one is embodied by a spawn, as the dormant seat
+    /// embodies one.
+    Embody(Box<SpawnMemberSpec>),
+    /// Unseated until its host's preparation settles.
+    Preparing,
+}
+
+/// What a create's commit step takes.
+pub(super) struct CreateCommit {
+    pub(super) operation: IdentityOperation,
+    pub(super) facts: ChangeAdmissionFacts,
+    pub(super) grant: Option<IdentityChangeGrant>,
+    pub(super) decided: bool,
+    pub(super) requester: IdentityChangeRequester,
+    pub(super) consent: IdentityChangeConsent,
+    pub(super) proposer: Option<String>,
+    pub(super) source_evidence: Option<IdentitySourceEvidence>,
+    /// Each identity, in request order, with its new entry's cause.
+    pub(super) identities: Vec<(CreatedIdentityRequest, mob_dsl::UnseatedEntryCause)>,
+    /// The prepared seats of the identities seated Dormant.
+    pub(super) seats: Vec<super::dormant_seat::DormantSeatCommitEntry>,
+}
+
+/// What a create's commit step answers.
+pub(super) enum CreateCommitted {
+    Committed(IdentityChangeReceipt),
+    Replayed(IdentityChangeReceipt),
+}
+
+/// One step of a store-owned identity change on the actor.
+pub(super) enum IdentityChangeCommand {
+    /// Plan a create.
+    PlanCreate {
+        operation: IdentityOperation,
+        facts: ChangeAdmissionFacts,
+        grant: Option<IdentityChangeGrant>,
+        decided: bool,
+        items: Vec<CreatedIdentityPlanItem>,
+        reply_tx: oneshot::Sender<Result<CreatePlanAnswer, MobError>>,
+    },
+    /// Commit a planned and prepared create.
+    CommitCreate {
+        commit: Box<CreateCommit>,
+        reply_tx: oneshot::Sender<Result<CreateCommitted, MobError>>,
+    },
+    /// Hold or release the mob's identity changes.
+    SetHeld {
+        held: bool,
+        reply_tx: oneshot::Sender<Result<(), MobError>>,
+    },
+}
+
+impl IdentityChangeCommand {
+    /// Answer the command with `error`, unserved.
+    pub(super) fn reply_error(self, error: MobError) {
+        match self {
+            Self::PlanCreate { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(error));
+            }
+            Self::CommitCreate { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(error));
+            }
+            Self::SetHeld { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(error));
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The grant: its owner reads the requester identity's current grant
+// ---------------------------------------------------------------------------
+
+/// The namespace of an identity change's prepared operation.
+const IDENTITY_CHANGE_OPERATION_NAMESPACE: &str = "meerkat.mob.identity_change";
+
+/// The binding of an identity change's prepared check: a domain operation
+/// that retains the change's operation of `requester` in this mob, owned by
+/// the mob's runtime host. Only the change's own grant owner reads it.
+fn identity_change_binding(
+    mob_id: &MobId,
+    operation_id: &str,
+    requester: &AgentIdentity,
+) -> Result<PreparedAuthorizationBinding, MobError> {
+    let authority = PrincipalRef::new(PrincipalKind::RuntimeHost, mob_id.as_str())
+        .map_err(|error| MobError::Internal(format!("the mob's principal: {error}")))?;
+    Ok(PreparedAuthorizationBinding::new(
+        OperationAuthorizationFacts {
+            operation_id: OperationId::new(),
+            execution_scope: OperationExecutionScope::Domain,
+            run_id: None,
+            context_revision: None,
+            operation: AuthorizationOperation::Source(SourceAuthorizationFacts {
+                target: SourceAuthorizationTarget::External(OwnerQualifiedTarget {
+                    authority,
+                    namespace: Arc::from(IDENTITY_CHANGE_OPERATION_NAMESPACE),
+                    id: Arc::from(format!("{operation_id}/{requester}")),
+                }),
+                usage: SourceAuthorizationUse::Retain,
+            }),
+        },
+    ))
+}
+
+/// What reads an identity's current grant without building it: the
+/// published machine state, the roster, the definition and the host's mint.
+#[derive(Clone)]
+pub(super) struct MemberGrantReader {
+    mob_id: MobId,
+    incarnation: LiveMobIncarnation,
+    definition: Arc<MobDefinition>,
+    roster: Arc<RwLock<RosterAuthority>>,
+    machine_state: watch::Receiver<mob_dsl::MobMachineState>,
+    mint: Option<Arc<dyn MemberGrantMint>>,
+    /// Whether each realm-referenced profile of the mob has mob tools, as
+    /// the admission resolved it.
+    realm_mob_tools: Arc<BTreeMap<ProfileName, bool>>,
+}
+
+impl MemberGrantReader {
+    /// Whether `profile` has mob tools: an inline profile's own flag, a
+    /// realm-referenced one's as the admission resolved it.
+    fn profile_mob_tools(
+        &self,
+        profile: &ProfileName,
+    ) -> Result<bool, OperationAuthorizationError> {
+        match self.definition.profiles.get(profile) {
+            Some(binding) => match binding.as_inline() {
+                Some(inline) => Ok(inline.tools.mob),
+                None => self
+                    .realm_mob_tools
+                    .get(profile)
+                    .copied()
+                    .ok_or(OperationAuthorizationError::Unavailable),
+            },
+            None => Ok(false),
+        }
+    }
+
+    /// `identity`'s current grant, as its next build would carry it: the
+    /// authority the runtime composes for its current profile (a profile
+    /// with mob tools spawns every profile of the mob), through the host's
+    /// mint. `None` when it holds none: no member holds the identity, or its
+    /// profile has no mob tools and the host mints none. Reads no session, so
+    /// a dormant identity's grant is read without waking it.
+    fn current_identity_grant(
+        &self,
+        identity: &AgentIdentity,
+    ) -> Result<Option<MobToolAuthorityContext>, OperationAuthorizationError> {
+        if !self
+            .machine_state
+            .borrow()
+            .identity_to_runtime
+            .contains_key(&mob_dsl::AgentIdentity::from_domain(identity))
+        {
+            return Ok(None);
+        }
+        let (profile, mob_tools) = {
+            let roster = self
+                .roster
+                .try_read()
+                .map_err(|_| OperationAuthorizationError::Unavailable)?;
+            let Some(entry) = roster.get(identity) else {
+                return Ok(None);
+            };
+            let mob_tools = match entry.effective_profile_override.as_ref() {
+                Some(profile) => profile.tools.mob,
+                None => self.profile_mob_tools(&entry.role)?,
+            };
+            (entry.role.clone(), mob_tools)
+        };
+        let composed = if mob_tools {
+            crate::build::default_member_mob_operator_authority(
+                &self.definition,
+                &self.mob_id,
+                self.incarnation,
+            )
+            .map_err(|_| OperationAuthorizationError::Unavailable)?
+        } else {
+            None
+        };
+        Ok(match &self.mint {
+            Some(mint) => mint.mint(&MemberGrantMintRequest {
+                mob_id: &self.mob_id,
+                agent_identity: identity,
+                profile: &profile,
+                incarnation: self.incarnation,
+                composed: composed.as_ref(),
+            }),
+            None => composed,
+        })
+    }
+
+    fn mint_revision(&self) -> u64 {
+        self.mint.as_ref().map_or(0, |mint| mint.revision())
+    }
+}
+
+/// Whether MobMachine's spawn admission admits every entry of `request`
+/// under `grant`, from the grant's raw facts (its manage scope over the mob
+/// and its spawn scope's membership of each profile) and the privileged
+/// fields each spec sets, as the spawn tools feed them. A pure verdict, asked
+/// of a scratch instance of the machine.
+fn spawn_admission_admits(
+    grant: Option<&MobToolAuthorityContext>,
+    mob_id: &MobId,
+    incarnation: meerkat_core::service::MobIncarnationId,
+    request: &IdentityGrantRequest,
+) -> Result<bool, OperationAuthorizationError> {
+    let manage = grant.is_some_and(|grant| grant.can_manage_mob(mob_id.as_str(), incarnation));
+    for entry in &request.entries {
+        let profile_contains = grant.is_some_and(|grant| {
+            grant.spawn_profile_scope_contains(mob_id.as_str(), incarnation, entry.profile.as_str())
+        });
+        let mut scratch = mob_dsl::MobMachineAuthority::new();
+        let admission = mob_dsl::MobMachineMutator::apply(
+            &mut scratch,
+            spawn_admission_input(manage, profile_contains, entry, true),
+        )
+        .map_err(|_| OperationAuthorizationError::Unavailable)?
+        .effects()
+        .iter()
+        .find_map(|effect| match effect {
+            mob_dsl::MobMachineEffect::SpawnMemberAdmissionResolved { admission } => {
+                Some(*admission)
+            }
+            _ => None,
+        })
+        .ok_or(OperationAuthorizationError::Unavailable)?;
+        if admission != mob_dsl::MobSpawnMemberAdmissionKind::Allowed {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// MobMachine's spawn admission input for one identity of a change: the
+/// grant's raw facts and, when `privileged`, the privileged fields its spec
+/// sets.
+fn spawn_admission_input(
+    manage_scope_present: bool,
+    profile_scope_contains: bool,
+    entry: &IdentityGrantEntry,
+    privileged: bool,
+) -> mob_dsl::MobMachineInput {
+    mob_dsl::MobMachineInput::ResolveSpawnMemberAdmission {
+        manage_scope_present,
+        profile_scope_contains,
+        privileged_resume_bridge_session_present: false,
+        privileged_resume_session_present: false,
+        privileged_backend_present: privileged && entry.backend_present,
+        privileged_runtime_mode_present: privileged && entry.runtime_mode_present,
+        privileged_launch_mode_present: false,
+        privileged_tool_access_policy_present: false,
+        privileged_tooling_present: false,
+        privileged_auth_binding_present: false,
+        privileged_binding_present: privileged && entry.binding_present,
+        privileged_placement_present: privileged && entry.placement_present,
+    }
+}
+
+/// The owner of an identity change's prepared check: it answers from the
+/// requester identity's current grant, never its session, so dormancy, a
+/// new activation and a session reset revoke nothing, and a grant revoked
+/// while the change waits refuses it.
+struct IdentityChangeGrantOwner {
+    reader: MemberGrantReader,
+    requester: AgentIdentity,
+    request: IdentityGrantRequest,
+    binding_id: Arc<str>,
+}
+
+impl IdentityChangeGrantOwner {
+    /// Whether `binding` is this change's own.
+    fn binds(&self, binding: &PreparedAuthorizationBinding) -> bool {
+        matches!(
+            &binding.facts().operation,
+            AuthorizationOperation::Source(SourceAuthorizationFacts {
+                target: SourceAuthorizationTarget::External(target),
+                usage: SourceAuthorizationUse::Retain,
+            }) if target.namespace.as_ref() == IDENTITY_CHANGE_OPERATION_NAMESPACE
+                && target.id == self.binding_id
+        )
+    }
+}
+
+impl WorkAuthorization for IdentityChangeGrantOwner {
+    fn prepare(
+        &self,
+        binding: &PreparedAuthorizationBinding,
+    ) -> Result<Arc<dyn PreparedOperationAuthorization>, OperationAuthorizationError> {
+        if !self.binds(binding) {
+            return Err(OperationRefused::new(OperationRefusalKind::MalformedFacts).into());
+        }
+        // What the decision observes, taken before the read: any later
+        // change of either asks for a new preparation.
+        let mut machine_state = self.reader.machine_state.clone();
+        let _ = machine_state.borrow_and_update();
+        let mint_revision = self.reader.mint_revision();
+        let grant = self.reader.current_identity_grant(&self.requester)?;
+        if !spawn_admission_admits(
+            grant.as_ref(),
+            &self.reader.mob_id,
+            self.reader.incarnation.incarnation(),
+            &self.request,
+        )? {
+            return Err(OperationRefused::new(OperationRefusalKind::Denied).into());
+        }
+        Ok(Arc::new(IdentityChangeGrantDecision {
+            binding: binding.clone(),
+            machine_state,
+            mint: self.reader.mint.clone(),
+            mint_revision,
+        }))
+    }
+}
+
+/// One preparation's decision: current while the machine state, the roster
+/// and the host's mint it read have not moved.
+struct IdentityChangeGrantDecision {
+    binding: PreparedAuthorizationBinding,
+    machine_state: watch::Receiver<mob_dsl::MobMachineState>,
+    mint: Option<Arc<dyn MemberGrantMint>>,
+    mint_revision: u64,
+}
+
+impl PreparedOperationAuthorization for IdentityChangeGrantDecision {
+    fn review_tier(&self) -> OperationReviewTier {
+        OperationReviewTier::R1
+    }
+
+    fn check_current(
+        &self,
+        binding: &PreparedAuthorizationBinding,
+    ) -> Result<(), OperationAuthorizationError> {
+        let moved = !self.binding.same_operation(binding)
+            || self.machine_state.has_changed().unwrap_or(true)
+            || self
+                .mint
+                .as_ref()
+                .is_some_and(|mint| mint.revision() != self.mint_revision);
+        if moved {
+            Err(OperationRefused::new(OperationRefusalKind::ReprepareRequired).into())
+        } else {
+            Ok(())
+        }
+    }
+}
+
 impl super::MobHandle {
+    /// The reader of this mob's members' current grants.
+    async fn member_grant_reader(&self) -> Result<MemberGrantReader, MobError> {
+        let mut realm_mob_tools = BTreeMap::new();
+        for (name, binding) in &self.definition.profiles {
+            if binding.as_inline().is_none() {
+                let profile = self
+                    .definition
+                    .resolve_profile(name, self.realm_profile_store.as_ref())
+                    .await?;
+                realm_mob_tools.insert(name.clone(), profile.tools.mob);
+            }
+        }
+        Ok(MemberGrantReader {
+            mob_id: self.definition.id.clone(),
+            incarnation: self.live_incarnation(),
+            definition: Arc::clone(&self.definition),
+            roster: Arc::clone(&self.roster),
+            machine_state: self.machine_state_watch_rx.clone(),
+            mint: self.member_grant_mint.clone(),
+            realm_mob_tools: Arc::new(realm_mob_tools),
+        })
+    }
+
     /// Admit an agent requester's identity change by its ordinary spawn
     /// grant: the live grant of `origin_session`, the requesting member's
     /// session as the dispatch that carries the request names it (never a
@@ -543,9 +1225,107 @@ impl super::MobHandle {
         operation: &IdentityOperation,
         request: &IdentityGrantRequest,
     ) -> Result<IdentityChangeGrant, MobError> {
-        let _ = (origin_session, operation, request);
-        Err(MobError::Internal(
-            "store-owned identity changes are not built yet".to_string(),
+        if request.entries.is_empty() {
+            return Err(refused(IdentityChangeRefusal::InvalidRequest {
+                problem: "the change names no identity".to_string(),
+            }));
+        }
+        for entry in &request.entries {
+            if !self.definition.profiles.contains_key(&entry.profile) {
+                return Err(refused(IdentityChangeRefusal::ProfileUnknown {
+                    profile: entry.profile.clone(),
+                }));
+            }
+        }
+        let first_profile = request.entries[0].profile.clone();
+        let Some((requester, _)) = self.member_of_session(origin_session).await else {
+            // A session no member of this mob holds holds no grant here.
+            return Err(refused(IdentityChangeRefusal::ProfileNotAllowed {
+                profile: first_profile,
+            }));
+        };
+        // The receiver's two raw facts for the requesting session, fed to
+        // MobMachine's spawn admission as the spawn tools feed them: first
+        // the profile alone, then with the privileged fields the spec sets.
+        let manage_scope_present = self.member_manage_scope_contains(origin_session);
+        let mut asked: Vec<(
+            super::SpawnMemberAdmissionObservations,
+            super::SpawnMemberAdmission,
+        )> = Vec::new();
+        for entry in &request.entries {
+            let profile_scope_contains =
+                self.member_spawn_profile_scope_contains(origin_session, entry.profile.as_str());
+            for privileged in [false, true] {
+                let observations = super::SpawnMemberAdmissionObservations {
+                    manage_scope_present,
+                    profile_scope_contains,
+                    backend_present: privileged && entry.backend_present,
+                    runtime_mode_present: privileged && entry.runtime_mode_present,
+                    binding_present: privileged && entry.binding_present,
+                    placement_present: privileged && entry.placement_present,
+                    ..super::SpawnMemberAdmissionObservations::default()
+                };
+                let admission = match asked.iter().find(|(asked, _)| *asked == observations) {
+                    Some((_, admission)) => *admission,
+                    None => {
+                        let admission = self.resolve_spawn_member_admission(observations).await?;
+                        asked.push((observations, admission));
+                        admission
+                    }
+                };
+                if admission == super::SpawnMemberAdmission::Allowed {
+                    continue;
+                }
+                return Err(refused(if privileged {
+                    IdentityChangeRefusal::PrivilegedField {
+                        field: privileged_field(entry),
+                    }
+                } else {
+                    IdentityChangeRefusal::ProfileNotAllowed {
+                        profile: entry.profile.clone(),
+                    }
+                }));
+            }
+        }
+        let owner = IdentityChangeGrantOwner {
+            reader: self.member_grant_reader().await?,
+            requester: requester.clone(),
+            request: request.clone(),
+            binding_id: Arc::from(format!("{}/{requester}", operation.operation_id)),
+        };
+        let context =
+            WorkAuthorizationContext::new(Arc::new(owner), OperationExecutionScope::Domain);
+        // The requester identity's grant, read now as the commit will read it
+        // again: a host whose mint disagrees with the grant its build hook
+        // minted is refused here, typed. The owner reads the roster without
+        // waiting; a read that met the actor's write is asked again.
+        const GRANT_READ_ATTEMPTS: usize = 8;
+        let mut attempt = 0;
+        let check = loop {
+            attempt += 1;
+            let binding =
+                identity_change_binding(self.mob_id(), &operation.operation_id, &requester)?;
+            match PreparedOperationCheck::prepare(context.clone(), binding) {
+                Ok(check) => break check,
+                Err(OperationAuthorizationError::Refused(_)) => {
+                    return Err(refused(IdentityChangeRefusal::ProfileNotAllowed {
+                        profile: first_profile,
+                    }));
+                }
+                Err(OperationAuthorizationError::Unavailable) if attempt < GRANT_READ_ATTEMPTS => {
+                    crate::tokio::task::yield_now().await;
+                }
+                Err(error) => {
+                    return Err(MobError::Internal(format!(
+                        "the identity change's grant could not be read: {error}"
+                    )));
+                }
+            }
+        };
+        Ok(IdentityChangeGrant::new(
+            requester,
+            operation.operation_id.clone(),
+            check,
         ))
     }
 
@@ -578,10 +1358,210 @@ impl super::MobHandle {
         create: StoreOwnedIdentityCreate,
         consent: IdentityChangeConsentInput<'_>,
     ) -> Result<IdentityChangeOutcome, MobError> {
-        let _ = (create, consent);
-        Err(MobError::Internal(
-            "store-owned identity changes are not built yet".to_string(),
-        ))
+        use super::dormant_seat::prepare_dormant_seat;
+        use futures::StreamExt as _;
+
+        validate_create(&create).map_err(refused)?;
+        if self.identity_member.is_none() {
+            return Err(refused(IdentityChangeRefusal::StorageUnsupported));
+        }
+        let StoreOwnedIdentityCreate {
+            operation,
+            requester,
+            proposer,
+            source_evidence,
+            identities,
+        } = create;
+        let mut items = Vec::with_capacity(identities.len());
+        for request in &identities {
+            if !self.definition.profiles.contains_key(&request.spec.profile) {
+                return Err(refused(IdentityChangeRefusal::ProfileUnknown {
+                    profile: request.spec.profile.clone(),
+                }));
+            }
+            if request.spec.is_hosted() {
+                return Err(refused(IdentityChangeRefusal::Unsupported {
+                    feature: "a placed or externally bound store-owned identity".to_string(),
+                }));
+            }
+            items.push(CreatedIdentityPlanItem {
+                spec: lower_created_spec(&request.spec).map_err(refused)?,
+                preparation: request.preparation,
+            });
+        }
+        let (requester_record, host_operator, grant) = match requester {
+            IdentityChangeRequesterInput::Agent { grant } => {
+                if grant.operation_id() != operation.operation_id {
+                    return Err(refused(IdentityChangeRefusal::InvalidRequest {
+                        problem: "the requester's grant admits another operation".to_string(),
+                    }));
+                }
+                (
+                    IdentityChangeRequester::Agent {
+                        identity: grant.requester().clone(),
+                    },
+                    false,
+                    Some(grant),
+                )
+            }
+            IdentityChangeRequesterInput::Host {
+                surface,
+                host_operator,
+            } => (
+                IdentityChangeRequester::Host { surface },
+                host_operator,
+                None,
+            ),
+            IdentityChangeRequesterInput::Human { principal } => {
+                (IdentityChangeRequester::Human { principal }, false, None)
+            }
+        };
+        let (consent_record, consent_kind, decided) = match consent {
+            IdentityChangeConsentInput::Policy(outcome) => (
+                IdentityChangeConsent::Policy { outcome },
+                mob_dsl::IdentityChangeConsentKind::Policy,
+                false,
+            ),
+            IdentityChangeConsentInput::Decided(permit) => (
+                IdentityChangeConsent::Decided {
+                    provenance: permit.consent().clone(),
+                },
+                mob_dsl::IdentityChangeConsentKind::Decided,
+                true,
+            ),
+            IdentityChangeConsentInput::Imported(provenance) => (
+                IdentityChangeConsent::Imported {
+                    provenance: provenance.clone(),
+                },
+                mob_dsl::IdentityChangeConsentKind::Imported,
+                false,
+            ),
+        };
+        let permit = match consent {
+            IdentityChangeConsentInput::Decided(permit) => Some(permit),
+            _ => None,
+        };
+        let permit_binds = permit.is_some_and(|permit| {
+            match (
+                DecisionOperationId::new(operation.operation_id.clone()),
+                Sha256Digest::new(operation.request_digest.clone()),
+            ) {
+                (Ok(operation_id), Ok(request_digest)) => {
+                    permit.binds(&operation_id, &request_digest)
+                }
+                _ => false,
+            }
+        });
+        let facts = |now_ms: u64| ChangeAdmissionFacts {
+            consent: consent_kind,
+            permit_binds,
+            permit_admits: permit.is_some_and(|permit| permit.admits_commit_at(now_ms)),
+            host_operator,
+        };
+
+        // The plan: the change's admission and its entries' records probed,
+        // and each identity's seat planned.
+        let answer = self
+            .send_actor_command(|reply_tx| {
+                super::MobCommand::IdentityChange(Box::new(IdentityChangeCommand::PlanCreate {
+                    operation: operation.clone(),
+                    facts: facts(now_ms()),
+                    grant: grant.clone(),
+                    decided,
+                    items,
+                    reply_tx,
+                }))
+            })
+            .await??;
+        let CreatePlan {
+            entries,
+            endpoint_source,
+        } = match answer {
+            CreatePlanAnswer::Replayed(receipt) => {
+                return Ok(IdentityChangeOutcome::Replayed { receipt });
+            }
+            CreatePlanAnswer::Planned(plan) => plan,
+        };
+
+        // Each seat's session and endpoint, off the actor; one that cannot
+        // be prepared fails the change, and nothing is written.
+        let mut embody = Vec::new();
+        let mut candidates = Vec::new();
+        for entry in entries {
+            match entry {
+                CreatePlanEntry::Seat(candidate) => candidates.push(candidate),
+                CreatePlanEntry::Embody(spec) => embody.push(*spec),
+                CreatePlanEntry::Preparing => {}
+            }
+        }
+        let session_service = self.session_service.as_ref();
+        let mob_id = &self.definition.id;
+        let prepared = futures::stream::iter(candidates)
+            .map(|candidate| {
+                let endpoint_source = endpoint_source.as_ref();
+                async move {
+                    prepare_dormant_seat(session_service, endpoint_source, mob_id, candidate).await
+                }
+            })
+            .buffered(super::dormant_seat::DORMANT_SEAT_PREPARE_CONCURRENCY)
+            .collect::<Vec<_>>()
+            .await;
+        let mut seats = Vec::with_capacity(prepared.len());
+        for prepared in prepared {
+            seats.push(prepared.map_err(|outcome| (*outcome).into_unseated_error())?);
+        }
+
+        let identities = identities
+            .into_iter()
+            .map(|request| {
+                let cause = match request.preparation {
+                    IdentityPreparationMode::None => mob_dsl::UnseatedEntryCause::SeatOwed,
+                    _ => mob_dsl::UnseatedEntryCause::PreparationPending,
+                };
+                (request, cause)
+            })
+            .collect::<Vec<_>>();
+        let committed = self
+            .send_actor_command(|reply_tx| {
+                super::MobCommand::IdentityChange(Box::new(IdentityChangeCommand::CommitCreate {
+                    commit: Box::new(CreateCommit {
+                        operation,
+                        facts: facts(now_ms()),
+                        grant,
+                        decided,
+                        requester: requester_record,
+                        consent: consent_record,
+                        proposer,
+                        source_evidence,
+                        identities,
+                        seats,
+                    }),
+                    reply_tx,
+                }))
+            })
+            .await??;
+        let receipt = match committed {
+            CreateCommitted::Replayed(receipt) => {
+                return Ok(IdentityChangeOutcome::Replayed { receipt });
+            }
+            CreateCommitted::Committed(receipt) => receipt,
+        };
+        // The identities whose specs owe a kickoff, spawned under created
+        // custody now that their rows and entries are committed: each runs
+        // its kickoff once. One whose spawn fails stays owed its seat, which
+        // the mob's next start seats from its row.
+        for spec in embody {
+            let agent_identity = spec.identity.clone();
+            if let Err(error) = Box::pin(self.spawn_spec_internal(spec)).await {
+                tracing::warn!(
+                    mob_id = %self.definition.id,
+                    agent_identity = %agent_identity,
+                    error = %error,
+                    "a store-owned identity that owes a kickoff was not spawned"
+                );
+            }
+        }
+        Ok(IdentityChangeOutcome::Committed { receipt })
     }
 
     /// Hold or release this mob's identity changes: while they are held,
@@ -590,10 +1570,13 @@ impl super::MobHandle {
     /// holds changes holds them again at its next start
     /// ([`super::MobBuilder::with_identity_changes_held`]).
     pub async fn set_identity_changes_held(&self, held: bool) -> Result<(), MobError> {
-        let _ = held;
-        Err(MobError::Internal(
-            "store-owned identity changes are not built yet".to_string(),
-        ))
+        self.send_actor_command(|reply_tx| {
+            super::MobCommand::IdentityChange(Box::new(IdentityChangeCommand::SetHeld {
+                held,
+                reply_tx,
+            }))
+        })
+        .await?
     }
 
     /// The receipt of the change committed under `operation_id` in this mob,
@@ -602,9 +1585,100 @@ impl super::MobHandle {
         &self,
         operation_id: &str,
     ) -> Result<Option<IdentityChangeReceipt>, MobError> {
-        let _ = operation_id;
-        Err(MobError::Internal(
-            "store-owned identity changes are not built yet".to_string(),
-        ))
+        let store = self
+            .identity_member
+            .as_ref()
+            .ok_or_else(|| refused(IdentityChangeRefusal::StorageUnsupported))?;
+        Ok(store
+            .observe_identity_change_receipt(self.mob_id(), operation_id)
+            .await?)
     }
+}
+
+/// The first privileged field `entry`'s spec sets, in the order a refusal
+/// names one.
+fn privileged_field(entry: &IdentityGrantEntry) -> &'static str {
+    if entry.runtime_mode_present {
+        "runtime_mode_override"
+    } else if entry.backend_present {
+        "backend"
+    } else if entry.binding_present {
+        "binding"
+    } else {
+        "placement"
+    }
+}
+
+/// A create's rows and receipt, sealed at its commit: each identity's row
+/// at revision 1 with its spec, its presence and the change's provenance,
+/// and the change's receipt with the requester and the consent.
+pub(super) fn create_rows_and_receipt(
+    mob_id: &MobId,
+    commit: &CreateCommit,
+    committed_at_ms: u64,
+) -> Result<(Vec<CreatedIdentityRowWrite>, IdentityChangeReceipt), MobError> {
+    let invalid = |error: crate::identity::IdentityIntentError| {
+        MobError::Internal(format!("a store-owned identity's row: {error}"))
+    };
+    let mut rows = Vec::with_capacity(commit.identities.len());
+    let mut entries = Vec::with_capacity(commit.identities.len());
+    for (request, cause) in &commit.identities {
+        let pending = *cause == mob_dsl::UnseatedEntryCause::PreparationPending;
+        let presence = if pending {
+            CreatedIdentityPresence::PendingPreparation {
+                attempt: 0,
+                constructed: request.preparation == IdentityPreparationMode::Constructed,
+            }
+        } else {
+            CreatedIdentityPresence::Present
+        };
+        let mut provenance = CreatedIdentityProvenance::entered(
+            IdentityEntered::Created,
+            commit.operation.operation_id.clone(),
+            committed_at_ms,
+            commit.requester.clone(),
+            commit.consent.clone(),
+        );
+        if let Some(proposer) = &commit.proposer {
+            provenance = provenance.with_proposer(proposer.clone());
+        }
+        if let Some(evidence) = &commit.source_evidence {
+            provenance = provenance.with_source_evidence(evidence.clone());
+        }
+        let record = CreatedIdentityRecord::with_spec(
+            mob_id.clone(),
+            request.spec.clone(),
+            1,
+            presence,
+            provenance,
+        )
+        .map_err(invalid)?;
+        let spec_digest = request.spec.spec_digest().map_err(invalid)?;
+        entries.push(
+            IdentityChangeReceiptEntry::new(
+                request.spec.identity.clone(),
+                if pending {
+                    IdentityChangeEntryOutcome::PendingPreparation
+                } else {
+                    IdentityChangeEntryOutcome::Committed
+                },
+            )
+            .with_spec(spec_digest, Some(1)),
+        );
+        rows.push(CreatedIdentityRowWrite {
+            record,
+            expected: CreatedIdentityRowExpectation::Absent,
+        });
+    }
+    let receipt = IdentityChangeReceipt::sealed(
+        mob_id.clone(),
+        commit.operation.operation_id.clone(),
+        commit.operation.request_digest.clone(),
+        IdentityChangeKind::Create,
+        entries,
+        committed_at_ms,
+    )
+    .and_then(|receipt| receipt.with_attribution(commit.requester.clone(), commit.consent.clone()))
+    .map_err(invalid)?;
+    Ok((rows, receipt))
 }

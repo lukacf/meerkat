@@ -6467,6 +6467,10 @@ pub struct MobHandle {
     /// build; see [`MobHandle::member_spawn_profile_scope_contains`].
     pub(super) member_session_authorities:
         Arc<super::member_session_authority::MemberSessionAuthorities>,
+    /// The host's mint of a member's grant, for the reads of an identity's
+    /// current grant that build nothing
+    /// ([`super::MobBuilder::with_member_grant_mint`]).
+    pub(super) member_grant_mint: Option<Arc<dyn super::MemberGrantMint>>,
 }
 
 /// Per-member retained per-spawn tool overlays (`SpawnMemberSpec::external_tools`)
@@ -20557,8 +20561,8 @@ impl MobHandle {
             tool_access_policy_present,
             tooling_present,
             auth_binding_present,
-            binding_present: _,
-            placement_present: _,
+            binding_present,
+            placement_present,
         } = observations;
         let effects = self
             .apply_machine_input_effects(mob_dsl::MobMachineInput::ResolveSpawnMemberAdmission {
@@ -20572,6 +20576,8 @@ impl MobHandle {
                 privileged_tool_access_policy_present: tool_access_policy_present,
                 privileged_tooling_present: tooling_present,
                 privileged_auth_binding_present: auth_binding_present,
+                privileged_binding_present: binding_present,
+                privileged_placement_present: placement_present,
             })
             .await?;
         let admission = effects

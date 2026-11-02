@@ -9561,6 +9561,7 @@ impl MobBuilder {
                 member_session_authorities: runtime_provisioner
                     .member_session_authorities()
                     .unwrap_or_default(),
+                member_grant_mint: wiring.member_residency.member_grant_mint.clone(),
             };
             // session_service is still live here (not consumed until start_runtime_with_components)
             if let Some(hook) = before_activation {
@@ -11245,6 +11246,7 @@ impl MobBuilder {
                 member_session_authorities: provisioner
                     .member_session_authorities()
                     .unwrap_or_default(),
+                member_grant_mint: member_residency.member_grant_mint.clone(),
             };
             if let Some(hook) = before_activation {
                 hook(handle.read_handle()).await?;

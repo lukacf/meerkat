@@ -171,6 +171,9 @@ impl MobCommand {
             // member's standing: no worker reconcile or agent-lane command
             // acts on it afterwards.
             | Self::AdoptLegacyIdentityEntry { .. }
+            // A store-owned identity change creates, changes or ends
+            // identities, the declared apply's class.
+            | Self::IdentityChange(_)
             // The declared apply decides identity entries' standing and its
             // seal retires the members of unlisted ones.
             | Self::DeclareIdentityEntries { .. }
@@ -479,6 +482,7 @@ impl MobCommand {
                 }
             },
             Self::AdoptLegacyIdentityEntry { .. }
+            | Self::IdentityChange(_)
             | Self::DeclareIdentityEntries { .. }
             | Self::SealDeclaredRoster { .. }
             | Self::OpenDeclaredApply { .. }
@@ -768,6 +772,7 @@ impl MobCommand {
             Self::AdoptLegacyIdentityEntry { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(error));
             }
+            Self::IdentityChange(command) => (*command).reply_error(error),
             Self::DeclareIdentityEntries { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(error));
             }

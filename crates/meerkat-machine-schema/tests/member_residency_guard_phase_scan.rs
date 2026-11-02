@@ -91,8 +91,10 @@ const REQUIRED_ARM_FAMILIES: &[&str] = &[
 /// it, the worker reconcile and ensure, the replay of an entry's row and of
 /// an unlisted retirement, the legacy adoption, the agent lane's member
 /// admission, the declared apply (its verdicts, its seal and the release of
-/// an archived session record), and the recovery of a created entry's row.
-/// They are written one arm per lifecycle phase as the residency arms are.
+/// an archived session record), the recovery of a created entry's row, and
+/// the identity changes (a change's admission, the record of a new
+/// store-owned entry and the host's changes hold). They are written one arm
+/// per lifecycle phase as the residency arms are.
 const IDENTITY_ENTRY_ARM_PREFIXES: &[&str] = &[
     "ProbeMemberAdmission",
     "BeginSpawnExec",
@@ -108,6 +110,9 @@ const IDENTITY_ENTRY_ARM_PREFIXES: &[&str] = &[
     "SealDeclaredRoster",
     "ForgetArchivedSession",
     "RecoverCreatedIdentityEntry",
+    "AdmitIdentityChange",
+    "RecordCreatedIdentityEntry",
+    "SetIdentityChangesHeld",
 ];
 
 /// Identity-entry families that must each name at least one arm.
@@ -130,6 +135,11 @@ const REQUIRED_IDENTITY_ENTRY_ARM_FAMILIES: &[&str] = &[
     "DeclareIdentityEntryRefusedNameUnreadable",
     "RecoverCreatedIdentityEntryRetired",
     "RecoverCreatedIdentityEntryUnreadable",
+    "AdmitIdentityChangeAdmitted",
+    "AdmitIdentityChangeMobNotRunning",
+    "RecordCreatedIdentityEntryRecorded",
+    "RecordCreatedIdentityEntryMobNotRunning",
+    "SetIdentityChangesHeld",
 ];
 
 /// Transition-name prefixes of the `MeerkatMachine` arms that serve member

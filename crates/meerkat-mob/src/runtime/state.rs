@@ -1561,6 +1561,10 @@ pub(super) enum MobCommand {
         reply_tx:
             oneshot::Sender<Result<mob_dsl::LegacyIdentityEntryAdoptionKind, crate::MobError>>,
     },
+    /// One step of a store-owned identity change
+    /// (`MobHandle::create_store_owned_identities`, the changes hold): its
+    /// plan, its commit step, or the host's hold.
+    IdentityChange(Box<super::identity_change::IdentityChangeCommand>),
     /// Decide one chunk of a declared roster's identities in one MobMachine
     /// step (`MobHandle::apply_declared_roster`): each identity's verdict.
     DeclareIdentityEntries {
@@ -2403,6 +2407,7 @@ impl MobCommand {
             Self::StartMemberRotation { .. } => ShutdownAnswerClass::CallerRequest,
             Self::CommitDormantSeats { .. } => ShutdownAnswerClass::CallerRequest,
             Self::AdoptLegacyIdentityEntry { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::IdentityChange(_) => ShutdownAnswerClass::CallerRequest,
             Self::DeclareIdentityEntries { .. } => ShutdownAnswerClass::CallerRequest,
             Self::OpenDeclaredApply { .. } => ShutdownAnswerClass::CallerRequest,
             // The lease's close is retained through a Shutdown step: a
@@ -2652,6 +2657,7 @@ impl MobCommand {
             Self::StartMemberRotation { .. } => "StartMemberRotation",
             Self::CommitDormantSeats { .. } => "CommitDormantSeats",
             Self::AdoptLegacyIdentityEntry { .. } => "AdoptLegacyIdentityEntry",
+            Self::IdentityChange(_) => "IdentityChange",
             Self::DeclareIdentityEntries { .. } => "DeclareIdentityEntries",
             Self::OpenDeclaredApply { .. } => "OpenDeclaredApply",
             Self::CloseDeclaredApply { .. } => "CloseDeclaredApply",

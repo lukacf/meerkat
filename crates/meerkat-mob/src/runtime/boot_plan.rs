@@ -620,8 +620,9 @@ pub(crate) async fn scan_boot_obligations_among(
 
 /// Seed the host's member-residency inputs into MobMachine: once per start,
 /// on the fresh authority, before any replay or plan. The policy, the
-/// composition authority and the host-pending set are machine state from
-/// then on: every plan, wake and seat reads them there.
+/// composition authority, the host-pending set and the host's hold of the
+/// mob's identity changes are machine state from then on: every plan, wake,
+/// seat and change reads them there.
 pub(crate) fn seed_member_residency(
     authority: &mut mob_dsl::MobMachineAuthority,
     config: &MemberResidencyConfig,
@@ -636,13 +637,24 @@ pub(crate) fn seed_member_residency(
             .map(mob_dsl::AgentIdentity::from_domain)
             .collect(),
     };
-    mob_dsl::MobMachineMutator::apply(authority, input)
-        .map(|_| ())
+    mob_dsl::MobMachineMutator::apply(authority, input).map_err(|error| {
+        MobError::Internal(format!(
+            "MobMachine ({context}) rejected the member residency seed: {error}"
+        ))
+    })?;
+    // The host's hold of the mob's identity changes, from its start.
+    if config.identity_changes_held {
+        mob_dsl::MobMachineMutator::apply(
+            authority,
+            mob_dsl::MobMachineInput::SetIdentityChangesHeld { held: true },
+        )
         .map_err(|error| {
             MobError::Internal(format!(
-                "MobMachine ({context}) rejected the member residency seed: {error}"
+                "MobMachine ({context}) rejected the identity changes hold: {error}"
             ))
-        })
+        })?;
+    }
+    Ok(())
 }
 
 /// What one start's `PlanBootMaterialization` inputs decided.

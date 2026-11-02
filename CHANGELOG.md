@@ -369,7 +369,7 @@ them.
 
 - `meerkat-runtime`, `meerkat-machine-schema`, `meerkat-machine-kernels`: the
   AuthMachine withdraws a lease on a consumer's refusal only while the lease
-  carries the publication the refusal names (see Fixed). `AuthMachineInput`
+  carries the publication the refusal names (see Added). `AuthMachineInput`
   and `AuthMachineInputVariant` gain `MarkPublicationRefused {
   refused_credential_generation, refused_credential_material_fingerprint }`,
   appended last, in the `auth_machine::dsl` bridge copies (meerkat-runtime)
@@ -1502,6 +1502,39 @@ them.
   these routes, and any configured Copilot route turns them off.
   `RealmConnectionSet::copilot_token_default` returns them.
 
+- `meerkat-copilot`, `meerkat-runtime`, `meerkat-core`: how a
+  `github_copilot_token` route uses its token. It sends
+  `Copilot-Integration-Id: copilot-developer-cli`, GitHub Copilot CLI's
+  integration id, which the Copilot API accepts for personal access tokens
+  (it refuses `vscode-chat`, which the device sign-in keeps sending), unless
+  the backend options set `integration_id`; GitHub's identity lookup gets
+  no integration id. `CopilotBackendConfig::from_token_options` builds that
+  configuration, also for `verify_operator_token`. When GitHub's identity
+  lookup answers 403 or 404 (it may not answer a fine-grained personal
+  access token), the route uses the default API host
+  `https://api.githubcopilot.com` with no login or plan, and only once the
+  account's model list loads there; a 401 from that list refuses the token,
+  and `CopilotAccountIdentity::looked_up` says whether the lookup answered.
+  A GitHub secondary rate limit (a 403 whose message says so, with or
+  without `Retry-After`) pauses the lookup like any rate limit, at least a
+  minute, and a command or resolver source is not run meanwhile. GitHub's
+  refusal of a token withdraws the account only while its lease carries the
+  publication the token was admitted under (for a stored token, the stored
+  record's own publication; see Breaking): a refusal that arrives after a
+  newer token was published fails that request, and the requests of the
+  same account state waiting on the same lookup, as `stale_credential`, and
+  the next request uses the newer token.
+  `AuthLeaseHandle::mark_publication_refused` (meerkat-core) publishes such
+  a refusal; its default fails a refusal closed until an implementation
+  provides it, and the `meerkat::auth::audit` lifecycle events record each
+  refusal with `action = mark_publication_refused`, one that changes
+  nothing included (its `from_phase` equals its `to_phase`). A route whose
+  token comes from a command with `refresh_interval_ms` reports the expiry
+  of the publication its token serves, so session builds within the
+  interval reuse the token instead of running the command and looking the
+  account up again.
+  (#2007, thanks @walter-chung) (#1992, thanks @patrick-juhl)
+
 - `meerkat-core`, `meerkat-runtime`, `meerkat-store`, `meerkat`,
   `meerkat-rpc`, `meerkat-machine-schema`: durable decisions. A durable
   decision holds one operation, sealed by the operation id and request digest
@@ -2435,33 +2468,6 @@ them.
   unaffected. An exchange 401, or a 403 that asks for an account action,
   still fails the build and asks for a new login.
 
-- `meerkat-copilot`, `meerkat-runtime`: GitHub's refusal of an operator
-  token (`github_copilot_token`) no longer withdraws a newer token. When two
-  account states share the account's lease (two provider registries, or two
-  credential stores) and one of them published a newer token from the
-  source while a request with the earlier token was in flight, GitHub's
-  refusal of the earlier token moved the account to `reauth_required` and
-  refused the newer token as well, until the source yielded yet another
-  value. A refusal now names the publication its token was admitted under
-  (the lease generation and, for a source the route reads itself, the
-  token's fingerprint), and the AuthMachine withdraws the lease only while
-  it carries that publication (see Breaking). A refusal of the current
-  token still moves the account to `reauth_required`; a refusal of an
-  earlier one fails only its own request, as `stale_credential`, and the
-  next request uses the newer token.
-  `AuthLeaseHandle::mark_publication_refused` (meerkat-core) is new; its
-  default fails closed, so other `AuthLeaseHandle` implementations are
-  unaffected. Thanks to @walter-chung (#2007), who proposed the property.
-
-- `meerkat-copilot`: building a session on a `github_copilot_token` route
-  whose token comes from a command with `refresh_interval_ms` no longer runs
-  the command again and repeats the GitHub account lookup and model listing.
-  The route reported no expiry while the account's lease carried the
-  interval, so every session build published the lease again, and the next
-  request read the source anew. The route now reports the expiry of the
-  lease publication its token serves: within the interval a build reuses
-  the lease, and the command runs at the interval it declares.
-
 - `meerkat-session`: a turn in flight when an embedding host's runtime stops
   is now treated as ended with that runtime. The check a runtime loop uses
   for this (`session_task_ended_with_its_runtime`) also required the session
@@ -3149,18 +3155,22 @@ them.
 
 - `meerkat-core`, `meerkat-llm-core`, `meerkat-openai`, `meerkat-anthropic`,
   `meerkat-copilot`: a credential that a provider, proxy or gateway echoes
-  back no longer reaches errors or logs. In GitHub Copilot token mode
-  (`github_copilot_token`) the bearer of every request is the operator's
-  long-lived GitHub token. The Responses, OpenAI-compatible Chat Completions
-  and Anthropic Messages clients now pass what they read from a response (a
-  rejection body, a stream error event, a data line that does not parse,
-  the provider error fields they log) through their authorizer before it
-  reaches a caller or a log, and every error keeps its class. The GitHub
-  Copilot authorizer removes the last four bearer values its account signed
-  requests with (the operator's GitHub token in token mode, the derived
-  Copilot token otherwise), and the GitHub `message` that an account
-  lookup, model listing or token exchange error quotes no longer carries
-  the token its request sent. For embedders:
+  back verbatim no longer reaches the errors or logs of a model request. In
+  GitHub Copilot token mode (`github_copilot_token`) the bearer of every
+  request is the operator's long-lived GitHub token. The Responses,
+  OpenAI-compatible Chat Completions and Anthropic Messages clients now pass
+  what they read from a text generation response (a rejection body, a
+  stream error event, a data line that does not parse, the provider error
+  fields they log) through their authorizer before it reaches a caller or
+  a log, and every error keeps its class. Image generation responses do not
+  pass through it (no GitHub Copilot route generates images), and an echo
+  a gateway altered (escaped, encoded or cut) can escape it. The GitHub
+  Copilot authorizer, the only one that implements the hook, removes the
+  last four bearer values its account signed requests with (the operator's
+  GitHub token in token mode, the derived Copilot token otherwise), and the
+  GitHub `message` that an account lookup, model listing or token exchange
+  error quotes no longer carries the token its request sent. For
+  embedders:
   `HttpAuthorizer::redact_response_diagnostic` (a provided method whose
   default leaves the diagnostic unchanged, so existing authorizers keep
   their behaviour), `LlmError::redact_diagnostics`,
@@ -3168,13 +3178,18 @@ them.
   `meerkat_llm_core::http::sensitive_header_value` are new. Ported from
   #2007; thanks to @walter-chung.
 
-- `meerkat-openai`, `meerkat-anthropic`: the header values a dynamic
-  authorizer supplies (the `Authorization` bearer among them) are marked
-  sensitive on every Responses, Chat Completions and Messages request, so
-  the request's `Debug` does not print them and HTTP/2 never indexes them.
-  A value that is not a valid header value now fails the request as
-  `authentication_failed` before it is sent; it failed when sent, as an
-  unknown error. Ported from #2007; thanks to @walter-chung.
+- `meerkat-llm-core`, `meerkat-openai`, `meerkat-anthropic`: credential
+  header values are marked sensitive on every Responses, Chat Completions
+  and Messages request, so the request's `Debug` does not print them and
+  HTTP/2 never indexes them: the values a dynamic authorizer supplies (the
+  `Authorization` bearer among them) and a static API key's (the public
+  API's `Authorization` bearer, Azure OpenAI's `api-key`, the compatible
+  client's bearer token, Anthropic's `x-api-key`). A value that is not a
+  valid header value now fails the request as `authentication_failed`
+  before it is sent; it failed later, with a generic error. A static key a
+  gateway echoes back is not redacted, and the Gemini client's credential
+  headers are unchanged. The authorizer part is ported from #2007; thanks
+  to @walter-chung.
 
 ### Upgrade notes
 

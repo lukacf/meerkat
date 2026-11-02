@@ -651,8 +651,9 @@ async fn changed_controller_facts_refuse_and_unrelated_configuration_consumes() 
         );
     }
 
-    // The output budget and the retry policy select, define and shape no
-    // route of the controller.
+    // The output budget's value and the retry policy select, define and
+    // shape no route of the controller. The budget stays known (only
+    // whether it is known is a prepared fact).
     let mut config = fixture.config.clone();
     config.max_tokens = Some(2048);
     config.retry.max_retries = 3;

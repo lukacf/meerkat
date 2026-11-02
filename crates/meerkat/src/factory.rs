@@ -1328,6 +1328,16 @@ impl AgentBuildConfig {
         self.initial_tool_filter = Some(filter);
     }
 
+    /// Whether this build's output budget is fixed before provider
+    /// resolution under the effective `config`: an explicit budget (the
+    /// build's own, or the one a restored session persisted) or a configured
+    /// one. Such a build reads none of the account's stated limits, so its
+    /// resolution may admit an account whose limits are pending; a budget
+    /// taken from the account's limit needs them.
+    pub(crate) fn output_budget_known(&self, config: &Config) -> bool {
+        self.max_tokens.is_some() || config.configured_max_tokens().is_some()
+    }
+
     /// Build config from a service `CreateSessionRequest` + event channel.
     pub fn from_create_session_request(
         req: &CreateSessionRequest,
@@ -10523,10 +10533,9 @@ impl AgentFactory {
                         // unavailable; the first request completes it. A
                         // budget taken from the account's limit needs those
                         // limits, so that build still fails until they are
-                        // known.
-                        if build_config.max_tokens.is_some()
-                            || config.configured_max_tokens().is_some()
-                        {
+                        // known. A prepared controller pins the same fact in
+                        // its inputs, so the build that consumes it agrees.
+                        if build_config.output_budget_known(config) {
                             env = env.admitting_pending_account_limits();
                         }
                         let explicit_auth_binding = build_config.auth_binding.is_some();

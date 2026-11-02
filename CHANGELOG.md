@@ -1214,6 +1214,20 @@ them.
   refusal converts into it with `From`), each appended last, so an
   exhaustive match needs their arms.
 
+- Behaviour-only (not measured by the gate): `meerkat`:
+  `resolve_create_session_model` serves a model on the route of its
+  provider that shares the named binding's credential account. A request
+  that names a route of a GitHub Copilot account and a model of another
+  provider family, and no provider, now resolves to the account's route of
+  that family (the resolution's `auth_binding` is that route, not the
+  binding the request named), where it failed with
+  `CreateSessionModelResolutionError::ProviderModelMismatch` (or
+  `ConfiguredProviderModelMismatch` for a configured model). An account
+  with two routes of that family refuses it as ambiguous
+  (`CreateSessionModelResolutionError::AuthBinding`). A request that also
+  names a provider, and an account with no route of the model's provider
+  (every account but a Copilot one), keep the mismatch error.
+
 ### Added
 
 - `meerkat-mob`, `meerkat-mob-mcp`: identity entries. A Rust host can tell
@@ -2476,14 +2490,6 @@ them.
   (`idx_workgraph_items_realm_namespace_updated`), where it decoded every
   item of the file and filtered them in Rust; the namespace read inside
   every SQLite item write uses the same pushdown.
-
-- Create-session resolution serves a model on the route of its provider
-  that shares the named binding's credential account: naming any route of a
-  GitHub Copilot account with a model of another provider family resolves
-  to the account's route of that family, where it failed as a
-  provider/model mismatch. A request that also names a provider, and an
-  account without such a route (every account but a Copilot one), keep the
-  mismatch error.
 
 - A session on a zero-config Copilot route, or on a route of a
   `[realm.<realm>.copilot]` account, carries the route's account as its

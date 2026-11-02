@@ -563,7 +563,10 @@ account, each with `auth_method = "github_copilot_token"` over that source:
 the routes the tables above declare, under the same names, so
 `rkat auth test`, `rkat auth status`, `rkat auth logout` and
 `--auth-binding global:copilot_anthropic` work as before, and `realm/get`
-lists them. No route has a default model. Like the explicit tables, they are
+lists them. The realm lists (`rkat auth realms`, `realm/list` and
+`GET /realms`) count a realm's explicit tables only, so they show no
+backends, auth profiles or bindings for a realm configured only by the
+section. No route has a default model. Like the explicit tables, they are
 the realm's routes for their providers: with no other binding of a provider in
 the realm, a request for a catalog model of that provider that names no
 binding runs on the account, before an API key variable.
@@ -603,13 +606,18 @@ Choosing a model:
   calls, streaming, structured outputs and thinking budgets are checked
   against the list on every request, as for every Copilot model. Nothing
   about the model is stored: a resumed session asks the account again.
-- A request that names no binding cannot reach such a model: it is refused as
-  before ("cannot infer provider from model"), so name a route of the account
-  as above. A live model switch or a fallback target to such a model needs a
-  `[models.<id>]` entry.
+- A request that names no binding cannot reach such a model: the account is
+  asked only on a route the request names. Without a provider the request is
+  refused as before ("cannot infer provider from model"); with one it is
+  refused after its credential resolves
+  (`model '<provider>:<id>' is absent from the effective model registry`), or
+  by that resolution's own error. Name a route of the account as above. A
+  live model switch or a fallback target to such a model, and any live
+  reconfigure of a session that runs one (a provider parameter or binding
+  change too), need a `[models.<id>]` entry.
 
-A model only the account defines is refused before any request is made, and
-no other route or credential is tried in its place:
+A model only the account defines is refused before any model request is
+made, and no other route or credential is tried in its place:
 
 | What happened | Refusal |
 |---|---|

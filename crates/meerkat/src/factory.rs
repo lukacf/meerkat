@@ -2592,7 +2592,7 @@ pub fn resolve_create_session_model(
         return Err(CreateSessionModelResolutionError::EmptyExplicitModel);
     }
 
-    let resolved_binding = request
+    let mut resolved_binding = request
         .auth_binding
         .as_ref()
         .map(|binding| meerkat_core::resolve_explicit_auth_binding_target(config, binding))
@@ -2659,7 +2659,7 @@ pub fn resolve_create_session_model(
         (meerkat_models::global_default_model().to_string(), None)
     };
 
-    let provider = provider_hint
+    let mut provider = provider_hint
         .or_else(|| registry.entry(&model).map(|entry| entry.provider))
         .ok_or_else(|| {
             if model_was_explicit {
@@ -2672,6 +2672,25 @@ pub fn resolve_create_session_model(
                 }
             }
         })?;
+    // A binding on a shared credential account names the account: when the
+    // registry gives the model another provider than the binding's, the
+    // account's route for that provider serves it (the routes of a GitHub
+    // Copilot account share one account across provider families), as a
+    // provider switch keeps its account. A request that names its provider,
+    // and an account with no route for the model's provider, keep the strict
+    // check below.
+    if request.provider.is_none()
+        && let Some(target) = resolved_binding.as_ref()
+        && let meerkat_core::AuthCredentialIdentity::Account(account) = &target.credential_identity
+        && let Some(registered) = registry.entry(&model).map(|entry| entry.provider)
+        && registered != provider
+        && let Some(route) = meerkat_core::resolve_credential_account_binding_for_provider(
+            config, registered, account,
+        )?
+    {
+        provider = registered;
+        resolved_binding = Some(route);
+    }
     if let Some(reason) = registry.provider_override_mismatch_reason(provider, &model) {
         return Err(if model_was_explicit {
             CreateSessionModelResolutionError::ProviderModelMismatch(reason)
@@ -3488,6 +3507,16 @@ impl std::fmt::Debug for AgentFactory {
         );
         d.finish()
     }
+}
+
+/// A build's model as the account behind the build's route defines it
+/// (`AgentFactory::account_model_definition`): its definition for the
+/// build's model registry, and the connection that read the account's model
+/// list, which the build holds until its client is built so the client's
+/// resolution reuses the same account state.
+struct AccountModelDefinition {
+    definition: meerkat_core::config::CustomModelConfig,
+    connection: meerkat_llm_core::provider_runtime::ResolvedConnection,
 }
 
 /// Output of `AgentFactory::resolve_llm_client_phase` (build_agent phase 3).
@@ -6383,6 +6412,11 @@ impl AgentFactory {
         Ok(binding)
     }
 
+    /// The credential identity of `identity`'s binding: the account a
+    /// binding table of its realm names, else the binding itself. A route no
+    /// table declares (a realm's `[copilot]` account routes, the zero-config
+    /// Copilot routes) has the identity its resolution gives it, its
+    /// account; a binding that does not resolve is its own credential.
     pub(crate) fn credential_identity_for_llm_identity(
         config: &Config,
         identity: &SessionLlmIdentity,
@@ -6390,10 +6424,13 @@ impl AgentFactory {
         let Some(auth_binding) = identity.auth_binding.as_ref() else {
             return Ok(None);
         };
+        if let Some(binding) = Self::configured_binding_for_llm_identity(config, identity)? {
+            return Ok(Some(binding.credential_identity(auth_binding)));
+        }
         Ok(Some(
-            Self::configured_binding_for_llm_identity(config, identity)?.map_or_else(
-                || meerkat_core::AuthCredentialIdentity::from_auth_binding(auth_binding),
-                |binding| binding.credential_identity(auth_binding),
+            meerkat_core::resolve_explicit_auth_binding_target(config, auth_binding).map_or_else(
+                |_| meerkat_core::AuthCredentialIdentity::from_auth_binding(auth_binding),
+                |target| target.credential_identity,
             ),
         ))
     }
@@ -6460,7 +6497,19 @@ impl AgentFactory {
         identity: &SessionLlmIdentity,
     ) -> Result<bool, FactoryError> {
         let Some(binding) = Self::configured_binding_for_llm_identity(config, identity)? else {
-            return Ok(false);
+            // A route no table of its realm declares (a realm's `[copilot]`
+            // account routes, the zero-config Copilot routes) is judged by
+            // the backend its resolution gives it.
+            return Ok(identity.auth_binding.as_ref().is_some_and(|auth_binding| {
+                meerkat_core::resolve_explicit_auth_binding_target(config, auth_binding).is_ok_and(
+                    |target| {
+                        Self::backend_is_copilot(
+                            target.backend.provider,
+                            &target.backend.backend_kind,
+                        )
+                    },
+                )
+            }));
         };
         let backend = config
             .realm
@@ -6477,11 +6526,16 @@ impl AgentFactory {
                     binding.backend_profile
                 ))
             })?;
-        Ok(matches!(
-            meerkat_providers::ProviderRuntimeCatalog::normalize_backend(
-                identity.provider,
-                &backend.backend_kind,
-            ),
+        Ok(Self::backend_is_copilot(
+            identity.provider,
+            &backend.backend_kind,
+        ))
+    }
+
+    /// Whether `backend_kind` of `provider` is a GitHub Copilot backend.
+    fn backend_is_copilot(provider: Provider, backend_kind: &str) -> bool {
+        matches!(
+            meerkat_providers::ProviderRuntimeCatalog::normalize_backend(provider, backend_kind),
             Ok(meerkat_providers::NormalizedBackendKind::OpenAi(
                 meerkat_core::provider_matrix::openai::OpenAiBackendKind::Copilot,
             ) | meerkat_providers::NormalizedBackendKind::Anthropic(
@@ -6489,13 +6543,139 @@ impl AgentFactory {
             ) | meerkat_providers::NormalizedBackendKind::Google(
                 meerkat_core::provider_matrix::google::GoogleBackendKind::Copilot,
             ))
-        ))
+        )
     }
 
     fn model_registry(&self, config: &Config) -> Result<ModelRegistry, BuildAgentError> {
         config
             .model_registry(meerkat_models::canonical())
             .map_err(|err| BuildAgentError::Config(err.to_string()))
+    }
+
+    /// The definition of `build_config`'s model by the model list of the
+    /// account its binding names, for a model `registry` does not define.
+    ///
+    /// Only a build that resolves its credentials asks: a client override,
+    /// a prepared controller and the test client shim leave the build as it
+    /// is, and so do a model the registry defines, a build that names no
+    /// binding, and a binding that is not a GitHub Copilot route on a
+    /// credential account (the client's own resolution reports a binding
+    /// that does not resolve). The named route resolves with the
+    /// environment and the lease the client's resolution uses, and its
+    /// lease is published as that resolution publishes it. Then:
+    ///
+    /// - the account offers the model: its provider family is the build's
+    ///   provider, and a fresh build moves to the account's route of that
+    ///   provider (a resumed build keeps its durable route; the resumed
+    ///   provider-switch rule moves it when the provider changed), or
+    ///   refuses with [`meerkat_core::ConnectionTargetError::NoCredentialAccountRoute`]
+    ///   when the account has none;
+    /// - the account refuses the model: the build fails with
+    ///   [`FactoryError::AccountModel`], and no other route or credential is
+    ///   tried;
+    /// - the backend states no account model list: the build is left as it
+    ///   is.
+    async fn account_model_definition(
+        &self,
+        config: &Config,
+        registry: &ModelRegistry,
+        build_config: &mut AgentBuildConfig,
+        fresh_build: bool,
+    ) -> Result<Option<AccountModelDefinition>, BuildAgentError> {
+        use meerkat_llm_core::provider_runtime::AccountModelLookup;
+
+        if build_config.llm_client_override.is_some()
+            || build_config.agent_llm_client_override.is_some()
+            || build_config.prepared_controller.is_some()
+            || test_client_shim_requested()
+            || registry.entry(&build_config.model).is_some()
+        {
+            return Ok(None);
+        }
+        let Some(auth_binding) = build_config
+            .auth_binding
+            .clone()
+            .filter(|auth_binding| !auth_binding.is_env_default())
+        else {
+            return Ok(None);
+        };
+        let Ok(target) = meerkat_core::resolve_explicit_auth_binding_target(config, &auth_binding)
+        else {
+            return Ok(None);
+        };
+        let meerkat_core::AuthCredentialIdentity::Account(account) =
+            target.credential_identity.clone()
+        else {
+            return Ok(None);
+        };
+        if !Self::backend_is_copilot(target.backend.provider, &target.backend.backend_kind) {
+            return Ok(None);
+        }
+
+        let auth_lease = match &build_config.runtime_build_mode {
+            RuntimeBuildMode::SessionOwned(bindings) => Some(bindings.auth_lease().clone()),
+            RuntimeBuildMode::StandaloneEphemeral => None,
+        };
+        #[allow(unused_mut)]
+        let mut env = self.host_resolver_environment();
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if let Some(persistence) = self
+                .resolution_provider_auth_persistence()
+                .map_err(BuildAgentError::LlmClient)?
+            {
+                env = env.with_provider_auth_persistence(persistence);
+            }
+        }
+        for (handle, resolver) in &self.external_auth_resolvers {
+            env = env.with_external_resolver(handle.clone(), resolver.clone());
+        }
+        if let Some(auth_lease) = auth_lease.as_ref() {
+            env = env.with_auth_lease_handle(auth_lease.clone());
+        }
+        let connection = self
+            .provider_registry
+            .resolve(&target.realm, &target.auth_binding, &env)
+            .await
+            .map_err(|error| BuildAgentError::LlmClient(FactoryError::ProviderAuth(error)))?;
+        if let Some(auth_lease) = auth_lease.as_ref() {
+            Self::publish_auth_lease(auth_lease, &target.auth_binding, &connection)
+                .map_err(BuildAgentError::LlmClient)?;
+        }
+
+        let definition = match self
+            .provider_registry
+            .account_model(&connection, &build_config.model)
+        {
+            AccountModelLookup::Offered(definition) => definition,
+            AccountModelLookup::Refused(refusal) => {
+                return Err(BuildAgentError::LlmClient(FactoryError::AccountModel(
+                    refusal,
+                )));
+            }
+            _ => return Ok(None),
+        };
+        let provider = definition.provider;
+        build_config.provider = Some(provider);
+        if fresh_build && provider != target.backend.provider {
+            let Some(route) = meerkat_core::resolve_credential_account_binding_for_provider(
+                config, provider, &account,
+            )
+            .map_err(|error| BuildAgentError::LlmClient(FactoryError::ConnectionTarget(error)))?
+            else {
+                return Err(BuildAgentError::LlmClient(FactoryError::ConnectionTarget(
+                    meerkat_core::ConnectionTargetError::NoCredentialAccountRoute {
+                        provider,
+                        account,
+                    },
+                )));
+            };
+            build_config.auth_binding = Some(route.auth_binding);
+        }
+        Ok(Some(AccountModelDefinition {
+            definition,
+            connection,
+        }))
     }
 
     fn resolve_provider_from_registry(
@@ -7725,6 +7905,37 @@ impl AgentFactory {
             )
             .map_err(|err| BuildAgentError::Config(err.to_string()))?
         };
+        // A model that neither the catalog, the config nor the build's own
+        // definitions define, on a route of an account that states the
+        // models it serves (a GitHub Copilot account), is defined for this
+        // build by the account's model list: the definition joins the
+        // registry through the caller-scoped seam, and the build's provider
+        // and route become those of the protocol the account serves the
+        // model on. The connection that read the list is held while the
+        // client is built.
+        let fresh_build = resumed_session_metadata.is_none();
+        let (registry, _account_model_connection) =
+            match meerkat_runtime::stack_relief::box_in_own_frame(|| {
+                self.account_model_definition(config, &registry, &mut build_config, fresh_build)
+            })
+            .await?
+            {
+                Some(AccountModelDefinition {
+                    definition,
+                    connection,
+                }) => {
+                    let mut models = build_config.custom_models.clone();
+                    models.insert(build_config.model.clone(), definition);
+                    let registry = ModelRegistry::from_config_with_models(
+                        config,
+                        &models,
+                        meerkat_models::canonical(),
+                    )
+                    .map_err(|err| BuildAgentError::Config(err.to_string()))?;
+                    (registry, Some(connection))
+                }
+                None => (registry, None),
+            };
         #[cfg(not(target_arch = "wasm32"))]
         let image_generation_planner: Option<
             Arc<dyn meerkat_core::ImageGenerationPlanner>,

@@ -36,6 +36,10 @@ const CAPI_EXPIRY_SKEW_SECONDS: i64 = 300;
 const MODEL_DISCOVERY_RETRY_SECONDS: u64 = 30;
 const MODEL_DISCOVERY_REFRESH_SECONDS: u64 = 300;
 const MODEL_DISCOVERY_MAX_RETRY_SECONDS: u64 = 3600;
+/// After a token exchange that failed transiently while the current token
+/// still serves, the next attempt waits this long unless the exchange sent
+/// its own `Retry-After`.
+const TOKEN_EXCHANGE_RETRY_SECONDS: u64 = 30;
 const BEARER_SCHEME: &str = "Bearer";
 const COPILOT_HTTP_TIMEOUT: StdDuration = StdDuration::from_secs(30);
 const MAX_COPILOT_HTTP_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
@@ -121,6 +125,90 @@ impl CopilotModelDiscoveryError {
             | Self::Http { .. } => StdDuration::from_secs(MODEL_DISCOVERY_RETRY_SECONDS),
         }
     }
+}
+
+/// Why one token exchange minted no token.
+enum CopilotTokenExchangeError {
+    /// The exchange may answer a later attempt.
+    Unavailable(CopilotExchangeUnavailable),
+    /// Every other failure: an account action, or an answer that is not a
+    /// usable token.
+    Failed(ProviderAuthError),
+}
+
+impl From<ProviderAuthError> for CopilotTokenExchangeError {
+    fn from(error: ProviderAuthError) -> Self {
+        Self::Failed(error)
+    }
+}
+
+impl CopilotTokenExchangeError {
+    /// A non-2xx answer that asks for no account action. HTTP 429, a 403 (a
+    /// GitHub API rate limit) and a 5xx may pass; any other status will not.
+    fn from_status(status: u16, retry_after: Option<StdDuration>, message: String) -> Self {
+        let retryable = match status {
+            403 | 429 => meerkat_llm_core::LlmError::RateLimited {
+                retry_after_ms: retry_after.map(|delay| delay.as_millis() as u64),
+            },
+            500..=599 => meerkat_llm_core::LlmError::ServerError {
+                status,
+                message: message.clone(),
+            },
+            _ => return Self::Failed(ProviderAuthError::SourceResolutionFailed(message)),
+        };
+        Self::Unavailable(CopilotExchangeUnavailable {
+            message,
+            retry_after,
+            retryable,
+        })
+    }
+
+    /// An exchange that got no answer. A network failure or a timeout may
+    /// pass; a refused redirect, an oversized answer or a missing HTTP
+    /// client will not.
+    fn from_transport(error: &CopilotHttpTransportError) -> Self {
+        let message = format!("Copilot token exchange failed: {error}");
+        let timeout = || meerkat_llm_core::LlmError::NetworkTimeout {
+            duration_ms: COPILOT_HTTP_TIMEOUT.as_millis() as u64,
+        };
+        let retryable = match error {
+            CopilotHttpTransportError::Timeout => timeout(),
+            CopilotHttpTransportError::Request(request) if request.is_timeout() => timeout(),
+            CopilotHttpTransportError::Request(request) if request.is_connect() => {
+                meerkat_llm_core::LlmError::ConnectionReset
+            }
+            CopilotHttpTransportError::Request(_) => meerkat_llm_core::LlmError::Unknown {
+                message: message.clone(),
+            },
+            #[cfg(test)]
+            CopilotHttpTransportError::Scripted(_) => meerkat_llm_core::LlmError::Unknown {
+                message: message.clone(),
+            },
+            CopilotHttpTransportError::ResponseTooLarge
+            | CopilotHttpTransportError::RedirectRefused { .. }
+            | CopilotHttpTransportError::ClientUnavailable(_) => {
+                return Self::Failed(ProviderAuthError::SourceResolutionFailed(message));
+            }
+        };
+        Self::Unavailable(CopilotExchangeUnavailable {
+            message,
+            retry_after: None,
+            retryable,
+        })
+    }
+}
+
+/// A token exchange that may succeed on a later attempt: a network failure
+/// or timeout, HTTP 429, a 5xx, or a 403 that asks for no account action (a
+/// GitHub API rate limit).
+#[derive(Debug, Clone)]
+struct CopilotExchangeUnavailable {
+    /// The failure as the exchange reported it.
+    message: String,
+    /// The exchange's own `Retry-After`, when it sent one.
+    retry_after: Option<StdDuration>,
+    /// The retryable class a turn fails with once no valid token is left.
+    retryable: meerkat_llm_core::LlmError,
 }
 
 #[async_trait]
@@ -318,6 +406,15 @@ impl CopilotRuntime {
         provider: Provider,
         model: &str,
     ) -> Option<CopilotRouteResolution> {
+        let state = self.connection_state(connection)?;
+        resolve_route_for_state(&state, provider, model)
+    }
+
+    /// The account state `connection`'s Copilot authorizer shares.
+    fn connection_state(
+        &self,
+        connection: &meerkat_llm_core::provider_runtime::ResolvedConnection,
+    ) -> Option<Arc<CopilotAccountState>> {
         let persistence_id = match connection.auth_lease.kind() {
             meerkat_core::ResolvedAuthKind::DynamicAuthorizer(authorizer) => {
                 authorizer.persistence_authority_id()?
@@ -328,10 +425,22 @@ impl CopilotRuntime {
             persistence_id,
             credential_identity: connection.credential_identity.clone(),
         };
-        let Some(state) = self.accounts.lock().get(&key).and_then(Weak::upgrade) else {
-            return None;
-        };
-        resolve_route_for_state(&state, provider, model)
+        self.accounts.lock().get(&key).and_then(Weak::upgrade)
+    }
+
+    /// The retryable class of the account's last token exchange failure,
+    /// while that failure leaves the account without a token to serve.
+    fn exchange_unavailable(
+        &self,
+        connection: &meerkat_llm_core::provider_runtime::ResolvedConnection,
+    ) -> Option<meerkat_llm_core::LlmError> {
+        let state = self.connection_state(connection)?;
+        let cache = state.cache.read();
+        cache
+            .as_ref()?
+            .exchange_unavailable
+            .as_ref()
+            .map(|unavailable| unavailable.retryable.clone())
     }
 }
 
@@ -769,6 +878,19 @@ impl CopilotRoutedClient {
         }
     }
 
+    /// A Copilot authorization failure as a turn sees it: while the account's
+    /// token exchange is temporarily unavailable and no token is left to
+    /// serve, the exchange failure's retryable class; otherwise the
+    /// authorizer's own error.
+    fn authorization_error(&self, error: AuthError) -> meerkat_llm_core::LlmError {
+        if matches!(error, AuthError::RefreshFailed(_))
+            && let Some(retryable) = self.runtime.exchange_unavailable(&self.connection)
+        {
+            return retryable;
+        }
+        meerkat_llm_core::LlmError::from_authorizer(error)
+    }
+
     fn ensure_prepared_route_current(
         &self,
         prepared: &PreparedCopilotRoute,
@@ -890,7 +1012,7 @@ impl meerkat_llm_core::LlmClient for CopilotRoutedClient {
             authorizer
                 .prepare_request()
                 .await
-                .map_err(meerkat_llm_core::LlmError::from_authorizer)?;
+                .map_err(|error| self.authorization_error(error))?;
             self.ensure_prepared_route_current(&prepared)?;
             let client = Arc::clone(&prepared.client);
             // Keep the original replay-route witness and per-work companion
@@ -914,9 +1036,14 @@ impl meerkat_llm_core::LlmClient for CopilotRoutedClient {
                     authorizer
                         .prepare_request()
                         .await
-                        .map_err(meerkat_llm_core::LlmError::from_authorizer)?;
+                        .map_err(|error| self.authorization_error(error))?;
                     self.refresh_prepared_route().map_err(Self::client_error)?;
                     Err(error)?;
+                    }
+                    // The provider client reports its own authorization
+                    // failure (after a 401, minting a new token) this way.
+                    Err(error @ meerkat_llm_core::LlmError::AuthenticationFailed { .. }) => {
+                    Err(self.runtime.exchange_unavailable(&self.connection).unwrap_or(error))?;
                     }
                     Err(error) => Err(error)?,
                 }
@@ -1210,10 +1337,18 @@ struct CachedCopilotToken {
     token: String,
     source_generation: u64,
     source_expires_at: Option<DateTime<Utc>>,
+    /// When the next token exchange is due. Never later than `expires_at`.
     refresh_at: DateTime<Utc>,
+    /// When the token stops serving: its own expiry, or the moment Copilot
+    /// refused it. Until then a refresh that fails transiently keeps
+    /// serving it.
+    expires_at: DateTime<Utc>,
     api_base: String,
     models: Option<Arc<CopilotModelSnapshot>>,
     model_discovery_refresh_at: Option<DateTime<Utc>>,
+    /// The last token exchange failure, while it was transient and left no
+    /// token to serve.
+    exchange_unavailable: Option<CopilotExchangeUnavailable>,
 }
 
 impl std::fmt::Debug for CachedCopilotToken {
@@ -1225,12 +1360,14 @@ impl std::fmt::Debug for CachedCopilotToken {
             .field("source_generation", &self.source_generation)
             .field("source_expires_at", &self.source_expires_at)
             .field("refresh_at", &self.refresh_at)
+            .field("expires_at", &self.expires_at)
             .field("api_base", &self.api_base)
             .field("has_models", &self.models.is_some())
             .field(
                 "model_discovery_refresh_at",
                 &self.model_discovery_refresh_at,
             )
+            .field("exchange_unavailable", &self.exchange_unavailable.is_some())
             .finish()
     }
 }
@@ -1242,6 +1379,7 @@ impl CachedCopilotToken {
     /// resolving while the new token is minted.
     fn refuse(&mut self) {
         self.refresh_at = DateTime::<Utc>::MIN_UTC;
+        self.expires_at = DateTime::<Utc>::MIN_UTC;
     }
 }
 
@@ -1408,19 +1546,64 @@ impl CopilotAuthorizer {
                     return Err(ProviderAuthError::Auth(AuthError::UserReauthRequired));
                 }
                 if remint {
-                    return self.mint_and_cache_token(source, source_generation).await;
+                    return self.remint(source, source_generation).await;
                 }
             }
             return Ok(cached);
         }
-        self.mint_and_cache_token(source, source_generation).await
+        self.remint(source, source_generation).await
+    }
+
+    /// Mint a new token from `source`. While the token exchange is
+    /// temporarily unavailable, the current token keeps serving as long as
+    /// it is valid and was minted from this source credential, and the
+    /// exchange is tried again after its `Retry-After` (or shortly). Once no
+    /// such token is left, the failure is recorded on the account, so a turn
+    /// fails with its retryable class.
+    async fn remint(
+        &self,
+        source: &PersistedTokens,
+        source_generation: u64,
+    ) -> Result<CachedTokenView, ProviderAuthError> {
+        let unavailable = match self.mint_and_cache_token(source, source_generation).await {
+            Ok(view) => return Ok(view),
+            Err(CopilotTokenExchangeError::Failed(error)) => {
+                if let Some(cached) = self.state.cache.write().as_mut() {
+                    cached.exchange_unavailable = None;
+                }
+                return Err(error);
+            }
+            Err(CopilotTokenExchangeError::Unavailable(unavailable)) => unavailable,
+        };
+        let now = (self.env.now)();
+        let error = ProviderAuthError::SourceResolutionFailed(unavailable.message.clone());
+        let mut cache = self.state.cache.write();
+        let Some(cached) = cache.as_mut() else {
+            return Err(error);
+        };
+        if cached.source_generation == source_generation && now < cached.expires_at {
+            cached.refresh_at = exchange_retry_at(now, unavailable.retry_after, cached.expires_at);
+            tracing::warn!(
+                credential_identity = %self.binding.credential_identity(),
+                error = %unavailable.message,
+                "Copilot token exchange failed transiently; the current token serves until it expires"
+            );
+            return Ok(CachedTokenView {
+                generation: cached.generation,
+                token: cached.token.clone(),
+                api_base: cached.api_base.clone(),
+                model_discovery_due: false,
+            });
+        }
+        cached.exchange_unavailable = Some(unavailable);
+        Err(error)
     }
 
     async fn mint_and_cache_token(
         &self,
         source: &PersistedTokens,
         source_generation: u64,
-    ) -> Result<CachedTokenView, ProviderAuthError> {
+    ) -> Result<CachedTokenView, CopilotTokenExchangeError> {
         let github_token = source
             .primary_secret
             .as_deref()
@@ -1441,10 +1624,11 @@ impl CopilotAuthorizer {
             .is_err_and(|error| matches!(error.status(), Some(401 | 403)))
         {
             self.mark_account_reauth_required()?;
-            return Err(ProviderAuthError::Auth(AuthError::UserReauthRequired));
+            return Err(ProviderAuthError::Auth(AuthError::UserReauthRequired).into());
         }
         let now = (self.env.now)();
         let refresh_at = token_refresh_at(&token, now)?;
+        let expires_at = token_expires_at(&token)?;
         let discovery_now = (self.env.now)();
         let (models, model_discovery_refresh_at) = match models_result {
             Ok(snapshot) => (
@@ -1480,9 +1664,11 @@ impl CopilotAuthorizer {
             source_generation,
             source_expires_at: source.expires_at,
             refresh_at,
+            expires_at,
             api_base,
             models,
             model_discovery_refresh_at,
+            exchange_unavailable: None,
         });
         Ok(view)
     }
@@ -1577,7 +1763,7 @@ impl CopilotAuthorizer {
     async fn mint_copilot_token(
         &self,
         github_token: &str,
-    ) -> Result<CopilotTokenEnvelope, ProviderAuthError> {
+    ) -> Result<CopilotTokenEnvelope, CopilotTokenExchangeError> {
         let endpoints = self
             .state
             .config
@@ -1615,21 +1801,21 @@ impl CopilotAuthorizer {
             .transport
             .get(endpoints.copilot_token_url.as_str(), headers)
             .await
-            .map_err(|error| {
-                ProviderAuthError::SourceResolutionFailed(format!(
-                    "Copilot token exchange failed: {error}"
-                ))
-            })?;
+            .map_err(|error| CopilotTokenExchangeError::from_transport(&error))?;
         if !(200..=299).contains(&response.status) {
             let body = String::from_utf8_lossy(&response.body);
             if token_exchange_requires_account_action(response.status, &response.body) {
                 self.mark_account_reauth_required()?;
-                return Err(ProviderAuthError::Auth(AuthError::UserReauthRequired));
+                return Err(ProviderAuthError::Auth(AuthError::UserReauthRequired).into());
             }
-            return Err(ProviderAuthError::SourceResolutionFailed(format!(
-                "Copilot token exchange returned {}: {body}",
-                response.status
-            )));
+            return Err(CopilotTokenExchangeError::from_status(
+                response.status,
+                response.retry_after,
+                format!(
+                    "Copilot token exchange returned {}: {body}",
+                    response.status
+                ),
+            ));
         }
         let token: CopilotTokenEnvelope =
             serde_json::from_slice(&response.body).map_err(|error| {
@@ -1640,13 +1826,15 @@ impl CopilotAuthorizer {
         if token.token.trim().is_empty() {
             return Err(ProviderAuthError::SourceResolutionFailed(
                 "Copilot token response contains an empty token".to_string(),
-            ));
+            )
+            .into());
         }
         let now_epoch = (self.env.now)().timestamp().max(0) as u64;
         if token.expires_at <= now_epoch {
             return Err(ProviderAuthError::SourceResolutionFailed(
                 "Copilot token response is already expired".to_string(),
-            ));
+            )
+            .into());
         }
         Ok(token)
     }
@@ -1929,18 +2117,22 @@ fn token_exchange_requires_account_action(status: u16, body: &[u8]) -> bool {
         .is_some()
 }
 
-fn token_refresh_at(
-    token: &CopilotTokenEnvelope,
-    now: DateTime<Utc>,
-) -> Result<DateTime<Utc>, ProviderAuthError> {
-    let expires_at = i64::try_from(token.expires_at)
+fn token_expires_at(token: &CopilotTokenEnvelope) -> Result<DateTime<Utc>, ProviderAuthError> {
+    i64::try_from(token.expires_at)
         .ok()
         .and_then(|timestamp| DateTime::<Utc>::from_timestamp(timestamp, 0))
         .ok_or_else(|| {
             ProviderAuthError::SourceResolutionFailed(
                 "Copilot token expiry is out of range".to_string(),
             )
-        })?;
+        })
+}
+
+fn token_refresh_at(
+    token: &CopilotTokenEnvelope,
+    now: DateTime<Utc>,
+) -> Result<DateTime<Utc>, ProviderAuthError> {
+    let expires_at = token_expires_at(token)?;
     let lifetime_seconds = expires_at.signed_duration_since(now).num_seconds();
     if lifetime_seconds <= 1 {
         return Err(ProviderAuthError::SourceResolutionFailed(
@@ -1991,6 +2183,21 @@ fn model_discovery_deadline(now: DateTime<Utc>, delay: StdDuration) -> DateTime<
     };
     now.checked_add_signed(delta)
         .unwrap_or(DateTime::<Utc>::MAX_UTC)
+}
+
+/// When to try the token exchange again after it failed transiently while
+/// the current token still serves: after the exchange's `Retry-After`, or a
+/// short delay without one, and no later than the token's expiry.
+fn exchange_retry_at(
+    now: DateTime<Utc>,
+    retry_after: Option<StdDuration>,
+    expires_at: DateTime<Utc>,
+) -> DateTime<Utc> {
+    let delay = retry_after.unwrap_or(StdDuration::from_secs(TOKEN_EXCHANGE_RETRY_SECONDS));
+    Duration::from_std(delay)
+        .ok()
+        .and_then(|delay| now.checked_add_signed(delay))
+        .map_or(expires_at, |retry_at| retry_at.min(expires_at))
 }
 
 fn insert_header(
@@ -2728,9 +2935,11 @@ mod tests {
             source_generation: 1,
             source_expires_at: None,
             refresh_at: Utc::now() + Duration::hours(1),
+            expires_at: Utc::now() + Duration::hours(2),
             api_base: "https://first.example.test".to_string(),
             models: Some(Arc::new(snapshot)),
             model_discovery_refresh_at: None,
+            exchange_unavailable: None,
         });
         let authorizer = Arc::new(CopilotAuthorizer {
             state: Arc::clone(&state),
@@ -2926,9 +3135,11 @@ mod tests {
             source_generation: 1,
             source_expires_at: None,
             refresh_at: Utc::now() + Duration::hours(1),
+            expires_at: Utc::now() + Duration::hours(2),
             api_base: "https://copilot.example.test".to_string(),
             models: Some(Arc::new(snapshot)),
             model_discovery_refresh_at: None,
+            exchange_unavailable: None,
         });
         let authorizer = Arc::new(CopilotAuthorizer {
             state: Arc::clone(&state),

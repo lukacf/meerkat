@@ -48,6 +48,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `FinishOAuthDevicePoll`(flow_id: String)
 - `ConsumeOAuthDeviceFlow`(flow_id: String, provider: String, now_millis: u64)
 - `ExpireOAuthDeviceFlow`(flow_id: String)
+- `MarkPublicationRefused`(refused_credential_generation: u64, refused_credential_material_fingerprint: Option<String>)
 
 ## Runtime-Internal Inputs
 - `RestoreAuthoritySnapshot`(lifecycle_phase: AuthLifecyclePhase, expires_at: Option<u64>, last_refresh: Option<u64>, refresh_attempt: u64, credential_present: Bool, credential_generation: u64, credential_published_at_millis: Option<u64>)
@@ -1631,9 +1632,85 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `EmitLifecycleEvent`
 - To: `Valid`
 
+### `MarkPublicationRefusedFromValid`
+- From: `Valid`
+- On: `MarkPublicationRefused`(refused_credential_generation, refused_credential_material_fingerprint)
+- Guards:
+  - `refused_publication_current`
+- Emits: `EmitLifecycleEvent`
+- To: `ReauthRequired`
+
+### `MarkPublicationRefusedFromExpiring`
+- From: `Expiring`
+- On: `MarkPublicationRefused`(refused_credential_generation, refused_credential_material_fingerprint)
+- Guards:
+  - `refused_publication_current`
+- Emits: `EmitLifecycleEvent`
+- To: `ReauthRequired`
+
+### `MarkPublicationRefusedFromExpired`
+- From: `Expired`
+- On: `MarkPublicationRefused`(refused_credential_generation, refused_credential_material_fingerprint)
+- Guards:
+  - `refused_publication_current`
+- Emits: `EmitLifecycleEvent`
+- To: `ReauthRequired`
+
+### `MarkPublicationRefusedFromRefreshing`
+- From: `Refreshing`
+- On: `MarkPublicationRefused`(refused_credential_generation, refused_credential_material_fingerprint)
+- Guards:
+  - `refused_publication_current`
+- Emits: `EmitLifecycleEvent`
+- To: `ReauthRequired`
+
+### `MarkPublicationRefusedSupersededValid`
+- From: `Valid`
+- On: `MarkPublicationRefused`(refused_credential_generation, refused_credential_material_fingerprint)
+- Guards:
+  - `refused_publication_superseded`
+- Emits: `EmitLifecycleEvent`
+- To: `Valid`
+
+### `MarkPublicationRefusedSupersededExpiring`
+- From: `Expiring`
+- On: `MarkPublicationRefused`(refused_credential_generation, refused_credential_material_fingerprint)
+- Guards:
+  - `refused_publication_superseded`
+- Emits: `EmitLifecycleEvent`
+- To: `Expiring`
+
+### `MarkPublicationRefusedSupersededExpired`
+- From: `Expired`
+- On: `MarkPublicationRefused`(refused_credential_generation, refused_credential_material_fingerprint)
+- Guards:
+  - `refused_publication_superseded`
+- Emits: `EmitLifecycleEvent`
+- To: `Expired`
+
+### `MarkPublicationRefusedSupersededRefreshing`
+- From: `Refreshing`
+- On: `MarkPublicationRefused`(refused_credential_generation, refused_credential_material_fingerprint)
+- Guards:
+  - `refused_publication_superseded`
+- Emits: `EmitLifecycleEvent`
+- To: `Refreshing`
+
+### `MarkPublicationRefusedWithdrawnReauthRequired`
+- From: `ReauthRequired`
+- On: `MarkPublicationRefused`(refused_credential_generation, refused_credential_material_fingerprint)
+- Emits: `EmitLifecycleEvent`
+- To: `ReauthRequired`
+
+### `MarkPublicationRefusedWithdrawnReleased`
+- From: `Released`
+- On: `MarkPublicationRefused`(refused_credential_generation, refused_credential_material_fingerprint)
+- Emits: `EmitLifecycleEvent`
+- To: `Released`
+
 ## Coverage
 ### Code Anchors
-- `auth_lease_handle` (machine `AuthMachine`): `crates/meerkat-runtime/src/handles/auth_lease.rs` — per-binding AuthMachine registry; AuthLeaseHandle trait impl drives acquire, observe credential freshness, expiring, expired, refresh, reauth, release, source-credential publication, lifecycle event, and wake loop DSL transitions through it
+- `auth_lease_handle` (machine `AuthMachine`): `crates/meerkat-runtime/src/handles/auth_lease.rs` — per-binding AuthMachine registry; AuthLeaseHandle trait impl drives acquire, observe credential freshness, expiring, expired, refresh, reauth, publication refusal, release, source-credential publication, lifecycle event, and wake loop DSL transitions through it
 - `oauth_flow_handle` (machine `AuthMachine`): `crates/meerkat-runtime/src/handles/oauth_flow.rs` — per-binding AuthMachine-owned OAuth browser and device flow lifecycle authority for admit, verify, begin poll, finish poll, consume, expire, valid, expiring, expired, refreshing, and reauth required phases
 
 ### Scenarios
@@ -1641,4 +1718,5 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `reauth_release_and_publication` — reauth required from valid/expiring/expired/refreshing, observe credential freshness for released state, release lease, emit lifecycle event, and wake refresh loop publication
 - `oauth_browser_flow_lifecycle` — OAuth browser flow admit, verify, consume, and expire operations stay under the per-binding AuthMachine lifecycle authority
 - `oauth_device_flow_lifecycle` — OAuth device flow admit, verify, begin poll, finish poll, consume, and expire operations stay under the per-binding AuthMachine lifecycle authority
+- `publication_refusal` — a consumer's refusal names the publication it refuses by credential generation and recorded fingerprint: it withdraws the lease to reauth required only while the lease carries that publication, and a late refusal of an earlier or another value, or of a lease already refused or released, changes nothing
 - `source_credential_publication` — a publisher that re-reads its credential value from a source asks for the publication verdict with the value's fingerprint and acquires only on publish: a new value publishes, the recorded value publishes again only when its declared freshness window ran out, and a refused or logged-out value is never published again

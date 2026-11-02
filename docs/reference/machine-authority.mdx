@@ -369,7 +369,7 @@ is open (`construction_is_held_or_activating`).
 
 The ci profile has no identities, so the hand-written audit
 `specs/machines/mob_machine/created_identity_audit.sh` drives the created
-entries' arms in ten runs, in two parts. Its recovery part has four:
+entries' arms in twelve runs, in two parts. Its recovery part has four:
 
 - The scan run scans a row of every presence, with and without a revival
   record, in Running and Stopped, until the boot plan's seal. The rows are
@@ -388,34 +388,48 @@ entries' arms in ten runs, in two parts. Its recovery part has four:
   never touches a `Created` entry.
 - The placed run scans the row of a member seated on a member host.
 
-Its changes part (0.9.9) has six:
+Its changes part (0.9.9) has eight:
 
 - The commit run drives every change's admission and the record of a name
-  with every cause, the changes hold and a seat under created custody: exactly
-  one arm answers each, and a new entry takes only a free name.
+  from every request's facts, the changes hold and a seat or membership
+  commit under created custody: exactly one arm answers each, a new entry
+  takes only a free name, its cause follows the declared apply's precedence
+  over its facts, and an entry held for its creation is never seated
+  Dormant.
 - The update run declares the same change of a roster-owned and a
-  store-owned identity seated under the same spec: exactly one arm answers
-  each, and both answer the same verdict for the same facts.
+  store-owned identity, owed their seats or seated under the same spec:
+  exactly one arm answers each, and both answer the same verdict for the
+  same facts.
 - The removal run removes a roster-owned identity through its retirement
-  and a store-owned one at once or archived: every removal's end tombstones
-  its name.
+  (or ends it by the destroy with its mark) and a store-owned one unseated,
+  seated through its retirement, or archived: every removal's end but the
+  destroy's tombstones its name.
 - The archive run archives a seated store-owned identity through its
   retirement and unarchives it onto its archived session: an archived
-  identity keeps its name and is never seated, and a roster-owned identity's
-  archive is refused.
+  identity keeps its name and is never seated, an identity awaiting its
+  preparation is never archived, and a roster-owned identity's archive is
+  refused.
 - The preparation run drives the start, settle and end of held
   constructions of either custody with their ladders, seats, membership
-  commits and removals: an entry awaiting its preparation is seated only by
-  its accepted activation, an accepted activation ends only by its
-  publication, and a `constructed` preparation is never settled without an
-  attempt.
-- The placement run seats a store-owned identity hosted on its first use by a
-  placed spawn holding its created custody.
+  commits, archives and removals: an entry awaiting its preparation is
+  seated only by its accepted activation, no end of an accepted activation
+  but its failed publication is enabled, and a `constructed` preparation is
+  never settled without an attempt.
+- The placement run seats a store-owned identity hosted on its first use by
+  a placed or peer-only spawn holding its created custody.
+- The unlist run unlists a roster-owned identity through its retirement
+  beside a store-owned one: exactly one arm answers each unlist, which
+  decides on its identity alone, and the unlisted identity's archived
+  session record holds its name.
+- The recovered run replays a seated store-owned identity's removal or
+  archive row and carries the recovered mark's retirement to its terminal,
+  running or stopped.
 
-The audit seeds defects, one per invariant above, per action property and
-per guard a reachable state needs, and refuses each; one mutant (created
-custody kept local) is refused by making the placement run's witness
-unreachable.
+The audit seeds defects of the invariants above, the action properties and
+the guards a reachable state needs, and refuses each with the violation it
+names (not every invariant has a mutant of its own); two mutants (created
+custody kept local, a recovered removal left unmarked) are refused by
+making a witness unreachable.
 
 Member rotations are `MobMachine` facts. A pending rotation records its
 identity's next session (`member_rotation_session_ids`), the endpoint it

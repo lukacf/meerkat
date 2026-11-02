@@ -2260,7 +2260,10 @@ them.
   that member's custody: MobMachine records it, the mob runs, and the member
   shows `custody_deferred` until a re-attempt restores it. Before, any such
   failure other than a hosting refusal or an unprovable tail of a retiring
-  member fail-stopped the whole mob with `MemberStartupRecoveryFailed`.
+  member fail-stopped the whole mob with `MemberStartupRecoveryFailed`. A
+  failed settle of the member's durable tail is a write and still stops the
+  start; a mob destroy re-attempts every deferred restore first and is
+  refused while one cannot restore.
 - `meerkat-mob`: a resume that fails after its pre-activation hook ran marks
   the handle the hook kept as stopped, so a host binding that refuses to
   replace a live mob's binding admits a later resume of the same store in

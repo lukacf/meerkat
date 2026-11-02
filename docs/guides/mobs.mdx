@@ -1331,8 +1331,10 @@ The class says why a mob is quarantined:
 
 - **Re-attempts.** One re-attempt of a mob's restore runs at a time: a call
   that meets a re-attempt in flight answers the refusal at once and never
-  waits for it. A re-attempt runs to its end even when the call that started
-  it goes away (a client that disconnects), and a call that meets a mob a
+  waits for it. Any call that addresses a `store_unavailable` mob by id can
+  start the re-attempt, before the call checks what its caller may do with
+  the mob. A re-attempt runs to its end even when the call that started it
+  goes away (a client that disconnects), and a call that meets a mob a
   re-attempt is restoring answers the refusal or the restored mob, never
   that the mob does not exist. A list never re-attempts, and a
   `store_unreadable` or `resume_refused` mob is never re-attempted on its
@@ -1559,22 +1561,27 @@ or any member bound to a session of a Stopped or Completed mob) does not fail
 the start when the failure is the member's own and came before the restore had
 an effect: another runtime owner on the realm hosts its session, its hosting
 claim cannot be taken, its durable tail could not be proven, or a read of its
-session state failed (`store_unavailable` when the store could not serve now,
-`store_unreadable` when the state cannot be read or decoded). The start defers
+session state failed before any settle of its durable tail ran
+(`store_unavailable` when the store could not serve now, `store_unreadable`
+when the state cannot be read or decoded). The start defers
 that member's custody restore: the mob runs, the member keeps its state and its
 session untouched, and `MobHandle::member_status` shows the deferral as
 `custody_deferred` (the restore and the cause its last attempt met; both
 vocabularies may grow, and the SDKs report a value they do not know as unknown
 instead of failing the read). The member is degraded, not Broken. A retire,
-`redrive_retirement`, respawn or destroy of the member re-attempts the restore
-first and answers `MobError::MemberCustodyDeferred` while it still cannot
-restore; an explicit resume re-attempts it once and still succeeds. A restore
+`redrive_retirement` or respawn of the member re-attempts the restore first
+and answers `MobError::MemberCustodyDeferred` while it still cannot restore;
+an explicit resume re-attempts it once and still succeeds. A restore
 that owes work (a retiring member's cleanup) is also re-attempted on its own,
 with backoff: once it succeeds, the retirement completes. A degraded member of
 a Stopped or Completed mob is re-attempted only by an operation on it, an
 explicit resume or the next start; no timer reads its state in the background.
-A divergence of the mob's own records, or a failure after the member's
-registration was prepared, still stops the start.
+A destroy of the mob re-attempts every deferred restore first and is refused
+with `MobError::MemberCustodyDeferred` while one still cannot restore, so a
+member whose stored state cannot be read (`store_unreadable`) holds the
+destroy until that state is repaired. A divergence of the mob's own records, a
+failed settle of the member's durable tail (a write), or a failure after the
+member's registration was prepared, still stops the start.
 
 While a Shutdown drains, a command the close refuses (spawn, respawn, work, a
 flow run, wiring, a host bind, a live commit, resume, reset or reload) fails

@@ -815,10 +815,11 @@ pub(super) fn refused(refusal: IdentityChangeRefusal) -> MobError {
     MobError::IdentityChangeRefused { refusal }
 }
 
-/// The current time in UNIX milliseconds.
+/// The current time in UNIX milliseconds (`time_compat`: the browser's
+/// clock on wasm32, where `std::time::SystemTime::now` panics).
 pub(super) fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    meerkat_core::time_compat::SystemTime::now()
+        .duration_since(meerkat_core::time_compat::UNIX_EPOCH)
         .ok()
         .and_then(|elapsed| u64::try_from(elapsed.as_millis()).ok())
         .unwrap_or(u64::MAX)

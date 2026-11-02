@@ -1493,7 +1493,7 @@ fn identity_entry_origin_is_read_only_by_the_custody_guards() {
             strays.extend(
                 reads
                     .iter()
-                    .filter(|at| !adoption.contains(at))
+                    .filter(|at| !adoption.contains(*at))
                     .map(|at| format!("{path}:{}", line_of(&code, *at))),
             );
         }

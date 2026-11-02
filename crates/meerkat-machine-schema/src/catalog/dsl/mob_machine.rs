@@ -4256,11 +4256,17 @@ macro_rules! mob_catalog_machine_dsl {
         disposition MemberInstructionTargetBlocked => local seam SurfaceResultAlignment,
         disposition MemberInstructionReleaseAuthorized => local seam OwnerRealizationOnly,
         disposition MemberInstructionReleaseNotNeeded => local seam SurfaceResultAlignment,
-        // Identity changes (0.9.9): both verdicts answer the change's commit
+        // Identity changes (0.9.9): the verdicts answer the change's commit
         // step, which writes nothing unless every one admits it.
         disposition IdentityChangeAdmissionResolved => local seam SurfaceResultAlignment,
         disposition CreatedIdentityEntryRecorded => local seam SurfaceResultAlignment,
         disposition IdentityEntryChangeResolved => local seam SurfaceResultAlignment,
+        // Host preparation (0.9.9): a held construction's start, a settle
+        // and an attempt's end answer the step that asked, which realizes
+        // the verdict (holds, activates or ends the construction) or refuses.
+        disposition PreparationConstructionResolved => local seam SurfaceResultAlignment,
+        disposition PreparationSettleResolved => local seam SurfaceResultAlignment,
+        disposition PreparationConstructionEnded => local seam SurfaceResultAlignment,
 
         // =====================================================================
         // Invariants

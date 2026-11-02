@@ -410,7 +410,10 @@ jobs:
     needs: changes
     if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    # A cold run of the monorepo layout compiles all of Core first (PR
+    # #2011's first run was cut at 30 minutes still compiling); sccache
+    # keeps the units a job compiled, so later runs are shorter.
+    timeout-minutes: 60
     permissions:
       contents: read
       # The sccache bucket's workload identity, as in the root CI.
@@ -591,7 +594,10 @@ jobs:
     needs: changes
     if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    # A cold run of the monorepo layout compiles all of Core first (PR
+    # #2011's first run was cut at 30 minutes still compiling); sccache
+    # keeps the units a job compiled, so later runs are shorter.
+    timeout-minutes: 60
     permissions:
       contents: read
       # The sccache bucket's workload identity, as in the root CI.
@@ -633,7 +639,10 @@ jobs:
     needs: changes
     if: needs.changes.outputs.extension_state == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    # A cold run of the monorepo layout compiles all of Core first (PR
+    # #2011's first run was cut at 30 minutes still compiling); sccache
+    # keeps the units a job compiled, so later runs are shorter.
+    timeout-minutes: 60
     permissions:
       contents: read
       # The sccache bucket's workload identity, as in the root CI.
@@ -681,7 +690,10 @@ jobs:
     needs: changes
     if: needs.changes.outputs.extension_state == 'true' && github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    # A cold run of the monorepo layout compiles all of Core first (PR
+    # #2011's first run was cut at 30 minutes still compiling); sccache
+    # keeps the units a job compiled, so later runs are shorter.
+    timeout-minutes: 60
     permissions:
       contents: read
       # The sccache bucket's workload identity, as in the root CI.

@@ -2435,6 +2435,33 @@ them.
   unaffected. An exchange 401, or a 403 that asks for an account action,
   still fails the build and asks for a new login.
 
+- `meerkat-copilot`, `meerkat-runtime`: GitHub's refusal of an operator
+  token (`github_copilot_token`) no longer withdraws a newer token. When two
+  account states share the account's lease (two provider registries, or two
+  credential stores) and one of them published a newer token from the
+  source while a request with the earlier token was in flight, GitHub's
+  refusal of the earlier token moved the account to `reauth_required` and
+  refused the newer token as well, until the source yielded yet another
+  value. A refusal now names the publication its token was admitted under
+  (the lease generation and, for a source the route reads itself, the
+  token's fingerprint), and the AuthMachine withdraws the lease only while
+  it carries that publication (see Breaking). A refusal of the current
+  token still moves the account to `reauth_required`; a refusal of an
+  earlier one fails only its own request, as `stale_credential`, and the
+  next request uses the newer token.
+  `AuthLeaseHandle::mark_publication_refused` (meerkat-core) is new; its
+  default fails closed, so other `AuthLeaseHandle` implementations are
+  unaffected. Thanks to @walter-chung (#2007), who proposed the property.
+
+- `meerkat-copilot`: building a session on a `github_copilot_token` route
+  whose token comes from a command with `refresh_interval_ms` no longer runs
+  the command again and repeats the GitHub account lookup and model listing.
+  The route reported no expiry while the account's lease carried the
+  interval, so every session build published the lease again, and the next
+  request read the source anew. The route now reports the expiry of the
+  lease publication its token serves: within the interval a build reuses
+  the lease, and the command runs at the interval it declares.
+
 - `meerkat-session`: a turn in flight when an embedding host's runtime stops
   is now treated as ended with that runtime. The check a runtime loop uses
   for this (`session_task_ended_with_its_runtime`) also required the session
@@ -3117,6 +3144,37 @@ them.
   pages through `list_events` until it holds `limit` public events or the
   ledger ends. The trait says that a store which serves pages should
   override it and `latest_event_seq`, as the built-in stores do.
+
+### Security
+
+- `meerkat-core`, `meerkat-llm-core`, `meerkat-openai`, `meerkat-anthropic`,
+  `meerkat-copilot`: a credential that a provider, proxy or gateway echoes
+  back no longer reaches errors or logs. In GitHub Copilot token mode
+  (`github_copilot_token`) the bearer of every request is the operator's
+  long-lived GitHub token. The Responses, OpenAI-compatible Chat Completions
+  and Anthropic Messages clients now pass what they read from a response (a
+  rejection body, a stream error event, a data line that does not parse,
+  the provider error fields they log) through their authorizer before it
+  reaches a caller or a log, and every error keeps its class. The GitHub
+  Copilot authorizer removes the last four bearer values its account signed
+  requests with (the operator's GitHub token in token mode, the derived
+  Copilot token otherwise), and the GitHub `message` that an account
+  lookup, model listing or token exchange error quotes no longer carries
+  the token its request sent. For embedders:
+  `HttpAuthorizer::redact_response_diagnostic` (a provided method whose
+  default leaves the diagnostic unchanged, so existing authorizers keep
+  their behaviour), `LlmError::redact_diagnostics`,
+  `meerkat_llm_core::streaming::redact_stream_diagnostics` and
+  `meerkat_llm_core::http::sensitive_header_value` are new. Ported from
+  #2007; thanks to @walter-chung.
+
+- `meerkat-openai`, `meerkat-anthropic`: the header values a dynamic
+  authorizer supplies (the `Authorization` bearer among them) are marked
+  sensitive on every Responses, Chat Completions and Messages request, so
+  the request's `Debug` does not print them and HTTP/2 never indexes them.
+  A value that is not a valid header value now fails the request as
+  `authentication_failed` before it is sent; it failed when sent, as an
+  unknown error. Ported from #2007; thanks to @walter-chung.
 
 ### Upgrade notes
 

@@ -405,6 +405,9 @@ compiles, but the default disables what they carry:
   `observes_bindings_only`. Without the first, an agent with a scoped tool
   grant gate refuses to build over the wrapper
   (`ToolGrantGateWithoutAdjudication`).
+- an `AuthLeaseHandle` wrapper: `publish_source_credential`. Its default
+  fails closed, so a `github_copilot_token` route that reads its token from
+  the environment, a command or a resolver fails to resolve over the wrapper.
 - a `RuntimeStore` decorator: `load_tool_grant`, `list_tool_grants`,
   `put_tool_grant_if_absent`, `compare_and_put_tool_grant`,
   `append_tool_grant_audit` and `read_tool_grant_audit`. Their defaults

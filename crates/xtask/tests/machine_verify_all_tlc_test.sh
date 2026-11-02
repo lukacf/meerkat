@@ -1296,7 +1296,7 @@ run_machine_verify() {
 # about 40 TLC runs, and each must stay within 348 s locally (800 s hosted
 # at a 2.3x runner factor):
 # audits-q = its scan and placed runs (two whole-space runs, 9 witnesses,
-# 11 mutants: 22 TLC runs) and audits-v = its reseat and names runs (two
+# 12 mutants: 23 TLC runs) and audits-v = its reseat and names runs (two
 # runs, 9 witnesses, 19 mutants: 30 TLC runs). As one shard (--part
 # recovery) they took 225 s locally with 4 TLC workers (2026-10-31), and
 # 235 s (2026-11-02) before the scan and names runs' witnesses and mutants

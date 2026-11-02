@@ -410,10 +410,10 @@ jobs:
     needs: changes
     if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-24.04
-    # A cold run of the monorepo layout compiles all of Core first (PR
-    # #2011's first run was cut at 30 minutes still compiling); sccache
-    # keeps the units a job compiled, so later runs are shorter.
-    timeout-minutes: 60
+    # A cold run of the monorepo layout compiles all of Core twice here: the
+    # examples build, then the test build of the bins (PR #2011's run was cut
+    # at 60 minutes in the second build). Compiling Core once is a follow-up.
+    timeout-minutes: 90
     permissions:
       contents: read
       # The sccache bucket's workload identity, as in the root CI.

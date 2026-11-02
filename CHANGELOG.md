@@ -576,6 +576,17 @@ them.
   resolvable, and after a discovery 403 the next turn reports that the
   account needs a new login.
 
+- `meerkat-copilot`: building a session on a GitHub Copilot route no
+  longer fails during a temporary token exchange outage when the account
+  has no valid token. The build minted a token first, so an agent build,
+  or the wake of a dormant session or mob member, failed (a woken mob
+  member was left broken and its waking message refused). The build now
+  succeeds, its route resolving without the account's model list until a
+  token exists; the first request performs the exchange and fails with a
+  retryable error while the outage lasts. An exchange 401, or a 403 that
+  asks for an account action, still fails the build and asks for a new
+  login.
+
 - `meerkat-session`: a turn in flight when an embedding host's runtime stops
   is now treated as ended with that runtime. The check a runtime loop uses
   for this (`session_task_ended_with_its_runtime`) also required the session

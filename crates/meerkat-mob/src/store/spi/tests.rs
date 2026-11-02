@@ -1892,9 +1892,11 @@ async fn same_operation_same_digest_replays_and_another_digest_is_operation_reus
 }
 
 /// One identity change lands whole or not at all on every built-in store:
-/// a commit writes its rows, its journal rows and its receipt together, and
-/// a commit whose expected row differs from the store's (a name a row holds
-/// already, one row of the batch) writes none of them.
+/// a commit writes its rows, its journal rows and its receipt together; a
+/// commit whose expected row differs from the store's (a name a row holds
+/// already, the batch's second row) writes none of them, its first row
+/// included; and a commit whose journal row the store refuses (a second
+/// creation of the mob) writes none of them either.
 ///
 /// RED: with the stores' commit reverted to the unavailable default, the
 /// first commit is refused on every store and nothing lands.
@@ -1933,8 +1935,9 @@ async fn a_commit_writes_rows_events_and_receipt_in_one_transaction_on_every_bui
             "{name}: the receipt"
         );
 
-        // A batch of a new name and a taken one: nothing of it lands.
-        let conflicting = create_change("create-batch", "sha256:batch", &["alpha", "beta"]);
+        // A batch of a new name and a taken one, the taken one second:
+        // nothing of it lands, the new name's row included.
+        let conflicting = create_change("create-batch", "sha256:batch", &["beta", "alpha"]);
         let refused = store
             .commit_identity_change(&conflicting)
             .await
@@ -1965,5 +1968,97 @@ async fn a_commit_writes_rows_events_and_receipt_in_one_transaction_on_every_bui
             None,
             "{name}: no receipt"
         );
+        assert!(
+            !created_rows(storage.identity.as_ref())
+                .await
+                .contains_key(&AgentIdentity::from("beta")),
+            "{name}: the batch's first row did not land"
+        );
+
+        // A change whose journal row the store refuses (a second creation of
+        // the mob, after its rows were checked): nothing of it lands.
+        let mut refused_journal = create_change("create-delta", "sha256:delta", &["delta"]);
+        refused_journal.events.push(event(
+            MobEventKind::MobCreated {
+                definition: Box::new(MobDefinition::explicit("mob")),
+            },
+            None,
+        ));
+        let refused = store.commit_identity_change(&refused_journal).await;
+        assert!(refused.is_err(), "{name}: {refused:?}");
+        assert_eq!(
+            journal_len(&storage).await,
+            before + 1,
+            "{name}: no journal row"
+        );
+        assert!(
+            !created_rows(storage.identity.as_ref())
+                .await
+                .contains_key(&AgentIdentity::from("delta")),
+            "{name}: no row"
+        );
+        assert_eq!(
+            store
+                .observe_identity_change_receipt(&MobId::from("mob"), "create-delta")
+                .await
+                .expect("the receipt read"),
+            None,
+            "{name}: no receipt"
+        );
     }
+}
+
+/// A host store whose batch commit fails lands nothing of the change: the
+/// commit answers the failure, and a process reopened over the host reads
+/// the changes before it only, with no row, journal row or receipt of the
+/// failed one.
+#[tokio::test]
+async fn a_change_whose_host_batch_fails_lands_nothing_on_a_host_store() {
+    let host = Arc::new(MemoryHost::default());
+    let process = start(&host, "mob").await;
+    let storage = process.stores.storage();
+    let committed = member_store(&storage)
+        .commit_identity_change(&create_change("create-alpha", "sha256:alpha", &["alpha"]))
+        .await
+        .expect("the first change commits");
+    assert!(
+        matches!(
+            committed,
+            crate::store::IdentityChangeCommit::Committed { .. }
+        ),
+        "{committed:?}"
+    );
+    host.fail_next_commit(HostStoreError::Invalid("refused by the test".to_string()));
+    let refused = member_store(&storage)
+        .commit_identity_change(&create_change(
+            "create-batch",
+            "sha256:batch",
+            &["beta", "gamma"],
+        ))
+        .await;
+    assert!(refused.is_err(), "{refused:?}");
+    drop(storage);
+    drop(process);
+
+    let reopened = start(&host, "mob").await;
+    let storage = reopened.stores.storage();
+    assert_eq!(
+        journal_len(&storage).await,
+        1,
+        "the first change's row only"
+    );
+    let rows = created_rows(storage.identity.as_ref()).await;
+    assert_eq!(
+        rows.keys().cloned().collect::<Vec<_>>(),
+        vec![AgentIdentity::from("alpha")],
+        "the first change's identity only"
+    );
+    assert_eq!(
+        member_store(&storage)
+            .observe_identity_change_receipt(&MobId::from("mob"), "create-batch")
+            .await
+            .expect("the receipt read"),
+        None,
+        "no receipt"
+    );
 }

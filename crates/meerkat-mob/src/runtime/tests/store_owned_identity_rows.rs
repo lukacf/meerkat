@@ -1393,6 +1393,69 @@ async fn a_create_of_a_taken_name_is_refused_and_writes_nothing() {
     assert!(!mob.is_member("fresh").await, "the change wrote nothing");
 }
 
+/// Row (R2.9): consent decided outside Meerkat commits only on the host
+/// operator's import: a host surface that is not the operator is refused
+/// `import_refused` with nothing written; the operator's change commits,
+/// its row's provenance and its receipt sealing the imported consent.
+#[tokio::test]
+async fn imported_consent_commits_only_for_the_host_operator_and_is_sealed_in_the_row_and_receipt()
+{
+    use meerkat_core::approval::decision::{ConsentProvenance, DecisionReference};
+    let mob = StoreOwnedMob::new("imported-consent").await;
+    let imported = ConsentProvenance::Imported {
+        source: DecisionReference::new("ticketing").expect("the import's source"),
+        reference: DecisionReference::new("ticket-7").expect("the import's reference"),
+        approver_id: None,
+        decided_at_ms: None,
+    };
+    let import = |requester| {
+        StoreOwnedIdentityCreate::new(
+            operation("import-alpha"),
+            requester,
+            vec![CreatedIdentityRequest::new(spec("alpha", "worker"))],
+        )
+    };
+    let journal = mob.journal().await.len();
+    assert_eq!(
+        refusal(
+            mob.create(
+                import(IdentityChangeRequesterInput::host("console")),
+                IdentityChangeConsentInput::Imported(&imported),
+            )
+            .await
+        ),
+        IdentityChangeRefusal::ImportRefused
+    );
+    assert!(mob.rows().await.is_empty(), "no row");
+    assert_eq!(mob.journal().await.len(), journal, "no journal row");
+    assert_eq!(
+        mob.handle
+            .identity_operation("import-alpha")
+            .await
+            .expect("the receipt read answers"),
+        None,
+        "no receipt"
+    );
+
+    let receipt = committed(
+        mob.create(
+            import(IdentityChangeRequesterInput::host_operator("console")),
+            IdentityChangeConsentInput::Imported(&imported),
+        )
+        .await,
+    );
+    let sealed = IdentityChangeConsent::Imported {
+        provenance: imported.clone(),
+    };
+    assert_eq!(receipt.consent, sealed, "the receipt seals the import");
+    assert_eq!(
+        mob.row("alpha").await.provenance.consent,
+        sealed,
+        "the row seals the import"
+    );
+    assert!(mob.seated_dormant("alpha"));
+}
+
 // ---------------------------------------------------------------------------
 // R2.14: the grant recheck
 // ---------------------------------------------------------------------------
@@ -2712,6 +2775,73 @@ async fn a_crash_during_a_removal_finishes_it_after_restart() {
     );
 }
 
+/// Row (R2.6, ruling 41): while a roster-owned identity's removal retires
+/// its member, the name's tombstone is already written (the removal's start
+/// transaction), and a declared apply that lists the identity defers it,
+/// seating and retiring nothing; once the removal ended, the roster's
+/// listing of the name is refused as a removed name.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_declared_apply_during_a_roster_owned_removal_defers_the_identity_its_tombstone_written()
+{
+    let mob = StoreOwnedMob::new("remove-roster-deferred").await;
+    let name = unique("listed");
+    mob.declare(&[name.as_str()]).await;
+    mob.handle
+        .ensure_member_live(&id(&name))
+        .await
+        .expect("wake the identity");
+    let hold = super::actor::retirement_stage_hold::install(&id(&name), "retire-runtime-quiesce");
+    let removal = {
+        let handle = mob.handle.clone();
+        let name = name.clone();
+        tokio::spawn(async move {
+            handle
+                .remove_identity(
+                    crate::runtime::IdentityRemoval::new(
+                        operation("remove-listed"),
+                        IdentityChangeRequesterInput::host("console"),
+                        name,
+                    ),
+                    ALLOW,
+                )
+                .await
+        })
+    };
+    tokio::time::timeout(STEP, hold.entered())
+        .await
+        .expect("the retirement reaches its held stage");
+    assert_eq!(
+        mob.row(&name).await.presence,
+        CreatedIdentityPresence::Removed,
+        "the tombstone is written at the removal's start"
+    );
+    let during = mob.declare(&[name.as_str()]).await;
+    assert!(
+        matches!(
+            during.entries.get(&id(&name)),
+            Some(crate::runtime::DeclaredEntryOutcome::Deferred { .. })
+        ),
+        "{during:?}"
+    );
+    hold.release();
+    committed(
+        tokio::time::timeout(STEP, removal)
+            .await
+            .expect("the removal answers")
+            .expect("the removal task"),
+    );
+    mob.removed(&name).await;
+    let after = mob.declare(&[name.as_str()]).await;
+    assert!(
+        matches!(
+            after.entries.get(&id(&name)),
+            Some(crate::runtime::DeclaredEntryOutcome::Refused { .. })
+        ),
+        "{after:?}"
+    );
+    assert!(!mob.is_member(&name).await);
+}
+
 /// Row: a removed name is refused by everything that would take it again:
 /// a create (`name_taken` by a removed identity), a declaration
 /// (`NameTombstoned`), a spawn and a legacy adoption.
@@ -3031,6 +3161,141 @@ async fn a_create_of_an_unlisted_roster_identitys_name_is_refused_name_taken() {
                 if *session_id == session
         ),
         "the re-list restores the identity on its own session: {relisted:?}"
+    );
+}
+
+/// Row (R2.15): an unarchive whose archived session is gone from the store
+/// seats the identity on a fresh session with the notice: the seat's row
+/// carries `history_unavailable` naming the lost session, and the entry
+/// lets its archived session record go.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unarchive_whose_archived_session_is_gone_seats_a_fresh_session_with_the_notice() {
+    let mob = StoreOwnedMob::new("unarchive-history-lost").await;
+    committed(
+        mob.create(host_create("create-kept", &["kept"]), ALLOW)
+            .await,
+    );
+    mob.handle
+        .ensure_member_live(&id("kept"))
+        .await
+        .expect("the wake builds the identity's session");
+    let archived = mob.session("kept").await;
+    committed(mob.archive("archive-kept", "kept").await);
+    mob.unseated_for("kept", UnseatedEntryCause::Archived).await;
+    // The store's retention purges the archived session.
+    mob.service.delete_persisted_session(&archived).await;
+
+    committed(mob.unarchive("unarchive-kept", "kept").await);
+    assert!(mob.seated_dormant("kept"));
+    let fresh = mob.session("kept").await;
+    assert_ne!(fresh, archived, "a fresh session");
+    assert_eq!(
+        mob.spawn_row("kept").await.history_unavailable,
+        Some(crate::runtime::HistoryUnavailable::new(archived)),
+        "the seat's row carries the notice"
+    );
+    match mob.read("kept") {
+        IdentityEntryRead::Entry(view) => assert_eq!(view.archived_session, None),
+        other => panic!("kept reads {other:?}"),
+    }
+}
+
+/// Row (R2.15): an update of an archived identity changes its row only, and
+/// its unarchive seats the identity from the updated spec: the seat carries
+/// the update's labels.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_update_of_an_archived_identity_is_applied_at_its_unarchive() {
+    let mob = StoreOwnedMob::new("unarchive-updated").await;
+    let first = spec("resting", "worker");
+    committed(
+        mob.create(host_create("create-resting", &["resting"]), ALLOW)
+            .await,
+    );
+    committed(mob.archive("archive-resting", "resting").await);
+    mob.unseated_for("resting", UnseatedEntryCause::Archived)
+        .await;
+    let mut labels = first.labels.clone();
+    labels.insert("tier".to_string(), "gold".to_string());
+    let updated = mob
+        .update(
+            "update-resting",
+            first.clone().with_labels(labels.clone()),
+            &spec_digest(&first),
+        )
+        .await
+        .expect("the update of the archived identity commits");
+    assert!(matches!(
+        updated.change,
+        IdentityChangeOutcome::Committed { .. }
+    ));
+    assert!(updated.applied.is_none(), "the row alone changes");
+    assert_eq!(
+        mob.standing("resting"),
+        Some(EntryStanding::Unseated(UnseatedEntryCause::Archived)),
+        "it stays archived"
+    );
+    assert_eq!(mob.row("resting").await.revision, 2);
+
+    committed(mob.unarchive("unarchive-resting", "resting").await);
+    assert!(mob.seated_dormant("resting"));
+    assert_eq!(
+        mob.handle
+            .get_member(&id("resting"))
+            .await
+            .expect("roster read")
+            .expect("the seated identity")
+            .labels,
+        labels,
+        "the seat carries the update's labels"
+    );
+}
+
+/// Row: an archive whose member's retirement a crash interrupted finishes
+/// after the restart: the identity reads archived, no member holds it, and
+/// its row stays archived on its member's session.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_crash_during_an_archive_finishes_it_after_restart() {
+    let mut mob = StoreOwnedMob::new("archive-crash").await;
+    let name = unique("resting");
+    committed(
+        mob.create(host_create("create-resting", &[&name]), ALLOW)
+            .await,
+    );
+    mob.handle
+        .ensure_member_live(&id(&name))
+        .await
+        .expect("wake the identity");
+    let session = mob.session(&name).await;
+    let hold = super::actor::retirement_stage_hold::install(&id(&name), "retire-runtime-quiesce");
+    let archive = {
+        let handle = mob.handle.clone();
+        let name = name.clone();
+        tokio::spawn(async move {
+            handle
+                .archive_identity(
+                    crate::runtime::IdentityArchiveChange::new(
+                        operation("archive-resting"),
+                        IdentityChangeRequesterInput::host("console"),
+                        name,
+                    ),
+                    ALLOW,
+                )
+                .await
+        })
+    };
+    tokio::time::timeout(STEP, hold.entered())
+        .await
+        .expect("the retirement reaches its held stage");
+    mob.restart_as(MobCompositionAuthority::Authoritative).await;
+    hold.release();
+    archive.abort();
+    mob.unseated_for(&name, UnseatedEntryCause::Archived).await;
+    assert!(!mob.is_member(&name).await);
+    assert_eq!(
+        mob.row(&name).await.presence,
+        CreatedIdentityPresence::Archived {
+            archived_session: Some(session)
+        }
     );
 }
 
@@ -4416,22 +4681,26 @@ async fn the_settle_activates_exactly_the_held_attempt_and_a_stale_attempt_is_re
 }
 
 /// The built-in identity store of a row's storage, whose change commit
-/// fails once, writing nothing, for a settle's receipt that accepts an
-/// activation (its entry `Activating`), as a store write that fails after
-/// the activation was sent.
-struct FailingActivationCommit {
+/// fails once, writing nothing, for the first change `fails` picks.
+struct FailingChangeCommit {
     inner: Arc<dyn crate::store::MobIdentityMemberStore>,
+    fails: fn(&crate::store::IdentityChangeWrite) -> bool,
     armed: AtomicBool,
 }
 
-impl FailingActivationCommit {
-    /// `storage` with its identity store wrapped, the failure armed.
-    fn wrap(storage: &mut MobStorage) -> Arc<Self> {
+impl FailingChangeCommit {
+    /// `storage` with its identity store wrapped, the failure armed for the
+    /// first change `fails` picks.
+    fn wrap(
+        storage: &mut MobStorage,
+        fails: fn(&crate::store::IdentityChangeWrite) -> bool,
+    ) -> Arc<Self> {
         let failing = Arc::new(Self {
             inner: storage
                 .identity_member
                 .clone()
                 .expect("the in-memory storage has the identity member store"),
+            fails,
             armed: AtomicBool::new(true),
         });
         storage.identity_member =
@@ -4439,6 +4708,9 @@ impl FailingActivationCommit {
         failing
     }
 
+    /// A settle's receipt that accepts an activation (its entry
+    /// `Activating`): a store write that fails after the activation was
+    /// sent.
     fn accepts_an_activation(write: &crate::store::IdentityChangeWrite) -> bool {
         write.receipt.change == IdentityChangeKind::SettlePreparation
             && write
@@ -4450,7 +4722,7 @@ impl FailingActivationCommit {
 }
 
 #[async_trait::async_trait]
-impl crate::store::MobIdentityMemberStore for FailingActivationCommit {
+impl crate::store::MobIdentityMemberStore for FailingChangeCommit {
     async fn observe_identity_member_target(
         &self,
         mob_id: &MobId,
@@ -4510,9 +4782,9 @@ impl crate::store::MobIdentityMemberStore for FailingActivationCommit {
         &self,
         write: &crate::store::IdentityChangeWrite,
     ) -> Result<crate::store::IdentityChangeCommit, MobStoreError> {
-        if Self::accepts_an_activation(write) && self.armed.swap(false, Ordering::SeqCst) {
+        if (self.fails)(write) && self.armed.swap(false, Ordering::SeqCst) {
             return Err(MobStoreError::WriteFailed(
-                "the row's store refused the settle's write".to_string(),
+                "the row's store refused the change's write".to_string(),
             ));
         }
         self.inner.commit_identity_change(write).await
@@ -4570,7 +4842,8 @@ impl crate::store::MobIdentityMemberStore for FailingActivationCommit {
 async fn a_store_write_failing_after_the_activation_send_ends_a_failed_publication_and_commits_nothing()
  {
     let mut storage = MobStorage::in_memory();
-    let failing = FailingActivationCommit::wrap(&mut storage);
+    let failing =
+        FailingChangeCommit::wrap(&mut storage, FailingChangeCommit::accepts_an_activation);
     let mob = HeldMob::with_storage("activation-write-fails", storage).await;
     mob.create_constructed("built").await;
     let held = mob
@@ -4661,6 +4934,61 @@ async fn a_store_write_failing_after_the_activation_send_ends_a_failed_publicati
         "{:?}",
         settled.settlement
     );
+}
+
+/// Row (P2-9d): a create whose store transaction fails writes nothing and
+/// seats nothing: the change answers the store's failure, and no row, no
+/// receipt, no journal row, no entry and no member exist. Once the store
+/// serves again, the same create commits and seats both identities.
+///
+/// A row for behaviour that stands (no RED leg).
+#[tokio::test]
+async fn a_create_whose_store_write_fails_writes_nothing_and_seats_nothing() {
+    let mut storage = MobStorage::in_memory();
+    let failing = FailingChangeCommit::wrap(&mut storage, |write| {
+        write.receipt.change == IdentityChangeKind::Create
+    });
+    let mob = StoreOwnedMob::build(
+        store_owned_definition("create-write-fails"),
+        storage,
+        |builder| builder,
+    )
+    .await;
+    let journal = mob.journal().await.len();
+    let failed = mob
+        .create(host_create("create-pair", &["alpha", "beta"]), ALLOW)
+        .await;
+    assert!(failed.is_err(), "{failed:?}");
+    assert!(
+        !failing.armed.load(Ordering::SeqCst),
+        "the store refused the create's write"
+    );
+    assert!(mob.rows().await.is_empty(), "no row");
+    assert_eq!(
+        mob.handle
+            .identity_operation("create-pair")
+            .await
+            .expect("the receipt read answers"),
+        None,
+        "no receipt"
+    );
+    assert_eq!(mob.journal().await.len(), journal, "no journal row");
+    for name in ["alpha", "beta"] {
+        assert!(!mob.is_member(name).await, "{name} has no member");
+        assert!(
+            matches!(
+                mob.read(name),
+                IdentityEntryRead::NotAnEntry { worker: None }
+            ),
+            "{name} is no entry"
+        );
+    }
+
+    committed(
+        mob.create(host_create("create-pair", &["alpha", "beta"]), ALLOW)
+            .await,
+    );
+    assert!(mob.seated_dormant("alpha") && mob.seated_dormant("beta"));
 }
 
 /// Row (RED): an accepted activation that a crash left without its

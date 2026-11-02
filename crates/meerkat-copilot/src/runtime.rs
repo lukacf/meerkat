@@ -1694,6 +1694,15 @@ impl CopilotAuthorizer {
             retryable = %unavailable.retryable,
             "Copilot token exchange failed transiently and no valid token is left; the turn fails with the retryable error and is retried"
         );
+        if cached.source_generation != source_generation {
+            // The entry's token was minted from an earlier sign-in. The entry
+            // now speaks for the current one, so a build admitted during the
+            // outage publishes the current sign-in's expiry, and the earlier
+            // sign-in's token is refused so it never serves this one.
+            cached.refuse();
+            cached.source_generation = source_generation;
+            cached.source_expires_at = source.expires_at;
+        }
         cached.exchange_unavailable = Some(unavailable);
         Err(CopilotTokenError::ExchangeUnavailable(error))
     }

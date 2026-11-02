@@ -18230,6 +18230,90 @@ mod tests {
 
     #[cfg(not(target_arch = "wasm32"))]
     #[tokio::test]
+    async fn a_controller_prepared_under_a_known_budget_refuses_a_build_without_one() {
+        use crate::prepared_controller::{
+            PreparedControllerCell, PreparedControllerRefusal, PreparedControllerTicket,
+            encode_prepared_controller_for_service,
+        };
+        let stand_in = PendingLimitsFactory::new();
+        stand_in.begin_outage();
+        let runtime = meerkat_runtime::MeerkatMachine::ephemeral();
+        let session_id = meerkat_core::SessionId::new();
+
+        // Prepared during the outage under an explicit budget: its resolution
+        // admitted the account's pending limits.
+        let mut request = PendingLimitsFactory::request();
+        request.max_tokens = Some(1024);
+        let graph = stand_in
+            .factory
+            .prepare_controller_graph(
+                request,
+                &Config::default(),
+                runtime.generated_auth_lease_handle(),
+                &session_id,
+            )
+            .await
+            .expect("a controller whose budget is known is prepared during the outage");
+        let ticket =
+            PreparedControllerTicket::new(PreparedControllerCell::new(session_id.clone(), graph));
+        assert_eq!(stand_in.admissions(), [true]);
+
+        let bindings = runtime
+            .prepare_bindings(session_id.clone())
+            .await
+            .expect("session runtime bindings");
+        let consuming_build = |max_tokens: Option<u32>| {
+            let mut build = PendingLimitsFactory::request();
+            build.max_tokens = max_tokens;
+            build.resume_session = Some(Session::with_id(session_id.clone()));
+            build.resume_session_intent = meerkat_core::SessionBuildIntent::Mint;
+            build.runtime_build_mode = RuntimeBuildMode::SessionOwned(bindings.clone());
+            build.prepared_controller =
+                Some(encode_prepared_controller_for_service(ticket.clone()));
+            build
+        };
+
+        // The session's build names no budget: its budget would come from the
+        // account's limit, which the admitted resolution never read.
+        let error = stand_in
+            .factory
+            .build_agent(consuming_build(None), &Config::default())
+            .await
+            .err()
+            .expect("a build whose budget comes from the account's limit must not consume a controller admitted under a known budget");
+        assert!(
+            matches!(
+                error,
+                BuildAgentError::PreparedController(PreparedControllerRefusal::InputsChanged(
+                    "output budget"
+                ))
+            ),
+            "{error}"
+        );
+
+        // The refusal leaves the controller to a build whose budget is known.
+        let agent = stand_in
+            .factory
+            .build_agent(consuming_build(Some(1024)), &Config::default())
+            .await
+            .expect("a build with the prepared budget consumes the controller");
+        assert_eq!(
+            agent
+                .session()
+                .session_metadata()
+                .expect("metadata written")
+                .max_tokens,
+            1024
+        );
+        assert_eq!(
+            stand_in.admissions(),
+            [true],
+            "consumption resolves nothing"
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
     async fn hot_swap_env_default_fallback_does_not_publish_auth_lease() {
         use meerkat_llm_core::provider_runtime::{
             ProviderAuthError, ProviderClientError, ProviderRuntime, ProviderRuntimeRegistry,

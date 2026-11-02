@@ -472,7 +472,9 @@ impl std::error::Error for PolicyRefusal {}
 #[non_exhaustive]
 pub enum PolicyRefusalKind {
     /// The JSON does not have the policy's shape: an unknown key, a wrong
-    /// type or a missing member. The detail is the parser's.
+    /// type or a missing member, where the detail is the parser's; or a
+    /// requester selector whose members contradict each other, so that it
+    /// selects nobody, where the detail says which.
     Malformed { detail: String },
     /// A required list, map or text is empty.
     Empty,

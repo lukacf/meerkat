@@ -257,7 +257,9 @@ pub struct ApprovalRuleConfig {
 /// A selector over requesters. Fields are all required to match; a list
 /// matches any of its values; an empty field matches anything. A surface
 /// matches only the host on that surface, and an identity, a profile or
-/// labels only an agent that has them.
+/// labels only an agent that has them; a human has none of them. A selector
+/// that names a member its kind lacks, or both a surface and an agent's
+/// member, selects nobody and is refused.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]

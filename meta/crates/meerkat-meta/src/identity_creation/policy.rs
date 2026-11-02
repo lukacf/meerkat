@@ -913,6 +913,9 @@ fn selector_of(
     })
 }
 
+/// A requester selector that can select somebody: one naming a member its
+/// kind lacks, or naming both a surface and an agent's member, is refused
+/// malformed at `path`.
 fn requester_selector(
     config: &RequesterSelectorConfig,
     path: &str,
@@ -922,11 +925,41 @@ fn requester_selector(
     {
         return Err(invalid(format!("{path}.surface"), surface));
     }
+    let agent = selector_of(&config.identity, &config.profile, &config.labels, path)?;
+    if let Some(detail) = selects_nobody(config) {
+        return Err(refusal(path, PolicyRefusalKind::Malformed { detail }));
+    }
     Ok(RequesterSelector {
         kind: config.kind,
         surface: config.surface.clone(),
-        agent: selector_of(&config.identity, &config.profile, &config.labels, path)?,
+        agent,
     })
+}
+
+/// Why a requester selector selects nobody, if it does. A surface is the
+/// host's, and an identity, a profile or labels an agent's; a human has
+/// none of them. A rule that can never match is a configuration error,
+/// never a silent no-op.
+fn selects_nobody(config: &RequesterSelectorConfig) -> Option<String> {
+    const NEVER: &str = "the rule would match no requester";
+    let surface = config.surface.as_ref().map(|_| "surface");
+    let agent_member = [
+        ("identity", !config.identity.is_empty()),
+        ("profile", !config.profile.is_empty()),
+        ("labels", !config.labels.is_empty()),
+    ]
+    .into_iter()
+    .find_map(|(member, named)| named.then_some(member));
+    match (config.kind, surface, agent_member) {
+        (Some(kind @ (RequesterKind::Agent | RequesterKind::Human)), Some(member), _)
+        | (Some(kind @ (RequesterKind::Host | RequesterKind::Human)), _, Some(member)) => {
+            Some(format!("kind {} has no {member}: {NEVER}", kind.token()))
+        }
+        (_, Some(_), Some(member)) => Some(format!(
+            "surface selects the host and {member} an agent: {NEVER}"
+        )),
+        _ => None,
+    }
 }
 
 /// Every profile `selector` names is one of the mob's `profiles`.

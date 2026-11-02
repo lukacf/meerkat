@@ -178,11 +178,13 @@ AREA_FILES = {
     # test greps it like every script.
     "scripts/memory-evals": frozenset({"integration", "console"}),
     # meerkat-meta's SQLite lock profile rows (src/sqlite_lock_profile_tests.rs,
-    # lib tests) read release.yml's shipped --bin list and MODULE.bazel's
+    # lib tests) read the release workflow's shipped --bin list (the
+    # monorepo's meta-release.yml; release.yml before it) and MODULE.bazel's
     # libsqlite3-sys flags. Only the test job runs them: the voice and
     # extension-state jobs run their lib tests by name filters that leave
     # these rows out.
     ".github/workflows/release.yml": frozenset({"rust"}),
+    ".github/workflows/meta-release.yml": frozenset({"rust"}),
     "MODULE.bazel": frozenset({"rust"}),
 }
 
@@ -304,6 +306,12 @@ MONOREPO_JOB_FILES = frozenset({
     ".github/actions/setup-sccache-ci/action.yml",
 })
 MONOREPO_MARK = "//"
+# Root files a Meta job reads, under their own names: meerkat-meta's SQLite
+# lock profile rows (lib tests) read the root meta-release.yml's shipped
+# --bin list and the root MODULE.bazel's libsqlite3-sys flags. meta-release.yml
+# keeps its own name: Meta's previous release workflow still sits in
+# meta/.github/workflows/release.yml, which Meta's release contract tests read.
+MONOREPO_READ_FILES = frozenset({".github/workflows/meta-release.yml", "MODULE.bazel"})
 
 
 def meta_path(path: str) -> str | None:
@@ -311,11 +319,14 @@ def meta_path(path: str) -> str | None:
     Meta job reads it: Meta's own files without MONOREPO_ROOT; the root's
     Cargo.toml, Cargo.lock, rust-toolchain.toml and .cargo/ under their own
     names, the build configuration Meta's copies of them were before the
-    monorepo; Meta's root workflows under their old names; and the root job
-    files, marked."""
+    monorepo; the root files a Meta job reads (MONOREPO_READ_FILES) under
+    their own names; Meta's root workflows under their old names; and the
+    root job files, marked."""
     if path.startswith(MONOREPO_ROOT):
         return path[len(MONOREPO_ROOT):]
     if path in RUST_INPUT_FILES or path.startswith(BUILD_CONFIGURATION_PREFIXES):
+        return path
+    if path in MONOREPO_READ_FILES:
         return path
     if path in MONOREPO_WORKFLOWS:
         return MONOREPO_WORKFLOWS[path]

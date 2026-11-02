@@ -97,7 +97,8 @@ AREA_NAMES = ("sdk/python", "sdk/typescript", "flow-editor", "console", "sdk", "
 # whose readers the scan audits too.
 SKIPPABLE_NAMES = ("README.md", "CHANGELOG.md", "CONTRIBUTING.md", "CLAUDE.md", "LICENSE-MIT",
                    "LICENSE-APACHE", ".github/CODEOWNERS", ".github/release.yml",
-                   ".github/workflows/release.yml", ".github/workflows/e2e-live.yml",
+                   ".github/workflows/release.yml", ".github/workflows/meta-release.yml",
+                   ".github/workflows/e2e-live.yml",
                    ".github/workflows/publish-docs.yml", ".pre-commit-config.yaml", ".gitignore",
                    "BUILD.bazel", "MODULE.bazel", ".bazelrc", ".bazelversion", "deny.toml",
                    "Makefile", ".config/nextest.toml")
@@ -190,9 +191,10 @@ CROSS_AREA_READS = {
     # The memory eval harness tests run scripts/memory-evals.
     ("crates/*/tests/", "scripts/memory-evals"): {"integration"},
     # meerkat-meta's SQLite lock profile rows (lib tests, which the test job
-    # runs) read release.yml's shipped --bin list and MODULE.bazel's
-    # libsqlite3-sys flags.
-    ("crates/*/src/", ".github/workflows/release.yml"): {"rust"},
+    # runs) read the monorepo's meta-release.yml's shipped --bin list and the
+    # root MODULE.bazel's libsqlite3-sys flags (the scan resolves both through
+    # meta_path).
+    ("crates/*/src/", ".github/workflows/meta-release.yml"): {"rust"},
     ("crates/*/src/", "MODULE.bazel"): {"rust"},
     # Workflow files: ci.yml runs console scripts and keys the console lane's
     # npm cache on console/package-lock.json, keys flow-editor's on its own,
@@ -234,10 +236,11 @@ CROSS_AREA_READS = {
     ("scripts/", "scripts/memory-evals"): set(),
     ("scripts/", "docs/"): set(),
     ("scripts/", "skippable"): set(),
-    # The same holds for their reads of release.yml (the release workflow's
-    # contract tests and release scripts) and MODULE.bazel (the version
-    # parity check and bump, and the Bazel BUILD generator).
+    # The same holds for their reads of release.yml and meta-release.yml (the
+    # release workflow's contract tests and release scripts) and MODULE.bazel
+    # (the version parity check and bump, and the Bazel BUILD generator).
     ("scripts/", ".github/workflows/release.yml"): set(),
+    ("scripts/", ".github/workflows/meta-release.yml"): set(),
     ("scripts/", "MODULE.bazel"): set(),
     # Forge's separate workflow exercises these reads. Its path filters include
     # installer, Console/packages, the Python SDK and root README/licenses.
@@ -251,8 +254,10 @@ CROSS_AREA_READS = {
     ("installer/", "examples/"): set(),
     # installer/tests/test_runtime_candidates.py names release workflows as
     # candidate attestation identities (the standalone repository's and
-    # Core's release.yml); it reads no workflow file (FORGE_NAMED_NOT_READ).
+    # Core's release.yml, the monorepo's meta-release.yml); it reads no
+    # workflow file (FORGE_NAMED_NOT_READ).
     ("installer/", ".github/workflows/release.yml"): set(),
+    ("installer/", ".github/workflows/meta-release.yml"): set(),
     # installer/tests/test_gateway_shutdown_horizon.py pins the shutdown
     # horizon crates/meerkat-meta/src/rpc_gateway.rs advertises. Forge's
     # workflow runs it, and its path filters name that source, so a pull
@@ -396,6 +401,17 @@ def references(text: str, *, bare: bool) -> list[str]:
     return cut
 
 
+def monorepo_root_name(root: Path, target: str) -> str | None:
+    """The name Meta's classifier gives `target` when it names nothing below
+    Meta's root (`root`) but a file at the monorepo's root (`root`'s parent)
+    that a Meta job reads (ci_changes.meta_path): a reference such as the
+    SQLite lock profile rows' read of the root meta-release.yml and
+    MODULE.bazel. None for anything else."""
+    if tracked_files(root, target) or not (root.parent / target).is_file():
+        return None
+    return ci_changes.meta_path(target)
+
+
 def cross_area_reads(root: Path) -> dict[tuple[str, str], set[str]]:
     reads: dict[tuple[str, str], set[str]] = {}
     for directory, subdirectories, files in os.walk(root):
@@ -417,7 +433,12 @@ def cross_area_reads(root: Path) -> dict[tuple[str, str], set[str]]:
                 text = block.sub("", text)
             text = "\n".join(line for line in text.splitlines() if not COMMENT_LINE.match(line))
             for target in references(text, bare=path.suffix != ".rs"):
-                lanes = target_lanes(root, target)
+                mapped = monorepo_root_name(root, target)
+                if mapped is not None:
+                    target = mapped
+                    lanes = ci_changes.path_lanes(mapped)
+                else:
+                    lanes = target_lanes(root, target)
                 if lanes is None or lanes == ci_changes.EVERY_LANE:
                     continue
                 reader, read = area_of(relative), area_of(target.rstrip("/") + ("/" if (root / target).is_dir() else ""))
@@ -923,7 +944,7 @@ class CiChangesTests(unittest.TestCase):
         self.assertIn(("console/", "sdk/typescript/"), reads)
         self.assertIn(("crates/*/tests/", "sdk/python/"), reads)
         self.assertIn(("crates/*/tests/", "scripts/memory-evals"), reads)
-        self.assertIn(("crates/*/src/", ".github/workflows/release.yml"), reads)
+        self.assertIn(("crates/*/src/", ".github/workflows/meta-release.yml"), reads)
         self.assertIn(("crates/*/src/", "MODULE.bazel"), reads)
         self.assertIn(("flow-editor/", "Makefile"), reads)
         self.assertIn(("crates/*/Cargo.toml", "examples/"), reads)
@@ -1110,6 +1131,9 @@ class MonorepoTests(unittest.TestCase):
             (".github/workflows/meta-installer.yml", ".github/workflows/forge.yml"),
             (".github/workflows/meta-installer-release.yml", ".github/workflows/forge-release.yml"),
             (".github/workflows/meta-e2e-live.yml", ".github/workflows/e2e-live.yml"),
+            # The root files a Meta job reads, under their own names.
+            (".github/workflows/meta-release.yml", ".github/workflows/meta-release.yml"),
+            ("MODULE.bazel", "MODULE.bazel"),
             # The root files every Rust job runs, marked.
             ("scripts/repo-cargo", "//scripts/repo-cargo"),
             (".github/actions/setup-sccache-ci/action.yml", "//.github/actions/setup-sccache-ci/action.yml"),
@@ -1117,7 +1141,6 @@ class MonorepoTests(unittest.TestCase):
             ("crates/meerkat-core/src/lib.rs", None),
             ("connect/crates/meerkat-connect/src/main.rs", None),
             (".github/workflows/ci.yml", None),
-            (".github/workflows/meta-release.yml", None),
             ("scripts/ci-cargo-lanes.mjs", None),
             ("docs/index.mdx", None),
             ("Makefile", None),
@@ -1135,6 +1158,12 @@ class MonorepoTests(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertTrue((MONOREPO / path).is_file(), f"{path} names nothing at the monorepo's root")
                 self.assertFalse((ROOT / old).exists(), f"meta/{old} stays beside {path}, which replaced it")
+        # The root files a Meta job reads keep their names: Meta has no file
+        # of those names.
+        for path in sorted(ci_changes.MONOREPO_READ_FILES):
+            with self.subTest(path=path):
+                self.assertTrue((MONOREPO / path).is_file(), f"{path} names nothing at the monorepo's root")
+                self.assertFalse((ROOT / path).exists(), f"meta/{path} would share the root's name")
         # The root's build configuration keeps its names: Meta has none of
         # its own any more.
         for path in sorted(ci_changes.RUST_INPUT_FILES):
@@ -1167,6 +1196,12 @@ class MonorepoTests(unittest.TestCase):
         for path in ("Cargo.lock", "Cargo.toml", "rust-toolchain.toml", ".cargo/config.toml"):
             with self.subTest(path=path):
                 self.assertEqual(self.classify("pull_request", path), (True, frozenset(RUST_LANES), frozenset()))
+        # The root files the SQLite lock profile rows read start the rust
+        # lane: a change to meta-release.yml's shipped --bin list or to
+        # MODULE.bazel's libsqlite3-sys flags.
+        for path in (".github/workflows/meta-release.yml", "MODULE.bazel"):
+            with self.subTest(path=path):
+                self.assertEqual(self.classify("pull_request", path), (True, frozenset({"rust"}), frozenset()))
         # Meta's workflow and the root files its jobs run reach every lane.
         for path in (".github/workflows/meta-ci.yml", "scripts/repo-cargo",
                      ".github/actions/setup-rust-ci/action.yml"):

@@ -149,11 +149,13 @@ read answers.
   `IdentityCensus::is_complete()` is false while a name is unreadable. The
   member binding history answers `MemberIdentityManagement::CreatedEntry` for
   a created entry. The enums are `#[non_exhaustive]`.
-- **The declared apply refuses created and reserved names.** A host roster
-  that lists a created entry's name, or a removed or unreadable one, is
-  answered `Refused` for that identity alone
-  (`DeclaredEntryRefusal::NameOwnedByCreated`, `NameTombstoned`,
-  `NameUnreadable`), and its seal never unlists a created entry.
+- **The declared apply notes created names and refuses reserved ones.** A
+  host roster that lists a created entry's name is answered
+  `DeclaredEntryOutcome::Noted` (`DeclaredEntryNote::OwnedByStore`) for that
+  identity alone, a quiet steady state that changes and retires nothing; a
+  removed or unreadable name is answered `Refused`
+  (`DeclaredEntryRefusal::NameTombstoned`, `NameUnreadable`). Its seal never
+  unlists a created entry.
 - **A host store opens over a row it cannot read.** A mob storage on the
   host store SPI reads its identity intents one entry at a time: an entry
   whose row this build cannot decode is kept as stored, read as unreadable

@@ -230,8 +230,9 @@ the replayed facts:
 - A present row of a seated local member records the member a `Created`
   entry. Whichever local member the journal seats under the name is the
   created one: a name holds one member at a time, and no declaration takes
-  a created entry's name (`NameOwnedByCreated`), so a member a predecessor
-  seated under it, whose spawn row carries no origin, is that entry's.
+  a created entry's name (the apply notes such a listing,
+  `DeclaredEntryNote::OwnedByStore`), so a member a predecessor seated under
+  it, whose spawn row carries no origin, is that entry's.
 - A present row whose identity the replay left without a member (a build
   that predates created entries retired it, or the spawn of a create's
   kickoff failed) records the entry unseated, owed its seat (`SeatOwed`),
@@ -272,9 +273,10 @@ and a custody of one origin never takes an entry of the other: both are refused
 `MobError::IdentityMember` before anything is created. A spawn already
 under way when its name is reserved is refused its seat with the same error
 and aborted: the name takes no member. A worker reconcile
-neither spawns nor retires a reserved name, the declared apply refuses a
-created, removed or unreadable name for that identity alone (see
-[The declared apply](#the-declared-apply)), the legacy adoption answers
+neither spawns nor retires a reserved name, the declared apply notes a
+created entry's name and refuses a removed or unreadable one for that
+identity alone (see [The declared apply](#the-declared-apply)), the legacy
+adoption answers
 `NotAdoptable` for any of them, and the agent lane refuses an unreadable
 member as an identity member. The host's own retire and rotation of the
 member an unreadable name keeps are not refused by the reservation, and a
@@ -387,7 +389,8 @@ seats); the agent lane is refused `MobError::ScopeDenied`.
 | Never seated, its preparation `required` or `constructed` (`DeclaredEntry::with_preparation`, as the host's rule for its profile derives it at this apply) | Awaits its host's preparation (`PreparationPending`): not seated, and a delivery to it is refused retryable (`MobError::MemberWakeRefused`, `HostPreparationPending`). A later declaration with no preparation settles a `required` one; a `constructed` one is settled only by the activation of its held construction (see [Host preparation and held constructions](#host-preparation-and-held-constructions)). |
 | Spawn, wake or retirement in flight | Deferred to the next apply (`Deferred`). |
 | A worker holds the name, the identity store manages it (a host adoption), declared twice, or a first-boot request for an undeclared identity | Refused for that identity alone (`Refused`, `DeclaredEntryRefusal`). |
-| A created entry holds the name, or the name is removed or unreadable | Refused for that identity alone (`DeclaredEntryRefusal::NameOwnedByCreated`, `NameTombstoned`, `NameUnreadable`): the apply never declares over a created entry or a reserved name. |
+| A created (store-owned) entry holds the name | Left as it is (`Noted`, `DeclaredEntryNote::OwnedByStore`): a quiet steady state. The listing changes nothing and retires nothing, so a roster that keeps listing an identity after its adoption into store custody (a rollback to an earlier roster generation included) is harmless. |
+| The name is removed or unreadable | Refused for that identity alone (`DeclaredEntryRefusal::NameTombstoned`, `NameUnreadable`): the apply never declares over a reserved name. |
 | Any, in a candidate composition | Refused `NonAuthoritative`: a candidate declares nothing and writes nothing. |
 
 A legacy member listed under its own name is adopted first

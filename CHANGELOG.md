@@ -1310,9 +1310,11 @@ them.
   never takes an entry of the other (`MobError::IdentityMember`); a fresh-life
   respawn of the member an unreadable name keeps is refused the same way,
   before that member is retired; a worker reconcile neither spawns nor retires
-  one; the declared apply refuses a created, removed or unreadable name for
-  that identity alone (`DeclaredEntryRefusal::NameOwnedByCreated`,
-  `NameTombstoned`, `NameUnreadable`); the legacy adoption answers
+  one; the declared apply answers a created entry's name with a typed note
+  (`DeclaredEntryOutcome::Noted`, `DeclaredEntryNote::OwnedByStore`: a quiet
+  steady state that changes and retires nothing) and refuses a removed or
+  unreadable one for that identity alone (`DeclaredEntryRefusal::NameTombstoned`,
+  `NameUnreadable`); the legacy adoption answers
   `NotAdoptable`; and the agent lane refuses an unreadable member as an
   identity member. The reads: `IdentityEntryRead::Unreadable { member }` and
   `Removed`, `IdentityEntryPage::unreadable`,

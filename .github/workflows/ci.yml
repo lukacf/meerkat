@@ -979,8 +979,9 @@ jobs:
   # entry audit's entry part (281 s locally), and four (audits-k,
   # audits-m, audits-n, audits-o) for its declared apply's apply, legacy,
   # roles and hosted parts (180, 230, 196 and 212 s locally with 4
-  # workers), and a sixteenth (audits-q) for the created identity audit
-  # (225 s locally); none of these ten is measured on a hosted runner yet.
+  # workers), and two (audits-q, audits-r) for the created identity audit's
+  # recovery part (225 s locally) and its changes part (about 400 s
+  # locally); none of these eleven is measured on a hosted runner yet.
   # The `machine-verify --all` sweep stays on nightly, the release gate and
   # the release-tag graph.
   tlc-audits:
@@ -995,7 +996,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        part: [audits-a, audits-b, audits-c, audits-d, audits-e, audits-f, audits-g, audits-h, audits-i, audits-j, audits-k, audits-l, audits-m, audits-n, audits-o, audits-q]
+        part: [audits-a, audits-b, audits-c, audits-d, audits-e, audits-f, audits-g, audits-h, audits-i, audits-j, audits-k, audits-l, audits-m, audits-n, audits-o, audits-q, audits-r]
     env:
       # A 4-vCPU runner: four TLC workers, and a heap that leaves room for
       # the runner.

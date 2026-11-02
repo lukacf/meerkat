@@ -22,9 +22,10 @@
 \* vacuously.
 \* This module keeps the generated model unchanged, extends
 \* identity_entry_apply_audit for its constants and arm families, and
-\* checks ten runs over fixed domains: the four of the recovery part below,
-\* and the six of the changes part (0.9.9: commit, update, removal,
-\* archive, preparation and placement), which its own section describes.
+\* checks twelve runs over fixed domains: the four of the recovery part
+\* below, and the eight of the changes part (0.9.9: commit, update,
+\* removal, archive, preparation, placement, unlist and recovered), which
+\* its own section describes.
 \* The recovery part:
 \*
 \*   scan (ScanSpec): member 1 recovered and bound (a seated local member),
@@ -189,7 +190,10 @@ ProbeExactlyOne ==
 \* seat row.
 C1Recover == RecoverRosterMemberRunning(Id1, Rid1, 1, 0, AuditProfile, AuditMode, FALSE)
 C1Bind == RecoverMemberSessionBindingFreshRunning(Id1, Rid1, Sess1, None)
-C1Declared == RecoverIdentityEntrySeatedRunning(Id1, Rid1, "Declared")
+\* The journal replay precedes the boot's scan of the created rows: a
+\* Declared seat row is replayed only while the scan has recorded no Created
+\* entry of the name.
+C1Declared == Origin(Id1) # Some("Created") /\ RecoverIdentityEntrySeatedRunning(Id1, Rid1, "Declared")
 CStop == AuditQuiesceStop \/ StopRunning \/ ResumeStopped
 
 (***************************************************************************)
@@ -526,14 +530,37 @@ NotAuditWitnessScanContradictedPlaced == [][~AuditWitnessScanContradictedPlaced]
 (* entry's record (commit), a store-owned update beside a roster's change *)
 (* of the same spec (update), the removal of either custody (removal), the *)
 (* archive and unarchive (archive), the host's preparation and its held    *)
-(* constructions (preparation) and the placed spawn of a store-owned       *)
-(* identity (placement).                                                   *)
+(* constructions (preparation), the placed and peer-only spawns of a       *)
+(* store-owned identity (placement), the one-entry unlist of a roster-     *)
+(* owned identity (unlist) and the replay of a removal or an archive in    *)
+(* flight carried to its terminal (recovered).                             *)
 (***************************************************************************)
 
 Receipts == {"Absent", "Same", "Other"}
 ConsentKinds == {"Policy", "Decided", "Imported"}
-Causes == {"SeatOwed", "HostedOnFirstUse", "HeldCreation", "PreparationPending", "Archived"}
 Seated(id) == id \in DOMAIN identity_to_runtime
+
+\* The facts a new store-owned entry is recorded from, <<preparation
+\* required, placement kind, held creation>>: each cause, and each
+\* precedence between two facts (a preparation over a placement and a held
+\* creation, a placement over a held creation).
+Facts ==
+    {<<FALSE, "Local", FALSE>>, <<FALSE, "Local", TRUE>>, <<FALSE, "Placed", FALSE>>,
+     <<FALSE, "External", TRUE>>, <<TRUE, "Placed", TRUE>>}
+\* The facts of a request whose new entry is unseated for `cause`.
+FactsFor(cause) ==
+    CASE cause = "PreparationPending" -> <<TRUE, "Local", FALSE>>
+      [] cause = "HostedOnFirstUse" -> <<FALSE, "Placed", FALSE>>
+      [] cause = "HeldCreation" -> <<FALSE, "Local", TRUE>>
+      [] OTHER -> <<FALSE, "Local", FALSE>>
+\* The cause the declared apply's precedence gives an identity never
+\* created, from its facts: its preparation, then a placed or externally
+\* bound spec, then its held creation, and otherwise its seat owed.
+ExpectedCause(f) ==
+    IF f[1] THEN "PreparationPending"
+    ELSE IF f[2] # "Local" THEN "HostedOnFirstUse"
+    ELSE IF f[3] THEN "HeldCreation"
+    ELSE "SeatOwed"
 
 \* Every arm of a change's admission, in a running and a stopped mob.
 AdmitArm(r, c, pb, pa, ho, gc, sc) ==
@@ -564,28 +591,29 @@ AdmitAny ==
     \E r \in Receipts, c \in ConsentKinds, pb \in BOOLEAN, pa \in BOOLEAN, ho \in BOOLEAN,
        gc \in BOOLEAN, sc \in BOOLEAN : AdmitArm(r, c, pb, pa, ho, gc, sc)
 
-\* Every arm of a new store-owned entry's record, in a running and a stopped
-\* mob.
-RecordArm(id, cause) ==
-    \/ RecordCreatedIdentityEntryRecorded(id, cause)
-    \/ RecordCreatedIdentityEntryNameHeldByIdentity(id, cause)
-    \/ RecordCreatedIdentityEntryNameHeldByWorker(id, cause)
-    \/ RecordCreatedIdentityEntryNameTombstoned(id, cause)
-    \/ RecordCreatedIdentityEntryNameUnreadable(id, cause)
-    \/ RecordCreatedIdentityEntryNonAuthoritative(id, cause)
-    \/ RecordCreatedIdentityEntryChangesHeld(id, cause)
-    \/ RecordCreatedIdentityEntryCauseRefused(id, cause)
-    \/ RecordCreatedIdentityEntryMobNotRunningStopped(id, cause)
-RecordVerdicts(id, cause) ==
-    << ENABLED RecordCreatedIdentityEntryRecorded(id, cause),
-       ENABLED RecordCreatedIdentityEntryNameHeldByIdentity(id, cause),
-       ENABLED RecordCreatedIdentityEntryNameHeldByWorker(id, cause),
-       ENABLED RecordCreatedIdentityEntryNameTombstoned(id, cause),
-       ENABLED RecordCreatedIdentityEntryNameUnreadable(id, cause),
-       ENABLED RecordCreatedIdentityEntryNonAuthoritative(id, cause),
-       ENABLED RecordCreatedIdentityEntryChangesHeld(id, cause),
-       ENABLED RecordCreatedIdentityEntryCauseRefused(id, cause),
-       ENABLED RecordCreatedIdentityEntryMobNotRunningStopped(id, cause) >>
+\* Every arm of a new store-owned entry's record from the facts `f`, in a
+\* running and a stopped mob.
+RecordArm(id, f) ==
+    \/ RecordCreatedIdentityEntryRecorded(id, f[1], f[2], f[3])
+    \/ RecordCreatedIdentityEntryNameHeldByIdentity(id, f[1], f[2], f[3])
+    \/ RecordCreatedIdentityEntryNameHeldByWorker(id, f[1], f[2], f[3])
+    \/ RecordCreatedIdentityEntryNameTombstoned(id, f[1], f[2], f[3])
+    \/ RecordCreatedIdentityEntryNameUnreadable(id, f[1], f[2], f[3])
+    \/ RecordCreatedIdentityEntryNonAuthoritative(id, f[1], f[2], f[3])
+    \/ RecordCreatedIdentityEntryChangesHeld(id, f[1], f[2], f[3])
+    \/ RecordCreatedIdentityEntryMobNotRunningStopped(id, f[1], f[2], f[3])
+RecordVerdicts(id, f) ==
+    << ENABLED RecordCreatedIdentityEntryRecorded(id, f[1], f[2], f[3]),
+       ENABLED RecordCreatedIdentityEntryNameHeldByIdentity(id, f[1], f[2], f[3]),
+       ENABLED RecordCreatedIdentityEntryNameHeldByWorker(id, f[1], f[2], f[3]),
+       ENABLED RecordCreatedIdentityEntryNameTombstoned(id, f[1], f[2], f[3]),
+       ENABLED RecordCreatedIdentityEntryNameUnreadable(id, f[1], f[2], f[3]),
+       ENABLED RecordCreatedIdentityEntryNonAuthoritative(id, f[1], f[2], f[3]),
+       ENABLED RecordCreatedIdentityEntryChangesHeld(id, f[1], f[2], f[3]),
+       ENABLED RecordCreatedIdentityEntryMobNotRunningStopped(id, f[1], f[2], f[3]) >>
+\* The record of a new entry unseated for `cause`.
+RecordAs(id, cause) ==
+    RecordCreatedIdentityEntryRecorded(id, FactsFor(cause)[1], FactsFor(cause)[2], FactsFor(cause)[3])
 HoldArm == \E held \in BOOLEAN : SetIdentityChangesHeldRunning(held) \/ SetIdentityChangesHeldStopped(held)
 
 \* Every arm of one identity's removal, archive and unarchive, in a running
@@ -621,6 +649,7 @@ ArchiveArm(id) ==
     \/ ArchiveIdentityEntryNonAuthoritative(id)
     \/ ArchiveIdentityEntryChangesHeld(id)
     \/ ArchiveIdentityEntryMobNotRunningStopped(id)
+    \/ ArchiveIdentityEntryPreparationPending(id)
 ArchiveVerdicts(id) ==
     << ENABLED ArchiveIdentityEntryArchiving(id),
        ENABLED ArchiveIdentityEntryArchived(id),
@@ -631,7 +660,8 @@ ArchiveVerdicts(id) ==
        ENABLED ArchiveIdentityEntryNameUnreadable(id),
        ENABLED ArchiveIdentityEntryNonAuthoritative(id),
        ENABLED ArchiveIdentityEntryChangesHeld(id),
-       ENABLED ArchiveIdentityEntryMobNotRunningStopped(id) >>
+       ENABLED ArchiveIdentityEntryMobNotRunningStopped(id),
+       ENABLED ArchiveIdentityEntryPreparationPending(id) >>
 UnarchiveArm(id) ==
     \/ UnarchiveIdentityEntryRestored(id)
     \/ UnarchiveIdentityEntryNotArchived(id)
@@ -652,6 +682,23 @@ UnarchiveVerdicts(id) ==
        ENABLED UnarchiveIdentityEntryNonAuthoritative(id),
        ENABLED UnarchiveIdentityEntryChangesHeld(id),
        ENABLED UnarchiveIdentityEntryMobNotRunningStopped(id) >>
+
+\* Every arm of one roster-owned identity's unlist, in a running and a
+\* stopped mob.
+UnlistArm(id) ==
+    \/ UnlistIdentityEntryRetiring(id)
+    \/ UnlistIdentityEntryRemoved(id)
+    \/ UnlistIdentityEntryDeferred(id)
+    \/ UnlistIdentityEntryNotADeclaredEntry(id)
+    \/ UnlistIdentityEntryNonAuthoritative(id)
+    \/ UnlistIdentityEntryMobNotRunningStopped(id)
+UnlistVerdicts(id) ==
+    << ENABLED UnlistIdentityEntryRetiring(id),
+       ENABLED UnlistIdentityEntryRemoved(id),
+       ENABLED UnlistIdentityEntryDeferred(id),
+       ENABLED UnlistIdentityEntryNotADeclaredEntry(id),
+       ENABLED UnlistIdentityEntryNonAuthoritative(id),
+       ENABLED UnlistIdentityEntryMobNotRunningStopped(id) >>
 
 \* Every arm of the declared apply's verdict for one declaration of the
 \* custody `cc` (TRUE: a store-owned identity's update) with the host's rule
@@ -674,6 +721,7 @@ DeclareCustodyArm(id, s, cc, pr) ==
     \/ DeclareIdentityEntryRefusedNameTombstoned(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], cc, pr)
     \/ DeclareIdentityEntryRefusedNameUnreadable(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], cc, pr)
     \/ DeclareIdentityEntryMobNotRunningStopped(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], cc, pr)
+    \/ DeclareIdentityEntryRecordOnly(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], cc, pr)
 DeclareCustodyVerdicts(id, s, cc, pr) ==
     << ENABLED DeclareIdentityEntryKept(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], cc, pr),
        ENABLED DeclareIdentityEntrySeatOwed(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], cc, pr),
@@ -691,9 +739,10 @@ DeclareCustodyVerdicts(id, s, cc, pr) ==
        ENABLED DeclareIdentityEntryRefusedNameOwnedByCreated(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], cc, pr),
        ENABLED DeclareIdentityEntryRefusedNameTombstoned(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], cc, pr),
        ENABLED DeclareIdentityEntryRefusedNameUnreadable(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], cc, pr),
-       ENABLED DeclareIdentityEntryMobNotRunningStopped(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], cc, pr) >>
+       ENABLED DeclareIdentityEntryMobNotRunningStopped(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], cc, pr),
+       ENABLED DeclareIdentityEntryRecordOnly(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], cc, pr) >>
 \* The arms a declaration answers, by their index in the tuple above.
-DeclareAnswers(id, s, cc, pr) == {i \in 1..17 : DeclareCustodyVerdicts(id, s, cc, pr)[i]}
+DeclareAnswers(id, s, cc, pr) == {i \in 1..18 : DeclareCustodyVerdicts(id, s, cc, pr)[i]}
 
 \* Member 2's ladder under created custody, its seat and its membership
 \* commit: generation 0 on runtime 2 (fence 2), or generation 1 on runtime 3
@@ -717,6 +766,8 @@ CArchiveAt(inc) == ObserveMemberRetirementArchivedLive(Id2, inc[1], inc[2], inc[
 ACommit ==
     CommitSpawnMembershipFresh(Id1, Rid1, 1, 0, AuditDigest, FALSE, AuditMode, Some(Sess1), None, None,
                                None, None, None, None, FALSE)
+\* Member 1's archive terminal of its first incarnation in a stopped mob.
+AArchiveStopped == ObserveMemberRetirementArchivedLiveStopped(Id1, Rid1, 1, 0, Some(Sess1), AuditDisposal, FALSE)
 
 (***************************************************************************)
 (* The commit run.                                                         *)
@@ -724,8 +775,10 @@ ACommit ==
 
 \* Member 1 recovered and bound as a worker (no entry row), member 2's name
 \* reserved by its row or not; the admission of every change, the record of
-\* either name with every cause, the host's changes hold, and member 2's
-\* seat under created custody, in a running and a stopped mob.
+\* either name from every request's facts, the host's changes hold, and
+\* member 2's ladder under created custody, its dormant seat (an entry owed
+\* its seat) or its membership commit (one held for its creation, which the
+\* held protocol publishes), in a running and a stopped mob.
 CommitNext ==
     \/ C1Recover
     \/ C1Bind
@@ -734,10 +787,11 @@ CommitNext ==
     \/ CStop
     \/ HoldArm
     \/ AdmitAny
-    \/ \E id \in CreatedIds, cause \in Causes : RecordArm(id, cause)
+    \/ \E id \in CreatedIds, f \in Facts : RecordArm(id, f)
     \/ CRAuthorize(Id2)
     \/ COpenAt(<<Rid2, 2, 0>>, FALSE, TRUE)
     \/ CSeatAt(<<Rid2, 2, 0>>, FALSE)
+    \/ CCommitAt(<<Rid2, 2, 0>>)
     \/ CRAbort(Id2)
     \/ SealBootMaterializationPlan
 
@@ -750,54 +804,81 @@ AuditAdmitExactlyOne ==
             Cardinality({i \in 1..11 : AdmitVerdicts(r, c, pb, pa, ho, gc, sc)[i]}) = 1
 AuditRecordExactlyOne ==
     phase \in {"Running", "Stopped"} =>
-        \A id \in CreatedIds, cause \in Causes :
-            Cardinality({i \in 1..9 : RecordVerdicts(id, cause)[i]}) = 1
+        \A id \in CreatedIds, f \in Facts :
+            Cardinality({i \in 1..8 : RecordVerdicts(id, f)[i]}) = 1
 
 \* A new store-owned entry takes only a free name: no entry, no member, no
-\* spawn under way, no reservation.
+\* spawn under way, no reservation, and no unlisted roster-owned identity's
+\* archived session record.
 AuditRecordTakesFreeNames ==
     [][\A id \in CreatedIds :
          (Origin(id) = None /\ OriginNext(id) = Some("Created"))
-           => (~Reserved(id) /\ ~Seated(id) /\ id \notin DOMAIN spawn_exec_phase)
+           => (/\ ~Reserved(id)
+               /\ ~Seated(id)
+               /\ id \notin DOMAIN spawn_exec_phase
+               /\ id \notin DOMAIN identity_entry_archived_sessions)
       ]_vars
+
+\* A new entry's cause is the declared apply's precedence over its
+\* request's facts.
+AuditRecordCauseFollowsFacts ==
+    [][\A id \in CreatedIds, f \in Facts :
+         RecordCreatedIdentityEntryRecorded(id, f[1], f[2], f[3]) => UnseatedNext(id) = Some(ExpectedCause(f))
+      ]_vars
+
+\* An entry held for its creation is never seated Dormant: only the held
+\* protocol's membership commit creates it.
+AuditHeldNeverSeatedDormant ==
+    [][Unseated(Id2) = Some("HeldCreation") => ~CSeatAt(<<Rid2, 2, 0>>, FALSE)]_vars
 
 \* Witnesses of the commit run.
 AuditWitnessCommitRecordedPending ==
-    /\ RecordCreatedIdentityEntryRecorded(Id2, "PreparationPending")
+    /\ RecordCreatedIdentityEntryRecorded(Id2, TRUE, "Placed", TRUE)
     /\ UnseatedNext(Id2) = Some("PreparationPending")
+AuditWitnessCommitRecordedHosted ==
+    /\ RecordCreatedIdentityEntryRecorded(Id2, FALSE, "External", TRUE)
+    /\ UnseatedNext(Id2) = Some("HostedOnFirstUse")
 AuditWitnessCommitRecordedHeld ==
-    /\ RecordCreatedIdentityEntryRecorded(Id2, "HeldCreation")
+    /\ RecordCreatedIdentityEntryRecorded(Id2, FALSE, "Local", TRUE)
     /\ UnseatedNext(Id2) = Some("HeldCreation")
 AuditWitnessCommitStaleSpec ==
     AdmitIdentityChangeStaleSpec("Absent", "Policy", FALSE, FALSE, FALSE, TRUE, FALSE)
 AuditWitnessCommitHeldRefused ==
     /\ identity_changes_held = TRUE
-    /\ RecordCreatedIdentityEntryChangesHeld(Id2, "SeatOwed")
+    /\ RecordCreatedIdentityEntryChangesHeld(Id2, FALSE, "Local", FALSE)
 AuditWitnessCommitWorkerRefused ==
     /\ Seated(Id1)
-    /\ RecordCreatedIdentityEntryNameHeldByWorker(Id1, "SeatOwed")
+    /\ RecordCreatedIdentityEntryNameHeldByWorker(Id1, FALSE, "Local", FALSE)
 AuditWitnessCommitCreatedSeat ==
     /\ Id2 \in spawn_exec_created_custody
     /\ CSeatAt(<<Rid2, 2, 0>>, FALSE)
     /\ OriginNext(Id2) = Some("Created")
     /\ Id2 \in DOMAIN identity_to_runtime'
+AuditWitnessCommitHeldCreated ==
+    /\ Unseated(Id2) = Some("HeldCreation")
+    /\ CCommitAt(<<Rid2, 2, 0>>)
+    /\ OriginNext(Id2) = Some("Created")
+    /\ UnseatedNext(Id2) = None
 
 NotAuditWitnessCommitRecordedPending == [][~AuditWitnessCommitRecordedPending]_vars
+NotAuditWitnessCommitRecordedHosted == [][~AuditWitnessCommitRecordedHosted]_vars
 NotAuditWitnessCommitRecordedHeld == [][~AuditWitnessCommitRecordedHeld]_vars
 NotAuditWitnessCommitStaleSpec == [][~AuditWitnessCommitStaleSpec]_vars
 NotAuditWitnessCommitHeldRefused == [][~AuditWitnessCommitHeldRefused]_vars
 NotAuditWitnessCommitWorkerRefused == [][~AuditWitnessCommitWorkerRefused]_vars
 NotAuditWitnessCommitCreatedSeat == [][~AuditWitnessCommitCreatedSeat]_vars
+NotAuditWitnessCommitHeldCreated == [][~AuditWitnessCommitHeldCreated]_vars
 
 (***************************************************************************)
 (* The update run.                                                         *)
 (***************************************************************************)
 
 \* Member 1 a roster-owned identity and member 2 a store-owned one, each
-\* seated on its first incarnation under its custody (the same profile and
-\* runtime mode); their declarations of the same change (kept, another
-\* runtime mode, another profile with the migration from the member's own
-\* declared or not), member 1's by its roster and member 2's by its update.
+\* owed its seat and seated on its first incarnation under its custody (the
+\* same profile and runtime mode); their declarations of the same change
+\* (kept, another runtime mode, another profile with the migration from the
+\* member's own declared or not), member 1's by its roster and member 2's
+\* by its update, before and after their seats.
 UpdateShapes ==
     {ApplyShape,
      <<AuditProfile, AuditModeAlt, "Local", FALSE, None, FALSE, FALSE, None, "None">>,
@@ -809,7 +890,7 @@ UpdateNext ==
     \/ AAuthorize
     \/ AOpen(AFirst)
     \/ ASeat(AFirst)
-    \/ RecordCreatedIdentityEntryRecorded(Id2, "SeatOwed")
+    \/ RecordAs(Id2, "SeatOwed")
     \/ CRAuthorize(Id2)
     \/ COpenAt(<<Rid2, 2, 0>>, FALSE, TRUE)
     \/ CSeatAt(<<Rid2, 2, 0>>, FALSE)
@@ -817,16 +898,19 @@ UpdateNext ==
 
 UpdateSpec == Init /\ [][UpdateNext]_vars
 
-\* Exactly one arm answers every update of the seated store-owned identity.
+\* Exactly one arm answers every update of the store-owned identity.
 AuditUpdateExactlyOne ==
-    Seated(Id2) => \A s \in UpdateShapes : Cardinality(DeclareAnswers(Id2, s, TRUE, FALSE)) = 1
+    Created(Id2) => \A s \in UpdateShapes : Cardinality(DeclareAnswers(Id2, s, TRUE, FALSE)) = 1
 
 \* A store-owned update and a roster's change of the same spec answer the
-\* same verdict, whenever both members' facts are the same (both seated
-\* under the same profile and runtime mode, neither with a role hold).
+\* same verdict whenever both identities' facts are the same: both entries,
+\* both seated (under the same profile and runtime mode) or both owed their
+\* seats, neither with a role hold or a spawn ladder the other lacks.
 UpdateSameFacts ==
-    /\ Seated(Id1)
-    /\ Seated(Id2)
+    /\ Origin(Id1) = Some("Declared")
+    /\ Origin(Id2) = Some("Created")
+    /\ Seated(Id1) = Seated(Id2)
+    /\ Unseated(Id1) = Unseated(Id2)
     /\ Profile(Id1) = Profile(Id2)
     /\ (IF Id1 \in DOMAIN member_runtime_modes THEN Some(member_runtime_modes[Id1]) ELSE None)
          = (IF Id2 \in DOMAIN member_runtime_modes THEN Some(member_runtime_modes[Id2]) ELSE None)
@@ -837,26 +921,41 @@ AuditUpdateParity ==
         \A s \in UpdateShapes : DeclareAnswers(Id1, s, FALSE, FALSE) = DeclareAnswers(Id2, s, TRUE, FALSE)
 
 \* Witnesses of the update run: the store-owned update's migration and
-\* restamp verdicts.
+\* restamp verdicts, and its verdict for an identity owed its seat.
 AuditWitnessUpdateMigrates ==
     DeclareIdentityEntryRoleMigrate(Id2, AuditProfile2, AuditMode, "Local", FALSE, Some(AuditProfile), FALSE, FALSE, None, "None", TRUE, FALSE)
 AuditWitnessUpdateRestamps ==
     DeclareIdentityEntryRuntimeModeRestamp(Id2, AuditProfile, AuditModeAlt, "Local", FALSE, None, FALSE, FALSE, None, "None", TRUE, FALSE)
+AuditWitnessUpdateOfUnseated ==
+    /\ ~Seated(Id2)
+    /\ DeclareIdentityEntrySeatOwed(Id2, AuditProfile2, AuditMode, "Local", FALSE, None, FALSE, FALSE, None, "None", TRUE, FALSE)
 
 NotAuditWitnessUpdateMigrates == [][~AuditWitnessUpdateMigrates]_vars
 NotAuditWitnessUpdateRestamps == [][~AuditWitnessUpdateRestamps]_vars
+NotAuditWitnessUpdateOfUnseated == [][~AuditWitnessUpdateOfUnseated]_vars
 
 (***************************************************************************)
 (* The removal run.                                                        *)
 (***************************************************************************)
 
+\* The mob's destroy of member 1's first incarnation, seated Dormant: its
+\* archive-only retirement admitted, its session ingress detach closed and
+\* its archive.
+ADestroy ==
+    \/ AuditQuiesceDestroy
+    \/ AdmitDestroyCleanup
+    \/ AdmitDestroyMemberRetireArchiveOnlyRunning(AuditMob, Id1, Rid1, 1, 0, Some(Sess1))
+    \/ ADetach(Rid1)
+    \/ ObserveDestroyMemberRetirementArchivedLiveRunning(Id1, Rid1, 1, 0, Some(Sess1), AuditDisposal)
+
 \* Member 1 a roster-owned identity declared and seated on its first
-\* incarnation, its removal retiring its member to the archive terminal;
+\* incarnation, its removal retiring its member to the archive terminal in a
+\* running or a stopped mob, or the mob's destroy ending it with its mark;
 \* member 2 a store-owned identity recorded with every new entry's cause,
-\* and archived, or its name reserved as unreadable; the removal of either,
-\* the declarations of member 1 after its removal, the host's changes hold
-\* and the build seed's composition authority, in a running and a stopped
-\* mob.
+\* seated under created custody and retired to its terminal, or archived,
+\* or its name reserved as unreadable; the removal of either, the
+\* declarations of member 1 after its removal, the host's changes hold and
+\* the build seed's composition authority, in a running and a stopped mob.
 RemovalNext ==
     \/ ASeed
     \/ HoldArm
@@ -868,7 +967,14 @@ RemovalNext ==
     \/ ASeat(AFirst)
     \/ ARetire(AFirst)
     \/ AArchive(AFirst)
-    \/ \E cause \in Causes \ {"Archived"} : RecordCreatedIdentityEntryRecorded(Id2, cause)
+    \/ AArchiveStopped
+    \/ ADestroy
+    \/ \E cause \in {"SeatOwed", "HostedOnFirstUse", "HeldCreation", "PreparationPending"} : RecordAs(Id2, cause)
+    \/ CRAuthorize(Id2)
+    \/ COpenAt(<<Rid2, 2, 0>>, FALSE, TRUE)
+    \/ CSeatAt(<<Rid2, 2, 0>>, FALSE)
+    \/ CRetireAt(<<Rid2, 2, 0>>)
+    \/ CArchiveAt(<<Rid2, 2, 0>>)
     \/ ArchiveIdentityEntryArchived(Id2)
     \/ \E id \in CreatedIds : RemoveArm(id)
 
@@ -879,10 +985,13 @@ AuditRemovalExactlyOne ==
         \A id \in CreatedIds : Cardinality({i \in 1..9 : RemoveVerdicts(id)[i]}) = 1
 
 \* The end of an entry its removal marked, and the removal of an unseated
-\* entry, tombstone its name in the same step.
+\* entry, tombstone its name in the same step; the mob's destroy, which
+\* ends every entry, is the one end that does not (the store keeps the
+\* tombstone row the removal's start wrote).
 AuditRemovalTombstones ==
     [][\A id \in CreatedIds :
          ((id \in identity_entry_removing \/ RemoveIdentityEntryRemoved(id))
+            /\ destroy_admitted = FALSE
             /\ id \in DOMAIN identity_entry_origins /\ id \notin DOMAIN identity_entry_origins')
            => id \in identity_entry_tombstones'
       ]_vars
@@ -896,6 +1005,21 @@ AuditWitnessRemovalEndsAtTerminal ==
     /\ Id1 \in identity_entry_removing
     /\ AArchive(AFirst)
     /\ Id1 \in identity_entry_tombstones'
+    /\ Id1 \notin DOMAIN identity_entry_origins'
+AuditWitnessRemovalEndsAtStoppedTerminal ==
+    /\ Id1 \in identity_entry_removing
+    /\ AArchiveStopped
+    /\ Id1 \in identity_entry_tombstones'
+    /\ Id1 \notin identity_entry_removing'
+AuditWitnessRemovalStoreOwnedEndsAtTerminal ==
+    /\ Id2 \in identity_entry_removing
+    /\ CArchiveAt(<<Rid2, 2, 0>>)
+    /\ Id2 \in identity_entry_tombstones'
+    /\ Id2 \notin DOMAIN identity_entry_origins'
+AuditWitnessRemovalDestroyClearsMark ==
+    /\ Id1 \in identity_entry_removing
+    /\ ObserveDestroyMemberRetirementArchivedLiveRunning(Id1, Rid1, 1, 0, Some(Sess1), AuditDisposal)
+    /\ Id1 \notin identity_entry_removing'
     /\ Id1 \notin DOMAIN identity_entry_origins'
 AuditWitnessRemovalAtOnce ==
     /\ Unseated(Id2) = Some("PreparationPending")
@@ -913,6 +1037,9 @@ AuditWitnessRemovalRefusesDeclaration ==
 
 NotAuditWitnessRemovalRetiring == [][~AuditWitnessRemovalRetiring]_vars
 NotAuditWitnessRemovalEndsAtTerminal == [][~AuditWitnessRemovalEndsAtTerminal]_vars
+NotAuditWitnessRemovalEndsAtStoppedTerminal == [][~AuditWitnessRemovalEndsAtStoppedTerminal]_vars
+NotAuditWitnessRemovalStoreOwnedEndsAtTerminal == [][~AuditWitnessRemovalStoreOwnedEndsAtTerminal]_vars
+NotAuditWitnessRemovalDestroyClearsMark == [][~AuditWitnessRemovalDestroyClearsMark]_vars
 NotAuditWitnessRemovalAtOnce == [][~AuditWitnessRemovalAtOnce]_vars
 NotAuditWitnessRemovalOfArchived == [][~AuditWitnessRemovalOfArchived]_vars
 NotAuditWitnessRemovalAlreadyRemoved == [][~AuditWitnessRemovalAlreadyRemoved]_vars
@@ -922,49 +1049,59 @@ NotAuditWitnessRemovalRefusesDeclaration == [][~AuditWitnessRemovalRefusesDeclar
 (* The archive run.                                                        *)
 (***************************************************************************)
 
-\* Member 2 a store-owned identity recorded owed its seat and seated under
-\* created custody, archived (its member retired to the archive terminal),
-\* unarchived and seated again on its archived session; a spawn ladder for
-\* it under created custody at any point, committed or aborted; member 1
-\* a roster-owned identity declared and never seated, whose archive and
-\* unarchive are its roster's, or its name reserved as unreadable; the
-\* host's changes hold and the build seed's composition authority, in a
-\* running and a stopped mob.
+\* Member 2 a store-owned identity recorded owed its seat or awaiting its
+\* host's preparation, seated under created custody, archived (its member
+\* retired to the archive terminal; only an archive retires it here),
+\* unarchived and seated again on its archived session, its update at any
+\* point, its removal; a spawn ladder for it under created custody at any
+\* point, committed or aborted; member 1 a roster-owned identity declared
+\* and never seated, whose archive and unarchive are its roster's, or its
+\* name reserved as unreadable; the host's changes hold and the build
+\* seed's composition authority, in a running and a stopped mob.
 ArchiveNext ==
     \/ ASeed
     \/ HoldArm
     \/ CStop
     \/ RecoverArm(Id1, "Unreadable", None)
     \/ DeclareCustodyArm(Id1, ApplyShape, FALSE, FALSE)
-    \/ RecordCreatedIdentityEntryRecorded(Id2, "SeatOwed")
+    \/ \E cause \in {"SeatOwed", "PreparationPending"} : RecordAs(Id2, cause)
     \/ CRAuthorize(Id2)
     \/ \E inc \in CIncarnations :
          \/ COpenAt(inc, FALSE, TRUE)
          \/ CSeatAt(inc, inc[3] = 1)
          \/ CCommitAt(inc)
-         \/ CRetireAt(inc)
+         \/ (Id2 \in identity_entry_archiving /\ CRetireAt(inc))
          \/ CArchiveAt(inc)
     \/ CRAbort(Id2)
+    \/ DeclareCustodyArm(Id2, ApplyShape, TRUE, FALSE)
     \/ \E id \in CreatedIds : ArchiveArm(id) \/ UnarchiveArm(id)
+    \/ RemoveArm(Id2)
 
 ArchiveSpec == Init /\ [][ArchiveNext]_vars
 
 AuditArchiveExactlyOne ==
     phase \in {"Running", "Stopped"} =>
-        \A id \in CreatedIds :
-            /\ Cardinality({i \in 1..10 : ArchiveVerdicts(id)[i]}) = 1
-            /\ Cardinality({i \in 1..9 : UnarchiveVerdicts(id)[i]}) = 1
+        /\ \A id \in CreatedIds :
+               /\ Cardinality({i \in 1..11 : ArchiveVerdicts(id)[i]}) = 1
+               /\ Cardinality({i \in 1..9 : UnarchiveVerdicts(id)[i]}) = 1
+        /\ Created(Id2) => Cardinality(DeclareAnswers(Id2, ApplyShape, TRUE, FALSE)) = 1
 
-\* An archived identity keeps its name and its entry until its unarchive:
-\* nothing else unseats its cause, and no member is seated under it.
+\* An archived identity keeps its name and its entry until its unarchive or
+\* its removal: nothing else unseats its cause, and no member is seated
+\* under it.
+AuditArchivedNeverSeated ==
+    [][\A id \in CreatedIds : Unseated(id) = Some("Archived") => ~(id \in DOMAIN identity_to_runtime')]_vars
 AuditArchivedKeepsItsName ==
     [][\A id \in CreatedIds :
          Unseated(id) = Some("Archived")
            => (\/ UnarchiveIdentityEntryRestored(id)
+               \/ RemoveIdentityEntryRemoved(id)
                \/ (UnseatedNext(id) = Some("Archived") /\ OriginNext(id) = Origin(id)))
       ]_vars
-AuditArchivedNeverSeated ==
-    [][\A id \in CreatedIds : Unseated(id) = Some("Archived") => ~(id \in DOMAIN identity_to_runtime')]_vars
+\* An identity awaiting its host's preparation is never archived: its
+\* preparation is settled first, or the identity removed.
+AuditPendingNeverArchived ==
+    [][\A id \in CreatedIds : Unseated(id) = Some("PreparationPending") => UnseatedNext(id) # Some("Archived")]_vars
 
 \* Witnesses of the archive run.
 AuditWitnessArchiveRetires ==
@@ -984,12 +1121,25 @@ AuditWitnessArchiveReseated ==
     /\ CSeatAt(<<Rid3, 3, 1>>, TRUE)
     /\ BindingNext(Id2) = Some(Sess3)
 AuditWitnessArchiveOwnedByRoster == ArchiveIdentityEntryOwnedByRoster(Id1)
+AuditWitnessArchivePendingRefused ==
+    /\ Unseated(Id2) = Some("PreparationPending")
+    /\ ArchiveIdentityEntryPreparationPending(Id2)
+    /\ UnseatedNext(Id2) = Some("PreparationPending")
+AuditWitnessArchiveUpdateRecordOnly ==
+    /\ Unseated(Id2) = Some("Archived")
+    /\ DeclareIdentityEntryRecordOnly(Id2, AuditProfile, AuditMode, "Local", FALSE, None, FALSE, FALSE, None, "None", TRUE, FALSE)
+AuditWitnessArchiveRemovalWaits ==
+    /\ Id2 \in identity_entry_archiving
+    /\ RemoveIdentityEntryInFlight(Id2)
 
 NotAuditWitnessArchiveRetires == [][~AuditWitnessArchiveRetires]_vars
 NotAuditWitnessArchiveAtTerminal == [][~AuditWitnessArchiveAtTerminal]_vars
 NotAuditWitnessArchiveRestored == [][~AuditWitnessArchiveRestored]_vars
 NotAuditWitnessArchiveReseated == [][~AuditWitnessArchiveReseated]_vars
 NotAuditWitnessArchiveOwnedByRoster == [][~AuditWitnessArchiveOwnedByRoster]_vars
+NotAuditWitnessArchivePendingRefused == [][~AuditWitnessArchivePendingRefused]_vars
+NotAuditWitnessArchiveUpdateRecordOnly == [][~AuditWitnessArchiveUpdateRecordOnly]_vars
+NotAuditWitnessArchiveRemovalWaits == [][~AuditWitnessArchiveRemovalWaits]_vars
 
 (***************************************************************************)
 (* The preparation run.                                                    *)
@@ -1060,13 +1210,13 @@ Activating(id) == IF id \in DOMAIN identity_entry_constructions_activating THEN 
 \* store-owned one recorded pending its preparation; the start, the settle
 \* and the end of their held constructions with every fact, each one's
 \* spawn ladder under its custody (member 1's first incarnation, member
-\* 2's first), its dormant seat and its membership commit, and its removal;
-\* under the build seed's composition authority, in a running and a
-\* stopped mob.
+\* 2's first), its dormant seat and its membership commit, its archive, its
+\* removal, and member 2's update; under the build seed's composition
+\* authority, in a running and a stopped mob.
 PrepNext ==
     \/ ASeed
     \/ \E pr \in BOOLEAN : DeclareCustodyArm(Id1, ApplyShape, FALSE, pr)
-    \/ RecordCreatedIdentityEntryRecorded(Id2, "PreparationPending")
+    \/ RecordAs(Id2, "PreparationPending")
     \/ \E id \in CreatedIds, a \in Attempts, k \in BOOLEAN : BeginArm(id, a, k)
     \/ \E id \in CreatedIds, a \in SettleAttempts, k \in BOOLEAN, b \in BOOLEAN, m \in BOOLEAN : SettleArm(id, a, k, b, m)
     \/ \E id \in CreatedIds, a \in Attempts, e \in EndKinds : EndArm(id, a, e)
@@ -1080,7 +1230,8 @@ PrepNext ==
     \/ CSeatAt(<<Rid2, 2, 0>>, FALSE)
     \/ CCommitAt(<<Rid2, 2, 0>>)
     \/ CRAbort(Id2)
-    \/ \E id \in CreatedIds : RemoveArm(id)
+    \/ DeclareCustodyArm(Id2, ApplyShape, TRUE, FALSE)
+    \/ \E id \in CreatedIds : ArchiveArm(id) \/ RemoveArm(id)
     \/ CStop
 
 PrepSpec == Init /\ [][PrepNext]_vars
@@ -1092,6 +1243,7 @@ AuditPrepExactlyOne ==
             /\ \A a \in SettleAttempts, k \in BOOLEAN, b \in BOOLEAN, m \in BOOLEAN :
                  Cardinality({i \in 1..11 : SettleVerdicts(id, a, k, b, m)[i]}) = 1
             /\ \A a \in Attempts, e \in EndKinds : Cardinality({i \in 1..6 : EndVerdicts(id, a, e)[i]}) = 1
+            /\ Cardinality({i \in 1..11 : ArchiveVerdicts(id)[i]}) = 1
 
 \* An attempt is open only for an entry awaiting its preparation (the
 \* recovery, which the run does not drive, runs before any attempt opens).
@@ -1107,16 +1259,15 @@ AuditPendingSeatedOnlyByItsActivation ==
            => Activating(id) # None
       ]_vars
 
-\* An accepted activation is final: it ends only by its publication's
-\* membership commit or its failed publication.
+\* An accepted activation is final: while it is in flight, no end of its
+\* attempt but its failed publication is enabled (its abort, its expiry and
+\* a refused construction answer ActivationPending), so only its
+\* publication's membership commit or its failed publication ends it.
 AuditAcceptedActivationIsFinal ==
-    [][\A id \in CreatedIds :
-         (Activating(id) # None /\ id \notin DOMAIN identity_entry_constructions_activating')
-           => (\/ id \in DOMAIN identity_to_runtime'
-               \/ \E a \in Attempts :
-                    EndPreparationConstructionEndedRunning(id, a, "PublicationFailed")
-                    \/ EndPreparationConstructionEndedStopped(id, a, "PublicationFailed"))
-      ]_vars
+    \A id \in CreatedIds, a \in Attempts, e \in EndKinds \ {"PublicationFailed"} :
+        Activating(id) = Some(a)
+          => /\ ~ENABLED EndPreparationConstructionEndedRunning(id, a, e)
+             /\ ~ENABLED EndPreparationConstructionEndedStopped(id, a, e)
 
 \* A `constructed` preparation is never settled without an attempt.
 AuditConstructedNeverSettledWithoutAttempt ==
@@ -1152,9 +1303,29 @@ AuditWitnessPrepExpired ==
     /\ EndPreparationConstructionEndedRunning(Id2, 1, "Expired")
     /\ Id2 \notin DOMAIN identity_entry_constructions_held'
     /\ UnseatedNext(Id2) = Some("PreparationPending")
-AuditWitnessPrepRemovalWaits ==
+\* A removal ends a held attempt with the entry, in one step, and waits
+\* while an accepted activation's publication is in flight.
+AuditWitnessPrepRemovalEndsHeld ==
     /\ Held(Id2) # None
+    /\ RemoveIdentityEntryRemoved(Id2)
+    /\ Id2 \notin DOMAIN identity_entry_constructions_held'
+    /\ Id2 \in identity_entry_tombstones'
+AuditWitnessPrepRemovalWaits ==
+    /\ Activating(Id2) # None
     /\ RemoveIdentityEntryInFlight(Id2)
+\* An archive of an identity whose attempt is held is refused, the attempt
+\* kept.
+AuditWitnessPrepArchiveRefusedWhileHeld ==
+    /\ Held(Id2) # None
+    /\ ArchiveIdentityEntryPreparationPending(Id2)
+    /\ Held(Id2) = (IF Id2 \in DOMAIN identity_entry_constructions_held' THEN Some(identity_entry_constructions_held'[Id2]) ELSE None)
+\* A store-owned update of an identity awaiting its preparation, with no
+\* attempt open, is record only.
+AuditWitnessPrepUpdateRecordOnly ==
+    /\ Unseated(Id2) = Some("PreparationPending")
+    /\ Held(Id2) = None
+    /\ Activating(Id2) = None
+    /\ DeclareIdentityEntryRecordOnly(Id2, AuditProfile, AuditMode, "Local", FALSE, None, FALSE, FALSE, None, "None", TRUE, FALSE)
 
 NotAuditWitnessPrepRosterPending == [][~AuditWitnessPrepRosterPending]_vars
 NotAuditWitnessPrepRosterSettledByDeclaration == [][~AuditWitnessPrepRosterSettledByDeclaration]_vars
@@ -1164,38 +1335,51 @@ NotAuditWitnessPrepPublished == [][~AuditWitnessPrepPublished]_vars
 NotAuditWitnessPrepRosterPublished == [][~AuditWitnessPrepRosterPublished]_vars
 NotAuditWitnessPrepAbortRefusedWhileActivating == [][~AuditWitnessPrepAbortRefusedWhileActivating]_vars
 NotAuditWitnessPrepExpired == [][~AuditWitnessPrepExpired]_vars
+NotAuditWitnessPrepRemovalEndsHeld == [][~AuditWitnessPrepRemovalEndsHeld]_vars
 NotAuditWitnessPrepRemovalWaits == [][~AuditWitnessPrepRemovalWaits]_vars
+NotAuditWitnessPrepArchiveRefusedWhileHeld == [][~AuditWitnessPrepArchiveRefusedWhileHeld]_vars
+NotAuditWitnessPrepUpdateRecordOnly == [][~AuditWitnessPrepUpdateRecordOnly]_vars
 
 (***************************************************************************)
 (* The placement run.                                                      *)
 (***************************************************************************)
 
 \* One member host bound; member 2 a store-owned identity recorded hosted on
-\* its first use (or owed its seat), its placed spawn ladder with each pair
-\* of custodies, its remote commit and its activation.
+\* its first use (placed, or externally bound and held), or owed its seat;
+\* its placed spawn ladder and its peer-only one (no session: an externally
+\* bound member) with each pair of custodies, their aborts, their commits
+\* and its activation.
 POpenAs(ec, cc) ==
     BeginSpawnExecRemote(Id2, Rid2, 2, 0, AuditDigest, FALSE, AuditMode, None, None, Some(Host1),
                          FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE,
                          None, Some(PlacedSpawn1), Some(AuditOperation), Some(Sess3), FALSE, FALSE, ec, cc)
+PeerOpenAs(ec, cc) ==
+    BeginSpawnExecFreshPeerOnly(Id2, Rid2, 2, 0, AuditDigest, FALSE, AuditMode, None, None, None,
+                                FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE,
+                                None, None, None, None, FALSE, FALSE, ec, cc)
+PeerCommit ==
+    CommitSpawnMembershipFreshPeerOnly(Id2, Rid2, 2, 0, AuditDigest, FALSE, AuditMode, None, None, None,
+                                       None, None, None, None, FALSE)
 PlacementNext ==
     \/ POwner
     \/ PBeginHost
     \/ PCommitHost
-    \/ \E cause \in {"HostedOnFirstUse", "SeatOwed"} : RecordCreatedIdentityEntryRecorded(Id2, cause)
+    \/ \E f \in {FactsFor("HostedOnFirstUse"), <<FALSE, "External", TRUE>>, FactsFor("SeatOwed")} :
+         RecordCreatedIdentityEntryRecorded(Id2, f[1], f[2], f[3])
     \/ PAuthorize(Id2)
-    \/ \E ec \in BOOLEAN, cc \in BOOLEAN : POpenAs(ec, cc)
+    \/ \E ec \in BOOLEAN, cc \in BOOLEAN : POpenAs(ec, cc) \/ PeerOpenAs(ec, cc)
     \/ PAbort(Id2)
+    \/ CRAbort(Id2)
     \/ PCommit
+    \/ PeerCommit
     \/ CommitSpawnActivationFinalRunning(Id2)
 
 PlacementSpec == Init /\ [][PlacementNext]_vars
 
-\* A placed ladder holds created custody only for a store-owned entry hosted
-\* on its first use.
+\* The placed opener holds created custody only for a store-owned entry
+\* hosted on its first use.
 AuditPlacedCreatedCustodyHosted ==
-    [][(Id2 \notin spawn_exec_created_custody /\ Id2 \in spawn_exec_created_custody')
-         => (Created(Id2) /\ Unseated(Id2) = Some("HostedOnFirstUse"))
-      ]_vars
+    [][\A ec \in BOOLEAN : POpenAs(ec, TRUE) => (Created(Id2) /\ Unseated(Id2) = Some("HostedOnFirstUse"))]_vars
 
 \* The placed witness: a store-owned identity hosted on its first use is
 \* seated by a placed spawn holding its created custody, and stays a
@@ -1205,6 +1389,124 @@ AuditWitnessPlacedCreated ==
     /\ PCommit
     /\ OriginNext(Id2) = Some("Created")
     /\ UnseatedNext(Id2) = None
+\* The peer-only witness: an externally bound store-owned identity is
+\* created by a peer-only spawn holding its created custody.
+AuditWitnessPeerOnlyCreated ==
+    /\ Id2 \in spawn_exec_created_custody
+    /\ PeerCommit
+    /\ OriginNext(Id2) = Some("Created")
+    /\ UnseatedNext(Id2) = None
 
 NotAuditWitnessPlacedCreated == [][~AuditWitnessPlacedCreated]_vars
+NotAuditWitnessPeerOnlyCreated == [][~AuditWitnessPeerOnlyCreated]_vars
+
+(***************************************************************************)
+(* The unlist run.                                                         *)
+(***************************************************************************)
+
+\* Member 1 a roster-owned identity declared and seated on its first
+\* incarnation, its ladder at any point; member 2 a store-owned identity
+\* recorded owed its seat; the one-entry unlist of either; member 1's
+\* retirement to its terminal, and the record of its name once its
+\* unlisted end kept its archived session record; the build seed's
+\* composition authority, in a running and a stopped mob.
+UnlistNext ==
+    \/ ASeed
+    \/ CStop
+    \/ DeclareCustodyArm(Id1, ApplyShape, FALSE, FALSE)
+    \/ AAuthorize
+    \/ AOpen(AFirst)
+    \/ ASeat(AFirst)
+    \/ AAbort
+    \/ ARetire(AFirst)
+    \/ AArchive(AFirst)
+    \/ RecordAs(Id2, "SeatOwed")
+    \/ RecordArm(Id1, FactsFor("SeatOwed"))
+    \/ \E id \in CreatedIds : UnlistArm(id)
+
+UnlistSpec == Init /\ [][UnlistNext]_vars
+
+AuditUnlistExactlyOne ==
+    phase \in {"Running", "Stopped"} =>
+        \A id \in CreatedIds : Cardinality({i \in 1..6 : UnlistVerdicts(id)[i]}) = 1
+
+\* An unlist decides on its identity alone: it changes no other identity's
+\* entry, and never a Created entry.
+AuditUnlistDecidesItsIdentityAlone ==
+    [][\A id \in CreatedIds :
+         UnlistArm(id)
+           => \A other \in CreatedIds :
+                (other # id \/ Created(other))
+                  => /\ OriginNext(other) = Origin(other)
+                     /\ UnseatedNext(other) = Unseated(other)
+                     /\ ((other \in identity_entry_retiring') = (other \in identity_entry_retiring))
+      ]_vars
+
+\* Witnesses of the unlist run.
+AuditWitnessUnlistMarksSeated ==
+    /\ Seated(Id1)
+    /\ UnlistIdentityEntryRetiring(Id1)
+    /\ Id1 \in identity_entry_retiring'
+AuditWitnessUnlistRemovesUnseated ==
+    /\ Origin(Id1) = Some("Declared")
+    /\ ~Seated(Id1)
+    /\ UnlistIdentityEntryRemoved(Id1)
+    /\ Id1 \notin DOMAIN identity_entry_origins'
+AuditWitnessUnlistDefersLadder ==
+    /\ Id1 \in DOMAIN spawn_exec_phase
+    /\ UnlistIdentityEntryDeferred(Id1)
+AuditWitnessUnlistEndsAtTerminal ==
+    /\ Id1 \in identity_entry_retiring
+    /\ AArchive(AFirst)
+    /\ Id1 \notin DOMAIN identity_entry_origins'
+    /\ RecordNext(Id1) # None
+AuditWitnessUnlistedNameRefused ==
+    /\ Origin(Id1) = None
+    /\ Record(Id1) # None
+    /\ RecordCreatedIdentityEntryNameHeldByIdentity(Id1, FALSE, "Local", FALSE)
+AuditWitnessUnlistLeavesCreated ==
+    /\ Created(Id2)
+    /\ UnlistIdentityEntryNotADeclaredEntry(Id2)
+
+NotAuditWitnessUnlistMarksSeated == [][~AuditWitnessUnlistMarksSeated]_vars
+NotAuditWitnessUnlistRemovesUnseated == [][~AuditWitnessUnlistRemovesUnseated]_vars
+NotAuditWitnessUnlistDefersLadder == [][~AuditWitnessUnlistDefersLadder]_vars
+NotAuditWitnessUnlistEndsAtTerminal == [][~AuditWitnessUnlistEndsAtTerminal]_vars
+NotAuditWitnessUnlistedNameRefused == [][~AuditWitnessUnlistedNameRefused]_vars
+NotAuditWitnessUnlistLeavesCreated == [][~AuditWitnessUnlistLeavesCreated]_vars
+
+(***************************************************************************)
+(* The recovered run.                                                      *)
+(***************************************************************************)
+
+\* Member 1 recovered and bound (a seated local member, Dormant); the scan of
+\* its store-owned row Present, then of a removal's or an archive's row,
+\* before the boot plan's seal; then the retirement the recovered mark owes,
+\* to its terminal, in a running and a stopped mob.
+RecoveredNext ==
+    \/ C1Recover
+    \/ C1Bind
+    \/ \E presence \in {"Present", "Tombstone", "Archived"} : RecoverArm(Id1, presence, None)
+    \/ SealBootMaterializationPlan
+    \/ CStop
+    \/ ARetire(AFirst)
+    \/ AArchive(AFirst)
+    \/ AArchiveStopped
+
+RecoveredSpec == Init /\ [][RecoveredNext]_vars
+
+\* Witnesses of the recovered run: a recovered removal and a recovered
+\* archive carried to their terminal.
+AuditWitnessRecoveredRemovalEnds ==
+    /\ Id1 \in identity_entry_removing
+    /\ AArchive(AFirst) \/ AArchiveStopped
+    /\ Id1 \in identity_entry_tombstones'
+    /\ Id1 \notin DOMAIN identity_entry_origins'
+AuditWitnessRecoveredArchiveEnds ==
+    /\ Id1 \in identity_entry_archiving
+    /\ AArchive(AFirst) \/ AArchiveStopped
+    /\ UnseatedNext(Id1) = Some("Archived")
+
+NotAuditWitnessRecoveredRemovalEnds == [][~AuditWitnessRecoveredRemovalEnds]_vars
+NotAuditWitnessRecoveredArchiveEnds == [][~AuditWitnessRecoveredArchiveEnds]_vars
 ====

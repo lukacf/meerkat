@@ -245,6 +245,7 @@ SetIdentityChangesHeldDestroyed the changes hold in a destroyed mob; created_ide
 RemoveIdentityEntryMobNotRunning* a removal in the Completed and Destroyed phases; created_identity_audit's removal run drives the Stopped arm
 ArchiveIdentityEntryMobNotRunning* an archive in the Completed and Destroyed phases; created_identity_audit's archive run drives the Stopped arm
 UnarchiveIdentityEntryMobNotRunning* an unarchive in the Completed and Destroyed phases; created_identity_audit's archive run drives the Stopped arm
+UnlistIdentityEntryMobNotRunning* a one-entry unlist in the Completed and Destroyed phases; created_identity_audit's unlist run drives the Stopped arm
 BeginPreparationConstructionMobNotRunning* a held construction's start in the Completed and Destroyed phases; created_identity_audit's preparation run drives the Stopped arm
 SettleHostPreparationMobNotRunning* a settle in the Completed and Destroyed phases; created_identity_audit's preparation run drives the Stopped arm
 EndPreparationConstructionEndedCompleted an attempt's end in a completed mob; created_identity_audit's preparation run drives its Running and Stopped arms

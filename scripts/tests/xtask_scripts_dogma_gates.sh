@@ -427,12 +427,13 @@ trap 'rm -rf "$tlc_env_tmp"' EXIT
 # witnesses violated, and with --mutants each seeded defect's target
 # invariant violated.
 # created_identity_audit.sh (mob_machine) requires a final distinct-state
-# count at or above each of its ten runs' floors, a coverage block in which
-# each covered action of every run generated a state, its forty-seven step
-# witnesses violated, and with --mutants each seeded defect's generated
-# invariant, totality invariant or action property violated and its
-# created_custody_local_kept mutant's run to end without an error (the
-# success line below).
+# count for each of its twelve runs (at or above the floor of each measured
+# one), a coverage block in which each covered action of every run
+# generated a state, its sixty-eight step witnesses violated, and with
+# --mutants each seeded defect's generated invariant, audit invariant,
+# totality invariant or action property violated and its
+# created_custody_local_kept and recovered_removal_unmarked mutants' runs to
+# end without an error (the success line below).
 # activation_body_retirement_audit.sh (session_document) requires its three
 # witnesses violated, and with --mutants each seeded defect's target
 # invariant violated.
@@ -970,17 +971,23 @@ printf '%s\n' \
   'echo "Error: Invariant AuditNamesAdoptionExactlyOne is violated."' \
   'echo "Error: Invariant AuditNamesLaneExactlyOne is violated."' \
   'echo "Error: Action property AuditNoSeatUnderReservedName is violated."' \
-  'for action in RecoverCreatedIdentityEntryRemovingRunning RecoverCreatedIdentityEntryRemovingStopped RecoverCreatedIdentityEntryArchivingRunning RecoverCreatedIdentityEntryArchivingStopped RecoverCreatedIdentityEntryArchivedRunning RecoverCreatedIdentityEntryArchivedStopped SetIdentityChangesHeldRunning SetIdentityChangesHeldStopped AdmitIdentityChangeAdmitted AdmitIdentityChangeReplayed AdmitIdentityChangeOperationReused AdmitIdentityChangeNonAuthoritative AdmitIdentityChangeChangesHeld AdmitIdentityChangeDecisionUnbound AdmitIdentityChangeDecisionExpired AdmitIdentityChangeImportedNotHostOperator AdmitIdentityChangeGrantRevoked AdmitIdentityChangeStaleSpec AdmitIdentityChangeMobNotRunningStopped RecordCreatedIdentityEntryRecorded RecordCreatedIdentityEntryNameHeldByIdentity RecordCreatedIdentityEntryNameHeldByWorker RecordCreatedIdentityEntryNameTombstoned RecordCreatedIdentityEntryNameUnreadable RecordCreatedIdentityEntryNonAuthoritative RecordCreatedIdentityEntryChangesHeld RecordCreatedIdentityEntryCauseRefused RecordCreatedIdentityEntryMobNotRunningStopped ArchiveIdentityEntryArchived RemoveIdentityEntryRetiring RemoveIdentityEntryRemoved RemoveIdentityEntryAlreadyRemoved RemoveIdentityEntryUnknown RemoveIdentityEntryInFlight RemoveIdentityEntryNameUnreadable RemoveIdentityEntryNonAuthoritative RemoveIdentityEntryChangesHeld RemoveIdentityEntryMobNotRunningStopped ArchiveIdentityEntryArchiving ArchiveIdentityEntryAlreadyArchived ArchiveIdentityEntryOwnedByRoster ArchiveIdentityEntryUnknown ArchiveIdentityEntryInFlight ArchiveIdentityEntryNameUnreadable ArchiveIdentityEntryNonAuthoritative ArchiveIdentityEntryChangesHeld ArchiveIdentityEntryMobNotRunningStopped UnarchiveIdentityEntryRestored UnarchiveIdentityEntryNotArchived UnarchiveIdentityEntryOwnedByRoster UnarchiveIdentityEntryUnknown UnarchiveIdentityEntryInFlight UnarchiveIdentityEntryNameUnreadable UnarchiveIdentityEntryNonAuthoritative UnarchiveIdentityEntryChangesHeld UnarchiveIdentityEntryMobNotRunningStopped DeclareIdentityEntryPreparationPending BeginPreparationConstructionHeld BeginPreparationConstructionNotPending BeginPreparationConstructionNotConstructed BeginPreparationConstructionConstructionOpen BeginPreparationConstructionNonAuthoritative BeginPreparationConstructionMobNotRunningStopped SettleHostPreparationSeat SettleHostPreparationActivationAccepted SettleHostPreparationNotPending SettleHostPreparationConstructionRequired SettleHostPreparationConstructionOpen SettleHostPreparationStaleAttempt SettleHostPreparationExpired SettleHostPreparationMismatch SettleHostPreparationActivationPending SettleHostPreparationNonAuthoritative SettleHostPreparationMobNotRunningStopped EndPreparationConstructionEndedRunning EndPreparationConstructionEndedStopped EndPreparationConstructionNotOpenRunning EndPreparationConstructionNotOpenStopped EndPreparationConstructionActivationPendingRunning EndPreparationConstructionActivationPendingStopped; do echo "<$action line 1, col 1 to line 1, col 2 of module model>: 1:1"; done' \
+  'for action in RecoverCreatedIdentityEntryRemovingRunning RecoverCreatedIdentityEntryRemovingStopped RecoverCreatedIdentityEntryArchivingRunning RecoverCreatedIdentityEntryArchivingStopped RecoverCreatedIdentityEntryArchivedRunning RecoverCreatedIdentityEntryArchivedStopped SetIdentityChangesHeldRunning SetIdentityChangesHeldStopped AdmitIdentityChangeAdmitted AdmitIdentityChangeReplayed AdmitIdentityChangeOperationReused AdmitIdentityChangeNonAuthoritative AdmitIdentityChangeChangesHeld AdmitIdentityChangeDecisionUnbound AdmitIdentityChangeDecisionExpired AdmitIdentityChangeImportedNotHostOperator AdmitIdentityChangeGrantRevoked AdmitIdentityChangeStaleSpec AdmitIdentityChangeMobNotRunningStopped RecordCreatedIdentityEntryRecorded RecordCreatedIdentityEntryNameHeldByIdentity RecordCreatedIdentityEntryNameHeldByWorker RecordCreatedIdentityEntryNameTombstoned RecordCreatedIdentityEntryNameUnreadable RecordCreatedIdentityEntryNonAuthoritative RecordCreatedIdentityEntryChangesHeld RecordCreatedIdentityEntryMobNotRunningStopped ArchiveIdentityEntryArchived RemoveIdentityEntryRetiring RemoveIdentityEntryRemoved RemoveIdentityEntryAlreadyRemoved RemoveIdentityEntryUnknown RemoveIdentityEntryInFlight RemoveIdentityEntryNameUnreadable RemoveIdentityEntryNonAuthoritative RemoveIdentityEntryChangesHeld RemoveIdentityEntryMobNotRunningStopped ArchiveIdentityEntryArchiving ArchiveIdentityEntryAlreadyArchived ArchiveIdentityEntryOwnedByRoster ArchiveIdentityEntryUnknown ArchiveIdentityEntryInFlight ArchiveIdentityEntryNameUnreadable ArchiveIdentityEntryNonAuthoritative ArchiveIdentityEntryChangesHeld ArchiveIdentityEntryMobNotRunningStopped UnarchiveIdentityEntryRestored UnarchiveIdentityEntryNotArchived UnarchiveIdentityEntryOwnedByRoster UnarchiveIdentityEntryUnknown UnarchiveIdentityEntryInFlight UnarchiveIdentityEntryNameUnreadable UnarchiveIdentityEntryNonAuthoritative UnarchiveIdentityEntryChangesHeld UnarchiveIdentityEntryMobNotRunningStopped DeclareIdentityEntryPreparationPending BeginPreparationConstructionHeld BeginPreparationConstructionNotPending BeginPreparationConstructionNotConstructed BeginPreparationConstructionConstructionOpen BeginPreparationConstructionNonAuthoritative BeginPreparationConstructionMobNotRunningStopped SettleHostPreparationSeat SettleHostPreparationActivationAccepted SettleHostPreparationNotPending SettleHostPreparationConstructionRequired SettleHostPreparationConstructionOpen SettleHostPreparationStaleAttempt SettleHostPreparationExpired SettleHostPreparationMismatch SettleHostPreparationActivationPending SettleHostPreparationNonAuthoritative SettleHostPreparationMobNotRunningStopped EndPreparationConstructionEndedRunning EndPreparationConstructionEndedStopped EndPreparationConstructionNotOpenRunning EndPreparationConstructionNotOpenStopped EndPreparationConstructionActivationPendingRunning EndPreparationConstructionActivationPendingStopped CommitSpawnMembershipFresh ObserveMemberRetirementArchivedLiveStopped BeginPlacedCompletionLifecycleQuiesceFresh AdmitDestroyCleanup AdmitDestroyMemberRetireArchiveOnlyRunning SessionIngressDetachedForMobDestroyRunning ObserveDestroyMemberRetirementArchivedLiveRunning ArchiveIdentityEntryPreparationPending DeclareIdentityEntryKept DeclareIdentityEntryLifecycleInFlight DeclareIdentityEntryRecordOnly DeclareIdentityEntrySeatOwed BeginSpawnExecFreshPeerOnly CommitSpawnMembershipFreshPeerOnly AbortSpawnExecActiveRunning RetireRunningReleasingArchiveOnly ObserveMemberRetirementArchivedLive SeedMemberResidencyRunning AuthorizeSpawnProfileRunning BeginSpawnExecFresh CommitDormantSeatRunning RecoverRosterMemberRunning RecoverMemberSessionBindingFreshRunning RecoverCreatedIdentityEntrySeatedRunning RecoverCreatedIdentityEntryUnreadableRunning SealBootMaterializationPlan UnlistIdentityEntryRetiring UnlistIdentityEntryRemoved UnlistIdentityEntryDeferred UnlistIdentityEntryNotADeclaredEntry UnlistIdentityEntryNonAuthoritative UnlistIdentityEntryMobNotRunningStopped; do echo "<$action line 1, col 1 to line 1, col 2 of module model>: 1:1"; done' \
   'echo "Error: Action property NotAuditWitnessCommitRecordedPending is violated."' \
+  'echo "Error: Action property NotAuditWitnessCommitRecordedHosted is violated."' \
   'echo "Error: Action property NotAuditWitnessCommitRecordedHeld is violated."' \
   'echo "Error: Action property NotAuditWitnessCommitStaleSpec is violated."' \
   'echo "Error: Action property NotAuditWitnessCommitHeldRefused is violated."' \
   'echo "Error: Action property NotAuditWitnessCommitWorkerRefused is violated."' \
   'echo "Error: Action property NotAuditWitnessCommitCreatedSeat is violated."' \
+  'echo "Error: Action property NotAuditWitnessCommitHeldCreated is violated."' \
   'echo "Error: Action property NotAuditWitnessUpdateMigrates is violated."' \
   'echo "Error: Action property NotAuditWitnessUpdateRestamps is violated."' \
+  'echo "Error: Action property NotAuditWitnessUpdateOfUnseated is violated."' \
   'echo "Error: Action property NotAuditWitnessRemovalRetiring is violated."' \
   'echo "Error: Action property NotAuditWitnessRemovalEndsAtTerminal is violated."' \
+  'echo "Error: Action property NotAuditWitnessRemovalEndsAtStoppedTerminal is violated."' \
+  'echo "Error: Action property NotAuditWitnessRemovalStoreOwnedEndsAtTerminal is violated."' \
+  'echo "Error: Action property NotAuditWitnessRemovalDestroyClearsMark is violated."' \
   'echo "Error: Action property NotAuditWitnessRemovalAtOnce is violated."' \
   'echo "Error: Action property NotAuditWitnessRemovalOfArchived is violated."' \
   'echo "Error: Action property NotAuditWitnessRemovalAlreadyRemoved is violated."' \
@@ -990,6 +997,9 @@ printf '%s\n' \
   'echo "Error: Action property NotAuditWitnessArchiveRestored is violated."' \
   'echo "Error: Action property NotAuditWitnessArchiveReseated is violated."' \
   'echo "Error: Action property NotAuditWitnessArchiveOwnedByRoster is violated."' \
+  'echo "Error: Action property NotAuditWitnessArchivePendingRefused is violated."' \
+  'echo "Error: Action property NotAuditWitnessArchiveUpdateRecordOnly is violated."' \
+  'echo "Error: Action property NotAuditWitnessArchiveRemovalWaits is violated."' \
   'echo "Error: Action property NotAuditWitnessPrepRosterPending is violated."' \
   'echo "Error: Action property NotAuditWitnessPrepRosterSettledByDeclaration is violated."' \
   'echo "Error: Action property NotAuditWitnessPrepStoreSettleSeats is violated."' \
@@ -998,15 +1008,40 @@ printf '%s\n' \
   'echo "Error: Action property NotAuditWitnessPrepRosterPublished is violated."' \
   'echo "Error: Action property NotAuditWitnessPrepAbortRefusedWhileActivating is violated."' \
   'echo "Error: Action property NotAuditWitnessPrepExpired is violated."' \
+  'echo "Error: Action property NotAuditWitnessPrepRemovalEndsHeld is violated."' \
   'echo "Error: Action property NotAuditWitnessPrepRemovalWaits is violated."' \
+  'echo "Error: Action property NotAuditWitnessPrepArchiveRefusedWhileHeld is violated."' \
+  'echo "Error: Action property NotAuditWitnessPrepUpdateRecordOnly is violated."' \
   'echo "Error: Action property NotAuditWitnessPlacedCreated is violated."' \
+  'echo "Error: Action property NotAuditWitnessPeerOnlyCreated is violated."' \
+  'echo "Error: Action property NotAuditWitnessUnlistMarksSeated is violated."' \
+  'echo "Error: Action property NotAuditWitnessUnlistRemovesUnseated is violated."' \
+  'echo "Error: Action property NotAuditWitnessUnlistDefersLadder is violated."' \
+  'echo "Error: Action property NotAuditWitnessUnlistEndsAtTerminal is violated."' \
+  'echo "Error: Action property NotAuditWitnessUnlistedNameRefused is violated."' \
+  'echo "Error: Action property NotAuditWitnessUnlistLeavesCreated is violated."' \
+  'echo "Error: Action property NotAuditWitnessRecoveredRemovalEnds is violated."' \
+  'echo "Error: Action property NotAuditWitnessRecoveredArchiveEnds is violated."' \
   'echo "Error: Invariant AuditUpdateExactlyOne is violated."' \
   'echo "Error: Action property AuditRemovalTombstones is violated."' \
   'echo "Error: Action property AuditArchivedKeepsItsName is violated."' \
   'echo "Error: Action property AuditArchivedNeverSeated is violated."' \
   'echo "Error: Action property AuditPendingSeatedOnlyByItsActivation is violated."' \
-  'echo "Error: Action property AuditAcceptedActivationIsFinal is violated."' \
+  'echo "Error: Invariant AuditAcceptedActivationIsFinal is violated."' \
+  'echo "Error: Invariant AuditConstructionAwaitsPreparation is violated."' \
   'echo "Error: Action property AuditConstructedNeverSettledWithoutAttempt is violated."' \
+  'echo "Error: Action property AuditRecordCauseFollowsFacts is violated."' \
+  'echo "Error: Invariant AuditRecordExactlyOne is violated."' \
+  'echo "Error: Invariant AuditAdmitExactlyOne is violated."' \
+  'echo "Error: Action property AuditHeldNeverSeatedDormant is violated."' \
+  'echo "Error: Invariant AuditUpdateParity is violated."' \
+  'echo "Error: Invariant AuditRemovalExactlyOne is violated."' \
+  'echo "Error: Action property AuditPendingNeverArchived is violated."' \
+  'echo "Error: Invariant AuditArchiveExactlyOne is violated."' \
+  'echo "Error: Invariant AuditPrepExactlyOne is violated."' \
+  'echo "Error: Action property AuditUnlistDecidesItsIdentityAlone is violated."' \
+  'echo "Error: Action property AuditRecordTakesFreeNames is violated."' \
+  'echo "Error: Invariant AuditUnlistExactlyOne is violated."' \
   'echo "Error: Invariant construction_is_held_or_activating is violated."' \
   'echo "Error: Invariant entry_ending_marks_are_seated_and_disjoint is violated."' \
   'echo "Error: Invariant archived_entry_is_store_owned is violated."' \
@@ -1092,7 +1127,7 @@ lane_part_output() {
 audit_lines() {
   grep -E '^running (bounded .* TLC audit|member [a-z]+ TLC audit|MobMachine arm coverage gate)$' | sort
 }
-audit_shards="audits-a audits-b audits-c audits-d audits-e audits-f audits-g audits-h audits-i audits-j audits-k audits-l audits-m audits-n audits-o audits-q"
+audit_shards="audits-a audits-b audits-c audits-d audits-e audits-f audits-g audits-h audits-i audits-j audits-k audits-l audits-m audits-n audits-o audits-q audits-r"
 shard_outputs="$(mktemp -d)"
 failed_parts=""
 idle_shards=""

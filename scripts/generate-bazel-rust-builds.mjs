@@ -3006,6 +3006,9 @@ for (const pkg of localPackages.values()) {
       ["machine_verify_audits_q_tlc_test", "audits-q", "8", "24GB",
         `"TLC_WORKERS": "8",
         "JAVA_TOOL_OPTIONS": "-Xmx16g",`],
+      ["machine_verify_audits_r_tlc_test", "audits-r", "8", "24GB",
+        `"TLC_WORKERS": "8",
+        "JAVA_TOOL_OPTIONS": "-Xmx16g",`],
     ]) {
       rules.push(`sh_test(
     name = "${name}",

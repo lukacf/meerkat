@@ -1150,6 +1150,20 @@ impl meerkat_llm_core::LlmClient for CopilotCapabilityGatedClient {
         self.inner.stream(request)
     }
 
+    /// Gate the request exactly as `stream` does, then hand the adapter the
+    /// request in its prepared form: its route witness and any work
+    /// authorization stay with it, and the adapter checks its own lowered
+    /// target.
+    fn stream_prepared<'a>(
+        &'a self,
+        request: &'a meerkat_llm_core::PreparedLlmRequest,
+    ) -> meerkat_llm_core::LlmStream<'a> {
+        if let Err(error) = self.validate_request(request.request()) {
+            return Box::pin(futures::stream::once(async move { Err(error) }));
+        }
+        self.inner.stream_prepared(request)
+    }
+
     fn provider(&self) -> Provider {
         self.inner.provider()
     }

@@ -586,7 +586,7 @@ AuditWitnessStaleMarkIgnored ==
 AuditWitnessRelistedAfterUnlist ==
     /\ Id1 \notin Entries
     /\ Record(Id1) = Some(Sess1)
-    /\ DeclareIdentityEntrySeatOwed(Id1, AuditProfile, AuditMode, "Local", FALSE, None, FALSE, FALSE, None, "None", FALSE)
+    /\ DeclareIdentityEntrySeatOwed(Id1, AuditProfile, AuditMode, "Local", FALSE, None, FALSE, FALSE, None, "None", FALSE, FALSE)
 \* The revive: the entry seated Dormant on its archived session, at its next
 \* generation.
 AuditWitnessRevived ==
@@ -621,19 +621,19 @@ AuditWitnessReplayMarked ==
 \* mark.
 AuditWitnessListedAgainUnmarked ==
     /\ Id1 \in identity_entry_retiring
-    /\ DeclareIdentityEntryKept(Id1, AuditProfile, AuditMode, "Local", FALSE, None, FALSE, FALSE, None, "None", FALSE)
+    /\ DeclareIdentityEntryKept(Id1, AuditProfile, AuditMode, "Local", FALSE, None, FALSE, FALSE, None, "None", FALSE, FALSE)
     /\ Id1 \notin identity_entry_retiring'
 \* An unseated identity whose seat would resume a session built under
 \* another role, with no migration from it declared, is recorded owed its
 \* seat and held; declared with the migration, it is owed its seat.
 AuditWitnessResumeRoleHeld ==
     /\ Id1 \notin DOMAIN identity_to_runtime
-    /\ DeclareIdentityEntryRoleMigrationHeld(Id1, AuditProfile2, AuditMode, "Local", FALSE, None, FALSE, FALSE, Some(AuditProfile), "None", FALSE)
+    /\ DeclareIdentityEntryRoleMigrationHeld(Id1, AuditProfile2, AuditMode, "Local", FALSE, None, FALSE, FALSE, Some(AuditProfile), "None", FALSE, FALSE)
     /\ UnseatedNext(Id1) = Some("SeatOwed")
     /\ CauseNext(Id1) = Some("RoleMigrationUndeclared")
 AuditWitnessResumeRoleMigrationOwed ==
     /\ Id1 \notin DOMAIN identity_to_runtime
-    /\ DeclareIdentityEntrySeatOwed(Id1, AuditProfile2, AuditMode, "Local", FALSE, Some(AuditProfile), FALSE, FALSE, Some(AuditProfile), "None", FALSE)
+    /\ DeclareIdentityEntrySeatOwed(Id1, AuditProfile2, AuditMode, "Local", FALSE, Some(AuditProfile), FALSE, FALSE, Some(AuditProfile), "None", FALSE, FALSE)
 \* A seat of a held identity keeps the role hold.
 AuditWitnessSeatKeepsRoleHold ==
     /\ Cause(Id1) = Some("RoleMigrationUndeclared")
@@ -641,10 +641,10 @@ AuditWitnessSeatKeepsRoleHold ==
     /\ CauseNext(Id1) = Some("RoleMigrationUndeclared")
 \* Refusals: a candidate composition, a name a worker holds, an intent row,
 \* and a declaration while the member's ladder is open.
-AuditWitnessCandidateRefused == DeclareIdentityEntryRefusedNonAuthoritative(Id1, AuditProfile, AuditMode, "Local", FALSE, None, FALSE, FALSE, None, "None", FALSE)
-AuditWitnessNameHeldByWorker == DeclareIdentityEntryRefusedNameHeldByWorker(Id2, AuditProfile, AuditMode, "Local", FALSE, None, FALSE, FALSE, None, "None", FALSE)
-AuditWitnessHostAdopted == DeclareIdentityEntryRefusedHostAdopted(Id1, AuditProfile, AuditMode, "Local", FALSE, None, TRUE, FALSE, None, "None", FALSE)
-AuditWitnessInFlight == DeclareIdentityEntryLifecycleInFlight(Id1, AuditProfile, AuditMode, "Local", FALSE, None, FALSE, FALSE, None, "None", FALSE)
+AuditWitnessCandidateRefused == DeclareIdentityEntryRefusedNonAuthoritative(Id1, AuditProfile, AuditMode, "Local", FALSE, None, FALSE, FALSE, None, "None", FALSE, FALSE)
+AuditWitnessNameHeldByWorker == DeclareIdentityEntryRefusedNameHeldByWorker(Id2, AuditProfile, AuditMode, "Local", FALSE, None, FALSE, FALSE, None, "None", FALSE, FALSE)
+AuditWitnessHostAdopted == DeclareIdentityEntryRefusedHostAdopted(Id1, AuditProfile, AuditMode, "Local", FALSE, None, TRUE, FALSE, None, "None", FALSE, FALSE)
+AuditWitnessInFlight == DeclareIdentityEntryLifecycleInFlight(Id1, AuditProfile, AuditMode, "Local", FALSE, None, FALSE, FALSE, None, "None", FALSE, FALSE)
 \* A mob reset and a destroy with entries present.
 AuditWitnessResetEndsEntries == Entries # {} /\ ResetToRunning
 AuditWitnessDestroyEndsEntries == Entries # {} /\ DestroyFromAny
@@ -815,7 +815,7 @@ AuditWitnessRoleHoldRefusesPeerWake ==
 \* A declared migration restamps the member on its own session under its
 \* new role.
 AuditWitnessMigrationVerdict ==
-    DeclareIdentityEntryRoleMigrate(Id1, AuditProfile2, AuditMode, "Local", FALSE, Some(AuditProfile), FALSE, FALSE, None, "None", FALSE)
+    DeclareIdentityEntryRoleMigrate(Id1, AuditProfile2, AuditMode, "Local", FALSE, Some(AuditProfile), FALSE, FALSE, None, "None", FALSE, FALSE)
 AuditWitnessMigrationRestamped ==
     /\ Profile(Id1) = Some(AuditProfile)
     /\ QCommit
@@ -823,18 +823,18 @@ AuditWitnessMigrationRestamped ==
     /\ BindingNext(Id1) = Binding(Id1)
 \* A runtime-mode change is restamped; a memory-only session rotates.
 AuditWitnessRestampVerdict ==
-    DeclareIdentityEntryRuntimeModeRestamp(Id1, AuditProfile, AuditModeAlt, "Local", FALSE, None, FALSE, FALSE, None, "None", FALSE)
+    DeclareIdentityEntryRuntimeModeRestamp(Id1, AuditProfile, AuditModeAlt, "Local", FALSE, None, FALSE, FALSE, None, "None", FALSE, FALSE)
 AuditWitnessRotateVerdict ==
-    DeclareIdentityEntryRoleRotate(Id1, AuditProfile2, AuditMode, "Local", FALSE, None, FALSE, TRUE, None, "None", FALSE)
+    DeclareIdentityEntryRoleRotate(Id1, AuditProfile2, AuditMode, "Local", FALSE, None, FALSE, TRUE, None, "None", FALSE, FALSE)
 \* The host restores the role: the hold ends.
 AuditWitnessRoleHoldEnded ==
     /\ Cause(Id1) = Some("RoleMigrationUndeclared")
-    /\ DeclareIdentityEntryKept(Id1, AuditProfile, AuditMode, "Local", FALSE, None, FALSE, FALSE, None, "None", FALSE)
+    /\ DeclareIdentityEntryKept(Id1, AuditProfile, AuditMode, "Local", FALSE, None, FALSE, FALSE, None, "None", FALSE, FALSE)
     /\ Id1 \notin DOMAIN member_host_preparation_causes'
 \* A first-boot preparation stands over a role move, and holds the wakes.
 AuditWitnessFirstBootKeptOverRoleHold ==
     /\ Cause(Id1) = Some("FirstBootRow")
-    /\ DeclareIdentityEntryRoleMigrationHeld(Id1, AuditProfile2, AuditMode, "Local", FALSE, None, FALSE, FALSE, None, "None", FALSE)
+    /\ DeclareIdentityEntryRoleMigrationHeld(Id1, AuditProfile2, AuditMode, "Local", FALSE, None, FALSE, FALSE, None, "None", FALSE, FALSE)
 \* A same-session successor under the new role takes member 1's key under
 \* that role's comms name.
 AuditWitnessRoleMoveTakesNewName ==
@@ -964,7 +964,7 @@ AuditWitnessApplyBusy == OpenDeclaredApplyBusy
 AuditWitnessEverCreatedOwedSeat ==
     /\ Id1 \notin DOMAIN identity_to_runtime
     /\ Id1 \in DOMAIN identity_runtime_generations
-    /\ DeclareIdentityEntrySeatOwed(Id1, AuditProfile, AuditMode, "Local", TRUE, None, FALSE, FALSE, None, "None", FALSE)
+    /\ DeclareIdentityEntrySeatOwed(Id1, AuditProfile, AuditMode, "Local", TRUE, None, FALSE, FALSE, None, "None", FALSE, FALSE)
 \* The forced destroy ends a ladder whose membership committed, and the
 \* startup binding request its commit recorded: no ladder or request
 \* outlives the members it named.
@@ -1155,7 +1155,7 @@ AuditRoleHoldEndsAtNewRole ==
 \* migration writes the role hold there.
 AuditSeatedResumeWritesRoleHold ==
     [][(Id1 \in DOMAIN identity_to_runtime
-          /\ DeclareIdentityEntryRoleMigrationHeld(Id1, AuditProfile2, AuditMode, "Local", FALSE, None, FALSE, FALSE, None, "Resume", FALSE))
+          /\ DeclareIdentityEntryRoleMigrationHeld(Id1, AuditProfile2, AuditMode, "Local", FALSE, None, FALSE, FALSE, None, "Resume", FALSE, FALSE))
          => CauseNext(Id1) = Some("RoleMigrationUndeclared")
       ]_vars
 
@@ -1164,7 +1164,7 @@ AuditSeatedResumeWritesRoleHold ==
 \* commits the new role ends it, and so does a fresh-session terminal.
 AuditWitnessMigrateKeepsHold ==
     /\ Cause(Id1) = Some("RoleMigrationUndeclared")
-    /\ DeclareIdentityEntryRoleMigrate(Id1, AuditProfile2, AuditMode, "Local", FALSE, Some(AuditProfile), FALSE, FALSE, None, "None", FALSE)
+    /\ DeclareIdentityEntryRoleMigrate(Id1, AuditProfile2, AuditMode, "Local", FALSE, Some(AuditProfile), FALSE, FALSE, None, "None", FALSE, FALSE)
 AuditWitnessHoldEndsAtSameSessionCommit ==
     /\ Cause(Id1) = Some("RoleMigrationUndeclared")
     /\ QCommit
@@ -1184,7 +1184,7 @@ AuditWitnessHoldKeptOnSameRole ==
 \* reveals the role hold in the same step.
 AuditWitnessSeatedResumeRevealsHold ==
     /\ Cause(Id1) = Some("FirstBootRow")
-    /\ DeclareIdentityEntryRoleMigrationHeld(Id1, AuditProfile2, AuditMode, "Local", FALSE, None, FALSE, FALSE, None, "Resume", FALSE)
+    /\ DeclareIdentityEntryRoleMigrationHeld(Id1, AuditProfile2, AuditMode, "Local", FALSE, None, FALSE, FALSE, None, "Resume", FALSE, FALSE)
     /\ CauseNext(Id1) = Some("RoleMigrationUndeclared")
 
 NotAuditWitnessMigrateKeepsHold == [][~AuditWitnessMigrateKeepsHold]_vars

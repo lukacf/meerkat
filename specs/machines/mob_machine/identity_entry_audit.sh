@@ -1052,6 +1052,16 @@ def replace_in_arm(arm, old, new):
     assert body.count(old) == 1, f"expected one {old[:70]!r} in {arm}, found {body.count(old)}"
     open(path, "w").write(text[:found.start()] + body.replace(old, new) + text[found.end():])
 
+def replace_all_in_arm(arm, old, new):
+    """Every occurrence of `old` in the arm's definition becomes `new`: the
+    generated model inlines a variable's earlier update into its later
+    ones, so a condition an update reads can occur more than once."""
+    text = open(path).read()
+    found = _arm(text, arm)
+    body = found.group(0)
+    assert body.count(old) >= 1, f"expected {old[:70]!r} in {arm}, found none"
+    open(path, "w").write(text[:found.start()] + body.replace(old, new) + text[found.end():])
+
 def replace_text(old, new):
     """The one occurrence of `old` in the model becomes `new`."""
     text = open(path).read()
@@ -1354,10 +1364,13 @@ PY
 keep_var("RecoverRosterMemberRetiredCurrentAlreadyAbsent", "identity_entry_retiring")
 PY
 
-  # The replay records a session its row does not record archived.
+  # The replay records a session its row does not record archived. Since
+  # 0.9.9 the removal's end drops the record the replay recorded, so the
+  # generated update of the record inlines the archived check more than
+  # once: every copy becomes TRUE.
   mutate legacy replay_records_unarchived_session "Action property AuditReplayRecordsOnlyArchived" <<'PY'
-replace_in_arm("RecoverRosterMemberRetiredRunning", "(session_archived = TRUE)", "TRUE")
-replace_in_arm("RecoverRosterMemberRetiredCurrentAlreadyAbsent", "(session_archived = TRUE)", "TRUE")
+replace_all_in_arm("RecoverRosterMemberRetiredRunning", "(session_archived = TRUE)", "TRUE")
+replace_all_in_arm("RecoverRosterMemberRetiredCurrentAlreadyAbsent", "(session_archived = TRUE)", "TRUE")
 PY
 
   # The replay ignores the row's hosted incarnation: a hosted incarnation's

@@ -527,6 +527,15 @@ snapshot from its first build. A placed member is reported blocked. A mob
 that recorded one journals at mob event schema 10, which 0.9.8 and 0.9.7
 refuse (`rkat storage doctor`: `operator-instruction-mob-events`).
 
+Ensure and a spawn in flight (since 0.9.9): `ensure_member` (RPC
+`mob/ensure_member`, and `mob/ingress_interaction` for its ingress member)
+waits for an in-flight spawn of the same member to seat it and answers with
+it, within the 60 s ready-wait budget (then `ReadyWaitTimedOut`), where it
+answered `MemberNotFound`; if that spawn fails before its member commits, the
+ensure spawns the member itself. A second spawn of a member whose first spawn
+has not settled is refused `MemberAlreadyExists`, where it could fail-stop the
+mob.
+
 Scratch `task_create` / `task_update` / `task_list` / `task_get` are separately
 enabled agent tools, not `MobHandle` methods. Durable shared commitments belong
 to WorkGraph, not that scratch-task surface.

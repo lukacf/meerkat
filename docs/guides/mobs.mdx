@@ -658,6 +658,16 @@ same rule: its member host reports whether the adopted session's first turn
 started. A member host of 0.9.4 or earlier reports nothing, and a resume there
 still runs the first turn.
 
+`mob/ensure_member` (Rust `MobHandle::ensure_member`) is the idempotent spawn:
+it spawns the member only when its identity holds none and otherwise answers
+the existing member, and `mob/ingress_interaction` ensures its ingress member
+the same way before it delivers. When a spawn of the same member is still in
+flight, the call waits for that spawn to seat the member and answers with it,
+within a 60 second ready-wait budget, after which it answers
+`ReadyWaitTimedOut`; if that spawn fails before its member is committed, the
+waiting call spawns the member itself. A second spawn of a member whose first
+spawn has not settled yet is refused `MemberAlreadyExists`.
+
 ### Trusted Rust member build overrides
 
 An in-process Rust host can attach a per-member

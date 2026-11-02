@@ -629,13 +629,33 @@ impl CopilotRuntime {
     }
 
     /// What the model list of `connection`'s Copilot account states about
-    /// `model`, which the model registry does not define.
+    /// `model`, which the model registry does not define
+    /// ([`CopilotModelSnapshot::account_model`]). The list is the one the
+    /// account state behind the connection holds, loaded when the route
+    /// resolved; while it holds none (the account's model discovery has not
+    /// answered), the list defines no model, and the model is refused as
+    /// unavailable.
     pub fn account_model(
         &self,
-        _connection: &meerkat_llm_core::provider_runtime::ResolvedConnection,
-        _model: &str,
+        connection: &meerkat_llm_core::provider_runtime::ResolvedConnection,
+        model: &str,
     ) -> meerkat_llm_core::provider_runtime::AccountModelLookup {
-        meerkat_llm_core::provider_runtime::AccountModelLookup::NotReported
+        use meerkat_llm_core::provider_runtime::{AccountModelLookup, AccountModelRefusal};
+
+        let snapshot = self.connection_state(connection).and_then(|state| {
+            state
+                .cache
+                .read()
+                .as_ref()
+                .and_then(|cached| cached.models.clone())
+        });
+        match snapshot {
+            Some(snapshot) => snapshot.account_model(&connection.credential_identity, model),
+            None => AccountModelLookup::Refused(AccountModelRefusal::ModelsUnavailable {
+                credential: connection.credential_identity.clone(),
+                model: model.to_string(),
+            }),
+        }
     }
 }
 

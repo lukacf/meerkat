@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
 
-use meerkat_core::Provider;
+use meerkat_core::config::CustomModelConfig;
+use meerkat_core::{AuthCredentialIdentity, Provider};
+use meerkat_llm_core::provider_runtime::{AccountModelLookup, AccountModelRefusal};
 use serde::{Deserialize, Serialize};
 use url::Url;
 
@@ -515,11 +517,7 @@ impl CopilotModelOffering {
     }
 
     pub fn route_for(&self, provider: Provider) -> Option<CopilotEndpoint> {
-        if self
-            .policy
-            .as_ref()
-            .is_some_and(|policy| policy.state != CopilotModelPolicyState::Enabled)
-        {
+        if !self.enabled() {
             return None;
         }
         let supports = |candidate| self.endpoints().any(|endpoint| endpoint == candidate);
@@ -545,15 +543,51 @@ impl CopilotModelOffering {
     }
 
     /// The provider family whose protocol serves this model on the account,
-    /// for a model the model registry does not define.
+    /// for a model the model registry does not define. It is read from the
+    /// endpoints the account advertises for the model alone, never from the
+    /// model's vendor, name or id: a model offered on the Messages endpoint
+    /// is the Anthropic family, which speaks Messages; otherwise a model
+    /// offered on the Responses or the Chat Completions endpoint is the
+    /// OpenAI family, whose route takes Responses first
+    /// ([`Self::route_for`]). `None` when the account's policy disables the
+    /// model or it advertises no endpoint Meerkat speaks.
     pub fn protocol_provider(&self) -> Option<Provider> {
-        None
+        if !self.enabled() {
+            return None;
+        }
+        let supports = |candidate| self.endpoints().any(|endpoint| endpoint == candidate);
+        if supports(CopilotEndpoint::Messages) {
+            Some(Provider::Anthropic)
+        } else if supports(CopilotEndpoint::Responses) || supports(CopilotEndpoint::ChatCompletions)
+        {
+            Some(Provider::OpenAI)
+        } else {
+            None
+        }
     }
 
     /// This model's definition for the model registry, for a model the
-    /// registry does not define.
-    pub fn registry_definition(&self) -> Option<meerkat_core::config::CustomModelConfig> {
-        None
+    /// registry does not define: the account's own statements and nothing
+    /// else. Its provider is [`Self::protocol_provider`]; its display name,
+    /// context window, prompt limit (the registry's input ceiling), output
+    /// limit and image input are what the account states. Every other
+    /// capability keeps the registry's conservative default for a model it
+    /// does not catalog, and the account capability gate enforces what else
+    /// the account states (tool calls, streaming, structured outputs,
+    /// thinking budgets) on every request. `None` when the model has no
+    /// protocol provider.
+    pub fn registry_definition(&self) -> Option<CustomModelConfig> {
+        let limits = &self.capabilities.limits;
+        Some(CustomModelConfig {
+            provider: self.protocol_provider()?,
+            display_name: self.name.clone(),
+            context_window: limits.max_context_window_tokens,
+            max_input_tokens: limits.max_prompt_tokens,
+            max_output_tokens: limits.max_output_tokens,
+            vision: self.capabilities.supports.vision,
+            web_search: None,
+            call_timeout_secs: None,
+        })
     }
 }
 
@@ -669,13 +703,32 @@ impl CopilotModelSnapshot {
     }
 
     /// What this model list states about `model`, which the model registry
-    /// does not define. `credential` names the account in a refusal.
+    /// does not define: the model's registry definition when the account
+    /// offers it on a protocol Meerkat speaks
+    /// ([`CopilotModelOffering::registry_definition`]). A model the list does
+    /// not name, or whose policy disables it, is refused as not offered,
+    /// naming the ids the account offers; a model offered on no endpoint
+    /// Meerkat speaks is refused as such. `credential` names the account in
+    /// a refusal.
     pub fn account_model(
         &self,
-        _credential: &meerkat_core::AuthCredentialIdentity,
-        _model: &str,
-    ) -> meerkat_llm_core::provider_runtime::AccountModelLookup {
-        meerkat_llm_core::provider_runtime::AccountModelLookup::NotReported
+        credential: &AuthCredentialIdentity,
+        model: &str,
+    ) -> AccountModelLookup {
+        match self.model(model) {
+            Some(offering) if offering.enabled() => match offering.registry_definition() {
+                Some(definition) => AccountModelLookup::Offered(definition),
+                None => AccountModelLookup::Refused(AccountModelRefusal::UnsupportedEndpoints {
+                    credential: credential.clone(),
+                    model: model.to_string(),
+                }),
+            },
+            Some(_) | None => AccountModelLookup::Refused(AccountModelRefusal::NotOffered {
+                credential: credential.clone(),
+                model: model.to_string(),
+                available: self.offered_model_ids().map(str::to_string).collect(),
+            }),
+        }
     }
 }
 

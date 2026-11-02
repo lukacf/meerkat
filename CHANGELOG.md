@@ -37,6 +37,54 @@ them.
 
 ### Breaking
 
+- `meerkat-mob-mcp`: a persisted mob store that does not restore is
+  quarantined instead of failing `MobMcpState`'s restore (see Fixed).
+  `MobMcpState::unrestored_mobs` is removed: `MobMcpState::quarantined_mobs`
+  lists the quarantined mobs (`QuarantinedMob`: the id, the class, whether a
+  re-attempt is in flight, the attempts and the failure its last attempt
+  met), and `MobMcpState::mob_inventory` reads the managed, held and
+  quarantined mobs in one read. `MobMcpState::held_child_mobs` returns
+  `Result<Vec<(MobId, SessionId)>, MobError>` and fails when the restore of
+  the persisted mobs failed, where it answered an empty list.
+- `meerkat-contracts`: `MobListResult` gains the public field
+  `quarantined: Vec<WireQuarantinedMob>` (see Added), so code that builds it
+  literally sets it (`Vec::new()` for none). Its wire form is unchanged
+  while it is empty.
+- `meerkat-machine-kernels`, `meerkat-machine-schema`, `meerkat-mob`: the mob
+  machine records a member's unrestored custody (see Fixed).
+  `MobMachineState` (meerkat-machine-schema and meerkat-mob) and the kernel
+  `generated::mob` `State` gain the public fields `member_custody_unrestored`
+  and `member_custody_unrestored_causes`, so code that builds either struct
+  literally must set them. `MobMachineSignal` and its variant enum and the
+  kernel `Signal` and `SignalKind` gain `RecordMemberCustodyUnrestored {
+  agent_identity, restore, cause }` and `ResolveMemberCustodyRestored {
+  agent_identity }`, appended last, so no existing variant's discriminant
+  moves. Exhaustive matches must add them.
+- Behaviour-only (not measured by the gate): every mob surface and the
+  Python, TypeScript and Web SDKs: a call that addresses a quarantined
+  persisted mob by id (a create of that id included) fails with the new
+  refusal kind `mob_quarantined` (`MobError::MobQuarantined`), whose
+  structured data carries `mob_id`, `class`, `retryable`,
+  `content_retained`, `cause` and `code`. A store that could not serve now
+  answers `SESSION_RUNTIME_UNAVAILABLE` with `retryable: true`; any other
+  class answers the code of the failure its restore met. Before, such a
+  store failed every mob call of the realm with the restore error, and a
+  refused resume answered `IncarnationInconsistent`, `IncarnationDestroyed`
+  or `Internal`. The SDKs read it typed (`mob_quarantined`,
+  `mobQuarantined`; see Added); a client that branches on refusal kinds
+  handles the new kind.
+- Behaviour-only (not measured by the gate): `meerkat-session`: a committed
+  whole-blob session read over a host store that answers unavailable, or
+  holds data that does not decode, fails with `SessionError::Store` (code
+  `SESSION_STORE_ERROR`) carrying the typed `RuntimeStoreError`, where it
+  failed with `SessionError::Agent` (`AGENT_ERROR`). Other read failures are
+  unchanged.
+- Behaviour-only (not measured by the gate): `meerkat-runtime`: a host store
+  read that answers `HostStoreError::Unavailable` surfaces as
+  `RuntimeStoreError::Unavailable`, and stored data that does not decode as
+  `RuntimeStoreError::Corrupt` (both new, see Added), where both surfaced as
+  `RuntimeStoreError::ReadFailed`. Writes are unchanged.
+
 - `meerkat-machine-kernels`, `meerkat-machine-schema`, `meerkat-mob`: the mob
   machine records identity entries (see Added). `MobMachineState`
   (meerkat-machine-schema and meerkat-mob) and the kernel `generated::mob`
@@ -1019,6 +1067,39 @@ them.
   meerkat-core needs a wildcard arm.
 
 ### Added
+
+- `meerkat-mob-mcp`, `meerkat-rpc`, `meerkat-contracts`: quarantined mobs
+  are visible and can be retried. `mob/list`, the MCP `meerkat_mob_list`
+  and `mob_list` tools and the browser runtime's `mob_list` read one
+  inventory and list each quarantined persisted mob under `quarantined`
+  (`WireQuarantinedMob`: the id, the class in the tolerant
+  `WireMobQuarantineClass` vocabulary `store_unavailable`,
+  `store_unreadable` or `resume_refused`, `retryable`, `retrying`,
+  `attempts`, and the refusal a lookup of the mob answers). The new
+  `mob/restore_retry` (`MobIdParams` to `MobRestoreRetryResult`, outcome
+  `restored`, `held`, `settled` or `not_quarantined`;
+  `MobMcpState::mob_restore_retry` in Rust) re-attempts a quarantined mob's
+  restore, for example after a repair. The Python SDK adds
+  `list_quarantined_mobs`, `mob_restore_retry` and `mob_quarantined` (a
+  typed `MobQuarantinedRefusal`), the TypeScript SDK `listQuarantinedMobs`,
+  `mobRestoreRetry` and `mobQuarantined`, and the Web SDK `mobQuarantined`.
+  See the mobs guide's section on quarantined mobs and degraded members.
+- `meerkat-machine-schema`, `meerkat-mob`: `MobStoreRestoreLifecycleMachine`,
+  a record-scoped machine that owns one quarantined persisted mob store: its
+  class, the one re-attempt in flight, and how each re-attempt ended.
+  `MobError::MobQuarantined` and `MobQuarantineClass` are the typed answer
+  for such a mob, and `MobError::restore_quarantine_class` classes a failed
+  restore.
+- `meerkat-core`, `meerkat-runtime`, `meerkat-store-conformance`:
+  `HostStoreError::Corrupt` (stored data that does not decode or fails the
+  store's own integrity check), and `RuntimeStoreError::Unavailable` and
+  `RuntimeStoreError::Corrupt`, so a host store read keeps unavailability
+  and corruption typed. The reference host store answers a typed read fault
+  for one scope (`set_read_fault` with `HostStoreReadFault`).
+- `meerkat-mob`, `meerkat-contracts`: the member custody deferral causes
+  `store_unavailable` and `store_unreadable` (`MemberCustodyDeferralCause`,
+  `WireMemberCustodyDeferralCause`) in the tolerant advisory vocabulary of
+  `custody_deferred`, which the SDKs read.
 
 - `meerkat-mob`, `meerkat-mob-mcp`: identity entries. A Rust host can tell
   its own durable identities from worker members: a spawn or a dormant seat
@@ -2140,6 +2221,31 @@ them.
 
 ### Fixed
 
+- `meerkat-mob-mcp`: one persisted mob store that does not restore no longer
+  aborts the restore of the realm. A store that cannot be opened, read or
+  decoded, or whose resume fails, is quarantined (kept exactly as found,
+  with no actor), and every other mob restores and serves; only a mob root
+  that cannot be created, read or listed still fails the restore. A store
+  that could not serve now (`store_unavailable`) is restored again by the
+  next call that addresses its mob (one attempt at a time: a call that meets
+  one in flight answers at once) and at the next start; one that needs a
+  repair (`store_unreadable`, `resume_refused`) at the next start or by
+  `mob/restore_retry`. A list never re-attempts.
+- `meerkat-mob`: one member's failed cleanup restore no longer stops its
+  mob. A mob start that cannot restore the cleanup delivery of a retiring
+  member (or of a member bound to a session of a Stopped or Completed mob)
+  for a failure of that member's own, met before the restore had an effect
+  (a read of its session the store could not serve or decode, a hosting
+  refusal, a durable tail it could not prove), defers that member's
+  custody: MobMachine records it, the mob runs, and the member shows
+  `custody_deferred` until a re-attempt restores it. Before, any such
+  failure other than a hosting refusal or an unprovable tail of a retiring
+  member fail-stopped the whole mob with `MemberStartupRecoveryFailed`.
+- `meerkat-mob`: a resume that fails after its pre-activation hook ran marks
+  the handle the hook kept as stopped, so a host binding that refuses to
+  replace a live mob's binding admits a later resume of the same store in
+  the same process.
+
 - `meerkat-machine-schema`, `meerkat-mob`: the mob machine's forced destroy
   (`DestroyFromAny`) clears every member fact the mob destroy (`DestroyMob`)
   clears, so both leave the same state. It now drops every spawn ladder: a
@@ -2490,6 +2596,19 @@ them.
 
 ### Upgrade notes
 
+- Quarantined mob stores: a host whose boot relied on a mob store that does
+  not restore failing its whole realm restore now gets a running realm with
+  that store quarantined. To keep failing the boot, read
+  `MobMcpState::quarantined_mobs` (or `mob/list`'s `quarantined`) after the
+  restore and refuse while it is not empty. No durable format changes: the
+  quarantine is derived again at every start, so a downgrade reads the
+  stores as before (and a store that does not restore fails the whole
+  restore of 0.9.8 again).
+- A host store implementation answers `HostStoreError::Corrupt` for stored
+  data that does not decode or fails its integrity check, and
+  `HostStoreError::Unavailable` for a read it cannot serve now, so a mob or
+  member over it is quarantined or degraded under the right class.
+
 - Operator instructions for a mob's members: a mob that recorded an
   operator instruction journals rows at mob event schema 10, which Core 0.9.7
   and 0.9.8 refuse ("unsupported stored mob event schema_version=10; expected
@@ -2570,6 +2689,16 @@ them.
   apply (the empty fold still advances the entry sequence).
 
 ### Known limitations
+
+- `meerkat-mob-mcp`: the agent-facing `mob_list` tool, which lists the mobs
+  the calling member may manage, does not list quarantined mobs: a
+  quarantined mob has no actor to read its grants from. The operator
+  surfaces list them.
+- `meerkat-mob`: a mob's own store read over the host store interface
+  reports a host store that could not serve as an unreadable store
+  (`MobStoreError::ReadFailed`), so a host that types the failed resume of
+  such a mob (Meerkat Meta, for its own mob) classes it `store_unreadable`,
+  not `store_unavailable`.
 
 - `meerkat`: a host that supplies its own stores keeps durable decisions in
   `approval_decisions.sqlite3` under its store path, as it keeps

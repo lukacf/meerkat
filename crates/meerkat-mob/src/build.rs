@@ -352,9 +352,8 @@ pub async fn build_agent_config(
     config.override_mob = override_mob;
     config.mob_tool_authority_context = authority;
     // This runtime's own witness, for a host's member build hook: the hook
-    // mints the member's scope for the mob as it runs (its identity creation
-    // scope among them) in every build, fresh, restore or wake, without
-    // holding the mob's handle.
+    // mints the member's scope for the mob as it runs in every build, fresh,
+    // restore or wake, without holding the mob's handle.
     config.mob_incarnation = mob_incarnation;
 
     // External tools (mob tools, task tools, rust bundles composed externally)

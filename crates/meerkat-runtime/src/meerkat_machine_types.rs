@@ -1219,8 +1219,6 @@ meerkat_machine_runtime_internal_inputs!(
         SetMobOperatorCreateAuthority,
         SetMobOperatorProfileMutation,
         SetMobOperatorSpawnProfilesInMob,
-        SetMobOperatorIdentityCreationInMob,
-        ResolveMobOperatorIdentityCreation,
     ],
     PeerRequestLifecycle => [
         PeerRequestReceived,

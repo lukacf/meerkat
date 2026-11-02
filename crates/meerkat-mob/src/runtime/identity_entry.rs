@@ -38,7 +38,7 @@
 //! predates created entries retired it) records the entry owed its seat, and
 //! the start seats it again, Dormant, on its archived session; a row pending
 //! its host's preparation records it unseated
-//! ([`UnseatedEntryCause::TemplatePreparation`]); and a removed entry's row
+//! ([`UnseatedEntryCause::PreparationPending`]); and a removed entry's row
 //! reserves its name for good ([`IdentityEntryRead::Removed`]). A row this
 //! build cannot read, a row the journal contradicts, and a member row whose
 //! origin this build does not know reserve the name as unreadable
@@ -46,6 +46,18 @@
 //! spawn, seat, declaration, worker reconcile, adoption or agent-lane
 //! command. The declared apply never declares over a created entry, and its
 //! seal never unlists one.
+//!
+//! An entry's origin is its provenance, and with it the custody of its
+//! desired record: the host's roster for a declared entry, the identity
+//! store's created entry row for a created one. Custody decides only which
+//! recovery reads that record at a start, which writer persists a change of
+//! it, the name guards (the declared apply and entry custody never take a
+//! created entry's name, and created custody never takes a declared entry's)
+//! and the name reservations (tombstones and unreadable names). It decides
+//! nothing about the entry's member: a created entry's member is a member
+//! like any other, built from its profile, with its own labels, tools, grants
+//! and wiring. A created entry is still local and created at once: nothing
+//! places one or holds its creation yet.
 //!
 //! The reads ([`super::MobHandle::identity_entry`],
 //! [`super::MobHandle::identity_entries`], [`super::MobHandle::identity_census`],
@@ -75,7 +87,12 @@ pub const IDENTITY_ENTRY_PAGE_MAX: usize = 256;
 /// ([`super::MobHandle::adopt_legacy_identity_entry`]), and nowhere else.
 pub(crate) const LEGACY_IDENTITY_LABEL: &str = "agent_identity";
 
-/// How an identity became an identity entry.
+/// How an identity became an identity entry: its provenance, and with it the
+/// custody of its desired record (see the module docs). Custody decides only
+/// where that record lives, which recovery and writer use it, and the name
+/// guards and reservations that follow; never the member's profile, labels,
+/// tools, grants or wiring. A created entry is still local and created at
+/// once: nothing places one or holds its creation yet.
 ///
 /// The handle's entry reads and the journal's rows answer with this type.
 /// MobMachine's own state holds the generated machine enum of the same name
@@ -86,13 +103,12 @@ pub(crate) const LEGACY_IDENTITY_LABEL: &str = "agent_identity";
 #[non_exhaustive]
 pub enum IdentityEntryOrigin {
     /// The host declared it: a spawn or a dormant seat whose spec carried
-    /// entry custody, or the adoption of a legacy member.
+    /// entry custody, or the adoption of a legacy member. Its desired record
+    /// is the host's roster.
     Declared,
     /// Created at runtime: its desired record is its created entry row in
-    /// the mob's identity store, from which every start recovers it, and
-    /// MobMachine alone drives its member. No declared apply declares over
-    /// it or unlists it, and no worker reconcile, spawn or agent-lane
-    /// command acts on it.
+    /// the mob's identity store, from which every start recovers it. No
+    /// declared apply declares over it or unlists it.
     Created,
 }
 
@@ -155,7 +171,7 @@ pub enum UnseatedEntryCause {
     /// A created entry whose host preparation is pending: it has no member
     /// until its host settles the preparation, and no seat takes its name
     /// meanwhile.
-    TemplatePreparation,
+    PreparationPending,
 }
 
 impl UnseatedEntryCause {
@@ -164,7 +180,7 @@ impl UnseatedEntryCause {
             mob_dsl::UnseatedEntryCause::SeatOwed => Self::SeatOwed,
             mob_dsl::UnseatedEntryCause::HostedOnFirstUse => Self::HostedOnFirstUse,
             mob_dsl::UnseatedEntryCause::HeldCreation => Self::HeldCreation,
-            mob_dsl::UnseatedEntryCause::TemplatePreparation => Self::TemplatePreparation,
+            mob_dsl::UnseatedEntryCause::PreparationPending => Self::PreparationPending,
         }
     }
 }
@@ -396,8 +412,8 @@ pub struct UnseatedEntryCounts {
     /// ([`UnseatedEntryCause::HeldCreation`]).
     pub held_creation: usize,
     /// Created entries awaiting their host's preparation
-    /// ([`UnseatedEntryCause::TemplatePreparation`]).
-    pub template_preparation: usize,
+    /// ([`UnseatedEntryCause::PreparationPending`]).
+    pub preparation_pending: usize,
 }
 
 /// The counts of [`super::MobHandle::identity_census`].
@@ -1032,8 +1048,8 @@ pub(crate) fn identity_census(
             EntryStanding::Unseated(UnseatedEntryCause::HeldCreation) => {
                 census.unseated_by_cause.held_creation += 1;
             }
-            EntryStanding::Unseated(UnseatedEntryCause::TemplatePreparation) => {
-                census.unseated_by_cause.template_preparation += 1;
+            EntryStanding::Unseated(UnseatedEntryCause::PreparationPending) => {
+                census.unseated_by_cause.preparation_pending += 1;
             }
         }
         if view.broken.is_some() {
@@ -1591,13 +1607,13 @@ mod tests {
             ),
             (
                 "preparing",
-                mob_dsl::UnseatedEntryCause::TemplatePreparation,
-                UnseatedEntryCause::TemplatePreparation,
+                mob_dsl::UnseatedEntryCause::PreparationPending,
+                UnseatedEntryCause::PreparationPending,
             ),
         ];
         for (name, machine_cause, _) in unseated {
             let identity = mob_dsl::AgentIdentity::from(name);
-            let origin = if machine_cause == mob_dsl::UnseatedEntryCause::TemplatePreparation {
+            let origin = if machine_cause == mob_dsl::UnseatedEntryCause::PreparationPending {
                 mob_dsl::IdentityEntryOrigin::Created
             } else {
                 mob_dsl::IdentityEntryOrigin::Declared
@@ -1638,7 +1654,7 @@ mod tests {
                 seat_owed: 1,
                 hosted_on_first_use: 1,
                 held_creation: 1,
-                template_preparation: 1,
+                preparation_pending: 1,
             }
         );
         assert_eq!(census.host_preparation_pending, 1);

@@ -709,8 +709,19 @@ macro_rules! mob_catalog_machine_dsl {
             // one's seal removes). Never journaled: a restart has no apply
             // open.
             declared_apply_open: bool,
-            // Created identity entries (0.9.9). The names of removed created
-            // entries: a tombstoned name is never an entry or a member again
+            // Created identity entries (0.9.9). An entry's origin
+            // (identity_entry_origins) is its provenance and the custody of
+            // its desired record: the host's roster for a Declared entry, the
+            // identity store's created entry row for a Created one. Custody
+            // decides only the recovery source, which writer persists a
+            // change of that record, the name guards and the name
+            // reservations below, never the member's profile, labels, tools,
+            // grants or wiring. A Created entry is still local and created at
+            // once: nothing places one or holds its creation yet (the peer-only
+            // and placed spawns' created_custody_local guard, and
+            // unseated_created_entry_is_preparing_or_owed).
+            // The names of removed created entries: a tombstoned name is
+            // never an entry or a member again
             // (tombstone_is_never_an_entry), and no spawn, declaration or
             // adoption takes it. Recovered at boot from the identity store's
             // created entry rows (RecoverCreatedIdentityEntry); the store
@@ -4920,7 +4931,7 @@ macro_rules! mob_catalog_machine_dsl {
             for_all(id in self.identity_entry_unseated.keys(),
                 self.identity_entry_origins.get_cloned(id) != Some(IdentityEntryOrigin::Created)
                 || self.identity_entry_unseated.get_cloned(id) == Some(UnseatedEntryCause::SeatOwed)
-                || self.identity_entry_unseated.get_cloned(id) == Some(UnseatedEntryCause::TemplatePreparation))
+                || self.identity_entry_unseated.get_cloned(id) == Some(UnseatedEntryCause::PreparationPending))
         }
 
         // A removed created entry's name is never an entry or a member again.
@@ -30965,7 +30976,7 @@ macro_rules! mob_catalog_machine_dsl {
         //   last bound to as its revival record when it has none, so the boot
         //   seats it again on that session (created custody);
         // - a row pending its host's preparation records the entry unseated,
-        //   TemplatePreparation;
+        //   PreparationPending;
         // - a removed entry's row records its tombstone;
         // - a row this build cannot read, and a row whose facts contradict the
         //   replay (a Declared entry of the same name, a member where the row
@@ -31032,7 +31043,7 @@ macro_rules! mob_catalog_machine_dsl {
             guard "no_spawn_ladder" { self.spawn_exec_phase.contains_key(agent_identity) == false }
             update {
                 self.identity_entry_origins.insert(agent_identity, IdentityEntryOrigin::Created);
-                self.identity_entry_unseated.insert(agent_identity, UnseatedEntryCause::TemplatePreparation);
+                self.identity_entry_unseated.insert(agent_identity, UnseatedEntryCause::PreparationPending);
                 self.members_to_spawn.remove(agent_identity);
                 self.members_to_retire.remove(agent_identity);
             }
@@ -34926,12 +34937,18 @@ pub enum MemberAdmissionVerdictKind {
     IdentityNameReserved,
 }
 
-/// How an identity became an identity entry (`identity_entry_origins`).
-/// The stored form of an entry's journal row names the origin.
+/// How an identity became an identity entry (`identity_entry_origins`): its
+/// provenance, and the custody of its desired record. Custody decides only
+/// the recovery source, which writer persists a change of that record, the
+/// name guards and the name reservations, never the member's profile,
+/// labels, tools, grants or wiring. A Created entry is still local and
+/// created at once: nothing places one or holds its creation yet. The stored
+/// form of an entry's journal row names the origin.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum IdentityEntryOrigin {
     /// The host declared it: a spawn or a dormant seat that carried entry
-    /// custody, or the adoption of a legacy member.
+    /// custody, or the adoption of a legacy member. Its desired record is
+    /// the host's roster.
     #[default]
     Declared,
     /// Created at runtime: its desired record is its created entry row in
@@ -35034,7 +35051,7 @@ pub enum UnseatedEntryCause {
     HeldCreation,
     /// A created entry whose host preparation is pending: no member exists
     /// until its host settles the preparation.
-    TemplatePreparation,
+    PreparationPending,
 }
 
 /// The presence a created entry's row in the identity store records, as the

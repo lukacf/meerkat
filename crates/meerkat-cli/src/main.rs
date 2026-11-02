@@ -15350,7 +15350,6 @@ async fn run_agent(
                 effective_workgraph,
             ),
             override_mob: meerkat_core::ToolCategoryOverride::Inherit,
-            mob_operator_authority_only: false,
             override_image_generation: if help_run {
                 meerkat_core::ToolCategoryOverride::Disable
             } else {

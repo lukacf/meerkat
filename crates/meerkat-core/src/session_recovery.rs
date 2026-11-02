@@ -604,7 +604,6 @@ pub fn resolve_effective_turn_config(
             .override_mob
             .map(ToolCategoryOverride::from_effective)
             .unwrap_or(metadata.tooling.mob),
-        mob_operator_authority_only: false,
         override_image_generation: overrides
             .override_image_generation
             .map(ToolCategoryOverride::from_effective)

@@ -10,7 +10,7 @@
 \* an identity the replay left without a member records the entry owed its
 \* seat, with the session its member was last bound to as its revival
 \* record; a row pending its host's preparation records it
-\* TemplatePreparation; a removed row records the name's tombstone; and an
+\* PreparationPending; a removed row records the name's tombstone; and an
 \* unreadable row, or one the replay contradicts (a Declared entry of the
 \* name, a member where the row says none, a placed member, the name's
 \* tombstone, a spawn ladder open for it), reserves the name as unreadable.
@@ -190,7 +190,7 @@ AuditWitnessScanRetired ==
     /\ RecordNext(Id2) = Some(Sess2)
 AuditWitnessScanPending ==
     /\ RecoverCreatedIdentityEntryPendingRunning(Id2, "PresentUnseated", None)
-    /\ UnseatedNext(Id2) = Some("TemplatePreparation")
+    /\ UnseatedNext(Id2) = Some("PreparationPending")
 AuditWitnessScanTombstone ==
     /\ RecoverCreatedIdentityEntryTombstoneRunning(Id2, "Tombstone", None)
     /\ Id2 \in identity_entry_tombstones'

@@ -330,7 +330,6 @@ impl McpScheduleContext {
                     override_schedule: meerkat_core::ToolCategoryOverride::Inherit,
                     override_workgraph: meerkat_core::ToolCategoryOverride::Inherit,
                     override_mob: meerkat_core::ToolCategoryOverride::Inherit,
-                    mob_operator_authority_only: false,
                     override_image_generation: meerkat_core::ToolCategoryOverride::Inherit,
                     override_web_search: meerkat_core::ToolCategoryOverride::Inherit,
                     schedule_tools: None,

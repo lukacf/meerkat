@@ -1795,10 +1795,9 @@ struct CreateSessionRecord {
     /// The witness of the mob runtime performing the build, as the build
     /// carries it to a host's member build hook.
     mob_incarnation: Option<meerkat_core::service::LiveMobIncarnation>,
-    /// The build's mob operator authority, and whether the build binds it
-    /// authority only, once the member build hook has run.
+    /// The build's mob operator authority, once the member build hook has
+    /// run.
     mob_tool_authority_context: Option<meerkat_core::service::MobToolAuthorityContext>,
-    mob_operator_authority_only: bool,
 }
 
 /// A host's member build hook: it edits a create request before the session
@@ -4748,10 +4747,6 @@ impl MockSessionService {
                     .build
                     .as_ref()
                     .and_then(|build| build.mob_tool_authority_context.clone()),
-                mob_operator_authority_only: req
-                    .build
-                    .as_ref()
-                    .is_some_and(|build| build.mob_operator_authority_only),
             });
 
         let mcp_server_names: Vec<String> = req
@@ -4795,15 +4790,11 @@ impl MockSessionService {
             // A session service that builds its agent through the agent
             // factory binds the member's tools to the session's mob operator
             // authority; this mock builds no agent, so it binds the request's
-            // as the factory does: none with mob tools disabled, unless the
-            // build is authority only.
+            // as the factory does: none with mob tools disabled.
             let authority = req
                 .build
                 .as_ref()
-                .filter(|build| {
-                    build.mob_operator_authority_only
-                        || !matches!(build.override_mob, ToolCategoryOverride::Disable)
-                })
+                .filter(|build| !matches!(build.override_mob, ToolCategoryOverride::Disable))
                 .and_then(|build| build.mob_tool_authority_context.clone())
                 .filter(
                     meerkat_core::service::MobToolAuthorityContext::is_generated_authority_context,
@@ -29351,9 +29342,9 @@ async fn test_visible_mob_operator_reads_still_require_exact_scope() {
     .expect("compose dispatcher")
     .expect("operator dispatcher should be visible when authority is injected");
 
-    // The injected authority binds only another mob, so it holds no mob
-    // operator scope in this one: the member's own mob operator tools are not
-    // listed, and a read that still reaches them is denied.
+    // The injected authority binds only another mob, so the member's own mob
+    // operator tools are not listed, and a read that still reaches them is
+    // admitted like any other, which denies it.
     let tools = dispatcher.tools();
     let tool_names = tools
         .iter()

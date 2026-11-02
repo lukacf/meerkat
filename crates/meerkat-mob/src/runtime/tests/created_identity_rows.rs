@@ -1000,12 +1000,12 @@ async fn the_census_reports_incomplete_over_an_unreadable_created_entry() {
         ),
         (0, 2, 1, 1, 1)
     );
-    assert_eq!(census.unseated_by_cause.template_preparation, 1);
+    assert_eq!(census.unseated_by_cause.preparation_pending, 1);
     assert!(!census.is_complete());
     assert_eq!(
         mob.standing("preparing"),
         Some(EntryStanding::Unseated(
-            UnseatedEntryCause::TemplatePreparation
+            UnseatedEntryCause::PreparationPending
         ))
     );
     assert!(matches!(
@@ -1131,7 +1131,7 @@ async fn a_sqlite_resume_recovers_every_created_row_among_host_adopted_intents()
             IdentityEntryRead::Entry(view)
                 if view.origin == IdentityEntryOrigin::Created
                     && view.standing
-                        == EntryStanding::Unseated(UnseatedEntryCause::TemplatePreparation)
+                        == EntryStanding::Unseated(UnseatedEntryCause::PreparationPending)
         ),
         "{:?}",
         read("f-preparing")
@@ -1174,8 +1174,9 @@ async fn a_sqlite_resume_recovers_every_created_row_among_host_adopted_intents()
 /// a reader that knows no created entry finds none, and the journal it
 /// leaves is edited to the predecessor's rows.
 ///
-/// The seat carries no roster labels, whatever the member's last spawn row
-/// carried, so no label-based authority reaches a created identity.
+/// The seat carries the roster labels of the member's last spawn row, as any
+/// revive keeps its member's spec: a created identity's labels select it
+/// like any identity's.
 ///
 /// The row runs over the persistent session service, where the archived
 /// session stays durable and the wake revives it. The mock durable service
@@ -1186,8 +1187,8 @@ async fn a_sqlite_resume_recovers_every_created_row_among_host_adopted_intents()
 /// (`reseat_owed_created_entries`): the entry stays unseated, owed its seat,
 /// and no member holds it. Drop `RecoverCreatedIdentityEntryRetired`: the
 /// start refuses the present row of an identity the journal left without a
-/// member. Copy the last spawn row's labels into the seat (`reseat_spec`):
-/// the seated entry carries the owner's label.
+/// member. Leave the last spawn row's labels out of the seat
+/// (`reseat_spec`): the seated entry carries no label.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_present_created_entry_whose_member_an_older_binary_retired_is_reseated_on_its_archived_session()
  {
@@ -1267,15 +1268,15 @@ async fn a_present_created_entry_whose_member_an_older_binary_retired_is_reseate
             .is_some_and(|generation| generation > retired_generation),
         "the entry is seated at its next generation"
     );
-    assert!(
+    assert_eq!(
         mob.handle
             .get_member(&id("owner"))
             .await
             .expect("roster read")
             .expect("the seated owner")
-            .labels
-            .is_empty(),
-        "a created seat carries no roster labels"
+            .labels,
+        BTreeMap::from([("team".to_string(), "alpha".to_string())]),
+        "the seat carries the labels of the owner's last spawn row"
     );
     tokio::time::timeout(STEP, mob.handle.ensure_member_live(&id("owner")))
         .await

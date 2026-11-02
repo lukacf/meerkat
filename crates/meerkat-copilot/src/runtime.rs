@@ -1526,6 +1526,20 @@ struct CopilotAccountPacing {
     /// published again; there is at most one per registry, and production
     /// registries live for the process.
     withdrawn_source_rereads: Mutex<BTreeMap<usize, WithdrawnSourceReread>>,
+    /// The Copilot API's refusal of a token GitHub's identity lookup did not
+    /// answer: that token is not asked about again before the pause ends,
+    /// and a request in between fails with the same refusal. Another token
+    /// value is asked about at once.
+    refused_token: Mutex<Option<RefusedTokenPause>>,
+}
+
+/// A paused Copilot refusal of one token value.
+#[derive(Clone)]
+struct RefusedTokenPause {
+    token: CredentialFingerprint,
+    until: DateTime<Utc>,
+    /// The refusal a request inside the pause fails with.
+    detail: String,
 }
 
 /// When the source of a token the lease withdrew (GitHub refused it, or a
@@ -2593,6 +2607,18 @@ impl CopilotAuthorizer {
                 return Err(OperatorRefusal::RateLimited { until }.into_provider_error());
             }
         }
+        // Copilot refused this very token a moment ago, after GitHub's
+        // identity lookup did not answer it: the refusal stands until the
+        // pause ends, with no request.
+        let token = CredentialFingerprint::of_secret(&material.token);
+        if let Some(paused) = self.state.pacing.refused_token.lock().as_ref()
+            && paused.token == token
+            && now < paused.until
+        {
+            return Err(ProviderAuthError::Auth(AuthError::RefreshFailed(
+                paused.detail.clone(),
+            )));
+        }
         let identity = match lookup_operator_identity(
             self.transport.as_ref(),
             &self.state.config,
@@ -2609,12 +2635,27 @@ impl CopilotAuthorizer {
         };
         *self.state.pacing.identity_retry_at.lock() = None;
         let models_result = self.fetch_models(&identity.api_base, &material.token).await;
+        let discovery_now = (self.env.now)();
         if let Err(error) = &models_result
-            && let Some(refusal) = models_refusal(error, !identity.looked_up)
+            && let Some(refusal) = models_refusal(error, identity.installation)
         {
+            // A 401 or 403 from the Copilot API is Copilot refusing a user
+            // token (no Copilot Requests permission, no seat, a policy, an
+            // integration not allowed), also after a lookup that did not
+            // answer it: that lookup authenticated the token, and only the
+            // lookup's own 401 says it is revoked. Such a token is not asked
+            // about again for a minute, so a refused account costs one
+            // lookup and one listing a minute, not two requests per request.
+            if !identity.looked_up && !identity.installation {
+                *self.state.pacing.refused_token.lock() = Some(RefusedTokenPause {
+                    token,
+                    until: rate_limit_until(None, None, discovery_now),
+                    detail: refusal.detail(),
+                });
+            }
             return Err(self.operator_refusal(refusal, &material.token, material.generation));
         }
-        let discovery_now = (self.env.now)();
+        *self.state.pacing.refused_token.lock() = None;
         // A token GitHub's identity lookup did not answer is vouched for by
         // its model list alone, so it is used only once that list loads: a
         // listing that fails fails this request, and a rate limit pauses the
@@ -2697,19 +2738,19 @@ impl CopilotAuthorizer {
     }
 
     /// Refresh the cached account's model list. A 401 or 403 drops the cache:
-    /// for a token no identity lookup answered (an installation token, or one
-    /// the lookup does not answer) a 401 is GitHub refusing the token itself;
-    /// for a looked-up token the account is rebuilt through the identity
-    /// lookup, which tells a revoked token from a Copilot refusal.
+    /// for an installation token a 401 is GitHub refusing the token itself;
+    /// for a user token, a token the identity lookup did not answer
+    /// included, the account is rebuilt through the identity lookup, which
+    /// tells a revoked token from a Copilot refusal.
     async fn rediscover_operator_models(
         &self,
         cached: CachedTokenView,
         generation: u64,
     ) -> Result<CachedTokenView, ProviderAuthError> {
-        let not_looked_up = cached
+        let installation = cached
             .identity
             .as_deref()
-            .is_some_and(|identity| !identity.looked_up);
+            .is_some_and(|identity| identity.installation);
         let models = self.fetch_models(&cached.api_base, &cached.token).await;
         let discovery_now = (self.env.now)();
         let status = models
@@ -2719,7 +2760,7 @@ impl CopilotAuthorizer {
         let refusal = models
             .as_ref()
             .err()
-            .and_then(|error| models_refusal(error, not_looked_up));
+            .and_then(|error| models_refusal(error, installation));
         {
             let mut cache = self.state.cache.write();
             if let Some(current) = cache.as_mut()
@@ -2752,7 +2793,7 @@ impl CopilotAuthorizer {
         let Some(refusal) = refusal else {
             return Ok(cached);
         };
-        if status == Some(401) && !not_looked_up {
+        if status == Some(401) && !installation {
             let material = self.load_operator_token().await?;
             return self.discover_operator_account(material).await;
         }
@@ -3212,8 +3253,10 @@ async fn lookup_operator_identity(
         // token the Copilot API accepts: a fine-grained personal access
         // token can get a 403 or a 404 from it. The token is then tried on
         // the default Copilot API host, unnamed, and used only once the
-        // account's model list loads there; a refusal of the token or of the
-        // account comes from that listing. A rate limit was answered above.
+        // account's model list loads there; a 401 or 403 from that listing
+        // is Copilot refusing the token, as for a looked-up token, and only
+        // this lookup's own 401 says that the token is revoked. A rate limit
+        // was answered above.
         status @ (403 | 404) => {
             tracing::warn!(
                 status,
@@ -3286,15 +3329,17 @@ fn copilot_user_headers(
 }
 
 /// The refusal a model listing answer is for an operator token: a 401 or 403
-/// is Copilot refusing the token, and for a token no identity lookup answered
-/// (an installation token, which has none, or a token the lookup does not
-/// answer), a 401 is GitHub refusing the token itself. A rate limit (a 403
-/// with `Retry-After` or an exhausted primary limit) is no refusal: the
-/// listing waits for GitHub's stated time ([`operator_models_retry_at`]). Any
-/// other failure is transient and the listing is retried later.
+/// is Copilot refusing the token, and for an installation token, which has no
+/// identity lookup, a 401 is GitHub refusing the token itself. A user token
+/// the lookup did not answer is a user token: the Copilot API also answers
+/// 401 for a valid token it does not serve. A rate limit (a 403 with
+/// `Retry-After`, an exhausted primary limit or a secondary limit) is no
+/// refusal: the listing waits for GitHub's stated time
+/// ([`operator_models_retry_at`]). Any other failure is transient and the
+/// listing is retried later.
 fn models_refusal(
     error: &CopilotModelDiscoveryError,
-    not_looked_up: bool,
+    installation: bool,
 ) -> Option<OperatorRefusal> {
     let CopilotModelDiscoveryError::Http {
         status,
@@ -3307,7 +3352,7 @@ fn models_refusal(
     };
     match *status {
         _ if *rate_limited => None,
-        401 if not_looked_up => Some(OperatorRefusal::TokenRejected {
+        401 if installation => Some(OperatorRefusal::TokenRejected {
             status: 401,
             message: message.clone(),
         }),
@@ -3589,7 +3634,7 @@ async fn verify_operator_token_with(
         .map_err(OperatorRefusal::into_provider_error)?;
     match fetch_copilot_models(transport, config, &identity.api_base, token).await {
         Ok(_) => Ok(identity),
-        Err(error) => Err(models_refusal(&error, !identity.looked_up).map_or_else(
+        Err(error) => Err(models_refusal(&error, identity.installation).map_or_else(
             || {
                 ProviderAuthError::Auth(AuthError::RefreshFailed(format!(
                     "GitHub Copilot model listing failed: {error}"
@@ -8254,10 +8299,11 @@ mod tests {
         }
 
         /// T5: Copilot refusing this identity (a 403 from the model list, here
-        /// after an identity lookup that did not answer the token; chat
-        /// disabled) is a typed `refresh_failed` that does not touch the
-        /// lease, and the same token works once that is fixed. A rate limit
-        /// pauses the identity lookup until GitHub's stated time.
+        /// after an identity lookup that did not answer the token, which
+        /// pauses that token for a minute; chat disabled) is a typed
+        /// `refresh_failed` that does not touch the lease, and the same token
+        /// works once that is fixed. A rate limit pauses the identity lookup
+        /// until GitHub's stated time.
         #[tokio::test]
         async fn copilot_refusal_is_typed_and_not_sticky() {
             let harness = Harness::new([
@@ -8287,6 +8333,7 @@ mod tests {
                 "{detail}"
             );
             assert_eq!(harness.operator.lease().phase, Some(AuthLeasePhase::Valid));
+            harness.operator.advance(61);
             harness
                 .resolve(CopilotProviderRoute::OpenAi)
                 .await

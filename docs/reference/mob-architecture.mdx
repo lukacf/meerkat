@@ -421,8 +421,9 @@ that apply removes it. A worker is never unlisted. The answer names each
 unlisted entry (`DeclaredRosterOutcome::unlisted`: `Retired`, `Removed`, or
 `Failed`, which the next complete apply retries). Any other retirement
 keeps the entry: a host's `retire` of a declared identity that stays listed
-ends its member, and the next apply seats the identity again. To remove a
-declared identity, unlist it.
+ends its member, and the next apply seats the identity again. To take a
+declared identity out of the roster, unlist it (`remove_identity` is
+permanent: it tombstones the name).
 
 An unlisted identity listed again comes back as the same identity. The end of
 its retirement recorded the session it archived (MobMachine's

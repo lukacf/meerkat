@@ -537,8 +537,12 @@ pub struct LifecycleEffectIntent {
     /// The cursor of the head of Core's member lifecycle journal, read
     /// before Core was asked for the step: a fact of the identity's member
     /// that Core journaled after it is the step's (or another step's of the
-    /// same member), so a step that failed tells from the journal whether
-    /// any of it reached Core. `None` for an intent recorded without it (by
+    /// same member), so a step that failed tells from the journal, after the
+    /// head it read, whether any of it reached Core. A rotation's intent (a
+    /// reset's, a delete's, a role move's) that replaced an earlier
+    /// rotation's intent for the same incarnation keeps the earlier, smaller
+    /// head: Core may finish the earlier rotation for the later step without
+    /// journaling a new start. `None` for an intent recorded without it (by
     /// an earlier build, or when the head did not read): a step that failed
     /// then keeps its intent.
     #[serde(default, skip_serializing_if = "Option::is_none")]

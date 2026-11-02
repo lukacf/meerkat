@@ -97,8 +97,12 @@
 //! fails, the fact it writes first (its retirement's start, or its seat),
 //! past that head, says the rotation reached Core, and its absence says
 //! nothing of it did, so it takes its record back and puts back the one it
-//! replaced (a later verb's record replaces an earlier one's). A head that
-//! does not read refuses the step before Core is asked. The projection reads
+//! replaced (a later verb's record replaces an earlier one's). A rotation's
+//! record that replaces an earlier rotation's record keeps the earlier head
+//! ([`kept_head`]), since Core may carry out the earlier rotation's started
+//! retirement for the later call without journaling a new start; the step
+//! still reads its own reach from the head it read itself. A head that does
+//! not read refuses the step before Core is asked. The projection reads
 //! a rotation's record by the same fact ([`step_reached`]): the record
 //! answers a retirement of its incarnation, or the fresh life's seat after
 //! it, only when Core journaled that fact after the rotation's head and up
@@ -860,6 +864,40 @@ async fn step_reached(
         cursor = page.next;
     }
     Ok(false)
+}
+
+/// Whether `verb` asks Core for a rotation onto a fresh session (a reset, a
+/// delete, a role move): its step records the head of Core's journal it read
+/// before it asked Core.
+fn rotates(verb: LifecycleEffectVerb) -> bool {
+    matches!(
+        verb,
+        LifecycleEffectVerb::Reset | LifecycleEffectVerb::Delete | LifecycleEffectVerb::RoleMove
+    )
+}
+
+/// The head of Core's journal that `record`, the lifecycle effect intent a
+/// step is about to write, keeps in place of `earlier`, the record under the
+/// same key that it replaces: the earlier record's head, when both are
+/// rotations' records of the same incarnation of the mob and the earlier
+/// head is the smaller. The earlier rotation may have started the
+/// incarnation's retirement, and Core finishes a rotation it started for a
+/// later call without journaling a new start (it re-drives the standing
+/// rotation): only the earlier head lies before the start of the retirement
+/// Core then ends for the later step. Any other record keeps its own head.
+fn kept_head(
+    record: &LifecycleEffectIntent,
+    earlier: Option<&LifecycleEffectIntent>,
+) -> Option<u64> {
+    let own = record.asked_after?;
+    let carried = earlier
+        .filter(|replaced| {
+            rotates(record.verb)
+                && rotates(replaced.verb)
+                && replaced.incarnation == record.incarnation
+        })
+        .and_then(|replaced| replaced.asked_after);
+    Some(carried.map_or(own, |head| head.min(own)))
 }
 
 /// Where a side effect was owed: the mob incarnation whose journal owed
@@ -2032,14 +2070,15 @@ impl IdentityRuntime {
     /// Before Core is asked for a step that ends `identity`'s live
     /// incarnation (`verb`): record what the step owes, keyed by that
     /// incarnation, with `asked_after`, the head of Core's journal the step
-    /// read before it asks Core, and, when its retirement owes the retirement
-    /// hook ([`intent_cause`] names a cause for `verb`), keep the incarnation
-    /// as the hook reads it. A reset or a delete of an identity whose last
-    /// incarnation Core had already retired records what it owes for that
-    /// incarnation too, read at the fresh life Core seats after it. `None`
-    /// when Core holds no incarnation of the identity's that the step ends
-    /// or follows, so the step owes the identity nothing. Refused typed, with
-    /// nothing asked of Core, when the record cannot be written.
+    /// read before it asks Core (or the earlier head of a rotation's record
+    /// it replaces, [`kept_head`]), and, when its retirement owes the
+    /// retirement hook ([`intent_cause`] names a cause for `verb`), keep the
+    /// incarnation as the hook reads it. A reset or a delete of an identity
+    /// whose last incarnation Core had already retired records what it owes
+    /// for that incarnation too, read at the fresh life Core seats after it.
+    /// `None` when Core holds no incarnation of the identity's that the step
+    /// ends or follows, so the step owes the identity nothing. Refused typed,
+    /// with nothing asked of Core, when the record cannot be written.
     pub(super) async fn prepare_lifecycle_retirement(
         &self,
         identity: &AgentIdentity,
@@ -2384,6 +2423,23 @@ impl IdentityRuntime {
     /// an incarnation replaces an earlier one's. `Ok(None)` when nothing is
     /// projected, or nothing would consume the record (no identity context
     /// or public view bound the projection), so nothing is recorded.
+    ///
+    /// A rotation's record that replaces an earlier rotation's record keeps
+    /// the earlier, smaller head of Core's journal ([`kept_head`]): Core may
+    /// finish the earlier rotation's started retirement for this step
+    /// without journaling a new start. The step reads its own reach from the
+    /// head it read itself ([`Self::lifecycle_step_reach`]), and the intent
+    /// it answers as replaced is the earlier record as it was read, so a step
+    /// Core refused takes its record back and puts the earlier one back
+    /// unchanged. Across verbs the earlier head reads the earlier rotation's
+    /// retirement as the later verb's while the later record stands: a
+    /// delete Core refused while an earlier reset's rotation still ran, read
+    /// by the projection before the delete takes its record back, answers the
+    /// reset's retirement as a delete's. Reading the record by its presence
+    /// would answer it the same way, and a record that kept the delete's own
+    /// head would answer it as a rotation no Meta verb asked for (`rotated`);
+    /// neither is right, and telling the two apart needs Core to journal
+    /// which request a rotation carried out.
     async fn record_lifecycle_effect_intent(
         &self,
         identity: &AgentIdentity,
@@ -2430,6 +2486,10 @@ impl IdentityRuntime {
             .map_err(|error| {
                 format!("reading the incarnation's lifecycle effect intent: {error}")
             })?;
+        // A rotation's record over an earlier rotation's keeps the earlier
+        // head; what this answers as replaced is the earlier record as read.
+        let head = kept_head(&record, earlier.as_ref());
+        let record = record.with_asked_after(head);
         store
             .set_lifecycle_effect_intent(&record)
             .await
@@ -3125,12 +3185,7 @@ impl IdentityRuntime {
         first: StepFirstFact,
         upto: u64,
     ) -> Result<bool, PageError> {
-        if !matches!(
-            intent.verb,
-            LifecycleEffectVerb::Reset
-                | LifecycleEffectVerb::Delete
-                | LifecycleEffectVerb::RoleMove
-        ) {
+        if !rotates(intent.verb) {
             return Ok(true);
         }
         let (Some(after), Some(bridge)) = (intent.asked_after, self.bridge.as_ref()) else {
@@ -4065,6 +4120,43 @@ mod tests {
         ] {
             assert_eq!(first.is(&fact, &alpha()), reached, "{first:?} at {fact:?}");
         }
+    }
+
+    /// A rotation's record that replaces an earlier rotation's record of the
+    /// same incarnation of the mob keeps the smaller of the two heads, across
+    /// verbs too. Any other record keeps its own head: one that replaces no
+    /// record, an unlisting's record, a record whose step read no head, and a
+    /// rotation's record over an unlisting's, over a record with no head, or
+    /// over a record of another incarnation of the mob.
+    #[test]
+    fn a_rotation_s_record_over_an_earlier_rotation_s_keeps_the_earlier_head() {
+        use LifecycleEffectVerb as Verb;
+        let intent = |verb: Verb, head: Option<u64>, incarnation: &str| {
+            LifecycleEffectIntent::new("mob", incarnation, "personal:alice", 0, verb, None, 0)
+                .with_asked_after(head)
+        };
+        for (verb, head, over, earlier_head, incarnation, kept) in [
+            (Verb::Reset, 5, Verb::Reset, Some(2), "one", 2),
+            (Verb::Delete, 5, Verb::Reset, Some(2), "one", 2),
+            (Verb::RoleMove, 5, Verb::Delete, Some(2), "one", 2),
+            (Verb::Reset, 5, Verb::RoleMove, Some(7), "one", 5),
+            (Verb::Reset, 5, Verb::Reset, None, "one", 5),
+            (Verb::Reset, 5, Verb::Reset, Some(2), "two", 5),
+            (Verb::Reset, 5, Verb::Unlisted, Some(2), "one", 5),
+            (Verb::Unlisted, 5, Verb::Reset, Some(2), "one", 5),
+        ] {
+            let record = intent(verb, Some(head), "one");
+            let earlier = intent(over, earlier_head, incarnation);
+            assert_eq!(
+                kept_head(&record, Some(&earlier)),
+                Some(kept),
+                "{verb:?} at {head} over {earlier:?}"
+            );
+        }
+        let reset = intent(Verb::Reset, Some(5), "one");
+        assert_eq!(kept_head(&reset, None), Some(5));
+        let unheaded = intent(Verb::Reset, None, "one");
+        assert_eq!(kept_head(&unheaded, Some(&reset)), None);
     }
 
     /// The note of a later retirement a Meta verb's record answered keeps

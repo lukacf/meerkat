@@ -11878,7 +11878,12 @@ macro_rules! mob_catalog_machine_dsl {
         // CRITICAL FIX (G1 regression): the Duplicate guard must also reject an
         // in-flight pending spawn (pending_spawn_sessions) so a concurrent
         // second spawn probing before the first records its binding still sees a
-        // duplicate. Admitted is the exact negation of all three presence facts.
+        // duplicate. An open spawn-exec ladder (spawn_exec_phase) is the same
+        // in-flight spawn: a local spawn opens it in the shell step that closes
+        // its pending admission (CompleteSpawn), an adopted resume in the step
+        // that ends its preparation, and it lasts until the membership commit
+        // binds the identity. Admitted is the exact negation of all four
+        // presence facts.
         transition ProbeMemberAdmissionDuplicate {
             per_phase [Running, Stopped, Completed, Destroyed]
             on input ProbeMemberAdmission { agent_identity, entry_custody, created_custody }
@@ -11886,6 +11891,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.identity_to_runtime.contains_key(agent_identity) == true
                 || self.member_session_bindings.contains_key(agent_identity) == true
                 || self.pending_spawn_sessions.contains_key(agent_identity) == true
+                || self.spawn_exec_phase.contains_key(agent_identity) == true
             }
             guard "custody_matches_name" {
                 (self.identity_entry_origins.contains_key(agent_identity) == false && created_custody == false)
@@ -11911,6 +11917,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.identity_to_runtime.contains_key(agent_identity) == false
                 && self.member_session_bindings.contains_key(agent_identity) == false
                 && self.pending_spawn_sessions.contains_key(agent_identity) == false
+                && self.spawn_exec_phase.contains_key(agent_identity) == false
             }
             guard "custody_matches_name" {
                 (self.identity_entry_origins.contains_key(agent_identity) == false && created_custody == false)

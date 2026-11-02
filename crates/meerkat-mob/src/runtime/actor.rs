@@ -40799,7 +40799,109 @@ impl MobActor {
         provision: PendingProvision,
         route: spawn_activation::SpawnActivationRoute,
     ) {
+        // Spawn ladder step 1 for a local spawn: open the spawn-exec phase in
+        // the actor command that closed its pending admission (or, for an
+        // adopted resume, admitted it), before the off-actor endpoint
+        // observation. MobMachine then holds the spawn in flight
+        // continuously, from `StageSpawn` (or this opening) through
+        // `CommitSpawnMembership`, so neither the member-admission probe nor
+        // `ensure_member` reads the identity as absent while its spawn runs.
+        // A remote spawn opened its ladder at enqueue (`BeginSpawnExecRemote`).
+        if ctx.remote.is_none()
+            && let Err(error) = self.open_local_spawn_exec(&ctx, &provision)
+        {
+            self.consume_spawn_provision_failure(
+                provision,
+                false,
+                &ctx.operation_id,
+                "spawn-exec open rejected",
+            )
+            .await;
+            Box::pin(self.settle_spawn_activation_route(route, Err(error))).await;
+            return;
+        }
         self.observe_spawn_admission(ctx, provision, route).await;
+    }
+
+    /// `BeginSpawnExec` for a local spawn: carries the spawn admission guards,
+    /// sets the per-identity phase to `Opened`, and emits nothing. Any failure
+    /// between here and `CommitSpawnMembership` fires `AbortSpawnExec` to
+    /// reset the phase.
+    fn open_local_spawn_exec(
+        &mut self,
+        ctx: &SpawnFinalizeCtx,
+        provision: &PendingProvision,
+    ) -> Result<(), MobError> {
+        let identity = crate::ids::AgentIdentity::from(ctx.agent_identity.as_str());
+        let agent_runtime_id = crate::ids::AgentRuntimeId::new(identity.clone(), ctx.generation);
+        let dsl_identity = mob_dsl::AgentIdentity::from_domain(&identity);
+        let bridge_session_id = provision
+            .member_ref()?
+            .bridge_session_id()
+            .map(mob_dsl::SessionId::from_domain);
+        let replacing = self
+            .dsl_authority
+            .state()
+            .member_session_bindings
+            .get(&dsl_identity)
+            .cloned();
+        let opened = self.apply_dsl_input(
+            mob_dsl::MobMachineInput::BeginSpawnExec {
+                agent_identity: dsl_identity,
+                agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(&agent_runtime_id),
+                fence_token: mob_dsl::FenceToken::from_domain(ctx.fence_token),
+                generation: mob_dsl::Generation::from_domain(ctx.generation),
+                profile_material_digest: ctx
+                    .authorized_profile_material
+                    .profile_material_digest
+                    .clone(),
+                external_addressable: ctx.authorized_profile_material.external_addressable,
+                runtime_mode: mob_dsl::SpawnPolicyRuntimeMode::from(ctx.runtime_mode),
+                bridge_session_id,
+                replacing,
+                // Local arm: placement is absent, so the multi-host denial
+                // guards are placement-gated vacuous; the observations bundle
+                // is nonetheless honest (captured at the spawn destructure and
+                // threaded here).
+                placement: None,
+                workgraph_required: ctx.observations.workgraph_required,
+                rust_bundles_present: ctx.observations.rust_bundles_present,
+                per_spawn_external_tools_present: ctx.observations.per_spawn_external_tools_present,
+                mob_default_external_tools_present: self.default_external_tools_provider.is_some(),
+                default_llm_client_override_present: self.default_llm_client.is_some(),
+                host_surface_mcp_allowlist_present: ctx
+                    .observations
+                    .host_surface_mcp_allowlist_present,
+                inherited_tool_filter_present: ctx.observations.inherited_tool_filter_present,
+                shell_env_present: ctx.observations.shell_env_present,
+                mcp_stdio_env_present: ctx.observations.mcp_stdio_env_present,
+                mcp_http_headers_present: ctx.observations.mcp_http_headers_present,
+                memory_required: ctx.observations.memory_required,
+                mcp_required: ctx.observations.mcp_required,
+                resume_session_id: ctx
+                    .observations
+                    .resume_session_id
+                    .as_ref()
+                    .map(mob_dsl::SessionId::from_domain),
+                placed_spawn_id: None,
+                placed_provision_operation_id: None,
+                placed_operation_owner_session_id: None,
+                effective_profile_override_present: false,
+                effective_model_override_present: false,
+                // The spawn acts for its name's identity entry exactly
+                // when its spec carried entry custody.
+                entry_custody: ctx.entry_custody,
+                created_custody: false,
+            },
+            "start_spawn_activation_begin_spawn_exec",
+        );
+        // State injection, test builds only: a test may reserve the name
+        // here, under the open ladder, which no production path does.
+        #[cfg(test)]
+        if opened.is_ok() {
+            self.inject_armed_unreadable_name_at_ladder_open(&identity);
+        }
+        opened
     }
 
     async fn finish_spawn_admission(
@@ -40966,8 +41068,9 @@ impl MobActor {
         }
     }
 
-    /// Spawn ladder, pre-commit phase: `BeginSpawnExec` -> trust / overlay /
-    /// event append -> `CommitSpawnMembership` -> `provision.commit()`. On any
+    /// Spawn ladder, pre-commit phase (the local ladder was opened by
+    /// `start_spawn_activation_from_pending`): trust / overlay / event append
+    /// -> `CommitSpawnMembership` -> `provision.commit()`. On any
     /// pre-membership failure the opened spawn-exec phase is reset via
     /// `AbortSpawnExec` and the pending provision is archived, leaving the
     /// identity respawnable.
@@ -40981,6 +41084,20 @@ impl MobActor {
         let observed = match observed {
             Ok(observed) => observed,
             Err(error) => {
+                // A local spawn opened its ladder before the observation.
+                let error = if ctx.remote.is_none() {
+                    let dsl_identity = mob_dsl::AgentIdentity::from_domain(
+                        &crate::ids::AgentIdentity::from(ctx.agent_identity.as_str()),
+                    );
+                    self.fold_spawn_exec_abort(
+                        &dsl_identity,
+                        &ctx.agent_identity,
+                        error,
+                        "finalize_spawn_admit_observation",
+                    )
+                } else {
+                    error
+                };
                 return match provision.rollback().await {
                     Ok(()) => Err(error),
                     Err(cleanup) => Err(MobError::Internal(format!(
@@ -41065,79 +41182,6 @@ impl MobActor {
             agent_identity = %agent_identity,
             "MobActor::finalize_spawn_admit preparing DSL Spawn"
         );
-        // Spawn ladder step 1: open the spawn-exec phase. `BeginSpawnExec`
-        // carries the spawn admission guards, sets the per-identity phase to
-        // `Opened`, and emits nothing. Any failure between here and
-        // `CommitSpawnMembership` fires `AbortSpawnExec` to reset the phase.
-        if ctx.remote.is_none() {
-            let begin_result = self.apply_dsl_input(
-                mob_dsl::MobMachineInput::BeginSpawnExec {
-                    agent_identity: dsl_identity.clone(),
-                    agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(&agent_runtime_id),
-                    fence_token: mob_dsl::FenceToken::from_domain(fence_token),
-                    generation: mob_dsl::Generation::from_domain(generation),
-                    profile_material_digest: authorized_profile_material
-                        .profile_material_digest
-                        .clone(),
-                    external_addressable,
-                    runtime_mode: mob_dsl::SpawnPolicyRuntimeMode::from(runtime_mode),
-                    bridge_session_id: bridge_session_id.clone(),
-                    replacing: replacing.clone(),
-                    // Local arm: placement is absent, so the multi-host
-                    // denial guards are placement-gated vacuous; the
-                    // observations bundle is nonetheless HONEST (DEC-P3-10 —
-                    // captured at the spawn destructure and threaded here).
-                    placement: None,
-                    workgraph_required: ctx.observations.workgraph_required,
-                    rust_bundles_present: ctx.observations.rust_bundles_present,
-                    per_spawn_external_tools_present: ctx
-                        .observations
-                        .per_spawn_external_tools_present,
-                    mob_default_external_tools_present: self
-                        .default_external_tools_provider
-                        .is_some(),
-                    default_llm_client_override_present: self.default_llm_client.is_some(),
-                    host_surface_mcp_allowlist_present: ctx
-                        .observations
-                        .host_surface_mcp_allowlist_present,
-                    inherited_tool_filter_present: ctx.observations.inherited_tool_filter_present,
-                    shell_env_present: ctx.observations.shell_env_present,
-                    mcp_stdio_env_present: ctx.observations.mcp_stdio_env_present,
-                    mcp_http_headers_present: ctx.observations.mcp_http_headers_present,
-                    memory_required: ctx.observations.memory_required,
-                    mcp_required: ctx.observations.mcp_required,
-                    resume_session_id: ctx
-                        .observations
-                        .resume_session_id
-                        .as_ref()
-                        .map(mob_dsl::SessionId::from_domain),
-                    placed_spawn_id: None,
-                    placed_provision_operation_id: None,
-                    placed_operation_owner_session_id: None,
-                    effective_profile_override_present: false,
-                    effective_model_override_present: false,
-                    // The spawn acts for its name's identity entry exactly
-                    // when its spec carried entry custody.
-                    entry_custody: ctx.entry_custody,
-                    created_custody: false,
-                },
-                "finalize_spawn_admit_begin_spawn_exec",
-            );
-            if let Err(error) = begin_result {
-                self.consume_spawn_provision_failure(
-                    provision,
-                    false,
-                    &ctx.operation_id,
-                    "spawn-exec open rejected",
-                )
-                .await;
-                return Err(error);
-            }
-            // State injection, test builds only: a test may reserve the name
-            // here, under the open ladder, which no production path does.
-            #[cfg(test)]
-            self.inject_armed_unreadable_name_at_ladder_open(agent_identity);
-        }
         // Remote: the ladder was opened at enqueue (`BeginSpawnExecRemote`,
         // rung = MaterializePending); the member recipient trust window
         // opens BEFORE the membership commit so kickoff/wiring sends can

@@ -8279,7 +8279,7 @@ KickoffCancelRequestedDestroyed(member_id) ==
 
 ProbeMemberAdmissionDuplicateRunning(agent_identity, entry_custody, created_custody) ==
     /\ phase = "Running"
-    /\ (IF ((agent_identity \in DOMAIN identity_to_runtime) = TRUE) THEN TRUE ELSE (IF ((agent_identity \in DOMAIN member_session_bindings) = TRUE) THEN TRUE ELSE ((agent_identity \in DOMAIN pending_spawn_sessions) = TRUE)))
+    /\ (IF ((agent_identity \in DOMAIN identity_to_runtime) = TRUE) THEN TRUE ELSE (IF ((agent_identity \in DOMAIN member_session_bindings) = TRUE) THEN TRUE ELSE (IF ((agent_identity \in DOMAIN pending_spawn_sessions) = TRUE) THEN TRUE ELSE ((agent_identity \in DOMAIN spawn_exec_phase) = TRUE))))
     /\ (IF (((agent_identity \in DOMAIN identity_entry_origins) = FALSE) /\ (created_custody = FALSE)) THEN TRUE ELSE (IF ((entry_custody = TRUE) /\ (created_custody = FALSE) /\ ((IF (agent_identity \in DOMAIN identity_entry_origins) THEN Some((IF agent_identity \in DOMAIN identity_entry_origins THEN identity_entry_origins[agent_identity] ELSE "None")) ELSE None) = Some("Declared"))) THEN TRUE ELSE ((created_custody = TRUE) /\ (entry_custody = FALSE) /\ ((IF (agent_identity \in DOMAIN identity_entry_origins) THEN Some((IF agent_identity \in DOMAIN identity_entry_origins THEN identity_entry_origins[agent_identity] ELSE "None")) ELSE None) = Some("Created")) /\ ((IF (agent_identity \in DOMAIN identity_entry_unseated) THEN Some((IF agent_identity \in DOMAIN identity_entry_unseated THEN identity_entry_unseated[agent_identity] ELSE "None")) ELSE None) = Some("SeatOwed")))))
     /\ (((agent_identity \in identity_entry_tombstones) = FALSE) /\ ((agent_identity \in identity_entry_unreadable) = FALSE))
     /\ phase' = "Running"
@@ -8289,7 +8289,7 @@ ProbeMemberAdmissionDuplicateRunning(agent_identity, entry_custody, created_cust
 
 ProbeMemberAdmissionDuplicateStopped(agent_identity, entry_custody, created_custody) ==
     /\ phase = "Stopped"
-    /\ (IF ((agent_identity \in DOMAIN identity_to_runtime) = TRUE) THEN TRUE ELSE (IF ((agent_identity \in DOMAIN member_session_bindings) = TRUE) THEN TRUE ELSE ((agent_identity \in DOMAIN pending_spawn_sessions) = TRUE)))
+    /\ (IF ((agent_identity \in DOMAIN identity_to_runtime) = TRUE) THEN TRUE ELSE (IF ((agent_identity \in DOMAIN member_session_bindings) = TRUE) THEN TRUE ELSE (IF ((agent_identity \in DOMAIN pending_spawn_sessions) = TRUE) THEN TRUE ELSE ((agent_identity \in DOMAIN spawn_exec_phase) = TRUE))))
     /\ (IF (((agent_identity \in DOMAIN identity_entry_origins) = FALSE) /\ (created_custody = FALSE)) THEN TRUE ELSE (IF ((entry_custody = TRUE) /\ (created_custody = FALSE) /\ ((IF (agent_identity \in DOMAIN identity_entry_origins) THEN Some((IF agent_identity \in DOMAIN identity_entry_origins THEN identity_entry_origins[agent_identity] ELSE "None")) ELSE None) = Some("Declared"))) THEN TRUE ELSE ((created_custody = TRUE) /\ (entry_custody = FALSE) /\ ((IF (agent_identity \in DOMAIN identity_entry_origins) THEN Some((IF agent_identity \in DOMAIN identity_entry_origins THEN identity_entry_origins[agent_identity] ELSE "None")) ELSE None) = Some("Created")) /\ ((IF (agent_identity \in DOMAIN identity_entry_unseated) THEN Some((IF agent_identity \in DOMAIN identity_entry_unseated THEN identity_entry_unseated[agent_identity] ELSE "None")) ELSE None) = Some("SeatOwed")))))
     /\ (((agent_identity \in identity_entry_tombstones) = FALSE) /\ ((agent_identity \in identity_entry_unreadable) = FALSE))
     /\ phase' = "Stopped"
@@ -8299,7 +8299,7 @@ ProbeMemberAdmissionDuplicateStopped(agent_identity, entry_custody, created_cust
 
 ProbeMemberAdmissionDuplicateCompleted(agent_identity, entry_custody, created_custody) ==
     /\ phase = "Completed"
-    /\ (IF ((agent_identity \in DOMAIN identity_to_runtime) = TRUE) THEN TRUE ELSE (IF ((agent_identity \in DOMAIN member_session_bindings) = TRUE) THEN TRUE ELSE ((agent_identity \in DOMAIN pending_spawn_sessions) = TRUE)))
+    /\ (IF ((agent_identity \in DOMAIN identity_to_runtime) = TRUE) THEN TRUE ELSE (IF ((agent_identity \in DOMAIN member_session_bindings) = TRUE) THEN TRUE ELSE (IF ((agent_identity \in DOMAIN pending_spawn_sessions) = TRUE) THEN TRUE ELSE ((agent_identity \in DOMAIN spawn_exec_phase) = TRUE))))
     /\ (IF (((agent_identity \in DOMAIN identity_entry_origins) = FALSE) /\ (created_custody = FALSE)) THEN TRUE ELSE (IF ((entry_custody = TRUE) /\ (created_custody = FALSE) /\ ((IF (agent_identity \in DOMAIN identity_entry_origins) THEN Some((IF agent_identity \in DOMAIN identity_entry_origins THEN identity_entry_origins[agent_identity] ELSE "None")) ELSE None) = Some("Declared"))) THEN TRUE ELSE ((created_custody = TRUE) /\ (entry_custody = FALSE) /\ ((IF (agent_identity \in DOMAIN identity_entry_origins) THEN Some((IF agent_identity \in DOMAIN identity_entry_origins THEN identity_entry_origins[agent_identity] ELSE "None")) ELSE None) = Some("Created")) /\ ((IF (agent_identity \in DOMAIN identity_entry_unseated) THEN Some((IF agent_identity \in DOMAIN identity_entry_unseated THEN identity_entry_unseated[agent_identity] ELSE "None")) ELSE None) = Some("SeatOwed")))))
     /\ (((agent_identity \in identity_entry_tombstones) = FALSE) /\ ((agent_identity \in identity_entry_unreadable) = FALSE))
     /\ phase' = "Completed"
@@ -8309,7 +8309,7 @@ ProbeMemberAdmissionDuplicateCompleted(agent_identity, entry_custody, created_cu
 
 ProbeMemberAdmissionDuplicateDestroyed(agent_identity, entry_custody, created_custody) ==
     /\ phase = "Destroyed"
-    /\ (IF ((agent_identity \in DOMAIN identity_to_runtime) = TRUE) THEN TRUE ELSE (IF ((agent_identity \in DOMAIN member_session_bindings) = TRUE) THEN TRUE ELSE ((agent_identity \in DOMAIN pending_spawn_sessions) = TRUE)))
+    /\ (IF ((agent_identity \in DOMAIN identity_to_runtime) = TRUE) THEN TRUE ELSE (IF ((agent_identity \in DOMAIN member_session_bindings) = TRUE) THEN TRUE ELSE (IF ((agent_identity \in DOMAIN pending_spawn_sessions) = TRUE) THEN TRUE ELSE ((agent_identity \in DOMAIN spawn_exec_phase) = TRUE))))
     /\ (IF (((agent_identity \in DOMAIN identity_entry_origins) = FALSE) /\ (created_custody = FALSE)) THEN TRUE ELSE (IF ((entry_custody = TRUE) /\ (created_custody = FALSE) /\ ((IF (agent_identity \in DOMAIN identity_entry_origins) THEN Some((IF agent_identity \in DOMAIN identity_entry_origins THEN identity_entry_origins[agent_identity] ELSE "None")) ELSE None) = Some("Declared"))) THEN TRUE ELSE ((created_custody = TRUE) /\ (entry_custody = FALSE) /\ ((IF (agent_identity \in DOMAIN identity_entry_origins) THEN Some((IF agent_identity \in DOMAIN identity_entry_origins THEN identity_entry_origins[agent_identity] ELSE "None")) ELSE None) = Some("Created")) /\ ((IF (agent_identity \in DOMAIN identity_entry_unseated) THEN Some((IF agent_identity \in DOMAIN identity_entry_unseated THEN identity_entry_unseated[agent_identity] ELSE "None")) ELSE None) = Some("SeatOwed")))))
     /\ (((agent_identity \in identity_entry_tombstones) = FALSE) /\ ((agent_identity \in identity_entry_unreadable) = FALSE))
     /\ phase' = "Destroyed"
@@ -8319,7 +8319,7 @@ ProbeMemberAdmissionDuplicateDestroyed(agent_identity, entry_custody, created_cu
 
 ProbeMemberAdmissionAdmittedRunning(agent_identity, entry_custody, created_custody) ==
     /\ phase = "Running"
-    /\ (((agent_identity \in DOMAIN identity_to_runtime) = FALSE) /\ ((agent_identity \in DOMAIN member_session_bindings) = FALSE) /\ ((agent_identity \in DOMAIN pending_spawn_sessions) = FALSE))
+    /\ (((agent_identity \in DOMAIN identity_to_runtime) = FALSE) /\ ((agent_identity \in DOMAIN member_session_bindings) = FALSE) /\ ((agent_identity \in DOMAIN pending_spawn_sessions) = FALSE) /\ ((agent_identity \in DOMAIN spawn_exec_phase) = FALSE))
     /\ (IF (((agent_identity \in DOMAIN identity_entry_origins) = FALSE) /\ (created_custody = FALSE)) THEN TRUE ELSE (IF ((entry_custody = TRUE) /\ (created_custody = FALSE) /\ ((IF (agent_identity \in DOMAIN identity_entry_origins) THEN Some((IF agent_identity \in DOMAIN identity_entry_origins THEN identity_entry_origins[agent_identity] ELSE "None")) ELSE None) = Some("Declared"))) THEN TRUE ELSE ((created_custody = TRUE) /\ (entry_custody = FALSE) /\ ((IF (agent_identity \in DOMAIN identity_entry_origins) THEN Some((IF agent_identity \in DOMAIN identity_entry_origins THEN identity_entry_origins[agent_identity] ELSE "None")) ELSE None) = Some("Created")) /\ ((IF (agent_identity \in DOMAIN identity_entry_unseated) THEN Some((IF agent_identity \in DOMAIN identity_entry_unseated THEN identity_entry_unseated[agent_identity] ELSE "None")) ELSE None) = Some("SeatOwed")))))
     /\ (((agent_identity \in identity_entry_tombstones) = FALSE) /\ ((agent_identity \in identity_entry_unreadable) = FALSE))
     /\ phase' = "Running"
@@ -8329,7 +8329,7 @@ ProbeMemberAdmissionAdmittedRunning(agent_identity, entry_custody, created_custo
 
 ProbeMemberAdmissionAdmittedStopped(agent_identity, entry_custody, created_custody) ==
     /\ phase = "Stopped"
-    /\ (((agent_identity \in DOMAIN identity_to_runtime) = FALSE) /\ ((agent_identity \in DOMAIN member_session_bindings) = FALSE) /\ ((agent_identity \in DOMAIN pending_spawn_sessions) = FALSE))
+    /\ (((agent_identity \in DOMAIN identity_to_runtime) = FALSE) /\ ((agent_identity \in DOMAIN member_session_bindings) = FALSE) /\ ((agent_identity \in DOMAIN pending_spawn_sessions) = FALSE) /\ ((agent_identity \in DOMAIN spawn_exec_phase) = FALSE))
     /\ (IF (((agent_identity \in DOMAIN identity_entry_origins) = FALSE) /\ (created_custody = FALSE)) THEN TRUE ELSE (IF ((entry_custody = TRUE) /\ (created_custody = FALSE) /\ ((IF (agent_identity \in DOMAIN identity_entry_origins) THEN Some((IF agent_identity \in DOMAIN identity_entry_origins THEN identity_entry_origins[agent_identity] ELSE "None")) ELSE None) = Some("Declared"))) THEN TRUE ELSE ((created_custody = TRUE) /\ (entry_custody = FALSE) /\ ((IF (agent_identity \in DOMAIN identity_entry_origins) THEN Some((IF agent_identity \in DOMAIN identity_entry_origins THEN identity_entry_origins[agent_identity] ELSE "None")) ELSE None) = Some("Created")) /\ ((IF (agent_identity \in DOMAIN identity_entry_unseated) THEN Some((IF agent_identity \in DOMAIN identity_entry_unseated THEN identity_entry_unseated[agent_identity] ELSE "None")) ELSE None) = Some("SeatOwed")))))
     /\ (((agent_identity \in identity_entry_tombstones) = FALSE) /\ ((agent_identity \in identity_entry_unreadable) = FALSE))
     /\ phase' = "Stopped"
@@ -8339,7 +8339,7 @@ ProbeMemberAdmissionAdmittedStopped(agent_identity, entry_custody, created_custo
 
 ProbeMemberAdmissionAdmittedCompleted(agent_identity, entry_custody, created_custody) ==
     /\ phase = "Completed"
-    /\ (((agent_identity \in DOMAIN identity_to_runtime) = FALSE) /\ ((agent_identity \in DOMAIN member_session_bindings) = FALSE) /\ ((agent_identity \in DOMAIN pending_spawn_sessions) = FALSE))
+    /\ (((agent_identity \in DOMAIN identity_to_runtime) = FALSE) /\ ((agent_identity \in DOMAIN member_session_bindings) = FALSE) /\ ((agent_identity \in DOMAIN pending_spawn_sessions) = FALSE) /\ ((agent_identity \in DOMAIN spawn_exec_phase) = FALSE))
     /\ (IF (((agent_identity \in DOMAIN identity_entry_origins) = FALSE) /\ (created_custody = FALSE)) THEN TRUE ELSE (IF ((entry_custody = TRUE) /\ (created_custody = FALSE) /\ ((IF (agent_identity \in DOMAIN identity_entry_origins) THEN Some((IF agent_identity \in DOMAIN identity_entry_origins THEN identity_entry_origins[agent_identity] ELSE "None")) ELSE None) = Some("Declared"))) THEN TRUE ELSE ((created_custody = TRUE) /\ (entry_custody = FALSE) /\ ((IF (agent_identity \in DOMAIN identity_entry_origins) THEN Some((IF agent_identity \in DOMAIN identity_entry_origins THEN identity_entry_origins[agent_identity] ELSE "None")) ELSE None) = Some("Created")) /\ ((IF (agent_identity \in DOMAIN identity_entry_unseated) THEN Some((IF agent_identity \in DOMAIN identity_entry_unseated THEN identity_entry_unseated[agent_identity] ELSE "None")) ELSE None) = Some("SeatOwed")))))
     /\ (((agent_identity \in identity_entry_tombstones) = FALSE) /\ ((agent_identity \in identity_entry_unreadable) = FALSE))
     /\ phase' = "Completed"
@@ -8349,7 +8349,7 @@ ProbeMemberAdmissionAdmittedCompleted(agent_identity, entry_custody, created_cus
 
 ProbeMemberAdmissionAdmittedDestroyed(agent_identity, entry_custody, created_custody) ==
     /\ phase = "Destroyed"
-    /\ (((agent_identity \in DOMAIN identity_to_runtime) = FALSE) /\ ((agent_identity \in DOMAIN member_session_bindings) = FALSE) /\ ((agent_identity \in DOMAIN pending_spawn_sessions) = FALSE))
+    /\ (((agent_identity \in DOMAIN identity_to_runtime) = FALSE) /\ ((agent_identity \in DOMAIN member_session_bindings) = FALSE) /\ ((agent_identity \in DOMAIN pending_spawn_sessions) = FALSE) /\ ((agent_identity \in DOMAIN spawn_exec_phase) = FALSE))
     /\ (IF (((agent_identity \in DOMAIN identity_entry_origins) = FALSE) /\ (created_custody = FALSE)) THEN TRUE ELSE (IF ((entry_custody = TRUE) /\ (created_custody = FALSE) /\ ((IF (agent_identity \in DOMAIN identity_entry_origins) THEN Some((IF agent_identity \in DOMAIN identity_entry_origins THEN identity_entry_origins[agent_identity] ELSE "None")) ELSE None) = Some("Declared"))) THEN TRUE ELSE ((created_custody = TRUE) /\ (entry_custody = FALSE) /\ ((IF (agent_identity \in DOMAIN identity_entry_origins) THEN Some((IF agent_identity \in DOMAIN identity_entry_origins THEN identity_entry_origins[agent_identity] ELSE "None")) ELSE None) = Some("Created")) /\ ((IF (agent_identity \in DOMAIN identity_entry_unseated) THEN Some((IF agent_identity \in DOMAIN identity_entry_unseated THEN identity_entry_unseated[agent_identity] ELSE "None")) ELSE None) = Some("SeatOwed")))))
     /\ (((agent_identity \in identity_entry_tombstones) = FALSE) /\ ((agent_identity \in identity_entry_unreadable) = FALSE))
     /\ phase' = "Destroyed"

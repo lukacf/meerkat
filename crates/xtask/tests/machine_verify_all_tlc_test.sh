@@ -959,8 +959,9 @@ fi
 # one-entry unlist (exactly one arm answering it, deciding on its identity
 # alone, a record taking no name an entry or the unlisted identity's
 # archived session record holds) and the replay of a removal or an archive
-# in flight carried to its terminal, its rows scanned before or after the
-# journal replay (no replay seats a member under an archived entry). They
+# in flight carried to its terminal, its one row scanned before or after
+# the journal replay (no replay seats a member under an archived entry, and
+# the boot plan's seal keeps an archived identity's standing). They
 # require every listed arm
 # to fire, a floor of distinct states (the changes part's printed until its
 # first green run sets them) and their witnesses reached, and --mutants

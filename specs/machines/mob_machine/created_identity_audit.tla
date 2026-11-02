@@ -1610,18 +1610,45 @@ RecoveredRetirePreserving ==
     /\ boot_plan_sealed = TRUE
     /\ RetireRunningPreservingBindingArchiveOnly(AuditMob, Rid1, Id1, 0, None, Some(Sess1))
 
+\* The replay of member 1's Created entry row: the spawn row of a
+\* store-owned identity's seated incarnation records its entry.
+C1Created == RecoverIdentityEntrySeatedRunning(Id1, Rid1, "Created")
+
+\* A store precondition the run keeps (a scope restriction): the store holds
+\* one created entry row per identity, keyed by (mob_id, agent_identity)
+\* (store/sqlite.rs:217-225), and the boot's scan pages those rows on a
+\* strictly advancing cursor, refusing any other
+\* (runtime/created_identity.rs:115-195), so it sends one row of an
+\* identity. Each row this run scans leaves its mark (a removal or an
+\* archive in flight, an archived entry, a tombstone or an unreadable
+\* name), so it scans a row of member 1 only while none is set. (The scan
+\* run sends further rows of one identity on purpose, for the arms that
+\* answer a contradicted row.) TLC names these steps after this wrapper,
+\* so the run reads its scan arms through its witnesses: a removal and an
+\* archive in flight, which only the Removing and Archiving arms mark,
+\* carried to their terminal.
+C1OneRow(presence) ==
+    /\ Unseated(Id1) = None
+    /\ Id1 \notin identity_entry_removing
+    /\ Id1 \notin identity_entry_archiving
+    /\ Id1 \notin identity_entry_tombstones
+    /\ Id1 \notin identity_entry_unreadable
+    /\ RecoverArm(Id1, presence, None)
+
 \* Member 1 recovered and bound (a seated local member, Dormant) with its
-\* peer endpoint, which the seal requires of a member it does not wake; the
-\* scan of its store-owned row Present, then of a removal's or an archive's
-\* row, before the boot plan's seal, in either order with the journal
+\* peer endpoint, which the seal requires of a member it does not wake, and
+\* its Created entry row replayed; its one row, a removal's or an archive's,
+\* scanned before the boot plan's seal, in either order with the journal
 \* replay (the shell replays first; MobMachine refuses a replay that would
-\* seat a member under an archived entry); then the retirement the
-\* recovered mark owes, to its terminal, in a running and a stopped mob.
+\* seat a member under an archived entry or a tombstoned name); then the
+\* retirement the recovered mark owes, to its terminal, in a running and a
+\* stopped mob.
 RecoveredNext ==
     \/ C1Recover
     \/ C1Bind
     \/ WEndpoint
-    \/ \E presence \in {"Present", "Tombstone", "Archived"} : RecoverArm(Id1, presence, None)
+    \/ C1Created
+    \/ \E presence \in {"Tombstone", "Archived"} : C1OneRow(presence)
     \/ SealBootMaterializationPlan
     \/ CStop
     \/ RecoveredRetireReleasing

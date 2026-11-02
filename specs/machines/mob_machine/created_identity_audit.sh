@@ -128,15 +128,17 @@
 #   never a Created entry (AuditUnlistDecidesItsIdentityAlone), and a
 #   record takes no name an entry or the unlisted identity's archived
 #   session record holds (AuditRecordTakesFreeNames).
-# - recovered: a store-owned identity replayed seated (recovered, bound and
-#   its peer endpoint recorded), its Present row followed by a removal's or
-#   an archive's row, the rows scanned before or after the replay, and the
+# - recovered: a store-owned identity replayed seated (recovered, bound, its
+#   peer endpoint recorded and its Created entry row replayed), its one row
+#   scanned (the store holds one row per identity, a scope restriction), a
+#   removal's or an archive's, before or after the replay, and the
 #   retirement the recovered mark owes to its terminal, running or stopped,
 #   once the boot plan is sealed (a scope restriction: the order the shell
 #   keeps): exactly one arm answers every row (AuditRecoverExactlyOne), the
-#   removal's end tombstones the name (AuditRemovalTombstones), and no
-#   replay or seat puts a member under the archived identity
-#   (AuditArchivedNeverSeated).
+#   removal's end tombstones the name (AuditRemovalTombstones), no replay
+#   or seat puts a member under the archived identity
+#   (AuditArchivedNeverSeated), and the boot plan's seal, a stop and a
+#   resume keep its standing and its name (AuditArchivedKeepsItsName).
 #
 # Every run checks every generated invariant (the created entries' among
 # them: tombstone_is_never_an_entry, entry_custodies_are_disjoint,
@@ -574,14 +576,16 @@ unlist_covered_actions=(
   UnlistIdentityEntryMobNotRunningStopped
 )
 
+# The recovered run scans its one row through C1OneRow, a wrapper of every
+# scan arm, which no alias reads (the table maps a wrapper to one arm): its
+# witnesses stand for the Removing and Archiving arms, the only ones that
+# mark a removal or an archive in flight, and the scan run checks every
+# scan arm's coverage.
 recovered_covered_actions=(
   RecoverRosterMemberRunning
   RecoverMemberSessionBindingFreshRunning
   RecoverMemberPeerEndpointFreshRunning
-  RecoverCreatedIdentityEntrySeatedRunning
-  RecoverCreatedIdentityEntryRemovingRunning
-  RecoverCreatedIdentityEntryArchivingRunning
-  RecoverCreatedIdentityEntryUnreadableRunning
+  RecoverIdentityEntrySeatedRunning
   SealBootMaterializationPlan
   RetireRunningReleasingArchiveOnly
   ObserveMemberRetirementArchivedLive
@@ -799,15 +803,12 @@ write_cfg() {
       ;;
     recovered)
       spec="RecoveredSpec"
-      # Not AuditArchivedKeepsItsName, the archive run's: this run scans a
-      # Present row before a removal's or an archive's row of the same
-      # identity (for the Created entry a boot's journal replay records),
-      # where a boot's scan sends one row per identity, and a Present row
-      # scanned after an archived one owes the archived identity its seat
-      # again (the scan's Retired arm), in a stopped mob too: no unarchive.
+      # A replay that seats a member under an archived identity breaks both
+      # archive properties, and is reported as the seat.
       run_properties="
   AuditRemovalTombstones
-  AuditArchivedNeverSeated"
+  AuditArchivedNeverSeated
+  AuditArchivedKeepsItsName"
       run_invariants="
   AuditRecoverExactlyOne"
       ;;

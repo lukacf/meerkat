@@ -458,10 +458,13 @@ Its changes part (0.9.9) has ten:
   beside a store-owned one: exactly one arm answers each unlist, which
   decides on its identity alone, and no record takes the name of an entry
   or of the unlisted identity's archived session record.
-- The recovered run replays a seated store-owned identity's removal or
-  archive row, scanned before or after the journal replay, and carries the
-  recovered mark's retirement to its terminal, running or stopped: no
-  replay seats a member under an archived entry.
+- The recovered run replays a seated store-owned identity, its `Created`
+  entry row included, and scans its one row, a removal's or an archive's
+  (the store keeps one row per identity), before or after the journal
+  replay. It carries the recovered mark's retirement to its terminal,
+  running or stopped: no replay seats a member under an archived entry, and
+  the boot plan's seal, a stop and a resume leave an archived identity
+  archived.
 
 The audit seeds defects of the invariants above, the action properties and
 the guards a reachable state needs, and refuses each with the violation it

@@ -10291,7 +10291,7 @@ impl MobHandle {
     /// Read the machine state the actor last published under `scope`, with
     /// no actor command and without copying the state: the handle's
     /// principal must hold `scope` in that same state's grant projection.
-    fn read_published_machine_state<T>(
+    pub(super) fn read_published_machine_state<T>(
         &self,
         scope: crate::ControlScope,
         read: impl FnOnce(&mob_dsl::MobMachineState) -> T,

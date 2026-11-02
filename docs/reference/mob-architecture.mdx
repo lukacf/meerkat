@@ -546,8 +546,9 @@ and revision: an update's `expected_spec_digest`, and a removal's or an
 archive change's `with_expected_spec_digest`; a roster-owned identity's spec
 is its host roster's to check, and a removal of one naming a digest is
 refused `InvalidRequest`) are refused typed (`MobError::IdentityChangeRefused`, an
-`IdentityChangeRefusal` with a stable kind token), with nothing written. Only
-the changes hold (`MobHandle::set_identity_changes_held`, or
+`IdentityChangeRefusal` with a stable kind token), with nothing written. Of
+these admission refusals, only the changes hold
+(`MobHandle::set_identity_changes_held`, or
 `MobBuilder::with_identity_changes_held` at a start; not durable) is
 retryable unchanged. An admitted change writes its identities' rows (schema
 version 2: the revision, the spec, the presence and the provenance with the

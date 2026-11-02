@@ -2361,10 +2361,12 @@ pub struct MemberCustodyDeferral {
 
 impl MemberCustodyDeferral {
     /// The deferral of `restore` whose last attempt met `cause`, when the
-    /// cause may defer a restore.
+    /// cause may defer that restore: a hosting refusal or an unprovable tail
+    /// for either restore, and for a cleanup delivery restore also a failed
+    /// read of the member's stored state.
     #[must_use]
     pub fn new(restore: MemberCustodyRestore, cause: &MobError) -> Option<Self> {
-        MemberCustodyDeferralCause::of(cause).map(|cause| Self { restore, cause })
+        MemberCustodyDeferralCause::of_restore(restore, cause).map(|cause| Self { restore, cause })
     }
 
     /// The deferral MobMachine records for a member.
@@ -4662,6 +4664,29 @@ mod tests {
         assert_eq!(
             MemberCustodyDeferralCause::StoreUnreadable.as_str(),
             "store_unreadable"
+        );
+    }
+
+    /// A deferral is built from the causes a restore defers on: a cleanup
+    /// delivery restore also on a failed read of the member's stored state,
+    /// an operation binding restore only on a hosting refusal or an
+    /// unprovable tail.
+    #[test]
+    fn a_deferral_is_built_from_the_causes_its_restore_defers_on() {
+        let unavailable =
+            MobError::SessionError(meerkat_core::service::SessionError::Store(Box::new(
+                meerkat_core::SessionStoreError::Internal("host store unavailable".to_string()),
+            )));
+        assert_eq!(
+            MemberCustodyDeferral::new(MemberCustodyRestore::CleanupDelivery, &unavailable),
+            Some(MemberCustodyDeferral {
+                restore: MemberCustodyRestore::CleanupDelivery,
+                cause: MemberCustodyDeferralCause::StoreUnavailable,
+            })
+        );
+        assert_eq!(
+            MemberCustodyDeferral::new(MemberCustodyRestore::StartupBinding, &unavailable),
+            None
         );
     }
 

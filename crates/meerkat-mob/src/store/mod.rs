@@ -5944,6 +5944,45 @@ pub(crate) struct IdentityChangeWrite {
     pub(crate) events: Vec<NewMobEvent>,
 }
 
+impl IdentityChangeWrite {
+    /// Refuse a write whose parts are incoherent before any store is read:
+    /// a row of another mob than the receipt's, two rows of one identity, an
+    /// invalid row or receipt, or a journal row a change may not write.
+    pub(crate) fn validate(&self) -> Result<(), MobStoreError> {
+        self.receipt
+            .validate()
+            .map_err(|error| MobStoreError::Serialization(error.to_string()))?;
+        let mut identities = std::collections::BTreeSet::new();
+        for row in &self.rows {
+            row.record
+                .validate()
+                .map_err(|error| MobStoreError::Serialization(error.to_string()))?;
+            if row.record.mob_id != self.receipt.mob_id {
+                return Err(MobStoreError::Internal(format!(
+                    "an identity change of mob '{}' writes a row of mob '{}'",
+                    self.receipt.mob_id, row.record.mob_id
+                )));
+            }
+            if !identities.insert(row.record.agent_identity.clone()) {
+                return Err(MobStoreError::Internal(format!(
+                    "an identity change writes two rows of '{}'",
+                    row.record.agent_identity
+                )));
+            }
+        }
+        for event in &self.events {
+            validate_mob_event_write_authority(&event.kind)?;
+            if event.mob_id != self.receipt.mob_id {
+                return Err(MobStoreError::Internal(format!(
+                    "an identity change of mob '{}' appends a journal row of mob '{}'",
+                    self.receipt.mob_id, event.mob_id
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
 /// The answer of one identity change's store transaction.
 #[derive(Debug, Clone)]
 pub(crate) enum IdentityChangeCommit {
@@ -5967,6 +6006,31 @@ pub(crate) enum IdentityChangeCommit {
         identity: AgentIdentity,
         current: Option<crate::identity::CreatedIdentityObservation>,
     },
+}
+
+/// Whether `current`, an identity's row as the created identity scan reads
+/// it (`present` says whether the identity has any row of the intents table
+/// at all), is what `expected` names.
+pub(crate) fn created_row_matches(
+    expected: &CreatedIdentityRowExpectation,
+    present: bool,
+    current: Option<&crate::identity::CreatedIdentityObservation>,
+) -> bool {
+    match (expected, current) {
+        (CreatedIdentityRowExpectation::Absent, None) => !present,
+        (
+            CreatedIdentityRowExpectation::Current { authority_digest },
+            Some(crate::identity::CreatedIdentityObservation::Created(record)),
+        ) => record.authority_digest == *authority_digest,
+        _ => false,
+    }
+}
+
+/// The key a store keeps an identity change's receipt under, in the table of
+/// receipts keyed by one request id: the operation's id in its own namespace,
+/// which no member tool mutation's request id shares by accident.
+pub(crate) fn identity_change_receipt_request_key(operation_id: &str) -> String {
+    format!("identity-change/{operation_id}")
 }
 
 /// One store-transaction read of a mob store's structural event journal and

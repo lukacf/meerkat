@@ -1418,6 +1418,58 @@ impl MobIdentityMemberStore for SpiMobIdentityStore {
             .await
     }
 
+    /// M + I in one batch: an identity change's rows, journal rows and
+    /// receipt, checked and applied in one locked in-memory step and
+    /// committed as one host batch over both scopes.
+    async fn commit_identity_change(
+        &self,
+        write: &crate::store::IdentityChangeWrite,
+    ) -> Result<crate::store::IdentityChangeCommit, MobStoreError> {
+        let touch = Touch {
+            intents: true,
+            change_receipt: Some((
+                write.receipt.mob_id.clone(),
+                write.receipt.operation_id.clone(),
+            )),
+            ..appended()
+        };
+        self.bundle
+            .write(touch, self.bundle.identity.commit_identity_change(write))
+            .await
+    }
+
+    /// I: read.
+    async fn observe_identity_change_receipt(
+        &self,
+        mob_id: &MobId,
+        operation_id: &str,
+    ) -> Result<Option<crate::identity::IdentityChangeReceipt>, MobStoreError> {
+        self.bundle
+            .read(
+                identity_read(),
+                self.bundle
+                    .identity
+                    .observe_identity_change_receipt(mob_id, operation_id),
+            )
+            .await
+    }
+
+    /// I: read.
+    async fn observe_created_identity(
+        &self,
+        mob_id: &MobId,
+        identity: &AgentIdentity,
+    ) -> Result<Option<crate::identity::CreatedIdentityObservation>, MobStoreError> {
+        self.bundle
+            .read(
+                identity_read(),
+                self.bundle
+                    .identity
+                    .observe_created_identity(mob_id, identity),
+            )
+            .await
+    }
+
     /// M + I in one batch: the member event appended under identity
     /// authority validated in the same locked state. The in-memory
     /// transaction writes no identity entry; the identity scope is locked so

@@ -576,16 +576,19 @@ unlist_covered_actions=(
   UnlistIdentityEntryMobNotRunningStopped
 )
 
-# The recovered run scans its one row through C1OneRow, a wrapper of every
-# scan arm, which no alias reads (the table maps a wrapper to one arm): its
-# witnesses stand for the Removing and Archiving arms, the only ones that
-# mark a removal or an archive in flight, and the scan run checks every
-# scan arm's coverage.
+# The recovered run scans its one row through a named wrapper of one arm
+# for each arm that answers it (C1OneRow*, each gated on no row's mark):
+# the alias table reads the Removing, Archiving and Unreadable arms under
+# theirs. It scans no Present row, so the Seated arm's coverage is the scan
+# run's.
 recovered_covered_actions=(
   RecoverRosterMemberRunning
   RecoverMemberSessionBindingFreshRunning
   RecoverMemberPeerEndpointFreshRunning
   RecoverIdentityEntrySeatedRunning
+  RecoverCreatedIdentityEntryRemovingRunning
+  RecoverCreatedIdentityEntryArchivingRunning
+  RecoverCreatedIdentityEntryUnreadableRunning
   SealBootMaterializationPlan
   RetireRunningReleasingArchiveOnly
   ObserveMemberRetirementArchivedLive
@@ -603,6 +606,9 @@ covered_aliases=(
   "names:C1RecoverInBootOrder:RecoverRosterMemberRunning"
   "archive:ArchiveRetireReleasing:RetireRunningReleasingArchiveOnly"
   "recovered:RecoveredRetireReleasing:RetireRunningReleasingArchiveOnly"
+  "recovered:C1OneRowRemoving:RecoverCreatedIdentityEntryRemovingRunning"
+  "recovered:C1OneRowArchiving:RecoverCreatedIdentityEntryArchivingRunning"
+  "recovered:C1OneRowUnreadable:RecoverCreatedIdentityEntryUnreadableRunning"
 )
 
 spec_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

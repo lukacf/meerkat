@@ -1623,17 +1623,61 @@ C1Created == RecoverIdentityEntrySeatedRunning(Id1, Rid1, "Created")
 \* archive in flight, an archived entry, a tombstone or an unreadable
 \* name), so it scans a row of member 1 only while none is set. (The scan
 \* run sends further rows of one identity on purpose, for the arms that
-\* answer a contradicted row.) TLC names these steps after this wrapper,
-\* so the run reads its scan arms through its witnesses: a removal and an
-\* archive in flight, which only the Removing and Archiving arms mark,
-\* carried to their terminal.
-C1OneRow(presence) ==
+\* answer a contradicted row.)
+C1Unscanned ==
     /\ Unseated(Id1) = None
     /\ Id1 \notin identity_entry_removing
     /\ Id1 \notin identity_entry_archiving
     /\ Id1 \notin identity_entry_tombstones
     /\ Id1 \notin identity_entry_unreadable
-    /\ RecoverArm(Id1, presence, None)
+
+\* The scan of member 1's one row, a removal's or an archive's: a named
+\* wrapper of one arm for each arm that answers such a row, in a running
+\* and a stopped mob. The runner's alias table counts the Removing,
+\* Archiving and Unreadable arms in a running mob for theirs; no Present
+\* row is scanned here, so the Seated arm is the scan run's.
+C1OneRowRemoving ==
+    /\ C1Unscanned
+    /\ RecoverCreatedIdentityEntryRemovingRunning(Id1, "Tombstone", None)
+C1OneRowRemovingStopped ==
+    /\ C1Unscanned
+    /\ RecoverCreatedIdentityEntryRemovingStopped(Id1, "Tombstone", None)
+C1OneRowTombstone ==
+    /\ C1Unscanned
+    /\ RecoverCreatedIdentityEntryTombstoneRunning(Id1, "Tombstone", None)
+C1OneRowTombstoneStopped ==
+    /\ C1Unscanned
+    /\ RecoverCreatedIdentityEntryTombstoneStopped(Id1, "Tombstone", None)
+C1OneRowArchiving ==
+    /\ C1Unscanned
+    /\ RecoverCreatedIdentityEntryArchivingRunning(Id1, "Archived", None)
+C1OneRowArchivingStopped ==
+    /\ C1Unscanned
+    /\ RecoverCreatedIdentityEntryArchivingStopped(Id1, "Archived", None)
+C1OneRowArchived ==
+    /\ C1Unscanned
+    /\ RecoverCreatedIdentityEntryArchivedRunning(Id1, "Archived", None)
+C1OneRowArchivedStopped ==
+    /\ C1Unscanned
+    /\ RecoverCreatedIdentityEntryArchivedStopped(Id1, "Archived", None)
+C1OneRowUnreadable(presence) ==
+    /\ C1Unscanned
+    /\ RecoverCreatedIdentityEntryUnreadableRunning(Id1, presence, None)
+C1OneRowUnreadableStopped(presence) ==
+    /\ C1Unscanned
+    /\ RecoverCreatedIdentityEntryUnreadableStopped(Id1, presence, None)
+C1OneRow ==
+    \/ C1OneRowRemoving
+    \/ C1OneRowRemovingStopped
+    \/ C1OneRowTombstone
+    \/ C1OneRowTombstoneStopped
+    \/ C1OneRowArchiving
+    \/ C1OneRowArchivingStopped
+    \/ C1OneRowArchived
+    \/ C1OneRowArchivedStopped
+    \/ \E presence \in {"Tombstone", "Archived"} :
+         \/ C1OneRowUnreadable(presence)
+         \/ C1OneRowUnreadableStopped(presence)
 
 \* Member 1 recovered and bound (a seated local member, Dormant) with its
 \* peer endpoint, which the seal requires of a member it does not wake, and
@@ -1648,7 +1692,7 @@ RecoveredNext ==
     \/ C1Bind
     \/ WEndpoint
     \/ C1Created
-    \/ \E presence \in {"Tombstone", "Archived"} : C1OneRow(presence)
+    \/ C1OneRow
     \/ SealBootMaterializationPlan
     \/ CStop
     \/ RecoveredRetireReleasing

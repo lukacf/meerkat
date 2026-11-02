@@ -1623,6 +1623,94 @@ fn tied_decisions_with_different_approvers_are_refused_before_anything_is_held()
 }
 
 #[test]
+fn a_review_plans_one_reviewer_who_is_not_the_requester() {
+    let review = |reviewer: &str| {
+        let mut outcome = json!({"kind": "review", "approver": {"id": "owner"}, "max_rounds": 2});
+        outcome["reviewer"] = json!(reviewer);
+        outcome
+    };
+    let policy = parse(&json!({
+        "enabled": true,
+        "approval": {"rules": [
+            {"change": ["descriptive", "capability"], "outcome": review("reviewer-1")},
+            {"change": ["remove"], "outcome": review("reviewer-1")},
+            {"change": ["remove"], "outcome": review("reviewer-2")}
+        ]}
+    }));
+    let host = RequesterFacts::host("gateway");
+    let entry = entry();
+    let reviewed = PlannedOutcome::Review {
+        approver_id: "owner".to_owned(),
+        reviewer: "reviewer-1".to_owned(),
+        max_rounds: 2,
+    };
+    // The rule's reviewer decides, and its approver takes an escalation.
+    let rename = update_of(&entry, json!({"display_name": "Helper two"}));
+    let planned = update_with(&policy, &host, &entry, &rename).expect("a review");
+    assert_eq!(planned.plan.outcome, reviewed);
+    assert!(planned.plan.holds_decision());
+    // Equally strict reviews that name the same reviewer are one review.
+    let both = update_of(
+        &entry,
+        json!({"display_name": "Helper two", "addressability": "internal_only"}),
+    );
+    let planned = update_with(&policy, &host, &entry, &both).expect("one review of both changes");
+    assert_eq!(planned.plan.outcome, reviewed);
+    // The requester never reviews its own request: when it is the reviewer,
+    // nobody is left to decide, and nothing is held.
+    let refusal = update_with(
+        &policy,
+        &agent_of("reviewer-1", "assistant", &[]),
+        &entry,
+        &rename,
+    )
+    .expect_err("the requester is the reviewer");
+    assert_eq!(refusal.to_data(), json!({"kind": "approval_unavailable"}));
+    // Equally strict reviews that name different reviewers leave no one
+    // reviewer.
+    let refusal = remove_identity_with(&policy, &host, &entry).expect_err("two reviewers");
+    assert_eq!(refusal.to_data(), json!({"kind": "approval_unavailable"}));
+}
+
+#[test]
+fn tied_notices_commit_with_the_first_approver() {
+    // A notice holds nothing: equally strict notices that name different
+    // approvers commit at once, and the first of them, in change class
+    // order, then target order, then declaration order, names the approver.
+    let notify = |approver: &str| json!({"kind": "notify", "approver": {"id": approver}});
+    let policy = parse(&json!({
+        "enabled": true,
+        "approval": {"rules": [
+            {"change": ["capability"], "outcome": notify("security")},
+            {"change": ["descriptive"], "outcome": notify("owner")},
+            {"change": ["remove"], "outcome": notify("owner")},
+            {"change": ["remove"], "outcome": notify("security")}
+        ]}
+    }));
+    let host = RequesterFacts::host("gateway");
+    let entry = entry();
+    let owner = PlannedOutcome::Notify {
+        approver_id: "owner".to_owned(),
+    };
+    let both = update_of(
+        &entry,
+        json!({"display_name": "Helper two", "addressability": "internal_only"}),
+    );
+    let planned = update_with(&policy, &host, &entry, &both).expect("tied notices commit");
+    assert_eq!(
+        planned.plan.outcome, owner,
+        "the descriptive change comes first in change class order"
+    );
+    assert_eq!(planned.plan.change, ChangeClass::Descriptive);
+    assert!(!planned.plan.holds_decision());
+    let removed = remove_identity_with(&policy, &host, &entry).expect("tied notices commit");
+    assert_eq!(
+        removed.plan.outcome, owner,
+        "the first rule in declaration order"
+    );
+}
+
+#[test]
 fn the_request_digest_is_stable_across_input_order() {
     let mut first = spec("helper");
     set_profile(&mut first, "analyst");
@@ -1740,6 +1828,28 @@ fn update_and_remove_check_self_change_spec_digest_and_change_classes() {
     assert_eq!(
         stale_removal(&lead(), &entry).unwrap_err().to_data(),
         stale_spec
+    );
+    // A roster-owned identity has no revision: its stale spec names the
+    // digest alone.
+    let roster = IdentityEntryFacts {
+        revision: None,
+        ..entry.clone()
+    };
+    let roster_stale = json!({
+        "kind": "stale_spec",
+        "current_digest": spec_digest_of(&roster),
+        "field": "expected_spec_digest"
+    });
+    let roster_rename = update_of(&roster, json!({"display_name": "Helper two"}));
+    assert_eq!(
+        update(&lead(), &roster, &stale_update(&roster_rename))
+            .unwrap_err()
+            .to_data(),
+        roster_stale
+    );
+    assert_eq!(
+        stale_removal(&lead(), &roster).unwrap_err().to_data(),
+        roster_stale
     );
     assert_eq!(
         update(&lead(), &entry, &update_of(&entry, json!({})))

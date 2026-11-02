@@ -2717,7 +2717,10 @@ impl MobMcpState {
     /// `Arc::new(state)` still works and keeps every other behaviour, but a
     /// state shared that way has no way to own a background task, so unfinished
     /// councils then need an explicit
-    /// [`TemporaryCouncilCoordinator::recover_unfinished`] call.
+    /// [`TemporaryCouncilCoordinator::recover_unfinished`] call. It also runs a
+    /// restore re-attempt, a resume and a create inline in the caller's future,
+    /// so a dropped caller cancels them mid-way, and the next admission of a
+    /// re-attempt ends an abandoned one.
     #[must_use]
     pub fn into_shared(self) -> Arc<Self> {
         Arc::new_cyclic(|weak| {

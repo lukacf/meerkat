@@ -34,8 +34,8 @@ use crate::identity_first::{
     RetiredIdentityMember, RosterProvider, SessionSnapshot,
 };
 use crate::memory::distiller::{
-    DistillerClientHandle, DistillerConfig, DistillerEngine, DistillerError, DistillerProfile,
-    TranscriptSlice, TranscriptSource,
+    CompactionDiscardSource, DiscardEntry, DistillerClientHandle, DistillerConfig, DistillerEngine,
+    DistillerError, DistillerProfile, TranscriptSlice, TranscriptSource,
 };
 use crate::memory::steward::{
     StewardClientHandle, StewardConfig, StewardEngine, StewardError, StewardProfile,
@@ -4088,12 +4088,53 @@ impl StewardClientHandle for UnaskedClient {
     fn invalidate(&self) {}
 }
 
+/// A source of compaction discards that holds none, and records each session
+/// whose semantic-memory scope the distiller drops.
+#[derive(Default)]
+struct DroppedScopes(StdMutex<Vec<String>>);
+
+impl DroppedScopes {
+    /// The sessions whose scope was dropped, in order.
+    fn dropped(&self) -> Vec<String> {
+        lock(&self.0).clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl CompactionDiscardSource for DroppedScopes {
+    async fn read_discards(
+        &self,
+        _session_key: &str,
+        _limit: usize,
+    ) -> Result<Vec<DiscardEntry>, DistillerError> {
+        Ok(Vec::new())
+    }
+
+    async fn drop_scope(&self, session_key: &str) -> Result<usize, DistillerError> {
+        lock(&self.0).push(session_key.to_string());
+        Ok(1)
+    }
+}
+
 /// Agent memory over a store in `dir`, whose distiller reads sessions
 /// through `reads` and whose steward keeps the exit-interview queue in the
 /// same store, and that store.
 fn memory_with_exit_interviews(
     dir: &std::path::Path,
     reads: &Arc<ReadSessions>,
+) -> (
+    AgentMemoryRuntimeInjector,
+    Arc<crate::SqliteAgentMemoryStore>,
+) {
+    memory_with_exit_interviews_over(dir, reads, None)
+}
+
+/// [`memory_with_exit_interviews`], whose distiller drops a retired
+/// session's semantic-memory scope through `scopes`, when there is one.
+fn memory_with_exit_interviews_over(
+    dir: &std::path::Path,
+    reads: &Arc<ReadSessions>,
+    scopes: Option<Arc<dyn CompactionDiscardSource>>,
 ) -> (
     AgentMemoryRuntimeInjector,
     Arc<crate::SqliteAgentMemoryStore>,
@@ -4109,7 +4150,7 @@ fn memory_with_exit_interviews(
         store.clone(),
         store.clone(),
         Arc::clone(reads) as Arc<dyn TranscriptSource>,
-        None,
+        scopes,
         None,
         "default",
     ));
@@ -5574,6 +5615,162 @@ async fn a_delete_refused_behind_a_reset_in_flight_keeps_the_resets_effects() {
     outcomes[&alice]
         .as_ref()
         .expect("the next step drives the reset's rotation to its end");
+    runtime.settle_lifecycle_projection().await;
+    let calls = lock(&seen).clone();
+    assert_eq!(calls.len(), 1, "{calls:?}");
+    assert_eq!(calls[0].generation, 0);
+    assert_eq!(calls[0].cause.as_str(), "reset", "{calls:?}");
+}
+
+/// A reset whose rotation Core started and then failed keeps what it
+/// recorded; the reset is asked again and Core re-drives the rotation it
+/// started, journaling no new start. The retirement it ends is the
+/// reset's.
+///
+/// RED before a rotation's record that replaces an earlier rotation's
+/// record kept the earlier head: the record of the reset asked again kept
+/// the head that call read, past the only start Core journaled, so the
+/// projection read the retirement as a rotation no Meta verb asked for, and
+/// the hook heard `rotated`.
+#[tokio::test]
+async fn a_retried_reset_core_re_drives_reaches_the_hook_as_reset() {
+    let alice = identity("personal:alice");
+    let core = Arc::new(SeatCore {
+        rotation_failure: StdMutex::new(Some(BridgeError::Mob(
+            "the retirement ran past its bound".to_string(),
+        ))),
+        ..SeatCore::default()
+    });
+    core.core.keep_journal();
+    let runtime = runtime_over(None, &core);
+    runtime.bind_lifecycle_projection(None);
+    register_live(&runtime, &core.core, spec(&alice), 0, SessionId::new())
+        .await
+        .expect("registered live");
+    let seen = recording_hook(&runtime);
+    runtime
+        .reset_tracked(&alice)
+        .await
+        .expect_err("the reset's rotation started and failed");
+    runtime
+        .reset_tracked(&alice)
+        .await
+        .expect("the reset asked again re-drives the started rotation");
+    runtime.settle_lifecycle_projection().await;
+    let calls = lock(&seen).clone();
+    assert_eq!(calls.len(), 1, "{calls:?}");
+    assert_eq!(calls[0].generation, 0);
+    assert_eq!(calls[0].cause.as_str(), "reset", "{calls:?}");
+}
+
+/// The delete twin of [`a_retried_reset_core_re_drives_reaches_the_hook_as_reset`]:
+/// the retirement Core ends for the delete asked again owes the delete's
+/// side effects, the exit interview (`delete`) and the drop of the retired
+/// session's semantic-memory scope, and reaches the hook as a delete.
+///
+/// RED before a rotation's record that replaces an earlier rotation's
+/// record kept the earlier head: the retirement read as a rotation no Meta
+/// verb asked for, so neither the exit interview nor the scope drop ran.
+#[tokio::test]
+async fn a_retried_delete_core_re_drives_owes_the_delete_s_side_effects() {
+    let alice = identity("personal:alice");
+    let session = SessionId::new();
+    let core = Arc::new(SeatCore {
+        rotation_failure: StdMutex::new(Some(BridgeError::Mob(
+            "the retirement ran past its bound".to_string(),
+        ))),
+        ..SeatCore::default()
+    });
+    core.core.keep_journal();
+    let runtime = runtime_over(None, &core);
+    runtime.bind_lifecycle_projection(None);
+    register_live(&runtime, &core.core, spec(&alice), 0, session.clone())
+        .await
+        .expect("registered live");
+    let seen = recording_hook(&runtime);
+    let memory_dir = tempfile::tempdir().expect("memory dir");
+    let reads = Arc::new(ReadSessions::default());
+    let scopes = Arc::new(DroppedScopes::default());
+    let (memory, store) = memory_with_exit_interviews_over(
+        memory_dir.path(),
+        &reads,
+        Some(Arc::clone(&scopes) as Arc<dyn CompactionDiscardSource>),
+    );
+    runtime.set_agent_memory(Some(memory)).await;
+
+    runtime
+        .delete_identity_tracked(&alice)
+        .await
+        .expect_err("the delete's rotation started and failed");
+    runtime
+        .delete_identity_tracked(&alice)
+        .await
+        .expect("the delete asked again re-drives the started rotation")
+        .expect("Core held an incarnation of alice's");
+    runtime.settle_lifecycle_projection().await;
+    assert_eq!(
+        exit_interviews_of(&store, &alice).await,
+        vec!["delete".to_string()],
+        "the delete's exit interview is queued"
+    );
+    assert_eq!(
+        scopes.dropped(),
+        vec![session.to_string()],
+        "the scope of the session the delete ended is dropped"
+    );
+    assert_eq!(heard_of(&seen, &alice), vec![("delete".to_string(), 0)]);
+}
+
+/// The first-boot twin of
+/// [`a_retried_reset_core_re_drives_reaches_the_hook_as_reset`]: Core holds
+/// alice live on the retired session of her pending first-boot `Fresh` row,
+/// and the seat step that carries the row out records a reset and asks Core
+/// for its rotation, which Core starts and then fails. The row stays
+/// pending, and so does the reset's record; the next seat step plans the
+/// row's rotation again, records the reset again, and Core re-drives the
+/// rotation it started, journaling no new start. The retirement it ends is
+/// the row's reset.
+///
+/// RED before a rotation's record that replaces an earlier rotation's
+/// record kept the earlier head: the next step's record kept the head that
+/// step read, past the only start Core journaled, so the hook heard
+/// `rotated`.
+#[tokio::test]
+async fn a_first_boot_fresh_row_core_re_drives_reaches_the_hook_as_reset() {
+    let alice = identity("personal:alice");
+    let retired_session = SessionId::new();
+    let core = Arc::new(SeatCore {
+        rotation_failure: StdMutex::new(Some(BridgeError::Mob(
+            "the retirement ran past its bound".to_string(),
+        ))),
+        ..SeatCore::default()
+    });
+    core.core.keep_journal();
+    let state_dir = tempfile::tempdir().expect("state dir");
+    FirstBootManifest::write_new(
+        state_dir.path(),
+        vec![FirstBootRow::Fresh {
+            identity: alice.clone(),
+            retired_session: retired_session.clone(),
+        }],
+    )
+    .expect("the manifest writes");
+    let runtime = runtime_over(Some(state_dir.path()), &core);
+    runtime.bind_lifecycle_projection(None);
+    register_live(&runtime, &core.core, spec(&alice), 0, retired_session)
+        .await
+        .expect("registered live");
+    let seen = recording_hook(&runtime);
+
+    let outcomes = runtime.seat_identities(&[spec(&alice)], None).await;
+    assert!(
+        outcomes[&alice].is_err(),
+        "the row's rotation started and failed"
+    );
+    let outcomes = runtime.seat_identities(&[spec(&alice)], None).await;
+    outcomes[&alice]
+        .as_ref()
+        .expect("the next step re-drives the row's started rotation");
     runtime.settle_lifecycle_projection().await;
     let calls = lock(&seen).clone();
     assert_eq!(calls.len(), 1, "{calls:?}");

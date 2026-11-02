@@ -66,7 +66,9 @@ pub struct ResolverEnvironment {
     provider_auth_persistence: Option<meerkat_core::auth::ProviderAuthPersistence>,
     #[cfg(not(target_arch = "wasm32"))]
     host_launch_guard: Option<HostLaunchGuard>,
-    /// See [`Self::admitting_pending_account_limits`].
+    /// See [`Self::admitting_pending_account_limits`]. Native only, like the
+    /// two fields above, so the struct keeps every field public on wasm32.
+    #[cfg(not(target_arch = "wasm32"))]
     admits_pending_account_limits: bool,
 }
 
@@ -84,6 +86,7 @@ impl ResolverEnvironment {
             provider_auth_persistence: None,
             #[cfg(not(target_arch = "wasm32"))]
             host_launch_guard: None,
+            #[cfg(not(target_arch = "wasm32"))]
             admits_pending_account_limits: false,
         }
     }
@@ -101,6 +104,7 @@ impl ResolverEnvironment {
             provider_auth_persistence: None,
             #[cfg(not(target_arch = "wasm32"))]
             host_launch_guard: None,
+            #[cfg(not(target_arch = "wasm32"))]
             admits_pending_account_limits: false,
         }
     }
@@ -184,16 +188,34 @@ impl ResolverEnvironment {
     /// none of those limits, for example one whose output budget is fixed
     /// before resolution. Off by default: a resolution fails during such an
     /// outage.
+    ///
+    /// On wasm32 it changes nothing: the environment is returned as it is,
+    /// and [`Self::admits_pending_account_limits`] is always false. No
+    /// provider that reads it is built for wasm32.
     #[must_use]
-    pub fn admitting_pending_account_limits(mut self) -> Self {
-        self.admits_pending_account_limits = true;
+    pub fn admitting_pending_account_limits(self) -> Self {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let mut env = self;
+            env.admits_pending_account_limits = true;
+            env
+        }
+        #[cfg(target_arch = "wasm32")]
         self
     }
 
     /// Whether this resolution may succeed while the account's stated limits
-    /// are pending (see [`Self::admitting_pending_account_limits`]).
+    /// are pending (see [`Self::admitting_pending_account_limits`]). Always
+    /// false on wasm32.
     pub fn admits_pending_account_limits(&self) -> bool {
-        self.admits_pending_account_limits
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.admits_pending_account_limits
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            false
+        }
     }
 }
 

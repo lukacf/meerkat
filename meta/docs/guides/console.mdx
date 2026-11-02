@@ -378,7 +378,11 @@ named and hides nothing else (see [host-provided attention items](/reference/con
 A source with a `decide_href` gives a read-only console a **Decide in** link on each pending approval, in the inbox and in an agent's chat, to the host page that decides it.
 Expand **Complete request details** before deciding. Stale or unavailable approval
 data does not mean there are no pending requests; use **Refresh approvals** to
-reload it. Read-only consoles cannot submit decisions.
+reload it. Read-only consoles cannot submit decisions. Where the connection
+offers no approvals (a gateway without `meta/gating/pending`, or an aggregate
+console, whose inbox lists host attention items only), the Approvals header
+reads **Not available on this connection** instead of pending and automatic
+counts.
 
 | Tab | What it shows |
 | --- | --- |
@@ -792,7 +796,7 @@ SpawnMemberSpec::new(
 
 | Label | Purpose |
 |-------|---------|
-| `display_name` | Human-readable name shown in the sidebar (overrides member_id) |
+| `display_name` | Human-readable name shown on every console surface; without it the console names the agent by its identity in words |
 | `console_group` | Recommended domain grouping selector for the stock console |
 | `group` | Legacy/sidebar group fallback |
 | `org` / `realm` | Common subgroup selectors |

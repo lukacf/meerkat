@@ -285,7 +285,11 @@ name prefixes.
   `default_model` wins when the model is omitted.
 - Otherwise Meerkat checks compatible configured defaults and then the
   provider/global catalog default.
-- A known provider/model mismatch fails before agent construction.
+- A known provider/model mismatch fails before agent construction. The
+  exception is a binding on a credential account that also has a route of
+  the model's provider (a GitHub Copilot account's routes): a request that
+  names such a binding and no provider moves to the account's route of the
+  model's provider.
 - An uncataloged model needs an explicit typed provider/binding owner; a name
   that merely begins with `gpt-` or `claude-` is never guessed.
 - On a route of a GitHub Copilot account, a model the registry does not define

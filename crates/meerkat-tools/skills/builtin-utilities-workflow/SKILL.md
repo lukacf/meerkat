@@ -37,3 +37,8 @@ turn. They are not a durable planning system by themselves.
 - Read-only tool policy admits only tools explicitly classified read-only.
   Shell, patching, image generation, blob writes, and undeclared tools remain
   unavailable under that policy.
+- A host can gate tools behind time-bounded grants. A gated tool stays hidden
+  until a grant opens it, and a call the gate refuses returns `policy_denied`
+  with the code `tool_grant_required`, `tool_grant_expired`,
+  `tool_grant_revoked`, or `tool_grant_unavailable`. Do not retry such a call:
+  the tool needs a grant from the host first.

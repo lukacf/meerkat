@@ -6648,7 +6648,7 @@ impl AgentFactory {
             AccountModelLookup::Offered(definition) => definition,
             AccountModelLookup::Refused(refusal) => {
                 return Err(BuildAgentError::LlmClient(FactoryError::AccountModel(
-                    refusal,
+                    Box::new(refusal),
                 )));
             }
             _ => return Ok(None),
@@ -7953,7 +7953,11 @@ impl AgentFactory {
         // Durable agent construction is the single fail-closed chokepoint for
         // release-stage admission. This check deliberately precedes client
         // overrides, binding selection, credential resolution, lease
-        // publication, and every provider/tool side effect. Experimental
+        // publication, and every provider/tool side effect, except the
+        // account-model lookup above: it resolves the named account route and
+        // publishes that route's lease to read the account's model list, but
+        // only for a model no registry row defines, and the definition it
+        // adds is operator-defined, never experimental. Experimental
         // identities are channel-scoped and may only enter through the
         // separately sealed live admission path.
         if registry

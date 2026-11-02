@@ -307,6 +307,11 @@ references, and event snapshots. It is optional and enabled through
   `POST /workgraph/goal/status`, `POST /workgraph/attention/list`.
 - Python/TypeScript SDKs expose typed read-only wrappers and session options
   `enable_workgraph` / `enableWorkGraph`.
+- Reads are pages (0.9.9): list and snapshot newest first, every list, ready
+  and snapshot result with `total_items`, `truncated` and, when it ended
+  early, a `next_cursor` to pass back as `cursor`; events page with
+  `after_seq` (`next_after_seq`). Evidence is withdrawn by a later ref's
+  `withdraws`, never removed.
 
 Use WorkGraph for durable pending work, dependencies, claims, and evidence. Use
 Schedule for time and recurrence; use memory for retrieved knowledge; use comms
@@ -1645,6 +1650,7 @@ names) and `read_only`, but no `allow`; the `[tools]` config section has no
   - CLI: `--wait-for-mcp` blocks before the first turn; the CLI also waits automatically when a server may need OAuth (streamable HTTP without a static `Authorization` header). The wait is the largest `connect_timeout_secs` plus 5 s (plus 300 s with `--mcp-auth interactive`); servers still pending then abort the run (`MCP servers still pending after ...`).
   - SDK: `McpRouterAdapter::wait_until_ready(timeout)` provides the same blocking behavior
   - `AgentBuildConfig.wait_for_mcp: bool` field for programmatic surface control
+- **Scoped tool grants** (0.9.9) - a build gates built-in tool families and tool names (`grant_gated_tools` on `SessionBuildOptions`, `AgentBuildConfig` or RPC `session/create`): they are mounted hidden and refused at dispatch (`policy_denied`, code `tool_grant_required`) until a live grant opens them for a bounded window (at most 24 hours by default): `MeerkatMachine::grant_tool`, RPC `tool_grants/grant|revoke|list|audit`, Python `grant_tool`, TypeScript `grantTool`. A gate that covers `web_search` turns the provider's native tools off. Details: `references/mcp_tools_skills_tools.md`.
 - **Composition** — most-restrictive wins (allow-lists intersect, deny-lists union, deny beats allow).
 - **Agent awareness** - a `tool_config_changed` event is emitted and a typed system notice ("Tool configuration changed: ...") is added to the conversation on any change. Notices are typed transcript rows; the literal `[SYSTEM NOTICE]` text prefix no longer exists.
 

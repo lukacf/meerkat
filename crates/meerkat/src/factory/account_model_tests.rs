@@ -75,6 +75,24 @@ const ACCOUNT_SECTION: &str = r#"
 source = { kind = "env", env = "COPILOT_GITHUB_TOKEN" }
 "#;
 
+/// Only the account's Anthropic route, as explicit device sign-in tables on
+/// the shared `github_copilot` account: the account has no OpenAI route.
+const ANTHROPIC_ROUTE_ONLY: &str = r#"
+[realm.global.backend.copilot_anthropic]
+provider = "anthropic"
+backend_kind = "copilot"
+
+[realm.global.auth.copilot_anthropic]
+provider = "anthropic"
+auth_method = "github_copilot_oauth"
+source = { kind = "managed_store" }
+
+[realm.global.binding.copilot_anthropic]
+backend_profile = "copilot_anthropic"
+auth_profile = "copilot_anthropic"
+credential_account = "github_copilot"
+"#;
+
 fn route(binding: &str) -> AuthBindingRef {
     AuthBindingRef {
         realm: RealmId::global(),
@@ -430,13 +448,16 @@ async fn a_model_the_account_does_not_offer_is_refused_typed_without_another_cre
         .build(ACCOUNT_MODEL, Provider::OpenAI, OPENAI_ROUTE)
         .await
     {
-        Err(BuildAgentError::LlmClient(meerkat_client::FactoryError::AccountModel(
-            AccountModelRefusal::NotOffered {
-                credential, model, ..
-            },
-        ))) => {
-            assert_eq!(model, ACCOUNT_MODEL);
-            assert_eq!(credential, github_copilot_credential());
+        Err(BuildAgentError::LlmClient(meerkat_client::FactoryError::AccountModel(refusal))) => {
+            match *refusal {
+                AccountModelRefusal::NotOffered {
+                    credential, model, ..
+                } => {
+                    assert_eq!(model, ACCOUNT_MODEL);
+                    assert_eq!(credential, github_copilot_credential());
+                }
+                other => panic!("expected the account's NotOffered refusal, got {other}"),
+            }
         }
         Err(other) => panic!("expected the account's typed refusal, got {other}"),
         Ok(_) => panic!("a model the account does not offer must not build"),
@@ -445,6 +466,49 @@ async fn a_model_the_account_does_not_offer_is_refused_typed_without_another_cre
         harness.log.resolved(),
         vec![(Provider::OpenAI, route(OPENAI_ROUTE))],
         "only the named account route resolves; no other credential is tried"
+    );
+    assert!(harness.log.served().is_empty(), "nothing is sent");
+}
+
+/// An account with no route of the protocol it serves the model on refuses
+/// the build typed, naming that protocol's provider and the account: the
+/// account's only route is its Anthropic one, and it serves the model on the
+/// OpenAI protocol. The named route resolves and the account is asked once;
+/// no other route or credential is tried in place of the missing one, and
+/// nothing is sent.
+#[tokio::test]
+async fn an_account_with_no_route_of_the_models_protocol_refuses_typed() {
+    let harness = Harness::new(
+        ANTHROPIC_ROUTE_ONLY,
+        Some(account_definition(Provider::OpenAI)),
+    );
+    let expected = meerkat_core::ConnectionTargetError::NoCredentialAccountRoute {
+        provider: Provider::OpenAI,
+        account: meerkat_core::CredentialAccountRef {
+            realm: RealmId::global(),
+            account: meerkat_core::CredentialAccountId::parse("github_copilot")
+                .expect("valid account"),
+        },
+    };
+    match harness
+        .build(ACCOUNT_MODEL, Provider::Anthropic, ANTHROPIC_ROUTE)
+        .await
+    {
+        Err(BuildAgentError::LlmClient(meerkat_client::FactoryError::ConnectionTarget(source))) => {
+            assert_eq!(source, expected);
+        }
+        Err(other) => panic!("expected the typed NoCredentialAccountRoute refusal, got {other}"),
+        Ok(_) => panic!("an account with no route of the model's protocol must not build"),
+    }
+    assert_eq!(
+        harness.log.resolved(),
+        vec![(Provider::Anthropic, route(ANTHROPIC_ROUTE))],
+        "only the named account route resolves; no other credential is tried"
+    );
+    assert_eq!(
+        harness.log.asked(),
+        vec![(Provider::Anthropic, ACCOUNT_MODEL.to_string())],
+        "the account is asked once, on the named route"
     );
     assert!(harness.log.served().is_empty(), "nothing is sent");
 }

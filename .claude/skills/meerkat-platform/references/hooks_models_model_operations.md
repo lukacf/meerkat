@@ -144,6 +144,22 @@ history_retained_rewrites = 4      # older pre-compaction bodies are retired
   and forecast triggers wait `min_turns_between_compactions` model calls after
   the previous attempt; the byte trigger does not, and neither does the history
   trigger while the last rewrite got the history under the threshold.
+- Since 0.9.9 it also projects each request's input: the provider's count for
+  the last answered request plus an estimate of only the rows appended since,
+  so one large tool result (a long listing, for one) that carries the next
+  request past the threshold compacts first instead of being refused. The
+  projection skips the cadence when that growth made the crossing; its anchor
+  rides the session's compaction cadence, so a rebuilt agent projects its
+  first request too.
+- Since 0.9.9 a request the provider refused for not fitting the model's
+  context, or one that carried the run's own tool results shortened, is
+  recorded in the cadence (`last_context_refusal_boundary_index`), and the
+  next check whose compaction covers the whole transcript (the next run's
+  first) compacts once, whatever the thresholds and the cadence say; the
+  refused run still fails. A run's own results that do not fit its request
+  (the provider's byte cap, or since 0.9.9 the model's input budget) are sent
+  shortened for that request only, with a marker naming the call and a
+  `tool_results_bounded_for_request` event; the transcript keeps them whole.
 - Since 0.9.4, when the last rewrite left the history at or above the
   threshold (for example System rows larger than an explicit
   `auto_compact_threshold`), a history crossing waits for the cadence instead
@@ -167,7 +183,11 @@ history_retained_rewrites = 4      # older pre-compaction bodies are retired
   source is trimmed (tool results, then other context, then user requests,
   each cut marked); if that still does not fit, only the newest user requests
   that fit are sent, under a note that it carries the newest N of the M user
-  requests. The discarded history becomes one `compaction_summary` user message starting "[Context compacted]"; system
+  requests. Each image or video in a user row or tool result reaches the
+  summarizer as a placeholder such as
+  `[image (image/png) omitted from this summary request]` (since 0.9.9; the
+  prompt says such a placeholder tells nothing about what the agent could
+  see). The discarded history becomes one `compaction_summary` user message starting "[Context compacted]"; system
   prompts and up to `recent_turn_budget` recent complete turns stay. Inside a
   run, after its first response, a compaction never folds the run's request
   or newest round: it folds the rows before the run first, then, when
@@ -216,7 +236,15 @@ history_retained_rewrites = 4      # older pre-compaction bodies are retired
   `SummarizationSource` that states its bound; returning
   `SummarizationSource::whole(meerkat_core::materialize_latest_system_prompt_versions(messages))`
   keeps the 0.9.3 behaviour. `CompactionContext.last_rewrite_history_tokens`
-  feeds `should_compact`; `None` keeps the 0.9.3 decisions.
+  feeds `should_compact`; `None` keeps the 0.9.3 decisions. Since 0.9.9
+  `CompactionContext` also carries `projected_input_tokens` (an
+  `InputTokenProjection`: the answered request's count plus the rows appended
+  since) and `last_context_refusal_boundary_index` (a recorded context
+  refusal or bounded request); a custom `Compactor` may read or ignore them,
+  and `None` measures as before. `build_compaction_context` takes the last
+  answered request (`Option<AnsweredRequestAnchor>`) as its third parameter,
+  and a host that swaps in a durable snapshot of a session calls
+  `Agent::reload_compaction_cadence` after the swap.
 - Anthropic server-side compaction is separate: `provider_params`
   `{"provider_tag": {"provider": "anthropic", "compaction": {"kind": "auto"}}}`.
 

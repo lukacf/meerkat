@@ -117,6 +117,14 @@ its open run until its next open.
   example its MCP servers connecting, for at most each server's connect
   timeout. A tool that is still missing then answers its call with an error
   result the model sees.
+- **A per-turn model selection carries over.** A run whose input carried a
+  per-turn LLM selection (a model, provider, self-hosted server, provider
+  params or auth binding) resumes under the LLM identity that selection saved
+  with the session before the run's first round; a mob member's field that
+  its profile lists in `resume_overrides` takes the profile's value, as on any
+  member resume. Through 0.9.8 a mob member's or an RPC session's resumed run
+  applied the selection again, which its committed boundary refused, and its
+  input never completed.
 
 ### Inputs And Ordering
 
@@ -169,6 +177,17 @@ before. An embedding host's own unregister without a disposition still
 stops: `UnregisterQueuedInputs::default()` is `Stop`. The suspend does not
 wait for the round, so a long tool call does not hold up a shutdown, and a
 process killed during it leaves the run as a crash would.
+
+The machine records the disposition each unregister carries out, which can
+differ from the one asked: a call that joins an unregister already in
+progress keeps the disposition that unregister began with, a `Keep` is
+recorded as a stop for a registration that served live work, and an unserved
+attachment's unregister records a stop for a requeue. Since 0.9.9 the caller
+reads the recorded disposition from its own answer, without polling:
+`RuntimeSessionUnregisterObserver::queued_inputs` (`None` until the machine
+began the unregister), or
+`MeerkatMachine::unregister_session_registration_until_terminal_reporting_queued_inputs_if_current`
+for the until-terminal unregister.
 
 A host that boots over a store another host serves, holds its members' run
 starts and must hand the store back unchanged shuts down with

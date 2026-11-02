@@ -283,6 +283,9 @@ that store:
   the `metadata` slot `declared_ephemeral`), so its side effects are run at
   least once within the process only: a kill loses those still owed, and the
   next start projects from the journal's head.
+- The first start of a release that projects the journal begins at the
+  journal's head: side effects an earlier release still owed when it stopped
+  (it kept them in memory) are not run.
 
 What a stopped gateway still owed when the next one starts runs in the
 background after init answers; `meta/status` (`lifecycle_projection.owed_events`)

@@ -151,6 +151,15 @@ default_model = "my-deployment"     # the Azure deployment name
   list is checked first: `Copilot account does not expose <endpoint> for
   <provider> model '<model>'` lists the ids the account offers. The
   integration is provisional (it uses an observed GitHub client contract).
+- Device sign-in (0.9.9): a temporary failure of the Copilot token exchange
+  (a network failure or timeout, HTTP 408, 429 or 5xx, a GitHub API rate
+  limit) does not fail turns while the current token is still valid; the
+  exchange is tried again after its `Retry-After` (or 30 s), and once no
+  valid token is left a turn fails with a retryable error the agent loop
+  retries. A token Copilot rejects with a 401 is replaced on its next use. A
+  session restore, a wake, or a build with a set output budget succeeds
+  during such an outage. An exchange 401, or a 403 that asks for an account
+  action, still needs a new sign-in.
 - `bedrock_aws_sigv4`, `vertex_google_auth` and `foundry_azure_ad` are
   compiled only with the `meerkat-anthropic` features `bedrock`, `vertex` and
   `foundry`, and `adc` / `compute_adc` only with `meerkat-gemini/adc`; the
@@ -260,11 +269,46 @@ the token store. It sets `[realm.global] default_binding` if none is set.
   `COPILOT_GITHUB_TOKEN`). `--from-env` writes the three routes reading
   `COPILOT_GITHUB_TOKEN`, then `GH_TOKEN`, then `GITHUB_TOKEN` and stores
   nothing; without it the token from `--secret` or stdin is checked, then
-  stored under `global:account:github_copilot` with the login as its account
-  id. The token is the Copilot API bearer, identity and API host come from
-  GitHub's `copilot_internal/user`, a classic `ghp_` token is refused, and a
-  token GitHub refuses moves the account to `reauth_required`. The routes hold
-  one method at a time: each login refuses routes set up for the other.
+  stored under `global:account:github_copilot` with the login, when GitHub
+  names one, as its account id. The token is the Copilot API bearer; the
+  login, plan and API host come from GitHub's `copilot_internal/user` when
+  that lookup answers the token (for a 403 or 404 see below). A classic
+  `ghp_` token is refused, and a token GitHub refuses moves the account to
+  `reauth_required`; a refusal of an
+  earlier token that a newer one already replaced fails only that request
+  (and requests waiting on the same lookup) as `stale_credential` and leaves
+  the newer token valid. When the lookup answers a token 403 or 404 (it may
+  not answer a fine-grained token), the route uses it unnamed (no login or
+  plan) on `https://api.githubcopilot.com` once the account's model list
+  loads there; a failed listing fails the request (`refresh_failed`). For a
+  user token, a 401 or 403 from the model listing is Copilot refusing the
+  token (`refresh_failed`, the lease untouched; after an unanswered lookup
+  the same token is asked about again after a minute); only the identity
+  lookup's own 401 marks a token revoked, and a later listing's 401 runs the
+  lookup again. A GitHub App installation token's listing 401 refuses it.
+  The routes of one account read the token from one credential source: a
+  route over another source is refused. Token routes send
+  `Copilot-Integration-Id: copilot-developer-cli` (the device sign-in's
+  routes `vscode-chat`, which Copilot refuses for a personal access token)
+  unless the backend options set `integration_id`; the lookup sends none. A
+  GitHub rate limit (a 429, or a 403 with `Retry-After`, a spent primary
+  limit or a message naming the secondary rate limit) pauses the account's
+  lookup for GitHub's stated time, at least a minute; a 5xx or network
+  failure pauses nothing. A command source with `refresh_interval_ms`
+  reports that lifetime as the token's expiry, so a session built within it
+  reuses the token without running the command again. A token a provider,
+  proxy or gateway echoes back verbatim is redacted from errors and logs (the
+  last four bearers the account signed with; a truncated or re-encoded echo
+  is not caught), and the header values the route signs requests with are
+  marked sensitive. The routes hold one method at a time: each login refuses
+  routes set up for the other. A Rust host checks a token without storing it
+  with `meerkat_copilot::verify_operator_token(token, &config)`, `config`
+  being `CopilotBackendConfig::from_token_options` of the routes' options,
+  which answers its `CopilotAccountIdentity` (`login`, `plan`, `api_base`,
+  `installation`, `looked_up`). The route is tested only against local
+  stand-ins for GitHub and the Copilot API; its live check with a
+  fine-grained token has not run yet (the auth guide lists what is not yet
+  observed live).
 - Zero-config: while `[realm.global]` configures no Copilot route, a request
   that names `global:copilot_openai`, `global:copilot_anthropic` or
   `global:copilot_gemini` resolves it in token mode from the same variables

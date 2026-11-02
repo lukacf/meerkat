@@ -92036,6 +92036,7 @@ fn summarize_mob_runtime_error(error: &MobError) -> String {
             "member_durable_tail_unprovable".to_string()
         }
         MobError::MemberCustodyDeferred { .. } => "member_custody_deferred".to_string(),
+        MobError::MobQuarantined { class, .. } => format!("mob_quarantined:{class}"),
         MobError::SpawnMemberAdmissionDenied { .. } => "spawn_member_admission_denied".to_string(),
         MobError::BridgeRequestTimedOut { .. } => "bridge_request_timed_out".to_string(),
         MobError::ForkSourceUnavailable { .. } => "fork_source_unavailable".to_string(),

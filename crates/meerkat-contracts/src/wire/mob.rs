@@ -2990,6 +2990,10 @@ pub enum WireMemberCustodyDeferralCause {
     /// The member's durable tail could not be proven, and its recovery kept
     /// it.
     DurableTailUnprovable,
+    /// The store could not serve a read of the member's state now.
+    StoreUnavailable,
+    /// The member's persisted state cannot be read or decoded.
+    StoreUnreadable,
     /// A cause this version does not know, as it was sent.
     Unknown(String),
 }
@@ -3002,6 +3006,8 @@ impl WireMemberCustodyDeferralCause {
             Self::ServedElsewhere => "served_elsewhere",
             Self::HostingUnavailable => "hosting_unavailable",
             Self::DurableTailUnprovable => "durable_tail_unprovable",
+            Self::StoreUnavailable => "store_unavailable",
+            Self::StoreUnreadable => "store_unreadable",
             Self::Unknown(raw) => raw,
         }
     }
@@ -3013,6 +3019,8 @@ impl From<String> for WireMemberCustodyDeferralCause {
             "served_elsewhere" => Self::ServedElsewhere,
             "hosting_unavailable" => Self::HostingUnavailable,
             "durable_tail_unprovable" => Self::DurableTailUnprovable,
+            "store_unavailable" => Self::StoreUnavailable,
+            "store_unreadable" => Self::StoreUnreadable,
             _ => Self::Unknown(raw),
         }
     }
@@ -3058,6 +3066,10 @@ mod custody_deferral_schema {
         /// The member's durable tail could not be proven, and its recovery kept
         /// it.
         DurableTailUnprovable,
+        /// The store could not serve a read of the member's state now.
+        StoreUnavailable,
+        /// The member's persisted state cannot be read or decoded.
+        StoreUnreadable,
     }
 }
 
@@ -5121,6 +5133,14 @@ mod tests {
                 (
                     WireMemberCustodyDeferralCause::DurableTailUnprovable,
                     "durable_tail_unprovable",
+                ),
+                (
+                    WireMemberCustodyDeferralCause::StoreUnavailable,
+                    "store_unavailable",
+                ),
+                (
+                    WireMemberCustodyDeferralCause::StoreUnreadable,
+                    "store_unreadable",
                 ),
             ] {
                 let deferral = WireMemberCustodyDeferral {

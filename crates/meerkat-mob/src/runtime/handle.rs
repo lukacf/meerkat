@@ -1706,6 +1706,12 @@ fn wire_custody_deferral(
             crate::MemberCustodyDeferralCause::DurableTailUnprovable => {
                 meerkat_contracts::WireMemberCustodyDeferralCause::DurableTailUnprovable
             }
+            crate::MemberCustodyDeferralCause::StoreUnavailable => {
+                meerkat_contracts::WireMemberCustodyDeferralCause::StoreUnavailable
+            }
+            crate::MemberCustodyDeferralCause::StoreUnreadable => {
+                meerkat_contracts::WireMemberCustodyDeferralCause::StoreUnreadable
+            }
         },
     }
 }
@@ -3140,6 +3146,9 @@ fn spawn_many_failure_observation(error: &MobError) -> mob_dsl::MobSpawnManyFail
         | MobError::IncarnationInconsistent { .. }
         | MobError::IncarnationDestroyed { .. }
         | MobError::ProvenanceUnavailable { .. }
+        // A quarantined store answers a lookup of its mob, never a
+        // spawn-many row of a running mob.
+        | MobError::MobQuarantined { .. }
         // A scope's incarnation is checked by the scoped verbs only.
         | MobError::IncarnationMismatch { .. }
         | MobError::PlacedCompletionDeliveryRejected

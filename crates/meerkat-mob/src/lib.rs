@@ -128,7 +128,7 @@ pub use error::{
     MemberCustodyDeferralCause, MemberCustodyRestore, MemberProvisionFailureCause,
     MemberRegistrationHookCall, MemberRuntimeDetachment, MemberSendIdempotencyRefusal,
     MemberWakeRefusal, MobDefinitionProjectionMismatchKind, MobError, MobFailureClass,
-    OperatorAuthorityCeilingRefusal, RuntimeEffectKind,
+    MobQuarantineClass, OperatorAuthorityCeilingRefusal, RuntimeEffectKind,
 };
 pub use event::{
     AttributedEvent, FlowCancelClass, ForkJobTerminalEvent, MemberRetiredFacts, MemberWireEdge,

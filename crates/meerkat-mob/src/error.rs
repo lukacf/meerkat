@@ -2,6 +2,7 @@
 
 use crate::control_policy::ScopeDenial;
 use crate::ids::{AgentIdentity, AgentRuntimeId, FenceToken, FlowId, LoopId, ProfileName, WorkRef};
+pub use crate::machines::mob_store_restore_lifecycle::MobQuarantineClass;
 use crate::runtime::MobState;
 use crate::store::FrameAtomicOperation;
 use crate::validate::Diagnostic;
@@ -1874,6 +1875,26 @@ pub enum MobError {
         incarnation: meerkat_core::service::MobIncarnationId,
     },
 
+    /// Mob `mob_id`'s persisted store is quarantined: the restore of the
+    /// host's persisted mobs could not restore it, so the mob has no actor,
+    /// its store is kept as found, and every other mob restores and serves.
+    /// `class` says why ([`MobQuarantineClass`]): a store that could not
+    /// serve a read now (`store_unavailable`, retryable: a verb that
+    /// addresses the mob by id re-attempts its restore once, and the next
+    /// start does too), a store or stored state that cannot be read
+    /// (`store_unreadable`), or another typed refusal of its resume
+    /// (`resume_refused`). `cause` is the failure the last restore attempt
+    /// met. An explicit retry re-attempts any class, for example after a
+    /// repair. Structured data: `kind` `mob_quarantined`, `class`,
+    /// `retryable`, `code`, `cause` and, when the cause has some,
+    /// `cause_data`.
+    #[error("mob '{mob_id}' is quarantined ({class}): {cause}")]
+    MobQuarantined {
+        mob_id: MobId,
+        class: MobQuarantineClass,
+        cause: Arc<MobError>,
+    },
+
     /// A create by a caller session was refused because the hosted rosters
     /// that could name that session could not all be read, so its provenance
     /// is not known (see `meerkat_mob::MobProvenance`). `mob_id` names the
@@ -2167,6 +2188,26 @@ impl MemberCustodyRestore {
             Self::CleanupDelivery => "cleanup_delivery",
         }
     }
+
+    /// The restore as MobMachine records it unrestored.
+    pub(crate) fn machine_kind(self) -> crate::machines::mob_machine::MemberCustodyRestoreKind {
+        use crate::machines::mob_machine::MemberCustodyRestoreKind as Kind;
+        match self {
+            Self::StartupBinding => Kind::StartupBinding,
+            Self::CleanupDelivery => Kind::CleanupDelivery,
+        }
+    }
+
+    /// The restore MobMachine records unrestored.
+    pub(crate) fn from_machine_kind(
+        kind: crate::machines::mob_machine::MemberCustodyRestoreKind,
+    ) -> Self {
+        use crate::machines::mob_machine::MemberCustodyRestoreKind as Kind;
+        match kind {
+            Kind::StartupBinding => Self::StartupBinding,
+            Kind::CleanupDelivery => Self::CleanupDelivery,
+        }
+    }
 }
 
 impl std::fmt::Display for MemberCustodyRestore {
@@ -2180,7 +2221,8 @@ impl std::fmt::Display for MemberCustodyRestore {
 
 /// The cause a member's deferred custody restore last met: the reason it
 /// stays deferred. Only these causes defer a restore; any other failure
-/// fails the operation that re-attempted it.
+/// fails the operation that re-attempted it. Every cause is scoped to the
+/// member and met before the restore had any effect.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
@@ -2192,6 +2234,14 @@ pub enum MemberCustodyDeferralCause {
     /// The member's durable tail could not be proven, and its recovery kept
     /// it ([`MobError::MemberDurableTailUnprovable`]).
     DurableTailUnprovable,
+    /// The store could not serve a read of the member's state now (for
+    /// example a host store that answered unavailable): nothing is known to
+    /// be wrong with the stored state. Defers a cleanup delivery restore.
+    StoreUnavailable,
+    /// The member's persisted state cannot be read or decoded. Defers a
+    /// cleanup delivery restore; a re-attempt answers the same until the
+    /// state is repaired.
+    StoreUnreadable,
 }
 
 impl MemberCustodyDeferralCause {
@@ -2212,6 +2262,46 @@ impl MemberCustodyDeferralCause {
         }
     }
 
+    /// The deferral cause `error` is for `restore`: [`Self::of`], and for a
+    /// cleanup delivery restore also a failed read of the member's stored
+    /// state, classed by its typed store failure
+    /// (`crate::runtime::actor::session_store_failure_class`): a store that
+    /// could not serve now defers as [`Self::StoreUnavailable`], a state that
+    /// is malformed or refused as [`Self::StoreUnreadable`]. Only the reads
+    /// a cleanup delivery restore makes before any effect carry such a
+    /// failure; the caller defers only those.
+    #[must_use]
+    pub(crate) fn of_restore(restore: MemberCustodyRestore, error: &MobError) -> Option<Self> {
+        if let Some(cause) = Self::of(error) {
+            return Some(cause);
+        }
+        if restore != MemberCustodyRestore::CleanupDelivery {
+            return None;
+        }
+        match error {
+            MobError::SessionError(error) => Self::of_session_store_failure(error),
+            _ => None,
+        }
+    }
+
+    fn of_session_store_failure(error: &meerkat_core::SessionError) -> Option<Self> {
+        use crate::runtime::actor::{SessionStoreFailureClass, session_store_failure_class};
+        match error {
+            meerkat_core::SessionError::WithSettlementFailures { error, .. } => {
+                Self::of_session_store_failure(error)
+            }
+            meerkat_core::SessionError::Store(source) => {
+                Some(match session_store_failure_class(source.as_ref()) {
+                    SessionStoreFailureClass::Unavailable => Self::StoreUnavailable,
+                    SessionStoreFailureClass::Malformed | SessionStoreFailureClass::Refused => {
+                        Self::StoreUnreadable
+                    }
+                })
+            }
+            _ => None,
+        }
+    }
+
     /// Stable token in structured data and on the wire.
     #[must_use]
     pub fn as_str(self) -> &'static str {
@@ -2219,14 +2309,43 @@ impl MemberCustodyDeferralCause {
             Self::ServedElsewhere => "served_elsewhere",
             Self::HostingUnavailable => "hosting_unavailable",
             Self::DurableTailUnprovable => "durable_tail_unprovable",
+            Self::StoreUnavailable => "store_unavailable",
+            Self::StoreUnreadable => "store_unreadable",
+        }
+    }
+
+    /// The cause as MobMachine records it.
+    pub(crate) fn machine_kind(self) -> crate::machines::mob_machine::MemberCustodyCauseKind {
+        use crate::machines::mob_machine::MemberCustodyCauseKind as Kind;
+        match self {
+            Self::ServedElsewhere => Kind::ServedElsewhere,
+            Self::HostingUnavailable => Kind::HostingUnavailable,
+            Self::DurableTailUnprovable => Kind::DurableTailUnprovable,
+            Self::StoreUnavailable => Kind::StoreUnavailable,
+            Self::StoreUnreadable => Kind::StoreUnreadable,
+        }
+    }
+
+    /// The cause MobMachine records.
+    pub(crate) fn from_machine_kind(
+        kind: crate::machines::mob_machine::MemberCustodyCauseKind,
+    ) -> Self {
+        use crate::machines::mob_machine::MemberCustodyCauseKind as Kind;
+        match kind {
+            Kind::ServedElsewhere => Self::ServedElsewhere,
+            Kind::HostingUnavailable => Self::HostingUnavailable,
+            Kind::DurableTailUnprovable => Self::DurableTailUnprovable,
+            Kind::StoreUnavailable => Self::StoreUnavailable,
+            Kind::StoreUnreadable => Self::StoreUnreadable,
         }
     }
 }
 
 /// A member's custody restore a mob start deferred instead of failing the
 /// whole start, as the member's status shows it: which restore, and the cause
-/// its last attempt met. Every operation on the member re-attempts the
-/// restore first, and the deferral clears once one succeeds.
+/// its last attempt met. MobMachine records it; every operation on the
+/// member re-attempts the restore first, and the deferral clears once one
+/// succeeds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[non_exhaustive]
 pub struct MemberCustodyDeferral {
@@ -2242,6 +2361,17 @@ impl MemberCustodyDeferral {
     #[must_use]
     pub fn new(restore: MemberCustodyRestore, cause: &MobError) -> Option<Self> {
         MemberCustodyDeferralCause::of(cause).map(|cause| Self { restore, cause })
+    }
+
+    /// The deferral MobMachine records for a member.
+    pub(crate) fn from_machine(
+        restore: crate::machines::mob_machine::MemberCustodyRestoreKind,
+        cause: crate::machines::mob_machine::MemberCustodyCauseKind,
+    ) -> Self {
+        Self {
+            restore: MemberCustodyRestore::from_machine_kind(restore),
+            cause: MemberCustodyDeferralCause::from_machine_kind(cause),
+        }
     }
 }
 
@@ -2512,6 +2642,25 @@ impl MobError {
     /// Structured-data `kind` of [`Self::held_before_activation`].
     pub const HELD_BEFORE_ACTIVATION_KIND: &'static str = "mob_held_before_activation";
 
+    /// Structured-data `kind` of [`Self::MobQuarantined`].
+    pub const MOB_QUARANTINED_KIND: &'static str = "mob_quarantined";
+
+    /// The wire code of a quarantined mob's answer: the runtime-unavailable
+    /// code for a store that could not serve now (retryable), and the code
+    /// of the failure its last restore attempt met otherwise.
+    fn mob_quarantined_code(
+        class: MobQuarantineClass,
+        cause: &MobError,
+    ) -> meerkat_contracts::ErrorCode {
+        if class.is_retryable() {
+            meerkat_contracts::ErrorCode::SessionRuntimeUnavailable
+        } else {
+            cause
+                .wire_error_code()
+                .unwrap_or(meerkat_contracts::ErrorCode::InternalError)
+        }
+    }
+
     /// A persisted mob its host holds before activation: restore has not
     /// started it, because the owner session it is bound to is unresolved
     /// (`reason`, a host-defined token). Projected under the
@@ -2592,6 +2741,30 @@ impl MobError {
     /// layer to reclassify authentication itself.
     pub fn structured_data(&self) -> Option<serde_json::Value> {
         match self {
+            // The quarantine is this variant's own fact; the failure its last
+            // restore attempt met keeps its structured data under
+            // "cause_data" (when it has some).
+            Self::MobQuarantined {
+                mob_id,
+                class,
+                cause,
+            } => {
+                let mut data = serde_json::json!({
+                    "kind": Self::MOB_QUARANTINED_KIND,
+                    "code": Self::mob_quarantined_code(*class, cause).to_string(),
+                    "mob_id": mob_id.as_str(),
+                    "class": class.as_str(),
+                    "retryable": class.is_retryable(),
+                    "content_retained": true,
+                    "cause": cause.to_string(),
+                });
+                if let Some(object) = data.as_object_mut()
+                    && let Some(cause_data) = cause.structured_data()
+                {
+                    object.insert("cause_data".to_string(), cause_data);
+                }
+                Some(data)
+            }
             Self::MemberSendIdempotency { refusal, .. } => Some(refusal.structured_data()),
             Self::FlowRoleTargetsRefused { flow_id, refusal } => Some(serde_json::json!({
                 "kind": "flow_role_targets_refused",
@@ -3057,6 +3230,9 @@ impl MobError {
                 | Self::MemberCustodyDeferred { cause: error, .. }
                 | Self::MemberStartupRecoveryFailed { cause: error, .. } => error.wire_error_code(),
                 Self::HostFeaturesProbeFailed { cause, .. } => cause.wire_error_code(),
+                Self::MobQuarantined { class, cause, .. } => {
+                    Some(Self::mob_quarantined_code(*class, cause))
+                }
                 // The close's answer (AdmissionClosed carries no code).
                 Self::DurabilityFailStop { .. } => None,
                 Self::SessionError(
@@ -3288,6 +3464,16 @@ impl MobError {
             }
             // The close's answer: AdmissionClosed falls to MobRejected.
             Self::DurabilityFailStop { .. } => MobFailureClass::MobRejected,
+            // A store that could not serve now is the transport class: an
+            // id-addressed verb re-attempts the restore. Every other
+            // quarantine needs its store repaired and an explicit retry.
+            Self::MobQuarantined { class, .. } => {
+                if class.is_retryable() {
+                    MobFailureClass::Transport
+                } else {
+                    MobFailureClass::RuntimeRejected
+                }
+            }
             Self::MobNotFound(_)
             | Self::ProfileNotFound(_)
             | Self::MemberNotFound(_)
@@ -4288,8 +4474,10 @@ mod tests {
     }
 
     /// Only a hosting refusal or an unprovable tail lets the start defer a
-    /// member's custody; every other cause, a bare revision conflict
-    /// included, stays fatal.
+    /// member's operation binding restore; every other cause, a bare
+    /// revision conflict included, stays fatal for it. (A cleanup delivery
+    /// restore also defers a failed read of the member's stored state:
+    /// `a_cleanup_delivery_restore_defers_a_failed_store_read`.)
     #[test]
     fn only_hosting_refusals_and_an_unprovable_tail_defer_custody() {
         let id = meerkat_core::SessionId::new();
@@ -4332,6 +4520,123 @@ mod tests {
         ] {
             assert!(!fatal.is_deferrable_custody_cause(), "{fatal} stays fatal");
         }
+    }
+
+    /// A cleanup delivery restore also defers a failed read of the member's
+    /// stored state, classed by its typed store failure: a store that could
+    /// not serve now is `store_unavailable`, a malformed or refusing state
+    /// `store_unreadable`. The operation binding restore keeps deferring the
+    /// hosting refusals and the unprovable tail only.
+    #[test]
+    fn a_cleanup_delivery_restore_defers_a_failed_store_read() {
+        let id = meerkat_core::SessionId::new();
+        let unavailable =
+            MobError::SessionError(meerkat_core::service::SessionError::Store(Box::new(
+                meerkat_core::SessionStoreError::Internal("host store unavailable".to_string()),
+            )));
+        let corrupted = MobError::SessionError(meerkat_core::service::SessionError::Store(
+            Box::new(meerkat_core::SessionStoreError::Corrupted(id.clone())),
+        ));
+        assert_eq!(
+            MemberCustodyDeferralCause::of_restore(
+                MemberCustodyRestore::CleanupDelivery,
+                &unavailable
+            ),
+            Some(MemberCustodyDeferralCause::StoreUnavailable)
+        );
+        assert_eq!(
+            MemberCustodyDeferralCause::of_restore(
+                MemberCustodyRestore::CleanupDelivery,
+                &corrupted
+            ),
+            Some(MemberCustodyDeferralCause::StoreUnreadable)
+        );
+        for error in [&unavailable, &corrupted] {
+            assert_eq!(
+                MemberCustodyDeferralCause::of_restore(MemberCustodyRestore::StartupBinding, error),
+                None,
+                "{error} stays fatal for an operation binding restore"
+            );
+        }
+        let served_elsewhere =
+            MobError::SessionError(meerkat_core::service::SessionError::ServedElsewhere {
+                id: id.clone(),
+            });
+        for restore in [
+            MemberCustodyRestore::StartupBinding,
+            MemberCustodyRestore::CleanupDelivery,
+        ] {
+            assert_eq!(
+                MemberCustodyDeferralCause::of_restore(restore, &served_elsewhere),
+                Some(MemberCustodyDeferralCause::ServedElsewhere)
+            );
+        }
+        assert_eq!(
+            MemberCustodyDeferralCause::of_restore(
+                MemberCustodyRestore::CleanupDelivery,
+                &MobError::Internal("local cleanup delivery tuple diverges".to_string())
+            ),
+            None,
+            "a divergence of the mob's own authority stays fatal"
+        );
+        assert_eq!(
+            MemberCustodyDeferralCause::StoreUnavailable.as_str(),
+            "store_unavailable"
+        );
+        assert_eq!(
+            MemberCustodyDeferralCause::StoreUnreadable.as_str(),
+            "store_unreadable"
+        );
+    }
+
+    /// A quarantined mob answers typed: a store that could not serve now is
+    /// retryable under the runtime-unavailable code and the transport class,
+    /// every other class needs a repair and carries the code of the failure
+    /// its last restore attempt met.
+    #[test]
+    fn a_quarantined_mob_answers_its_class_typed() {
+        let mob_id = MobId::from("quarantined");
+        let unavailable = MobError::MobQuarantined {
+            mob_id: mob_id.clone(),
+            class: MobQuarantineClass::StoreUnavailable,
+            cause: Arc::new(MobError::SessionError(
+                meerkat_core::service::SessionError::Store(Box::new(
+                    meerkat_core::SessionStoreError::Internal("unavailable".to_string()),
+                )),
+            )),
+        };
+        assert_eq!(unavailable.failure_class(), MobFailureClass::Transport);
+        assert_eq!(
+            unavailable.wire_error_code(),
+            Some(meerkat_contracts::ErrorCode::SessionRuntimeUnavailable)
+        );
+        let data = unavailable.structured_data().expect("structured data");
+        assert_eq!(data["kind"], MobError::MOB_QUARANTINED_KIND);
+        assert_eq!(data["code"], "SESSION_RUNTIME_UNAVAILABLE");
+        assert_eq!(data["mob_id"], "quarantined");
+        assert_eq!(data["class"], "store_unavailable");
+        assert_eq!(data["retryable"], true);
+        assert!(unavailable.wire_detail().is_none());
+
+        let refused = MobError::MobQuarantined {
+            mob_id,
+            class: MobQuarantineClass::ResumeRefused,
+            cause: Arc::new(MobError::IncarnationInconsistent {
+                mob_id: MobId::from("quarantined"),
+                inconsistency: IncarnationInconsistency::MultipleRecords { count: 2 },
+            }),
+        };
+        assert_eq!(refused.failure_class(), MobFailureClass::RuntimeRejected);
+        let data = refused.structured_data().expect("structured data");
+        assert_eq!(data["class"], "resume_refused");
+        assert_eq!(data["retryable"], false);
+        assert_eq!(
+            data["code"],
+            refused
+                .wire_error_code()
+                .expect("a code for every quarantine")
+                .to_string()
+        );
     }
 
     /// A durable profile's spawn on a mob without persistent sessions is

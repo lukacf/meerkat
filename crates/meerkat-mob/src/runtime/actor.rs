@@ -510,7 +510,7 @@ async fn member_session_present(
 /// session read or restore failure reads a store failure through this one
 /// split ([`session_store_failure_class`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum SessionStoreFailureClass {
+pub(crate) enum SessionStoreFailureClass {
     /// The persisted state cannot be decoded or verified (`Serialization`,
     /// `Corrupted`). `Corrupted` is deterministic for the same persisted state
     /// and request by the `SessionStoreError::Corrupted` contract, never a
@@ -530,7 +530,7 @@ pub(super) enum SessionStoreFailureClass {
 
 /// Classify the source of a [`meerkat_core::service::SessionError::Store`]
 /// ([`SessionStoreFailureClass`]).
-pub(super) fn session_store_failure_class(
+pub(crate) fn session_store_failure_class(
     source: &(dyn std::error::Error + Send + Sync + 'static),
 ) -> SessionStoreFailureClass {
     use meerkat_core::SessionStoreError;

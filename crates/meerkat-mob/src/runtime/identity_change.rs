@@ -494,6 +494,38 @@ pub enum IdentityChangeRefusal {
         current_digest: String,
         current_revision: Option<u64>,
     },
+    /// The identity awaits no preparation.
+    PreparationNotPending { identity: AgentIdentity },
+    /// The settle's binding is not the held construction's.
+    PreparationMismatch { identity: AgentIdentity },
+    /// A construction of the identity is held or activating: its attempt.
+    ConstructionOpen {
+        identity: AgentIdentity,
+        attempt: u64,
+    },
+    /// The attempt is not the identity's held construction: the current
+    /// one, if any.
+    StaleAttempt {
+        identity: AgentIdentity,
+        current: Option<u64>,
+    },
+    /// The identity's preparation is not `constructed`: it takes no held
+    /// construction.
+    NotConstructed { identity: AgentIdentity },
+    /// The identity's preparation is `constructed`: only the activation of
+    /// its held construction settles it.
+    ConstructionRequired { identity: AgentIdentity },
+    /// The activation of the attempt was accepted: its publication is in
+    /// flight, and nothing aborts or replaces it.
+    ActivationPending {
+        identity: AgentIdentity,
+        attempt: u64,
+    },
+    /// The held construction could not be made.
+    ConstructionRefused {
+        identity: AgentIdentity,
+        reason: String,
+    },
 }
 
 impl IdentityChangeRefusal {
@@ -521,6 +553,14 @@ impl IdentityChangeRefusal {
             Self::NotArchived { .. } => "not_archived",
             Self::OwnerReadOnly { .. } => "owner_read_only",
             Self::StaleSpec { .. } => "stale_spec",
+            Self::PreparationNotPending { .. } => "preparation_not_pending",
+            Self::PreparationMismatch { .. } => "preparation_mismatch",
+            Self::ConstructionOpen { .. } => "construction_open",
+            Self::StaleAttempt { .. } => "stale_attempt",
+            Self::NotConstructed { .. } => "not_constructed",
+            Self::ConstructionRequired { .. } => "construction_required",
+            Self::ActivationPending { .. } => "activation_pending",
+            Self::ConstructionRefused { .. } => "construction_refused",
         }
     }
 
@@ -592,6 +632,41 @@ impl std::fmt::Display for IdentityChangeRefusal {
             } => write!(
                 formatter,
                 "the spec of '{identity}' moved since the change was decided (now {current_digest})"
+            ),
+            Self::PreparationNotPending { identity } => {
+                write!(formatter, "'{identity}' awaits no preparation")
+            }
+            Self::PreparationMismatch { identity } => write!(
+                formatter,
+                "the settle of '{identity}' does not bind its held construction"
+            ),
+            Self::ConstructionOpen { identity, attempt } => write!(
+                formatter,
+                "a construction of '{identity}' is open (attempt {attempt})"
+            ),
+            Self::StaleAttempt { identity, current } => match current {
+                Some(current) => write!(
+                    formatter,
+                    "the attempt is not the held construction of '{identity}' (attempt {current})"
+                ),
+                None => write!(formatter, "no construction of '{identity}' is held"),
+            },
+            Self::NotConstructed { identity } => write!(
+                formatter,
+                "the preparation of '{identity}' takes no held construction"
+            ),
+            Self::ConstructionRequired { identity } => write!(
+                formatter,
+                "the preparation of '{identity}' is settled by activating its held construction"
+            ),
+            Self::ActivationPending { identity, attempt } => write!(
+                formatter,
+                "the activation of '{identity}' (attempt {attempt}) was accepted and its \
+                 publication is in flight"
+            ),
+            Self::ConstructionRefused { identity, reason } => write!(
+                formatter,
+                "the construction of '{identity}' was refused: {reason}"
             ),
         }
     }

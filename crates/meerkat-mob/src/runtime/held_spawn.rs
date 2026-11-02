@@ -640,6 +640,17 @@ pub(super) async fn provision_held(
     // keeps its actual outcome.
     let expired = match decision {
         Ok(Ok(HeldSpawnDecision::Activate { decided_at })) if decided_at < setup_deadline => {
+            #[cfg(test)]
+            {
+                let hook = HELD_PUBLICATION_TEST_HOOKS
+                    .lock()
+                    .expect("held publication hook")
+                    .remove(member);
+                if let Some((entered_tx, release_rx)) = hook {
+                    let _ = entered_tx.send(());
+                    let _ = release_rx.await;
+                }
+            }
             return held_provision.publish().await;
         }
         Ok(Ok(HeldSpawnDecision::Activate { .. })) | Err(_) => true,
@@ -672,6 +683,30 @@ pub(crate) fn arm_held_ready_delivery_for_test(
         HELD_READY_DELIVERY_TEST_HOOKS
             .lock()
             .expect("held ready delivery hook")
+            .insert(member.to_string(), (entered_tx, release_rx))
+            .is_none()
+    );
+    (entered_rx, release_tx)
+}
+
+/// Test seam: parks a held setup whose activation was accepted, before its
+/// publication, so a test can pass the setup deadline and drop the
+/// observers in between. Inert unless armed for the member.
+#[cfg(all(test, feature = "runtime-adapter", not(target_arch = "wasm32")))]
+static HELD_PUBLICATION_TEST_HOOKS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, HeldReadyDeliveryTestHook>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+#[cfg(all(test, feature = "runtime-adapter", not(target_arch = "wasm32")))]
+pub(crate) fn arm_held_publication_for_test(
+    member: &str,
+) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+    let (entered_tx, entered_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
+    assert!(
+        HELD_PUBLICATION_TEST_HOOKS
+            .lock()
+            .expect("held publication hook")
             .insert(member.to_string(), (entered_tx, release_rx))
             .is_none()
     );

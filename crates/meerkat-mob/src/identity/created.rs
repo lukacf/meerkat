@@ -940,6 +940,9 @@ pub enum IdentityChangeEntryOutcome {
     Archived,
     /// The identity is listed again, or unarchived.
     Restored,
+    /// The activation of the identity's held construction was accepted: its
+    /// publication seats it, and one that ends otherwise leaves it pending.
+    Activating,
 }
 
 /// One identity of a change's receipt.

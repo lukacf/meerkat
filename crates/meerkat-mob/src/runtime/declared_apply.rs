@@ -199,16 +199,37 @@ pub struct DeclaredEntry {
     /// then awaits its held creation and is never seated otherwise. The
     /// host's current policy decides; nothing is kept of an earlier one.
     pub held_creation: bool,
+    /// The host's preparation of the identity before its first seat, as its
+    /// rule for the identity's profile derives it at this apply: an identity
+    /// never seated whose preparation is `required` or `constructed` waits
+    /// unseated for it ([`DeclaredEntryOutcome::PreparationPending`]). The
+    /// host settles a `required` preparation by declaring the identity with
+    /// none, and a `constructed` one by activating its held construction
+    /// ([`super::MobHandle::settle_identity_preparation`]).
+    pub preparation: crate::identity::IdentityPreparationMode,
 }
 
 impl DeclaredEntry {
-    /// A declared identity, created by the apply when it is not held.
+    /// A declared identity, created by the apply when it is not held and
+    /// needs no preparation.
     #[must_use]
     pub fn new(spec: SpawnMemberSpec) -> Self {
         Self {
             spec,
             held_creation: false,
+            preparation: crate::identity::IdentityPreparationMode::None,
         }
+    }
+
+    /// The host's preparation of the identity before its first seat
+    /// ([`Self::preparation`]).
+    #[must_use]
+    pub fn with_preparation(
+        mut self,
+        preparation: crate::identity::IdentityPreparationMode,
+    ) -> Self {
+        self.preparation = preparation;
+        self
     }
 
     /// Whether the host holds the identity's creation for its held protocol.
@@ -313,6 +334,10 @@ pub enum DeclaredEntryOutcome {
     RoleMigrationHeld { from: ProfileName, to: ProfileName },
     /// The identity awaits its held creation.
     AwaitingHeldCreation,
+    /// The identity, never seated, awaits its host's preparation: it is not
+    /// seated, and a delivery to it is refused retryable until the host
+    /// settles it ([`DeclaredEntry::preparation`]).
+    PreparationPending,
     /// The identity is hosted on its first use: its host creates the member
     /// (a spawn whose spec carries entry custody).
     HostedOnFirstUse,

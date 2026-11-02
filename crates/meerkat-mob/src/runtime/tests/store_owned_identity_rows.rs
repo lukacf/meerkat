@@ -2191,6 +2191,7 @@ fn answer_kind(outcome: &crate::runtime::DeclaredEntryOutcome) -> &'static str {
         Outcome::FreshLife { .. } => "fresh_life",
         Outcome::RoleMigrationHeld { .. } => "role_migration_held",
         Outcome::AwaitingHeldCreation => "awaiting_held_creation",
+        Outcome::PreparationPending => "preparation_pending",
         Outcome::HostedOnFirstUse => "hosted_on_first_use",
         Outcome::Deferred { .. } => "deferred",
         Outcome::Refused { .. } => "refused",
@@ -2941,4 +2942,611 @@ async fn a_held_store_owned_identity_is_created_by_the_held_protocol_and_never_s
         mob.standing("held")
     );
     assert_eq!(mob.origin("held"), Some(IdentityEntryOrigin::Created));
+}
+
+// ---------------------------------------------------------------------------
+// R2.8 and R2.6: host preparation for either custody, held constructions
+// ---------------------------------------------------------------------------
+
+/// A host surface's settle of `name`'s preparation as `operation_id`,
+/// activating `attempt`'s held construction when it names one.
+async fn settle(
+    handle: &MobHandle,
+    operation_id: &str,
+    name: &str,
+    attempt: Option<u64>,
+) -> Result<crate::runtime::IdentityPreparationSettled, MobError> {
+    let mut settle = crate::runtime::IdentityPreparationSettle::new(
+        operation(operation_id),
+        IdentityChangeRequesterInput::host("console"),
+        name,
+    );
+    if let Some(attempt) = attempt {
+        settle = settle.with_attempt(attempt);
+    }
+    tokio::time::timeout(STEP, handle.settle_identity_preparation(settle, ALLOW))
+        .await
+        .expect("the settle answers")
+}
+
+/// A host surface's create of `name` on the worker profile, prepared by its
+/// host as `preparation`.
+fn prepared_create(
+    operation_id: &str,
+    spec: CreatedIdentitySpec,
+    preparation: IdentityPreparationMode,
+) -> StoreOwnedIdentityCreate {
+    StoreOwnedIdentityCreate::new(
+        operation(operation_id),
+        IdentityChangeRequesterInput::host("console"),
+        vec![CreatedIdentityRequest::new(spec).with_preparation(preparation)],
+    )
+}
+
+/// Whether `error` is the retryable refusal of a delivery to an identity
+/// awaiting its host's preparation.
+fn preparation_refusal(error: &MobError, name: &str) -> bool {
+    matches!(
+        error,
+        MobError::MemberWakeRefused {
+            member_id,
+            refusal: crate::MemberWakeRefusal::HostPreparationPending,
+        } if *member_id == id(name)
+    )
+}
+
+/// Row (RED): a roster-owned identity whose host's rule requires its
+/// preparation waits unseated for it: the apply answers it pending and
+/// seats nothing, a delivery to it is refused retryable, an apply that
+/// still derives the preparation keeps it pending, and the host's
+/// declaration with no preparation (its settle) seats it Dormant.
+///
+/// RED on the old tree: the apply ignores the preparation and seats it.
+#[tokio::test]
+async fn a_roster_owned_identity_with_preparation_waits_unseated_until_settled() {
+    let mob = StoreOwnedMob::new("roster-preparing").await;
+    let declared = |preparation| {
+        DeclaredRoster::partial([
+            DeclaredEntry::new(roster_spec("prepared")).with_preparation(preparation)
+        ])
+    };
+    for _ in 0..2 {
+        let pending = tokio::time::timeout(
+            STEP,
+            mob.handle
+                .apply_declared_roster(declared(IdentityPreparationMode::Required)),
+        )
+        .await
+        .expect("the apply answers")
+        .expect("the apply runs");
+        assert!(
+            matches!(
+                pending.entries.get(&id("prepared")),
+                Some(crate::runtime::DeclaredEntryOutcome::PreparationPending)
+            ),
+            "{pending:?}"
+        );
+        mob.unseated_for("prepared", UnseatedEntryCause::PreparationPending)
+            .await;
+        assert!(!mob.is_member("prepared").await);
+        let refused = mob
+            .handle
+            .ensure_member_live(&id("prepared"))
+            .await
+            .expect_err("a delivery to an identity awaiting its preparation is refused");
+        assert!(preparation_refusal(&refused, "prepared"), "{refused:?}");
+    }
+    let settled = tokio::time::timeout(
+        STEP,
+        mob.handle
+            .apply_declared_roster(declared(IdentityPreparationMode::None)),
+    )
+    .await
+    .expect("the apply answers")
+    .expect("the apply runs");
+    assert!(
+        matches!(
+            settled.entries.get(&id("prepared")),
+            Some(crate::runtime::DeclaredEntryOutcome::Seated { .. })
+        ),
+        "{settled:?}"
+    );
+    assert!(mob.is_member("prepared").await);
+}
+
+/// Row (RED): a store-owned identity whose host's rule requires its
+/// preparation is created pending and unseated; a delivery to it is refused
+/// retryable; and its settle seats it Dormant from its row's spec, its row
+/// present again, with the settle's receipt.
+///
+/// RED on the old tree: no settle exists.
+#[tokio::test]
+async fn a_store_owned_identity_with_preparation_waits_unseated_and_a_delivery_is_refused_retryable()
+ {
+    let mob = StoreOwnedMob::new("store-preparing").await;
+    committed(
+        mob.create(
+            prepared_create(
+                "create-pending",
+                spec("pending", "worker"),
+                IdentityPreparationMode::Required,
+            ),
+            ALLOW,
+        )
+        .await,
+    );
+    mob.unseated_for("pending", UnseatedEntryCause::PreparationPending)
+        .await;
+    let refused = mob
+        .handle
+        .ensure_member_live(&id("pending"))
+        .await
+        .expect_err("a delivery to an identity awaiting its preparation is refused");
+    assert!(preparation_refusal(&refused, "pending"), "{refused:?}");
+    assert!(!mob.is_member("pending").await);
+
+    let settled = settle(&mob.handle, "settle-pending", "pending", None)
+        .await
+        .expect("the settle commits");
+    let receipt = committed(Ok(settled.change));
+    assert_eq!(receipt.change, IdentityChangeKind::SettlePreparation);
+    assert!(
+        matches!(
+            settled.settlement,
+            Some(crate::runtime::PreparationSettlement::Seated(
+                crate::runtime::DeclaredEntryOutcome::Seated { .. }
+            ))
+        ),
+        "{:?}",
+        settled.settlement
+    );
+    assert!(mob.seated_dormant("pending"));
+    assert_eq!(
+        mob.row("pending").await.presence,
+        CreatedIdentityPresence::Present
+    );
+}
+
+/// Row (RED): a settle of an identity whose spec owes a kickoff embodies it
+/// and runs the kickoff once; a retry of the settle replays its receipt and
+/// runs nothing again, and a later settle finds no preparation pending.
+///
+/// RED on the old tree: no settle exists.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_settle_seats_dormant_and_runs_an_owed_kickoff_once() {
+    let mob = StoreOwnedMob::new("settle-kickoff").await;
+    mob.service.set_keep_alive_turns_complete_immediately(true);
+    let kicked = spec("kicked", "worker")
+        .with_runtime_mode_override(crate::MobRuntimeMode::AutonomousHost)
+        .with_initial_message(meerkat_core::types::ContentInput::from("Begin."));
+    committed(
+        mob.create(
+            prepared_create("create-kicked", kicked, IdentityPreparationMode::Required),
+            ALLOW,
+        )
+        .await,
+    );
+    let settled = settle(&mob.handle, "settle-kicked", "kicked", None)
+        .await
+        .expect("the settle commits");
+    assert!(
+        matches!(
+            settled.settlement,
+            Some(crate::runtime::PreparationSettlement::Seated(
+                crate::runtime::DeclaredEntryOutcome::Embodied { .. }
+            ))
+        ),
+        "{:?}",
+        settled.settlement
+    );
+    mob.handle
+        .wait_for_members_kickoff_complete(&[id("kicked")], Some(STEP))
+        .await
+        .expect("the kickoff resolves");
+    let session = mob.session("kicked").await;
+    let kickoffs = || async {
+        mob.service
+            .recorded_start_turn_prompts()
+            .await
+            .into_iter()
+            .filter(|(ran_on, ran)| *ran_on == session && ran == "Begin.")
+            .count()
+    };
+    let deadline = tokio::time::Instant::now() + STEP;
+    while kickoffs().await == 0 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the owed kickoff never ran"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(kickoffs().await, 1, "the kickoff runs once");
+    let retried = settle(&mob.handle, "settle-kicked", "kicked", None)
+        .await
+        .expect("the retry answers");
+    assert!(matches!(
+        retried.change,
+        IdentityChangeOutcome::Replayed { .. }
+    ));
+    assert_eq!(kickoffs().await, 1, "a retried settle runs nothing again");
+    assert_eq!(
+        refusal(settle(&mob.handle, "settle-kicked-again", "kicked", None).await),
+        IdentityChangeRefusal::PreparationNotPending {
+            identity: id("kicked")
+        }
+    );
+}
+
+/// Row (RED): an identity whose preparation is constructed is never seated
+/// Dormant: its settle without an attempt is refused `construction_required`,
+/// a dormant seat of it is refused, and it stays pending.
+///
+/// RED on the old tree: no settle exists.
+#[tokio::test]
+async fn a_constructed_profile_refuses_a_settle_without_an_attempt_and_never_seats_dormant() {
+    let mob = StoreOwnedMob::new("constructed-dormant").await;
+    committed(
+        mob.create(
+            prepared_create(
+                "create-built",
+                spec("built", "worker"),
+                IdentityPreparationMode::Constructed,
+            ),
+            ALLOW,
+        )
+        .await,
+    );
+    assert_eq!(
+        refusal(settle(&mob.handle, "settle-built", "built", None).await),
+        IdentityChangeRefusal::ConstructionRequired {
+            identity: id("built")
+        }
+    );
+    let refused = mob
+        .handle
+        .seat_dormant_members(vec![
+            SpawnMemberSpec::host_root("worker", id("built")).with_created_custody(true),
+        ])
+        .await
+        .expect("the seat batch answers");
+    assert!(
+        matches!(
+            refused[0],
+            crate::runtime::DormantSeatOutcome::Refused { .. }
+        ),
+        "{refused:?}"
+    );
+    mob.unseated_for("built", UnseatedEntryCause::PreparationPending)
+        .await;
+    assert!(matches!(
+        mob.row("built").await.presence,
+        CreatedIdentityPresence::PendingPreparation {
+            constructed: true,
+            ..
+        }
+    ));
+}
+
+impl HeldMob {
+    async fn create_constructed(&self, name: &str) {
+        committed(
+            tokio::time::timeout(
+                STEP,
+                self.handle.create_store_owned_identities(
+                    prepared_create(
+                        &format!("create-{name}"),
+                        spec(name, "worker")
+                            .with_runtime_mode_override(crate::MobRuntimeMode::TurnDriven),
+                        IdentityPreparationMode::Constructed,
+                    ),
+                    ALLOW,
+                ),
+            )
+            .await
+            .expect("the create answers"),
+        );
+    }
+
+    async fn construct(
+        &self,
+        operation_id: &str,
+        name: &str,
+    ) -> Result<crate::runtime::HeldPreparation, MobError> {
+        tokio::time::timeout(
+            STEP,
+            self.handle
+                .construct_identity(crate::runtime::IdentityConstructionRequest::new(
+                    operation(operation_id),
+                    name,
+                    tokio::time::Instant::now() + STEP,
+                )),
+        )
+        .await
+        .expect("the construction answers")
+    }
+}
+
+/// Row (RED): a settle activates exactly the held attempt. The host's held
+/// construction holds the identity's member unpublished; a settle naming
+/// another attempt is refused `stale_attempt` with the current one; the
+/// settle naming it publishes that very construction, a store-owned
+/// member; and a later settle finds no preparation pending.
+///
+/// RED on the old tree: no held construction exists.
+#[tokio::test]
+async fn the_settle_activates_exactly_the_held_attempt_and_a_stale_attempt_is_refused() {
+    let mob = HeldMob::new("construct-settle").await;
+    mob.create_constructed("built").await;
+    let held = mob
+        .construct("construct-built", "built")
+        .await
+        .expect("the construction is held");
+    assert_eq!(held.identity(), &id("built"));
+    assert_eq!(
+        mob.standing("built"),
+        Some(EntryStanding::Unseated(
+            UnseatedEntryCause::PreparationPending
+        )),
+        "a held construction is not published"
+    );
+    let stale = held.attempt() + 1;
+    assert_eq!(
+        refusal(settle(&mob.handle, "settle-stale", "built", Some(stale)).await),
+        IdentityChangeRefusal::StaleAttempt {
+            identity: id("built"),
+            current: Some(held.attempt()),
+        }
+    );
+    let settled = settle(&mob.handle, "settle-built", "built", Some(held.attempt()))
+        .await
+        .expect("the settle activates the held construction");
+    assert!(
+        matches!(
+            settled.settlement,
+            Some(crate::runtime::PreparationSettlement::Activated { attempt })
+                if attempt == held.attempt()
+        ),
+        "{:?}",
+        settled.settlement
+    );
+    assert!(matches!(
+        mob.standing("built"),
+        Some(EntryStanding::Seated(_))
+    ));
+    assert_eq!(mob.origin("built"), Some(IdentityEntryOrigin::Created));
+    assert_eq!(
+        refusal(settle(&mob.handle, "settle-again", "built", Some(held.attempt())).await),
+        IdentityChangeRefusal::PreparationNotPending {
+            identity: id("built")
+        }
+    );
+}
+
+/// Row (RED): an accepted activation that a crash left without its
+/// publication ends `publication_interrupted` and keeps the identity
+/// pending. The settle's receipt journals the acceptance (written here as
+/// the settle's step writes it, and the process stops before the
+/// publication); after the restart, a retry of the settle replays its
+/// receipt and answers the interrupted publication, the identity is still
+/// pending, and a new held attempt can be constructed and activated.
+///
+/// RED on the old tree: no settle exists.
+#[tokio::test]
+async fn a_crash_between_acceptance_and_commit_ends_the_attempt_publication_interrupted_and_keeps_the_entry_pending()
+ {
+    let mut mob = HeldMob::new("construct-crash").await;
+    mob.create_constructed("built").await;
+    let mob_id = mob.handle.mob_id().clone();
+    let receipt = crate::IdentityChangeReceipt::sealed(
+        mob_id,
+        "settle-built",
+        digest("settle-built"),
+        IdentityChangeKind::SettlePreparation,
+        vec![crate::identity::IdentityChangeReceiptEntry::new(
+            id("built"),
+            IdentityChangeEntryOutcome::Activating,
+        )],
+        1,
+    )
+    .expect("the acceptance's receipt");
+    let store = mob
+        .storage
+        .identity_member
+        .clone()
+        .expect("the built-in identity store");
+    let written = crate::store::MobIdentityMemberStore::commit_identity_change(
+        store.as_ref(),
+        &crate::store::IdentityChangeWrite {
+            receipt,
+            rows: Vec::new(),
+            events: Vec::new(),
+        },
+    )
+    .await
+    .expect("the acceptance's transaction");
+    assert!(matches!(
+        written,
+        crate::store::IdentityChangeCommit::Committed { .. }
+    ));
+
+    mob.restart().await;
+    let replayed = settle(&mob.handle, "settle-built", "built", Some(1))
+        .await
+        .expect("the retry answers");
+    assert!(matches!(
+        replayed.change,
+        IdentityChangeOutcome::Replayed { .. }
+    ));
+    assert!(
+        matches!(
+            replayed.settlement,
+            Some(crate::runtime::PreparationSettlement::PublicationEnded {
+                end: crate::runtime::ConstructionEnd::PublicationInterrupted,
+                ..
+            })
+        ),
+        "{:?}",
+        replayed.settlement
+    );
+    assert_eq!(
+        mob.standing("built"),
+        Some(EntryStanding::Unseated(
+            UnseatedEntryCause::PreparationPending
+        )),
+        "the identity stays pending"
+    );
+    let held = mob
+        .construct("construct-again", "built")
+        .await
+        .expect("a new attempt is held");
+    settle(&mob.handle, "settle-again", "built", Some(held.attempt()))
+        .await
+        .expect("the new attempt activates");
+    assert!(matches!(
+        mob.standing("built"),
+        Some(EntryStanding::Seated(_))
+    ));
+}
+
+/// Row (RED): a removal of an identity whose construction is held aborts
+/// the construction and tombstones the name: no member is published, the
+/// name reads removed, and the held attempt settles nothing.
+///
+/// RED on the old tree: no held construction exists.
+#[tokio::test]
+async fn a_removal_during_a_held_construction_aborts_it_and_tombstones() {
+    let mob = HeldMob::new("construct-remove").await;
+    mob.create_constructed("built").await;
+    let held = mob
+        .construct("construct-built", "built")
+        .await
+        .expect("the construction is held");
+    let removed = tokio::time::timeout(
+        STEP,
+        mob.handle.remove_identity(
+            crate::runtime::IdentityRemoval::new(
+                operation("remove-built"),
+                IdentityChangeRequesterInput::host("console"),
+                "built",
+            ),
+            ALLOW,
+        ),
+    )
+    .await
+    .expect("the removal answers");
+    committed(removed);
+    let deadline = tokio::time::Instant::now() + STEP;
+    while !matches!(
+        mob.handle
+            .identity_entry(&id("built"))
+            .expect("the entry read answers"),
+        IdentityEntryRead::Removed
+    ) {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the identity never read removed"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        mob.handle
+            .get_member(&id("built"))
+            .await
+            .expect("roster read")
+            .is_none(),
+        "the held construction was never published"
+    );
+    assert!(matches!(
+        settle(&mob.handle, "settle-built", "built", Some(held.attempt())).await,
+        Err(MobError::IdentityChangeRefused { .. })
+    ));
+}
+
+/// Row (RED): an activation accepted before the attempt's deadline publishes
+/// after it, and nothing replaces it meanwhile. The settle's acceptance
+/// holds while the publication is parked past the deadline and the host's
+/// observer is dropped: the identity is not published before its commit,
+/// an abort is refused `activation_pending`, a new attempt
+/// `construction_open`, and the deadline ends nothing. Released, the
+/// publication seats exactly that construction, and the settle answers it
+/// activated.
+///
+/// RED on the old tree: no held construction exists.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_activation_accepted_before_the_deadline_publishes_after_it_and_nothing_replaces_it() {
+    let mob = HeldMob::new("construct-deadline").await;
+    // The publication hold is keyed by name across the test process.
+    let name = unique("parked");
+    mob.create_constructed(&name).await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    let held = tokio::time::timeout(
+        STEP,
+        mob.handle
+            .construct_identity(crate::runtime::IdentityConstructionRequest::new(
+                operation("construct-parked"),
+                name.as_str(),
+                deadline,
+            )),
+    )
+    .await
+    .expect("the construction answers")
+    .expect("the construction is held");
+    let attempt = held.attempt();
+    let (entered, release) = crate::runtime::held_spawn::arm_held_publication_for_test(&name);
+    let handle = mob.handle.clone();
+    let settled_name = name.clone();
+    let settling = tokio::spawn(async move {
+        settle(&handle, "settle-parked", &settled_name, Some(attempt)).await
+    });
+    tokio::time::timeout(STEP, entered)
+        .await
+        .expect("the accepted publication parks")
+        .expect("the publication hold");
+    drop(held);
+    tokio::time::sleep_until(deadline + Duration::from_millis(200)).await;
+    assert_eq!(
+        mob.standing(&name),
+        Some(EntryStanding::Unseated(
+            UnseatedEntryCause::PreparationPending
+        )),
+        "nothing is published before its commit"
+    );
+    assert_eq!(
+        refusal(
+            mob.handle
+                .abort_identity_construction(&id(&name), attempt)
+                .await
+        ),
+        IdentityChangeRefusal::ActivationPending {
+            identity: id(&name),
+            attempt,
+        }
+    );
+    assert_eq!(
+        refusal(mob.construct("construct-parked-again", &name).await),
+        IdentityChangeRefusal::ConstructionOpen {
+            identity: id(&name),
+            attempt,
+        }
+    );
+    let _ = release.send(());
+    let settled = tokio::time::timeout(STEP, settling)
+        .await
+        .expect("the settle answers")
+        .expect("the settle task")
+        .expect("the settle commits");
+    assert!(
+        matches!(
+            settled.settlement,
+            Some(crate::runtime::PreparationSettlement::Activated { attempt: activated })
+                if activated == attempt
+        ),
+        "{:?}",
+        settled.settlement
+    );
+    assert!(matches!(
+        mob.standing(&name),
+        Some(EntryStanding::Seated(_))
+    ));
+    assert_eq!(mob.origin(&name), Some(IdentityEntryOrigin::Created));
 }

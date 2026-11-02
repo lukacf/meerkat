@@ -255,6 +255,11 @@ pub use identity_change::{
     StoreOwnedIdentityCreate, StoreOwnedIdentityUpdate,
 };
 mod identity_entry;
+mod identity_preparation;
+pub use identity_preparation::{
+    ConstructionEnd, HeldPreparation, IdentityConstructionRequest, IdentityPreparationSettle,
+    IdentityPreparationSettled, PreparationSettlement,
+};
 mod identity_incarnation_custody;
 mod identity_local_services;
 #[cfg(any(test, feature = "test-support"))]

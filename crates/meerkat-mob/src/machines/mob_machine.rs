@@ -62,13 +62,13 @@ pub use meerkat_machine_schema::catalog::dsl::mob_machine::{
 pub use meerkat_machine_schema::catalog::dsl::mob_machine::{RespawnRefusalReason, RotationTarget};
 // The declared apply: unseated causes, host preparation causes, declared
 // placements, verdicts, the seal's verdict, why an archived session record
-// is let go, the kind of a host's first-boot request and the verdict of an
-// apply's opening. The schema's own types, one definition for both
-// instantiations of the machine.
+// is let go, the kind of a host's first-boot request, the verdict of an
+// apply's opening and of a one-entry unlist. The schema's own types, one
+// definition for both instantiations of the machine.
 pub use meerkat_machine_schema::catalog::dsl::mob_machine::{
     ArchivedSessionForgetReason, DeclaredApplyOpenVerdict, DeclaredRosterSealVerdict,
     EntryPlacementKind, FirstBootRequestKind, HostPreparationCause, IdentityEntryVerdict,
-    UnseatedEntryCause,
+    UnlistEntryVerdict, UnseatedEntryCause,
 };
 // Operator instructions: a record's slot effect and target kind, why a
 // member's delivery is blocked or deferred, why a write is refused, and the
@@ -16263,7 +16263,9 @@ mod tests {
             &mut authority,
             MobMachineInput::RecordCreatedIdentityEntry {
                 agent_identity: identity.clone(),
-                cause: UnseatedEntryCause::HostedOnFirstUse,
+                preparation_required: false,
+                placement: EntryPlacementKind::Placed,
+                held_creation: false,
             },
         )
         .expect("the record answers");
@@ -16443,8 +16445,11 @@ mod tests {
     /// keeps it, another runtime mode restamps it, another profile with the
     /// migration from its current role migrates it, and the entry stays
     /// Created. A roster's declaration of the name is refused as the store's
-    /// (RefusedNameOwnedByCreated), and no arm takes a store-owned update's
-    /// declaration of a Declared entry or of an archived Created one.
+    /// (RefusedNameOwnedByCreated). A store-owned update's declaration of an
+    /// archived Created entry is answered record only (its row is the whole
+    /// change: MobMachine routes it from the step's own state, no longer the
+    /// shell from a row read before it), and no arm takes one of a Declared
+    /// entry.
     #[test]
     fn a_store_owned_update_takes_the_declared_apply_verdicts_under_created_custody() {
         let (mut authority, member) = dormant_member_authority("created-updated");
@@ -16501,16 +16506,19 @@ mod tests {
         );
         let archived = AgentIdentity::from("archived-updated");
         recover_created(&mut authority, &archived, RecoveredPresence::Archived, None);
-        for identity in [&declared, &archived] {
-            assert!(
-                MobMachineMutator::apply(
-                    &mut authority,
-                    declare_input(identity, created(Declaration::default())),
-                )
-                .is_err(),
-                "no arm declares {identity:?} under created custody"
-            );
-        }
+        assert_eq!(
+            declare(&mut authority, &archived, created(Declaration::default())),
+            IdentityEntryVerdict::RecordOnly,
+            "an archived identity's update changes its row alone"
+        );
+        assert!(
+            MobMachineMutator::apply(
+                &mut authority,
+                declare_input(&declared, created(Declaration::default())),
+            )
+            .is_err(),
+            "no arm declares a Declared entry under created custody"
+        );
     }
 
     /// No worker reconcile spawns a removed name or retires a member whose
@@ -16955,7 +16963,9 @@ mod tests {
             &mut authority,
             MobMachineInput::RecordCreatedIdentityEntry {
                 agent_identity: created.clone(),
-                cause: UnseatedEntryCause::PreparationPending,
+                preparation_required: true,
+                placement: EntryPlacementKind::Local,
+                held_creation: false,
             },
         )
         .expect("the record answers");
@@ -16989,5 +16999,363 @@ mod tests {
             Some(&UnseatedEntryCause::SeatOwed),
             "the settled entry is owed its seat"
         );
+    }
+
+    // ---------------------------------------------------------------------
+    // Identity changes and the one-entry unlist (0.9.9)
+    // ---------------------------------------------------------------------
+
+    /// One identity's removal, archive or unarchive, and its verdict.
+    fn change_entry(
+        authority: &mut MobMachineAuthority,
+        identity: &AgentIdentity,
+        kind: IdentityEntryChangeKind,
+    ) -> IdentityEntryChangeVerdict {
+        let agent_identity = identity.clone();
+        let input = match kind {
+            IdentityEntryChangeKind::Remove => {
+                MobMachineInput::RemoveIdentityEntry { agent_identity }
+            }
+            IdentityEntryChangeKind::Archive => {
+                MobMachineInput::ArchiveIdentityEntry { agent_identity }
+            }
+            IdentityEntryChangeKind::Unarchive => {
+                MobMachineInput::UnarchiveIdentityEntry { agent_identity }
+            }
+        };
+        MobMachineMutator::apply(authority, input)
+            .expect("the change answers")
+            .effects()
+            .iter()
+            .find_map(|effect| match effect {
+                MobMachineEffect::IdentityEntryChangeResolved { verdict, .. } => Some(*verdict),
+                _ => None,
+            })
+            .expect("the change emits its verdict")
+    }
+
+    /// One roster-owned identity's unlist, and its verdict.
+    fn unlist(authority: &mut MobMachineAuthority, identity: &AgentIdentity) -> UnlistEntryVerdict {
+        MobMachineMutator::apply(
+            authority,
+            MobMachineInput::UnlistIdentityEntry {
+                agent_identity: identity.clone(),
+            },
+        )
+        .expect("the unlist answers")
+        .effects()
+        .iter()
+        .find_map(|effect| match effect {
+            MobMachineEffect::IdentityEntryUnlisted { verdict, .. } => Some(*verdict),
+            _ => None,
+        })
+        .expect("the unlist emits its verdict")
+    }
+
+    /// An identity awaiting its host's preparation is never archived: its
+    /// archive is refused PreparationPending whatever attempt is open and
+    /// changes nothing. Its removal ends a held attempt in the same step and
+    /// tombstones the name, and waits while an accepted activation's
+    /// publication is in flight.
+    #[test]
+    fn a_pending_identitys_archive_is_refused_and_its_removal_ends_a_held_attempt() {
+        let mut authority = MobMachineAuthority::new();
+        let required = AgentIdentity::from("pending-required");
+        let held = AgentIdentity::from("pending-held");
+        let activating = AgentIdentity::from("pending-activating");
+        for identity in [&required, &held, &activating] {
+            recover_created(
+                &mut authority,
+                identity,
+                RecoveredPresence::PresentUnseated,
+                None,
+            );
+        }
+        assert_eq!(
+            begin_construction(&mut authority, &held, 1, true),
+            PreparationConstructionVerdict::Held
+        );
+        assert_eq!(
+            begin_construction(&mut authority, &activating, 1, true),
+            PreparationConstructionVerdict::Held
+        );
+        assert_eq!(
+            settle_preparation(&mut authority, &activating, Some(1), true, true),
+            PreparationSettleVerdict::ActivationAccepted
+        );
+        let before = authority.state().clone();
+        for identity in [&required, &held, &activating] {
+            assert_eq!(
+                change_entry(&mut authority, identity, IdentityEntryChangeKind::Archive),
+                IdentityEntryChangeVerdict::PreparationPending,
+                "{identity:?}"
+            );
+        }
+        assert_eq!(
+            authority.state(),
+            &before,
+            "a refused archive changes nothing"
+        );
+
+        assert_eq!(
+            change_entry(&mut authority, &held, IdentityEntryChangeKind::Remove),
+            IdentityEntryChangeVerdict::Removed
+        );
+        let state = authority.state();
+        assert!(
+            !state.identity_entry_constructions_held.contains_key(&held),
+            "the removal ends the held attempt in its step"
+        );
+        assert!(state.identity_entry_tombstones.contains(&held));
+        assert!(!state.identity_entry_origins.contains_key(&held));
+        assert_eq!(
+            change_entry(&mut authority, &activating, IdentityEntryChangeKind::Remove),
+            IdentityEntryChangeVerdict::InFlight,
+            "an accepted activation's publication is in flight"
+        );
+        assert_eq!(
+            change_entry(&mut authority, &required, IdentityEntryChangeKind::Remove),
+            IdentityEntryChangeVerdict::Removed
+        );
+    }
+
+    /// A new store-owned entry's cause is MobMachine's, derived from the
+    /// request's facts with the declared apply's precedence for an identity
+    /// never created (`created_entry_cause`): its preparation first, then a
+    /// placed or externally bound spec, then its held creation, and
+    /// otherwise its seat owed.
+    #[test]
+    fn a_created_entrys_cause_is_derived_from_the_requests_facts() {
+        let mut authority = MobMachineAuthority::new();
+        for (name, preparation_required, placement, held_creation, cause) in [
+            (
+                "cause-prepared",
+                true,
+                EntryPlacementKind::Placed,
+                true,
+                UnseatedEntryCause::PreparationPending,
+            ),
+            (
+                "cause-placed",
+                false,
+                EntryPlacementKind::Placed,
+                true,
+                UnseatedEntryCause::HostedOnFirstUse,
+            ),
+            (
+                "cause-external",
+                false,
+                EntryPlacementKind::External,
+                false,
+                UnseatedEntryCause::HostedOnFirstUse,
+            ),
+            (
+                "cause-held",
+                false,
+                EntryPlacementKind::Local,
+                true,
+                UnseatedEntryCause::HeldCreation,
+            ),
+            (
+                "cause-owed",
+                false,
+                EntryPlacementKind::Local,
+                false,
+                UnseatedEntryCause::SeatOwed,
+            ),
+        ] {
+            let identity = AgentIdentity::from(name);
+            let recorded = MobMachineMutator::apply(
+                &mut authority,
+                MobMachineInput::RecordCreatedIdentityEntry {
+                    agent_identity: identity.clone(),
+                    preparation_required,
+                    placement,
+                    held_creation,
+                },
+            )
+            .expect("the record answers");
+            assert!(
+                recorded.effects().iter().any(|effect| matches!(
+                    effect,
+                    MobMachineEffect::CreatedIdentityEntryRecorded {
+                        verdict: CreatedIdentityRecordVerdict::Recorded,
+                        ..
+                    }
+                )),
+                "{name}"
+            );
+            assert_eq!(
+                authority.state().identity_entry_unseated.get(&identity),
+                Some(&cause),
+                "{name}"
+            );
+        }
+    }
+
+    /// A store-owned update of an archived identity, or of one awaiting its
+    /// host's preparation, is answered record only and changes nothing in
+    /// the machine: its row is the whole change.
+    #[test]
+    fn a_store_owned_update_of_an_archived_or_pending_identity_is_record_only() {
+        let mut authority = MobMachineAuthority::new();
+        let archived = AgentIdentity::from("update-archived");
+        let pending = AgentIdentity::from("update-pending");
+        recover_created(&mut authority, &archived, RecoveredPresence::Archived, None);
+        recover_created(
+            &mut authority,
+            &pending,
+            RecoveredPresence::PresentUnseated,
+            None,
+        );
+        let before = authority.state().clone();
+        for identity in [&archived, &pending] {
+            assert_eq!(
+                declare(
+                    &mut authority,
+                    identity,
+                    Declaration {
+                        created_custody: true,
+                        ..Declaration::default()
+                    }
+                ),
+                IdentityEntryVerdict::RecordOnly,
+                "{identity:?}"
+            );
+        }
+        assert_eq!(
+            authority.state(),
+            &before,
+            "a record-only verdict writes nothing"
+        );
+    }
+
+    /// The one-entry unlist decides on its identity alone, as the seal
+    /// decides an unlisted Declared entry: a seated entry is marked, an
+    /// unseated one ends at once, a name that is no Declared entry (a
+    /// worker's, or none) is left as it is, and no other entry is read or
+    /// changed.
+    #[test]
+    fn the_one_entry_unlist_decides_on_its_identity_alone() {
+        let mut authority = MobMachineAuthority::new();
+        let seated = seat_live_entry_member(&mut authority, "unlist-seated", 81);
+        let other = seat_live_entry_member(&mut authority, "unlist-other", 82);
+        let worker = seat_live_member_with_endpoint(&mut authority, "unlist-worker", 83);
+        let unseated = AgentIdentity::from("unlist-unseated");
+        assert_eq!(
+            declare(&mut authority, &unseated, Declaration::default()),
+            IdentityEntryVerdict::SeatOwed
+        );
+        assert_eq!(
+            unlist(&mut authority, &seated.identity),
+            UnlistEntryVerdict::Retiring
+        );
+        let state = authority.state();
+        assert!(state.identity_entry_retiring.contains(&seated.identity));
+        assert!(
+            !state.identity_entry_retiring.contains(&other.identity),
+            "no other entry is marked"
+        );
+        assert_eq!(
+            unlist(&mut authority, &unseated),
+            UnlistEntryVerdict::Removed
+        );
+        let state = authority.state();
+        assert!(!state.identity_entry_origins.contains_key(&unseated));
+        assert!(state.identity_entry_origins.contains_key(&other.identity));
+        let before = authority.state().clone();
+        for identity in [&worker.identity, &AgentIdentity::from("unlist-nobody")] {
+            assert_eq!(
+                unlist(&mut authority, identity),
+                UnlistEntryVerdict::NotADeclaredEntry,
+                "{identity:?}"
+            );
+        }
+        assert_eq!(authority.state(), &before, "nothing changes");
+    }
+
+    /// An unlisted roster-owned identity's archived session record holds its
+    /// name: the end of its unlisted retirement ends the entry and keeps the
+    /// record, and a new store-owned entry of the name is refused
+    /// NameHeldByIdentity with the record kept, so a re-list restores the
+    /// identity.
+    #[test]
+    fn an_unlisted_identitys_archived_session_record_holds_its_name() {
+        let (mut authority, member) = dormant_member_authority("unlisted-name");
+        authority
+            .apply_signal(recover_entry_signal(&member.identity, &member.runtime_id))
+            .expect("the replay records the entry");
+        assert_eq!(
+            unlist(&mut authority, &member.identity),
+            UnlistEntryVerdict::Retiring
+        );
+        retire_and_archive(&mut authority, &member);
+        let state = authority.state();
+        assert!(
+            !state.identity_entry_origins.contains_key(&member.identity),
+            "the end of the unlisted retirement ends the entry"
+        );
+        assert!(
+            state
+                .identity_entry_archived_sessions
+                .contains_key(&member.identity),
+            "the identity's archived session record outlives the entry"
+        );
+        let recorded = MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::RecordCreatedIdentityEntry {
+                agent_identity: member.identity.clone(),
+                preparation_required: false,
+                placement: EntryPlacementKind::Local,
+                held_creation: false,
+            },
+        )
+        .expect("the record answers");
+        assert!(recorded.effects().iter().any(|effect| matches!(
+            effect,
+            MobMachineEffect::CreatedIdentityEntryRecorded {
+                verdict: CreatedIdentityRecordVerdict::NameHeldByIdentity,
+                ..
+            }
+        )));
+        assert!(
+            authority
+                .state()
+                .identity_entry_archived_sessions
+                .contains_key(&member.identity),
+            "the refused record keeps the archived session record"
+        );
+    }
+
+    /// One arm answers each created row of an identity during the replay: a
+    /// removal's row after an archive's row of the same seated identity, or
+    /// the reverse, contradicts the mark the first recovered and reads the
+    /// name unreadable, so no identity carries both marks.
+    #[test]
+    fn a_second_row_contradicting_a_recovered_mark_reads_unreadable() {
+        for (first, second) in [
+            (RecoveredPresence::Archived, RecoveredPresence::Tombstone),
+            (RecoveredPresence::Tombstone, RecoveredPresence::Archived),
+        ] {
+            let (mut authority, member) = dormant_member_authority("double-mark");
+            recover_created(
+                &mut authority,
+                &member.identity,
+                RecoveredPresence::Present,
+                None,
+            );
+            recover_created(&mut authority, &member.identity, first, None);
+            recover_created(&mut authority, &member.identity, second, None);
+            let state = authority.state();
+            assert!(
+                state.identity_entry_unreadable.contains(&member.identity),
+                "{first:?} then {second:?}"
+            );
+            assert!(
+                !(state.identity_entry_removing.contains(&member.identity)
+                    && state.identity_entry_archiving.contains(&member.identity)),
+                "{first:?} then {second:?}: one mark at most"
+            );
+        }
     }
 }

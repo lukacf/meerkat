@@ -354,6 +354,15 @@ pub(super) enum ConstructionOutcome {
     },
 }
 
+/// The report of a held construction's end that a removal waits on, which
+/// the hold's completion sends ([`ConstructionOutcome`]). A build without
+/// held constructions has none.
+#[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+pub(super) type ConstructionEndReport =
+    crate::tokio::sync::watch::Receiver<Option<ConstructionOutcome>>;
+#[cfg(not(all(feature = "runtime-adapter", not(target_arch = "wasm32"))))]
+pub(super) type ConstructionEndReport = std::convert::Infallible;
+
 /// Await the end of the attempt `outcome` reports. A registry gone before it
 /// reported (the mob stopped) answers the publication interrupted.
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
@@ -831,31 +840,6 @@ impl super::MobHandle {
             ConstructionOutcome::Published => Err(MobError::Internal(format!(
                 "the construction of '{identity}' was published before its abort"
             ))),
-        }
-    }
-
-    /// Abort `identity`'s held construction, if one is held (not one whose
-    /// activation was accepted): a removal ends it first.
-    #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
-    pub(super) async fn abort_held_construction_of(
-        &self,
-        identity: &AgentIdentity,
-    ) -> Result<(), MobError> {
-        let held = self
-            .machine_state_watch_rx
-            .borrow()
-            .identity_entry_constructions_held
-            .get(&mob_dsl::AgentIdentity::from_domain(identity))
-            .copied();
-        let Some(attempt) = held else {
-            return Ok(());
-        };
-        match self.abort_identity_construction(identity, attempt).await {
-            Ok(_)
-            | Err(MobError::IdentityChangeRefused {
-                refusal: IdentityChangeRefusal::StaleAttempt { .. },
-            }) => Ok(()),
-            Err(error) => Err(error),
         }
     }
 

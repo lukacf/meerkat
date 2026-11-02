@@ -1493,6 +1493,12 @@ const MOB_MACHINE_RUNTIME_INTERNAL_CLASSIFICATIONS:
         input: MobMachineCatalogInput::EndPreparationConstruction,
         reason: MobMachineRuntimeInternalReason::IdentityEntryAuthority,
     },
+    // The one-entry unlist of a roster-owned identity (0.9.9), decided in
+    // the actor's step for the handle's unlist. Not a surface command.
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::UnlistIdentityEntry,
+        reason: MobMachineRuntimeInternalReason::IdentityEntryAuthority,
+    },
 ];
 
 #[doc(hidden)]

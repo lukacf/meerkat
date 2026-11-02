@@ -1002,34 +1002,34 @@ pub(super) fn lower_created_spec(
     Ok(seat)
 }
 
-/// One identity a create's plan takes: its seat spec, and the cause its new
-/// entry is unseated for until its seat ([`created_entry_cause`]).
+/// One identity a create's plan takes: its seat spec, and the request's
+/// facts its new entry is recorded from (MobMachine derives the cause it is
+/// unseated for until its seat, `RecordCreatedIdentityEntry`).
 pub(super) struct CreatedIdentityPlanItem {
     pub(super) spec: SpawnMemberSpec,
-    pub(super) cause: mob_dsl::UnseatedEntryCause,
+    pub(super) facts: CreatedEntryFacts,
 }
 
-impl CreatedIdentityPlanItem {
-    /// The cause a new entry of this identity is unseated for until its seat
-    /// or its host's creation or preparation.
-    pub(super) fn unseated_cause(&self) -> mob_dsl::UnseatedEntryCause {
-        self.cause
-    }
+/// The facts of a create's request MobMachine records a new store-owned
+/// entry from: whether its host's rule requires its preparation, where its
+/// member lives, and whether its host holds its creation.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct CreatedEntryFacts {
+    pub(super) preparation_required: bool,
+    pub(super) placement: mob_dsl::EntryPlacementKind,
+    pub(super) held_creation: bool,
 }
 
-/// The cause a new store-owned entry is unseated for at its create's commit:
-/// awaiting its host's preparation; hosted on its first use (a placed or
-/// externally bound spec, its host's spawn creates it); held for its host's
-/// held protocol; or owed its seat, which the commit step takes.
-pub(super) fn created_entry_cause(request: &CreatedIdentityRequest) -> mob_dsl::UnseatedEntryCause {
-    if request.preparation != IdentityPreparationMode::None {
-        mob_dsl::UnseatedEntryCause::PreparationPending
-    } else if request.spec.is_hosted() {
-        mob_dsl::UnseatedEntryCause::HostedOnFirstUse
-    } else if request.held_creation {
-        mob_dsl::UnseatedEntryCause::HeldCreation
-    } else {
-        mob_dsl::UnseatedEntryCause::SeatOwed
+impl CreatedEntryFacts {
+    /// The facts of `request`, whose seat spec is `seat`.
+    pub(super) fn of(request: &CreatedIdentityRequest, seat: &SpawnMemberSpec) -> Self {
+        Self {
+            preparation_required: super::identity_preparation::preparation_required(
+                request.preparation,
+            ),
+            placement: super::declared_apply::placement_kind(seat),
+            held_creation: request.held_creation,
+        }
     }
 }
 
@@ -1079,17 +1079,18 @@ pub(super) fn admission_refusal(
 }
 
 /// The refusal a new entry's record verdict answers; `None` for
-/// `Recorded`.
+/// `Recorded`. An unlisted roster-owned identity's archived session record
+/// holds its name, as an entry does (`by: identity`).
 pub(super) fn record_refusal(
     verdict: mob_dsl::CreatedIdentityRecordVerdict,
     identity: &AgentIdentity,
-) -> Option<Result<IdentityChangeRefusal, MobError>> {
+) -> Option<IdentityChangeRefusal> {
     use mob_dsl::CreatedIdentityRecordVerdict as Verdict;
     let taken = |by| {
-        Some(Ok(IdentityChangeRefusal::NameTaken {
+        Some(IdentityChangeRefusal::NameTaken {
             identity: identity.clone(),
             by,
-        }))
+        })
     };
     match verdict {
         Verdict::Recorded => None,
@@ -1097,12 +1098,9 @@ pub(super) fn record_refusal(
         Verdict::NameHeldByWorker => taken(IdentityNameHolder::Worker),
         Verdict::NameTombstoned => taken(IdentityNameHolder::Removed),
         Verdict::NameUnreadable => taken(IdentityNameHolder::Unreadable),
-        Verdict::NonAuthoritative => Some(Ok(IdentityChangeRefusal::CandidateLaunch)),
-        Verdict::ChangesHeld => Some(Ok(IdentityChangeRefusal::ChangesHeld)),
-        Verdict::MobNotRunning => Some(Ok(IdentityChangeRefusal::MobNotRunning)),
-        Verdict::CauseRefused => Some(Err(MobError::Internal(format!(
-            "MobMachine refused the cause of '{identity}'s new entry"
-        )))),
+        Verdict::NonAuthoritative => Some(IdentityChangeRefusal::CandidateLaunch),
+        Verdict::ChangesHeld => Some(IdentityChangeRefusal::ChangesHeld),
+        Verdict::MobNotRunning => Some(IdentityChangeRefusal::MobNotRunning),
     }
 }
 
@@ -1362,8 +1360,9 @@ pub(super) struct CreateCommit {
     pub(super) consent: IdentityChangeConsent,
     pub(super) proposer: Option<String>,
     pub(super) source_evidence: Option<IdentitySourceEvidence>,
-    /// Each identity, in request order, with its new entry's cause.
-    pub(super) identities: Vec<(CreatedIdentityRequest, mob_dsl::UnseatedEntryCause)>,
+    /// Each identity, in request order, with the facts its new entry is
+    /// recorded from.
+    pub(super) identities: Vec<(CreatedIdentityRequest, CreatedEntryFacts)>,
     /// The prepared seats of the identities seated Dormant.
     pub(super) seats: Vec<super::dormant_seat::DormantSeatCommitEntry>,
 }
@@ -1430,6 +1429,12 @@ pub(super) enum IdentityChangeCommand {
         completion: Result<(), MobError>,
         reply_tx: oneshot::Sender<Result<(), MobError>>,
     },
+    /// Unlist one roster-owned identity (its archive, which its host's
+    /// roster owns): MobMachine's verdict, decided on that identity alone.
+    Unlist {
+        identity: AgentIdentity,
+        reply_tx: oneshot::Sender<Result<mob_dsl::UnlistEntryVerdict, MobError>>,
+    },
     /// Abort a held construction attempt before its activation.
     #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
     AbortConstruction {
@@ -1458,11 +1463,14 @@ pub(super) struct EntryChangeCommit {
     pub(super) consent: IdentityChangeConsent,
 }
 
-/// What an entry change's commit step answers.
+/// What an entry change's commit step answers: the committed change's
+/// receipt and verdict, with the report of the end of a held construction
+/// its removal ended, or the receipt of the operation committed before.
 pub(super) enum EntryChangeCommitted {
     Committed {
         receipt: IdentityChangeReceipt,
         verdict: mob_dsl::IdentityEntryChangeVerdict,
+        ended_construction: Option<super::identity_preparation::ConstructionEndReport>,
     },
     Replayed(IdentityChangeReceipt),
 }
@@ -1558,12 +1566,15 @@ pub(super) fn declared_entry_receipt_outcome(
 ) -> Option<IdentityChangeEntryOutcome> {
     use mob_dsl::IdentityEntryVerdict as Verdict;
     match verdict {
+        // A record-only update of an archived or pending identity commits
+        // its row.
         Verdict::Kept
         | Verdict::SeatOwed
         | Verdict::RuntimeModeRestamp
         | Verdict::RoleMigrate
         | Verdict::RoleRotate
-        | Verdict::RoleMigrationHeld => Some(IdentityChangeEntryOutcome::Committed),
+        | Verdict::RoleMigrationHeld
+        | Verdict::RecordOnly => Some(IdentityChangeEntryOutcome::Committed),
         Verdict::HostedOnFirstUse => Some(IdentityChangeEntryOutcome::HostedOnFirstUse),
         Verdict::AwaitHeldCreation => Some(IdentityChangeEntryOutcome::AwaitingHeldCreation),
         Verdict::PreparationPending => Some(IdentityChangeEntryOutcome::PendingPreparation),
@@ -1653,10 +1664,13 @@ pub(super) fn store_owned_update_commit(commit: IdentityChangeCommit) -> Result<
 
 /// The change kind, the receipt's outcome for the identity, and the row a
 /// verdict writes; a verdict that writes nothing answers a refusal.
+/// `open_attempt` is the identity's held or activating construction, which
+/// the refusal of an archive of an identity awaiting its preparation names.
 pub(super) fn entry_change_answer(
     kind: mob_dsl::IdentityEntryChangeKind,
     verdict: mob_dsl::IdentityEntryChangeVerdict,
     identity: &AgentIdentity,
+    open_attempt: Option<u64>,
 ) -> Result<(IdentityChangeKind, IdentityChangeEntryOutcome), MobError> {
     use mob_dsl::IdentityEntryChangeVerdict as Verdict;
     let change = match kind {
@@ -1701,6 +1715,14 @@ pub(super) fn entry_change_answer(
         Verdict::NonAuthoritative => return Err(refused(IdentityChangeRefusal::CandidateLaunch)),
         Verdict::ChangesHeld => return Err(refused(IdentityChangeRefusal::ChangesHeld)),
         Verdict::MobNotRunning => return Err(refused(IdentityChangeRefusal::MobNotRunning)),
+        // Its preparation is never dropped: settled first, or the identity
+        // removed.
+        Verdict::PreparationPending => {
+            return Err(refused(IdentityChangeRefusal::HostPreparationPending {
+                identity: identity.clone(),
+                attempt: open_attempt,
+            }));
+        }
     };
     Ok((change, outcome))
 }
@@ -1818,6 +1840,9 @@ impl IdentityChangeCommand {
                 let _ = reply_tx.send(Err(error));
             }
             Self::Settle { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(error));
+            }
+            Self::Unlist { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(error));
             }
             #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
@@ -2326,9 +2351,10 @@ impl super::MobHandle {
                     profile: request.spec.profile.clone(),
                 }));
             }
+            let spec = lower_created_spec(&request.spec).map_err(refused)?;
             items.push(CreatedIdentityPlanItem {
-                spec: lower_created_spec(&request.spec).map_err(refused)?,
-                cause: created_entry_cause(request),
+                facts: CreatedEntryFacts::of(request, &spec),
+                spec,
             });
         }
         let attribution_facts = ChangeAttribution::facts_of(
@@ -2399,10 +2425,12 @@ impl super::MobHandle {
         let identities = identities
             .into_iter()
             .map(|request| {
-                let cause = created_entry_cause(&request);
-                (request, cause)
+                let facts = lower_created_spec(&request.spec)
+                    .map(|seat| CreatedEntryFacts::of(&request, &seat))
+                    .map_err(refused)?;
+                Ok((request, facts))
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>, MobError>>()?;
         let committed = self
             .send_actor_command(|reply_tx| {
                 super::MobCommand::IdentityChange(Box::new(IdentityChangeCommand::CommitCreate {
@@ -2493,18 +2521,26 @@ fn privileged_field(entry: &IdentityGrantEntry) -> &'static str {
 
 /// A create's rows and receipt, sealed at its commit: each identity's row
 /// at revision 1 with its spec, its presence and the change's provenance,
-/// and the change's receipt with the requester and the consent.
+/// and the change's receipt with the requester and the consent. `causes`
+/// are the causes MobMachine recorded each new entry unseated for, in
+/// request order.
 pub(super) fn create_rows_and_receipt(
     mob_id: &MobId,
     commit: &CreateCommit,
+    causes: &[mob_dsl::UnseatedEntryCause],
     committed_at_ms: u64,
 ) -> Result<(Vec<CreatedIdentityRowWrite>, IdentityChangeReceipt), MobError> {
     let invalid = |error: crate::identity::IdentityIntentError| {
         MobError::Internal(format!("a store-owned identity's row: {error}"))
     };
+    if causes.len() != commit.identities.len() {
+        return Err(MobError::Internal(
+            "a create's records answered another count of identities".to_string(),
+        ));
+    }
     let mut rows = Vec::with_capacity(commit.identities.len());
     let mut entries = Vec::with_capacity(commit.identities.len());
-    for (request, cause) in &commit.identities {
+    for ((request, _), cause) in commit.identities.iter().zip(causes) {
         let pending = *cause == mob_dsl::UnseatedEntryCause::PreparationPending;
         let presence = if pending {
             CreatedIdentityPresence::PendingPreparation {
@@ -2577,7 +2613,11 @@ impl super::MobHandle {
     /// cause `removed`: the identity reads retiring until the retirement's
     /// end, which ends the entry and tombstones its name. An identity no
     /// member holds (owed its seat, archived, awaiting its preparation or its
-    /// creation) is tombstoned at once. The store-owned row (presence
+    /// creation) is tombstoned at once; a held construction of it ends in the
+    /// same step (its hold aborts, its member never published, and the
+    /// removal answers once the hold ended), and one whose activation was
+    /// accepted is in flight: the removal is refused retryable until its
+    /// publication ends. The store-owned row (presence
     /// `removed`, with the removal's record) and the receipt are written in
     /// one store transaction before anything retires; a roster-owned
     /// identity's tombstone is the store's first row of its name. The name is
@@ -2620,8 +2660,12 @@ impl super::MobHandle {
     /// refused ([`MobError::IdentityArchived`]) until its unarchive; updates
     /// of it are allowed. A roster-owned identity's archive is refused
     /// [`IdentityChangeRefusal::OwnerReadOnly`]: its host unlists it
-    /// ([`Self::unlist_declared_identity`]). Answers once the member's
-    /// retirement ended, as a removal does.
+    /// ([`Self::unlist_declared_identity`]). An identity awaiting its host's
+    /// preparation is not archived: refused
+    /// [`IdentityChangeRefusal::HostPreparationPending`] (retryable, naming
+    /// its open construction attempt), with nothing written, until its
+    /// preparation is settled, or the identity removed. Answers once the
+    /// member's retirement ended, as a removal does.
     pub async fn archive_identity(
         &self,
         change: IdentityArchiveChange,
@@ -2697,53 +2741,52 @@ impl super::MobHandle {
             decided,
             consent,
         } = ChangeAttribution::of(requester, consent, &operation)?;
-        let commit = || EntryChangeCommit {
+        let commit = EntryChangeCommit {
             kind,
             identity: identity.clone(),
-            operation: operation.clone(),
+            operation,
             facts: consent_facts.at(now_ms()),
-            grant: grant.clone(),
+            grant,
             decided,
-            requester: requester.clone(),
-            consent: consent.clone(),
+            requester,
+            consent,
         };
         let committed = self
             .send_actor_command(|reply_tx| {
                 super::MobCommand::IdentityChange(Box::new(
                     IdentityChangeCommand::CommitEntryChange {
-                        commit: Box::new(commit()),
+                        commit: Box::new(commit),
                         reply_tx,
                     },
                 ))
             })
-            .await?;
-        // A removal of an identity whose construction is held aborts the
-        // construction first, its member never published, and is decided
-        // again: the removal tombstones the identity at once.
-        #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
-        let committed = if kind == mob_dsl::IdentityEntryChangeKind::Remove
-            && matches!(committed, Err(MobError::LifecycleOperationPending { .. }))
-            && self
-                .machine_state_watch_rx
-                .borrow()
-                .identity_entry_constructions_held
-                .contains_key(&mob_dsl::AgentIdentity::from_domain(&identity))
-        {
-            self.abort_held_construction_of(&identity).await?;
-            self.send_actor_command(|reply_tx| {
-                super::MobCommand::IdentityChange(Box::new(
-                    IdentityChangeCommand::CommitEntryChange {
-                        commit: Box::new(commit()),
-                        reply_tx,
-                    },
-                ))
-            })
-            .await?
-        } else {
-            committed
-        };
-        let (receipt, verdict, replayed) = match committed? {
-            EntryChangeCommitted::Committed { receipt, verdict } => (receipt, Some(verdict), false),
+            .await??;
+        let (receipt, verdict, replayed) = match committed {
+            EntryChangeCommitted::Committed {
+                receipt,
+                verdict,
+                ended_construction,
+            } => {
+                // A removal that ended a held construction answers once the
+                // construction's hold ended, its member never published.
+                #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+                if let Some(report) = ended_construction
+                    && let super::identity_preparation::ConstructionOutcome::Ended {
+                        cleanup: Some(cleanup),
+                        ..
+                    } = super::identity_preparation::construction_outcome(report).await
+                {
+                    tracing::warn!(
+                        mob_id = %self.mob_id(),
+                        agent_identity = %identity,
+                        cleanup = %cleanup,
+                        "the removed identity's held construction did not confirm its cleanup"
+                    );
+                }
+                #[cfg(not(all(feature = "runtime-adapter", not(target_arch = "wasm32"))))]
+                let _ = ended_construction;
+                (receipt, Some(verdict), false)
+            }
             EntryChangeCommitted::Replayed(receipt) => (receipt, None, true),
         };
         match verdict {
@@ -2916,7 +2959,10 @@ impl super::MobHandle {
     /// restamp commits (a crash before it is carried out by the next start);
     /// a placement, binding or backend change is read only while no member
     /// holds the identity. An archived identity's update, and the update of
-    /// one awaiting its host's preparation, changes its row only.
+    /// one awaiting its host's preparation, changes its row only: MobMachine
+    /// decides that in the declaration step from the step's own state, so an
+    /// unarchive or a settle that runs before the step is the update's
+    /// starting point.
     ///
     /// A retry of a committed update with the same request answers
     /// [`IdentityChangeOutcome::Replayed`], never a stale spec. Refused
@@ -2926,10 +2972,10 @@ impl super::MobHandle {
     /// store-owned ([`IdentityChangeRefusal::IdentityUnknown`], or
     /// [`IdentityChangeRefusal::OwnerReadOnly`] for a roster-owned one), and
     /// every refusal of [`Self::create_store_owned_identities`] that applies
-    /// to a change. An identity whose member's spawn, wake or retirement is
-    /// in flight is refused [`MobError::LifecycleOperationPending`],
-    /// retryable, and so is an update while another declared apply of the
-    /// mob runs.
+    /// to a change. An identity whose member's spawn, wake, retirement,
+    /// removal or archive, or whose held construction, is in flight is
+    /// refused [`MobError::LifecycleOperationPending`], retryable, and so is
+    /// an update while another declared apply of the mob runs.
     pub async fn update_store_owned_identity(
         &self,
         update: StoreOwnedIdentityUpdate,
@@ -2955,30 +3001,14 @@ impl super::MobHandle {
                 feature: "a store-owned update's host preparation".to_string(),
             }));
         }
-        let store = self
-            .identity_member
-            .clone()
-            .ok_or_else(|| refused(IdentityChangeRefusal::StorageUnsupported))?;
+        if self.identity_member.is_none() {
+            return Err(refused(IdentityChangeRefusal::StorageUnsupported));
+        }
         if !self.definition.profiles.contains_key(&spec.profile) {
             return Err(refused(IdentityChangeRefusal::ProfileUnknown {
                 profile: spec.profile.clone(),
             }));
         }
-        // The identity's row's presence. An identity with no store-owned row
-        // is declared nothing, and the declaration step answers it: a retry
-        // of an update that committed replays, and anything else is refused
-        // (a roster-owned identity's change is its host roster's).
-        let presence = match store
-            .observe_created_identity(self.mob_id(), &spec.identity)
-            .await?
-        {
-            Some(crate::identity::CreatedIdentityObservation::Created(row))
-                if row.presence != CreatedIdentityPresence::Removed && row.spec.is_some() =>
-            {
-                Some(row.presence)
-            }
-            _ => None,
-        };
         let attribution_facts = ChangeAttribution::facts_of(
             consent,
             &operation,
@@ -2990,18 +3020,16 @@ impl super::MobHandle {
             decided,
             consent: consent_record,
         } = ChangeAttribution::of(requester, consent, &operation)?;
-        // The identity's declaration under created custody. An archived
-        // identity, and one awaiting its host's preparation, is declared
-        // nothing: its row changes, and its unarchive or its settle seats it
-        // from the new spec.
-        let entries = match presence {
-            Some(CreatedIdentityPresence::Present) => {
-                vec![super::DeclaredEntry::new(
-                    lower_created_spec(&spec).map_err(refused)?,
-                )]
-            }
-            _ => Vec::new(),
-        };
+        // The identity's declaration under created custody, always:
+        // MobMachine routes it in the declaration step from that step's own
+        // state. An archived identity, and one awaiting its host's
+        // preparation, is answered record only (its row changes, and its
+        // unarchive or its settle seats it from the new spec); an identity
+        // with no store-owned entry is answered at the step's sink (a retry
+        // of an update that committed replays, anything else is refused).
+        let entries = vec![super::DeclaredEntry::new(
+            lower_created_spec(&spec).map_err(refused)?,
+        )];
         let change = DeclaredChangeWrite {
             operation,
             facts: attribution_facts.at(now_ms()),

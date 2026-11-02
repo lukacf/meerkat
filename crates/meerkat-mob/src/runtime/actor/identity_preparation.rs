@@ -19,8 +19,8 @@ use super::super::identity_preparation::{
     construction_end_of, construction_refusal, settle_published_construction_row,
 };
 use super::super::identity_preparation::{
-    ConstructionEnd, PreparationSettleCommit, PreparationSettleCommitted, PreparationSettlement,
-    settle_refusal,
+    ConstructionEnd, ConstructionEndReport, PreparationSettleCommit, PreparationSettleCommitted,
+    PreparationSettlement, settle_refusal,
 };
 use super::identity_change::ChangeAdmission;
 use super::*;
@@ -597,6 +597,58 @@ impl MobActor {
         Ok(())
     }
 
+    /// Send the abort to the hold of `identity`'s `attempt`, which MobMachine
+    /// ended (an abort, or the identity's removal), and record the end:
+    /// answers the report of the hold's end, which its completion sends. A
+    /// hold that has not reached the registry is refused its adoption, and
+    /// its dropped decision channel aborts it.
+    #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+    fn abort_held_construction(
+        &mut self,
+        identity: &AgentIdentity,
+        attempt: u64,
+    ) -> crate::tokio::sync::watch::Receiver<Option<ConstructionOutcome>> {
+        let report = match self.held_constructions.held_mut(identity) {
+            Some(held) if held.attempt == attempt => {
+                if let Some(decision) = held.decision.take() {
+                    let _ = decision.send(super::super::held_spawn::HeldSpawnDecision::Abort);
+                }
+                held.outcome.subscribe()
+            }
+            _ => {
+                let (_, report) =
+                    crate::tokio::sync::watch::channel(Some(ConstructionOutcome::Ended {
+                        end: ConstructionEnd::Aborted,
+                        cleanup: None,
+                    }));
+                report
+            }
+        };
+        self.held_constructions
+            .record_end(identity, attempt, ConstructionEnd::Aborted);
+        report
+    }
+
+    /// The removal of `identity` ended its held `attempt` in its own step
+    /// (`RemoveIdentityEntryRemoved`): the abort goes to the attempt's hold,
+    /// whose member is never published, and the report of the hold's end is
+    /// answered. A build without held constructions holds none.
+    pub(super) fn abort_hold_ended_by_removal(
+        &mut self,
+        identity: &AgentIdentity,
+        attempt: u64,
+    ) -> Option<ConstructionEndReport> {
+        #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+        {
+            Some(self.abort_held_construction(identity, attempt))
+        }
+        #[cfg(not(all(feature = "runtime-adapter", not(target_arch = "wasm32"))))]
+        {
+            let _ = (identity, attempt);
+            None
+        }
+    }
+
     /// Abort `identity`'s held `attempt` in one actor step: MobMachine ends
     /// it (`EndPreparationConstruction`, aborted) unless its activation was
     /// accepted, and the abort goes to its hold. Answers the report of the
@@ -630,28 +682,7 @@ impl MobActor {
             })?;
         match verdict {
             mob_dsl::ConstructionEndVerdict::Ended => {
-                let report = match self.held_constructions.held_mut(&identity) {
-                    Some(held) if held.attempt == attempt => {
-                        if let Some(decision) = held.decision.take() {
-                            let _ =
-                                decision.send(super::super::held_spawn::HeldSpawnDecision::Abort);
-                        }
-                        held.outcome.subscribe()
-                    }
-                    // The attempt's hold has not reached the registry: its
-                    // adoption is refused and the dropped hold aborts.
-                    _ => {
-                        let (_, report) =
-                            crate::tokio::sync::watch::channel(Some(ConstructionOutcome::Ended {
-                                end: ConstructionEnd::Aborted,
-                                cleanup: None,
-                            }));
-                        report
-                    }
-                };
-                self.held_constructions
-                    .record_end(&identity, attempt, ConstructionEnd::Aborted);
-                Ok(report)
+                Ok(self.abort_held_construction(&identity, attempt))
             }
             mob_dsl::ConstructionEndVerdict::ActivationPending => {
                 Err(refused(IdentityChangeRefusal::ActivationPending {

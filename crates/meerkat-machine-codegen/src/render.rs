@@ -889,7 +889,6 @@ const MACHINE_TRANSITION_ENUM_LATE_TAILS: &[(&str, &[&str])] = &[
             "RecordCreatedIdentityEntryNameUnreadable",
             "RecordCreatedIdentityEntryNonAuthoritative",
             "RecordCreatedIdentityEntryChangesHeld",
-            "RecordCreatedIdentityEntryCauseRefused",
             "RecordCreatedIdentityEntryMobNotRunningStopped",
             "RecordCreatedIdentityEntryMobNotRunningCompleted",
             "RecordCreatedIdentityEntryMobNotRunningDestroyed",
@@ -980,6 +979,20 @@ const MACHINE_TRANSITION_ENUM_LATE_TAILS: &[(&str, &[&str])] = &[
             "EndPreparationConstructionActivationPendingStopped",
             "EndPreparationConstructionActivationPendingCompleted",
             "EndPreparationConstructionActivationPendingDestroyed",
+            // Identity changes (0.9.9): the archive of an identity awaiting
+            // its host's preparation, a store-owned update of an archived or
+            // pending identity, and the one-entry unlist of a roster-owned
+            // identity.
+            "ArchiveIdentityEntryPreparationPending",
+            "DeclareIdentityEntryRecordOnly",
+            "UnlistIdentityEntryRetiring",
+            "UnlistIdentityEntryRemoved",
+            "UnlistIdentityEntryDeferred",
+            "UnlistIdentityEntryNotADeclaredEntry",
+            "UnlistIdentityEntryNonAuthoritative",
+            "UnlistIdentityEntryMobNotRunningStopped",
+            "UnlistIdentityEntryMobNotRunningCompleted",
+            "UnlistIdentityEntryMobNotRunningDestroyed",
         ],
     ),
     // The entered-step arms of the review attempt lifecycle (0.9.7), after

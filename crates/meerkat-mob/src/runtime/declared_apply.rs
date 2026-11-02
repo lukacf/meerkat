@@ -497,7 +497,7 @@ pub(in crate::runtime) struct SealAnswer {
 
 /// Where a declared spec's member lives: a placed member or one bound to an
 /// external backend is hosted on its first use, any other is local.
-fn placement_kind(spec: &SpawnMemberSpec) -> mob_dsl::EntryPlacementKind {
+pub(super) fn placement_kind(spec: &SpawnMemberSpec) -> mob_dsl::EntryPlacementKind {
     match (&spec.placement, &spec.binding) {
         (Some(_), _) | (None, Some(crate::RuntimeBinding::HostMaterialized { .. })) => {
             mob_dsl::EntryPlacementKind::Placed
@@ -813,15 +813,22 @@ impl super::MobHandle {
         outcome
     }
 
-    /// Unlist one roster-owned identity, as a complete roster that lists
-    /// every other Declared entry would: its member retires (the journal
+    /// Unlist one roster-owned identity, decided by MobMachine on that
+    /// identity alone (`UnlistIdentityEntry`), as a complete roster's seal
+    /// decides an unlisted Declared entry: its member retires (the journal
     /// records the cause [`super::MemberRetirementCause::Unlisted`]) and the
     /// end of the retirement ends the entry, or an entry no member holds ends
-    /// at once. No tombstone is written: its archived session record outlives
-    /// the entry, so listing it again ([`Self::apply_declared_roster`] with a
-    /// partial roster) seats it on its own session. This is a roster-owned
-    /// identity's archive, and its re-list the unarchive. An identity that is
-    /// no Declared entry is left as it is, and the outcome names nothing.
+    /// at once. No other entry is read or changed, so an entry recorded
+    /// meanwhile (a spawn's, an adoption's) stays listed. No tombstone is
+    /// written: its archived session record outlives the entry and holds the
+    /// name (a store-owned create of it is refused), so listing it again
+    /// ([`Self::apply_declared_roster`] with a partial roster) seats it on
+    /// its own session. This is a roster-owned identity's archive, and its
+    /// re-list the unarchive. An identity that is no Declared entry is left
+    /// as it is, and the outcome names nothing; one whose spawn, retirement,
+    /// removal or held construction is in flight is refused
+    /// [`MobError::LifecycleOperationPending`], retryable, and nothing
+    /// changes.
     pub async fn unlist_declared_identity(
         &self,
         identity: &AgentIdentity,
@@ -844,21 +851,64 @@ impl super::MobHandle {
                 });
             }
         };
-        // Every Declared entry but this one is listed: the seal unlists this
-        // one alone. No other apply runs while the lease is held, and only an
-        // apply records a Declared entry.
-        let mut listed =
-            super::identity_entry::declared_entries(&self.machine_state_watch_rx.borrow());
         #[cfg(test)]
         super::identity_change::pass_change_step_hold_for_test(self.mob_id(), "unlist").await;
-        let mut outcome = DeclaredRosterOutcome::default();
-        let result = if listed.remove(identity) {
-            self.seal_declared_roster(listed, &mut outcome).await
-        } else {
-            Ok(())
-        };
+        let result = self.unlist_open_declared_identity(identity).await;
         lease.close().await;
-        result.map(|()| outcome)
+        result
+    }
+
+    /// The body of [`Self::unlist_declared_identity`], under its open fact:
+    /// MobMachine's verdict for the identity, realized.
+    async fn unlist_open_declared_identity(
+        &self,
+        identity: &AgentIdentity,
+    ) -> Result<DeclaredRosterOutcome, MobError> {
+        let verdict = self
+            .send_actor_command(|reply_tx| {
+                MobCommand::IdentityChange(Box::new(
+                    super::identity_change::IdentityChangeCommand::Unlist {
+                        identity: identity.clone(),
+                        reply_tx,
+                    },
+                ))
+            })
+            .await??;
+        let mut outcome = DeclaredRosterOutcome::default();
+        match verdict {
+            mob_dsl::UnlistEntryVerdict::Retiring => {
+                let answer = match self.retire(identity.clone()).await {
+                    Ok(()) => UnlistedEntryOutcome::Retired,
+                    Err(error) => UnlistedEntryOutcome::Failed { error },
+                };
+                outcome.unlisted.insert(identity.clone(), answer);
+            }
+            mob_dsl::UnlistEntryVerdict::Removed => {
+                outcome
+                    .unlisted
+                    .insert(identity.clone(), UnlistedEntryOutcome::Removed);
+            }
+            mob_dsl::UnlistEntryVerdict::Deferred => {
+                return Err(MobError::LifecycleOperationPending {
+                    intent: format!(
+                        "unlist '{identity}' while its spawn, retirement, removal or held \
+                         construction is in flight"
+                    ),
+                });
+            }
+            // A candidate composition unlists nothing, and a name that is no
+            // readable Declared entry is left as it is.
+            mob_dsl::UnlistEntryVerdict::NotADeclaredEntry
+            | mob_dsl::UnlistEntryVerdict::NonAuthoritative => {}
+            // The actor answers a mob that is not running with its own
+            // invalid transition.
+            mob_dsl::UnlistEntryVerdict::MobNotRunning => {
+                return Err(MobError::Internal(
+                    "the unlist answered a mob that is not running".to_string(),
+                ));
+            }
+        }
+        Ok(outcome)
     }
 
     /// The body of [`Self::run_declared_apply`], under its open fact.
@@ -954,18 +1004,20 @@ impl super::MobHandle {
         let session_memory_only = !self.session_service.keeps_durable_member_sessions();
 
         // A legacy member listed under its own name is adopted first, once:
-        // MobMachine then declares it as the entry it is.
+        // MobMachine then declares it as the entry it is. A store-owned
+        // update's declaration adopts nothing: its identity is the store's.
         let legacy: Vec<AgentIdentity> = {
             let state = self.machine_state_watch_rx.borrow();
             declared
-                .keys()
-                .filter(|identity| {
+                .iter()
+                .filter(|(identity, entry)| {
                     let dsl_identity = mob_dsl::AgentIdentity::from_domain(identity);
-                    state.identity_to_runtime.contains_key(&dsl_identity)
+                    !entry.spec.created_custody
+                        && state.identity_to_runtime.contains_key(&dsl_identity)
                         && !state.identity_entry_origins.contains_key(&dsl_identity)
                         && !intent_managed.contains(*identity)
                 })
-                .cloned()
+                .map(|(identity, _)| identity.clone())
                 .collect()
         };
         for identity in legacy {
@@ -993,6 +1045,15 @@ impl super::MobHandle {
                     resume_session_roles.insert(identity, role);
                 }
                 Ok(None) => {}
+                // A store-owned update is decided with its identity's facts
+                // or not at all: nothing is written.
+                Err(error)
+                    if change.as_ref().is_some_and(
+                        super::identity_change::DeclaredChangeWrite::is_store_owned_update,
+                    ) =>
+                {
+                    return Err(error);
+                }
                 Err(error) => {
                     declared.remove(&identity);
                     outcome.entries.insert(identity, failure_outcome(error));
@@ -1056,6 +1117,9 @@ impl super::MobHandle {
                 }
             };
             match (verdict, request) {
+                // A store-owned update of an archived or pending identity:
+                // its row is the whole change, and no member is acted on.
+                (mob_dsl::IdentityEntryVerdict::RecordOnly, _) => {}
                 // An unseated identity owed its seat: on a first-boot
                 // request's session, on its archived session, or fresh.
                 (mob_dsl::IdentityEntryVerdict::SeatOwed, request) => {
@@ -1168,10 +1232,24 @@ impl super::MobHandle {
     ) -> Vec<(AgentIdentity, Result<SessionId, MobError>)> {
         let state = self.machine_state_watch_rx.borrow();
         declared
-            .keys()
-            .filter_map(|identity| {
+            .iter()
+            .filter_map(|(identity, entry)| {
                 let dsl_identity = mob_dsl::AgentIdentity::from_domain(identity);
                 if state.identity_to_runtime.contains_key(&dsl_identity) {
+                    return None;
+                }
+                // A store-owned identity archived or awaiting its host's
+                // preparation is declared record only: the seat its unarchive
+                // or its settle takes observes the session it resumes.
+                if entry.spec.created_custody
+                    && matches!(
+                        state.identity_entry_unseated.get(&dsl_identity),
+                        Some(
+                            mob_dsl::UnseatedEntryCause::Archived
+                                | mob_dsl::UnseatedEntryCause::PreparationPending
+                        )
+                    )
+                {
                     return None;
                 }
                 let session = match first_boot_requests.get(identity) {
@@ -1715,6 +1793,7 @@ impl super::MobHandle {
             // A seat verdict is realized by the seat step, and a mob that is
             // not running fails the declaration step itself.
             mob_dsl::IdentityEntryVerdict::SeatOwed
+            | mob_dsl::IdentityEntryVerdict::RecordOnly
             | mob_dsl::IdentityEntryVerdict::MobNotRunning => DeclaredEntryOutcome::Failed {
                 error: MobError::Internal(format!(
                     "the declared apply realized '{identity}''s verdict {verdict:?} outside its \

@@ -249,6 +249,7 @@ pub enum MobMachineCatalogInput {
     BeginPreparationConstruction,
     SettleHostPreparation,
     EndPreparationConstruction,
+    UnlistIdentityEntry,
 }
 
 impl MobMachineCatalogInput {
@@ -498,6 +499,7 @@ impl MobMachineCatalogInput {
         Self::BeginPreparationConstruction,
         Self::SettleHostPreparation,
         Self::EndPreparationConstruction,
+        Self::UnlistIdentityEntry,
     ];
 
     #[must_use]
@@ -750,6 +752,7 @@ impl MobMachineCatalogInput {
             Self::BeginPreparationConstruction => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::BeginPreparationConstruction,
             Self::SettleHostPreparation => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::SettleHostPreparation,
             Self::EndPreparationConstruction => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::EndPreparationConstruction,
+            Self::UnlistIdentityEntry => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::UnlistIdentityEntry,
         }
     }
 
@@ -1027,6 +1030,7 @@ impl MobMachineCatalogInput {
             Self::BeginPreparationConstruction => "BeginPreparationConstruction",
             Self::SettleHostPreparation => "SettleHostPreparation",
             Self::EndPreparationConstruction => "EndPreparationConstruction",
+            Self::UnlistIdentityEntry => "UnlistIdentityEntry",
         }
     }
 }

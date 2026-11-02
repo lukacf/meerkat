@@ -14,10 +14,11 @@
 use super::super::dormant_seat::DormantSeatPlanEntry;
 use super::super::identity_change::{
     ChangeAdmissionFacts, CreateCommit, CreateCommitted, CreatePlan, CreatePlanAnswer,
-    CreatePlanEntry, CreatedIdentityPlanItem, EntryChangeCommit, EntryChangeCommitted,
-    IdentityChangeCommand, IdentityChangeGrant, IdentityChangeRefusal, IdentityOperation,
-    admission_refusal, committed_change_events, create_rows_and_receipt, entry_change_answer,
-    entry_change_row, grant_current_at_the_sink, now_ms, record_refusal, refused,
+    CreatePlanEntry, CreatedEntryFacts, CreatedIdentityPlanItem, EntryChangeCommit,
+    EntryChangeCommitted, IdentityChangeCommand, IdentityChangeGrant, IdentityChangeRefusal,
+    IdentityOperation, admission_refusal, committed_change_events, create_rows_and_receipt,
+    entry_change_answer, entry_change_row, grant_current_at_the_sink, now_ms, record_refusal,
+    refused,
 };
 use super::dormant_seat::{SeatCommitScope, SeatCommitWrite, SeatPlanMode};
 use super::*;
@@ -73,6 +74,9 @@ impl MobActor {
             IdentityChangeCommand::Settle { commit, reply_tx } => {
                 let result = Box::pin(self.settle_identity_preparation_step(*commit)).await;
                 let _ = reply_tx.send(result);
+            }
+            IdentityChangeCommand::Unlist { identity, reply_tx } => {
+                let _ = reply_tx.send(self.unlist_identity_entry(&identity));
             }
             #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
             IdentityChangeCommand::BeginConstruction { request, reply_tx } => {
@@ -203,17 +207,25 @@ impl MobActor {
         }
     }
 
-    /// Record each new store-owned entry on `authority`, in order; the first
-    /// identity MobMachine refuses refuses the change.
+    /// Record each new store-owned entry on `authority`, in order, from its
+    /// request's facts; the first identity MobMachine refuses refuses the
+    /// change. Answers the cause MobMachine recorded each entry unseated for
+    /// (`created_entry_cause`), read on `authority` through `state`, in
+    /// order.
     fn record_created_entries<M: mob_dsl::MobMachineMutator>(
         authority: &mut M,
-        identities: impl IntoIterator<Item = (AgentIdentity, mob_dsl::UnseatedEntryCause)>,
-    ) -> Result<(), MobError> {
-        for (agent_identity, cause) in identities {
+        state: fn(&M) -> &mob_dsl::MobMachineState,
+        identities: impl IntoIterator<Item = (AgentIdentity, CreatedEntryFacts)>,
+    ) -> Result<Vec<mob_dsl::UnseatedEntryCause>, MobError> {
+        let mut causes = Vec::new();
+        for (agent_identity, facts) in identities {
+            let dsl_identity = mob_dsl::AgentIdentity::from_domain(&agent_identity);
             let transition = authority
                 .apply(mob_dsl::MobMachineInput::RecordCreatedIdentityEntry {
-                    agent_identity: mob_dsl::AgentIdentity::from_domain(&agent_identity),
-                    cause,
+                    agent_identity: dsl_identity.clone(),
+                    preparation_required: facts.preparation_required,
+                    placement: facts.placement,
+                    held_creation: facts.held_creation,
                 })
                 .map_err(|error| MobError::MobMachineRejected {
                     context: "record_created_identity_entry",
@@ -234,10 +246,20 @@ impl MobActor {
                     )
                 })?;
             if let Some(refusal) = record_refusal(verdict, &agent_identity) {
-                return Err(refusal.map_or_else(|error| error, refused));
+                return Err(refused(refusal));
             }
+            let cause = state(authority)
+                .identity_entry_unseated
+                .get(&dsl_identity)
+                .copied()
+                .ok_or_else(|| {
+                    MobError::Internal(format!(
+                        "MobMachine recorded '{agent_identity}' with no unseated cause"
+                    ))
+                })?;
+            causes.push(cause);
         }
-        Ok(())
+        Ok(causes)
     }
 
     /// Plan a store-owned create: its admission and its entries' records
@@ -260,18 +282,19 @@ impl MobActor {
             ChangeAdmission::Replayed(receipt) => return Ok(CreatePlanAnswer::Replayed(receipt)),
             ChangeAdmission::Admitted => {}
         }
-        Self::record_created_entries(
+        let causes = Self::record_created_entries(
             &mut probe,
+            mob_dsl::MobMachineAuthority::state,
             items
                 .iter()
-                .map(|item| (item.spec.identity.clone(), item.unseated_cause())),
+                .map(|item| (item.spec.identity.clone(), item.facts)),
         )?;
         let mut entries = Vec::with_capacity(items.len());
-        for item in items {
+        for (item, cause) in items.into_iter().zip(causes) {
             // Only an entry owed its seat is seated by the commit step: one
             // awaiting its host's preparation, hosted on its first use or
             // held for its host's held protocol is created by its host.
-            if item.unseated_cause() != mob_dsl::UnseatedEntryCause::SeatOwed {
+            if cause != mob_dsl::UnseatedEntryCause::SeatOwed {
                 entries.push(CreatePlanEntry::Unseated);
                 continue;
             }
@@ -363,14 +386,16 @@ impl MobActor {
             ChangeAdmission::Replayed(receipt) => return Ok(CreateCommitted::Replayed(receipt)),
             ChangeAdmission::Admitted => {}
         }
-        Self::record_created_entries(
+        let causes = Self::record_created_entries(
             &mut authority,
+            mob_dsl::MobMachinePreparedAuthority::state,
             commit
                 .identities
                 .iter()
-                .map(|(request, cause)| (request.spec.identity.clone(), *cause)),
+                .map(|(request, facts)| (request.spec.identity.clone(), *facts)),
         )?;
-        let (rows, receipt) = create_rows_and_receipt(&self.definition.id, &commit, now_ms())?;
+        let (rows, receipt) =
+            create_rows_and_receipt(&self.definition.id, &commit, &causes, now_ms())?;
         let CreateCommit { seats, .. } = commit;
         let staged = self
             .stage_seat_commit(authority, seats, SeatCommitScope::AllOrNothing)
@@ -393,7 +418,10 @@ impl MobActor {
     /// and the identity's row (the tombstone, the archived row, or the row
     /// present again); and only then does the machine commit. The member's
     /// retirement a Retiring or Archiving verdict owes runs after, on the
-    /// handle, and its start row records the mark's cause.
+    /// handle, and its start row records the mark's cause. A removal that
+    /// ended a held construction in its step (`Removed`) sends the abort to
+    /// the construction's hold once committed, and answers the report of
+    /// the hold's end.
     async fn commit_identity_entry_change(
         &mut self,
         commit: EntryChangeCommit,
@@ -420,6 +448,13 @@ impl MobActor {
             ChangeAdmission::Admitted => {}
         }
         let agent_identity = mob_dsl::AgentIdentity::from_domain(&commit.identity);
+        // The construction held for the identity before the step: a removal
+        // that ends the entry ends it in the same step.
+        let held_attempt = authority
+            .state()
+            .identity_entry_constructions_held
+            .get(&agent_identity)
+            .copied();
         let input = match commit.kind {
             mob_dsl::IdentityEntryChangeKind::Remove => {
                 mob_dsl::MobMachineInput::RemoveIdentityEntry {
@@ -455,7 +490,22 @@ impl MobActor {
             .ok_or_else(|| {
                 MobError::Internal("MobMachine changed an identity with no verdict".into())
             })?;
-        let (change, outcome) = entry_change_answer(commit.kind, verdict, &commit.identity)?;
+        // The identity's open construction, held or activating, which the
+        // refusal of an archive awaiting its preparation names.
+        let open_attempt = {
+            let state = authority.state();
+            state
+                .identity_entry_constructions_held
+                .get(&agent_identity)
+                .or_else(|| {
+                    state
+                        .identity_entry_constructions_activating
+                        .get(&agent_identity)
+                })
+                .copied()
+        };
+        let (change, outcome) =
+            entry_change_answer(commit.kind, verdict, &commit.identity, open_attempt)?;
         // The session an archive records: the seated member's, or the
         // unseated entry's archived session record.
         let archived_session = {
@@ -522,6 +572,18 @@ impl MobActor {
             committed_change_events(commit).map(|_| ())
         })
         .await?;
-        Ok(EntryChangeCommitted::Committed { receipt, verdict })
+        // The removal ended the held construction with its entry: its hold
+        // aborts, and its member is never published.
+        let ended_construction = match (verdict, held_attempt) {
+            (mob_dsl::IdentityEntryChangeVerdict::Removed, Some(attempt)) => {
+                self.abort_hold_ended_by_removal(&commit.identity, attempt)
+            }
+            _ => None,
+        };
+        Ok(EntryChangeCommitted::Committed {
+            receipt,
+            verdict,
+            ended_construction,
+        })
     }
 }

@@ -1440,6 +1440,9 @@ const ORIGIN_GUARD_TRANSITIONS: &[&str] = &[
     "ArchiveIdentityEntry",
     "UnarchiveIdentityEntry",
     "RemoveIdentityEntry",
+    // The roster writer's one-entry unlist, which acts on a Declared entry
+    // only.
+    "UnlistIdentityEntry",
 ];
 
 const ORIGIN_GUARD_INVARIANTS: &[&str] = &[

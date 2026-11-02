@@ -4411,6 +4411,7 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
                     "RefusedNameOwnedByCreated",
                     "RefusedNameTombstoned",
                     "RefusedNameUnreadable",
+                    "RecordOnly",
                 ],
             ),
             NamedTypeBinding::string_enum(
@@ -4476,7 +4477,6 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
                     "NameUnreadable",
                     "NonAuthoritative",
                     "ChangesHeld",
-                    "CauseRefused",
                     "MobNotRunning",
                 ],
             ),
@@ -4503,6 +4503,7 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
                     "NonAuthoritative",
                     "ChangesHeld",
                     "MobNotRunning",
+                    "PreparationPending",
                 ],
             ),
             // Held constructions (0.9.9): the verdicts of a construction's
@@ -4542,6 +4543,18 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
             NamedTypeBinding::string_enum(
                 "ConstructionEndVerdict",
                 &["Ended", "NotOpen", "ActivationPending"],
+            ),
+            // The one-entry unlist of a roster-owned identity (0.9.9).
+            NamedTypeBinding::string_enum(
+                "UnlistEntryVerdict",
+                &[
+                    "Retiring",
+                    "Removed",
+                    "Deferred",
+                    "NotADeclaredEntry",
+                    "NonAuthoritative",
+                    "MobNotRunning",
+                ],
             ),
             NamedTypeBinding::string("RuntimeEpochId"),
             NamedTypeBinding::string("ResumeAttemptId"),
@@ -5213,6 +5226,9 @@ runtime_internal_inputs!(
         BeginPreparationConstruction,
         SettleHostPreparation,
         EndPreparationConstruction,
+        // The one-entry unlist of a roster-owned identity, decided in the
+        // actor's step for the handle's unlist. Not a surface command.
+        UnlistIdentityEntry,
     ]
 );
 

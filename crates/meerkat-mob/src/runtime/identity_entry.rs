@@ -76,7 +76,6 @@
 //! store-owned identity's revision, spec, presence and provenance, and a
 //! removed name's tombstone with its removal's record.
 
-use std::collections::BTreeSet;
 use std::ops::Bound;
 
 use meerkat_core::types::SessionId;
@@ -243,8 +242,8 @@ impl HostPreparationCause {
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum MemberRetirementCause {
-    /// The declared apply's seal unlisted the member's identity entry: the
-    /// end of the retirement ends the entry.
+    /// The declared apply's seal, or the one-entry unlist, unlisted the
+    /// member's identity entry: the end of the retirement ends the entry.
     Unlisted,
     /// The identity was removed ([`super::MobHandle::remove_identity`]):
     /// the end of the retirement ends the entry and tombstones its name.
@@ -1363,10 +1362,11 @@ pub(crate) fn machine_entry_origin(
 
 /// Why `identity`'s retirement started or ended, as its journal rows record
 /// it, read from `state`, MobMachine's state before the step that writes the
-/// row: [`MemberRetirementCause::Unlisted`] while the declared apply's seal
-/// marks the identity's entry (`identity_entry_retiring`). The seal marks
-/// only a member whose retirement has not started and whose spawn is not in
-/// flight, and never drops the mark of one whose retirement has, so the
+/// row: [`MemberRetirementCause::Unlisted`] while the declared apply's seal,
+/// or the one-entry unlist, marks the identity's entry
+/// (`identity_entry_retiring`). Either marks only a member whose retirement
+/// has not started and whose spawn is not in flight, and the seal never
+/// drops the mark of one whose retirement has, so the
 /// start row and the end's row read the same mark, and the end of a marked
 /// retirement ends the entry. The one reader of the mark for the journal:
 /// the start row and the plain terminal row read it here. A rotation's
@@ -1415,18 +1415,6 @@ pub(crate) fn owed_entry_endings(state: &mob_dsl::MobMachineState) -> Vec<AgentI
         .chain(state.identity_entry_archiving.iter())
         .map(|identity| AgentIdentity::from(identity.0.as_str()))
         .filter(|identity| entry_ending_owed(state, identity))
-        .collect()
-}
-
-/// The roster-owned entries of `state`: every Declared entry, readable or
-/// not, in identity order. The one-entry unlist seals the roster with all of
-/// them but the one it unlists.
-pub(crate) fn declared_entries(state: &mob_dsl::MobMachineState) -> BTreeSet<AgentIdentity> {
-    state
-        .identity_entry_origins
-        .iter()
-        .filter(|(_, origin)| **origin == mob_dsl::IdentityEntryOrigin::Declared)
-        .map(|(identity, _)| AgentIdentity::from(identity.0.as_str()))
         .collect()
 }
 

@@ -93,8 +93,10 @@ const REQUIRED_ARM_FAMILIES: &[&str] = &[
 /// admission, the declared apply (its verdicts, its seal and the release of
 /// an archived session record), the recovery of a created entry's row, and
 /// the identity changes (a change's admission, the record of a new
-/// store-owned entry and the host's changes hold). They are written one arm
-/// per lifecycle phase as the residency arms are.
+/// store-owned entry, the host's changes hold, a removal, an archive and an
+/// unarchive), a held construction's start, a settle and an attempt's end,
+/// and the one-entry unlist. They are written one arm per lifecycle phase as
+/// the residency arms are.
 const IDENTITY_ENTRY_ARM_PREFIXES: &[&str] = &[
     "ProbeMemberAdmission",
     "BeginSpawnExec",
@@ -116,6 +118,10 @@ const IDENTITY_ENTRY_ARM_PREFIXES: &[&str] = &[
     "RemoveIdentityEntry",
     "ArchiveIdentityEntry",
     "UnarchiveIdentityEntry",
+    "BeginPreparationConstruction",
+    "SettleHostPreparation",
+    "EndPreparationConstruction",
+    "UnlistIdentityEntry",
 ];
 
 /// Identity-entry families that must each name at least one arm.

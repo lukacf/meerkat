@@ -35,10 +35,14 @@ impl MobActor {
     /// identity's receipt, recording each declared identity the step
     /// answered; or a store-owned update's row at the next revision (refused
     /// `stale_spec` when the row's spec moved since the change was decided)
-    /// and its receipt. A replayed store-owned update decides and writes
-    /// nothing again; a replayed roster change decides its declarations and
-    /// writes nothing. A store-owned update whose identity's member step is
-    /// in flight is refused retryable, with nothing written.
+    /// and its receipt. MobMachine routes a store-owned update from this
+    /// step's state: an archived identity, or one awaiting its host's
+    /// preparation, is answered record only (its row is the whole change).
+    /// A replayed store-owned update decides and writes nothing again; a
+    /// replayed roster change decides its declarations and writes nothing. A
+    /// store-owned update whose identity's member step is in flight (a
+    /// spawn, wake, retirement, removal, archive or held construction) is
+    /// refused retryable, with nothing written.
     pub(super) async fn declare_identity_entries(
         &mut self,
         declarations: Vec<IdentityDeclaration>,
@@ -256,7 +260,8 @@ impl MobActor {
                 Err(error) => error,
                 Ok(_) => MobError::LifecycleOperationPending {
                     intent: format!(
-                        "update '{}', whose member's spawn, wake or retirement is in flight",
+                        "update '{}', whose member's spawn, wake, retirement, removal, archive \
+                         or held construction is in flight",
                         verdict.agent_identity
                     ),
                 },
@@ -282,8 +287,9 @@ impl MobActor {
                         Ok(decided) => declared_entry_receipt_outcome(decided.verdict),
                         Err(_) => None,
                     })
-                    // An archived identity, or one awaiting its host's
-                    // preparation, is declared nothing: its row changes.
+                    // Every update declares its identity, and the step
+                    // refused one no arm took: an archived or pending
+                    // identity's record-only verdict commits its row.
                     .unwrap_or(crate::identity::IdentityChangeEntryOutcome::Committed);
                 let digest = row
                     .record
@@ -412,6 +418,38 @@ impl MobActor {
             mob_dsl::MobMachineInput::CloseDeclaredApply,
             "close_declared_apply",
         )
+    }
+
+    /// Unlist one roster-owned identity (`UnlistIdentityEntry`) in one
+    /// MobMachine step, decided on that identity alone: a seated Declared
+    /// entry is marked (the handle retires its member with the cause
+    /// Unlisted), an unseated one ends at once, one with a member step in
+    /// flight is deferred, and any other name is left as it is. No other
+    /// entry is read or changed. A mob that is not running answers an
+    /// invalid transition.
+    pub(super) fn unlist_identity_entry(
+        &mut self,
+        identity: &AgentIdentity,
+    ) -> Result<mob_dsl::UnlistEntryVerdict, MobError> {
+        let effects = self.apply_dsl_input_collect_effects(
+            mob_dsl::MobMachineInput::UnlistIdentityEntry {
+                agent_identity: mob_dsl::AgentIdentity::from_domain(identity),
+            },
+            "unlist_identity_entry",
+        )?;
+        let verdict = effects
+            .iter()
+            .find_map(|effect| match effect {
+                mob_dsl::MobMachineEffect::IdentityEntryUnlisted { verdict, .. } => Some(*verdict),
+                _ => None,
+            })
+            .ok_or_else(|| {
+                MobError::Internal("MobMachine answered no unlist verdict".to_string())
+            })?;
+        if verdict == mob_dsl::UnlistEntryVerdict::MobNotRunning {
+            return Err(self.invalid_transition_to(MobState::Running));
+        }
+        Ok(verdict)
     }
 
     /// Seal a complete declared roster (`SealDeclaredRoster`) in one

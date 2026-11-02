@@ -877,10 +877,11 @@ async fn the_legacy_adoption_answers_a_created_or_reserved_name_not_adoptable() 
 /// ladder opens only through BeginSpawnExec, which refuses a reserved name,
 /// and the boot scan runs before any ladder opens), so a test-only state
 /// injection reserves the name, as the boot scan's Unreadable arm would,
-/// under the worker spawn's open ladder. A local spawn opens its ladder
-/// after its session is created and prepares the ladder's close in the same
-/// actor step, so no command lands between the two: the injection is armed
-/// before the spawn and fires the moment the ladder opens.
+/// under the worker spawn's open ladder. A local spawn opens its ladder in
+/// the actor command that closes its pending admission, before the off-actor
+/// endpoint check, and closes it in a later actor command once that check
+/// returns, so the reservation exists during the check: the injection is
+/// armed before the spawn and fires the moment the ladder opens.
 ///
 /// RED: drop `name_not_reserved` from the ladder close arms (as before the
 /// close guard): the worker is seated under the reserved name and the spawn

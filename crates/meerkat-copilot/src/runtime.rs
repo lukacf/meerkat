@@ -497,6 +497,10 @@ impl CopilotRuntime {
             config,
             mode,
         )?;
+        state.claim_source(
+            &binding.auth_profile().source,
+            binding.credential_identity(),
+        )?;
         let authorizer = Arc::new(CopilotAuthorizer {
             state,
             binding: binding.clone(),
@@ -1504,6 +1508,9 @@ struct CopilotAccountState {
     /// ([`HttpAuthorizer::redact_response_diagnostic`]), a value a rotation
     /// replaced included.
     signed_bearers: Mutex<std::collections::VecDeque<String>>,
+    /// The credential source the account's routes read the token from: the
+    /// first route's, which every later route of the account must name too.
+    source: Mutex<Option<CredentialSourceSpec>>,
 }
 
 /// Pacing of an operator-token account: GitHub's rate limits on its identity
@@ -1555,6 +1562,30 @@ struct WithdrawnSourceReread {
 }
 
 impl CopilotAccountState {
+    /// The routes of one account read its token from one source, as they
+    /// share one auth method and one configuration: the first route's
+    /// source is the account's, and a route over another one is refused.
+    /// A token is then never labelled against another source's
+    /// publications (for a stored token, the record's marker generation).
+    fn claim_source(
+        &self,
+        source: &CredentialSourceSpec,
+        identity: &AuthCredentialIdentity,
+    ) -> Result<(), ProviderAuthError> {
+        let mut claimed = self.source.lock();
+        match claimed.as_ref() {
+            None => {
+                *claimed = Some(source.clone());
+                Ok(())
+            }
+            Some(account_source) if account_source == source => Ok(()),
+            Some(_) => Err(ProviderAuthError::SourceResolutionFailed(format!(
+                "Copilot routes sharing credential identity '{identity}' disagree on the \
+                 credential source; one credential account reads its token from one source"
+            ))),
+        }
+    }
+
     /// An account state with pacing of its own (tests; the runtime shares
     /// its per-account pacing through `with_pacing`).
     #[cfg(test)]
@@ -1578,6 +1609,7 @@ impl CopilotAccountState {
             next_generation: AtomicU64::new(1),
             pacing,
             signed_bearers: Mutex::new(std::collections::VecDeque::new()),
+            source: Mutex::new(None),
         }
     }
 

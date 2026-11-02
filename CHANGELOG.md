@@ -50,8 +50,10 @@ them.
   names `global:copilot_openai`, `global:copilot_anthropic` or
   `global:copilot_gemini` resolves from those variables with no config
   (default selection never picks these routes). Hosts can check a token
-  without storing it (`meerkat_copilot::verify_operator_token`). See Added,
-  and Breaking for the new `GitHubCopilotToken` auth method variants.
+  without storing it (`meerkat_copilot::verify_operator_token`), and a
+  verbatim echo of the token stays out of provider errors, stream errors and
+  logs (see Security). See Added, and Breaking for the new
+  `GitHubCopilotToken` auth method variants.
 
 - GitHub Copilot reliability. A temporary failure of the Copilot token
   exchange (a network failure or timeout, HTTP 408, 429 or 5xx, or a GitHub
@@ -81,10 +83,12 @@ them.
   quarantined mobs in one read. `MobMcpState::held_child_mobs` returns
   `Result<Vec<(MobId, SessionId)>, MobError>` and fails when the restore of
   the persisted mobs failed, where it answered an empty list.
+
 - `meerkat-contracts`: `MobListResult` gains the public field
   `quarantined: Vec<WireQuarantinedMob>` (see Added), so code that builds it
   literally sets it (`Vec::new()` for none). Its wire form is unchanged
   while it is empty.
+
 - `meerkat-machine-kernels`, `meerkat-machine-schema`, `meerkat-mob`: the mob
   machine records a member's unrestored custody (see Fixed).
   `MobMachineState` (meerkat-machine-schema and meerkat-mob) and the kernel
@@ -128,6 +132,7 @@ them.
   `AuthorizeSpawnProfileSeatedRunning` move. `TransitionId` has no repr and
   (de)serializes by variant name, so only an integer cast observes the moved
   discriminants.
+
 - Behaviour-only (not measured by the gate): every mob surface and the
   Python, TypeScript and Web SDKs: a call that addresses a quarantined
   persisted mob by id (a create of that id included) fails with the new
@@ -141,22 +146,26 @@ them.
   or `Internal`. The SDKs read it typed (`mob_quarantined`,
   `mobQuarantined`; see Added); a client that branches on refusal kinds
   handles the new kind.
+
 - Behaviour-only (not measured by the gate): `meerkat-session`: a committed
   whole-blob session read over a host store that answers unavailable, or
   holds data that does not decode, fails with `SessionError::Store` (code
   `SESSION_STORE_ERROR`) carrying the typed `RuntimeStoreError`, where it
   failed with `SessionError::Agent` (`AGENT_ERROR`). Other read failures are
   unchanged.
+
 - `meerkat-mob`: `MobStoreError` gains `Unavailable(String)`, appended last:
   a mob store over the host store interface answers it for a read the host
   store could not serve now (`HostStoreError::Unavailable`), where it
   answered `ReadFailed`, and a restore classes it `store_unavailable`. A
   `match` over every variant adds an arm for it.
+
 - `meerkat-runtime`: `MeerkatMachine::archive_runtime_residue_present`
   answers `Result<bool, RuntimeStoreError>`: its one failure, the read of the
   runtime's machine lifecycle record, keeps the store's typed error, where it
   answered `RuntimeDriverError::Internal` with the error's text. A caller that
   only formats the error keeps compiling.
+
 - Behaviour-only (not measured by the gate): `meerkat-runtime`: a host store
   read that answers `HostStoreError::Unavailable` surfaces as
   `RuntimeStoreError::Unavailable`, and stored data that does not decode as
@@ -575,12 +584,14 @@ them.
   `RecoverCreatedIdentityEntryArchivedRunning` and
   `RecoverCreatedIdentityEntryArchivedStopped`, so no existing variant's
   discriminant moves. Exhaustive matches must add the new variants.
+
 - `meerkat-mob`: `SpawnMemberAdmissionObservations` gains the public fields
   `binding_present` and `placement_present` (a runtime binding or a
   placement on the request, which a grant with manage scope alone admits, as
   MobMachine's spawn admission decides), so code that builds it literally
   must set them (`false` keeps the previous answer) or end the literal with
   `..Default::default()`.
+
 - `meerkat-machine-kernels`, `meerkat-machine-schema`, `meerkat-mob`: the mob
   machine answers the retire of an identity with no current incarnation
   (`RetireAbsent`) in a completed and in a destroyed mob too, and
@@ -1463,6 +1474,7 @@ them.
   typed `MobQuarantinedRefusal`), the TypeScript SDK `listQuarantinedMobs`,
   `mobRestoreRetry` and `mobQuarantined`, and the Web SDK `mobQuarantined`.
   See the mobs guide's section on quarantined mobs and degraded members.
+
 - `meerkat-machine-schema`, `meerkat-mob`: `MobStoreRestoreLifecycleMachine`,
   a record-scoped machine that owns one quarantined persisted mob store: its
   class, which re-attempts it admits (`RequestRetry` names its
@@ -1472,6 +1484,7 @@ them.
   `MobError::MobQuarantined` and `MobQuarantineClass` are the typed answer
   for such a mob, and `MobError::restore_quarantine_class` classes a failed
   restore.
+
 - `meerkat-core`, `meerkat-runtime`, `meerkat-store-conformance`:
   `HostStoreError::Corrupt` (stored data that does not decode or fails the
   store's own integrity check), and `RuntimeStoreError::Unavailable` and
@@ -1479,6 +1492,7 @@ them.
   and corruption typed. The reference host store answers a typed read fault
   for one scope (`set_read_fault` with `HostStoreReadFault`), or for every
   scope of a kind (`set_kind_read_fault`).
+
 - `meerkat-mob`, `meerkat-contracts`: the member custody deferral causes
   `store_unavailable` and `store_unreadable` (`MemberCustodyDeferralCause`,
   `WireMemberCustodyDeferralCause`) in the tolerant advisory vocabulary of
@@ -1926,8 +1940,10 @@ them.
   login, a stored token, the rollback of a failed login), replaces it, and
   the refused value is then published once more. `CredentialFingerprint`
   (an opaque SHA-256 fingerprint with a redacted `Debug` and no `Display`) and
-  `SourceCredentialPublication` are new. The method's default fails closed,
-  so other `AuthLeaseHandle` implementations are unaffected.
+  `SourceCredentialPublication` are new. The method's default fails closed
+  until an implementation provides it: an `AuthLeaseHandle` wrapper forwards
+  it, or a `github_copilot_token` route that reads its token from the
+  environment, a command or a resolver fails to resolve over the wrapper.
 
 - GitHub Copilot with a service-account token: `auth_method =
   "github_copilot_token"` authenticates the `copilot` backends with a GitHub
@@ -2868,6 +2884,7 @@ them.
   answered as not found. A create of the id of a restored child mob held
   before activation is refused with the held answer, as a lookup of the id
   is, before it opens that mob's store.
+
 - `meerkat-mob`: one member's failed cleanup restore no longer stops its
   mob. A mob start that cannot restore the cleanup delivery of a retiring
   member (or of a member bound to a session of a Stopped or Completed mob)
@@ -2881,6 +2898,7 @@ them.
   failed settle of the member's durable tail is a write and still stops the
   start; a mob destroy re-attempts every deferred restore first and is
   refused while one cannot restore.
+
 - `meerkat-mob`: a resume that fails after its pre-activation hook ran marks
   the handle the hook kept as stopped, so a host binding that refuses to
   replace a live mob's binding admits a later resume of the same store in
@@ -3765,10 +3783,11 @@ them.
   not restore failing its whole realm restore now gets a running realm with
   that store quarantined. To keep failing the boot, read
   `MobMcpState::quarantined_mobs` (or `mob/list`'s `quarantined`) after the
-  restore and refuse while it is not empty. No durable format changes: the
-  quarantine is derived again at every start, so a downgrade reads the
-  stores as before (and a store that does not restore fails the whole
+  restore and refuse while it is not empty. The quarantine changes no
+  durable format: it is derived again at every start, so a downgrade reads
+  the stores as before (and a store that does not restore fails the whole
   restore of 0.9.8 again).
+
 - A host store implementation answers `HostStoreError::Corrupt` for stored
   data that does not decode or fails its integrity check, and
   `HostStoreError::Unavailable` for a read it cannot serve now, so a mob or
@@ -3923,6 +3942,25 @@ them.
   the turns that run on it, as a crash would (see Breaking).
 
 ### Known limitations
+
+- `meerkat-copilot`: the `github_copilot_token` route is covered by tests
+  against local stand-ins for GitHub and Copilot; its live check against
+  GitHub with a fine-grained personal access token had not run when this
+  release was cut. Not yet observed live: whether GitHub's identity lookup
+  answers a fine-grained token of a Copilot Business or Enterprise machine
+  user (when it does not, the route uses the default API host); whether the
+  per-plan API hosts accept such a token under `copilot-developer-cli`, and
+  `Bearer` for `gho_` and `ghu_` tokens; Claude models (`/v1/messages`) with
+  a fine-grained token; whether `/models` lists the supported endpoints and
+  an enabled policy for every plan; the Copilot API's answers to a revoked or
+  expired token and to its own rate limits and quotas; whether the identity
+  lookup answers 401 for a valid token without Copilot access, or sends
+  rate-limit headers; what a GitHub App installation token gets without
+  server-to-server Copilot access (a 401 there holds the token refused until
+  its value changes); the body form of Copilot API errors (plain text reads
+  as "no message"); whether an organization that turns off the Copilot CLI
+  policy refuses token route requests; and whether a fine-grained token works
+  on Copilot Individual plans.
 
 - `meerkat-mob-mcp`: the agent-facing `mob_list` tool, which lists the mobs
   the calling member may manage, does not list quarantined mobs: a

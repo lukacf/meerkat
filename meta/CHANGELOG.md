@@ -7,8 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-Forge 0.3.0's agent teams pin the Meta 0.9.6 runtime; the 0.9.5 notes said 0.9.4.
-
 ### Breaking
 
 - A host's own `MobSessionService` wrapper (around the session service it
@@ -501,6 +499,27 @@ Forge 0.3.0's agent teams pin the Meta 0.9.6 runtime; the 0.9.5 notes said 0.9.4
   `SYSTEM_ROW_PRUNE_REFUSAL_CAUSES` (a closed vocabulary) and
   `TRANSCRIPT_REVISION_CONFLICT_KIND`.
 
+- A launch takes an identity policy: one change policy for every durable
+  identity, for an agent, the host or its console asking to create, update
+  or remove one, from `runtime_options.identity_creation` or, for a native
+  host, `GatewayHostComposition::identity_creation_policy` (build it with
+  `IdentityCreationPolicy::from_config`, which validates it). The option is
+  validated as it is parsed (a refusal names the policy path, and a reserved
+  `context` key is refused as unknown), and init refuses (`-32602`) a launch
+  that gives both forms, a policy that names a profile the mob definition
+  lacks, and a policy, a disabled one included, on a launch without
+  `persistent_state`. A launch that gives none starts as before. Nothing acts
+  on the policy yet: the executor, the decision ingresses, the host RPC
+  methods and the agent tools that carry identity requests are not in this
+  release. `GatewayHostComposition` also gains `validate_identity_request`
+  (the host's own check of a request; the default admits every request) and
+  `identity_consequences` (the host's warning lines for a request; the
+  default states none), both provided. The public module
+  `meerkat_meta::identity_creation` is the pure policy layer: parsing and
+  validation (`PolicyRefusal`), request normalization against the policy
+  (`IdentityRefusal`), the approval plan and the canonical rendering
+  (`render_v1`).
+
 ### Changed
 
 - Both of Meta's mob session service wrappers (the pre-build delegation and
@@ -764,6 +783,8 @@ Forge 0.3.0's agent teams pin the Meta 0.9.6 runtime; the 0.9.5 notes said 0.9.4
 
 ### Fixed
 
+- Release notes: Forge 0.3.0's agent teams pin the Meta 0.9.6 runtime; the
+  0.9.5 notes said 0.9.4.
 - One durable child mob store that does not restore no longer fails the
   boot: Meerkat 0.9.9 keeps it quarantined (kept as found, with no actor) and
   restores the other child mobs. The quarantined mob stays in the hosted set

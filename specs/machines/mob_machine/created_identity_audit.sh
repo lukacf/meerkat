@@ -213,7 +213,7 @@ in_part() {
 # run's floor may be `unmeasured` until then, which checks no floor and
 # prints the run's distinct-state count.
 scan_states=3264
-reseat_states=6597
+reseat_states=13193
 names_states=2880
 placed_states=198
 admit_states=12

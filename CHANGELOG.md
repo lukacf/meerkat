@@ -549,17 +549,19 @@ them.
 
 - `meerkat-copilot`: a temporary failure of the GitHub Copilot token
   exchange no longer fails turns as an authentication error. A network
-  failure or timeout, HTTP 429, a 5xx, or a GitHub API rate limit (a 403
-  that asks for no account action) at the token's refresh point failed the
-  turn, and every turn waiting on the same refresh, with "Authentication
-  failed", although the current Copilot token was still valid. The current
-  token now keeps serving until it expires, and the exchange is tried
-  again after its `Retry-After`, or after 30 seconds without one. Once no
-  valid token is left, the turn fails with a retryable error (rate limited
-  with the exchange's `Retry-After`, server error, network timeout or
-  connection error), which the agent loop retries. An exchange 401, or a
-  403 that asks for an account action, is still an authentication failure
-  that needs a new login.
+  failure or timeout, HTTP 408 or 429, a 5xx, or a GitHub API rate limit (a
+  403 that asks for no account action) at the token's refresh point failed
+  the turn, and every turn waiting on the same refresh, with
+  "Authentication failed", although the current Copilot token was still
+  valid. The current token, when it was minted from the current GitHub
+  sign-in, now keeps serving until it expires, and the exchange is tried
+  again after its `Retry-After` (at least a second later), or after 30
+  seconds without one. Once no valid token is left, the turn fails with a
+  retryable error (rate limited with the exchange's `Retry-After`, server
+  error, network timeout, connection or unknown error), which the agent
+  loop retries, and a warning names the exchange's own failure. An
+  exchange 401, or a 403 that asks for an account action, is still an
+  authentication failure that needs a new login.
 
 - `meerkat-copilot`: a GitHub Copilot session no longer loses its route
   when Copilot rejects its token. A 401 from a model request, or a 401 or

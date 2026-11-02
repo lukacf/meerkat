@@ -6422,6 +6422,106 @@ mod tests {
             assert_eq!(harness.transport.request_count(), 5);
         }
 
+        /// The lease publication an agent build makes once it resolved a
+        /// route, as the facade's `AgentFactory::publish_auth_lease` does:
+        /// none while the lease carries a credential, is valid or expiring and
+        /// has the expiry the connection's lease reports; otherwise a
+        /// publication with that expiry, naming no value.
+        #[cfg(unix)]
+        fn publish_as_an_agent_build(
+            auth_lease: &meerkat_core::handles::GeneratedAuthLeaseHandle,
+            connection_lease: &dyn meerkat_core::AuthLease,
+        ) {
+            let expires_at = connection_lease
+                .expires_at()
+                .map_or(u64::MAX, |at| at.timestamp().max(0) as u64);
+            let snapshot = auth_lease.snapshot(&lease_key());
+            if snapshot.credential_present
+                && snapshot.expires_at.unwrap_or(u64::MAX) == expires_at
+                && matches!(
+                    snapshot.phase,
+                    Some(AuthLeasePhase::Valid | AuthLeasePhase::Expiring)
+                )
+            {
+                return;
+            }
+            auth_lease
+                .acquire_lease(&lease_key(), expires_at)
+                .expect("the build publishes the lease");
+        }
+
+        /// One agent build's auth step on `harness`: resolve the route over
+        /// `source`, then the build's lease publication over the
+        /// connection's lease, as a provider runtime builds it.
+        #[cfg(unix)]
+        async fn build_session(
+            harness: &Harness,
+            source: CredentialSourceSpec,
+        ) -> CopilotResolvedAuth {
+            let resolved = harness
+                .resolve_from(CopilotProviderRoute::OpenAi, source)
+                .await
+                .expect("the route resolves");
+            let connection_lease =
+                meerkat_llm_core::provider_runtime::DynamicLease::from_authorizer(
+                    resolved.authorizer(),
+                    resolved.metadata().clone(),
+                    crate::GITHUB_COPILOT_AUTHORIZER_LABEL,
+                );
+            publish_as_an_agent_build(&harness.operator.auth_lease, &connection_lease);
+            resolved
+        }
+
+        /// Within a command source's `refresh_interval_ms`, a second session
+        /// build reuses the account's lease: the route reports the expiry of
+        /// the publication it serves, so the build's own lease publication
+        /// publishes nothing, and the second build neither runs the command
+        /// nor looks the account up again.
+        #[cfg(unix)]
+        #[tokio::test]
+        async fn session_builds_within_the_refresh_interval_reuse_the_lease() {
+            let directory = tempfile::tempdir().expect("command directory");
+            let harness = Harness::new([
+                Ok(svc_bot()),
+                Ok(models_response()),
+                Ok(svc_bot()),
+                Ok(models_response()),
+            ]);
+            let source = counter_command(directory.path(), Some(600_000));
+
+            let first = build_session(&harness, source.clone()).await;
+            harness.operator.advance(60);
+            let second = build_session(&harness, source).await;
+
+            assert_eq!(
+                command_runs(directory.path()),
+                1,
+                "one command run for both builds"
+            );
+            assert_eq!(
+                harness.transport.request_count(),
+                2,
+                "one identity lookup and one model listing for both builds"
+            );
+            let lease = harness.operator.lease();
+            assert_eq!(lease.generation, 1, "no build publishes the lease again");
+            assert_eq!(
+                first
+                    .authorizer()
+                    .expires_at()
+                    .map(|at| at.timestamp().max(0) as u64),
+                lease.expires_at,
+                "the route reports the expiry of the publication it serves"
+            );
+            let (_, bearer) = authorize_once(
+                &second.concrete_authorizer(),
+                &format!("{BUSINESS_API}/responses"),
+            )
+            .await;
+            assert_eq!(bearer, format!("Bearer github_pat_{CANARY}_command_1"));
+            assert_eq!(command_runs(directory.path()), 1);
+        }
+
         /// A command source that counts its runs in `directory` and prints
         /// the token the row writes to `directory/token`.
         #[cfg(unix)]

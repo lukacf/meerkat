@@ -394,13 +394,18 @@ Forge 0.3.0's agent teams pin the Meta 0.9.6 runtime; the 0.9.5 notes said 0.9.4
   answers it (`Unsupported` for a mob handle whose principal may not list the
   mob's members), and `PublicSessionBridge` forwards it.
 
-- `LifecycleEffectIntent` records the head of Core's journal its step read
-  before it asked Core (`asked_after`), and whether Core had retired the
-  incarnation before the step asked for the identity's fresh life
-  (`predecessor_retired`), which keys the record in the `FreshLifeAfter`
-  slot of its `LifecycleIntentKey` (`key()`). Both are serde-default, with
-  builders (`with_asked_after`, `with_predecessor_retired`); so is the key's
-  `slot`, which reads `End` when absent.
+- `LifecycleEffectIntent` records a head of Core's journal read before its
+  step asked Core (`asked_after`): the head the step read, or, when a
+  reset's, a delete's or a role move's record replaces an earlier one of
+  those under the same key in the same incarnation of the mob, the earlier
+  record's head if it is the smaller, since Core may finish the earlier
+  step's started rotation for the later step without journaling a new
+  start. It also records whether Core had retired the incarnation before
+  the step asked for the identity's fresh life (`predecessor_retired`),
+  which keys the record in the `FreshLifeAfter` slot of its
+  `LifecycleIntentKey` (`key()`). Both are serde-default, with builders
+  (`with_asked_after`, `with_predecessor_retired`); so is the key's `slot`,
+  which reads `End` when absent.
 
 - `SessionBridge::mob_incarnation` names the incarnation of the bridge's mob
   without a store read; it defaults to `None`, and `MobSessionBridge` (and
@@ -648,18 +653,23 @@ Forge 0.3.0's agent teams pin the Meta 0.9.6 runtime; the 0.9.5 notes said 0.9.4
     later pass takes the unlisting back. A reset, a delete, a role move and a
     first-boot `Fresh` row's reset read the head of Core's journal before they
     ask Core, and are refused, retryable, with nothing asked of Core
-    (`IdentityHistoryUnavailable`), when that head does not read. When the
-    step fails, the fact it journals first past that head says whether it
-    reached Core: its retirement's start, naming its rotation, for the
-    incarnation it read live, or the fresh life Core seated after that
-    incarnation when a host's retirement of it ended first; else the fresh
-    life's seat. Another fact of the member (the end of a host's rotation that
-    started before the head, say) is no reach. Without it nothing reached
-    Core, so the step takes back what it recorded and puts back what an
-    earlier step recorded in the same slot, and the bridge's error picks the
-    answer. Otherwise (or when the journal does not read) it keeps its records
-    and answers that the rotation may have started and that the identity's
-    next roster compile drives it to its end, whatever the error;
+    (`IdentityHistoryUnavailable`), when that head does not read. A reset and
+    a delete then read Core's binding of the identity again, and are refused,
+    retryable, with nothing recorded and nothing asked of Core
+    (`IdentityWakeRetryable`), when its generation or liveness changed since
+    they first read it: another lifecycle operation of the member ended while
+    they prepared. When the step fails, the fact it journals first past that
+    head says whether it reached Core: its retirement's start, naming its
+    rotation, for the incarnation it read live, or the fresh life Core seated
+    after that incarnation when a host's retirement of it ended first; else
+    the fresh life's seat. Another fact of the member (the end of a host's
+    rotation that started before the head, say) is no reach. Without it
+    nothing reached Core, so the step takes back what it recorded and puts
+    back what an earlier step recorded in the same slot, and the bridge's
+    error picks the answer. Otherwise (or when the journal does not read) it
+    keeps its records and answers that the rotation may have started and that
+    the identity's next roster compile drives it to its end, whatever the
+    error;
   - a reset or a delete of an identity whose last incarnation Core had
     already retired owes the session that incarnation left the verb's
     memory side effects (the reset's distillation behind its boundary; the

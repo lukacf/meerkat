@@ -13,10 +13,12 @@ STATE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/incident-topology-smoke.XXXXXX")"
 LISTEN_ADDR=""
 
 cleanup() {
-  stop_server
+  local status=0
+  stop_server || status=$?
   rm -rf "$STATE_DIR"
+  return "$status"
 }
-trap cleanup EXIT
+trap 'cleanup || exit 1' EXIT
 trap 'cleanup; exit 130' INT
 trap 'cleanup; exit 143' TERM
 
@@ -63,13 +65,34 @@ sys.exit(1)
 PY
 }
 
+# SERVER_PID leads the process group start_server starts the server in (the
+# subshell, or the server itself when bash execs it). A server can outlive
+# the subshell, still holding the durable state the next start reopens, so
+# return only once no process of that group is left: at most 60 s after
+# SIGTERM, then SIGKILL the group and fail. Never wait unbounded: the leader
+# is reaped only once it has exited (a zombie still counts as a member).
 stop_server() {
   if [[ -z "${SERVER_PID:-}" ]]; then
     return
   fi
-  kill -TERM -- -"${SERVER_PID}" >/dev/null 2>&1 || kill "${SERVER_PID}" >/dev/null 2>&1 || true
-  wait "${SERVER_PID}" >/dev/null 2>&1 || true
+  local group="${SERVER_PID}"
   SERVER_PID=""
+  kill -TERM -- -"${group}" >/dev/null 2>&1 || kill "${group}" >/dev/null 2>&1 || true
+  local deadline=$((SECONDS + 60))
+  while kill -0 -- -"${group}" >/dev/null 2>&1; do
+    if [[ "$(ps -o stat= -p "${group}" 2>/dev/null | tr -d ' ' || true)" == Z* ]]; then
+      wait "${group}" >/dev/null 2>&1 || true
+      continue
+    fi
+    if ((SECONDS >= deadline)); then
+      local leftover
+      leftover="$(pgrep -g "${group}" | tr '\n' ' ' || true)"
+      kill -KILL -- -"${group}" >/dev/null 2>&1 || true
+      echo "[incident-topology] server process group ${group} still had processes 60 s after SIGTERM (pids: ${leftover:-unknown}); sent SIGKILL" >&2
+      return 1
+    fi
+    sleep 0.2
+  done
 }
 
 start_server() {

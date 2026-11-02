@@ -66,6 +66,13 @@ scratch space and not semantic memory.
   `workgraph_events`.
 - A `labels` filter on list, ready, or snapshot matches only items that carry
   every listed label. Filter on one label to widen the result.
+- `workgraph_list`, `workgraph_ready`, and `workgraph_snapshot` return one
+  page: at most `limit` items (100 by default), list and snapshot most
+  recently updated first, ready by priority and then age. A result with
+  `truncated: true` has more matching items (`total_items` counts them all);
+  pass its `next_cursor` back as `cursor` to read the next page rather than
+  raising `limit`. `workgraph_events` pages forward with `after_seq` set to
+  the previous page's `next_after_seq`.
 - Use `workgraph_events` for audit history and `workgraph_snapshot` for a
   graph-wide view. Do not reconstruct either from peer chat or task lists.
 - `workgraph_policy_escalate` and `workgraph_attention_reassign` are available

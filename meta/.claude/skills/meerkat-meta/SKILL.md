@@ -11,7 +11,9 @@ Apps own desired roster and product policy. Meerkat machines admit member and se
 
 ## Current Baseline
 
-Repository: `lukacf/meerkat-meta`. One workspace version covers every artifact:
+Source: `meta/` in the `lukacf/meerkat` repository, beside Core and Connect in
+one Cargo workspace (releases through Meta 0.9.7 were cut from the standalone
+`lukacf/meerkat-meta` repository). One Meta version covers every artifact:
 
 | Artifact | Name |
 | --- | --- |
@@ -27,11 +29,15 @@ Repository: `lukacf/meerkat-meta`. One workspace version covers every artifact:
 (`publish = false`). `meta_flow_editor` is a development binary that CI builds;
 it is not released.
 
-The authoritative Meta release line is `[workspace.package].version` in the
-root `Cargo.toml`; the 0.9 line pairs with Meerkat 0.9. `make verify-version-parity`
-checks the Python and TypeScript SDK package versions, the TypeScript lockfile's
-root versions, the root Bazel module, the primary `crates/meerkat-meta/BUILD.bazel`
-version fields, and canonical Rust installation snippets. Separately, run
+The authoritative Meta release line is the version of
+`crates/meerkat-meta/Cargo.toml`, which every crate under `meta/` declares
+too; the root `[workspace.package].version` is Core's, on its own cycle. The
+0.9 line pairs with Meerkat 0.9. `make verify-version-parity` (from the
+repository root, `make -C meta verify-version-parity`) checks the Meta crates'
+versions, the Python and TypeScript SDK package versions, the TypeScript
+lockfile's root versions, a Bazel module when `meta/` has one, the primary
+`crates/meerkat-meta/BUILD.bazel` version fields, and canonical Rust
+installation snippets. Separately, run
 `node scripts/generate-bazel-rust-builds.mjs --check` to check generated
 per-crate BUILD freshness.
 
@@ -261,7 +267,7 @@ Key facts:
 - The closed action vocabulary lives in `access/model.rs::ACCESS_ACTIONS`. It covers agent view/send/lifecycle, scoped memory, gating, WorkGraph, mob observation, topology, mobpack author/deploy, runtime administration, and access administration. Do not maintain a shorter shadow list in surface code.
 - Enforcement seams: experience filtering + affordance intersection in `runtime/console_ingress.rs` (`handle_console_rest_json_route_with_snapshot_and_access`), RPC gating + result filtering + `meta/access/*` admin methods in `http_console.rs` (`console_rpc_access_requirement`, `handle_access_admin_rpc`), SSE gating in `http_sse.rs` (`sse_access_context`).
 - `mob.observe` gates the whole-mob event surfaces (`/mob/events`, `/meta/mob_events/stream`, `meta/mob_events/query`/`subscribe`) but does NOT override per-agent `agent.view`: events are filtered per source/`agent_identity`, mob-level (unattributed) events flow on `mob.observe` alone. "Observe all" = `mob.observe` + `agent.view` on `*`.
-- Spawn-lineage inheritance: agent-spawned members carry a `spawned_by` console label (recorded by `src/console_spawn.rs`); agent checks walk the member plus its spawn ancestors (`evaluate_access_lineage`, depth 8, cycle-safe), so rules matching the parent also match its spawned members, with deny-overrides preserved across the chain. Lineage is runtime-derived ONLY: `spawned_by`/`via_tool` claims in caller-controlled labels (spawn specs, roster) are stripped at every enforcement seam (`sanitize_unverified_lineage_labels`) - only the in-memory spawn registry may assert them.
+- Spawn-lineage inheritance: agent-spawned members carry a `spawned_by` console label (recorded by `src/console_spawn.rs`); agent checks walk the member plus its spawn ancestors (`evaluate_access_lineage`, depth 8, cycle-safe), so rules matching the parent also match its spawned members, with deny-overrides preserved across the chain; a member whose lineage goes past the bound is refused for everyone but an admin. Lineage is runtime-derived ONLY: `spawned_by`/`via_tool` claims in caller-controlled labels (spawn specs, roster) are stripped at every enforcement seam (`sanitize_unverified_lineage_labels`) - only the in-memory spawn registry may assert them.
 - `/blobs/{id}` is a capability surface (content-addressed `sha256:` ids, deduped across agents, no per-agent ACL) — authn + hash-unguessability, not an `agent.view` boundary.
 - Live config: successful `AccessController` config mutations validate and advance the revision. They persist TOML only when a persistence path is configured through `load` (an existing, valid file; a missing or invalid one is an error) or `with_persist_path`; `AccessController::new` and `disabled` remain in-memory unless a path is attached. A configuration that names no admin grants administration to nobody. Per-request `AccessView` snapshots and cached agent label/role attributes from roster projections let label selectors work on identity-only surfaces.
 - Console UI: `console/src/panels/AccessPanel.tsx`, nav kind `access` appears only when `experience.access.can_administer`. The panel re-reads the access configuration in the background without disabling edits: a background read changes the panel only when it lands. The first read after opening Access or changing connection or subject, a Refresh, and the read after a save still disable edits until they land, and a save still carries the draft's edit token, which the owner checks.
@@ -447,6 +453,8 @@ Since 0.9.4 the identity runtime runs on Meerkat's member verbs, and Meerkat hol
 - When Meerkat reports an identity's session gone, the identity wakes on a fresh session and the status names the session it replaced.
 - Refusals are typed: an identity Meerkat cannot resume, history it cannot read yet, an identity a host adopted, and a wake held for an operator. The lease codes `-32003` and `-32005` are no longer answered.
 - A saved `DeliveryScope` carries Meerkat's member generation and fence token. A scope saved by 0.9.3, or captured before a respawn, is refused as stale (`-32007`): capture a new one.
+- Lifecycle side effects (the customizer's `after_create`, the host's retirement hook, a retired session's distillation and an unlisted or deleted identity's exit interview) run from Core's member lifecycle journal (Meerkat 0.9.9), through a cursor in Meta's metadata store beside what each step owes and the side effects that failed (`identity_first/runtime/lifecycle_projection.rs`): at least once, bounded (30 s a call, at most 3 attempts, then reported as `lifecycle_effect_failed`), durable over a durable metadata store. `meta/status.lifecycle_projection` and the JSON `/healthz` report it (`off` when the session bridge cannot read the journal, reported once as `lifecycle_projection_off`; `stalled` after three failed runs in a row). A host `SessionBridge` answers `member_lifecycle_journal_head`, `member_lifecycle_journal_page` and `member_standing`, and a host-supplied `PersistentMetadataStore` keeps the cursor and the step intents durably.
+- A reset or delete whose Core rotation failed after any of it reached Core answers `-32603` saying it may have started (the identity's next roster compile finishes it); one whose step cannot read the journal's head, or record what it owes, is refused `-32052` before Core is asked.
 
 Gateway note: on an identity-first gateway (`meta_gateway` init
 `identity_first: true`, or any runtime with the `console_identity_roster` slot
@@ -464,6 +472,7 @@ Key files:
 - `crates/meerkat-meta/src/identity_first/orchestrator.rs`
 - `crates/meerkat-meta/src/identity_first/bridge.rs`
 - `crates/meerkat-meta/src/identity_first/gateway_bridges.rs`
+- `crates/meerkat-meta/src/identity_first/runtime/lifecycle_projection.rs`
 - `sdk/python/meerkat_meta/identity_first_models.py`
 - `sdk/python/meerkat_meta/identity_first_providers.py`
 - `sdk/typescript/src/runtime.ts`
@@ -519,6 +528,9 @@ Hooks an embedding host uses around the runtime:
 - `UnifiedRuntimeBuilder::operation_refusal_observer` installs Meerkat's operation refusal observer on every agent factory the builder owns (persistent, scratch and temp-dir launches). A builder given an already-built `mob_spec()` refuses it with `ConflictingConfiguration`, and the `MobBootstrapSpec` constructors take none.
 - A gateway host answers `GatewayHostComposition::operation_refusal_observer`. The gateway asks it once per member factory, with the same construction it offers `compose_member_factory`, before any answer is installed: `Ok(None)` (the default) installs nothing and `Err` refuses init. An installed observer sees every agent its factory builds, including spawned helpers, forks, and the child mobs and councils agents create.
 - A gateway host answers `GatewayHostComposition::operation_review` with Meerkat's `BoundOperationReview`. The gateway asks it with the same construction, before any answer is installed and before any session exists on its runtime. When the review routes R3 to human consent, the gateway first installs its consent owner-loss settlement on the runtime it has just built, then the review on the factory; a review without a consent route goes on the factory alone. `Ok(None)` (the default) installs nothing, and `Err` refuses init. A runtime that refuses the settlement fails init with `GatewayHostError::ConsentSettlementRefused`.
+
+- `MobBootstrapSpec::with_agent_customizer` declares the identity runtime's agent customizer for a runtime composed with `UnifiedRuntime::bootstrap` (or the `bootstrap_with_*` family), so the members a killed process left owing work, built before the identity bootstrap, are held until the roster pass publishes their customizer tools. A declaring runtime must bootstrap an identity context (`activate_without_identity_context` and `MobRuntime::bootstrap` refuse it), and `UnifiedRuntimeBuilder::mob_spec` refuses a spec that declares one (the builder composes its own).
+- A host's own `MobSessionService` or `SessionAgentBuilder` wrapper forwards `session_comms_identity_root` (required since Meerkat 0.9.9, no default) and the provided `record_member_instruction_target`, `release_member_instruction_target`, `read_member_instructions`, `bind_seated_member_session`, `runtime_turn_lost_its_host_runtime` and `live_session_actor_registered`, as Meta's own wrappers do; their defaults refuse or answer `false`.
 
 Delivery and ownership facts an embedding host meets:
 
@@ -636,15 +648,16 @@ already green, and emits an immutable run/attempt/tier/artifact/digest selection
 backed by signed provenance and outer/inner executable hashes. Save the
 selections outside the repo and obtain consumer acceptance against those bytes.
 
-The release owner then tags the same source as `vX.Y.Z` and invokes
-`make release-promote RELEASE_TAG=vX.Y.Z ARTIFACT_SELECTION=<core json-file>`.
+The release owner then tags the same source as `meta-vX.Y.Z` (Meta's own
+tag line, independent of Core's `vX.Y.Z`) and invokes
+`make release-promote RELEASE_TAG=meta-vX.Y.Z ARTIFACT_SELECTION=<core json-file>`.
 `TIER` is for `release-candidate` only: `release-promote`,
 `release-assets-recover` and `release-registry-retry` refuse it (unset it if
 the shell still exports it from the candidate step).
 Promotion accepts only the core selection and verifies and publishes the
 original bytes without rebuilding or signing again. The trailing tier is added
 afterwards, add-only, with
-`make release-assets-recover RELEASE_TAG=vX.Y.Z ARTIFACT_SELECTION=<trailing json-file>`. Assets precede the Python and TypeScript SDKs, then the crates
+`make release-assets-recover RELEASE_TAG=meta-vX.Y.Z ARTIFACT_SELECTION=<trailing json-file>`. Assets precede the Python and TypeScript SDKs, then the crates
 (`meta-extension-state`, then `meerkat-meta`) and an exact registry readback.
 A failed SDK registry upload does not stop the crates; the readback still fails
 the run while any registry lacks the exact version.
@@ -652,9 +665,9 @@ Releases do not publish documentation (see Current Baseline).
 `REGISTRY_DRY_RUN=true` suppresses all publication;
 `PUBLISH_RELEASE_PACKAGES=false` selects asset-only promotion.
 
-Use `make release-registry-retry RELEASE_TAG=vX.Y.Z` for registry-only retry
+Use `make release-registry-retry RELEASE_TAG=meta-vX.Y.Z` for registry-only retry
 (optional `REGISTRY_DRY_RUN=true`), and `make release-assets-recover
-RELEASE_TAG=vX.Y.Z ARTIFACT_SELECTION=<json-file>` to add missing validated
+RELEASE_TAG=meta-vX.Y.Z ARTIFACT_SELECTION=<json-file>` to add missing validated
 original assets. Never replace existing hashes, rebuild expired candidates,
 re-push historical tags, or rerun historical release workflows. Recovery must
 dispatch the current workflow on main with the old tag as data. Missing originals

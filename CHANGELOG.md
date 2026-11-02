@@ -35,6 +35,41 @@ them.
 
 ## [Unreleased]
 
+### Highlights
+
+- GitHub Copilot without a device sign-in. A `copilot` route with
+  `auth_method = "github_copilot_token"` authenticates with a GitHub token
+  from any credential source, as GitHub Copilot CLI does with
+  `COPILOT_GITHUB_TOKEN`: fine-grained personal access tokens with the
+  Copilot Requests permission, OAuth and GitHub App user tokens, and GitHub
+  App installation tokens are accepted, and classic personal access tokens
+  are refused. `rkat auth login copilot --non-interactive` stores a token
+  from `--secret` or stdin, or with `--from-env` reads `COPILOT_GITHUB_TOKEN`,
+  then `GH_TOKEN`, then `GITHUB_TOKEN`; `rkat auth test` prints the account
+  a token resolves to. While no Copilot route is configured, a request that
+  names `global:copilot_openai`, `global:copilot_anthropic` or
+  `global:copilot_gemini` resolves from those variables with no config
+  (default selection never picks these routes). Hosts can check a token
+  without storing it (`meerkat_copilot::verify_operator_token`). See Added,
+  and Breaking for the new `GitHubCopilotToken` auth method variants.
+
+- GitHub Copilot reliability. A temporary failure of the Copilot token
+  exchange (a network failure or timeout, HTTP 408, 429 or 5xx, or a GitHub
+  API rate limit) no longer fails turns as an authentication error: a
+  current token minted from the current sign-in keeps serving until it
+  expires, and the exchange is tried again. A token Copilot rejects with a
+  401 is replaced on its next use instead of leaving the session without a
+  route. Restoring or waking a session, or building one with a set output
+  budget, no longer fails during an exchange outage. Governed requests (a
+  governed turn, or an operation review on a Copilot model) are no longer
+  refused once the account's model list is known, and the Responses route no
+  longer fails on reasoning or message items that are identical apart from
+  their ids. See Fixed.
+
+- Before you upgrade: these crates need Rust 1.97.0 or newer (see Changed),
+  pin them exactly at `=0.9.9`, and read the Upgrade notes before you plan a
+  rollback: 0.9.8 refuses some state that 0.9.9 writes.
+
 ### Breaking
 
 - `meerkat-machine-kernels`, `meerkat-machine-schema`, `meerkat-mob`: the mob
@@ -675,7 +710,7 @@ them.
   settlement: once the session's mutation gate is free, it detaches the
   runtime loop and hard-cancels the loop's exact current run through the
   executor's interrupt handle, as a ready-gated caller on a degraded
-  session already did. Through 0.9.7 the discard waited for the loop to
+  session already did. Through 0.9.8 the discard waited for the loop to
   hand its executor back on its own (a run in flight first reached its
   refused commit, and an idle loop never did), and a failed admission left
   the loop attached until such a caller came. After the detach,
@@ -694,7 +729,7 @@ them.
   (`MobError::LifecycleOperationPending`) while that retirement stands, unless
   the member is host-pending, and a retry alone does not succeed: the
   retirement must finish, or be re-driven (`MobHandle::redrive_retirement`),
-  first. In 0.9.7 the call took the retirement over.
+  first. Through 0.9.8 the call took the retirement over.
 
 - `meerkat-mob`: `MemberRespawnReceipt` is no longer `UnwindSafe` or
   `RefUnwindSafe`. The receipt now keeps the error of a respawn's wake that
@@ -2302,6 +2337,11 @@ them.
 
 ### Changed
 
+- Rust 1.97.0 is the minimum supported Rust version: every crate of this
+  release declares `rust-version = "1.97.0"`, the toolchain it is built and
+  tested with (0.9.8 declared 1.94.0). Cargo refuses to build these crates
+  with an older rustc.
+
 - `meerkat-core`: `BackendProfile::admits_mid_conversation_system_messages`
   answers no for an OpenAI backend kind this version does not know (it
   answered yes), as for a binding the config does not resolve. A capability
@@ -3265,6 +3305,27 @@ them.
 
 ### Upgrade notes
 
+- Build with Rust 1.97.0 or newer: the crates declare
+  `rust-version = "1.97.0"` (0.9.8 declared 1.94.0), and Cargo refuses an
+  older rustc (see Changed).
+
+- Pin the Core crates exactly at `=0.9.9`, as for every release. Meta 0.9.7
+  pins Core `=0.9.8`, so a host that embeds Meta stays on Core 0.9.8 until a
+  Meta release pins `=0.9.9`.
+
+- A rollback to 0.9.8 is refused for some sessions. 0.9.8 reads session
+  envelopes 3 and 4 only, and 0.9.9 writes a session at envelope 5 once it
+  holds an operator-instruction fact or a retired or moved instruction
+  activation row. A session that holds instruction activations a later
+  activation of the same key superseded gets there at its first compaction
+  on 0.9.9, which retires the superseded bodies; a mob member that receives
+  operator instructions gets there at its first run that applies them. Every
+  other session stays at envelope 4 and still reads on 0.9.8. Before a
+  rollback, run `rkat storage doctor` on 0.9.9: its
+  `operator-instruction-envelope` finding lists the sessions at envelope 5,
+  and its `operator-instruction-mob-events` finding lists the mobs 0.9.8
+  cannot restore (see the notes below).
+
 - Operator instructions for a mob's members: a mob that recorded an
   operator instruction journals rows at mob event schema 10, which Core 0.9.7
   and 0.9.8 refuse ("unsupported stored mob event schema_version=10; expected
@@ -3294,12 +3355,12 @@ them.
   JSON-RPC client that is not one of the SDKs (which refuse) must check the
   server's contract version (0.9.9 or later) before sending a gate.
 
-- Durable decisions need no migration: 0.9.8 creates
+- Durable decisions need no migration: 0.9.9 creates
   `approval_decisions.sqlite3` with the first hold and changes no existing
-  file, and `approvals.json` keeps its format. Rolling back to 0.9.7 keeps
-  every approval: 0.9.7 never opens the decisions file, and nothing serves the
+  file, and `approvals.json` keeps its format. Rolling back to 0.9.8 keeps
+  every approval: 0.9.8 never opens the decisions file, and nothing serves the
   decisions under it (none expires, executes or settles its notice). Back on
-  0.9.8, an open decision past its deadline expires at its first read (a
+  0.9.9, an open decision past its deadline expires at its first read (a
   deadline driver reads the due ones) and owes its notice; an approved one is
   listed as owed and runs only before its deadline, and past it expires the
   same way, unless its execution permit was outstanding at the rollback: that
@@ -3360,10 +3421,10 @@ them.
   `list_schedule_occurrences`, and the TypeScript SDK's `listSchedules` and
   `listScheduleOccurrences`. See Breaking.
 
-- No storage migration. A session's compaction cadence gains two optional
-  fields, written only when set; 0.9.8 and earlier ignore them, and a cadence
-  they wrote reads without them, so its first answered request on this
-  release sets the anchor.
+- The compaction cadence needs no migration. A session's cadence gains two
+  optional fields, written only when set; 0.9.8 and earlier ignore them, and
+  a cadence they wrote reads without them, so its first answered request on
+  this release sets the anchor.
 
 - A host that builds `CompactionContext` or `SessionCompactionCadence` by
   struct literal, or calls `build_compaction_context`, adds the new fields or

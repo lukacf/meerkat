@@ -56,7 +56,16 @@ facade builds use the factory/config pipeline rather than direct
 it declares no context window), and the returned `SummarizationSource` states
 how much of the history it carries. Returning
 `SummarizationSource::whole(meerkat_core::materialize_latest_system_prompt_versions(messages))`
-keeps the 0.9.3 behaviour.
+keeps the 0.9.3 behaviour. Since 0.9.9 the `CompactionContext` a `Compactor`
+decides from also carries `projected_input_tokens` (an
+`InputTokenProjection`: the last answered request's count plus the estimate
+of the rows appended since) and `last_context_refusal_boundary_index` (a
+recorded context refusal or bounded request; see
+[How compaction triggers](#how-compaction-triggers)); a custom `Compactor` may
+read them or ignore them, and `None` measures as before. A host that swaps a
+durable snapshot of the session into a live agent calls
+`Agent::reload_compaction_cadence` after the swap, so the agent adopts the
+cadence the snapshot carries.
 
 ```rust
 let factory = AgentFactory::new(store_path)

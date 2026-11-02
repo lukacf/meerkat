@@ -118,6 +118,16 @@ message at that turn boundary. System messages are repeatable and may appear
 anywhere in the transcript; an append never replaces row zero or rewrites an
 earlier message.
 
+A resume that names an explicit system prompt appends it as such a row too,
+except, since 0.9.9, when the prompt is exactly the newest System row the
+model reads as a prompt (one without an append identity, an instruction
+activation or an operator-instruction entry, that is not a superseded prompt
+version): then it appends nothing, where earlier releases appended another
+identical row. A different prompt, and an earlier prompt sent again after a
+change, still append; a bare resume appends nothing; and
+`StartTurnRequest.system_prompt` keeps its per-turn append. A host that
+materializes a resumed session itself asks `Session::newest_prompt_row_is`.
+
 Keyed system-prompt updates instead append rows carrying
 `SystemPromptVersionIdentity`: a `SystemPromptKey` and `SystemPromptVersion`.
 The active model view selects the latest version per key; unkeyed rows are
@@ -163,6 +173,39 @@ Providers with only a top-level instruction field reject later System rows
 with a typed projection error; unsupported placements on other wires also fail
 typed rather than silently hoisting or merging canonical rows. Provider
 capability never changes, rejects, or rewrites the durable Session itself.
+
+### Operator instructions
+
+Since 0.9.9 a host gives a session standing System-plane instructions by
+slot (a namespace and a key), revision and body; this is a Rust API with no
+wire method. `SessionServiceInstructionExt::set_session_instruction` records a
+session-owned write (activate a body, or revoke, at a higher revision; an
+exact retry answers as a duplicate), and `read_session_instructions` reads
+the recorded target, the entries in effect and how the session's model lowers
+them (`lowering`). The persistent service records a live session's write
+through a task it owns and a dormant session's store-only, without waking it;
+the ephemeral service refuses `durability_unavailable`. A write changes only
+the recorded target. The pending changes apply at the session's next fresh
+run start as one System entry appended before the run's own input, naming the
+run; a resumed run applies nothing, and a run that never starts takes its
+entry back, so the changes stay pending. A model that lowers System rows only
+in its leading prompt defers them (`leading_prefix_only`) until a compaction
+at a run's first request carries them in its snapshot, and a backend whose
+wire carries only one leading System row keeps them pending
+(`lowering_unavailable`). A compaction folds every entry row into one
+snapshot of the instructions in effect after the leading System prefix, and
+no summary request, host curator window or compactor input carries an
+instruction body. A stale or conflicting revision, a slot that instruction
+activations manage, more than 64 slots, a body over 256 KiB and more than
+1 MiB of Active bodies are refused typed (`InstructionSetErrorCode`), and so
+is a model change onto a target that cannot carry the entry rows the session
+wrote where they stand. A mob member's session belongs to its mob, which
+writes through `MobHandle::set_operator_instruction`: the session's own
+host's writes are refused `owned_by_mob` (see
+[Operator instructions](/guides/mobs#operator-instructions-rust-hosts)). A
+session that holds operator-instruction facts is written at session envelope
+5, which releases before 0.9.9 refuse (see
+[Upgrading](/guides/upgrading#downgrading-to-0-9-8)).
 
 ### interrupt
 

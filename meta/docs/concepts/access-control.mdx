@@ -61,6 +61,8 @@ This is what makes agent-fanned-out workers governable without per-worker rules:
 
 Lineage is **runtime-derived only**: `spawned_by` and `via_tool` come from the spawn path's own record of who performed the spawn. A `spawned_by` claim arriving through caller-controlled labels (spawn specs, roster labels) is stripped at every enforcement seam — an unverified claim could otherwise mint inherited visibility, or hide a member behind a denied parent. The lineage registry is in-memory: it repopulates as members are spawned and does not survive a runtime restart.
 
+In a multi-runtime Console, member rows and the identity list calls (`GET /console/identities`, `meta/console/list_identities`) name each member's spawner with its runtime's prefix, as they name the member: a rule on the prefixed spawner (`b/ops-lead`) reaches the rows of the members it spawned, and a rule on the bare name (`ops-lead`) does not reach the members another runtime's agent of that name spawned.
+
 ### Side chats
 
 A Console **side chat** (`meta/fork_member`) is decided as the agent it was forked from: its `side_chat_of` label names that agent, and agent checks evaluate the side chat, then the agent and the agent's own ancestors. Every decision on a side chat is the agent's:

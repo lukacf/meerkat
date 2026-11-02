@@ -696,6 +696,11 @@ let report: UnifiedRuntimeShutdownReport = runtime.shutdown().await;
 ```
 
 The shutdown report includes status from both the mob and module runtimes.
+`shutdown` returns only once the root mob's actor task has returned (within
+the root mob's terminal shutdown budget), so after a teardown that settled
+every member, dropping the runtime releases Core's custody of the state
+directory at once, and a new runtime composed on it in the same process is
+not refused as in use (`StorageLayoutError::RuntimeInUse`).
 
 ## HTTP composition and binding
 
@@ -728,7 +733,7 @@ Key routes in the reference app include:
 
 | Route | Method | Description |
 |-------|--------|-------------|
-| `/healthz` | GET | Runtime health summary: `ok`, or in JSON a `status` that reads `degraded` while Core holds restored members broken (`broken_members` names each) |
+| `/healthz` | GET | Runtime health summary: `ok`, or in JSON a `status` that reads `degraded` while Core holds restored members broken (`broken_members` names each) or while the lifecycle projection is off or stalled (`lifecycle_projection` says which and why, and names the events a stopped predecessor still owes while they drain) |
 | `/console` | GET | Admin console HTML |
 | `/console/assets/console-app.js` | GET | React bundle |
 | `/console/assets/console-app.css` | GET | Stylesheet |

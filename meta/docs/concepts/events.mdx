@@ -188,8 +188,15 @@ The structural subscriber reads from `MobEventsView`. With a saved cursor it use
 Cursor persistence is not event persistence:
 
 - If a persistent-state path is configured and no explicit metadata store is supplied, Meta creates `<path>/meta_metadata.sqlite3` for projection metadata.
-- That metadata stores the resume cursor, not the mob-event ledger.
-- `.persistent_state(path)` by itself keeps Mob storage in memory.
+- That metadata stores the resume cursor, not the mob-event ledger. On an
+  identity-first runtime it also keeps the lifecycle projection's cursor, what
+  each lifecycle step owes and the side effects that failed: a host that
+  supplies its own store (`UnifiedRuntimeBuilder::persistent_metadata`) keeps
+  them durably, or a restart skips the side effects a stopped process still
+  owed (see
+  [Lifecycle side effects across a restart](/guides/deployment#lifecycle-side-effects-across-a-restart)).
+- `.persistent_state(path)` keeps Mob storage durable in `event_log.sqlite3`
+  under the state directory; a build without it keeps Mob storage in memory.
 - Replaying events written while Meta was down requires an upstream Meerkat mob-event store that retained those events.
 
 If a saved cursor is stale for the available ledger, the subscriber falls back to the latest cursor.

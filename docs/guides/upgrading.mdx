@@ -58,18 +58,327 @@ Meerkat is pre-1.0, and patch releases can carry declared breaking changes.
 ## Upgrading to 0.9.9
 
 This section is for systems running 0.9.8. The full list of changes is in
-the CHANGELOG under `## [0.9.9]`.
+the CHANGELOG under `## [0.9.9]`. 0.9.9 has no migration step: it opens every
+0.9.8 store as it is, and creates what it adds on first use (the
+`runtime-tool-grants` schema domain with the first scoped tool grant,
+`approval_decisions.sqlite3` with the first durable decision). Some of what
+it writes, though, 0.9.8 cannot read: read
+[Downgrading to 0.9.8](#downgrading-to-0-9-8) before you plan a rollback,
+and back up the state root as the steps above say.
+
+### Before you upgrade
+
+- **Rust 1.97.0 or newer.** Every crate of this release declares
+  `rust-version = "1.97.0"` (0.9.8 declared 1.94.0), and Cargo refuses to
+  build them, `cargo install rkat` included, with an older rustc.
+- **Pin `=0.9.9`.** Move every `meerkat*` dependency to `=0.9.9` at once.
+  Meta 0.9.7 pins Core `=0.9.8`, so a host that embeds Meta stays on Core
+  0.9.8 until a Meta release pins `=0.9.9`.
+- **Upgrade the SDKs with the server.** A Python, TypeScript or Web SDK of
+  0.9.8 or earlier refuses the new `tool_results_bounded_for_request` event
+  type, as it does any event type newer than its contract.
+- **Know when a session stops reading on 0.9.8.** 0.9.9 writes a session at
+  session envelope 5, which 0.9.8 refuses, once the session holds an
+  operator-instruction fact or a retired or moved instruction activation row.
+  A session in which a later activation of a key superseded an earlier one
+  gets there at its first compaction on 0.9.9, which retires the superseded
+  body; a mob member that receives operator instructions gets there at its
+  first run that applies them. Every other session stays at envelope 4 and
+  still reads on 0.9.8. `rkat storage doctor` on 0.9.9 lists the sessions at
+  envelope 5 (`operator-instruction-envelope`) and the mobs 0.9.8 cannot
+  restore (`operator-instruction-mob-events`).
+
+### Breaking changes and what to do
+
+#### Agent schedule tools answer pages of summaries
+
+The schedule tools' replies changed, for agents and for every generic call
+path that runs them: RPC `schedule/call`, REST `POST /schedule/call`, the MCP
+server's `meerkat_schedule_*` tools, the Python SDK's `call_schedule_tool` and
+the TypeScript SDK's `callScheduleTool`. `meerkat_schedule_list` returns one
+page of summaries (`{"schedules": [...], "page": {...}}`, 50 by default, at
+most 200) where it returned every live schedule whole; every tool that
+returns one schedule returns the public shape of `schedule/get`, without
+`machine_state`; and `meerkat_schedule_occurrences` pages every list reply
+(at most 200 rows), with summaries by default. The host listings
+(`schedule/list`, `schedule/get`, `GET /schedules`, `list_schedules`,
+`listSchedules`) return every schedule whole, as before. A schedule's
+`superseded_ack_ids` now lists only the occurrences its latest revise or
+delete superseded.
+
+**Do:** read one schedule whole with `meerkat_schedule_get`, or every schedule
+whole through the host listing; read the public fields where you read
+`machine_state`; follow `page.next_cursor`, and pass `view: "full"` for whole
+occurrences. Bulk readers use the typed host surfaces, not the agent tools:
+RPC `schedule/list` and `schedule/occurrences`, REST `GET /schedules` and
+`GET /schedules/{id}/occurrences`, the Python SDK's `list_schedules` and
+`list_schedule_occurrences`, and the TypeScript SDK's `listSchedules` and
+`listScheduleOccurrences`. See
+[Agent-side schedule tools](/guides/scheduling#agent-side-schedule-tools).
+
+#### WorkGraph reads come newest first and report their cut
+
+`list` and `snapshot` (the agent tools, `workgraph/list` and
+`workgraph/snapshot`, the REST routes and `rkat workgraph`) return the most
+recently updated items first, so a `limit` cut keeps the newest; they
+returned the least recently updated first. `ready` and `snapshot` no longer
+refuse a namespace with more than 1,000 live items, nor `snapshot` one with
+more than 1,000 edges touching a live item or 1,000 attention bindings: they
+read the whole namespace, and `limit` (default 100, at most 1,000) cuts the
+result. Every list, ready and snapshot result reports its cut
+(`total_items`, `truncated`) and names a `next_cursor` when it ended early;
+events results report `truncated`, `next_after_seq` and
+`event_high_water_mark`. `WorkGraphStore::list_items` of the built-in stores
+orders newest first as well.
+
+**Do:** a reader that needs every item follows `next_cursor` (`--cursor` on
+the CLI) instead of raising `limit`, and a reader that relied on the
+oldest-first order sorts the items itself. A result without the new fields
+comes from an older server and may still have been cut. In Rust, set the new
+fields where you build `WorkGraphSnapshot`, `WorkGraphItemsResponse`,
+`WorkItemsResult`, `WorkGraphEventsResponse` or `WorkEventsResult`
+literally; a filter literal that ends with `..Default::default()` keeps
+compiling. See
+[Filter Semantics](/reference/workgraph-reference#filter-semantics).
+
+#### Scoped tool grant gates need every host upgraded
+
+A session built with `grant_gated_tools` (Rust `SessionBuildOptions` or
+`AgentBuildConfig`, or JSON-RPC `session/create`) records its gate in its
+tooling metadata, which a binary older than scoped tool grants does not read:
+such a binary resumes a gated session with its gated tools ungated. An
+`rkat-rpc` older than scoped tool grants also ignores `grant_gated_tools` and
+builds the session ungated. The Python and TypeScript SDKs refuse to send a
+gate to a server whose contract is older than 0.9.9.
+
+**Do:** upgrade every host that serves gated sessions before relying on a
+gate, and do not roll such a host back. A JSON-RPC client that is not one of
+the SDKs checks the server's contract version (0.9.9 or later) before it
+sends a gate. See [Scoped tool grants](/concepts/tools#scoped-tool-grants).
+
+#### `rkat run` stops waiting for a stdin that stays silent
+
+With the default `--stdin auto`, `rkat run` and `rkat run --resume` read stdin
+on a thread of their own: input that has not started within 2 s is skipped
+with one warning, and input that started is read to end of file as before.
+Before, a run whose stdin was not a terminal and stayed open without writing
+blocked forever.
+
+**Do:** a producer that pipes into `rkat run` but starts writing more than
+2 s after launch passes `--stdin blob`, which still waits for end of file; a
+launcher that hands `rkat run` an open stdin it never writes can pass
+`--stdin off` to skip the wait. See
+[Stdin modes and Unix pipes](/cli/commands#stdin-modes-and-unix-pipes).
+
+#### Member turns run on the host's runtime
+
+The turns of runtime-backed mob members, and of the sessions an RPC
+`SessionRuntime` serves, now run on the host's runtime, as the turns of the
+sessions a host creates directly through a session service already did: a
+member's on the runtime of the task that provisions it (the mob actor's), an
+RPC session's on the runtime the `SessionRuntime` was built on. Before, a
+member's turns ran on Core's process-wide `meerkat-machine-cleanup` runtime,
+and a deferred or rebuilt RPC session's on `meerkat-runtime-serving`. The
+agent loop, model streaming, tool calls and whatever the tools spawn now use
+the host's worker threads and their stack, and a member tool that blocks its
+thread holds one of the host's workers. A host runtime that stops in the
+middle of a turn ends the turn as a crash would: its inputs stay non-terminal
+and the next start resumes them, and an RPC session runtime refuses an input
+that arrives while the session waits for that start (`host_runtime_stopped`).
+The two process-wide runtimes keep the cleanup
+and runtime-loop work, and their threads take 16 MiB again when
+`RKAT_WORKER_STACK_BYTES` is unset.
+
+**Do:** size the worker stacks of the runtime your mobs and RPC session
+runtimes run on for the tools you compose. A Tokio runtime built with default
+settings gives its workers 2 MiB (`tokio::runtime::Builder::thread_stack_size`
+sets it); Core's host binaries, and an embedding that runs its main future
+through `meerkat_runtime::host_stack::run_host`, run their workers on 8 MiB
+(`RKAT_WORKER_STACK_BYTES` sets it). Build an RPC `SessionRuntime` inside the
+Tokio runtime its sessions should run on, and keep that runtime running while
+you serve them: built outside a Tokio runtime it records none, and the actor
+of a deferred or rebuilt session is then created on Core's serving runtime,
+as before. A `MobSessionService` wrapper forwards
+`runtime_turn_lost_its_host_runtime` (see
+[Wrappers and decorators](#wrappers-and-decorators)). See
+[Worker Stack Budget](/guides/deploying#worker-stack-budget).
+
+#### Compaction projects each request's input
+
+The compaction check now projects each request's input tokens: the
+provider's count for the last answered request plus an estimate of only the
+rows appended since, so a large tool result that would carry the next request
+past the threshold compacts first. A request the provider refused for not
+fitting the model's context, or one that carried the run's own tool results
+shortened (`tool_results_bounded_for_request`), makes the next run's first
+check compact the whole transcript once. The anchor and the refusal ride the
+session's compaction cadence in two optional fields that 0.9.8 ignores.
+
+**Do:** nothing for the default compactor. A custom `Compactor` that wants
+the projection or the refusal reads the new `CompactionContext` fields. To
+leave more room for what one boundary appends, set a lower explicit
+`auto_compact_threshold` (config, or a mob profile's): the derived threshold
+is four-fifths of the model's context window. See
+[Capacity and cadence](/concepts/memory-and-compaction#capacity-and-cadence).
+
+#### Text that models and tests read
+
+- A `policy_denied` tool error reads `Tool call denied (<code>): <message>`
+  to the model, from the denial itself, for an application consequence policy
+  and a scoped tool grant gate alike.
+- The compaction summary request names each image or video in a user row or
+  tool result as `[image (<media type>) omitted from this summary request]` or
+  `[video (<media type>) omitted from this summary request]`, where it wrote
+  `[image: <media type>]` and `[video: <media type>]`, and the compaction
+  prompt gains a paragraph saying that such a placeholder tells nothing about
+  what the agent could see. The prompt still contains `CONTEXT COMPACTION`.
+
+**Do:** update a client or test that matches either text.
+
+#### Consent, approvals and governed steps
+
+- Approval reads and decisions run host code. `ApprovalService::get`, `list`
+  and `decide_consent` call the host's authorization `prepare` and
+  `review_operation_context` (and, at a decision or a spend, the route's
+  `eligibility`) on the caller's thread, outside the approval owner's locks,
+  for a consent whose retained decision an owner publication change made
+  stale. `decide_consent` can answer a retryable `StoreUnavailable`, with
+  nothing recorded.
+- A pending or approved human consent is kept across unrelated authorization
+  changes and past the end of its decision's own validity window. It is
+  withdrawn as `ContextChanged` when its binding, review tier or presented
+  material changes, and as `AuthorityChanged` when its owners refuse the
+  operation (an owner change gave `context_changed` before) or its approver
+  was revoked or forbidden by policy since deciding.
+- The native work owner's operation-time steps answer another actor's hold
+  of the work's authorization publication writer as a refusal to rebuild
+  (`Refused(ReprepareRequired)`), where they answered `Unavailable`, and
+  Core's governed dispatch steps answer `AuthorizationRefused`
+  (`ReprepareRequired`) where they answered
+  `OperationAuthorizationUnavailable`. A scoped original's admission answers
+  an owner change it meets as `policy_changed`, where it answered
+  `policy_unavailable`.
+
+**Do:** never hold a lock your authorization owners take while you read or
+decide approvals, and retry `StoreUnavailable`. Match the refusal to rebuild
+where you matched the unavailable answer for this contention, or take the
+steps through their waiting forms
+(`run_if_current_within_after_owner_change`,
+`issue_child_if_current_within_after_owner_change`,
+`GovernedHelperChildIssuance::issue_or_recover_after_owner_change`,
+`GovernedHelperAdmissionFence::create_idempotent_after_owner_change`). A
+consent route that answers eligibility only for logins within their own
+expiry keeps answering for a login through an approval decided in it, until
+that login is logged out, replaced or retired; a route that resolves
+eligibility with `PublishedConsentEligibility::observe` overrides
+`HumanConsentRoute::eligibility_answer` with
+`PublishedConsentEligibility::observe_answer`. See
+[Human consent](/guides/authorization-integration#human-consent) and
+[Owner changes in progress](/guides/authorization-integration#owner-changes-in-progress).
+
+#### Mob hosts (Rust)
+
+- A dormant seat on in-process comms takes the members' comms identity root
+  from the mob's session service when the host declares none (see
+  [Dormant seats and comms keys](/guides/mobs#dormant-seats-and-comms-keys-rust-hosts)).
+  A service that reports `NotKept`, or a root it cannot resolve, has every
+  seat refused unless the host declares a root.
+- `MobHandle::rotate_member` is durable from its start, and a restarted mob
+  finishes it itself. It no longer takes over a retirement of the member that
+  started without a rotation: the call is refused retryable
+  (`MobError::LifecycleOperationPending`) until that retirement finishes or is
+  re-driven (`MobHandle::redrive_retirement`).
+- A retire that races a spawn of the same identity is refused
+  `MobError::LifecycleOperationPending`, retryable once the spawn settles.
+- A spawn, a spawn policy's auto-spawn or a dormant seat of a local session
+  member in a mob with no runtime (every profile `TurnDriven`, on a session
+  service without a runtime adapter) is refused before anything of it exists,
+  with `MobError::MissingMemberCapability` (`outbound_comms_runtime`), where it
+  failed `Internal` after the member's session was created.
+
+**Do:** drop a comms identity root you passed only to match your factory's;
+keep `MobBuilder::with_network_member_comms` for members on TCP or UDS. After
+a restart, read a member once before you re-issue an unanswered
+`rotate_member`: a higher generation means the rotation finished, a member
+`MobHandle::list_members_including_retiring` lists as Retiring means the mob
+finishes it, and the generation the call saw, not Retiring, means it never
+started. Retry `LifecycleOperationPending`. See
+[Respawn rotation and scoped release](/reference/mob-architecture#respawn-rotation-and-scoped-release).
+
+#### Host store authors
+
+A host store meets obligation 5 (fencing) at commit: it refuses a batch whose
+token is below one acquired before the batch's commit point with
+`FencedOut`. A store that only hides such a batch at load answers the stale
+writer's commit `Ok`, and is outside the host store contract. On a host store
+realm, a stopped store writer no longer fails turns: a dispatch, a round
+commit or a closing save waits for the writer's re-acquire, and a store fence
+gap suspends the run until the fence is back.
+
+**Do:** make the fence check and the commit one transaction, as an
+append-only store must. See
+[Obligations](/reference/host-store-spi#obligations) and
+[Keeping A Realm In Your Own Database](/guides/durable-runs#keeping-a-realm-in-your-own-database).
+
+#### Rust API: new fields and variants
+
+These public types gained fields or variants, so code that builds them
+literally or matches them exhaustively follows them:
+
+- `SessionBuildOptions` and `AgentBuildConfig` gain `grant_gated_tools` and
+  `mob_incarnation` (`Default` and `AgentBuildConfig::new` fill both, which
+  keeps every build unchanged); `meerkat-rpc`'s `CreateSessionParams` gains
+  `grant_gated_tools`; `SessionTooling` gains `grant_gated`,
+  `SessionToolVisibilityState` gains `tool_grant_gated_names` and
+  `tool_grant_open_names`, and `CoreApplyFailureCause` gains `reason`.
+- `AgentErrorReason` gains `ToolGrantGateRefused` and `BuildAgentError` gains
+  `GrantGate`; both enums are exhaustive. `AgentBuildPolicyError` gains
+  `ToolGrantGateWithoutAdjudication`.
+- `SystemMessage` gains `instruction_entry` and `retired_instruction_body`
+  (`None` keeps the previous behaviour), and `WireSessionMessage::System` the
+  same two wire fields. `SessionLlmRequestPolicy` gains
+  `operator_instruction_lowering`.
+- `CompactionContext` gains `projected_input_tokens` and
+  `last_context_refusal_boundary_index`, `SessionCompactionCadence` gains
+  `last_context_refusal_boundary_index` and `last_answered_request`, and
+  `meerkat_core::agent::compact::build_compaction_context` takes the last
+  answered request as its third parameter. `None` measures as before.
+- `TranscriptEditError` is `#[non_exhaustive]` and gains
+  `SystemRowPruneRefused`.
+- `ForkInstructionRefusalCause` gains `HeadBodyRetired` (wire
+  `head_body_retired`), which the generated Python, TypeScript and Web SDK
+  refusal-cause unions list too.
+- `OpenAiAuthMethod`, `AnthropicAuthMethod` and `GoogleAuthMethod` gain
+  `GitHubCopilotToken` (wire `github_copilot_token`).
+- `MemberRespawnReceipt` is no longer `UnwindSafe` or `RefUnwindSafe`.
+- `MobEventKind` gains `OperatorInstructionCommitted` and
+  `MemberInstructionTargetsRecorded`, and its `MemberRetirementStarted` and
+  `MemberRetired` gain fields that serde skips.
+- The mob, runtime, auth, session document and session persistence version
+  machine types in `meerkat-machine-kernels`, `meerkat-machine-schema`,
+  `meerkat-mob`, `meerkat-runtime` and `meerkat-core` gain inputs, signals,
+  effects, state fields and transitions, and `InputFieldDomainKind` gains
+  `CiValues`. Every new variant is appended after the released ones, so no
+  implicit discriminant moves.
+
+**Do:** add the fields and the arms. Wrap a `MemberRespawnReceipt` that a
+closure inside `std::panic::catch_unwind` captures in
+`std::panic::AssertUnwindSafe` where that is sound. The CHANGELOG's
+`### Breaking` names every change.
 
 ### Wrappers and decorators
 
-Implement the new required method; it has no default, so a wrapper without
-it no longer compiles:
+Implement the new required methods; they have no default, so a wrapper
+without them no longer compiles:
 
 - a `SessionAgentBuilder` or `MobSessionService` wrapper:
   `session_comms_identity_root` (required, no default). Forward it to the
   builder or service you wrap: a mob seats its dormant members under the
   root it reports. A builder or service that builds no comms of its own
   answers `SessionCommsIdentityRoot::NotKept`.
+- a `SessionRuntimeLlmReconfigureService` implementation:
+  `live_session_own_operator_instruction_entry_placement`, which says where
+  the operator-instruction entry rows a live session wrote itself stand.
 
 Forward these new methods too. They have defaults, so a wrapper without them
 compiles, but the default disables what they carry:
@@ -85,6 +394,41 @@ compiles, but the default disables what they carry:
 - a `SessionAgentBuilder` wrapper: `instruction_lowering_for_identity`. Its
   default (`None`) leaves the status read unable to report that a model
   cannot carry operator instructions (`lowering_unavailable`).
+- a `MobSessionService` wrapper: `runtime_turn_lost_its_host_runtime`, as you
+  forward `live_session_actor_registered`. Its default answers `false`, so a
+  member of a stopped host runtime served through the wrapper can have an
+  input that reaches it after the stop recorded as a failed run.
+- a `MobSessionService` wrapper over a durable session owner:
+  `bind_seated_member_session`. Its default refuses, so a dormant resume seat
+  over a session that names no member binding is refused.
+- an `AgentToolDispatcher` wrapper: `adjudicates_tool_grants` and
+  `observes_bindings_only`. Without the first, an agent with a scoped tool
+  grant gate refuses to build over the wrapper
+  (`ToolGrantGateWithoutAdjudication`).
+- an `AuthLeaseHandle` wrapper: `publish_source_credential`. Its default
+  fails closed, so a `github_copilot_token` route that reads its token from
+  the environment, a command or a resolver fails to resolve over the wrapper.
+- a `RuntimeStore` decorator: `load_tool_grant`, `list_tool_grants`,
+  `put_tool_grant_if_absent`, `compare_and_put_tool_grant`,
+  `append_tool_grant_audit` and `read_tool_grant_audit`. Their defaults
+  answer `Unsupported`, so the grant service refuses every grant behind the
+  decorator and a gated name stays closed.
+- a `SessionCheckpointer` wrapper: `dispatch_fence_ready`. Its default checks
+  the fence without waiting, so a run behind the wrapper fails where it would
+  wait for a stopped host store writer's re-acquire.
+- a custom mob storage: `MobIdentityStore::scan_created_identities_page`. Its
+  default reads none, which is right only for a storage that never holds a
+  created identity entry.
+- a `WorkGraphStore` that serves pages: `list_public_events` and
+  `latest_event_seq`, as the built-in stores do. The default
+  `list_public_events` pages through `list_events`.
+- an `HttpAuthorizer` wrapper: `redact_response_diagnostic`. Its default
+  changes nothing, so a credential a provider echoes back reaches the errors
+  and logs of the requests signed through the wrapper.
+- an `AuthLeaseHandle` wrapper: `mark_publication_refused` too. Its default
+  fails closed, so GitHub's refusal of a `github_copilot_token` route's token
+  fails to be recorded over the wrapper, and the request fails without
+  withdrawing the token.
 
 ### Declared identity entries
 
@@ -274,6 +618,25 @@ a rewrite moved an instruction activation row to another offset. 0.9.8 refuses s
 `rkat storage doctor` lists them (Info finding
 `operator-instruction-envelope`) before you roll back. Every other session
 stays at envelope 4 and reads on 0.9.8 unchanged.
+
+0.9.8 does not read a session's scoped tool grant gate, which 0.9.9 records
+in the session's tooling metadata: 0.9.8 resumes a gated session with its
+gated tools ungated. Grant rows and their audit log live in the
+`runtime-tool-grants` schema domain, which 0.9.8 leaves alone. A turn that
+failed because its session's build refused the gate records
+`AgentErrorReason::ToolGrantGateRefused` in its failed-turn completion row,
+and 0.9.8 decodes `AgentErrorReason` strictly, so it cannot read a runtime
+store whose completion row carries it.
+
+A 0.9.8 mob controller cannot decode a 0.9.9 member host's
+`head_body_retired` refusal of a placed fork under `reactivate_inherited`:
+the create fails closed with an untyped internal error ("failed to decode
+command bridge reply") and creates nothing on either side. A 0.9.8 temporary
+council that meets it ends `participant_seating_failed` and keeps a cleanup
+debt for that seat that nothing clears, not even an upgrade of that
+controller. Upgrade mob controllers together with their member hosts before
+relying on `reactivate_inherited` for placed forks of members whose
+instruction activations a compaction may have retired.
 
 ## Upgrading to 0.9.8
 

@@ -228,6 +228,21 @@ account's model list defines it, protocol and limits included (see
 [GitHub Copilot configured once](#github-copilot-configured-once)); a
 `[models.<id>]` entry for it still works, and wins.
 
+The device sign-in's routes send a Copilot token that Meerkat obtains from the
+GitHub sign-in by a token exchange and replaces before it expires. A temporary
+failure of that exchange (a network failure or timeout, HTTP 408, 429 or 5xx,
+or a GitHub API rate limit) does not fail turns: the current token, minted from
+the current sign-in, keeps serving until it expires, and the exchange is tried
+again after its `Retry-After` (at least a second later), or after 30 seconds
+without one. Once no valid token is left, a turn fails with a retryable error
+(rate limited, server error, network timeout), which the agent loop retries. A
+token Copilot rejects with a 401 is replaced on its next use, and the
+account's routes stay resolvable. Restoring or waking a session, or building
+one whose output budget is set explicitly or in the configuration, succeeds
+during such an outage on the account's last known model list; the first
+request then performs the exchange. An exchange 401, or a 403 that asks for an
+account action, still needs a new sign-in.
+
 <Warning>
 GitHub does not currently publish a stable third-party Copilot inference
 contract. This native integration uses the observed GitHub device client
@@ -366,7 +381,8 @@ refuses is never stored. It is kept as a static bearer under the shared
 `source = { kind = "managed_store" }`. RPC and REST store one with
 `auth/profile/create` (`auth_method = "github_copilot_token"`) on a route with
 that source. Other sources need only a different `source` line, the same on
-all three routes:
+all three routes (the routes of one account read its token from one source:
+a route over another source is refused before any request):
 
 ```toml
 # Installation token minted by a host script; re-run before its 1 h expiry
@@ -384,8 +400,11 @@ counts in whole seconds and must outlast that minute), and several minutes
 serve better: `61000` runs the command again about every second, `600000`
 about every nine minutes. A shorter one is refused before the command runs,
 as `unsupported_combination` (see below), rather than running it on every
-request. An external resolver is asked again after the Copilot API refuses a
-token, so a rotated token heals that request.
+request. The route reports that lifetime as its token's expiry, so a session
+built within it reuses the published token: building a session neither
+publishes the token again nor runs the command, and it repeats neither the
+account lookup nor the model listing. An external resolver is asked again
+after the Copilot API refuses a token, so a rotated token heals that request.
 
 Token kinds (read from the documented prefix only):
 
@@ -416,9 +435,11 @@ What each refusal looks like:
 | No token in any of the variables (one that is set but empty counts as unset) | `missing_secret` | none |
 | A classic personal access token | `unsupported_combination` (`auth = "classic_personal_access_token"`) | none |
 | A command source whose `refresh_interval_ms` is below `61000` | `unsupported_combination` (`auth = "command_refresh_interval_within_refresh_window"`) | none: the command does not run |
-| GitHub refused the token itself: revoked, expired or invalid | `user_reauth_required` | the `github_copilot` account is `reauth_required` until a different token value appears or the process restarts: an environment variable is read again on every request and a command or resolver at most once a minute, and a new token heals the account as soon as it is read; replace the token rather than signing in again |
-| Copilot refused the account: no seat, no Copilot Requests permission, an organization policy, chat disabled | `refresh_failed`, with GitHub's message | none: the same token works once that is fixed |
-| Rate limited, or GitHub unavailable | `refresh_failed` | the identity lookup waits for the time GitHub states, for every session of the account, and a command or resolver source is not run meanwhile; a rate-limited model listing fails nothing and is asked again after that time |
+| GitHub refused the account's current token: revoked, expired or invalid (a 401 from the identity lookup, which a later model listing's 401 runs again; for a GitHub App installation token, a 401 from the model listing) | `user_reauth_required` | the `github_copilot` account is `reauth_required` until a different token value appears or the process restarts: an environment variable is read again on every request and a command or resolver at most once a minute, and a new token heals the account as soon as it is read; replace the token rather than signing in again |
+| GitHub refused an earlier token after the account published a newer one (a request still in flight with the earlier token, for example when two credential stores or provider registries share the account) | `stale_credential` | that request, and requests waiting on the same lookup, fail; the newer token stays valid and the next request uses it; nothing is paused |
+| Copilot refused the token: no seat, no Copilot Requests permission, an organization policy, chat disabled (for a user token, a 401 or 403 from the model listing, or a refusal from the identity lookup other than a 401) | `refresh_failed`, with GitHub's message | none: the same token works once that is fixed; when the identity lookup did not answer the token, the same token is asked about again after a minute, and another token at once |
+| Rate limited: a 429, or a 403 with `Retry-After`, with `x-ratelimit-remaining: 0` or whose message says a secondary rate limit was exceeded | `refresh_failed` | the identity lookup waits for the time GitHub states (`Retry-After`, else the limit's reset; a minute when GitHub states none, and never less than a minute or more than an hour), for every session of the account, and a command or resolver source is not run meanwhile; a rate-limited model listing fails nothing and is asked again after that time, except for a token the lookup does not answer, whose request fails and whose lookup waits the same way |
+| GitHub unavailable: the identity lookup answers a 5xx, times out or cannot connect | `refresh_failed` | none: the next request looks the account up again |
 | Logged out (`rkat auth logout global:copilot_openai`) | `lease_absent` | until a different token value appears or the process restarts; meanwhile a command or resolver is read again at most once a minute, as after a refusal |
 
 Which token value was refused or logged out is remembered only in the
@@ -426,25 +447,53 @@ process's memory, by the account's AuthMachine lease. A restart, or any other
 publication on the account that names no token value (a sign-in, a stored
 token, a refresh, the rollback of a failed login), replaces that record: a
 refused token is then sent once more, and refused again, and a logged-out
-token is used again.
+token is used again. A refusal withdraws only the publication it names, so
+GitHub's refusal of a token the account has already replaced leaves the newer
+token valid (the `stale_credential` row).
 
 `rkat auth status copilot_openai` shows `auth_method: github_copilot_token`
 and the account's lifecycle (`absent` before a process first uses a token from
 the environment, then `valid`, `reauth_required` or `released`).
 `rkat auth test copilot_openai` resolves the route and prints `account:` and
-`plan:`.
+`plan:`; once a route serves a GitHub App installation token, or a token
+GitHub's identity lookup does not answer, it prints
+`account: not named by GitHub (...)` and no `plan:`.
+`rkat auth login copilot --non-interactive` names such an account
+`an unnamed GitHub account` (an installation token
+`github.com installation (server-to-server)`), and refuses to store a token
+whose model listing Copilot refuses, with Copilot's reason. A Rust host checks
+a token without storing it, as the CLI does before it stores one, with
+`meerkat_copilot::verify_operator_token(token, &config)`, where `config` is
+`CopilotBackendConfig::from_token_options` of the routes' backend options, so
+the check sends what the routes send: it refuses a classic personal access
+token, looks up the Copilot identity and lists the account's models, which
+must succeed, with no AuthMachine, token store or cache effect, and answers
+the token's `CopilotAccountIdentity` (`login`, `plan`, `api_base`,
+`installation` for a GitHub App installation token, and `looked_up`, whether
+GitHub's identity lookup answered for the token).
+`CopilotAuthorizer::account_identity` reads the identity a route's token
+resolved to.
 
 The token goes only to `api.github.com` (the identity lookup) and to an
-`https` `githubcopilot.com` API host; a redirect is refused, and the token
-never appears in an error or a log line: a failed lookup or model listing is
+`https` `githubcopilot.com` API host, and a redirect is refused. Meerkat keeps
+the token out of its errors and log lines: a failed lookup or model listing is
 reported by its status and GitHub's own error message, never by the response
-body. Meerkat stores no token it reads
-from the environment, a command or a resolver; a stored token uses the
-configured credential store, like an API key. A token in the host environment
-is inherited by shell tools the host runs without confinement, so hosts that
-run shell tools unconfined should prefer `managed_store`, `command` or
-`external_resolver`. A credential command's stderr becomes error text: a
-minting script must not print the token there.
+body, and a token the message quotes shows as `<redacted>`. A token a
+provider, proxy or gateway echoes back is redacted too: the route removes the
+last four bearer values its account signed requests with (the operator's
+GitHub token in token mode, the derived Copilot token after a device sign-in)
+from rejection bodies, stream error events, data lines that do not parse and
+the provider error fields it logs, and every error keeps its class. The
+bearer, and every header value the route signs a provider request with, is
+marked sensitive, so a request's `Debug` output does not print it. Only a
+verbatim echo is caught: an echo that a provider or gateway truncated,
+re-encoded or otherwise transformed can keep part of a token. Meerkat stores
+no token it reads from the environment, a command or a resolver; a stored
+token uses the configured credential store, like an API key. A token in the
+host environment is inherited by shell tools the host runs without
+confinement, so hosts that run shell tools unconfined should prefer
+`managed_store`, `command` or `external_resolver`. A credential command's
+stderr becomes error text: a minting script must not print the token there.
 
 The three reserved routes and the `github_copilot` account hold one method at
 a time. `rkat auth login copilot` (device sign-in) and
@@ -459,6 +508,39 @@ every route of the account. A mob member names its route with
 `--auth-binding global:copilot_anthropic`, or
 `{"realm": "global", "binding": "copilot_anthropic"}` on the wire. The warning
 above about GitHub's unpublished Copilot contract applies to this mode too.
+
+<Note>
+The token route is tested against local stand-ins for GitHub and the Copilot
+API. Its check against GitHub with a real fine-grained personal access token
+has not run yet, so these answers are not yet observed live:
+
+- whether GitHub's identity lookup answers a fine-grained token of a Copilot
+  Business or Enterprise machine user, with its login and API host (if it
+  does not, the route uses the default host, above);
+- whether the per-plan API hosts (`api.business.githubcopilot.com`,
+  `api.enterprise.githubcopilot.com`) accept such a token under
+  `copilot-developer-cli`, and whether they accept `Bearer` for `gho_` and
+  `ghu_` tokens;
+- Claude models (`/v1/messages`) with a fine-grained token;
+- whether `/models` lists each model's supported endpoints and an enabled
+  policy for every plan's token callers (without them a route falls back to
+  its default endpoint);
+- what the Copilot API answers for a revoked or expired token used directly
+  as its bearer, and for its own rate limits and quotas (status, body and
+  `Retry-After` form);
+- whether GitHub's identity lookup ever answers 401 for a valid token that
+  lacks Copilot access, which would hold that token refused until its value
+  changes, and whether it sends rate-limit headers;
+- what a GitHub App installation token gets when its organization has not
+  enabled server-to-server Copilot requests or the App lacks Copilot
+  Requests: a 401 there holds the token refused until its value changes;
+- the body form of Copilot API errors: public reports show plain text, which
+  Meerkat reports as "no message" instead of GitHub's reason;
+- whether an organization that turns off the Copilot CLI policy refuses token
+  route requests, which present as `copilot-developer-cli`;
+- whether a fine-grained token works on Copilot Individual plans at all (one
+  public report shows a 401).
+</Note>
 
 ### GitHub Copilot configured once
 
@@ -677,6 +759,26 @@ auth_method)` pairs. The table below summarizes what's wired today.
 External commands (`CredentialSourceSpec::Command`) and file
 descriptors (`CredentialSourceSpec::FileDescriptor`) let host
 applications inject tokens without going through OAuth.
+
+Credential header values are marked sensitive on every OpenAI Responses,
+OpenAI-compatible Chat Completions and Anthropic Messages request, so the
+request's `Debug` output does not print them and HTTP/2 never indexes them:
+the values a dynamic authorizer supplies (an `external_authorizer` route's, a
+Copilot route's bearer) and a static API key's (the OpenAI `Authorization`
+bearer, Azure OpenAI's `api-key`, the compatible client's bearer, Anthropic's
+`x-api-key`). The Gemini client's credential headers are not marked. A value
+that is not a valid HTTP header value fails the request as an authentication
+failure ("a credential header value is not a valid HTTP header value") before
+it is sent. Those clients also pass what they read from a text generation
+response (a rejection body, a stream error event, a data line that does not
+parse, the provider error fields they log) through the authorizer's
+`HttpAuthorizer::redact_response_diagnostic` before it reaches a caller or a
+log; its default changes nothing, and the Copilot authorizer redacts the
+bearers it signed with. Only a verbatim echo is redacted, and nothing redacts
+a static API key a gateway echoes back. `LlmError::redact_diagnostics`,
+`meerkat_llm_core::streaming::redact_stream_diagnostics` and
+`meerkat_llm_core::http::sensitive_header_value` serve an embedder's own
+client.
 
 ## Credential sources
 
@@ -961,6 +1063,11 @@ Every accepted lifecycle transition emits a structured tracing event:
 - `target = "meerkat::auth::audit"`
 - Fields: `lease_key`, `realm`, optional `binding` / `account` / `profile`
   projections, `action`, `from_phase`, `to_phase`
+
+GitHub's refusal of a Copilot token route's token is recorded with
+`action = mark_publication_refused`, also when it changes nothing: a refusal
+of a token the account has already replaced, or on a lease already refused
+or logged out, keeps `from_phase` equal to `to_phase`.
 
 REST and RPC surfaces also emit audit events for user-initiated
 actions: `create_profile`, `delete_profile`, `login_oauth_complete`,

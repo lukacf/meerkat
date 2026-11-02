@@ -306,9 +306,8 @@ enum HostedMob {
     /// A restored child mob held before activation: the answer a lookup of
     /// it gets.
     Held(MobError),
-    /// A quarantined persisted mob: the answer a lookup of it gets, and
-    /// whether its class lets an id-addressed verb re-attempt its restore.
-    Quarantined { error: MobError, retryable: bool },
+    /// A quarantined persisted mob: the answer a lookup of it gets.
+    Quarantined(MobError),
     /// No set holds it.
     Absent,
 }
@@ -319,7 +318,7 @@ impl HostedMob {
     fn into_handle(self, mob_id: &MobId) -> Result<MobHandle, MobError> {
         match self {
             Self::Managed(handle) => Ok(*handle),
-            Self::Held(error) | Self::Quarantined { error, .. } => Err(error),
+            Self::Held(error) | Self::Quarantined(error) => Err(error),
             Self::Absent => Err(MobError::MobNotFound(mob_id.clone())),
         }
     }
@@ -4555,29 +4554,24 @@ impl MobMcpState {
             .values()
             .find(|quarantined| &quarantined.mob_id == mob_id)
         {
-            Some(quarantined) => HostedMob::Quarantined {
-                error: quarantined.error(),
-                retryable: quarantined.class().is_retryable(),
-            },
+            Some(quarantined) => HostedMob::Quarantined(quarantined.error()),
             None => HostedMob::Absent,
         }
     }
 
-    /// The console-bound handle of the managed mob `mob_id`. A mob
-    /// quarantined as `store_unavailable` (a store that could not serve may
-    /// serve now) gets one re-attempt of its restore first, and none while
-    /// another is in flight (that one is never waited for). Otherwise the
-    /// answer of the set holding the mob: the typed quarantine, the
-    /// held-before-activation refusal, or [`MobError::MobNotFound`] when no
-    /// set holds it. The sets are read as one ([`Self::hosted_mob`]), so a
-    /// mob a concurrent re-attempt registers is answered quarantined
-    /// (retryable) or managed, never not found.
+    /// The console-bound handle of the managed mob `mob_id`. A quarantined
+    /// mob is asked for one re-attempt of its restore on demand first: the
+    /// store's record admits it only for a store that could not serve now
+    /// (`store_unavailable`), and never while another is in flight (that one
+    /// is never waited for). Otherwise the answer of the set holding the
+    /// mob: the typed quarantine, the held-before-activation refusal, or
+    /// [`MobError::MobNotFound`] when no set holds it. The sets are read as
+    /// one ([`Self::hosted_mob`]), so a mob a concurrent re-attempt registers
+    /// is answered quarantined (retryable) or managed, never not found.
     async fn managed_handle(&self, mob_id: &MobId) -> Result<MobHandle, MobError> {
         match self.hosted_mob(mob_id).await {
-            HostedMob::Quarantined {
-                retryable: true, ..
-            } => {
-                self.reattempt_unavailable_quarantine(mob_id).await;
+            HostedMob::Quarantined(_) => {
+                self.reattempt_quarantine_on_demand(mob_id).await;
                 #[cfg(test)]
                 {
                     let hold = self
@@ -4606,14 +4600,15 @@ impl MobMcpState {
     /// whose attempt's token is gone was left by an attempt that ended
     /// without resolving it (its future was dropped, or it panicked): that
     /// attempt is resolved as failed, under the class the record holds, and
-    /// a new one may be admitted. With `unavailable_only`, only a store
-    /// quarantined as `store_unavailable` is re-attempted: an id-addressed
-    /// verb never re-attempts a store that needs a repair.
+    /// a new one may be admitted. `trigger` names what asks: the record
+    /// admits an explicit re-attempt of any class, and an on-demand one (an
+    /// id-addressed verb) only for a store that could not serve now; it
+    /// refuses an on-demand re-attempt of a store that needs a repair.
     #[cfg(not(target_arch = "wasm32"))]
     async fn admit_store_retry(
         &self,
         mob_id: &MobId,
-        unavailable_only: bool,
+        trigger: mob_store_dsl::MobStoreRetryTrigger,
     ) -> Option<Result<(PathBuf, Arc<()>), MobError>> {
         let mut stores = self.quarantined_stores.write().await;
         let (path, quarantined) = stores
@@ -4638,12 +4633,9 @@ impl MobMcpState {
                 );
             }
         }
-        if unavailable_only && !quarantined.class().is_retryable() {
-            return Some(Err(quarantined.error()));
-        }
         let admitted = mob_store_dsl::MobStoreRestoreLifecycleMachineMutator::apply(
             &mut quarantined.record,
-            mob_store_dsl::MobStoreRestoreLifecycleInput::RequestRetry {},
+            mob_store_dsl::MobStoreRestoreLifecycleInput::RequestRetry { trigger },
         );
         match admitted {
             Ok(transition)
@@ -4658,8 +4650,9 @@ impl MobMcpState {
                 quarantined.attempt = Arc::downgrade(&attempt);
                 Some(Ok((path.clone(), attempt)))
             }
-            // A re-attempt is in flight: answer the quarantine at once, never
-            // waiting for it.
+            // Refused: a re-attempt is in flight (answered at once, never
+            // waited for), or an on-demand re-attempt of a store that needs a
+            // repair. The answer is the quarantine.
             Ok(_) => Some(Err(quarantined.error())),
             Err(error) => {
                 tracing::error!(
@@ -4685,7 +4678,7 @@ impl MobMcpState {
     async fn reattempt_store(
         &self,
         mob_id: &MobId,
-        unavailable_only: bool,
+        trigger: mob_store_dsl::MobStoreRetryTrigger,
     ) -> Option<Result<StoreRestored, MobError>> {
         if let Some(state) = self.self_weak.get().and_then(std::sync::Weak::upgrade) {
             let attempt_mob_id = mob_id.clone();
@@ -4693,9 +4686,7 @@ impl MobMcpState {
                 state_tasks::StateTaskKind::Owned,
                 "mob restore retry",
                 meerkat_runtime::stack_relief::box_in_own_frame(move || async move {
-                    state
-                        .reattempt_store_owned(&attempt_mob_id, unavailable_only)
-                        .await
+                    state.reattempt_store_owned(&attempt_mob_id, trigger).await
                 }),
             ) else {
                 return Some(Err(Self::stood_down_error()));
@@ -4706,7 +4697,7 @@ impl MobMcpState {
                 )))
             });
         }
-        self.reattempt_store_owned(mob_id, unavailable_only).await
+        self.reattempt_store_owned(mob_id, trigger).await
     }
 
     /// The body of [`Self::reattempt_store`]: admit the re-attempt, run it,
@@ -4715,9 +4706,9 @@ impl MobMcpState {
     async fn reattempt_store_owned(
         &self,
         mob_id: &MobId,
-        unavailable_only: bool,
+        trigger: mob_store_dsl::MobStoreRetryTrigger,
     ) -> Option<Result<StoreRestored, MobError>> {
-        let (path, attempt) = match self.admit_store_retry(mob_id, unavailable_only).await? {
+        let (path, attempt) = match self.admit_store_retry(mob_id, trigger).await? {
             Ok(admitted) => admitted,
             Err(error) => return Some(Err(error)),
         };
@@ -4837,19 +4828,22 @@ impl MobMcpState {
         }
     }
 
-    /// For an id-addressed verb that found `mob_id` quarantined: one
-    /// re-attempt of the restore of its store when it is quarantined as
-    /// `store_unavailable` (a store that could not serve may serve now), and
-    /// none while another re-attempt is in flight (that one is never waited
-    /// for). The caller reads the hosted sets again for its answer.
-    async fn reattempt_unavailable_quarantine(&self, mob_id: &MobId) {
+    /// For an id-addressed verb that found `mob_id` quarantined: ask for one
+    /// re-attempt of the restore of its store on demand. The store's record
+    /// decides: it admits one for a store that could not serve now
+    /// (`store_unavailable`), and none for a store that needs a repair or
+    /// while another re-attempt is in flight (that one is never waited for).
+    /// The caller reads the hosted sets again for its answer.
+    async fn reattempt_quarantine_on_demand(&self, mob_id: &MobId) {
         #[cfg(target_arch = "wasm32")]
         {
             let _ = mob_id;
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
-            let _ = self.reattempt_store(mob_id, true).await;
+            let _ = self
+                .reattempt_store(mob_id, mob_store_dsl::MobStoreRetryTrigger::OnDemand)
+                .await;
         }
     }
 
@@ -4875,8 +4869,10 @@ impl MobMcpState {
         let _admission = self.admit("mob restore retry")?;
         self.ensure_restored().await?;
         #[cfg(not(target_arch = "wasm32"))]
-        if matches!(self.hosted_mob(mob_id).await, HostedMob::Quarantined { .. })
-            && let Some(answer) = self.reattempt_store(mob_id, false).await
+        if matches!(self.hosted_mob(mob_id).await, HostedMob::Quarantined(_))
+            && let Some(answer) = self
+                .reattempt_store(mob_id, mob_store_dsl::MobStoreRetryTrigger::Explicit)
+                .await
         {
             return answer.map(|restored| match restored {
                 StoreRestored::Managed | StoreRestored::Skipped => MobRestoreRetryOutcome::Restored,
@@ -4888,7 +4884,7 @@ impl MobMcpState {
             HostedMob::Managed(_) | HostedMob::Held(_) => {
                 Ok(MobRestoreRetryOutcome::NotQuarantined)
             }
-            HostedMob::Quarantined { error, .. } => Err(error),
+            HostedMob::Quarantined(error) => Err(error),
             HostedMob::Absent => Err(MobError::MobNotFound(mob_id.clone())),
         }
     }
@@ -5591,7 +5587,7 @@ impl MobMcpState {
         // A quarantined store is kept as found and a held child keeps its
         // store: no create takes the id of either (the hosted sets are read
         // as one).
-        if let HostedMob::Held(error) | HostedMob::Quarantined { error, .. } =
+        if let HostedMob::Held(error) | HostedMob::Quarantined(error) =
             self.hosted_mob(&mob_id).await
         {
             return Err(error);
@@ -5810,7 +5806,7 @@ impl MobMcpState {
             HostedMob::Managed(_) => {
                 return Err(MobError::Internal(format!("mob already exists: {mob_id}")));
             }
-            HostedMob::Held(error) | HostedMob::Quarantined { error, .. } => return Err(error),
+            HostedMob::Held(error) | HostedMob::Quarantined(error) => return Err(error),
         }
         if self.destroy_cleanup_owed(&mob_id) {
             return Err(Self::owed_destroy_cleanup_error(&mob_id));

@@ -20,10 +20,11 @@
 //!
 //! - **The mob's own lifecycle.** `MobMachine` is canonical there once the
 //!   store resumes; a quarantined store has no `MobMachine` state at all.
-//! - **Retry policy or time.** It reads no clock and never re-attempts on
-//!   its own. The shell asks for a re-attempt (an explicit retry, or an
-//!   id-addressed verb that meets a `StoreUnavailable` quarantine) and the
-//!   machine admits at most one at a time.
+//! - **Time.** It reads no clock and never re-attempts on its own. The shell
+//!   asks for a re-attempt, naming what asks (an explicit retry, or an
+//!   id-addressed verb that meets the quarantine on demand), and the machine
+//!   decides: an explicit re-attempt of any class, an on-demand one only for
+//!   a store that could not serve now, and at most one at a time.
 //! - **The restore itself.** The shell runs the re-attempt the machine
 //!   admitted and reports how it ended; the machine owns what the outcome
 //!   means for the record.
@@ -90,6 +91,29 @@ impl std::fmt::Display for MobQuarantineClass {
     }
 }
 
+/// What asks for a re-attempt of a quarantined store's restore.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum MobStoreRetryTrigger {
+    /// An explicit retry, for example after the store was repaired.
+    #[default]
+    Explicit,
+    /// An id-addressed verb that met the quarantine.
+    OnDemand,
+}
+
 /// How a re-attempt of a quarantined store's restore ended.
 #[derive(
     Debug,
@@ -145,6 +169,9 @@ pub enum MobStoreRestoreRefusal {
     AlreadyClassified,
     /// A re-attempt outcome arrived while no re-attempt was in flight.
     NotRetrying,
+    /// An on-demand re-attempt of a store that needs a repair first: only
+    /// an explicit retry re-attempts it.
+    NotRetryable,
 }
 
 machine! {
@@ -183,8 +210,8 @@ machine! {
         input MobStoreRestoreLifecycleInput {
             // The restore pass could not restore the store: quarantine it.
             Quarantine { class: Enum<MobQuarantineClass> },
-            // Ask for one re-attempt of the store's restore.
-            RequestRetry {},
+            // Ask for one re-attempt of the store's restore, naming what asks.
+            RequestRetry { trigger: Enum<MobStoreRetryTrigger> },
             // The re-attempt the machine admitted ended. `class` is the class
             // a failed attempt met; it is ignored for any other outcome.
             ResolveRetry { outcome: Enum<MobStoreRestoreOutcome>, class: Enum<MobQuarantineClass> },
@@ -256,12 +283,14 @@ machine! {
 
         // ------------------------------------------------------------------
         // RequestRetry
-        // At most one re-attempt is in flight; a second request is refused
-        // at once and never waits for the first.
+        // An explicit request re-attempts a store of any class; an on-demand
+        // request only a store that could not serve now. At most one
+        // re-attempt is in flight; a second request is refused at once and
+        // never waits for the first.
         // ------------------------------------------------------------------
 
         transition RequestRetryUnclassified {
-            on input RequestRetry {}
+            on input RequestRetry { trigger }
             guard "unclassified" { self.lifecycle_phase == Phase::Unclassified }
             update {}
             to Unclassified
@@ -269,15 +298,26 @@ machine! {
         }
 
         transition RequestRetryQuarantined {
-            on input RequestRetry {}
+            on input RequestRetry { trigger }
             guard "quarantined" { self.lifecycle_phase == Phase::Quarantined }
+            guard "retryable" { trigger == MobStoreRetryTrigger::Explicit || self.class == MobQuarantineClass::StoreUnavailable }
             update {}
             to Retrying
             emit RetryAdmitted { attempts: self.attempts }
         }
 
+        transition RequestRetryQuarantinedNotRetryable {
+            on input RequestRetry { trigger }
+            guard "quarantined" { self.lifecycle_phase == Phase::Quarantined }
+            guard "on_demand" { trigger == MobStoreRetryTrigger::OnDemand }
+            guard "needs_repair" { self.class != MobQuarantineClass::StoreUnavailable }
+            update {}
+            to Quarantined
+            emit RequestRefused { reason: MobStoreRestoreRefusal::NotRetryable }
+        }
+
         transition RequestRetryRetrying {
-            on input RequestRetry {}
+            on input RequestRetry { trigger }
             guard "retrying" { self.lifecycle_phase == Phase::Retrying }
             update {}
             to Retrying
@@ -285,7 +325,7 @@ machine! {
         }
 
         transition RequestRetryReleased {
-            on input RequestRetry {}
+            on input RequestRetry { trigger }
             guard "released" { self.lifecycle_phase == Phase::Released }
             update {}
             to Released

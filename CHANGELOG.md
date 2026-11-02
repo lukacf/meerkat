@@ -1097,7 +1097,10 @@ them.
   See the mobs guide's section on quarantined mobs and degraded members.
 - `meerkat-machine-schema`, `meerkat-mob`: `MobStoreRestoreLifecycleMachine`,
   a record-scoped machine that owns one quarantined persisted mob store: its
-  class, the one re-attempt in flight, and how each re-attempt ended.
+  class, which re-attempts it admits (`RequestRetry` names its
+  `MobStoreRetryTrigger`: an explicit re-attempt of any class, an on-demand
+  one only for `store_unavailable`, refused otherwise with `NotRetryable`),
+  the one re-attempt in flight, and how each re-attempt ended.
   `MobError::MobQuarantined` and `MobQuarantineClass` are the typed answer
   for such a mob, and `MobError::restore_quarantine_class` classes a failed
   restore.

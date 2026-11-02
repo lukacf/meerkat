@@ -3870,6 +3870,7 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                         "QuarantineReleased",
                         "RequestRetryUnclassified",
                         "RequestRetryQuarantined",
+                        "RequestRetryQuarantinedNotRetryable",
                         "RequestRetryRetrying",
                         "RequestRetryReleased",
                         "ResolveRetryFailed",
@@ -3913,6 +3914,16 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                             "RequestRetryQuarantined",
                             "RequestRetryRetrying",
                             "RequestRetryReleased",
+                        ])
+                        .effects(&["RetryAdmitted", "RequestRefused"]),
+                ),
+                scenario(
+                    "mob_store_retry_eligibility",
+                    "mob_store_restore_lifecycle_machine.rs::an_on_demand_re_attempt_is_admitted_only_for_a_store_that_could_not_serve admits an on-demand re-attempt only for a store quarantined as store_unavailable, refuses it unchanged for store_unreadable and resume_refused, and admits an explicit re-attempt for every class",
+                    CoverageClaims::none()
+                        .transitions(&[
+                            "RequestRetryQuarantined",
+                            "RequestRetryQuarantinedNotRetryable",
                         ])
                         .effects(&["RetryAdmitted", "RequestRefused"]),
                 ),

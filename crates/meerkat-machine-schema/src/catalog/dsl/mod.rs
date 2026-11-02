@@ -5536,6 +5536,7 @@ pub fn mob_store_restore_lifecycle_schema_metadata() -> MachineSchemaMetadata {
                 "MobQuarantineClass",
                 &["StoreUnavailable", "StoreUnreadable", "ResumeRefused"],
             ),
+            NamedTypeBinding::string_enum("MobStoreRetryTrigger", &["Explicit", "OnDemand"]),
             NamedTypeBinding::string_enum(
                 "MobStoreRestoreOutcome",
                 &["Managed", "Held", "Settled", "Failed"],
@@ -5547,6 +5548,7 @@ pub fn mob_store_restore_lifecycle_schema_metadata() -> MachineSchemaMetadata {
                     "NotQuarantined",
                     "AlreadyClassified",
                     "NotRetrying",
+                    "NotRetryable",
                 ],
             ),
         ],

@@ -685,6 +685,12 @@ macro_rules! non_flow_reducer_authority_mob_machine_inputs {
             | mob_dsl::MobMachineInput::DeclareIdentityEntry { .. }
             | mob_dsl::MobMachineInput::SealDeclaredRoster { .. }
             | mob_dsl::MobMachineInput::ForgetArchivedSession { .. }
+            | mob_dsl::MobMachineInput::AdmitIdentityChange { .. }
+            | mob_dsl::MobMachineInput::RecordCreatedIdentityEntry { .. }
+            | mob_dsl::MobMachineInput::SetIdentityChangesHeld { .. }
+            | mob_dsl::MobMachineInput::RemoveIdentityEntry { .. }
+            | mob_dsl::MobMachineInput::ArchiveIdentityEntry { .. }
+            | mob_dsl::MobMachineInput::UnarchiveIdentityEntry { .. }
             | mob_dsl::MobMachineInput::OpenDeclaredApply
             | mob_dsl::MobMachineInput::CloseDeclaredApply
             | mob_dsl::MobMachineInput::FinishExplicitResume { .. }
@@ -1981,6 +1987,12 @@ impl FlowAuthorityInputRecord {
             | mob_dsl::MobMachineInput::DeclareIdentityEntry { .. }
             | mob_dsl::MobMachineInput::SealDeclaredRoster { .. }
             | mob_dsl::MobMachineInput::ForgetArchivedSession { .. }
+            | mob_dsl::MobMachineInput::AdmitIdentityChange { .. }
+            | mob_dsl::MobMachineInput::RecordCreatedIdentityEntry { .. }
+            | mob_dsl::MobMachineInput::SetIdentityChangesHeld { .. }
+            | mob_dsl::MobMachineInput::RemoveIdentityEntry { .. }
+            | mob_dsl::MobMachineInput::ArchiveIdentityEntry { .. }
+            | mob_dsl::MobMachineInput::UnarchiveIdentityEntry { .. }
             | mob_dsl::MobMachineInput::OpenDeclaredApply
             | mob_dsl::MobMachineInput::CloseDeclaredApply
             | mob_dsl::MobMachineInput::FinishExplicitResume { .. }

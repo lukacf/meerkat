@@ -15880,6 +15880,110 @@ mod tests {
         assert!(!authority.state().identity_to_runtime.contains_key(&removed));
     }
 
+    /// An archived entry's name takes no member from the journal replay,
+    /// whatever order MobMachine meets its facts in. The store holds an
+    /// archive's row beside its member's roster row while the archive's
+    /// retirement runs (a crash between the two leaves both); the boot
+    /// replays the roster before it scans the rows, and the scan then marks
+    /// the entry archiving again so the retirement finishes. A replay after
+    /// the scan recorded the entry archived, local or placed, is refused:
+    /// no member is seated under the archived entry, which stays archived.
+    #[test]
+    fn no_replay_seats_a_member_under_an_archived_entry() {
+        let owner_session_id = SessionId("archived-replay-owner".to_string());
+        let host_id = HostId("archived-replay-host".to_string());
+        let mut authority = MobMachineAuthority::new();
+        authority
+            .apply_signal(MobMachineSignal::RecoverOwnerBridgeSession {
+                bridge_session_id: owner_session_id.clone(),
+                destroy_on_owner_archive: false,
+                implicit_delegation_mob: false,
+            })
+            .expect("recover the placed members' owner");
+        authority
+            .apply_signal(MobMachineSignal::RecoverHostBinding {
+                host_id: host_id.clone(),
+                pubkey: PeerSigningKey([9; 32]),
+                endpoint: PeerAddress("tcp://archived-replay-host.test:4100".to_string()),
+                epoch: 1,
+                binding_generation: 1,
+                protocol_min: 4,
+                protocol_max: 4,
+                engine_version: "archived-replay-engine".to_string(),
+                durable_sessions: true,
+                autonomous_members: true,
+                hard_cancel_member: true,
+                tracked_input_cancel: true,
+                memory_store: true,
+                mcp: true,
+                resolvable_providers: std::collections::BTreeSet::from(["anthropic".to_string()]),
+                approval_forwarding: false,
+                live_endpoint: None,
+            })
+            .expect("recover the placed members' host");
+        let local = |name: &str| MobMachineSignal::RecoverRosterMember {
+            agent_identity: AgentIdentity::from(name),
+            agent_runtime_id: AgentRuntimeId(format!("{name}:0")),
+            fence_token: FenceToken(1),
+            generation: Generation(0),
+            profile_name: "worker".to_string(),
+            runtime_mode: SpawnPolicyRuntimeMode::AutonomousHost,
+            external_addressable: false,
+        };
+        let placed = |name: &str, peer: u8| MobMachineSignal::RecoverCommittedPlacedSpawn {
+            spawn_id: PlacedSpawnId(format!("{name}-spawn")),
+            agent_identity: AgentIdentity::from(name),
+            agent_runtime_id: AgentRuntimeId(format!("{name}:0")),
+            generation: Generation(0),
+            fence_token: FenceToken(1),
+            host_id: host_id.clone(),
+            host_binding_generation: 1,
+            member_session_id: SessionId(format!("{name}-session")),
+            member_peer_endpoint: MemberPeerEndpoint::new(
+                PeerName(format!("mob/worker/{name}")),
+                PeerId(format!("{name}-peer")),
+                PeerAddress(format!("tcp://{name}.test:4200")),
+                PeerSigningKey([peer; 32]),
+            ),
+            profile_name: "worker".to_string(),
+            runtime_mode: SpawnPolicyRuntimeMode::AutonomousHost,
+            external_addressable: true,
+            provision_operation_id: format!("{name}-operation"),
+            operation_owner_session_id: owner_session_id.clone(),
+        };
+        // The roster rows of names with no entry replay into seats.
+        authority
+            .apply_signal(local("archived-replay-local-kept"))
+            .expect("a local roster row replays");
+        authority
+            .apply_signal(placed("archived-replay-placed-kept", 3))
+            .expect("a placed roster row replays");
+        for (name, replay) in [
+            ("archived-replay-local", local("archived-replay-local")),
+            (
+                "archived-replay-placed",
+                placed("archived-replay-placed", 4),
+            ),
+        ] {
+            let archived = AgentIdentity::from(name);
+            recover_created(&mut authority, &archived, RecoveredPresence::Archived, None);
+            assert!(
+                authority.apply_signal(replay).is_err(),
+                "no replay seats a member under the archived entry {name}"
+            );
+            let state = authority.state();
+            assert!(
+                !state.identity_to_runtime.contains_key(&archived),
+                "{name} has no member"
+            );
+            assert_eq!(
+                state.identity_entry_unseated.get(&archived),
+                Some(&UnseatedEntryCause::Archived),
+                "{name} stays archived"
+            );
+        }
+    }
+
     /// A created entry row of a name a spawn ladder acts for is answered
     /// unreadable: it ends neither the entry nor the ladder's custody, so no
     /// custody outlives the entry it was opened for

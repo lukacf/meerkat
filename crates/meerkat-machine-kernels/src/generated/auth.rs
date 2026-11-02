@@ -582,6 +582,28 @@ pub mod inputs {
                 .finish()
         }
     }
+    #[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct MarkPublicationRefused {
+        pub refused_credential_generation: u64,
+        pub refused_credential_material_fingerprint: Option<String>,
+    }
+    impl std::fmt::Debug for MarkPublicationRefused {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("MarkPublicationRefused")
+                .field(
+                    "refused_credential_generation",
+                    &self.refused_credential_generation,
+                )
+                .field(
+                    "refused_credential_material_fingerprint",
+                    &self
+                        .refused_credential_material_fingerprint
+                        .as_ref()
+                        .map(|_| "<redacted>"),
+                )
+                .finish()
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -617,6 +639,7 @@ pub enum Input {
     ResolveCredentialUseAdmission(inputs::ResolveCredentialUseAdmission),
     ResolveOAuthLoginCredentialDisposition(inputs::ResolveOAuthLoginCredentialDisposition),
     ResolveSourceCredentialPublication(inputs::ResolveSourceCredentialPublication),
+    MarkPublicationRefused(inputs::MarkPublicationRefused),
 }
 impl Input {
     pub fn kind(&self) -> InputKind {
@@ -660,6 +683,7 @@ impl Input {
             Self::ResolveSourceCredentialPublication(_) => {
                 InputKind::ResolveSourceCredentialPublication
             }
+            Self::MarkPublicationRefused(_) => InputKind::MarkPublicationRefused,
         }
     }
 }
@@ -696,6 +720,7 @@ pub enum InputKind {
     ResolveCredentialUseAdmission,
     ResolveOAuthLoginCredentialDisposition,
     ResolveSourceCredentialPublication,
+    MarkPublicationRefused,
 }
 
 pub mod effects {
@@ -938,6 +963,16 @@ pub enum TransitionId {
     ResolveSourceCredentialPublicationAlreadyPublishedReleased,
     AcquireFromExpiring,
     AcquireFromExpired,
+    MarkPublicationRefusedFromValid,
+    MarkPublicationRefusedFromExpiring,
+    MarkPublicationRefusedFromExpired,
+    MarkPublicationRefusedFromRefreshing,
+    MarkPublicationRefusedSupersededValid,
+    MarkPublicationRefusedSupersededExpiring,
+    MarkPublicationRefusedSupersededExpired,
+    MarkPublicationRefusedSupersededRefreshing,
+    MarkPublicationRefusedWithdrawnReauthRequired,
+    MarkPublicationRefusedWithdrawnReleased,
 }
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

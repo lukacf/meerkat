@@ -2080,6 +2080,84 @@ AcquireFromExpired(expires_at_ts, arg_credential_published_at_millis, arg_creden
     /\ UnchangedFrame_406de655613c82f8
 
 
+MarkPublicationRefusedFromValid(refused_credential_generation, refused_credential_material_fingerprint) ==
+    /\ phase = "Valid"
+    /\ ((credential_generation = refused_credential_generation) /\ (credential_material_fingerprint = refused_credential_material_fingerprint))
+    /\ phase' = "ReauthRequired"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_117129097f16be0f
+
+
+MarkPublicationRefusedFromExpiring(refused_credential_generation, refused_credential_material_fingerprint) ==
+    /\ phase = "Expiring"
+    /\ ((credential_generation = refused_credential_generation) /\ (credential_material_fingerprint = refused_credential_material_fingerprint))
+    /\ phase' = "ReauthRequired"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_117129097f16be0f
+
+
+MarkPublicationRefusedFromExpired(refused_credential_generation, refused_credential_material_fingerprint) ==
+    /\ phase = "Expired"
+    /\ ((credential_generation = refused_credential_generation) /\ (credential_material_fingerprint = refused_credential_material_fingerprint))
+    /\ phase' = "ReauthRequired"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_117129097f16be0f
+
+
+MarkPublicationRefusedFromRefreshing(refused_credential_generation, refused_credential_material_fingerprint) ==
+    /\ phase = "Refreshing"
+    /\ ((credential_generation = refused_credential_generation) /\ (credential_material_fingerprint = refused_credential_material_fingerprint))
+    /\ phase' = "ReauthRequired"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_117129097f16be0f
+
+
+MarkPublicationRefusedSupersededValid(refused_credential_generation, refused_credential_material_fingerprint) ==
+    /\ phase = "Valid"
+    /\ (IF (credential_generation # refused_credential_generation) THEN TRUE ELSE (credential_material_fingerprint # refused_credential_material_fingerprint))
+    /\ phase' = "Valid"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_117129097f16be0f
+
+
+MarkPublicationRefusedSupersededExpiring(refused_credential_generation, refused_credential_material_fingerprint) ==
+    /\ phase = "Expiring"
+    /\ (IF (credential_generation # refused_credential_generation) THEN TRUE ELSE (credential_material_fingerprint # refused_credential_material_fingerprint))
+    /\ phase' = "Expiring"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_117129097f16be0f
+
+
+MarkPublicationRefusedSupersededExpired(refused_credential_generation, refused_credential_material_fingerprint) ==
+    /\ phase = "Expired"
+    /\ (IF (credential_generation # refused_credential_generation) THEN TRUE ELSE (credential_material_fingerprint # refused_credential_material_fingerprint))
+    /\ phase' = "Expired"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_117129097f16be0f
+
+
+MarkPublicationRefusedSupersededRefreshing(refused_credential_generation, refused_credential_material_fingerprint) ==
+    /\ phase = "Refreshing"
+    /\ (IF (credential_generation # refused_credential_generation) THEN TRUE ELSE (credential_material_fingerprint # refused_credential_material_fingerprint))
+    /\ phase' = "Refreshing"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_117129097f16be0f
+
+
+MarkPublicationRefusedWithdrawnReauthRequired(refused_credential_generation, refused_credential_material_fingerprint) ==
+    /\ phase = "ReauthRequired"
+    /\ phase' = "ReauthRequired"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_117129097f16be0f
+
+
+MarkPublicationRefusedWithdrawnReleased(refused_credential_generation, refused_credential_material_fingerprint) ==
+    /\ phase = "Released"
+    /\ phase' = "Released"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_117129097f16be0f
+
+
 Next ==
     \/ (phase = "Valid" \/ phase = "Refreshing" \/ phase = "ReauthRequired" \/ phase = "Released") /\ \E expires_at_ts \in OptionU64Values : \E arg_credential_published_at_millis \in 0..2 : \E arg_credential_material_fingerprint \in OptionStringValues : Acquire(expires_at_ts, arg_credential_published_at_millis, arg_credential_material_fingerprint)
     \/ MarkExpiring
@@ -2268,6 +2346,16 @@ Next ==
     \/ (phase = "Released") /\ \E arg_credential_material_fingerprint \in StringValues : ResolveSourceCredentialPublicationAlreadyPublishedReleased(arg_credential_material_fingerprint)
     \/ (phase = "Expiring") /\ \E expires_at_ts \in OptionU64Values : \E arg_credential_published_at_millis \in 0..2 : \E arg_credential_material_fingerprint \in OptionStringValues : AcquireFromExpiring(expires_at_ts, arg_credential_published_at_millis, arg_credential_material_fingerprint)
     \/ (phase = "Expired") /\ \E expires_at_ts \in OptionU64Values : \E arg_credential_published_at_millis \in 0..2 : \E arg_credential_material_fingerprint \in OptionStringValues : AcquireFromExpired(expires_at_ts, arg_credential_published_at_millis, arg_credential_material_fingerprint)
+    \/ (phase = "Valid") /\ \E refused_credential_generation \in 0..2 : \E refused_credential_material_fingerprint \in OptionStringValues : MarkPublicationRefusedFromValid(refused_credential_generation, refused_credential_material_fingerprint)
+    \/ (phase = "Expiring") /\ \E refused_credential_generation \in 0..2 : \E refused_credential_material_fingerprint \in OptionStringValues : MarkPublicationRefusedFromExpiring(refused_credential_generation, refused_credential_material_fingerprint)
+    \/ (phase = "Expired") /\ \E refused_credential_generation \in 0..2 : \E refused_credential_material_fingerprint \in OptionStringValues : MarkPublicationRefusedFromExpired(refused_credential_generation, refused_credential_material_fingerprint)
+    \/ (phase = "Refreshing") /\ \E refused_credential_generation \in 0..2 : \E refused_credential_material_fingerprint \in OptionStringValues : MarkPublicationRefusedFromRefreshing(refused_credential_generation, refused_credential_material_fingerprint)
+    \/ (phase = "Valid") /\ \E refused_credential_generation \in 0..2 : \E refused_credential_material_fingerprint \in OptionStringValues : MarkPublicationRefusedSupersededValid(refused_credential_generation, refused_credential_material_fingerprint)
+    \/ (phase = "Expiring") /\ \E refused_credential_generation \in 0..2 : \E refused_credential_material_fingerprint \in OptionStringValues : MarkPublicationRefusedSupersededExpiring(refused_credential_generation, refused_credential_material_fingerprint)
+    \/ (phase = "Expired") /\ \E refused_credential_generation \in 0..2 : \E refused_credential_material_fingerprint \in OptionStringValues : MarkPublicationRefusedSupersededExpired(refused_credential_generation, refused_credential_material_fingerprint)
+    \/ (phase = "Refreshing") /\ \E refused_credential_generation \in 0..2 : \E refused_credential_material_fingerprint \in OptionStringValues : MarkPublicationRefusedSupersededRefreshing(refused_credential_generation, refused_credential_material_fingerprint)
+    \/ (phase = "ReauthRequired") /\ \E refused_credential_generation \in 0..2 : \E refused_credential_material_fingerprint \in OptionStringValues : MarkPublicationRefusedWithdrawnReauthRequired(refused_credential_generation, refused_credential_material_fingerprint)
+    \/ (phase = "Released") /\ \E refused_credential_generation \in 0..2 : \E refused_credential_material_fingerprint \in OptionStringValues : MarkPublicationRefusedWithdrawnReleased(refused_credential_generation, refused_credential_material_fingerprint)
     \/ TerminalStutter
 
 oauth_flow_membership_consistent == ((DOMAIN oauth_browser_flow_providers = oauth_browser_flow_ids) /\ (DOMAIN oauth_browser_flow_redirect_uris = oauth_browser_flow_ids) /\ (DOMAIN oauth_browser_flow_expires_at_millis = oauth_browser_flow_ids) /\ (DOMAIN oauth_device_flow_providers = oauth_device_flow_ids) /\ (DOMAIN oauth_device_flow_expires_at_millis = oauth_device_flow_ids) /\ (\A flow_id \in oauth_device_poll_ids : (flow_id \in oauth_device_flow_ids)) /\ (oauth_outstanding_flow_count = (Cardinality(oauth_browser_flow_ids) + Cardinality(oauth_device_flow_ids))))

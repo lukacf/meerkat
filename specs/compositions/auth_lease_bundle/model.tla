@@ -4778,6 +4778,224 @@ auth_machine_AcquireFromExpired(arg_expires_at_ts, arg_credential_published_at_m
        /\ model_step_count' = model_step_count + 1
 
 
+auth_machine_MarkPublicationRefusedFromValid(arg_refused_credential_generation, arg_refused_credential_material_fingerprint) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "auth_machine"
+       /\ packet.variant = "MarkPublicationRefused"
+       /\ packet.payload.refused_credential_generation = arg_refused_credential_generation
+       /\ packet.payload.refused_credential_material_fingerprint = arg_refused_credential_material_fingerprint
+       /\ ~HigherPriorityReady("auth_machine_authority")
+       /\ auth_machine_phase = "Valid"
+       /\ ((auth_machine_credential_generation = packet.payload.refused_credential_generation) /\ (auth_machine_credential_material_fingerprint = packet.payload.refused_credential_material_fingerprint))
+       /\ auth_machine_phase' = "ReauthRequired"
+       /\ UnchangedFrame_b36328745f4ddb6a
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "auth_machine", variant |-> "EmitLifecycleEvent", payload |-> [credential_generation |-> auth_machine_credential_generation, credential_published_at_millis |-> auth_machine_credential_published_at_millis, expires_at |-> auth_machine_expires_at, new_state |-> "ReauthRequired"], effect_id |-> (model_step_count + 1), source_transition |-> "MarkPublicationRefusedFromValid"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "auth_machine", transition |-> "MarkPublicationRefusedFromValid", actor |-> "auth_machine_authority", step |-> (model_step_count + 1), from_phase |-> auth_machine_phase, to_phase |-> "ReauthRequired"]}
+       /\ obligation_auth_machine_auth_lease_lifecycle_publication' = obligation_auth_machine_auth_lease_lifecycle_publication \cup {[effect_id |-> (model_step_count + 1), new_state |-> "ReauthRequired", expires_at |-> auth_machine_expires_at, credential_generation |-> auth_machine_credential_generation, credential_published_at_millis |-> auth_machine_credential_published_at_millis]}
+       /\ UnchangedFrame_87048e7ba4c974a0
+       /\ model_step_count' = model_step_count + 1
+
+
+auth_machine_MarkPublicationRefusedFromExpiring(arg_refused_credential_generation, arg_refused_credential_material_fingerprint) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "auth_machine"
+       /\ packet.variant = "MarkPublicationRefused"
+       /\ packet.payload.refused_credential_generation = arg_refused_credential_generation
+       /\ packet.payload.refused_credential_material_fingerprint = arg_refused_credential_material_fingerprint
+       /\ ~HigherPriorityReady("auth_machine_authority")
+       /\ auth_machine_phase = "Expiring"
+       /\ ((auth_machine_credential_generation = packet.payload.refused_credential_generation) /\ (auth_machine_credential_material_fingerprint = packet.payload.refused_credential_material_fingerprint))
+       /\ auth_machine_phase' = "ReauthRequired"
+       /\ UnchangedFrame_b36328745f4ddb6a
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "auth_machine", variant |-> "EmitLifecycleEvent", payload |-> [credential_generation |-> auth_machine_credential_generation, credential_published_at_millis |-> auth_machine_credential_published_at_millis, expires_at |-> auth_machine_expires_at, new_state |-> "ReauthRequired"], effect_id |-> (model_step_count + 1), source_transition |-> "MarkPublicationRefusedFromExpiring"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "auth_machine", transition |-> "MarkPublicationRefusedFromExpiring", actor |-> "auth_machine_authority", step |-> (model_step_count + 1), from_phase |-> auth_machine_phase, to_phase |-> "ReauthRequired"]}
+       /\ obligation_auth_machine_auth_lease_lifecycle_publication' = obligation_auth_machine_auth_lease_lifecycle_publication \cup {[effect_id |-> (model_step_count + 1), new_state |-> "ReauthRequired", expires_at |-> auth_machine_expires_at, credential_generation |-> auth_machine_credential_generation, credential_published_at_millis |-> auth_machine_credential_published_at_millis]}
+       /\ UnchangedFrame_87048e7ba4c974a0
+       /\ model_step_count' = model_step_count + 1
+
+
+auth_machine_MarkPublicationRefusedFromExpired(arg_refused_credential_generation, arg_refused_credential_material_fingerprint) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "auth_machine"
+       /\ packet.variant = "MarkPublicationRefused"
+       /\ packet.payload.refused_credential_generation = arg_refused_credential_generation
+       /\ packet.payload.refused_credential_material_fingerprint = arg_refused_credential_material_fingerprint
+       /\ ~HigherPriorityReady("auth_machine_authority")
+       /\ auth_machine_phase = "Expired"
+       /\ ((auth_machine_credential_generation = packet.payload.refused_credential_generation) /\ (auth_machine_credential_material_fingerprint = packet.payload.refused_credential_material_fingerprint))
+       /\ auth_machine_phase' = "ReauthRequired"
+       /\ UnchangedFrame_b36328745f4ddb6a
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "auth_machine", variant |-> "EmitLifecycleEvent", payload |-> [credential_generation |-> auth_machine_credential_generation, credential_published_at_millis |-> auth_machine_credential_published_at_millis, expires_at |-> auth_machine_expires_at, new_state |-> "ReauthRequired"], effect_id |-> (model_step_count + 1), source_transition |-> "MarkPublicationRefusedFromExpired"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "auth_machine", transition |-> "MarkPublicationRefusedFromExpired", actor |-> "auth_machine_authority", step |-> (model_step_count + 1), from_phase |-> auth_machine_phase, to_phase |-> "ReauthRequired"]}
+       /\ obligation_auth_machine_auth_lease_lifecycle_publication' = obligation_auth_machine_auth_lease_lifecycle_publication \cup {[effect_id |-> (model_step_count + 1), new_state |-> "ReauthRequired", expires_at |-> auth_machine_expires_at, credential_generation |-> auth_machine_credential_generation, credential_published_at_millis |-> auth_machine_credential_published_at_millis]}
+       /\ UnchangedFrame_87048e7ba4c974a0
+       /\ model_step_count' = model_step_count + 1
+
+
+auth_machine_MarkPublicationRefusedFromRefreshing(arg_refused_credential_generation, arg_refused_credential_material_fingerprint) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "auth_machine"
+       /\ packet.variant = "MarkPublicationRefused"
+       /\ packet.payload.refused_credential_generation = arg_refused_credential_generation
+       /\ packet.payload.refused_credential_material_fingerprint = arg_refused_credential_material_fingerprint
+       /\ ~HigherPriorityReady("auth_machine_authority")
+       /\ auth_machine_phase = "Refreshing"
+       /\ ((auth_machine_credential_generation = packet.payload.refused_credential_generation) /\ (auth_machine_credential_material_fingerprint = packet.payload.refused_credential_material_fingerprint))
+       /\ auth_machine_phase' = "ReauthRequired"
+       /\ UnchangedFrame_b36328745f4ddb6a
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "auth_machine", variant |-> "EmitLifecycleEvent", payload |-> [credential_generation |-> auth_machine_credential_generation, credential_published_at_millis |-> auth_machine_credential_published_at_millis, expires_at |-> auth_machine_expires_at, new_state |-> "ReauthRequired"], effect_id |-> (model_step_count + 1), source_transition |-> "MarkPublicationRefusedFromRefreshing"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "auth_machine", transition |-> "MarkPublicationRefusedFromRefreshing", actor |-> "auth_machine_authority", step |-> (model_step_count + 1), from_phase |-> auth_machine_phase, to_phase |-> "ReauthRequired"]}
+       /\ obligation_auth_machine_auth_lease_lifecycle_publication' = obligation_auth_machine_auth_lease_lifecycle_publication \cup {[effect_id |-> (model_step_count + 1), new_state |-> "ReauthRequired", expires_at |-> auth_machine_expires_at, credential_generation |-> auth_machine_credential_generation, credential_published_at_millis |-> auth_machine_credential_published_at_millis]}
+       /\ UnchangedFrame_87048e7ba4c974a0
+       /\ model_step_count' = model_step_count + 1
+
+
+auth_machine_MarkPublicationRefusedSupersededValid(arg_refused_credential_generation, arg_refused_credential_material_fingerprint) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "auth_machine"
+       /\ packet.variant = "MarkPublicationRefused"
+       /\ packet.payload.refused_credential_generation = arg_refused_credential_generation
+       /\ packet.payload.refused_credential_material_fingerprint = arg_refused_credential_material_fingerprint
+       /\ ~HigherPriorityReady("auth_machine_authority")
+       /\ auth_machine_phase = "Valid"
+       /\ (IF (auth_machine_credential_generation # packet.payload.refused_credential_generation) THEN TRUE ELSE (auth_machine_credential_material_fingerprint # packet.payload.refused_credential_material_fingerprint))
+       /\ auth_machine_phase' = "Valid"
+       /\ UnchangedFrame_b36328745f4ddb6a
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "auth_machine", variant |-> "EmitLifecycleEvent", payload |-> [credential_generation |-> auth_machine_credential_generation, credential_published_at_millis |-> auth_machine_credential_published_at_millis, expires_at |-> auth_machine_expires_at, new_state |-> "Valid"], effect_id |-> (model_step_count + 1), source_transition |-> "MarkPublicationRefusedSupersededValid"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "auth_machine", transition |-> "MarkPublicationRefusedSupersededValid", actor |-> "auth_machine_authority", step |-> (model_step_count + 1), from_phase |-> auth_machine_phase, to_phase |-> "Valid"]}
+       /\ obligation_auth_machine_auth_lease_lifecycle_publication' = obligation_auth_machine_auth_lease_lifecycle_publication \cup {[effect_id |-> (model_step_count + 1), new_state |-> "Valid", expires_at |-> auth_machine_expires_at, credential_generation |-> auth_machine_credential_generation, credential_published_at_millis |-> auth_machine_credential_published_at_millis]}
+       /\ UnchangedFrame_87048e7ba4c974a0
+       /\ model_step_count' = model_step_count + 1
+
+
+auth_machine_MarkPublicationRefusedSupersededExpiring(arg_refused_credential_generation, arg_refused_credential_material_fingerprint) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "auth_machine"
+       /\ packet.variant = "MarkPublicationRefused"
+       /\ packet.payload.refused_credential_generation = arg_refused_credential_generation
+       /\ packet.payload.refused_credential_material_fingerprint = arg_refused_credential_material_fingerprint
+       /\ ~HigherPriorityReady("auth_machine_authority")
+       /\ auth_machine_phase = "Expiring"
+       /\ (IF (auth_machine_credential_generation # packet.payload.refused_credential_generation) THEN TRUE ELSE (auth_machine_credential_material_fingerprint # packet.payload.refused_credential_material_fingerprint))
+       /\ auth_machine_phase' = "Expiring"
+       /\ UnchangedFrame_b36328745f4ddb6a
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "auth_machine", variant |-> "EmitLifecycleEvent", payload |-> [credential_generation |-> auth_machine_credential_generation, credential_published_at_millis |-> auth_machine_credential_published_at_millis, expires_at |-> auth_machine_expires_at, new_state |-> "Expiring"], effect_id |-> (model_step_count + 1), source_transition |-> "MarkPublicationRefusedSupersededExpiring"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "auth_machine", transition |-> "MarkPublicationRefusedSupersededExpiring", actor |-> "auth_machine_authority", step |-> (model_step_count + 1), from_phase |-> auth_machine_phase, to_phase |-> "Expiring"]}
+       /\ obligation_auth_machine_auth_lease_lifecycle_publication' = obligation_auth_machine_auth_lease_lifecycle_publication \cup {[effect_id |-> (model_step_count + 1), new_state |-> "Expiring", expires_at |-> auth_machine_expires_at, credential_generation |-> auth_machine_credential_generation, credential_published_at_millis |-> auth_machine_credential_published_at_millis]}
+       /\ UnchangedFrame_87048e7ba4c974a0
+       /\ model_step_count' = model_step_count + 1
+
+
+auth_machine_MarkPublicationRefusedSupersededExpired(arg_refused_credential_generation, arg_refused_credential_material_fingerprint) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "auth_machine"
+       /\ packet.variant = "MarkPublicationRefused"
+       /\ packet.payload.refused_credential_generation = arg_refused_credential_generation
+       /\ packet.payload.refused_credential_material_fingerprint = arg_refused_credential_material_fingerprint
+       /\ ~HigherPriorityReady("auth_machine_authority")
+       /\ auth_machine_phase = "Expired"
+       /\ (IF (auth_machine_credential_generation # packet.payload.refused_credential_generation) THEN TRUE ELSE (auth_machine_credential_material_fingerprint # packet.payload.refused_credential_material_fingerprint))
+       /\ auth_machine_phase' = "Expired"
+       /\ UnchangedFrame_b36328745f4ddb6a
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "auth_machine", variant |-> "EmitLifecycleEvent", payload |-> [credential_generation |-> auth_machine_credential_generation, credential_published_at_millis |-> auth_machine_credential_published_at_millis, expires_at |-> auth_machine_expires_at, new_state |-> "Expired"], effect_id |-> (model_step_count + 1), source_transition |-> "MarkPublicationRefusedSupersededExpired"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "auth_machine", transition |-> "MarkPublicationRefusedSupersededExpired", actor |-> "auth_machine_authority", step |-> (model_step_count + 1), from_phase |-> auth_machine_phase, to_phase |-> "Expired"]}
+       /\ obligation_auth_machine_auth_lease_lifecycle_publication' = obligation_auth_machine_auth_lease_lifecycle_publication \cup {[effect_id |-> (model_step_count + 1), new_state |-> "Expired", expires_at |-> auth_machine_expires_at, credential_generation |-> auth_machine_credential_generation, credential_published_at_millis |-> auth_machine_credential_published_at_millis]}
+       /\ UnchangedFrame_87048e7ba4c974a0
+       /\ model_step_count' = model_step_count + 1
+
+
+auth_machine_MarkPublicationRefusedSupersededRefreshing(arg_refused_credential_generation, arg_refused_credential_material_fingerprint) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "auth_machine"
+       /\ packet.variant = "MarkPublicationRefused"
+       /\ packet.payload.refused_credential_generation = arg_refused_credential_generation
+       /\ packet.payload.refused_credential_material_fingerprint = arg_refused_credential_material_fingerprint
+       /\ ~HigherPriorityReady("auth_machine_authority")
+       /\ auth_machine_phase = "Refreshing"
+       /\ (IF (auth_machine_credential_generation # packet.payload.refused_credential_generation) THEN TRUE ELSE (auth_machine_credential_material_fingerprint # packet.payload.refused_credential_material_fingerprint))
+       /\ auth_machine_phase' = "Refreshing"
+       /\ UnchangedFrame_b36328745f4ddb6a
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "auth_machine", variant |-> "EmitLifecycleEvent", payload |-> [credential_generation |-> auth_machine_credential_generation, credential_published_at_millis |-> auth_machine_credential_published_at_millis, expires_at |-> auth_machine_expires_at, new_state |-> "Refreshing"], effect_id |-> (model_step_count + 1), source_transition |-> "MarkPublicationRefusedSupersededRefreshing"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "auth_machine", transition |-> "MarkPublicationRefusedSupersededRefreshing", actor |-> "auth_machine_authority", step |-> (model_step_count + 1), from_phase |-> auth_machine_phase, to_phase |-> "Refreshing"]}
+       /\ obligation_auth_machine_auth_lease_lifecycle_publication' = obligation_auth_machine_auth_lease_lifecycle_publication \cup {[effect_id |-> (model_step_count + 1), new_state |-> "Refreshing", expires_at |-> auth_machine_expires_at, credential_generation |-> auth_machine_credential_generation, credential_published_at_millis |-> auth_machine_credential_published_at_millis]}
+       /\ UnchangedFrame_87048e7ba4c974a0
+       /\ model_step_count' = model_step_count + 1
+
+
+auth_machine_MarkPublicationRefusedWithdrawnReauthRequired(arg_refused_credential_generation, arg_refused_credential_material_fingerprint) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "auth_machine"
+       /\ packet.variant = "MarkPublicationRefused"
+       /\ packet.payload.refused_credential_generation = arg_refused_credential_generation
+       /\ packet.payload.refused_credential_material_fingerprint = arg_refused_credential_material_fingerprint
+       /\ ~HigherPriorityReady("auth_machine_authority")
+       /\ auth_machine_phase = "ReauthRequired"
+       /\ auth_machine_phase' = "ReauthRequired"
+       /\ UnchangedFrame_b36328745f4ddb6a
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "auth_machine", variant |-> "EmitLifecycleEvent", payload |-> [credential_generation |-> auth_machine_credential_generation, credential_published_at_millis |-> auth_machine_credential_published_at_millis, expires_at |-> auth_machine_expires_at, new_state |-> "ReauthRequired"], effect_id |-> (model_step_count + 1), source_transition |-> "MarkPublicationRefusedWithdrawnReauthRequired"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "auth_machine", transition |-> "MarkPublicationRefusedWithdrawnReauthRequired", actor |-> "auth_machine_authority", step |-> (model_step_count + 1), from_phase |-> auth_machine_phase, to_phase |-> "ReauthRequired"]}
+       /\ obligation_auth_machine_auth_lease_lifecycle_publication' = obligation_auth_machine_auth_lease_lifecycle_publication \cup {[effect_id |-> (model_step_count + 1), new_state |-> "ReauthRequired", expires_at |-> auth_machine_expires_at, credential_generation |-> auth_machine_credential_generation, credential_published_at_millis |-> auth_machine_credential_published_at_millis]}
+       /\ UnchangedFrame_87048e7ba4c974a0
+       /\ model_step_count' = model_step_count + 1
+
+
+auth_machine_MarkPublicationRefusedWithdrawnReleased(arg_refused_credential_generation, arg_refused_credential_material_fingerprint) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "auth_machine"
+       /\ packet.variant = "MarkPublicationRefused"
+       /\ packet.payload.refused_credential_generation = arg_refused_credential_generation
+       /\ packet.payload.refused_credential_material_fingerprint = arg_refused_credential_material_fingerprint
+       /\ ~HigherPriorityReady("auth_machine_authority")
+       /\ auth_machine_phase = "Released"
+       /\ auth_machine_phase' = "Released"
+       /\ UnchangedFrame_b36328745f4ddb6a
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "auth_machine", variant |-> "EmitLifecycleEvent", payload |-> [credential_generation |-> auth_machine_credential_generation, credential_published_at_millis |-> auth_machine_credential_published_at_millis, expires_at |-> auth_machine_expires_at, new_state |-> "Released"], effect_id |-> (model_step_count + 1), source_transition |-> "MarkPublicationRefusedWithdrawnReleased"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "auth_machine", transition |-> "MarkPublicationRefusedWithdrawnReleased", actor |-> "auth_machine_authority", step |-> (model_step_count + 1), from_phase |-> auth_machine_phase, to_phase |-> "Released"]}
+       /\ obligation_auth_machine_auth_lease_lifecycle_publication' = obligation_auth_machine_auth_lease_lifecycle_publication \cup {[effect_id |-> (model_step_count + 1), new_state |-> "Released", expires_at |-> auth_machine_expires_at, credential_generation |-> auth_machine_credential_generation, credential_published_at_millis |-> auth_machine_credential_published_at_millis]}
+       /\ UnchangedFrame_87048e7ba4c974a0
+       /\ model_step_count' = model_step_count + 1
+
+
 auth_machine_oauth_flow_membership_consistent == ((DOMAIN auth_machine_oauth_browser_flow_providers = auth_machine_oauth_browser_flow_ids) /\ (DOMAIN auth_machine_oauth_browser_flow_redirect_uris = auth_machine_oauth_browser_flow_ids) /\ (DOMAIN auth_machine_oauth_browser_flow_expires_at_millis = auth_machine_oauth_browser_flow_ids) /\ (DOMAIN auth_machine_oauth_device_flow_providers = auth_machine_oauth_device_flow_ids) /\ (DOMAIN auth_machine_oauth_device_flow_expires_at_millis = auth_machine_oauth_device_flow_ids) /\ (\A flow_id \in auth_machine_oauth_device_poll_ids : (flow_id \in auth_machine_oauth_device_flow_ids)) /\ (auth_machine_oauth_outstanding_flow_count = (Cardinality(auth_machine_oauth_browser_flow_ids) + Cardinality(auth_machine_oauth_device_flow_ids))))
 auth_machine_released_oauth_membership_drained == (IF (auth_machine_phase # "Released") THEN TRUE ELSE (auth_machine_oauth_outstanding_flow_count = 0))
 auth_machine_released_not_release_draining == (IF (auth_machine_phase # "Released") THEN TRUE ELSE (auth_machine_release_draining = FALSE))
@@ -4970,6 +5188,16 @@ EntryPacketAdmissible_auth_machine(packet) ==
     \/ /\ (packet.variant = "ResolveSourceCredentialPublication") /\ (auth_machine_phase = "Released") /\ ((auth_machine_credential_material_fingerprint = Some(packet.payload.credential_material_fingerprint)))
     \/ /\ (packet.variant = "Acquire") /\ (auth_machine_phase = "Expiring")
     \/ /\ (packet.variant = "Acquire") /\ (auth_machine_phase = "Expired")
+    \/ /\ (packet.variant = "MarkPublicationRefused") /\ (auth_machine_phase = "Valid") /\ (((auth_machine_credential_generation = packet.payload.refused_credential_generation) /\ (auth_machine_credential_material_fingerprint = packet.payload.refused_credential_material_fingerprint)))
+    \/ /\ (packet.variant = "MarkPublicationRefused") /\ (auth_machine_phase = "Expiring") /\ (((auth_machine_credential_generation = packet.payload.refused_credential_generation) /\ (auth_machine_credential_material_fingerprint = packet.payload.refused_credential_material_fingerprint)))
+    \/ /\ (packet.variant = "MarkPublicationRefused") /\ (auth_machine_phase = "Expired") /\ (((auth_machine_credential_generation = packet.payload.refused_credential_generation) /\ (auth_machine_credential_material_fingerprint = packet.payload.refused_credential_material_fingerprint)))
+    \/ /\ (packet.variant = "MarkPublicationRefused") /\ (auth_machine_phase = "Refreshing") /\ (((auth_machine_credential_generation = packet.payload.refused_credential_generation) /\ (auth_machine_credential_material_fingerprint = packet.payload.refused_credential_material_fingerprint)))
+    \/ /\ (packet.variant = "MarkPublicationRefused") /\ (auth_machine_phase = "Valid") /\ ((IF (auth_machine_credential_generation # packet.payload.refused_credential_generation) THEN TRUE ELSE (auth_machine_credential_material_fingerprint # packet.payload.refused_credential_material_fingerprint)))
+    \/ /\ (packet.variant = "MarkPublicationRefused") /\ (auth_machine_phase = "Expiring") /\ ((IF (auth_machine_credential_generation # packet.payload.refused_credential_generation) THEN TRUE ELSE (auth_machine_credential_material_fingerprint # packet.payload.refused_credential_material_fingerprint)))
+    \/ /\ (packet.variant = "MarkPublicationRefused") /\ (auth_machine_phase = "Expired") /\ ((IF (auth_machine_credential_generation # packet.payload.refused_credential_generation) THEN TRUE ELSE (auth_machine_credential_material_fingerprint # packet.payload.refused_credential_material_fingerprint)))
+    \/ /\ (packet.variant = "MarkPublicationRefused") /\ (auth_machine_phase = "Refreshing") /\ ((IF (auth_machine_credential_generation # packet.payload.refused_credential_generation) THEN TRUE ELSE (auth_machine_credential_material_fingerprint # packet.payload.refused_credential_material_fingerprint)))
+    \/ /\ (packet.variant = "MarkPublicationRefused") /\ (auth_machine_phase = "ReauthRequired")
+    \/ /\ (packet.variant = "MarkPublicationRefused") /\ (auth_machine_phase = "Released")
 
 EntryPacketAdmissible(packet) ==
     CASE
@@ -5368,6 +5596,16 @@ CoreNext ==
     \/ \E arg_credential_material_fingerprint \in StringValues : auth_machine_ResolveSourceCredentialPublicationAlreadyPublishedReleased(arg_credential_material_fingerprint)
     \/ \E arg_expires_at_ts \in OptionU64Values : \E arg_credential_published_at_millis \in 0..2 : \E arg_credential_material_fingerprint \in OptionStringValues : auth_machine_AcquireFromExpiring(arg_expires_at_ts, arg_credential_published_at_millis, arg_credential_material_fingerprint)
     \/ \E arg_expires_at_ts \in OptionU64Values : \E arg_credential_published_at_millis \in 0..2 : \E arg_credential_material_fingerprint \in OptionStringValues : auth_machine_AcquireFromExpired(arg_expires_at_ts, arg_credential_published_at_millis, arg_credential_material_fingerprint)
+    \/ \E arg_refused_credential_generation \in 0..2 : \E arg_refused_credential_material_fingerprint \in OptionStringValues : auth_machine_MarkPublicationRefusedFromValid(arg_refused_credential_generation, arg_refused_credential_material_fingerprint)
+    \/ \E arg_refused_credential_generation \in 0..2 : \E arg_refused_credential_material_fingerprint \in OptionStringValues : auth_machine_MarkPublicationRefusedFromExpiring(arg_refused_credential_generation, arg_refused_credential_material_fingerprint)
+    \/ \E arg_refused_credential_generation \in 0..2 : \E arg_refused_credential_material_fingerprint \in OptionStringValues : auth_machine_MarkPublicationRefusedFromExpired(arg_refused_credential_generation, arg_refused_credential_material_fingerprint)
+    \/ \E arg_refused_credential_generation \in 0..2 : \E arg_refused_credential_material_fingerprint \in OptionStringValues : auth_machine_MarkPublicationRefusedFromRefreshing(arg_refused_credential_generation, arg_refused_credential_material_fingerprint)
+    \/ \E arg_refused_credential_generation \in 0..2 : \E arg_refused_credential_material_fingerprint \in OptionStringValues : auth_machine_MarkPublicationRefusedSupersededValid(arg_refused_credential_generation, arg_refused_credential_material_fingerprint)
+    \/ \E arg_refused_credential_generation \in 0..2 : \E arg_refused_credential_material_fingerprint \in OptionStringValues : auth_machine_MarkPublicationRefusedSupersededExpiring(arg_refused_credential_generation, arg_refused_credential_material_fingerprint)
+    \/ \E arg_refused_credential_generation \in 0..2 : \E arg_refused_credential_material_fingerprint \in OptionStringValues : auth_machine_MarkPublicationRefusedSupersededExpired(arg_refused_credential_generation, arg_refused_credential_material_fingerprint)
+    \/ \E arg_refused_credential_generation \in 0..2 : \E arg_refused_credential_material_fingerprint \in OptionStringValues : auth_machine_MarkPublicationRefusedSupersededRefreshing(arg_refused_credential_generation, arg_refused_credential_material_fingerprint)
+    \/ \E arg_refused_credential_generation \in 0..2 : \E arg_refused_credential_material_fingerprint \in OptionStringValues : auth_machine_MarkPublicationRefusedWithdrawnReauthRequired(arg_refused_credential_generation, arg_refused_credential_material_fingerprint)
+    \/ \E arg_refused_credential_generation \in 0..2 : \E arg_refused_credential_material_fingerprint \in OptionStringValues : auth_machine_MarkPublicationRefusedWithdrawnReleased(arg_refused_credential_generation, arg_refused_credential_material_fingerprint)
     \/ OwnerFeedback_auth_machine_auth_release_oauth_flow_drain_ExpireOAuthBrowserFlow
     \/ OwnerFeedback_auth_machine_auth_release_oauth_flow_drain_ExpireOAuthDeviceFlow
     \/ QuiescentStutter

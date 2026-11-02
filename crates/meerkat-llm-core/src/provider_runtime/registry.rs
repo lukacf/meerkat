@@ -66,6 +66,8 @@ pub struct ResolverEnvironment {
     provider_auth_persistence: Option<meerkat_core::auth::ProviderAuthPersistence>,
     #[cfg(not(target_arch = "wasm32"))]
     host_launch_guard: Option<HostLaunchGuard>,
+    /// See [`Self::admitting_pending_account_limits`].
+    admits_pending_account_limits: bool,
 }
 
 impl ResolverEnvironment {
@@ -82,6 +84,7 @@ impl ResolverEnvironment {
             provider_auth_persistence: None,
             #[cfg(not(target_arch = "wasm32"))]
             host_launch_guard: None,
+            admits_pending_account_limits: false,
         }
     }
 
@@ -98,6 +101,7 @@ impl ResolverEnvironment {
             provider_auth_persistence: None,
             #[cfg(not(target_arch = "wasm32"))]
             host_launch_guard: None,
+            admits_pending_account_limits: false,
         }
     }
 
@@ -171,6 +175,25 @@ impl ResolverEnvironment {
     {
         self.env_lookup = Arc::new(lookup);
         self
+    }
+
+    /// Let this resolution succeed while a temporary outage keeps the
+    /// provider from obtaining the account's derived credential, and with it
+    /// the account's stated limits (its model list and output limits); the
+    /// first request then obtains it. Set this only for a build that reads
+    /// none of those limits, for example one whose output budget is fixed
+    /// before resolution. Off by default: a resolution fails during such an
+    /// outage.
+    #[must_use]
+    pub fn admitting_pending_account_limits(mut self) -> Self {
+        self.admits_pending_account_limits = true;
+        self
+    }
+
+    /// Whether this resolution may succeed while the account's stated limits
+    /// are pending (see [`Self::admitting_pending_account_limits`]).
+    pub fn admits_pending_account_limits(&self) -> bool {
+        self.admits_pending_account_limits
     }
 }
 

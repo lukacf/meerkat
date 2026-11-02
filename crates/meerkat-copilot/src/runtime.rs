@@ -3314,6 +3314,175 @@ mod tests {
         assert!(!token_exchange_requires_account_action(500, b""));
     }
 
+    /// The class of a non-2xx exchange answer that asks for no account
+    /// action: a rate limit (429, or a 403) with its Retry-After, a server
+    /// error (5xx) and a request timeout (408) may pass; any other status
+    /// fails as before, with its text.
+    #[test]
+    fn token_exchange_statuses_are_classified() {
+        for status in [403, 429] {
+            let classified = CopilotTokenExchangeError::from_status(
+                status,
+                Some(StdDuration::from_secs(7)),
+                format!("Copilot token exchange returned {status}"),
+            );
+            assert!(
+                matches!(
+                    classified,
+                    CopilotTokenExchangeError::Unavailable(CopilotExchangeUnavailable {
+                        retry_after: Some(_),
+                        retryable: meerkat_llm_core::LlmError::RateLimited {
+                            retry_after_ms: Some(7000)
+                        },
+                        ..
+                    })
+                ),
+                "HTTP {status} is a rate limit carrying its Retry-After"
+            );
+        }
+        for status in [500, 502, 503] {
+            let classified = CopilotTokenExchangeError::from_status(
+                status,
+                None,
+                format!("Copilot token exchange returned {status}"),
+            );
+            assert!(
+                matches!(
+                    classified,
+                    CopilotTokenExchangeError::Unavailable(CopilotExchangeUnavailable {
+                        retryable: meerkat_llm_core::LlmError::ServerError {
+                            status: classified_status,
+                            ..
+                        },
+                        ..
+                    }) if classified_status == status
+                ),
+                "HTTP {status} is a server error"
+            );
+        }
+        for status in [400, 404, 422] {
+            let message = format!("Copilot token exchange returned {status}");
+            let classified = CopilotTokenExchangeError::from_status(status, None, message.clone());
+            assert!(
+                matches!(
+                    &classified,
+                    CopilotTokenExchangeError::Failed(ProviderAuthError::SourceResolutionFailed(
+                        failure
+                    )) if failure == &message
+                ),
+                "HTTP {status} fails as before"
+            );
+        }
+        let classified = CopilotTokenExchangeError::from_status(
+            408,
+            None,
+            "Copilot token exchange returned 408".to_string(),
+        );
+        assert!(
+            matches!(
+                classified,
+                CopilotTokenExchangeError::Unavailable(CopilotExchangeUnavailable {
+                    retryable: meerkat_llm_core::LlmError::NetworkTimeout { .. },
+                    ..
+                })
+            ),
+            "HTTP 408 is a timeout of the exchange"
+        );
+    }
+
+    /// The exchange's transport failures as the production transport and
+    /// HTTP client report them: its own timeout, a request timeout and a
+    /// refused connection may pass; a refused redirect, an oversized answer
+    /// or a missing HTTP client will not.
+    #[tokio::test]
+    async fn token_exchange_transport_failures_are_classified() {
+        fn retryable_class(
+            error: &CopilotHttpTransportError,
+        ) -> Option<meerkat_llm_core::LlmError> {
+            match CopilotTokenExchangeError::from_transport(error) {
+                CopilotTokenExchangeError::Unavailable(unavailable) => Some(unavailable.retryable),
+                CopilotTokenExchangeError::Failed(_) => None,
+            }
+        }
+
+        assert!(matches!(
+            retryable_class(&CopilotHttpTransportError::Timeout),
+            Some(meerkat_llm_core::LlmError::NetworkTimeout {
+                duration_ms: 30_000
+            })
+        ));
+
+        // An endpoint that accepts the connection and never answers.
+        let silent = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = silent.local_addr().unwrap();
+        let timed_out = reqwest::Client::builder()
+            .timeout(StdDuration::from_millis(50))
+            .build()
+            .unwrap()
+            .get(format!("http://{address}/token"))
+            .send()
+            .await
+            .expect_err("a silent endpoint times out");
+        assert!(timed_out.is_timeout(), "{timed_out:?}");
+        assert!(matches!(
+            retryable_class(&CopilotHttpTransportError::Request(timed_out)),
+            Some(meerkat_llm_core::LlmError::NetworkTimeout { .. })
+        ));
+
+        // A refused connection, through the production transport.
+        let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = closed.local_addr().unwrap();
+        drop(closed);
+        let refused = match ReqwestCopilotHttpTransport::new()
+            .get(&format!("http://{address}/token"), HeaderMap::new())
+            .await
+        {
+            Err(error) => error,
+            Ok(response) => panic!("a closed port answered: status {}", response.status),
+        };
+        assert!(
+            matches!(
+                retryable_class(&refused),
+                Some(meerkat_llm_core::LlmError::ConnectionReset)
+            ),
+            "{refused:?}"
+        );
+
+        for failure in [
+            CopilotHttpTransportError::RedirectRefused { status: 302 },
+            CopilotHttpTransportError::ResponseTooLarge,
+            CopilotHttpTransportError::ClientUnavailable(
+                meerkat_auth_core::auth_oauth::CredentialHttpClientUnavailable,
+            ),
+        ] {
+            assert!(retryable_class(&failure).is_none(), "{failure:?}");
+        }
+    }
+
+    #[test]
+    fn exchange_retry_waits_at_least_a_second_and_never_past_expiry() {
+        let now = DateTime::from_timestamp(1_800_000_000, 0).expect("valid timestamp");
+        let expires_at = now + Duration::seconds(600);
+        assert_eq!(
+            exchange_retry_at(now, Some(StdDuration::ZERO), expires_at),
+            now + Duration::seconds(1),
+            "Retry-After: 0 cannot switch the backoff off"
+        );
+        assert_eq!(
+            exchange_retry_at(now, Some(StdDuration::from_secs(60)), expires_at),
+            now + Duration::seconds(60)
+        );
+        assert_eq!(
+            exchange_retry_at(now, None, expires_at),
+            now + Duration::seconds(30)
+        );
+        assert_eq!(
+            exchange_retry_at(now, Some(StdDuration::from_secs(u64::MAX)), expires_at),
+            expires_at,
+            "a retry is never scheduled past the token's expiry"
+        );
+    }
+
     #[tokio::test]
     async fn route_scoped_credential_identity_is_rejected() {
         let (auth_binding, account_binding) = validated_binding();
@@ -4882,6 +5051,99 @@ mod tests {
             );
             assert_eq!(transport.request_count(), 6);
             assert_eq!(session.bearers(), ["Bearer derived-two"]);
+        }
+
+        /// The retryable class of the exchange failure the account recorded.
+        fn recorded_exchange_failure(
+            authorizer: &CopilotAuthorizer,
+        ) -> Option<meerkat_llm_core::LlmError> {
+            authorizer.state.cache.read().as_ref().and_then(|cached| {
+                cached
+                    .exchange_unavailable
+                    .as_ref()
+                    .map(|unavailable| unavailable.retryable.clone())
+            })
+        }
+
+        #[tokio::test]
+        async fn a_recorded_exchange_failure_lasts_until_the_exchange_answers() {
+            let clock = TestClock::new();
+            let transport = Arc::new(ScriptedTransport::new([
+                token_at("derived-one", clock.at(3600), 200),
+                models_response(),
+                json_response(503, serde_json::json!({"message": "unavailable"})),
+                json_response(404, serde_json::json!({"message": "Not Found"})),
+                json_response(503, serde_json::json!({"message": "unavailable"})),
+                token_at("derived-two", clock.at(3700 + 3600), 200),
+                models_response(),
+            ]));
+            let account = RouteAccount::new(transport.clone(), &clock).await;
+            let authorizer = account
+                .runtime
+                .resolve(&account.binding, &account.env)
+                .await
+                .unwrap()
+                .concrete_authorizer();
+
+            // The token has expired: each preparation tries the exchange.
+            clock.set(3700);
+            assert!(authorizer.prepare_request().await.is_err());
+            assert!(
+                matches!(
+                    recorded_exchange_failure(&authorizer),
+                    Some(meerkat_llm_core::LlmError::ServerError { status: 503, .. })
+                ),
+                "an outage that leaves no token to serve is recorded with its class"
+            );
+            assert!(authorizer.prepare_request().await.is_err());
+            assert!(
+                recorded_exchange_failure(&authorizer).is_none(),
+                "a failure that is not transient clears the record"
+            );
+            assert!(authorizer.prepare_request().await.is_err());
+            assert!(recorded_exchange_failure(&authorizer).is_some());
+            authorizer
+                .prepare_request()
+                .await
+                .expect("the exchange answers again");
+            assert!(
+                recorded_exchange_failure(&authorizer).is_none(),
+                "a successful mint clears the record"
+            );
+            assert_eq!(transport.request_count(), 7);
+        }
+
+        #[tokio::test]
+        async fn a_failure_after_a_recorded_outage_fails_the_turn_as_itself() {
+            let clock = TestClock::new();
+            let transport = Arc::new(ScriptedTransport::new([
+                token_at("derived-one", clock.at(3600), 200),
+                models_response(),
+                json_response(503, serde_json::json!({"message": "unavailable"})),
+                json_response(404, serde_json::json!({"message": "Not Found"})),
+            ]));
+            let account = RouteAccount::new(transport.clone(), &clock).await;
+            let session = account.session([]).await;
+
+            clock.set(3700);
+            let events = session.turn().await;
+            let [Err(error)] = events.as_slice() else {
+                panic!("the turn fails once: {events:?}");
+            };
+            assert!(retried(error), "{error:?}");
+
+            let events = session.turn().await;
+            let [Err(error)] = events.as_slice() else {
+                panic!("the turn fails once: {events:?}");
+            };
+            assert!(
+                matches!(
+                    error,
+                    meerkat_llm_core::LlmError::AuthenticationFailed { .. }
+                ) && !retried(error),
+                "a later failure that is not transient must not be reported as the earlier outage: {error:?}"
+            );
+            assert_eq!(transport.request_count(), 4);
         }
     }
 }

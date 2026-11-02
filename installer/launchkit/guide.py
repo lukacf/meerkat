@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+from contextlib import contextmanager
 import inspect
 import json
 
@@ -1094,6 +1095,15 @@ class GuideService:
         saved.pop("organization_update", None)
         saved = await asyncio.to_thread(self.store.save, saved, version, **({"command": command} if command else {}))
         return await self._with_implementation_evidence(saved)
+
+    @contextmanager
+    def build_admission(self, identity):
+        """Read saved build inputs without asynchronous display projections."""
+        with self.store.build_admission(identity) as state:
+            for index, message in enumerate(state["messages"]):
+                message.setdefault("id", f"legacy-{identity}-{index}")
+            state.setdefault("brief", DesignBrief().model_dump(mode="json"))
+            yield state
 
     async def get(self, identity):
         state = await asyncio.to_thread(self.store.get, identity)

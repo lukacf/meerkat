@@ -104,6 +104,48 @@ class GuideStore:
             row = db.execute("SELECT body FROM guided_setups WHERE id=?", (identity,)).fetchone()
         return json.loads(row["body"]) if row else None
 
+    @contextmanager
+    def build_admission(self, identity: str):
+        """Hold the saved guide and operation unchanged through publication.
+
+        This final synchronous read never creates or migrates a store. Take
+        the writer reservation without waiting on the event loop, including
+        in WAL mode where a read transaction would not exclude new commits.
+        The caller must not await or start external work inside this context.
+        """
+        identity = self.identity(identity)
+        db = None
+        try:
+            path = (self.root / "guided-setups.sqlite3").absolute()
+            db = sqlite3.connect(path.as_uri() + "?mode=rw", uri=True, timeout=0,
+                                 isolation_level=None)
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT body FROM guided_setups WHERE id=?", (identity,)).fetchone()
+            if row is None:
+                raise DraftConflict("This setup changed. Reload before building the application.")
+            state = json.loads(row[0])
+            state.pop("operation", None)
+            table = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='guide_operations'").fetchone()
+            if table is not None:
+                operation = db.execute("SELECT body FROM guide_operations WHERE guide_id=?", (identity,)).fetchone()
+                if operation is not None:
+                    state["operation"] = json.loads(operation[0])
+        except (sqlite3.Error, ValueError, TypeError, AttributeError):
+            if db is not None:
+                db.close()
+            raise DraftConflict("The saved setup is unavailable or being updated. Reload before building the application.") from None
+        except BaseException:
+            if db is not None:
+                db.close()
+            raise
+        try:
+            yield state
+        finally:
+            try:
+                db.rollback()
+            finally:
+                db.close()
+
     def list(self, *, include_all=False):
         with self._database() as db:
             rows = db.execute("SELECT body FROM guided_setups ORDER BY rowid DESC"

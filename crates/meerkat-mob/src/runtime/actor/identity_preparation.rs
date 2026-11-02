@@ -16,8 +16,9 @@ use super::super::identity_change::{
 };
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 use super::super::identity_preparation::{
-    ConstructionBegun, ConstructionOutcome, HeldConstruction, IdentityConstructionRequest,
-    construction_end_of, construction_refusal, settle_published_construction_row,
+    ConstructionBegun, ConstructionFailure, ConstructionOutcome, HeldConstruction,
+    IdentityConstructionRequest, construction_end_of, construction_refusal,
+    settle_published_construction_row,
 };
 use super::super::identity_preparation::{
     ConstructionEnd, ConstructionEndReport, PreparationSettleCommit, PreparationSettleCommitted,
@@ -606,7 +607,7 @@ impl MobActor {
                     error = %error,
                     "a held construction ended without its publication"
                 );
-                let cause = Some(error.to_string());
+                let cause = Some(ConstructionFailure::of(&error));
                 if let Some(kind) = end.machine_kind() {
                     self.apply_dsl_input(
                         mob_dsl::MobMachineInput::EndPreparationConstruction {

@@ -357,8 +357,8 @@ pub use runtime::{
 };
 pub use runtime::{CloseIfIdleOutcome, MobAdmissionCloseReason, MobBusy};
 pub use runtime::{
-    ConstructionEnd, HeldPreparation, IdentityConstructionRequest, IdentityPreparationSettle,
-    IdentityPreparationSettled, PreparationSettlement,
+    ConstructionEnd, ConstructionFailure, HeldPreparation, IdentityConstructionRequest,
+    IdentityPreparationSettle, IdentityPreparationSettled, PreparationSettlement,
 };
 pub use runtime::{
     CreatedIdentityRequest, IdentityArchiveChange, IdentityChangeConsentInput, IdentityChangeGrant,

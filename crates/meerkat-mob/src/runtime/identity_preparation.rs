@@ -76,6 +76,34 @@ pub enum ConstructionEnd {
     PublicationInterrupted,
 }
 
+/// The error that ended a held construction's attempt, typed: the class of
+/// the failure ([`MobError::failure_class`]), its wire error code when it
+/// has one ([`MobError::wire_error_code`]), and its text for diagnostics. A
+/// host tells a refused membership commit from a provider or a store fault
+/// by the class and the code; nothing branches on the detail.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ConstructionFailure {
+    /// The class of the failure.
+    pub class: crate::MobFailureClass,
+    /// The failure's wire error code, when it has one.
+    pub error_code: Option<meerkat_contracts::ErrorCode>,
+    /// The failure's text, for diagnostics only.
+    pub detail: String,
+}
+
+impl ConstructionFailure {
+    /// The typed failure of `error`. (RED: it keeps the text only.)
+    #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+    pub(crate) fn of(error: &MobError) -> Self {
+        Self {
+            class: crate::MobFailureClass::Internal,
+            error_code: None,
+            detail: error.to_string(),
+        }
+    }
+}
+
 impl ConstructionEnd {
     /// The end's stable token (`aborted`, `expired`, `refused`,
     /// `publication_failed`, `publication_interrupted`).
@@ -269,12 +297,13 @@ pub enum PreparationSettlement {
     /// flight.
     ActivationPending { attempt: u64 },
     /// The accepted activation of `attempt` ended without its publication:
-    /// the identity stays pending. `cause` is the error that ended it, when
-    /// this process saw it end.
+    /// the identity stays pending. `cause` is the typed failure that ended
+    /// it, when this process saw it end.
+    #[non_exhaustive]
     PublicationEnded {
         attempt: u64,
         end: ConstructionEnd,
-        cause: Option<String>,
+        cause: Option<ConstructionFailure>,
     },
 }
 
@@ -352,12 +381,12 @@ pub(super) enum ConstructionOutcome {
     /// The accepted activation published the member.
     Published,
     /// The attempt ended without a publication; `cleanup` is the error of a
-    /// hold's cleanup its abort could not confirm, and `cause` the error
-    /// that ended the attempt.
+    /// hold's cleanup its abort could not confirm, and `cause` the typed
+    /// failure that ended the attempt.
     Ended {
         end: ConstructionEnd,
         cleanup: Option<String>,
-        cause: Option<String>,
+        cause: Option<ConstructionFailure>,
     },
 }
 
@@ -416,13 +445,13 @@ pub(super) struct HeldConstruction {
     pub(super) activation_sent: bool,
 }
 
-/// How an identity's attempt ended, in this process: its end, and the error
-/// that ended it, if one did.
+/// How an identity's attempt ended, in this process: its end, and the typed
+/// failure that ended it, if one did.
 #[derive(Debug, Clone)]
 pub(super) struct EndedAttempt {
     pub(super) attempt: u64,
     pub(super) end: ConstructionEnd,
-    pub(super) cause: Option<String>,
+    pub(super) cause: Option<ConstructionFailure>,
 }
 
 /// The mob's registry of held constructions (the actor's): the hold of each
@@ -454,15 +483,15 @@ impl HeldConstructions {
         self.ended.get(identity)
     }
 
-    /// Record how `identity`'s `attempt` ended, with the error that ended
-    /// it, if one did.
+    /// Record how `identity`'s `attempt` ended, with the typed failure that
+    /// ended it, if one did.
     #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
     pub(super) fn record_end(
         &mut self,
         identity: &AgentIdentity,
         attempt: u64,
         end: ConstructionEnd,
-        cause: Option<String>,
+        cause: Option<ConstructionFailure>,
     ) {
         self.ended.insert(
             identity.clone(),

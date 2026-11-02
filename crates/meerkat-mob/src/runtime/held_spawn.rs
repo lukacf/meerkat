@@ -683,10 +683,16 @@ pub(super) async fn provision_held(
                 }
                 if take_held_publication_failure_for_test(member) {
                     return Err(match held_provision.abort().await {
-                        Ok(()) => MobError::Internal(HELD_PUBLICATION_FAILURE_FOR_TEST.to_string()),
-                        Err(cleanup) => MobError::Internal(format!(
-                            "{HELD_PUBLICATION_FAILURE_FOR_TEST}; cleanup failed: {cleanup}"
-                        )),
+                        Ok(()) => MobError::MobMachineRejected {
+                            context: "held_publication_for_test",
+                            reason: HELD_PUBLICATION_FAILURE_FOR_TEST.to_string(),
+                        },
+                        Err(cleanup) => MobError::MobMachineRejected {
+                            context: "held_publication_for_test",
+                            reason: format!(
+                                "{HELD_PUBLICATION_FAILURE_FOR_TEST}; cleanup failed: {cleanup}"
+                            ),
+                        },
                     });
                 }
             }

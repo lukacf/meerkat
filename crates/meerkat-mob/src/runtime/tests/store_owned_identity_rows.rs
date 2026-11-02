@@ -5299,11 +5299,13 @@ async fn a_crash_between_acceptance_and_commit_ends_the_attempt_publication_inte
 }
 
 /// Row (RED): an accepted activation whose publication fails answers the
-/// error that ended it: the settle answers the failed publication with its
-/// cause, and the identity stays pending.
+/// error that ended it, typed: the settle answers the failed publication
+/// with its cause's failure class and wire error code (the seam's is a
+/// membership commit MobMachine refused, as a ladder refused at its
+/// publication is) and its text, and the identity stays pending.
 ///
 /// RED on the old tree: the end's cause is discarded, and the settle
-/// answers none.
+/// answers none; then the cause kept the text only, with no class.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_failed_publication_answers_the_error_that_ended_it() {
     let mob = HeldMob::new("construct-publication-fails").await;
@@ -5325,9 +5327,17 @@ async fn a_failed_publication_answers_the_error_that_ended_it() {
             cause: Some(cause),
         }) => {
             assert_eq!(attempt, held.attempt());
+            assert_eq!(
+                cause.class,
+                crate::MobFailureClass::MobRejected,
+                "the cause's class is the refusal's: {cause:?}"
+            );
+            assert_eq!(cause.error_code, None, "{cause:?}");
             assert!(
-                cause.contains(crate::runtime::held_spawn::HELD_PUBLICATION_FAILURE_FOR_TEST),
-                "the cause names the error that ended the publication: {cause}"
+                cause
+                    .detail
+                    .contains(crate::runtime::held_spawn::HELD_PUBLICATION_FAILURE_FOR_TEST),
+                "the cause's detail names the error that ended the publication: {cause:?}"
             );
         }
         other => panic!("the failed publication answers its cause: {other:?}"),

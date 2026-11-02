@@ -7727,6 +7727,102 @@ mod tests {
             assert_eq!(operator.lease().generation, 2);
         }
 
+        /// A refusal of a stored token names the publication the token was
+        /// stored under (its record's durable marker), not a lease snapshot
+        /// read after the value. A newer token being stored meanwhile (its
+        /// publication made, its record not yet saved when this request read
+        /// the store) stays valid: this request fails as `stale_credential`,
+        /// and once the newer record is saved it serves.
+        #[tokio::test]
+        async fn a_refusal_of_a_stored_token_names_its_stored_publication() {
+            let harness = Harness::new([
+                Ok(json_response(
+                    401,
+                    serde_json::json!({"message": "Bad credentials"}),
+                )),
+                Ok(svc_bot()),
+                Ok(models_response()),
+            ]);
+            let store = harness
+                .operator
+                .env
+                .provider_auth_persistence()
+                .expect("provider-auth persistence")
+                .token_store();
+            let identity = account_identity();
+            let key = meerkat_core::auth::TokenKey::from_credential_identity(&identity);
+            let stored = |token: String| PersistedTokens {
+                auth_mode: PersistedAuthMode::StaticBearer,
+                primary_secret: Some(token),
+                refresh_token: None,
+                id_token: None,
+                expires_at: None,
+                last_refresh: Some(Utc::now()),
+                scopes: Vec::new(),
+                account_id: None,
+                metadata: serde_json::Value::Null,
+            };
+            // As a store write does: publish the token's lifecycle, then mark
+            // the record with that publication.
+            let publish = |tokens: PersistedTokens| {
+                let transition = meerkat_core::publish_token_lifecycle_acquired_for_identity(
+                    &harness.operator.auth_lease,
+                    &identity,
+                    &tokens,
+                )
+                .expect("publish the stored token");
+                meerkat_core::mark_tokens_lifecycle_published_for_transition(
+                    &key,
+                    &tokens,
+                    &transition,
+                )
+                .expect("mark the stored token")
+            };
+            let earlier = publish(stored(user_token("stored-earlier")));
+            store
+                .save(&key, &earlier)
+                .await
+                .expect("store the earlier token");
+            let newer = publish(stored(user_token("stored-newer")));
+            let newer_generation = harness.operator.lease().generation;
+
+            let refused = harness
+                .resolve_from(
+                    CopilotProviderRoute::OpenAi,
+                    CredentialSourceSpec::ManagedStore,
+                )
+                .await
+                .err();
+            assert_eq!(
+                harness.operator.lease().phase,
+                Some(AuthLeasePhase::Valid),
+                "a refusal of the earlier stored token must not withdraw the newer one"
+            );
+            assert_eq!(harness.operator.lease().generation, newer_generation);
+            assert_eq!(
+                refused,
+                Some(ProviderAuthError::Auth(AuthError::StaleCredential))
+            );
+
+            store
+                .save(&key, &newer)
+                .await
+                .expect("the newer token's record is saved");
+            let resolved = harness
+                .resolve_from(
+                    CopilotProviderRoute::OpenAi,
+                    CredentialSourceSpec::ManagedStore,
+                )
+                .await
+                .expect("the newer stored token serves");
+            let (_, bearer) = authorize_once(
+                &resolved.concrete_authorizer(),
+                &format!("{BUSINESS_API}/responses"),
+            )
+            .await;
+            assert_eq!(bearer, format!("Bearer {}", user_token("stored-newer")));
+        }
+
         /// A command source's `refresh_interval_ms` at or below the
         /// AuthMachine's refresh window would run the command and look the
         /// account up again on every request: it is refused as

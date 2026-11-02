@@ -4249,6 +4249,20 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
                 ],
             ),
             NamedTypeBinding::string_enum(
+                "MemberCustodyRestoreKind",
+                &["StartupBinding", "CleanupDelivery"],
+            ),
+            NamedTypeBinding::string_enum(
+                "MemberCustodyCauseKind",
+                &[
+                    "ServedElsewhere",
+                    "HostingUnavailable",
+                    "DurableTailUnprovable",
+                    "StoreUnavailable",
+                    "StoreUnreadable",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
                 "MemberWakeAbandonKind",
                 &[
                     "NotCurrent",

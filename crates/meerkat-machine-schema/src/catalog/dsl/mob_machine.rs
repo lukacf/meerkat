@@ -152,6 +152,17 @@ macro_rules! mob_catalog_machine_dsl {
             // The reason remains display detail; this map preserves the
             // typed code without parsing that detail.
             member_restore_failure_codes: Map<AgentIdentity, String>,
+            // A seated member's startup custody restore that a start could
+            // not complete, for a cause scoped to that member and before any
+            // effect: which restore is unrestored, and the typed cause its
+            // last attempt met. The member keeps its seat and its lifecycle
+            // (degraded is not Broken), and the mob goes on. Volatile: every
+            // start re-derives it from the restores it runs. An operation on
+            // the member, or a re-attempt the shell schedules for owed work,
+            // re-attempts the restore first; a success resolves it. The two
+            // maps share their keys, and a seat that ends takes its entry.
+            member_custody_unrestored: Map<AgentIdentity, Enum<MemberCustodyRestoreKind>>,
+            member_custody_unrestored_causes: Map<AgentIdentity, Enum<MemberCustodyCauseKind>>,
             // Runtime retirement is a durable pending obligation from
             // admission until archival completion. Consumer-refusal code and
             // detail are diagnostic facts; the session correlation is broader
@@ -862,6 +873,8 @@ macro_rules! mob_catalog_machine_dsl {
             concluded_objective_ids = EmptySet,
             member_restore_failures = EmptyMap,
             member_restore_failure_codes = EmptyMap,
+            member_custody_unrestored = EmptyMap,
+            member_custody_unrestored_causes = EmptyMap,
             runtime_retire_refusal_codes = EmptyMap,
             runtime_retire_refusal_reasons = EmptyMap,
             runtime_retire_pending_sessions = EmptyMap,
@@ -2174,6 +2187,13 @@ macro_rules! mob_catalog_machine_dsl {
             RecoverCompletedWithCleanupCustody,
             RecoverOwnerBridgeSession { bridge_session_id: SessionId, destroy_on_owner_archive: bool, implicit_delegation_mob: bool },
             RecoverMemberRestoreFailure { agent_identity: AgentIdentity, reason: String },
+            // A start, or a re-attempt, could not restore a seated member's
+            // custody for a cause scoped to that member, before any effect:
+            // the member keeps its seat with that custody unrestored, and the
+            // mob goes on in its phase.
+            RecordMemberCustodyUnrestored { agent_identity: AgentIdentity, restore: Enum<MemberCustodyRestoreKind>, cause: Enum<MemberCustodyCauseKind> },
+            // A re-attempt restored the member's custody.
+            ResolveMemberCustodyRestored { agent_identity: AgentIdentity },
             RecoverPendingPlacedSpawn { spawn_id: PlacedSpawnId, agent_identity: AgentIdentity, generation: Generation, fence_token: FenceToken, host_id: HostId, host_binding_generation: u64, spec_digest: String, runtime_mode: Enum<SpawnPolicyRuntimeMode>, provision_operation_id: String, operation_owner_session_id: SessionId },
             RecoverCommittedPlacedSpawn { spawn_id: PlacedSpawnId, agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, generation: Generation, fence_token: FenceToken, host_id: HostId, host_binding_generation: u64, member_session_id: SessionId, member_peer_endpoint: MemberPeerEndpoint, profile_name: String, runtime_mode: Enum<SpawnPolicyRuntimeMode>, external_addressable: bool, provision_operation_id: String, operation_owner_session_id: SessionId },
             RecoverPlacedCarrierCleanup { obligation: PlacedCarrierCleanupObligation },
@@ -4994,8 +5014,21 @@ macro_rules! mob_catalog_machine_dsl {
                 && self.member_state_markers == EmptyMap
                 && self.member_restore_failures == EmptyMap
                 && self.member_restore_failure_codes == EmptyMap
+                && self.member_custody_unrestored == EmptyMap
+                && self.member_custody_unrestored_causes == EmptyMap
                 && self.remote_runtime_retired_ids == EmptySet
                 && self.remote_supervisor_revoked_ids == EmptySet)
+        }
+
+        // An unrestored custody belongs to a seated member: a seat that ends
+        // takes its record, and the restore and its cause are recorded
+        // together.
+        invariant custody_unrestored_members_are_seated {
+            for_all(id in self.member_custody_unrestored.keys(),
+                self.identity_to_runtime.contains_key(id)
+                && self.member_custody_unrestored_causes.contains_key(id))
+            && for_all(id in self.member_custody_unrestored_causes.keys(),
+                self.member_custody_unrestored.contains_key(id))
         }
 
         // Operator instructions: every record holds all of its fields, and
@@ -10428,6 +10461,8 @@ macro_rules! mob_catalog_machine_dsl {
                 // side effect again after terminal completion.
                 self.pending_session_ingress_detach_runtime_ids.remove(agent_runtime_id);
                 self.identity_to_runtime.remove(agent_identity);
+                self.member_custody_unrestored.remove(agent_identity);
+                self.member_custody_unrestored_causes.remove(agent_identity);
                 self.member_definition_wiring_exempt.remove(agent_identity);
                 self.member_seat_session_unborn.remove(agent_identity);
                 self.member_session_bindings.remove(agent_identity);
@@ -10578,6 +10613,8 @@ macro_rules! mob_catalog_machine_dsl {
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.pending_session_ingress_detach_runtime_ids.remove(agent_runtime_id);
                 self.identity_to_runtime.remove(agent_identity);
+                self.member_custody_unrestored.remove(agent_identity);
+                self.member_custody_unrestored_causes.remove(agent_identity);
                 self.member_definition_wiring_exempt.remove(agent_identity);
                 self.member_seat_session_unborn.remove(agent_identity);
                 self.member_session_bindings.remove(agent_identity);
@@ -13663,6 +13700,8 @@ macro_rules! mob_catalog_machine_dsl {
                 self.runtime_retire_refusal_reasons.remove(agent_runtime_id);
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.identity_to_runtime.remove(agent_identity);
+                self.member_custody_unrestored.remove(agent_identity);
+                self.member_custody_unrestored_causes.remove(agent_identity);
                 // An identity entry outlives a retirement the declared apply did
                 // not start: a placed entry stays unseated, hosted on its first
                 // use. Only the end of an unlisted retirement (the seal's mark)
@@ -13792,6 +13831,8 @@ macro_rules! mob_catalog_machine_dsl {
                 self.runtime_retire_refusal_reasons.remove(agent_runtime_id);
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.identity_to_runtime.remove(agent_identity);
+                self.member_custody_unrestored.remove(agent_identity);
+                self.member_custody_unrestored_causes.remove(agent_identity);
                 // An identity entry outlives a retirement the declared apply did
                 // not start: it stays unseated, owed a seat, and its archived
                 // session is recorded, so the next apply seats it there again.
@@ -13918,6 +13959,8 @@ macro_rules! mob_catalog_machine_dsl {
                 self.runtime_retire_refusal_reasons.remove(agent_runtime_id);
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.identity_to_runtime.remove(agent_identity);
+                self.member_custody_unrestored.remove(agent_identity);
+                self.member_custody_unrestored_causes.remove(agent_identity);
                 self.identity_entry_origins.remove(agent_identity);
                 self.member_definition_wiring_exempt.remove(agent_identity);
                 self.member_seat_session_unborn.remove(agent_identity);
@@ -14022,6 +14065,8 @@ macro_rules! mob_catalog_machine_dsl {
                 self.runtime_retire_refusal_reasons.remove(agent_runtime_id);
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.identity_to_runtime.remove(agent_identity);
+                self.member_custody_unrestored.remove(agent_identity);
+                self.member_custody_unrestored_causes.remove(agent_identity);
                 // An identity entry outlives a retirement the declared apply did
                 // not start: it stays unseated, owed a seat, and its archived
                 // session is recorded, so the next apply seats it there again.
@@ -14137,6 +14182,8 @@ macro_rules! mob_catalog_machine_dsl {
                 self.runtime_retire_refusal_reasons.remove(agent_runtime_id);
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.identity_to_runtime.remove(agent_identity);
+                self.member_custody_unrestored.remove(agent_identity);
+                self.member_custody_unrestored_causes.remove(agent_identity);
                 // An identity entry outlives a retirement the declared apply did
                 // not start: it stays unseated, owed a seat, and its archived
                 // session is recorded, so the next apply seats it there again.
@@ -14255,6 +14302,8 @@ macro_rules! mob_catalog_machine_dsl {
                 self.runtime_retire_refusal_reasons.remove(agent_runtime_id);
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.identity_to_runtime.remove(agent_identity);
+                self.member_custody_unrestored.remove(agent_identity);
+                self.member_custody_unrestored_causes.remove(agent_identity);
                 self.identity_entry_origins.remove(agent_identity);
                 self.member_definition_wiring_exempt.remove(agent_identity);
                 self.member_seat_session_unborn.remove(agent_identity);
@@ -14352,6 +14401,8 @@ macro_rules! mob_catalog_machine_dsl {
                 self.runtime_retire_refusal_reasons.remove(agent_runtime_id);
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.identity_to_runtime.remove(agent_identity);
+                self.member_custody_unrestored.remove(agent_identity);
+                self.member_custody_unrestored_causes.remove(agent_identity);
                 // An identity entry outlives a retirement the declared apply did
                 // not start: it stays unseated, owed a seat, and its archived
                 // session is recorded, so the next apply seats it there again.
@@ -14463,6 +14514,8 @@ macro_rules! mob_catalog_machine_dsl {
                 self.runtime_retire_refusal_reasons.remove(agent_runtime_id);
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.identity_to_runtime.remove(agent_identity);
+                self.member_custody_unrestored.remove(agent_identity);
+                self.member_custody_unrestored_causes.remove(agent_identity);
                 // An identity entry outlives a retirement the declared apply did
                 // not start: a placed entry stays unseated, hosted on its first
                 // use. Only the end of an unlisted retirement (the seal's mark)
@@ -14586,6 +14639,8 @@ macro_rules! mob_catalog_machine_dsl {
                 self.runtime_retire_refusal_reasons.remove(agent_runtime_id);
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.identity_to_runtime.remove(agent_identity);
+                self.member_custody_unrestored.remove(agent_identity);
+                self.member_custody_unrestored_causes.remove(agent_identity);
                 // An identity entry outlives a retirement the declared apply did
                 // not start: a placed entry stays unseated, hosted on its first
                 // use. Only the end of an unlisted retirement (the seal's mark)
@@ -14810,6 +14865,8 @@ macro_rules! mob_catalog_machine_dsl {
                 self.runtime_retire_refusal_reasons.remove(agent_runtime_id);
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.identity_to_runtime.remove(agent_identity);
+                self.member_custody_unrestored.remove(agent_identity);
+                self.member_custody_unrestored_causes.remove(agent_identity);
                 self.identity_entry_origins.remove(agent_identity);
                 self.identity_entry_retiring.remove(agent_identity);
                 // The entry's role hold ends with it.
@@ -14904,6 +14961,8 @@ macro_rules! mob_catalog_machine_dsl {
                 self.runtime_retire_refusal_reasons.remove(agent_runtime_id);
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.identity_to_runtime.remove(agent_identity);
+                self.member_custody_unrestored.remove(agent_identity);
+                self.member_custody_unrestored_causes.remove(agent_identity);
                 self.identity_entry_origins.remove(agent_identity);
                 self.identity_entry_retiring.remove(agent_identity);
                 // The entry's role hold ends with it.
@@ -14992,6 +15051,8 @@ macro_rules! mob_catalog_machine_dsl {
                 self.runtime_retire_refusal_reasons.remove(agent_runtime_id);
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.identity_to_runtime.remove(agent_identity);
+                self.member_custody_unrestored.remove(agent_identity);
+                self.member_custody_unrestored_causes.remove(agent_identity);
                 self.identity_entry_origins.remove(agent_identity);
                 self.identity_entry_retiring.remove(agent_identity);
                 // The entry's role hold ends with it.
@@ -15079,6 +15140,8 @@ macro_rules! mob_catalog_machine_dsl {
                 self.runtime_retire_refusal_reasons.remove(agent_runtime_id);
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.identity_to_runtime.remove(agent_identity);
+                self.member_custody_unrestored.remove(agent_identity);
+                self.member_custody_unrestored_causes.remove(agent_identity);
                 self.identity_entry_origins.remove(agent_identity);
                 self.identity_entry_retiring.remove(agent_identity);
                 // The entry's role hold ends with it.
@@ -15182,6 +15245,8 @@ macro_rules! mob_catalog_machine_dsl {
                 self.runtime_retire_refusal_reasons.remove(agent_runtime_id);
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.identity_to_runtime.remove(agent_identity);
+                self.member_custody_unrestored.remove(agent_identity);
+                self.member_custody_unrestored_causes.remove(agent_identity);
                 self.identity_entry_origins.remove(agent_identity);
                 self.identity_entry_retiring.remove(agent_identity);
                 // The entry's role hold ends with it.
@@ -15289,6 +15354,8 @@ macro_rules! mob_catalog_machine_dsl {
                 self.runtime_retire_refusal_reasons.remove(agent_runtime_id);
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.identity_to_runtime.remove(agent_identity);
+                self.member_custody_unrestored.remove(agent_identity);
+                self.member_custody_unrestored_causes.remove(agent_identity);
                 self.identity_entry_origins.remove(agent_identity);
                 self.identity_entry_retiring.remove(agent_identity);
                 // The entry's role hold ends with it.
@@ -15443,6 +15510,66 @@ macro_rules! mob_catalog_machine_dsl {
                 self.topology_epoch += 1;
                 self.member_restore_failure_codes.remove(agent_identity);
             }
+            to Running
+        }
+
+        // A seated member's custody restore failed for a cause scoped to that
+        // member, before any effect (a store read, a hosting refusal, a held
+        // durable tail): the machine records which restore is unrestored and
+        // why. The member keeps its seat and its lifecycle (degraded is not
+        // Broken: no residency, wake or topology fact changes), and the mob
+        // goes on in its phase. A later record for the same member replaces
+        // the cause its last attempt met.
+        transition RecordMemberCustodyUnrestoredSeated {
+            per_phase [Running, Stopped, Completed]
+            on signal RecordMemberCustodyUnrestored { agent_identity, restore, cause }
+            guard "member_seated" { self.identity_to_runtime.contains_key(agent_identity) == true }
+            update {
+                self.member_custody_unrestored.insert(agent_identity, restore);
+                self.member_custody_unrestored_causes.insert(agent_identity, cause);
+            }
+            to Running
+        }
+
+        // A record for an identity the mob does not seat changes nothing:
+        // there is no custody left to restore for it.
+        transition RecordMemberCustodyUnrestoredNotSeated {
+            per_phase [Running, Stopped, Completed]
+            on signal RecordMemberCustodyUnrestored { agent_identity, restore, cause }
+            guard "member_not_seated" { self.identity_to_runtime.contains_key(agent_identity) == false }
+            update {}
+            to Running
+        }
+
+        // A destroyed mob holds no member lifecycle: a late record changes
+        // nothing.
+        transition RecordMemberCustodyUnrestoredDestroyed {
+            on signal RecordMemberCustodyUnrestored { agent_identity, restore, cause }
+            guard { self.lifecycle_phase == Phase::Destroyed }
+            update {}
+            to Destroyed
+        }
+
+        // A re-attempt restored the member's custody: its record goes.
+        transition ResolveMemberCustodyRestoredRecorded {
+            per_phase [Running, Stopped, Completed]
+            on signal ResolveMemberCustodyRestored { agent_identity }
+            guard "custody_recorded" { self.member_custody_unrestored.contains_key(agent_identity) == true }
+            update {
+                self.member_custody_unrestored.remove(agent_identity);
+                self.member_custody_unrestored_causes.remove(agent_identity);
+            }
+            to Running
+        }
+
+        // Nothing is recorded for the member (a seat that ended took its
+        // record with it, or a destroy cleared every record): nothing
+        // changes.
+        transition ResolveMemberCustodyRestoredUnrecorded {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on signal ResolveMemberCustodyRestored { agent_identity }
+            guard "custody_not_recorded" { self.member_custody_unrestored.contains_key(agent_identity) == false }
+            update {}
             to Running
         }
 
@@ -15830,6 +15957,8 @@ macro_rules! mob_catalog_machine_dsl {
                 self.runtime_retire_archive_only = EmptySet;
                 self.member_restore_failures = EmptyMap;
                 self.member_restore_failure_codes = EmptyMap;
+                self.member_custody_unrestored = EmptyMap;
+                self.member_custody_unrestored_causes = EmptyMap;
                 self.runtime_retire_refusal_codes = EmptyMap;
                 self.runtime_retire_refusal_reasons = EmptyMap;
                 self.runtime_retire_pending_sessions = EmptyMap;
@@ -23351,6 +23480,8 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_state_markers = EmptyMap;
                 self.member_restore_failures = EmptyMap;
                 self.member_restore_failure_codes = EmptyMap;
+                self.member_custody_unrestored = EmptyMap;
+                self.member_custody_unrestored_causes = EmptyMap;
                 self.remote_runtime_retired_ids = EmptySet;
                 self.remote_supervisor_revoked_ids = EmptySet;
                 // The destroy drops every member, so every residency
@@ -34137,6 +34268,30 @@ pub enum MemberWakeRetryableKind {
     HostingClaimHeld,
     WakeTimedOut,
     BuildPreparationRefused,
+}
+
+/// Which startup restore of a seated member's custody a start could not
+/// complete: the member's operation binding, or its local cleanup delivery.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum MemberCustodyRestoreKind {
+    #[default]
+    StartupBinding,
+    CleanupDelivery,
+}
+
+/// The typed cause a member's unrestored custody restore last met. Every
+/// cause is scoped to that member and met before any effect: another runtime
+/// owner hosts the member's session, its hosting claim cannot be taken, its
+/// durable tail is withheld, the store could not serve a read of the
+/// member's state now, or the member's persisted state cannot be read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum MemberCustodyCauseKind {
+    #[default]
+    ServedElsewhere,
+    HostingUnavailable,
+    DurableTailUnprovable,
+    StoreUnavailable,
+    StoreUnreadable,
 }
 
 /// A shell path that ends a wake attempt without a resolution. The first three

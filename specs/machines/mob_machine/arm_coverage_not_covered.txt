@@ -232,3 +232,5 @@ PrepareMemberInstructionDeliverySpawning* a member whose spawn committed its mem
 RecordMemberInstructionTarget* record feedback in a stopped, completed or destroyed mob; operator_instruction_delivery_audit drives every Running arm of the family
 RefuseMemberInstructionTarget* refusal feedback in a stopped, completed or destroyed mob; operator_instruction_delivery_audit drives every Running arm of the family
 ResolveMemberInstructionRelease* the release verdict in a stopped, completed or destroyed mob; operator_instruction_delivery_audit drives both Running arms, and the region rows pin the verdict
+RecordMemberCustodyUnrestored* member custody deferral records: degraded is not Broken, a record changes no lifecycle, residency, wake or topology fact; driven by the Rust rows of crates/meerkat-machine-schema/tests/mob_machine_member_custody_region.rs, no hand-written audit drives it
+ResolveMemberCustodyRestored* member custody deferral resolves, which only drop a record; driven by the Rust rows of crates/meerkat-machine-schema/tests/mob_machine_member_custody_region.rs, no hand-written audit drives it

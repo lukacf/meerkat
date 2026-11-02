@@ -158,11 +158,14 @@ pure helper `identity_entry_verdict` over the declaration and the member's
 facts, and each guarded to act only on the entries of the custody it
 declares, by an explicit check: a roster's declaration (`created_custody`
 false) on an identity that is no entry or a `Declared` one, a store-owned
-update's (`created_custody` true, since 0.9.9) on its `Created` entry, seated
-or owed its seat; an entry of the other origin, an archived one and one
-awaiting its host's preparation are taken by no arm. A store-owned update
-is a declaration under created custody, so both custodies answer the same
-verdict for the same facts. The declaration carries the shell's raw
+update's (`created_custody` true, since 0.9.9) on its `Created` entry,
+seated, owed its seat, hosted on its first use or awaiting its held
+creation, and, answered `RecordOnly` (its row alone changes, and its
+unarchive or settle seats the new spec), archived or awaiting its host's
+preparation; an entry of the other origin is taken by no arm. A store-owned
+update is a declaration under created custody, so both custodies answer the
+same verdict for the same facts, and MobMachine routes it from its own
+step's state. The declaration carries the shell's raw
 observations: whether the host's rule requires the identity's preparation
 before its first seat (`preparation_required`, answered `PreparationPending`
 for a roster-owned identity never seated), the identity
@@ -270,7 +273,9 @@ whose member the replay seats (its publication committed before a crash)
 records the member a `Created` entry; an archived row records it unseated
 (`Archived`); a removed or archived row whose member's retirement the replay
 holds in flight records the removal or the archive in flight
-(`identity_entry_removing`, `identity_entry_archiving`); a removed row
+(`identity_entry_removing`, `identity_entry_archiving`), one mark per entry,
+so a second row contradicting a recovered mark reserves the name as
+unreadable; a removed row
 records the name's tombstone (`identity_entry_tombstones`); and an
 unreadable row, or one the replay
 contradicts (a tombstone of the name, or a spawn ladder open for it,
@@ -323,16 +328,28 @@ whether an agent requester's grant is current at this final sink, whether the
 spec the change was decided against is the identity's (`StaleSpec`
 otherwise) and the host's changes hold (`identity_changes_held`, set by
 `SetIdentityChangesHeld`); `RecordCreatedIdentityEntry` records a new
-store-owned entry, unseated with its cause, under a free name only
-(`CreatedIdentityRecordVerdict`); and `RemoveIdentityEntry`,
-`ArchiveIdentityEntry` and `UnarchiveIdentityEntry` answer one identity's
-removal, archive and unarchive (`IdentityEntryChangeVerdict`). A removal or an
-archive of a seated entry marks its ending (`identity_entry_removing`,
-`identity_entry_archiving`) and the end of its member's retirement consumes
-the mark, tombstoning the name or leaving the entry unseated, `Archived`, on
-its archived session; an unseated entry is tombstoned or archived at once. At
-most one ending mark lands on an entry, only on a seated one
-(`entry_ending_marks_are_seated_and_disjoint`). Each answers one arm per
+store-owned entry, unseated with the cause its helper derives from the
+request's facts (whether its host's rule requires its preparation, its
+placement, a held creation) in `identity_entry_verdict`'s precedence, under
+a free name only (`CreatedIdentityRecordVerdict`; an unlisted roster-owned
+identity's archived session record holds its name); and
+`RemoveIdentityEntry`, `ArchiveIdentityEntry` and `UnarchiveIdentityEntry`
+answer one identity's removal, archive and unarchive
+(`IdentityEntryChangeVerdict`). A removal or an archive of a seated entry
+marks its ending (`identity_entry_removing`, `identity_entry_archiving`) and
+the end of its member's retirement consumes the mark, tombstoning the name
+or leaving the entry unseated, `Archived`, on its archived session; the
+destroy's retirement ends the mark with the entry. An unseated entry is
+tombstoned at once, a held construction of it ending in the same step (an
+accepted activation is in flight until its publication ends), and archived
+at once unless it awaits its host's preparation, whose archive is refused
+(`PreparationPending`, the change's typed refusal `host_preparation_pending`).
+At most one ending mark lands on an entry, only on a seated one
+(`entry_ending_marks_are_seated_and_disjoint`). `UnlistIdentityEntry`
+unlists one `Declared` entry, decided on that identity's own facts
+(`UnlistEntryVerdict`): its seated member's retirement marked as the seal
+marks one, an entry no member holds ended at once, one whose member step
+is in flight deferred, and nothing else read. Each answers one arm per
 verdict through a pure helper, with a `MobNotRunning` arm per other phase.
 
 The host's preparation before an identity's first seat is `MobMachine`'s for

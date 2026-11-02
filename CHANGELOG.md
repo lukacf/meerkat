@@ -322,9 +322,11 @@ them.
   `MobMachineCatalogInput` (meerkat-mob) and the kernel `Input` and
   `InputKind` gain `AdmitIdentityChange { receipt, consent, permit_binds,
   permit_admits, host_operator, grant_current, spec_current }`,
-  `RecordCreatedIdentityEntry { agent_identity, cause }`,
-  `SetIdentityChangesHeld { held }`, `RemoveIdentityEntry { agent_identity }`,
-  `ArchiveIdentityEntry { agent_identity }`, `UnarchiveIdentityEntry {
+  `RecordCreatedIdentityEntry { agent_identity, preparation_required,
+  placement, held_creation }` (the machine derives the new entry's cause from
+  these facts), `SetIdentityChangesHeld { held }`, `RemoveIdentityEntry {
+  agent_identity }`, `ArchiveIdentityEntry { agent_identity }`,
+  `UnarchiveIdentityEntry { agent_identity }`, `UnlistIdentityEntry {
   agent_identity }`, `BeginPreparationConstruction { agent_identity, attempt,
   constructed }`, `SettleHostPreparation { agent_identity, attempt,
   constructed, before_deadline, binding_matches }` and
@@ -332,17 +334,20 @@ them.
   `MobMachineEffect`, its variant enum `MobMachineEffectVariant`
   (meerkat-machine-schema), and the kernel `Effect` and `EffectKind` gain
   `IdentityChangeAdmissionResolved`, `CreatedIdentityEntryRecorded`,
-  `IdentityEntryChangeResolved`, `PreparationConstructionResolved`,
-  `PreparationSettleResolved` and `PreparationConstructionEnded`; each
-  appended last. The machine enums `IdentityChangeReceiptKind`,
-  `IdentityChangeConsentKind`, `IdentityChangeAdmissionKind`,
-  `CreatedIdentityRecordVerdict`, `IdentityEntryChangeKind`,
-  `IdentityEntryChangeVerdict`, `PreparationConstructionVerdict`,
+  `IdentityEntryChangeResolved`, `IdentityEntryUnlisted`,
+  `PreparationConstructionResolved`, `PreparationSettleResolved` and
+  `PreparationConstructionEnded`; each appended last. The machine enums
+  `IdentityChangeReceiptKind`, `IdentityChangeConsentKind`,
+  `IdentityChangeAdmissionKind`, `CreatedIdentityRecordVerdict`,
+  `IdentityEntryChangeKind`, `IdentityEntryChangeVerdict`,
+  `UnlistEntryVerdict`, `PreparationConstructionVerdict`,
   `PreparationSettleVerdict`, `ConstructionEndKind` and
   `ConstructionEndVerdict` are new, and the machine enums new in this
   release gain variants: `UnseatedEntryCause` gains `Archived`,
   `RecoveredPresence` `PendingConstruction` and `Archived`, and
-  `IdentityEntryVerdict` `PreparationPending`. The invariant
+  `IdentityEntryVerdict` `PreparationPending` and `RecordOnly` (a
+  store-owned update of an archived identity, or of one awaiting its host's
+  preparation, changes its row only). The invariant
   `unseated_created_entry_is_preparing_or_owed` is retired (a store-owned
   update records a created entry hosted on its first use or held), and
   `archived_entry_is_store_owned`,
@@ -353,9 +358,10 @@ them.
   last, every arm of the new inputs (the `AdmitIdentityChange`,
   `RecordCreatedIdentityEntry`, `SetIdentityChangesHeld`,
   `RemoveIdentityEntry`, `ArchiveIdentityEntry`, `UnarchiveIdentityEntry`,
-  `BeginPreparationConstruction`, `SettleHostPreparation` and
-  `EndPreparationConstruction` families, in the order of the codegen's late
-  tail), `DeclareIdentityEntryPreparationPending`,
+  `UnlistIdentityEntry`, `BeginPreparationConstruction`,
+  `SettleHostPreparation` and `EndPreparationConstruction` families, in the
+  order of the codegen's late tail), `DeclareIdentityEntryPreparationPending`,
+  `DeclareIdentityEntryRecordOnly`,
   `RecoverCreatedIdentityEntryRemovingRunning`,
   `RecoverCreatedIdentityEntryRemovingStopped`,
   `RecoverCreatedIdentityEntryArchivingRunning`,
@@ -1357,20 +1363,43 @@ them.
   identity's (`StaleSpec`, with the current digest and revision) are refused
   typed with nothing written (`MobError::IdentityChangeRefused`,
   `IdentityChangeRefusal` with a stable kind token, `IdentityNameHolder` for a
-  taken name). The receipt (`IdentityChangeReceipt`, schema version
+  taken name). An agent's grant binds what its change commits: it keeps the
+  request its admission checked (`IdentityGrantRequest`, built with
+  `for_specs`, `for_update` or `for_identity`) and the operation's request
+  digest, and each commit step commits only what that request covers
+  (`IdentityGrantRequest::covers`: a create's specs, an update's new spec
+  and the identity's current profile, and the current profile of the
+  identity a removal, archive, unarchive or settle changes), refusing
+  anything else `InvalidRequest`. An executor admits a change that waited
+  across a restart again from its recorded requester identity
+  (`MobHandle::identity_change_grant_for`), reading no session and waking
+  nothing; a grant the identity no longer holds answers `GrantRevoked`. A
+  removal or an archive change can be decided against a spec
+  (`IdentityRemoval::with_expected_spec_digest`,
+  `IdentityArchiveChange::with_expected_spec_digest`): a store-owned
+  identity whose row's spec moved since refuses it `StaleSpec`. The receipt
+  (`IdentityChangeReceipt`, schema version
   `IDENTITY_CHANGE_RECEIPT_SCHEMA_VERSION`) records the change's kind, its
   requester and consent and each identity's outcome, spec digest and
-  revision; `MobHandle::identity_operation` reads it back. A create seats
-  each identity Dormant as a roster-owned identity of the same spec is, and
-  spawns one that owes a kickoff once the change committed; a placed or
+  revision; `MobHandle::identity_operation` reads it back (with the List
+  scope, as the record reads). A create seats each identity Dormant as a
+  roster-owned identity of the same spec is, and spawns one that owes a
+  kickoff once the change committed, answering each such spawn
+  (`IdentityCreateOutcome::embodied`: embodied, or failed with the identity
+  owed its seat, which the next start embodies once); a placed or
   externally bound identity is hosted on its first use and one whose host
   holds its creation awaits it, and their host's spawn holding the
   identity's created custody (`SpawnMemberSpec::with_created_custody`)
   creates them. An update is a declared apply of the identity under created
   custody, so it answers the verdict a roster-owned identity's change of the
-  same spec answers (kept, restamped, role-migrated, held); a role
-  migration is kept in the row until its restamp commits, and a crash
-  before it is carried out at the next start. A removal retires a seated
+  same spec answers (kept, restamped, role-migrated, held); MobMachine
+  routes it in its declaration step, so an archived identity's update, and
+  that of one awaiting its host's preparation, changes the row only and
+  its unarchive or settle seats the new spec; a role migration is kept in
+  the row until its restamp commits, and a crash before it is carried out
+  at the next start; a store-owned restamp seats the row's labels, and a
+  respawn can name the labels it seats (`MemberRespawn::with_labels`, the
+  "Apply now" of a stale seat). A removal retires a seated
   identity's member (`MemberRetirementCause::Removed`) and tombstones its
   name at the retirement's end, or at once for an identity no member holds;
   the name is never an identity or a member again, for either custody, and
@@ -1379,9 +1408,14 @@ them.
   member (`MemberRetirementCause::Archived`) and keeps its entry unseated
   (`UnseatedEntryCause::Archived`) on its archived session, refusing
   deliveries to it with the new `MobError::IdentityArchived`; its unarchive
-  seats it Dormant there again. A roster-owned identity's archive is refused
-  (`OwnerReadOnly`): `MobHandle::unlist_declared_identity` unlists it alone,
-  and listing it again restores it. A roster's own change can carry a
+  seats it Dormant there again. An identity awaiting its host's preparation
+  is not archived (`HostPreparationPending`, retryable, naming its open
+  attempt) until its preparation is settled, or the identity removed. A
+  roster-owned identity's archive is refused (`OwnerReadOnly`):
+  `MobHandle::unlist_declared_identity` unlists it alone, decided by
+  MobMachine on that identity alone, and listing it again restores it; its
+  archived session record holds its name meanwhile (a create of it is
+  refused `name_taken`). A roster's own change can carry a
   receipt too (`DeclaredRoster::with_change`, `IdentityRosterChange`,
   `DeclaredRosterOutcome::receipt`). The identity store's row (schema
   version 2) now holds the identity's spec, its pending role migration, its
@@ -2540,11 +2574,12 @@ them.
 - Store-owned identities: a mob whose host created, archived or removed an
   identity (a removed roster-owned identity's tombstone included) holds rows
   of identity store schema 2, which 0.9.8 reads per identity on SQLite and
-  refuses as a whole on a host store. Before a downgrade, read
-  `MobHandle::identity_record_census()` on 0.9.9 and settle what it counts
-  first: identities awaiting their host's preparation, held constructions,
-  and seated store-owned identities whose last seat row predates their row
-  (see the upgrading guide). A roster that still lists a removed identity is
+  refuses as a whole on a host store. This release has no step that deletes
+  these rows: a removal writes its name's tombstone and an archive keeps its
+  row, so a mob that holds any (`IdentityRecordCensus::created_rows` above
+  zero) has no supported downgrade before the export and purge steps.
+  `MobHandle::identity_record_census()` counts the rows and what a downgrade
+  must settle first. A roster that still lists a removed identity is
   answered `DeclaredEntryRefusal::NameTombstoned` for it: drop it from the
   roster.
 

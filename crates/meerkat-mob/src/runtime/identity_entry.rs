@@ -495,8 +495,7 @@ pub struct IdentityRecordCensus {
     /// their row's labels or profile: the seat keeps its labels until it is
     /// seated again or respawned with the row's labels (Apply now,
     /// [`super::MemberRespawn::with_labels`]), and its role until its
-    /// restamp. Respawned or removed before a downgrade, which reads the
-    /// seat row.
+    /// restamp. A downgrade rebuilds such a member from its seat row.
     pub seats_stale: usize,
 }
 

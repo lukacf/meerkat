@@ -261,6 +261,11 @@ struct QuarantinedStore {
     mob_id: MobId,
     record: mob_store_dsl::MobStoreRestoreLifecycleMachineAuthority,
     cause: Arc<MobError>,
+    /// The re-attempt the record admitted last: alive while that attempt
+    /// runs. A Retrying record whose attempt is gone was left by an attempt
+    /// that ended without resolving it (its future was dropped, or it
+    /// panicked).
+    attempt: std::sync::Weak<()>,
 }
 
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
@@ -289,6 +294,33 @@ impl QuarantinedStore {
                 == mob_store_dsl::MobStoreRestoreLifecyclePhase::Retrying,
             attempts: state.attempts,
             cause: Arc::clone(&self.cause),
+        }
+    }
+}
+
+/// The one hosted set holding a mob id, as [`MobMcpState::hosted_mob`]
+/// reads it.
+enum HostedMob {
+    /// Managed: its handle, bound to the console principal.
+    Managed(Box<MobHandle>),
+    /// A restored child mob held before activation: the answer a lookup of
+    /// it gets.
+    Held(MobError),
+    /// A quarantined persisted mob: the answer a lookup of it gets, and
+    /// whether its class lets an id-addressed verb re-attempt its restore.
+    Quarantined { error: MobError, retryable: bool },
+    /// No set holds it.
+    Absent,
+}
+
+impl HostedMob {
+    /// The managed mob's handle, or the answer of the set holding the mob,
+    /// or [`MobError::MobNotFound`] when no set holds it.
+    fn into_handle(self, mob_id: &MobId) -> Result<MobHandle, MobError> {
+        match self {
+            Self::Managed(handle) => Ok(*handle),
+            Self::Held(error) | Self::Quarantined { error, .. } => Err(error),
+            Self::Absent => Err(MobError::MobNotFound(mob_id.clone())),
         }
     }
 }
@@ -1296,6 +1328,15 @@ pub struct MobMcpState {
     /// cancelled or failed transfer leaves it held, never unaccounted for.
     #[cfg(not(target_arch = "wasm32"))]
     held_child_transfer: Mutex<()>,
+    /// The set-move lock. The final step of every move of a mob between the
+    /// hosted sets (managed, held, quarantined) runs under its write side,
+    /// as one critical section with no I/O in it: the insert into the next
+    /// set and the drop from the earlier one (a restore re-attempt that
+    /// registers or holds a quarantined store's mob, an activation of a held
+    /// child). A reader that must find a mob in exactly one set reads the
+    /// sets under its read side ([`Self::hosted_mob`]), so it never waits
+    /// for a move's slow work, only for that final step.
+    set_moves: RwLock<()>,
     /// Test seam: when set, a child teardown parks right before its WorkGraph
     /// preflight, so a test can cancel the caller exactly there.
     #[cfg(test)]
@@ -1352,6 +1393,19 @@ pub struct MobMcpState {
     /// and before the managed-set registration.
     #[cfg(test)]
     resume_insert_hold: std::sync::Mutex<Option<Arc<InsertHold>>>,
+    /// Test seam: when set, a store restore re-attempt parks after the store
+    /// restored (the mob is in its next set) and before its quarantine record
+    /// is resolved.
+    #[cfg(test)]
+    retry_release_hold: std::sync::Mutex<Option<Arc<InsertHold>>>,
+    /// Test seam: taken by the next store restore re-attempt, which parks
+    /// after its admission (its record is Retrying) and before the restore.
+    #[cfg(test)]
+    retry_start_hold: std::sync::Mutex<Option<Arc<InsertHold>>>,
+    /// Test seam: taken by the next id lookup of a mob that is not managed,
+    /// which parks after its one re-attempt request and before it answers.
+    #[cfg(test)]
+    lookup_answer_hold: std::sync::Mutex<Option<Arc<InsertHold>>>,
     /// Test seam: the store at this path is refused at its resume as one
     /// whose creation record disagrees with its log.
     #[cfg(test)]
@@ -1516,6 +1570,7 @@ impl MobMcpState {
             quarantined_stores: RwLock::new(BTreeMap::new()),
             #[cfg(not(target_arch = "wasm32"))]
             held_child_transfer: Mutex::new(()),
+            set_moves: RwLock::new(()),
             #[cfg(test)]
             teardown_preflight_hold: std::sync::Mutex::new(None),
             mob_set_restored: std::sync::atomic::AtomicBool::new(false),
@@ -1541,6 +1596,12 @@ impl MobMcpState {
             create_insert_hold: std::sync::Mutex::new(None),
             #[cfg(test)]
             resume_insert_hold: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            retry_release_hold: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            retry_start_hold: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            lookup_answer_hold: std::sync::Mutex::new(None),
             #[cfg(test)]
             refused_resume_store: std::sync::Mutex::new(None),
             #[cfg(test)]
@@ -2304,13 +2365,17 @@ impl MobMcpState {
             }
         }
         let mut matches: BTreeMap<MobId, SessionMemberMatch> = BTreeMap::new();
-        // Held children first and then the managed set, under the transfer
-        // lock: a child moving from one set to the other is read in one of
-        // them, and a mob read in both counts once.
+        // The hosted sets are read as one, under the set-move lock, whose
+        // write side the final step of every move between them takes: a mob
+        // that moves is read in exactly one set, and a mob read in two (two
+        // stores naming one id) counts once. A held child's whole transfer
+        // holds the transfer lock, which the lookup also takes. The rosters
+        // are read from the snapshot, outside the set-move lock, so the
+        // lookup never holds it across I/O.
         #[cfg(not(target_arch = "wasm32"))]
         let _transfer = self.held_child_transfer.lock().await;
-        #[cfg(not(target_arch = "wasm32"))]
-        {
+        let (held, quarantined, managed) = {
+            let _moves = self.set_moves.read().await;
             let held = self
                 .held_child_mobs
                 .read()
@@ -2318,16 +2383,6 @@ impl MobMcpState {
                 .values()
                 .cloned()
                 .collect::<Vec<_>>();
-            for held in held {
-                if let Some(found) = Self::held_child_member_of_session(&held, session_id).await? {
-                    matches.insert(held.mob_id.clone(), found);
-                }
-            }
-        }
-        // A quarantined persisted mob is hosted too: its stored roster
-        // refuses the lookup when it names the session or cannot be read.
-        #[cfg(not(target_arch = "wasm32"))]
-        {
             let quarantined = self
                 .quarantined_stores
                 .read()
@@ -2335,17 +2390,29 @@ impl MobMcpState {
                 .iter()
                 .map(|(path, quarantined)| (path.clone(), quarantined.mob_id.clone()))
                 .collect::<Vec<_>>();
-            for (path, mob_id) in quarantined {
-                Self::unrestored_member_lookup(&path, &mob_id, session_id).await?;
+            let managed = self
+                .mobs
+                .read()
+                .await
+                .iter()
+                .map(|(mob_id, managed)| (mob_id.clone(), managed.handle.clone()))
+                .collect::<Vec<_>>();
+            (held, quarantined, managed)
+        };
+        #[cfg(target_arch = "wasm32")]
+        let _ = (&held, &quarantined);
+        #[cfg(not(target_arch = "wasm32"))]
+        for held in held {
+            if let Some(found) = Self::held_child_member_of_session(&held, session_id).await? {
+                matches.insert(held.mob_id.clone(), found);
             }
         }
-        let managed = self
-            .mobs
-            .read()
-            .await
-            .iter()
-            .map(|(mob_id, managed)| (mob_id.clone(), managed.handle.clone()))
-            .collect::<Vec<_>>();
+        // A quarantined persisted mob is hosted too: its stored roster
+        // refuses the lookup when it names the session or cannot be read.
+        #[cfg(not(target_arch = "wasm32"))]
+        for (path, mob_id) in quarantined {
+            Self::unrestored_member_lookup(&path, &mob_id, session_id).await?;
+        }
         for (mob_id, handle) in managed {
             if let Some((identity, generation)) = handle.member_of_session(session_id).await {
                 matches.insert(
@@ -4003,6 +4070,7 @@ impl MobMcpState {
                 mob_id,
                 record,
                 cause: Arc::new(quarantine.cause),
+                attempt: std::sync::Weak::new(),
             },
         );
     }
@@ -4259,6 +4327,15 @@ impl MobMcpState {
         .await
     }
 
+    /// Register a resumed persisted mob, from the store at `path`, as a
+    /// managed mob. The registration is the final step of the mob's move
+    /// into the managed set, under the set-move lock ([`Self::set_moves`]):
+    /// in the same critical section the store's quarantine record, if a
+    /// restore re-attempt left one, is released and dropped, and the mob's
+    /// held row, if it was held, is dropped, so no reader finds the mob in
+    /// two sets or in none. A refused registration (a destroy cleanup owed
+    /// under the id, or a mob already managed under it) destroys the resumed
+    /// mob once the locks are released.
     #[cfg(not(target_arch = "wasm32"))]
     async fn register_resumed_mob(
         &self,
@@ -4267,32 +4344,51 @@ impl MobMcpState {
         on_managed: Option<MemberExternalToolsOnManaged>,
     ) -> Result<MobId, MobError> {
         let mob_id = handle.definition().id.clone();
-        match self.mobs.write().await.entry(mob_id.clone()) {
-            Entry::Vacant(_) if self.destroy_cleanup_owed(&mob_id) => {
-                // A destroyed mob's storage cleanup is owed under this id;
-                // that storage is never removed here.
-                let _ = handle.destroy().await;
-                return Err(Self::owed_destroy_cleanup_error(&mob_id));
-            }
-            Entry::Vacant(entry) => {
-                entry.insert(self.managed_mob_entry(
-                    handle,
-                    Some(path.to_path_buf()),
-                    ManagedInsertOrigin::RootRestore,
-                ));
-                // Under the managed set's write lock: a caller that finds
-                // the mob also finds what its build bound.
-                if let Some(on_managed) = on_managed {
-                    on_managed(&mob_id);
+        let refused = {
+            let _moves = self.set_moves.write().await;
+            let refused = {
+                let mut mobs = self.mobs.write().await;
+                match mobs.entry(mob_id.clone()) {
+                    // A destroyed mob's storage cleanup is owed under this
+                    // id; that storage is never removed here.
+                    Entry::Vacant(_) if self.destroy_cleanup_owed(&mob_id) => {
+                        Some((handle, Self::owed_destroy_cleanup_error(&mob_id)))
+                    }
+                    Entry::Vacant(entry) => {
+                        entry.insert(self.managed_mob_entry(
+                            handle,
+                            Some(path.to_path_buf()),
+                            ManagedInsertOrigin::RootRestore,
+                        ));
+                        // Under the managed set's write lock: a caller that
+                        // finds the mob also finds what its build bound.
+                        if let Some(on_managed) = on_managed {
+                            on_managed(&mob_id);
+                        }
+                        None
+                    }
+                    Entry::Occupied(_) => Some((
+                        handle,
+                        MobError::Internal(format!(
+                            "duplicate persisted mob id during restore: {mob_id}"
+                        )),
+                    )),
                 }
+            };
+            if refused.is_none() {
                 self.note_mob_set_changed();
+                Self::release_quarantine_record(
+                    &mut *self.quarantined_stores.write().await,
+                    path,
+                    mob_store_dsl::MobStoreRestoreOutcome::Managed,
+                );
+                self.held_child_mobs.write().await.remove(&mob_id);
             }
-            Entry::Occupied(_) => {
-                let _ = handle.destroy().await;
-                return Err(MobError::Internal(format!(
-                    "duplicate persisted mob id during restore: {mob_id}"
-                )));
-            }
+            refused
+        };
+        if let Some((handle, error)) = refused {
+            let _ = handle.destroy().await;
+            return Err(error);
         }
         Ok(mob_id)
     }
@@ -4373,6 +4469,12 @@ impl MobMcpState {
         }
     }
 
+    /// Hold a restored child mob before activation, from the store at
+    /// `held.storage_path`. The hold is the final step of the mob's move
+    /// into the held set, under the set-move lock ([`Self::set_moves`]): in
+    /// the same critical section the store's quarantine record, if a
+    /// restore re-attempt left one, is released and dropped, so no reader
+    /// finds the mob in two sets or in none.
     #[cfg(not(target_arch = "wasm32"))]
     async fn hold_child_mob(&self, held: HeldChildMob) {
         tracing::warn!(
@@ -4381,40 +4483,161 @@ impl MobMcpState {
             reason = %held.reason,
             "holding a restored child mob before activation"
         );
+        let path = held.storage_path.clone();
+        let _moves = self.set_moves.write().await;
         self.held_child_mobs
             .write()
             .await
             .insert(held.mob_id.clone(), held);
+        Self::release_quarantine_record(
+            &mut *self.quarantined_stores.write().await,
+            &path,
+            mob_store_dsl::MobStoreRestoreOutcome::Held,
+        );
     }
 
-    /// The quarantined persisted mob `mob_id`, as its lookup answer
-    /// ([`MobError::MobQuarantined`]).
-    async fn quarantined_mob_error(&self, mob_id: &MobId) -> Option<MobError> {
-        self.quarantined_stores
+    /// Release the quarantine record of the store at `path`, if there is
+    /// one, now that the store's mob moved into its next set (`outcome`:
+    /// managed or held). Runs inside that move's critical section, under
+    /// the set-move lock. A record whose re-attempt is in flight is resolved
+    /// with the outcome (`ResolveRetry`, which releases it) and dropped. A
+    /// record with no attempt in flight is stale, since its store restored
+    /// all the same, and is dropped as it is.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn release_quarantine_record(
+        stores: &mut BTreeMap<PathBuf, QuarantinedStore>,
+        path: &Path,
+        outcome: mob_store_dsl::MobStoreRestoreOutcome,
+    ) {
+        let Some(quarantined) = stores.get_mut(path) else {
+            return;
+        };
+        if quarantined.record.state().lifecycle_phase
+            == mob_store_dsl::MobStoreRestoreLifecyclePhase::Retrying
+        {
+            let class = quarantined.class();
+            if let Err(error) = mob_store_dsl::MobStoreRestoreLifecycleMachineMutator::apply(
+                &mut quarantined.record,
+                mob_store_dsl::MobStoreRestoreLifecycleInput::ResolveRetry { outcome, class },
+            ) {
+                tracing::error!(
+                    path = %path.display(),
+                    error = ?error,
+                    "the quarantine record refused a re-attempt's outcome"
+                );
+            }
+        }
+        stores.remove(path);
+    }
+
+    /// The one hosted set that holds `mob_id`, read under the set-move lock
+    /// ([`Self::set_moves`]): the final step of every move between the sets
+    /// runs under its write side, so a mob that moves is found in exactly
+    /// one set, never in two or in none. The read waits for no move's slow
+    /// work, only for a final step in flight. A mob id two stores name is
+    /// answered from the first of managed, held and quarantined.
+    async fn hosted_mob(&self, mob_id: &MobId) -> HostedMob {
+        let _moves = self.set_moves.read().await;
+        if let Some(handle) = self.console_bound_handle(mob_id).await {
+            return HostedMob::Managed(Box::new(handle));
+        }
+        if let Some(held) = self.held_child_mobs.read().await.get(mob_id) {
+            return HostedMob::Held(MobError::held_before_activation(
+                &held.mob_id,
+                &held.owner,
+                held.reason.token(),
+            ));
+        }
+        match self
+            .quarantined_stores
             .read()
             .await
             .values()
             .find(|quarantined| &quarantined.mob_id == mob_id)
-            .map(QuarantinedStore::error)
+        {
+            Some(quarantined) => HostedMob::Quarantined {
+                error: quarantined.error(),
+                retryable: quarantined.class().is_retryable(),
+            },
+            None => HostedMob::Absent,
+        }
+    }
+
+    /// The console-bound handle of the managed mob `mob_id`. A mob
+    /// quarantined as `store_unavailable` (a store that could not serve may
+    /// serve now) gets one re-attempt of its restore first, and none while
+    /// another is in flight (that one is never waited for). Otherwise the
+    /// answer of the set holding the mob: the typed quarantine, the
+    /// held-before-activation refusal, or [`MobError::MobNotFound`] when no
+    /// set holds it. The sets are read as one ([`Self::hosted_mob`]), so a
+    /// mob a concurrent re-attempt registers is answered quarantined
+    /// (retryable) or managed, never not found.
+    async fn managed_handle(&self, mob_id: &MobId) -> Result<MobHandle, MobError> {
+        match self.hosted_mob(mob_id).await {
+            HostedMob::Quarantined {
+                retryable: true, ..
+            } => {
+                self.reattempt_unavailable_quarantine(mob_id).await;
+                #[cfg(test)]
+                {
+                    let hold = self
+                        .lookup_answer_hold
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .take();
+                    if let Some(hold) = hold {
+                        hold.reached
+                            .store(true, std::sync::atomic::Ordering::SeqCst);
+                        hold.release.notified().await;
+                    }
+                }
+                self.hosted_mob(mob_id).await.into_handle(mob_id)
+            }
+            hosted => hosted.into_handle(mob_id),
+        }
     }
 
     /// Admit one re-attempt of the restore of the store `mob_id` is
-    /// quarantined under: its record moves to Retrying. `Ok(path)` when the
-    /// record admitted it; otherwise the answer the caller gets (the
-    /// quarantine, typed, while another re-attempt is in flight), or `None`
-    /// when no store of `mob_id` is quarantined. With `unavailable_only`,
-    /// only a store quarantined as `store_unavailable` is re-attempted: an
-    /// id-addressed verb never re-attempts a store that needs a repair.
+    /// quarantined under: its record moves to Retrying. `Ok((path, attempt))`
+    /// when the record admitted it, where `attempt` is the attempt's token:
+    /// hold it until the record is resolved. Otherwise the answer the caller
+    /// gets (the quarantine, typed, while another re-attempt is in flight),
+    /// or `None` when no store of `mob_id` is quarantined. A Retrying record
+    /// whose attempt's token is gone was left by an attempt that ended
+    /// without resolving it (its future was dropped, or it panicked): that
+    /// attempt is resolved as failed, under the class the record holds, and
+    /// a new one may be admitted. With `unavailable_only`, only a store
+    /// quarantined as `store_unavailable` is re-attempted: an id-addressed
+    /// verb never re-attempts a store that needs a repair.
     #[cfg(not(target_arch = "wasm32"))]
     async fn admit_store_retry(
         &self,
         mob_id: &MobId,
         unavailable_only: bool,
-    ) -> Option<Result<PathBuf, MobError>> {
+    ) -> Option<Result<(PathBuf, Arc<()>), MobError>> {
         let mut stores = self.quarantined_stores.write().await;
         let (path, quarantined) = stores
             .iter_mut()
             .find(|(_, quarantined)| &quarantined.mob_id == mob_id)?;
+        if quarantined.record.state().lifecycle_phase
+            == mob_store_dsl::MobStoreRestoreLifecyclePhase::Retrying
+            && quarantined.attempt.upgrade().is_none()
+        {
+            let class = quarantined.class();
+            if let Err(error) = mob_store_dsl::MobStoreRestoreLifecycleMachineMutator::apply(
+                &mut quarantined.record,
+                mob_store_dsl::MobStoreRestoreLifecycleInput::ResolveRetry {
+                    outcome: mob_store_dsl::MobStoreRestoreOutcome::Failed,
+                    class,
+                },
+            ) {
+                tracing::error!(
+                    mob_id = %mob_id,
+                    error = ?error,
+                    "the quarantine record refused the end of an abandoned re-attempt"
+                );
+            }
+        }
         if unavailable_only && !quarantined.class().is_retryable() {
             return Some(Err(quarantined.error()));
         }
@@ -4431,7 +4654,9 @@ impl MobMcpState {
                     )
                 }) =>
             {
-                Some(Ok(path.clone()))
+                let attempt = Arc::new(());
+                quarantined.attempt = Arc::downgrade(&attempt);
+                Some(Ok((path.clone(), attempt)))
             }
             // A re-attempt is in flight: answer the quarantine at once, never
             // waiting for it.
@@ -4447,15 +4672,90 @@ impl MobMcpState {
         }
     }
 
-    /// Run the re-attempt [`Self::admit_store_retry`] admitted for the store
-    /// at `path`, and resolve its record: a store the re-attempt released
-    /// (managed, held or settled) drops its record; a failed one stays
-    /// quarantined under the class it met, with its failure. The whole
-    /// re-attempt holds the transfer lock that moves mobs between the hosted
-    /// sets, so a reader of the sets finds the mob in exactly one of them.
+    /// One re-attempt of the restore of the store `mob_id` is quarantined
+    /// under ([`Self::admit_store_retry`], then [`Self::run_store_retry`]),
+    /// run to the end as a task this state owns, as a create is: a caller
+    /// dropped mid-attempt (a client that disconnects) never strands it, and
+    /// the task still resolves the record (released into its next set, or
+    /// back to quarantined under the class it met). The caller only awaits
+    /// the answer. `None` when no store of `mob_id` is quarantined. A state
+    /// shared without the self-reference that owns tasks runs it inline; an
+    /// attempt dropped there is ended by the next admission.
     #[cfg(not(target_arch = "wasm32"))]
-    async fn run_store_retry(&self, path: &Path) -> Result<StoreRestored, MobError> {
-        let _transfer = self.held_child_transfer.lock().await;
+    async fn reattempt_store(
+        &self,
+        mob_id: &MobId,
+        unavailable_only: bool,
+    ) -> Option<Result<StoreRestored, MobError>> {
+        if let Some(state) = self.self_weak.get().and_then(std::sync::Weak::upgrade) {
+            let attempt_mob_id = mob_id.clone();
+            let Some(answer) = self.state_tasks.spawn(
+                state_tasks::StateTaskKind::Owned,
+                "mob restore retry",
+                meerkat_runtime::stack_relief::box_in_own_frame(move || async move {
+                    state
+                        .reattempt_store_owned(&attempt_mob_id, unavailable_only)
+                        .await
+                }),
+            ) else {
+                return Some(Err(Self::stood_down_error()));
+            };
+            return answer.await.unwrap_or_else(|_| {
+                Some(Err(MobError::Internal(
+                    "mob restore retry ended without an answer (it panicked)".to_string(),
+                )))
+            });
+        }
+        self.reattempt_store_owned(mob_id, unavailable_only).await
+    }
+
+    /// The body of [`Self::reattempt_store`]: admit the re-attempt, run it,
+    /// and resolve its record.
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn reattempt_store_owned(
+        &self,
+        mob_id: &MobId,
+        unavailable_only: bool,
+    ) -> Option<Result<StoreRestored, MobError>> {
+        let (path, attempt) = match self.admit_store_retry(mob_id, unavailable_only).await? {
+            Ok(admitted) => admitted,
+            Err(error) => return Some(Err(error)),
+        };
+        Some(
+            meerkat_runtime::stack_relief::box_in_own_frame(|| {
+                self.run_store_retry(&path, attempt)
+            })
+            .await,
+        )
+    }
+
+    /// Run the re-attempt [`Self::admit_store_retry`] admitted for the store
+    /// at `path` (its token `attempt` is held until the record is resolved),
+    /// and resolve its record. The restore runs outside every lock. A store
+    /// it restores leaves the quarantine in the step that moves its mob into
+    /// the managed or held set ([`Self::register_resumed_mob`],
+    /// [`Self::hold_child_mob`]), under the set-move lock; a store swept or
+    /// settled drops its record here, and a failed one stays quarantined
+    /// under the class it met, with its failure, under the same lock.
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn run_store_retry(
+        &self,
+        path: &Path,
+        attempt: Arc<()>,
+    ) -> Result<StoreRestored, MobError> {
+        #[cfg(test)]
+        {
+            let hold = self
+                .retry_start_hold
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+            if let Some(hold) = hold {
+                hold.reached
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                hold.release.notified().await;
+            }
+        }
         let restored = match self.admit("mob restore retry") {
             Ok(_admission) => {
                 meerkat_runtime::stack_relief::box_in_own_frame(|| self.restore_one_store(path))
@@ -4467,8 +4767,23 @@ impl MobMcpState {
                 cause: error,
             }),
         };
+        #[cfg(test)]
+        {
+            let hold = self
+                .retry_release_hold
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            if let Some(hold) = hold {
+                hold.reached
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                hold.release.notified().await;
+            }
+        }
+        let _moves = self.set_moves.write().await;
         let mut stores = self.quarantined_stores.write().await;
         let Some(quarantined) = stores.get_mut(path) else {
+            // The move into the managed or held set released the record.
             return restored.map_err(|quarantine| quarantine.cause);
         };
         let (outcome, class) = match &restored {
@@ -4499,6 +4814,7 @@ impl MobMcpState {
                 "the quarantine record refused a re-attempt's outcome"
             );
         }
+        drop(attempt);
         match restored {
             Ok(restored) => {
                 if quarantined.record.state().lifecycle_phase
@@ -4521,27 +4837,19 @@ impl MobMcpState {
         }
     }
 
-    /// For an id-addressed verb that found `mob_id` unmanaged: one
+    /// For an id-addressed verb that found `mob_id` quarantined: one
     /// re-attempt of the restore of its store when it is quarantined as
     /// `store_unavailable` (a store that could not serve may serve now), and
-    /// none while another re-attempt is in flight. True when the re-attempt
-    /// made the mob managed; the caller then reads the managed set again.
-    async fn reattempt_unavailable_quarantine(&self, mob_id: &MobId) -> bool {
+    /// none while another re-attempt is in flight (that one is never waited
+    /// for). The caller reads the hosted sets again for its answer.
+    async fn reattempt_unavailable_quarantine(&self, mob_id: &MobId) {
         #[cfg(target_arch = "wasm32")]
         {
             let _ = mob_id;
-            false
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
-            let Some(Ok(path)) = self.admit_store_retry(mob_id, true).await else {
-                return false;
-            };
-            matches!(
-                meerkat_runtime::stack_relief::box_in_own_frame(|| self.run_store_retry(&path))
-                    .await,
-                Ok(StoreRestored::Managed | StoreRestored::Skipped)
-            )
+            let _ = self.reattempt_store(mob_id, true).await;
         }
     }
 
@@ -4554,7 +4862,9 @@ impl MobMcpState {
     /// A failed re-attempt keeps it quarantined, under the class it met, and
     /// answers [`MobError::MobQuarantined`]. A mob that is managed or held
     /// answers [`MobRestoreRetryOutcome::NotQuarantined`]; an unknown id
-    /// [`MobError::MobNotFound`].
+    /// [`MobError::MobNotFound`]. The hosted sets are read as one, and the
+    /// re-attempt runs as a task this state owns, so a dropped caller does
+    /// not end it.
     ///
     /// Needs the console owner (`SendCommand`) and this state's admission.
     pub async fn mob_restore_retry(
@@ -4565,26 +4875,22 @@ impl MobMcpState {
         let _admission = self.admit("mob restore retry")?;
         self.ensure_restored().await?;
         #[cfg(not(target_arch = "wasm32"))]
-        if let Some(admitted) = self.admit_store_retry(mob_id, false).await {
-            let path = admitted?;
-            return meerkat_runtime::stack_relief::box_in_own_frame(|| self.run_store_retry(&path))
-                .await
-                .map(|restored| match restored {
-                    StoreRestored::Managed | StoreRestored::Skipped => {
-                        MobRestoreRetryOutcome::Restored
-                    }
-                    StoreRestored::Held => MobRestoreRetryOutcome::Held,
-                    StoreRestored::Settled => MobRestoreRetryOutcome::Settled,
-                });
+        if matches!(self.hosted_mob(mob_id).await, HostedMob::Quarantined { .. })
+            && let Some(answer) = self.reattempt_store(mob_id, false).await
+        {
+            return answer.map(|restored| match restored {
+                StoreRestored::Managed | StoreRestored::Skipped => MobRestoreRetryOutcome::Restored,
+                StoreRestored::Held => MobRestoreRetryOutcome::Held,
+                StoreRestored::Settled => MobRestoreRetryOutcome::Settled,
+            });
         }
-        if self.mobs.read().await.contains_key(mob_id) {
-            return Ok(MobRestoreRetryOutcome::NotQuarantined);
+        match self.hosted_mob(mob_id).await {
+            HostedMob::Managed(_) | HostedMob::Held(_) => {
+                Ok(MobRestoreRetryOutcome::NotQuarantined)
+            }
+            HostedMob::Quarantined { error, .. } => Err(error),
+            HostedMob::Absent => Err(MobError::MobNotFound(mob_id.clone())),
         }
-        #[cfg(not(target_arch = "wasm32"))]
-        if self.held_child_mobs.read().await.contains_key(mob_id) {
-            return Ok(MobRestoreRetryOutcome::NotQuarantined);
-        }
-        Err(MobError::MobNotFound(mob_id.clone()))
     }
 
     /// A member lookup of `session_id` over the persisted mob `mob_id` left
@@ -4756,25 +5062,14 @@ impl MobMcpState {
                 return Err(MobMcpDestroyError::Mob(error));
             }
         };
+        // Managed custody now holds the child: its registration ends its
+        // hold in the same step.
         meerkat_runtime::stack_relief::box_in_own_frame(|| {
             self.register_resumed_mob(handle, &path, on_managed)
         })
         .await
         .map_err(MobMcpDestroyError::Mob)?;
-        // Managed custody now holds the child: only now does its hold end.
-        self.held_child_mobs.write().await.remove(&mob_id);
         Ok(custody)
-    }
-
-    /// The held child mob `mob_id`, or the quarantined persisted mob
-    /// `mob_id`, as its operational lookup answer.
-    async fn unmanaged_mob_error(&self, mob_id: &MobId) -> Option<MobError> {
-        if let Some(error) = self.quarantined_mob_error(mob_id).await {
-            return Some(error);
-        }
-        self.held_child_mobs.read().await.get(mob_id).map(|held| {
-            MobError::held_before_activation(&held.mob_id, &held.owner, held.reason.token())
-        })
     }
 
     /// The restored child mobs held before activation, with their owners.
@@ -4795,39 +5090,12 @@ impl MobMcpState {
     /// and the failure its last restore attempt met; a lookup of the id
     /// answers [`MobError::MobQuarantined`]. They are not in
     /// [`Self::mob_list`] (see [`Self::mob_inventory`]); their stores are
-    /// kept as found. Fails, rather than answer an empty list, when the
-    /// restore of the persisted mobs fails.
+    /// kept as found. The sets are read as [`Self::mob_inventory`] reads
+    /// them, so a mob managed or held is never listed. Fails, rather than
+    /// answer an empty list, when the restore of the persisted mobs fails.
     pub async fn quarantined_mobs(&self) -> Result<Vec<QuarantinedMob>, MobError> {
         self.ensure_restored().await?;
-        Ok(self
-            .quarantined_stores
-            .read()
-            .await
-            .values()
-            .map(QuarantinedStore::row)
-            .collect())
-    }
-
-    /// Every mob this state hosts, from one read: the managed mobs (as
-    /// [`Self::mob_list`] reports them), the restored child mobs held before
-    /// activation, and the persisted mobs the restore keeps quarantined.
-    /// Each mob id is in exactly one of them: the sets are read under the
-    /// lock that every move between them holds. A read never re-attempts a
-    /// quarantined store's restore.
-    ///
-    /// Needs the console owner (`List`), as [`Self::mob_list`] does.
-    pub async fn mob_inventory(&self) -> Result<MobInventory, MobError> {
-        self.require_console_owner(ControlScope::List)?;
-        self.ensure_restored().await?;
-        #[cfg(not(target_arch = "wasm32"))]
-        let _transfer = self.held_child_transfer.lock().await;
-        let held = self
-            .held_child_mobs
-            .read()
-            .await
-            .values()
-            .map(|held| (held.mob_id.clone(), held.owner.clone()))
-            .collect::<Vec<_>>();
+        let _moves = self.set_moves.read().await;
         let quarantined = self
             .quarantined_stores
             .read()
@@ -4835,12 +5103,79 @@ impl MobMcpState {
             .values()
             .map(QuarantinedStore::row)
             .collect::<Vec<_>>();
+        let held = self
+            .held_child_mobs
+            .read()
+            .await
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let managed = self
+            .mobs
+            .read()
+            .await
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        Ok(quarantined
+            .into_iter()
+            .filter(|row| !held.contains(&row.mob_id) && !managed.contains(&row.mob_id))
+            .collect())
+    }
+
+    /// Every mob this state hosts, from one read: the managed mobs (as
+    /// [`Self::mob_list`] reports them), the restored child mobs held before
+    /// activation, and the persisted mobs the restore keeps quarantined.
+    /// Each mob id is in exactly one of them: the sets are read under the
+    /// set-move lock, whose write side every move between them takes for
+    /// its final step (the insert into the next set and the drop from the
+    /// earlier one), so a mob that moves is read in exactly one set. The
+    /// read waits for no move's slow work, only for a final step in flight,
+    /// and never re-attempts a quarantined store's restore. A mob id two
+    /// stores name is reported in the first of managed, held and
+    /// quarantined.
+    ///
+    /// Needs the console owner (`List`), as [`Self::mob_list`] does.
+    pub async fn mob_inventory(&self) -> Result<MobInventory, MobError> {
+        self.require_console_owner(ControlScope::List)?;
+        self.ensure_restored().await?;
+        let _moves = self.set_moves.read().await;
+        let quarantined = self
+            .quarantined_stores
+            .read()
+            .await
+            .values()
+            .map(QuarantinedStore::row)
+            .collect::<Vec<_>>();
+        let held = self
+            .held_child_mobs
+            .read()
+            .await
+            .values()
+            .map(|held| (held.mob_id.clone(), held.owner.clone()))
+            .collect::<Vec<_>>();
         let managed = self
             .mobs
             .read()
             .await
             .iter()
             .map(|(id, managed)| (id.clone(), managed.handle.lifecycle_observation()))
+            .collect::<Vec<_>>();
+        let managed_ids = managed
+            .iter()
+            .map(|(mob_id, _)| mob_id)
+            .collect::<BTreeSet<_>>();
+        let held = held
+            .into_iter()
+            .filter(|(mob_id, _)| !managed_ids.contains(mob_id))
+            .collect::<Vec<_>>();
+        let held_ids = held
+            .iter()
+            .map(|(mob_id, _)| mob_id)
+            .collect::<BTreeSet<_>>();
+        let quarantined = quarantined
+            .into_iter()
+            .filter(|row| !managed_ids.contains(&row.mob_id) && !held_ids.contains(&row.mob_id))
             .collect::<Vec<_>>();
         Ok(MobInventory {
             managed,
@@ -4904,8 +5239,9 @@ impl MobMcpState {
             .collect::<Vec<_>>();
         let mut destroyed = Vec::new();
         for held in held {
-            // A transfer cancelled after registration leaves both rows: the
-            // managed mob owns the child, so only the stale hold is dropped.
+            // A mob managed under the child's id (a registration ends the
+            // hold of the child it registers, so this is another store
+            // naming the id) owns the id: only the stale hold is dropped.
             if self.mobs.read().await.contains_key(&held.mob_id) {
                 self.held_child_mobs.write().await.remove(&held.mob_id);
                 continue;
@@ -4950,10 +5286,11 @@ impl MobMcpState {
                     continue;
                 }
             };
-            // The held row stays until the child is registered as managed.
-            // The teardown and the resume are built in their own frames: at
-            // opt-level 0 each awaited future reserved twice its size in
-            // this poll frame.
+            // The held row stays until the child is registered as managed:
+            // the registration ends the hold in the same step. The teardown
+            // and the resume are built in their own frames: at opt-level 0
+            // each awaited future reserved twice its size in this poll
+            // frame.
             if archived {
                 if meerkat_runtime::stack_relief::box_in_own_frame(|| {
                     self.tear_down_archived_child_mob(
@@ -4968,19 +5305,12 @@ impl MobMcpState {
                 {
                     destroyed.push(held.mob_id.clone());
                 }
-            } else {
-                match meerkat_runtime::stack_relief::box_in_own_frame(|| {
-                    self.resume_persisted_mob(storage, &held.storage_path)
-                })
-                .await
-                {
-                    Ok(_) => {
-                        self.held_child_mobs.write().await.remove(&held.mob_id);
-                    }
-                    Err(error) => {
-                        tracing::warn!(mob_id = %held.mob_id, error = %error, "held child mob could not be resumed");
-                    }
-                }
+            } else if let Err(error) = meerkat_runtime::stack_relief::box_in_own_frame(|| {
+                self.resume_persisted_mob(storage, &held.storage_path)
+            })
+            .await
+            {
+                tracing::warn!(mob_id = %held.mob_id, error = %error, "held child mob could not be resumed");
             }
         }
         destroyed
@@ -5157,18 +5487,14 @@ impl MobMcpState {
         self.require_console_owner(ControlScope::SendCommand)?;
         let _admission = self.admit("mob callback route claim")?;
         self.ensure_restored().await?;
-        // A mob quarantined because its store could not serve gets one
-        // re-attempt of its restore first (see `Self::handle_for`).
-        if !self.mobs.read().await.contains_key(mob_id) {
-            self.reattempt_unavailable_quarantine(mob_id).await;
-        }
+        // The mob must be managed: one re-attempt of an unavailable store's
+        // restore first, otherwise the answer of the set holding it (see
+        // `Self::managed_handle`).
+        self.managed_handle(mob_id).await?;
         let mobs = self.mobs.read().await;
         let Some(managed) = mobs.get(mob_id) else {
-            drop(mobs);
-            return Err(self
-                .unmanaged_mob_error(mob_id)
-                .await
-                .unwrap_or_else(|| MobError::MobNotFound(mob_id.clone())));
+            // Destroyed since: no set holds it.
+            return Err(MobError::MobNotFound(mob_id.clone()));
         };
         let answer = match managed
             .handle
@@ -5202,17 +5528,12 @@ impl MobMcpState {
         self.require_console_owner(ControlScope::SendCommand)?;
         let _admission = self.admit("mob callback claim token mint")?;
         self.ensure_restored().await?;
-        // As a claim: one re-attempt of an unavailable store's restore.
-        if !self.mobs.read().await.contains_key(mob_id) {
-            self.reattempt_unavailable_quarantine(mob_id).await;
-        }
+        // As a claim: the mob must be managed (see `Self::managed_handle`).
+        self.managed_handle(mob_id).await?;
         let mobs = self.mobs.read().await;
         let Some(managed) = mobs.get(mob_id) else {
-            drop(mobs);
-            return Err(self
-                .unmanaged_mob_error(mob_id)
-                .await
-                .unwrap_or_else(|| MobError::MobNotFound(mob_id.clone())));
+            // Destroyed since: no set holds it.
+            return Err(MobError::MobNotFound(mob_id.clone()));
         };
         let token = meerkat_mob::MobClaimToken::mint()
             .map_err(|error| MobError::Internal(error.to_string()))?;
@@ -5267,6 +5588,14 @@ impl MobMcpState {
         definition.source_identity = Some(source_identity);
         let mob_id = definition.id.clone();
         self.ensure_restored().await?;
+        // A quarantined store is kept as found and a held child keeps its
+        // store: no create takes the id of either (the hosted sets are read
+        // as one).
+        if let HostedMob::Held(error) | HostedMob::Quarantined { error, .. } =
+            self.hosted_mob(&mob_id).await
+        {
+            return Err(error);
+        }
         if let Some(existing) = self.mobs.read().await.get(&mob_id) {
             let existing_definition = existing.handle.definition();
             if existing_definition.source_identity == definition.source_identity
@@ -5473,12 +5802,15 @@ impl MobMcpState {
             .await?;
         let mob_id = definition.id.clone();
         self.ensure_restored().await?;
-        if self.mobs.read().await.contains_key(&mob_id) {
-            return Err(MobError::Internal(format!("mob already exists: {mob_id}")));
-        }
-        // A quarantined store is kept as found: no create takes its id.
-        if let Some(error) = self.quarantined_mob_error(&mob_id).await {
-            return Err(error);
+        // The hosted sets, read as one: a quarantined store is kept as
+        // found and a held child keeps its store, so no create takes the id
+        // of either.
+        match self.hosted_mob(&mob_id).await {
+            HostedMob::Absent => {}
+            HostedMob::Managed(_) => {
+                return Err(MobError::Internal(format!("mob already exists: {mob_id}")));
+            }
+            HostedMob::Held(error) | HostedMob::Quarantined { error, .. } => return Err(error),
         }
         if self.destroy_cleanup_owed(&mob_id) {
             return Err(Self::owed_destroy_cleanup_error(&mob_id));
@@ -7888,20 +8220,11 @@ impl MobMcpState {
     /// the lookup answers the restored mob when it passes. While another
     /// re-attempt is in flight, or when it fails, or for any other
     /// quarantine, the lookup answers [`MobError::MobQuarantined`] at once.
+    /// The hosted sets are read as one, so a mob a concurrent re-attempt
+    /// registers is never answered as not found.
     pub async fn handle_for(&self, mob_id: &MobId) -> Result<MobHandle, MobError> {
         self.ensure_restored().await?;
-        if let Some(handle) = self.console_bound_handle(mob_id).await {
-            return Ok(handle);
-        }
-        if self.reattempt_unavailable_quarantine(mob_id).await
-            && let Some(handle) = self.console_bound_handle(mob_id).await
-        {
-            return Ok(handle);
-        }
-        Err(self
-            .unmanaged_mob_error(mob_id)
-            .await
-            .unwrap_or_else(|| MobError::MobNotFound(mob_id.clone())))
+        self.managed_handle(mob_id).await
     }
 
     /// The managed mob `mob_id`'s handle, rebound to the console principal.
@@ -19829,13 +20152,31 @@ mod tests {
         svc: &Arc<MockSessionSvc>,
         root: &std::path::Path,
     ) -> (MobId, MobId) {
+        a_running_and_a_stopped_mob_before_a_restart_as(
+            svc,
+            root,
+            "restore-unavailable",
+            "restore-stopped",
+        )
+        .await
+    }
+
+    /// [`a_running_and_a_stopped_mob_before_a_restart`] under the ids
+    /// `running` and `stopped`, for a test that must not share its mob ids
+    /// with another test in the same process.
+    async fn a_running_and_a_stopped_mob_before_a_restart_as(
+        svc: &Arc<MockSessionSvc>,
+        root: &std::path::Path,
+        running: &str,
+        stopped: &str,
+    ) -> (MobId, MobId) {
         let state = restored_state(svc, root);
         let running = state
-            .mob_create_definition(explicit_definition("restore-unavailable"))
+            .mob_create_definition(explicit_definition(running))
             .await
             .expect("create the running mob");
         let stopped = state
-            .mob_create_definition(explicit_definition("restore-stopped"))
+            .mob_create_definition(explicit_definition(stopped))
             .await
             .expect("create the stopped mob");
         state.mob_stop(&stopped).await.expect("stop the second mob");
@@ -20164,6 +20505,17 @@ mod tests {
         })
         .await
         .expect("the retry reaches its resume");
+        // Before the resumed mob is registered, a reader finds it once:
+        // quarantined, with its re-attempt in flight.
+        let inventory = restored.mob_inventory().await.expect("the inventory reads");
+        assert_one_set_per_id(&inventory);
+        assert!(
+            inventory
+                .quarantined
+                .iter()
+                .any(|row| row.mob_id == running && row.retrying),
+            "{inventory:?}"
+        );
         let concurrent =
             tokio::time::timeout(Duration::from_secs(5), restored.mob_status(&running))
                 .await
@@ -20243,6 +20595,342 @@ mod tests {
                 .any(|(mob_id, _)| mob_id == &running),
             "{inventory:?}"
         );
+    }
+
+    /// A state over `root` shared the way every host shares it
+    /// ([`MobMcpState::into_shared`]): it owns the tasks a caller's work
+    /// hands off, so a dropped caller does not end them.
+    fn shared_restored_state(
+        svc: &Arc<MockSessionSvc>,
+        root: &std::path::Path,
+    ) -> Arc<MobMcpState> {
+        MobMcpState::new(svc.clone(), meerkat_mob::MobControlPrincipal::Owner)
+            .expect("runtime custody")
+            .with_persistent_storage_root(Some(root.to_path_buf()))
+            .into_shared()
+    }
+
+    /// Wait until `hold` is reached.
+    async fn hold_reached(hold: &InsertHold, what: &str) {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !hold.reached.load(std::sync::atomic::Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("{what}"));
+    }
+
+    /// Whether `state` keeps a quarantine record of `mob_id`.
+    async fn keeps_quarantine_record(state: &MobMcpState, mob_id: &MobId) -> bool {
+        state
+            .quarantined_stores
+            .read()
+            .await
+            .values()
+            .any(|quarantined| &quarantined.mob_id == mob_id)
+    }
+
+    /// A verb that finds a mob unmanaged while a re-attempt of its store's
+    /// restore is in flight, and answers after that re-attempt registered
+    /// the mob, answers the retryable quarantine or the managed mob, never
+    /// that the mob does not exist.
+    #[tokio::test]
+    async fn a_verb_concurrent_with_a_re_attempt_that_registers_the_mob_never_answers_not_found() {
+        let svc = Arc::new(MockSessionSvc::new());
+        let root = tempfile::tempdir().expect("tempdir");
+        let (running, _stopped) =
+            a_running_and_a_stopped_mob_before_a_restart(&svc, root.path()).await;
+        let restored = restored_state(&svc, root.path());
+        // The pass meets the outage: the running mob is quarantined.
+        svc.fail_next_lists(1);
+        assert!(!quarantine_row(&restored, &running).await.retrying);
+
+        // A re-attempt parks inside its resume, before it registers the mob.
+        let resume_hold = Arc::new(InsertHold::default());
+        *restored
+            .resume_insert_hold
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&resume_hold));
+        let retrying = {
+            let restored = Arc::clone(&restored);
+            let running = running.clone();
+            tokio::spawn(async move { restored.mob_restore_retry(&running).await })
+        };
+        hold_reached(&resume_hold, "the re-attempt reaches its resume").await;
+
+        // A verb finds the mob unmanaged, its own re-attempt request is
+        // refused while the first runs, and it parks before it answers.
+        let answer_hold = Arc::new(InsertHold::default());
+        *restored
+            .lookup_answer_hold
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&answer_hold));
+        let verb = {
+            let restored = Arc::clone(&restored);
+            let running = running.clone();
+            tokio::spawn(async move { restored.handle_for(&running).await.map(|_| ()) })
+        };
+        hold_reached(&answer_hold, "the verb reaches its answer").await;
+
+        // The re-attempt registers the mob and ends.
+        *restored
+            .resume_insert_hold
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        resume_hold.release.notify_one();
+        assert_eq!(
+            retrying
+                .await
+                .expect("the retry task joins")
+                .expect("the retry restores the mob"),
+            MobRestoreRetryOutcome::Restored
+        );
+
+        answer_hold.release.notify_one();
+        let answered = tokio::time::timeout(Duration::from_secs(10), verb)
+            .await
+            .expect("the verb answers")
+            .expect("the verb task joins");
+        match answered {
+            Ok(())
+            | Err(MobError::MobQuarantined {
+                class: meerkat_mob::MobQuarantineClass::StoreUnavailable,
+                ..
+            }) => {}
+            Err(other) => panic!(
+                "a verb concurrent with the re-attempt that registered the mob answers the \
+                 retryable quarantine or the mob, never: {other:?}"
+            ),
+        }
+        restored
+            .handle_for(&running)
+            .await
+            .expect("the registered mob serves");
+    }
+
+    /// Park a verb's re-attempt of `running`'s restore after its admission,
+    /// before its restore, and drop the verb's caller (a client that
+    /// disconnects aborts its request). The record is then Retrying with
+    /// that attempt.
+    async fn drop_a_verb_inside_its_re_attempt(restored: &Arc<MobMcpState>, running: &MobId) {
+        let start_hold = Arc::new(InsertHold::default());
+        *restored
+            .retry_start_hold
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&start_hold));
+        let verb = {
+            let restored = Arc::clone(restored);
+            let running = running.clone();
+            tokio::spawn(async move { restored.handle_for(&running).await.map(|_| ()) })
+        };
+        hold_reached(&start_hold, "the verb's re-attempt is admitted").await;
+        assert!(quarantine_row(restored, running).await.retrying);
+        verb.abort();
+        assert!(verb.await.expect_err("the verb was aborted").is_cancelled());
+        start_hold.release.notify_one();
+    }
+
+    /// The restored mobs give up their supervisor routes, as the fixture's
+    /// predecessors do.
+    async fn shut_down_restored_mobs(state: &MobMcpState, mob_ids: [&MobId; 2]) {
+        for mob_id in mob_ids {
+            state
+                .handle_for(mob_id)
+                .await
+                .expect("restored mob handle")
+                .shutdown()
+                .await
+                .expect("retire the restored supervisor route");
+        }
+    }
+
+    /// On a state shared as every host shares it, a caller dropped while its
+    /// re-attempt of a store's restore runs leaves no re-attempt stranded:
+    /// the state's own task finishes the attempt without its caller, so the
+    /// record is released and the mob managed with no further verb.
+    #[tokio::test]
+    async fn a_dropped_caller_leaves_no_re_attempt_stranded_on_a_shared_state() {
+        let svc = Arc::new(MockSessionSvc::new());
+        let root = tempfile::tempdir().expect("tempdir");
+        let (running, stopped) = a_running_and_a_stopped_mob_before_a_restart_as(
+            &svc,
+            root.path(),
+            "dropped-shared-running",
+            "dropped-shared-stopped",
+        )
+        .await;
+        let restored = shared_restored_state(&svc, root.path());
+        // The pass meets the outage: the running mob is quarantined.
+        svc.fail_next_lists(1);
+        assert!(!quarantine_row(&restored, &running).await.retrying);
+
+        drop_a_verb_inside_its_re_attempt(&restored, &running).await;
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !(restored.mobs.read().await.contains_key(&running)
+                && !keeps_quarantine_record(&restored, &running).await)
+            {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the re-attempt the dropped caller started finishes without it");
+
+        restored
+            .handle_for(&running)
+            .await
+            .expect("the next verb serves the mob");
+        let inventory = restored.mob_inventory().await.expect("the inventory reads");
+        assert_one_set_per_id(&inventory);
+        assert!(inventory.quarantined.is_empty(), "{inventory:?}");
+        shut_down_restored_mobs(&restored, [&running, &stopped]).await;
+    }
+
+    /// On a state shared without the self-reference that owns tasks, the
+    /// re-attempt runs in its caller's future, so dropping the caller drops
+    /// it. It leaves no re-attempt stranded all the same: the next verb finds
+    /// the record Retrying with no live attempt, ends that attempt, and
+    /// re-attempts, which serves the mob once the store serves.
+    #[tokio::test]
+    async fn a_dropped_caller_leaves_no_re_attempt_stranded_on_a_plain_state() {
+        let svc = Arc::new(MockSessionSvc::new());
+        let root = tempfile::tempdir().expect("tempdir");
+        let (running, stopped) = a_running_and_a_stopped_mob_before_a_restart_as(
+            &svc,
+            root.path(),
+            "dropped-plain-running",
+            "dropped-plain-stopped",
+        )
+        .await;
+        let restored = restored_state(&svc, root.path());
+        // The pass meets the outage: the running mob is quarantined.
+        svc.fail_next_lists(1);
+        assert!(!quarantine_row(&restored, &running).await.retrying);
+
+        drop_a_verb_inside_its_re_attempt(&restored, &running).await;
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while restored.handle_for(&running).await.is_err() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the next verb re-attempts the abandoned restore and serves the mob");
+
+        let inventory = restored.mob_inventory().await.expect("the inventory reads");
+        assert_one_set_per_id(&inventory);
+        assert!(inventory.quarantined.is_empty(), "{inventory:?}");
+        assert!(!keeps_quarantine_record(&restored, &running).await);
+        shut_down_restored_mobs(&restored, [&running, &stopped]).await;
+    }
+
+    /// A re-attempt that registers a mob drops its quarantine record in the
+    /// same step: no reader finds the mob both managed and quarantined, and
+    /// a member lookup of a session the mob's roster names reads the managed
+    /// mob (not the quarantined store's roster) without waiting for the
+    /// re-attempt to end.
+    #[tokio::test]
+    async fn a_mob_a_re_attempt_registers_is_never_both_managed_and_quarantined() {
+        let svc = Arc::new(MockSessionSvc::new());
+        let root = tempfile::tempdir().expect("tempdir");
+        let state = restored_state(&svc, root.path());
+        let mob_id = state
+            .mob_create_definition(explicit_definition("restore-member"))
+            .await
+            .expect("create the mob");
+        let worker = AgentIdentity::from("worker-1");
+        state
+            .mob_spawn(
+                &mob_id,
+                ProfileName::from("worker"),
+                worker.clone(),
+                Some(MobRuntimeMode::TurnDriven),
+                None,
+                None,
+            )
+            .await
+            .expect("spawn a member of the mob");
+        let member_session = state
+            .mob_resolve_bridge_session_id(&mob_id, &worker)
+            .await
+            .expect("resolve bridge session")
+            .expect("member bridge session");
+        // A restart: the predecessor gives up its supervisor route.
+        state
+            .handle_for(&mob_id)
+            .await
+            .expect("predecessor mob handle")
+            .shutdown()
+            .await
+            .expect("retire the predecessor supervisor route");
+        drop(state);
+
+        let restored = restored_state(&svc, root.path());
+        // The pass meets the outage: the mob is quarantined.
+        svc.fail_next_lists(1);
+        assert!(!quarantine_row(&restored, &mob_id).await.retrying);
+
+        // A re-attempt parks once the store restored, before it ends.
+        let hold = Arc::new(InsertHold::default());
+        *restored
+            .retry_release_hold
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&hold));
+        let retrying = {
+            let restored = Arc::clone(&restored);
+            let mob_id = mob_id.clone();
+            tokio::spawn(async move { restored.mob_restore_retry(&mob_id).await })
+        };
+        hold_reached(&hold, "the re-attempt restores the store").await;
+        assert!(restored.mobs.read().await.contains_key(&mob_id));
+        assert!(
+            !keeps_quarantine_record(&restored, &mob_id).await,
+            "a mob registered as managed keeps no quarantine record"
+        );
+        let inventory = restored.mob_inventory().await.expect("the inventory reads");
+        assert_one_set_per_id(&inventory);
+        assert!(
+            inventory
+                .managed
+                .iter()
+                .any(|(managed, _)| managed == &mob_id),
+            "{inventory:?}"
+        );
+        assert!(
+            restored
+                .quarantined_mobs()
+                .await
+                .expect("the quarantined mobs read")
+                .is_empty()
+        );
+        let matches = tokio::time::timeout(
+            Duration::from_secs(5),
+            restored.session_member_matches(&member_session),
+        )
+        .await
+        .expect("a member lookup does not wait for the re-attempt")
+        .expect("the member lookup reads the managed mob");
+        assert!(
+            matches
+                .iter()
+                .any(|found| found.mob_id == mob_id && found.identity == worker),
+            "{matches:?}"
+        );
+
+        *restored
+            .retry_release_hold
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        hold.release.notify_one();
+        assert_eq!(
+            retrying
+                .await
+                .expect("the retry task joins")
+                .expect("the retry restores the mob"),
+            MobRestoreRetryOutcome::Restored
+        );
+        let inventory = restored.mob_inventory().await.expect("the inventory reads");
+        assert_one_set_per_id(&inventory);
+        assert!(inventory.quarantined.is_empty(), "{inventory:?}");
     }
 
     /// A store that cannot be decoded stays quarantined and visible. Lookups

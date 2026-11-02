@@ -621,7 +621,11 @@ a coherent WAL read. Reports per-root realm inventory,
 manifest state, schema-ledger versions per database, dual-root split-brain
 twins, persisted-session structural decode failures, transcript-history
 footprint, dangling session→blob references, and orphaned
-lock/lease/backup artifacts.
+lock/lease/backup artifacts. Since 0.9.9 it also lists, as informational
+findings, the sessions written at session envelope 5
+(`operator-instruction-envelope`) and the mob databases that hold
+operator-instruction events (`operator-instruction-mob-events`), which a
+release before 0.9.9 refuses.
 Exit 0 = no error-severity findings; exit 1 = errors found.
 
 `storage migrate` is the offline migration framework, dry-run by default;

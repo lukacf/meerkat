@@ -522,6 +522,59 @@ Since 0.8.52 (the 0.9.0 release):
   `MetaJob*Params`, `ToolDeadlineOwner::MetaPublicCallback`, and JSON-RPC
   `meta/jobs/*`.
 
+Since 0.9.8 (the 0.9.9 release):
+
+- **Two record-scoped, clock-free canonical machines.**
+  `ToolGrantLifecycleMachine` (`meerkat_runtime::tool_grant::dsl`) owns one
+  scoped tool grant (issuance against a maximum lifetime, expiry, revocation,
+  use admission); `DurableDecisionMachine` (`meerkat_runtime::decision::dsl`)
+  owns one durable decision (hold, presentation, attested decision,
+  execution permit, expiry, withdrawal, the notice an ended decision owes).
+  Their owners are `ToolGrantService` and `DurableDecisionService` over the
+  `RuntimeStore` (`runtime-tool-grants`) and `DecisionStore`
+  (`approval_decisions.sqlite3`).
+- **MeerkatMachine** holds the scoped tool grant gate (the names a build
+  gated and the gated names a boundary's live grants opened, invariant
+  `tool_grant_open_names_are_gated`), `RunStartHoldReason::HostPreparation`,
+  `SuspendRunForStop` with `RunSuspensionCause` (`RequeueStop`, `FenceGap`),
+  held input controllers for kept governed work that waits for its host to
+  supply its controller client again, and the denial of a model switch onto a
+  target that cannot carry the session's transcript.
+- **SessionDocumentMachine** decides operator instructions (ownership by the
+  session or a mob, revision order, slot limit, active budget, application
+  at a fresh run start, deferral, entry sequence, fold source) and which
+  superseded instruction activation bodies a compaction retires. A document
+  with such facts is written at session envelope 5; every other stays at 4.
+- **MobMachine** owns identity entries (origin `Declared` or `Created`,
+  unseated causes, removed and unreadable name reservations), the declared
+  apply's verdicts, every rotation's target (`FreshSession`, `SameSession`)
+  and the refusal of an entry's fresh-life respawn, the definition-wiring
+  exemption, operator instruction records with each member's owed, recorded
+  and blocked delivery facts, and a reset that commits only on an empty
+  roster (`AdmitReset` is its pure preflight). Operator-instruction events
+  journal at mob event schema 10.
+- **AuthMachine** records the credential material a source-read publication
+  carries (`ResolveSourceCredentialPublication`), so a value that was
+  refused or logged out is not published again until a different one
+  appears. Copilot routes authenticate in token mode
+  (`github_copilot_token`) as well as by device sign-in.
+- **Turns run on the host's runtime.** A mob member's session actor, and a
+  deferred or rebuilt RPC `SessionRuntime` session's, are materialized on the
+  host's runtime; Core's process-wide `meerkat-machine-cleanup` and
+  `meerkat-runtime-serving` runtimes keep custody tails and runtime loops (on
+  16 MiB threads by default). A host runtime that stops is crash-equivalent:
+  `runtime_turn_lost_its_host_runtime` degrades the session's registration
+  to a cold reload before the loop sees the lost task.
+- **Session comms identity root.** `SessionAgentBuilder` and
+  `MobSessionService` report where their builds keep each session's comms
+  key pair (`session_comms_identity_root`, required, a wrapper forwards it),
+  and a dormant seat reads or mints keys there unless the host declares a
+  root.
+- **Host store fence gap.** A dispatch, round commit or closing save waits
+  for a stopped writer's re-acquire (`SessionCheckpointer::dispatch_fence_ready`,
+  `SelfFence::dispatch_window`, `SelfFence::lost`); a gap suspends the run
+  through the machine (`FenceGap`), and only another writer ends the session.
+
 ## Runtime Dogma (first review lens)
 
 Canonical doctrine: `docs/architecture/meerkat-dogma.md` (nine rules; mirrored

@@ -1056,7 +1056,7 @@ pub fn normalize_create(
     let targets: Vec<PlanTarget<'_>> = checked
         .iter()
         .map(|(identity, entry)| PlanTarget {
-            identity: *identity,
+            identity,
             profile: entry.request.spec.profile.as_str(),
             authority_labels: &entry.authority,
         })

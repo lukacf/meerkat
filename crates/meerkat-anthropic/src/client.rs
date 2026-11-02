@@ -1443,7 +1443,7 @@ impl AnthropicClient {
     > {
         let Some(authorizer) = &self.authorizer else {
             return Ok((
-                request.header("x-api-key", &self.api_key),
+                request.header("x-api-key", http::sensitive_header_value(&self.api_key)?),
                 meerkat_core::HttpAuthorizationReceipt::untracked(),
             ));
         };
@@ -1570,7 +1570,7 @@ impl AnthropicClient {
             .await?;
         #[cfg(target_arch = "wasm32")]
         let mut request = request
-            .header("x-api-key", &self.api_key)
+            .header("x-api-key", http::sensitive_header_value(&self.api_key)?)
             .header("anthropic-dangerous-direct-browser-access", "true");
         #[cfg(target_arch = "wasm32")]
         let receipt = meerkat_core::HttpAuthorizationReceipt::untracked();

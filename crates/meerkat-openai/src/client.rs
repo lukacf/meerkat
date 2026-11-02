@@ -1078,10 +1078,13 @@ impl OpenAiClient {
             receipt
         } else if let Some(api_key) = &self.api_key {
             if self.azure_openai_wire_config().is_some() {
-                request_builder = request_builder.header("api-key", api_key);
-            } else {
                 request_builder =
-                    request_builder.header("Authorization", format!("Bearer {api_key}"));
+                    request_builder.header("api-key", http::sensitive_header_value(api_key)?);
+            } else {
+                request_builder = request_builder.header(
+                    "Authorization",
+                    http::sensitive_header_value(&format!("Bearer {api_key}"))?,
+                );
             }
             meerkat_core::HttpAuthorizationReceipt::untracked()
         } else {

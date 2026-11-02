@@ -4,14 +4,16 @@ use crate::error::LlmError;
 #[cfg(not(target_arch = "wasm32"))]
 use std::net::IpAddr;
 
-/// A header value a dynamic authorizer supplies, marked sensitive. The
-/// authorizer is the credential boundary: its values (an `Authorization`
-/// bearer, a session token) are secrets, so the HTTP stack keeps them out of
-/// `Debug` output and out of HTTP/2 header compression tables.
+/// A credential header value, marked sensitive: one a dynamic authorizer
+/// supplies (an `Authorization` bearer, a session token) or a static API key
+/// (an `Authorization` bearer, `x-api-key`, `api-key`). These values are
+/// secrets, so the HTTP stack keeps them out of `Debug` output and out of
+/// HTTP/2 header compression tables. A value that is not a valid header value
+/// fails as `authentication_failed`, before any request is sent.
 pub fn sensitive_header_value(value: &str) -> Result<reqwest::header::HeaderValue, LlmError> {
     let mut value = reqwest::header::HeaderValue::from_str(value).map_err(|_| {
         LlmError::AuthenticationFailed {
-            message: "the authorizer supplied an invalid header value".to_string(),
+            message: "a credential header value is not a valid HTTP header value".to_string(),
         }
     })?;
     value.set_sensitive(true);

@@ -673,12 +673,14 @@ impl OpenAiCompatibleClient {
         &self,
         request: reqwest::RequestBuilder,
         content_type: &'static str,
-    ) -> reqwest::RequestBuilder {
+    ) -> Result<reqwest::RequestBuilder, LlmError> {
         let request = request.header("Content-Type", content_type);
-        if let Some(token) = &self.bearer_token {
-            request.header("Authorization", format!("Bearer {token}"))
-        } else {
-            request
+        match &self.bearer_token {
+            Some(token) => Ok(request.header(
+                "Authorization",
+                http::sensitive_header_value(&format!("Bearer {token}"))?,
+            )),
+            None => Ok(request),
         }
     }
 
@@ -696,7 +698,7 @@ impl OpenAiCompatibleClient {
         ),
         LlmError,
     > {
-        let mut request = self.apply_auth(request, content_type);
+        let mut request = self.apply_auth(request, content_type)?;
         let receipt = if let Some(authorizer) = &self.authorizer {
             let mut headers = Vec::new();
             authorizer

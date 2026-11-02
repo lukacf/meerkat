@@ -675,6 +675,34 @@ impl Roster {
         self.seat_builds.get(session_id).cloned()
     }
 
+    /// Set the descriptive inputs a store-owned identity's seat carries to
+    /// the first build of its session from the identity's row: `context`
+    /// and `instructions`, as its spec holds them now (its row is its
+    /// record, so a descriptive update applies at the member's next build).
+    /// The caller has checked that no build created the session (MobMachine's
+    /// `member_seat_session_unborn`); the session's born row drops them, as
+    /// it drops every seat's. The seat's other inputs are kept.
+    pub(crate) fn set_store_owned_seat_inputs(
+        &mut self,
+        agent_identity: &AgentIdentity,
+        context: Option<serde_json::Value>,
+        instructions: Vec<String>,
+    ) {
+        let Some(session_id) = self
+            .entries
+            .get(agent_identity)
+            .and_then(|entry| entry.member_ref.bridge_session_id())
+            .cloned()
+        else {
+            return;
+        };
+        let build = self.seat_builds.entry(session_id).or_default();
+        let mut next = crate::runtime::SeatBuild::clone(build);
+        next.inputs.context = context;
+        next.inputs.additional_instructions = Some(instructions);
+        *build = Arc::new(next);
+    }
+
     /// Whether a journal row of this mob recorded the member comms endpoint
     /// of `session_id` (its public key): peers trusted that key, so a seat of
     /// the session whose key pair is missing is refused rather than given a

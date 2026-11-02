@@ -16,6 +16,13 @@
 //! Each identity's answer is its own and typed: one identity's refusal or
 //! failure never fails the pass. An unchanged roster writes nothing: no
 //! journal row, no wake.
+//!
+//! The same verdicts realize a store-owned identity's update
+//! ([`super::MobHandle::update_store_owned_identity`]): a declared apply of
+//! that one identity under created custody, whose declaration step writes
+//! the identity's row and the change's receipt. A partial roster carrying a
+//! roster-owned identity's change ([`DeclaredRoster::with_change`]) writes
+//! that change's receipt in its declaration step's transaction.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -395,6 +402,9 @@ pub(in crate::runtime) struct IdentityDeclaration {
     /// roster carries one: the declaration's step ends the first-boot
     /// preparation the request carries out.
     pub(in crate::runtime) first_boot: mob_dsl::FirstBootRequestKind,
+    /// Whose declaration it is: a store-owned identity's update (its
+    /// Created entry), or a host's roster (a Declared entry or a free name).
+    pub(in crate::runtime) created_custody: bool,
 }
 
 impl IdentityDeclaration {
@@ -420,6 +430,7 @@ impl IdentityDeclaration {
                 .as_ref()
                 .map(|profile| profile.as_str().to_string()),
             first_boot: self.first_boot,
+            created_custody: self.created_custody,
         }
     }
 }
@@ -430,6 +441,13 @@ impl IdentityDeclaration {
 pub(in crate::runtime) struct DeclarationVerdict {
     pub(in crate::runtime) agent_identity: AgentIdentity,
     pub(in crate::runtime) verdict: Result<DecidedDeclaration, MobError>,
+}
+
+/// One declaration step's answer: each declaration's verdict, and what the
+/// step answered of the change it carried.
+pub(in crate::runtime) struct DeclarationStep {
+    pub(in crate::runtime) verdicts: Vec<DeclarationVerdict>,
+    pub(in crate::runtime) change: Option<super::identity_change::DeclaredChangeAnswer>,
 }
 
 /// One decided declaration ([`DeclarationVerdict`]).
@@ -678,6 +696,16 @@ impl super::MobHandle {
     ///   [`DeclaredEntryRefusal::NameUnreadable`]).
     /// - A candidate composition answers every identity refused and writes
     ///   nothing.
+    /// - A partial roster that carries a roster-owned identity's change
+    ///   ([`DeclaredRoster::with_change`]) writes the change's receipt in its
+    ///   declaration step's transaction, with each identity the step
+    ///   answered (a `Kept` answer included), and answers it
+    ///   ([`DeclaredRosterOutcome::receipt`]); a retry of the operation with
+    ///   the same request answers that receipt, another request under it is
+    ///   refused ([`super::IdentityChangeRefusal::OperationReused`]), and so
+    ///   is a change while the host holds the mob's identity changes. Such a
+    ///   roster declares at most [`DECLARED_APPLY_CHUNK`] identities, in one
+    ///   step.
     ///
     /// A complete roster is sealed after the last chunk: a Declared entry it
     /// does not list whose member is seated is retired (its start row records
@@ -693,9 +721,9 @@ impl super::MobHandle {
     ///
     /// The apply decides and seats in chunks of [`DECLARED_APPLY_CHUNK`]
     /// identities, each one MobMachine step. Applies of one mob run one at a
-    /// time: a call while another apply of the mob runs is refused
-    /// [`MobError::LifecycleOperationPending`], retryable, and writes
-    /// nothing.
+    /// time, a store-owned identity's update included: a call while another
+    /// apply of the mob runs is refused [`MobError::LifecycleOperationPending`],
+    /// retryable, and writes nothing.
     ///
     /// Between a restart and the first apply after it, MobMachine knows only
     /// the entries its journal rows record: the seated ones, and those whose
@@ -708,6 +736,27 @@ impl super::MobHandle {
         &self,
         roster: DeclaredRoster,
     ) -> Result<DeclaredRosterOutcome, MobError> {
+        self.run_declared_apply(roster, None)
+            .await
+            .map(|(outcome, _)| outcome)
+    }
+
+    /// Run one declared apply of `roster` under the mob's apply lease, with
+    /// the store-owned update `update` it carries out, if any (see
+    /// [`Self::apply_declared_roster`]): the answer, and what the apply's
+    /// declaration step answered of its change (a roster-owned identity's or
+    /// the update).
+    pub(super) async fn run_declared_apply(
+        &self,
+        roster: DeclaredRoster,
+        update: Option<super::identity_change::DeclaredChangeWrite>,
+    ) -> Result<
+        (
+            DeclaredRosterOutcome,
+            Option<super::identity_change::DeclaredChangeAnswer>,
+        ),
+        MobError,
+    > {
         self.admit_control_scope_for(
             mob_dsl::ControlScope::Retire,
             ScopeAdmissionSubject::DeclaredApply,
@@ -729,7 +778,7 @@ impl super::MobHandle {
                 });
             }
         };
-        let outcome = self.apply_open_declared_roster(roster).await;
+        let outcome = self.apply_open_declared_roster(roster, update).await;
         lease.close().await;
         outcome
     }
@@ -780,19 +829,56 @@ impl super::MobHandle {
         result.map(|()| outcome)
     }
 
-    /// The body of [`Self::apply_declared_roster`], under its open fact.
+    /// The body of [`Self::run_declared_apply`], under its open fact.
     async fn apply_open_declared_roster(
         &self,
         roster: DeclaredRoster,
-    ) -> Result<DeclaredRosterOutcome, MobError> {
+        update: Option<super::identity_change::DeclaredChangeWrite>,
+    ) -> Result<
+        (
+            DeclaredRosterOutcome,
+            Option<super::identity_change::DeclaredChangeAnswer>,
+        ),
+        MobError,
+    > {
         let DeclaredRoster {
             entries,
             complete,
             role_migrations,
             first_boot_requests,
-            change: _,
+            change,
         } = roster;
         let mut outcome = DeclaredRosterOutcome::default();
+        // The change the apply carries out: a roster-owned identity's
+        // (written with a partial roster's one declaration step), or a
+        // store-owned identity's update.
+        let change = match (change, update) {
+            (Some(_), Some(_)) => {
+                return Err(MobError::Internal(
+                    "a declared apply carried a roster change and a store-owned update".into(),
+                ));
+            }
+            (Some(change), None) => {
+                if complete {
+                    return Err(super::identity_change::refused(
+                        super::IdentityChangeRefusal::InvalidRequest {
+                            problem: "a roster-owned identity's change is applied by a partial \
+                                      roster"
+                                .to_string(),
+                        },
+                    ));
+                }
+                Some(super::identity_change::DeclaredChangeWrite::roster(change))
+            }
+            (None, update) => update,
+        };
+        if change.is_some() && entries.len() > self.declared_apply_chunk() {
+            return Err(super::identity_change::refused(
+                super::IdentityChangeRefusal::BatchTooLarge {
+                    max: self.declared_apply_chunk(),
+                },
+            ));
+        }
 
         // One declaration per identity: an identity declared twice is
         // refused, and stays listed.
@@ -897,9 +983,19 @@ impl super::MobHandle {
                 Some(FirstBootRequest::Resume { .. }) => mob_dsl::FirstBootRequestKind::Resume,
                 Some(FirstBootRequest::Fresh) => mob_dsl::FirstBootRequestKind::Fresh,
             },
+            created_custody: entry.spec.created_custody,
         };
         let declarations: Vec<IdentityDeclaration> = declared.values().map(declare).collect();
-        let verdicts = self.declare_identity_entries(declarations).await?;
+        let (verdicts, change) = self.declare_identity_entries(declarations, change).await?;
+        outcome.receipt = change.as_ref().map(|answer| answer.receipt().clone());
+        // A replayed store-owned update realizes nothing again.
+        if matches!(
+            change,
+            Some(super::identity_change::DeclaredChangeAnswer::Replayed(_))
+        ) && verdicts.is_empty()
+        {
+            return Ok((outcome, change));
+        }
 
         // Realize each verdict.
         let mut seats: Vec<OwedSeat> = Vec::new();
@@ -1021,7 +1117,7 @@ impl super::MobHandle {
         if complete {
             self.seal_declared_roster(listed, &mut outcome).await?;
         }
-        Ok(outcome)
+        Ok((outcome, change))
     }
 
     /// The session each declared identity no member holds would be seated
@@ -1069,7 +1165,7 @@ impl super::MobHandle {
     /// session that is not archived: a session it does not see is refused
     /// typed (`SessionError::Unsupported`), never read as one with no role,
     /// unless MobMachine records that no build created it.
-    async fn resume_session_role(
+    pub(super) async fn resume_session_role(
         &self,
         session_id: &SessionId,
     ) -> Result<Option<ProfileName>, MobError> {
@@ -1136,29 +1232,45 @@ impl super::MobHandle {
             .collect())
     }
 
-    /// MobMachine's verdicts for `declarations`, one chunk per actor step.
+    /// MobMachine's verdicts for `declarations`, one chunk per actor step,
+    /// and what the first step answered of `change`, which it carries (one
+    /// step decides it even with no declaration).
     async fn declare_identity_entries(
         &self,
         declarations: Vec<IdentityDeclaration>,
-    ) -> Result<Vec<DeclarationVerdict>, MobError> {
+        change: Option<super::identity_change::DeclaredChangeWrite>,
+    ) -> Result<
+        (
+            Vec<DeclarationVerdict>,
+            Option<super::identity_change::DeclaredChangeAnswer>,
+        ),
+        MobError,
+    > {
         let chunk_size = self.declared_apply_chunk();
         let mut verdicts = Vec::with_capacity(declarations.len());
+        let mut answer = None;
+        let mut change = change.map(Box::new);
         let mut declarations = declarations.into_iter().peekable();
-        while declarations.peek().is_some() {
+        while declarations.peek().is_some() || change.is_some() {
             let chunk: Vec<IdentityDeclaration> = declarations.by_ref().take(chunk_size).collect();
             #[cfg(test)]
             let decided = chunk.len();
-            verdicts.extend(
-                self.send_actor_command(|reply_tx| MobCommand::DeclareIdentityEntries {
+            let carried = change.take();
+            let step = self
+                .send_actor_command(|reply_tx| MobCommand::DeclareIdentityEntries {
                     declarations: chunk,
+                    change: carried,
                     reply_tx,
                 })
-                .await??,
-            );
+                .await??;
+            verdicts.extend(step.verdicts);
+            if step.change.is_some() {
+                answer = step.change;
+            }
             #[cfg(test)]
             record_declared_apply_decision_for_test(self.mob_id(), decided);
         }
-        Ok(verdicts)
+        Ok((verdicts, answer))
     }
 
     /// The identities one step of this mob's declared apply takes:
@@ -1190,7 +1302,10 @@ impl super::MobHandle {
         session_memory_only: bool,
         resume_session_role: Option<&ProfileName>,
     ) -> Result<OwedSeat, MobError> {
-        let mut spec = entry.spec.clone().with_entry_custody(true);
+        let mut spec = entry
+            .spec
+            .clone()
+            .with_entry_custody(!entry.spec.created_custody);
         spec.history_unavailable = None;
         // The role the resumed session was last built under, when it is
         // another than the declared one.
@@ -1408,7 +1523,12 @@ impl super::MobHandle {
             return failure_outcome(error);
         }
         match self
-            .rotate_member(entry.spec.clone().with_entry_custody(true))
+            .rotate_member(
+                entry
+                    .spec
+                    .clone()
+                    .with_entry_custody(!entry.spec.created_custody),
+            )
             .await
         {
             Ok(session_id) => DeclaredEntryOutcome::FreshLife { session_id },
@@ -1464,7 +1584,12 @@ impl super::MobHandle {
                     return failure_outcome(error);
                 }
                 match self
-                    .rotate_member(entry.spec.clone().with_entry_custody(true))
+                    .rotate_member(
+                        entry
+                            .spec
+                            .clone()
+                            .with_entry_custody(!entry.spec.created_custody),
+                    )
                     .await
                 {
                     Ok(session_id) => DeclaredEntryOutcome::RoleRotated { session_id },

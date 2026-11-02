@@ -48,12 +48,16 @@
 \* Each run explores its whole reachable space under the VIEW of
 \* member_residency_audit, with TLC coverage. Properties: every generated
 \* invariant of ci.cfg (the created entries' among them:
-\* unseated_created_entry_is_preparing_or_owed, tombstone_is_never_an_entry,
-\* entry_custodies_are_disjoint, worker_reconcile_spares_entries,
-\* destroyed_mob_holds_no_member_lifecycle), and per run:
+\* tombstone_is_never_an_entry, entry_custodies_are_disjoint,
+\* worker_reconcile_spares_entries, destroyed_mob_holds_no_member_lifecycle),
+\* and per run:
 \*   scan and placed: AuditRecoverExactlyOne (invariant, ENABLED form:
 \*     exactly one arm answers every row while the replay runs, and none
 \*     once the boot plan is sealed).
+\*   scan: AuditScanUnseatedCauses (invariant: the scan records a Created
+\*     entry unseated only owed its seat, awaiting its host's preparation
+\*     or archived; a store-owned update's declaration, which no recovery
+\*     run makes, is what may record one hosted on its first use or held).
 \*   reseat and placed: AuditNoSeatUnderReservedName (action property: no
 \*     ladder close seats a member under a reserved name).
 \*   reseat: AuditReseatRecoverExactlyOne (the same, for rows without a
@@ -130,6 +134,13 @@ RecoverExactlyOneOver(lasts) ==
         Cardinality({i \in 1..10 : RecoverVerdicts(id, presence, last)[i]})
             = IF boot_plan_sealed = FALSE /\ phase \in {"Running", "Stopped"} THEN 1 ELSE 0
 AuditRecoverExactlyOne == RecoverExactlyOneOver(Lasts)
+
+\* The causes the boot's scan records a Created entry unseated for: owed its
+\* seat (a Present row of an identity no member holds), awaiting its host's
+\* preparation (a row pending it), or archived (an archived row).
+AuditScanUnseatedCauses ==
+    \A id \in DOMAIN identity_entry_unseated :
+        Created(id) => identity_entry_unseated[id] \in {"SeatOwed", "PreparationPending", "Archived"}
 
 \* Every arm of the admission probe in a running and a stopped mob.
 ProbeVerdicts(id, ec, cc) ==
@@ -359,15 +370,15 @@ NamesShape == <<AuditProfile, AuditMode, "Local", FALSE, None, FALSE, FALSE, Non
 \* unreadable name.
 DeclareArmAll(id, s) ==
     \/ DeclareArm(id, s)
-    \/ DeclareIdentityEntryRefusedNameOwnedByCreated(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9])
-    \/ DeclareIdentityEntryRefusedNameTombstoned(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9])
-    \/ DeclareIdentityEntryRefusedNameUnreadable(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9])
+    \/ DeclareIdentityEntryRefusedNameOwnedByCreated(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], FALSE)
+    \/ DeclareIdentityEntryRefusedNameTombstoned(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], FALSE)
+    \/ DeclareIdentityEntryRefusedNameUnreadable(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], FALSE)
 DeclareOneArmAll(id, s) ==
     Cardinality({i \in 1..18 :
         (DeclareEnabled(id, s) \o
-         << ENABLED DeclareIdentityEntryRefusedNameOwnedByCreated(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9]),
-            ENABLED DeclareIdentityEntryRefusedNameTombstoned(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9]),
-            ENABLED DeclareIdentityEntryRefusedNameUnreadable(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9]) >>)[i]}) = 1
+         << ENABLED DeclareIdentityEntryRefusedNameOwnedByCreated(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], FALSE),
+            ENABLED DeclareIdentityEntryRefusedNameTombstoned(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], FALSE),
+            ENABLED DeclareIdentityEntryRefusedNameUnreadable(id, s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9], FALSE) >>)[i]}) = 1
 
 \* Every arm of the legacy adoption, every phase of the run.
 NamesAdoptVerdicts(id, observed) ==

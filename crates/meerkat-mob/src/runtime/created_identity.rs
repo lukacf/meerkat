@@ -14,13 +14,23 @@
 //! unreadable through the same signal.
 //!
 //! A created entry owed its seat (a build that predates created entries
-//! retired its member) is seated again once the mob runs, Dormant, on its
-//! archived session, under created custody, with the role, runtime mode,
-//! overrides, continuity, wiring and roster labels of its member's last spawn
-//! row, as any revive keeps its member's spec: the same member comes back on
-//! the same session, history kept, and wakes on its first delivery. An entry
-//! with no archived session, or whose archived session cannot be revived,
-//! stays owed its seat, and its reads say so.
+//! retired its member, or a kickoff's spawn after its create failed) is
+//! seated again once the mob runs, Dormant, under created custody, from its
+//! row's spec when the row carries one: on its archived session (the same
+//! member comes back on the same session, history kept, and wakes on its
+//! first delivery), on a fresh session with the notice when that session is
+//! gone from the store, or on a fresh one when it has none; a spec that owes
+//! a kickoff is embodied. A row written before rows carried their spec seats
+//! the entry with the role, runtime mode, overrides, continuity, wiring and
+//! roster labels of its member's last spawn row, as any revive keeps its
+//! member's spec, and only on its archived session: an entry with none, or
+//! whose archived session cannot be revived, stays owed its seat, and its
+//! reads say so.
+//!
+//! The start also carries out what the rows keep owed: the role migration
+//! of a store-owned update whose restamp a crash prevented, and the
+//! descriptive inputs (context, instructions) a seat whose session no build
+//! created carries to its first build, set from the row's current spec.
 
 use std::collections::BTreeMap;
 
@@ -82,18 +92,29 @@ fn last_bound_sessions(mob_id: &MobId, events: &[MobEvent]) -> BTreeMap<AgentIde
     sessions
 }
 
+/// What a start carries out from the store-owned rows it recovered: each
+/// present identity's spec (a seat whose session no build created takes its
+/// descriptive inputs from it), and the identities whose row keeps a role
+/// migration its restamp has not committed.
+#[derive(Debug, Default)]
+pub(super) struct RecoveredCreatedRows {
+    pub(super) specs: BTreeMap<AgentIdentity, crate::identity::CreatedIdentitySpec>,
+    pub(super) role_migrations_owed: std::collections::BTreeSet<AgentIdentity>,
+}
+
 /// Recover `mob_id`'s created entry rows into MobMachine, one
 /// `RecoverCreatedIdentityEntry` per row of the identity store's created
 /// identity scan, after the replay of `epoch_events` and before the start's
-/// member plan.
+/// member plan; and answer what the start carries out from them.
 pub(super) async fn recover_created_identity_entries(
     authority: &mut mob_dsl::MobMachineAuthority,
     store: &dyn MobIdentityStore,
     mob_id: &MobId,
     epoch_events: &[MobEvent],
-) -> Result<(), MobError> {
+) -> Result<RecoveredCreatedRows, MobError> {
+    let mut recovered = RecoveredCreatedRows::default();
     if !recovers_in_phase(authority) {
-        return Ok(());
+        return Ok(recovered);
     }
     let mut last_sessions = None;
     let mut after = None;
@@ -106,6 +127,15 @@ pub(super) async fn recover_created_identity_entries(
             )
             .await?;
         for (identity, observation) in &page.observations {
+            if let CreatedIdentityObservation::Created(record) = observation
+                && record.presence == CreatedIdentityPresence::Present
+                && let Some(spec) = &record.spec
+            {
+                recovered.specs.insert(identity.clone(), spec.clone());
+                if record.pending_role_migration.is_some() {
+                    recovered.role_migrations_owed.insert(identity.clone());
+                }
+            }
             // An archived row names its archived session itself; any other
             // row's revival record is its member's last bound session.
             let archived_session = match observation {
@@ -134,7 +164,7 @@ pub(super) async fn recover_created_identity_entries(
             )?;
         }
         match page.next {
-            None => return Ok(()),
+            None => return Ok(recovered),
             Some(next) if after.as_ref().is_none_or(|current| &next > current) => {
                 after = Some(next);
             }
@@ -187,10 +217,11 @@ fn reseat_spec(row: &MemberSpawnedEvent, session_id: SessionId) -> super::SpawnM
     spec
 }
 
-/// The created entries owed their seat that a start seats again: each one's
-/// archived session record, in identity order. None when the mob is not
-/// running, its destroy is admitted, or the composition is a candidate.
-fn owed_created_seats(state: &mob_dsl::MobMachineState) -> Vec<(AgentIdentity, SessionId)> {
+/// The created entries owed their seat that a start seats again, in
+/// identity order, each with its archived session record if it has one.
+/// None when the mob is not running, its destroy is admitted, or the
+/// composition is a candidate.
+fn owed_created_seats(state: &mob_dsl::MobMachineState) -> Vec<(AgentIdentity, Option<SessionId>)> {
     if state.lifecycle_phase != mob_dsl::MobPhase::Running
         || state.destroy_admitted
         || state.composition_authority != mob_dsl::CompositionAuthorityKind::Authoritative
@@ -206,34 +237,120 @@ fn owed_created_seats(state: &mob_dsl::MobMachineState) -> Vec<(AgentIdentity, S
         {
             continue;
         }
-        let Some(archived) = state.identity_entry_archived_sessions.get(identity) else {
-            continue;
+        let archived = match state
+            .identity_entry_archived_sessions
+            .get(identity)
+            .map(|archived| SessionId::parse(&archived.0))
+            .transpose()
+        {
+            Ok(archived) => archived,
+            Err(error) => {
+                tracing::warn!(
+                    agent_identity = %identity.0,
+                    error = %error,
+                    "a created entry owed its seat holds an invalid archived session"
+                );
+                continue;
+            }
         };
-        match SessionId::parse(&archived.0) {
-            Ok(session_id) => owed.push((AgentIdentity::from(identity.0.as_str()), session_id)),
-            Err(error) => tracing::warn!(
-                agent_identity = %identity.0,
-                error = %error,
-                "a created entry owed its seat holds an invalid archived session"
-            ),
-        }
+        owed.push((AgentIdentity::from(identity.0.as_str()), archived));
     }
     owed
 }
 
 impl super::MobHandle {
-    /// Seat every created entry owed its seat again, Dormant, on its
-    /// archived session, under created custody (see the module docs): after
-    /// a start that runs the mob, and after a stopped mob's resume. A mob
-    /// that is not running, and a candidate composition, seat nothing. Never
-    /// fails its caller: an entry it cannot seat stays owed its seat, and
-    /// the failure is logged.
+    /// Carry out at a start what the store-owned rows keep owed (see the
+    /// module docs): the entries owed their seat
+    /// ([`Self::reseat_owed_created_entries`]), then, off the caller's path,
+    /// each role migration whose restamp a crash prevented, in its own
+    /// declared apply. Never fails its caller: what it cannot carry out
+    /// stays owed, and the failure is logged.
+    pub(super) async fn carry_out_store_owned_rows_at_start(
+        &self,
+        role_migrations_owed: std::collections::BTreeSet<AgentIdentity>,
+    ) {
+        self.reseat_owed_created_entries().await;
+        if role_migrations_owed.is_empty() {
+            return;
+        }
+        // The mob's own obligation, whoever started it.
+        let owner = self.non_owning().with_command_authority(
+            crate::control_policy::CommandAuthority::principal(
+                crate::control_policy::MobControlPrincipal::Owner,
+            ),
+        );
+        crate::tokio::spawn(async move {
+            for identity in role_migrations_owed {
+                if let Err(error) = owner.redeclare_store_owned_identity(&identity).await {
+                    tracing::warn!(
+                        mob_id = %owner.mob_id(),
+                        agent_identity = %identity,
+                        error = %error,
+                        "a store-owned identity's role migration was not carried out"
+                    );
+                }
+            }
+        });
+    }
+
+    /// Seat every created entry owed its seat again, Dormant, under created
+    /// custody (see the module docs): after a start that runs the mob, and
+    /// after a stopped mob's resume. An entry whose row carries its spec is
+    /// seated from it; one whose row predates its spec, from its last spawn
+    /// row, on its archived session. A mob that is not running, and a
+    /// candidate composition, seat nothing. Never fails its caller: an entry
+    /// it cannot seat stays owed its seat, and the failure is logged.
     pub(super) async fn reseat_owed_created_entries(&self) {
         self.redrive_owed_entry_endings();
         let owed = owed_created_seats(&self.machine_state_watch_rx.borrow());
         if owed.is_empty() {
             return;
         }
+        // The mob's own obligation, whoever started or resumed it.
+        let owner = self.non_owning().with_command_authority(
+            crate::control_policy::CommandAuthority::principal(
+                crate::control_policy::MobControlPrincipal::Owner,
+            ),
+        );
+        let mut legacy = Vec::new();
+        for (identity, archived) in owed {
+            let spec = if self.identity_member.is_some() {
+                match self.store_owned_spec(&identity).await {
+                    Ok(spec) => spec,
+                    Err(error) => {
+                        tracing::warn!(
+                            mob_id = %self.mob_id(),
+                            agent_identity = %identity,
+                            error = %error,
+                            "a created entry owed its seat: its row could not be read"
+                        );
+                        continue;
+                    }
+                }
+            } else {
+                None
+            };
+            match (spec, archived) {
+                (Some(spec), _) => {
+                    if let Err(error) =
+                        Box::pin(owner.seat_store_owned_from_spec(&identity, &spec)).await
+                    {
+                        tracing::warn!(
+                            mob_id = %self.mob_id(),
+                            agent_identity = %identity,
+                            error = %error,
+                            "a created entry owed its seat was not seated from its row's spec"
+                        );
+                    }
+                }
+                (None, Some(session_id)) => legacy.push((identity, session_id)),
+                (None, None) => {}
+            }
+        }
+        if legacy.is_empty() {
+            return;
+        }
+        let owed = legacy;
         let rows = match self.last_spawn_rows().await {
             Ok(rows) => rows,
             Err(error) => {
@@ -256,12 +373,6 @@ impl super::MobHandle {
                 ),
             }
         }
-        // The mob's own obligation, whoever started or resumed it.
-        let owner = self.non_owning().with_command_authority(
-            crate::control_policy::CommandAuthority::principal(
-                crate::control_policy::MobControlPrincipal::Owner,
-            ),
-        );
         match owner.seat_dormant_members(specs).await {
             Ok(outcomes) => {
                 for outcome in outcomes {

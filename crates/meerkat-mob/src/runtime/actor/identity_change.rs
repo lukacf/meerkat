@@ -25,7 +25,7 @@ use crate::identity::{IdentityChangeReceipt, IdentityChangeReceiptObservation};
 use crate::machines::mob_machine::MobMachineMutator as _;
 
 /// What a change's admission decided on its authority.
-enum ChangeAdmission {
+pub(super) enum ChangeAdmission {
     Admitted,
     Replayed(IdentityChangeReceipt),
 }
@@ -111,7 +111,7 @@ impl MobActor {
     /// MobMachine's admission of a change on `authority`, from its facts:
     /// the store's receipt, read now, and the requester's grant, checked
     /// current now (a host or human request carries none).
-    async fn decide_change_admission<M: mob_dsl::MobMachineMutator>(
+    pub(super) async fn decide_change_admission<M: mob_dsl::MobMachineMutator>(
         &self,
         authority: &mut M,
         operation: &IdentityOperation,

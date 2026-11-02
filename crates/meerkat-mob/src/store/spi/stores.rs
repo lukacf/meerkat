@@ -1438,6 +1438,21 @@ impl MobIdentityMemberStore for SpiMobIdentityStore {
             .await
     }
 
+    /// I: the one store-owned row the settle writes, checked and applied in
+    /// one locked in-memory step and committed as one host batch.
+    async fn settle_created_identity_row(
+        &self,
+        row: &crate::store::CreatedIdentityRowWrite,
+    ) -> Result<bool, MobStoreError> {
+        let touch = Touch {
+            intents: true,
+            ..Touch::default()
+        };
+        self.bundle
+            .write(touch, self.bundle.identity.settle_created_identity_row(row))
+            .await
+    }
+
     /// I: read.
     async fn observe_identity_change_receipt(
         &self,

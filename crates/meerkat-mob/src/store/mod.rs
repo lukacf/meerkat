@@ -5891,6 +5891,23 @@ pub(crate) trait MobIdentityMemberStore: Send + Sync {
         Err(MobStoreError::IdentityMemberAtomicPersistenceUnavailable)
     }
 
+    /// Write one store-owned identity's row as a committed change's
+    /// follow-up, never as a change: checked against what the writer
+    /// expects the identity's current row to be
+    /// ([`CreatedIdentityRowExpectation`]), it answers `true` once it
+    /// landed and `false`, with nothing changed, when the current row
+    /// differs. A store-owned update's restamp lets the row's pending role
+    /// migration go through it once the restamp committed.
+    ///
+    /// The default answers that the storage cannot make the guarantee.
+    async fn settle_created_identity_row(
+        &self,
+        row: &CreatedIdentityRowWrite,
+    ) -> Result<bool, MobStoreError> {
+        let _ = row;
+        Err(MobStoreError::IdentityMemberAtomicPersistenceUnavailable)
+    }
+
     /// The receipt of the identity change `operation_id` of `mob_id`, if one
     /// committed. Never writes.
     async fn observe_identity_change_receipt(

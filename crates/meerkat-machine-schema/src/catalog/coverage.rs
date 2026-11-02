@@ -927,7 +927,6 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                             "ProbeMemberAdmissionIdentityNameReservedRunning",
                         ])
                         .invariants(&[
-                            "unseated_created_entry_is_preparing_or_owed",
                             "tombstone_is_never_an_entry",
                             "entry_custodies_are_disjoint",
                         ]),

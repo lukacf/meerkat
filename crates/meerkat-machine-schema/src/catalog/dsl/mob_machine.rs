@@ -719,10 +719,13 @@ macro_rules! mob_catalog_machine_dsl {
             // decides only the recovery source, which writer persists a
             // change of that record, the name guards and the name
             // reservations below, never the member's profile, labels, tools,
-            // grants or wiring. A Created entry is still local and created at
-            // once: nothing places one or holds its creation yet (the peer-only
-            // and placed spawns' created_custody_local guard, and
-            // unseated_created_entry_is_preparing_or_owed).
+            // grants or wiring. A store-owned identity's update declares its
+            // Created entry through the declared apply's own verdicts
+            // (DeclareIdentityEntry under created custody), so an unseated
+            // Created entry may be hosted on its first use or await its held
+            // creation as a Declared one may; the spawn ladders that would
+            // create it there still take created custody locally only (the
+            // peer-only and placed spawns' created_custody_local guard).
             // The names of removed created entries: a tombstoned name is
             // never an entry or a member again
             // (tombstone_is_never_an_entry), and no spawn, declaration or
@@ -2127,7 +2130,14 @@ macro_rules! mob_catalog_machine_dsl {
             // one: the step ends the first-boot preparation the request carries
             // out (a seated member's Resume, a hosted or held identity's
             // request), so no window opens before the role check.
-            DeclareIdentityEntry { agent_identity: AgentIdentity, profile_name: String, runtime_mode: Enum<SpawnPolicyRuntimeMode>, placement: Enum<EntryPlacementKind>, held_creation: bool, declared_migration_from: Option<String>, intent_managed: bool, session_memory_only: bool, resume_session_role: Option<String>, first_boot: Enum<FirstBootRequestKind> },
+            // created_custody says whose declaration it is: false for a
+            // host's roster (it acts on a Declared entry or a name no entry
+            // holds), true for a store-owned identity's update, whose record
+            // is its created entry row (it acts on that Created entry while
+            // it is seated or owed its seat, never on an archived one or one
+            // awaiting its host's preparation). The verdicts are the same
+            // arms for both custodies.
+            DeclareIdentityEntry { agent_identity: AgentIdentity, profile_name: String, runtime_mode: Enum<SpawnPolicyRuntimeMode>, placement: Enum<EntryPlacementKind>, held_creation: bool, declared_migration_from: Option<String>, intent_managed: bool, session_memory_only: bool, resume_session_role: Option<String>, first_boot: Enum<FirstBootRequestKind>, created_custody: bool },
             // The seal of a complete declared roster: `desired` is every
             // identity the roster lists.
             SealDeclaredRoster { desired: Set<AgentIdentity> },
@@ -5154,18 +5164,6 @@ macro_rules! mob_catalog_machine_dsl {
             && for_all(id in self.members_to_retire,
                 self.identity_entry_origins.contains_key(id) == false
                 && self.identity_entry_unreadable.contains(id) == false)
-        }
-
-        // A Created entry with no member is owed its seat (an older build
-        // retired its member) or awaits its host's preparation; never
-        // hosted on its first use or held for a held creation (a created
-        // entry is local, and created at once).
-        invariant unseated_created_entry_is_preparing_or_owed {
-            for_all(id in self.identity_entry_unseated.keys(),
-                self.identity_entry_origins.get_cloned(id) != Some(IdentityEntryOrigin::Created)
-                || self.identity_entry_unseated.get_cloned(id) == Some(UnseatedEntryCause::SeatOwed)
-                || self.identity_entry_unseated.get_cloned(id) == Some(UnseatedEntryCause::PreparationPending)
-                || self.identity_entry_unseated.get_cloned(id) == Some(UnseatedEntryCause::Archived))
         }
 
         // Only a store-owned entry is archived: the archive is the store's
@@ -30507,14 +30505,23 @@ macro_rules! mob_catalog_machine_dsl {
         // instructions) is no lifecycle fact, so nothing is written but the
         // end of a role hold the host ended by restoring the role.
         transition DeclareIdentityEntryKept {
-            on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot }
+            on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody }
             guard { self.lifecycle_phase == Phase::Running }
-            // The declared apply acts on Declared entries only, by this
-            // explicit check: an identity another origin holds is never
-            // declared over (no arm takes it).
-            guard "declared_entry_or_no_entry" {
-                self.identity_entry_origins.contains_key(agent_identity) == false
-                || self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Declared)
+            // The declared apply acts on the entries of the custody it
+            // declares, by this explicit check: a roster's declaration on a
+            // Declared entry or a name no entry holds, a store-owned update's
+            // on its Created entry, seated or owed its seat. An identity the
+            // other custody holds, and a Created entry archived or awaiting
+            // its host's preparation, is never declared over (no arm takes
+            // it).
+            guard "entry_of_the_declared_custody" {
+                (created_custody == false
+                    && (self.identity_entry_origins.contains_key(agent_identity) == false
+                        || self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Declared)))
+                || (created_custody == true
+                    && self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Created)
+                    && self.identity_entry_unseated.get_cloned(agent_identity) != Some(UnseatedEntryCause::Archived)
+                    && self.identity_entry_unseated.get_cloned(agent_identity) != Some(UnseatedEntryCause::PreparationPending))
             }
             // Nor a reserved name: a removed created entry's, or one whose
             // created entry row this build cannot read.
@@ -30567,14 +30574,23 @@ macro_rules! mob_catalog_machine_dsl {
         // session when the identity has one (the entry comes back with its
         // history), on a fresh one otherwise.
         transition DeclareIdentityEntrySeatOwed {
-            on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot }
+            on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody }
             guard { self.lifecycle_phase == Phase::Running }
-            // The declared apply acts on Declared entries only, by this
-            // explicit check: an identity another origin holds is never
-            // declared over (no arm takes it).
-            guard "declared_entry_or_no_entry" {
-                self.identity_entry_origins.contains_key(agent_identity) == false
-                || self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Declared)
+            // The declared apply acts on the entries of the custody it
+            // declares, by this explicit check: a roster's declaration on a
+            // Declared entry or a name no entry holds, a store-owned update's
+            // on its Created entry, seated or owed its seat. An identity the
+            // other custody holds, and a Created entry archived or awaiting
+            // its host's preparation, is never declared over (no arm takes
+            // it).
+            guard "entry_of_the_declared_custody" {
+                (created_custody == false
+                    && (self.identity_entry_origins.contains_key(agent_identity) == false
+                        || self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Declared)))
+                || (created_custody == true
+                    && self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Created)
+                    && self.identity_entry_unseated.get_cloned(agent_identity) != Some(UnseatedEntryCause::Archived)
+                    && self.identity_entry_unseated.get_cloned(agent_identity) != Some(UnseatedEntryCause::PreparationPending))
             }
             // Nor a reserved name: a removed created entry's, or one whose
             // created entry row this build cannot read.
@@ -30605,7 +30621,11 @@ macro_rules! mob_catalog_machine_dsl {
                 ) == IdentityEntryVerdict::SeatOwed
             }
             update {
-                self.identity_entry_origins.insert(agent_identity, IdentityEntryOrigin::Declared);
+                // A roster's declaration records a Declared entry; a
+                // store-owned update's entry stays Created.
+                if created_custody == false {
+                    self.identity_entry_origins.insert(agent_identity, IdentityEntryOrigin::Declared);
+                }
                 self.identity_entry_unseated.insert(agent_identity, UnseatedEntryCause::SeatOwed);
                 // A session service that keeps no durable sessions has no
                 // archived session to revive the entry on.
@@ -30632,14 +30652,23 @@ macro_rules! mob_catalog_machine_dsl {
         // member (a spawn holding the entry's custody), never the dormant
         // seat.
         transition DeclareIdentityEntryHostedOnFirstUse {
-            on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot }
+            on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody }
             guard { self.lifecycle_phase == Phase::Running }
-            // The declared apply acts on Declared entries only, by this
-            // explicit check: an identity another origin holds is never
-            // declared over (no arm takes it).
-            guard "declared_entry_or_no_entry" {
-                self.identity_entry_origins.contains_key(agent_identity) == false
-                || self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Declared)
+            // The declared apply acts on the entries of the custody it
+            // declares, by this explicit check: a roster's declaration on a
+            // Declared entry or a name no entry holds, a store-owned update's
+            // on its Created entry, seated or owed its seat. An identity the
+            // other custody holds, and a Created entry archived or awaiting
+            // its host's preparation, is never declared over (no arm takes
+            // it).
+            guard "entry_of_the_declared_custody" {
+                (created_custody == false
+                    && (self.identity_entry_origins.contains_key(agent_identity) == false
+                        || self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Declared)))
+                || (created_custody == true
+                    && self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Created)
+                    && self.identity_entry_unseated.get_cloned(agent_identity) != Some(UnseatedEntryCause::Archived)
+                    && self.identity_entry_unseated.get_cloned(agent_identity) != Some(UnseatedEntryCause::PreparationPending))
             }
             // Nor a reserved name: a removed created entry's, or one whose
             // created entry row this build cannot read.
@@ -30675,7 +30704,9 @@ macro_rules! mob_catalog_machine_dsl {
                 if first_boot != FirstBootRequestKind::None && self.member_host_preparation_causes.get_cloned(agent_identity) == Some(HostPreparationCause::FirstBootRow) {
                     self.member_host_preparation_causes.remove(agent_identity);
                 }
-                self.identity_entry_origins.insert(agent_identity, IdentityEntryOrigin::Declared);
+                if created_custody == false {
+                    self.identity_entry_origins.insert(agent_identity, IdentityEntryOrigin::Declared);
+                }
                 self.identity_entry_unseated.insert(agent_identity, UnseatedEntryCause::HostedOnFirstUse);
                 self.members_to_spawn.remove(agent_identity);
                 self.members_to_retire.remove(agent_identity);
@@ -30688,14 +30719,23 @@ macro_rules! mob_catalog_machine_dsl {
         // its held creation: the entry is recorded, and only a spawn holding
         // its custody (the host's held protocol) creates it.
         transition DeclareIdentityEntryAwaitHeldCreation {
-            on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot }
+            on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody }
             guard { self.lifecycle_phase == Phase::Running }
-            // The declared apply acts on Declared entries only, by this
-            // explicit check: an identity another origin holds is never
-            // declared over (no arm takes it).
-            guard "declared_entry_or_no_entry" {
-                self.identity_entry_origins.contains_key(agent_identity) == false
-                || self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Declared)
+            // The declared apply acts on the entries of the custody it
+            // declares, by this explicit check: a roster's declaration on a
+            // Declared entry or a name no entry holds, a store-owned update's
+            // on its Created entry, seated or owed its seat. An identity the
+            // other custody holds, and a Created entry archived or awaiting
+            // its host's preparation, is never declared over (no arm takes
+            // it).
+            guard "entry_of_the_declared_custody" {
+                (created_custody == false
+                    && (self.identity_entry_origins.contains_key(agent_identity) == false
+                        || self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Declared)))
+                || (created_custody == true
+                    && self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Created)
+                    && self.identity_entry_unseated.get_cloned(agent_identity) != Some(UnseatedEntryCause::Archived)
+                    && self.identity_entry_unseated.get_cloned(agent_identity) != Some(UnseatedEntryCause::PreparationPending))
             }
             // Nor a reserved name: a removed created entry's, or one whose
             // created entry row this build cannot read.
@@ -30731,7 +30771,9 @@ macro_rules! mob_catalog_machine_dsl {
                 if first_boot != FirstBootRequestKind::None && self.member_host_preparation_causes.get_cloned(agent_identity) == Some(HostPreparationCause::FirstBootRow) {
                     self.member_host_preparation_causes.remove(agent_identity);
                 }
-                self.identity_entry_origins.insert(agent_identity, IdentityEntryOrigin::Declared);
+                if created_custody == false {
+                    self.identity_entry_origins.insert(agent_identity, IdentityEntryOrigin::Declared);
+                }
                 self.identity_entry_unseated.insert(agent_identity, UnseatedEntryCause::HeldCreation);
                 self.members_to_spawn.remove(agent_identity);
                 self.members_to_retire.remove(agent_identity);
@@ -30744,14 +30786,23 @@ macro_rules! mob_catalog_machine_dsl {
         // its own session (a same-session rotation, when the member is
         // idle); a role hold ends.
         transition DeclareIdentityEntryRuntimeModeRestamp {
-            on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot }
+            on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody }
             guard { self.lifecycle_phase == Phase::Running }
-            // The declared apply acts on Declared entries only, by this
-            // explicit check: an identity another origin holds is never
-            // declared over (no arm takes it).
-            guard "declared_entry_or_no_entry" {
-                self.identity_entry_origins.contains_key(agent_identity) == false
-                || self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Declared)
+            // The declared apply acts on the entries of the custody it
+            // declares, by this explicit check: a roster's declaration on a
+            // Declared entry or a name no entry holds, a store-owned update's
+            // on its Created entry, seated or owed its seat. An identity the
+            // other custody holds, and a Created entry archived or awaiting
+            // its host's preparation, is never declared over (no arm takes
+            // it).
+            guard "entry_of_the_declared_custody" {
+                (created_custody == false
+                    && (self.identity_entry_origins.contains_key(agent_identity) == false
+                        || self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Declared)))
+                || (created_custody == true
+                    && self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Created)
+                    && self.identity_entry_unseated.get_cloned(agent_identity) != Some(UnseatedEntryCause::Archived)
+                    && self.identity_entry_unseated.get_cloned(agent_identity) != Some(UnseatedEntryCause::PreparationPending))
             }
             // Nor a reserved name: a removed created entry's, or one whose
             // created entry row this build cannot read.
@@ -30806,14 +30857,23 @@ macro_rules! mob_catalog_machine_dsl {
         // terminal commits the new role: a deferred or refused restamp keeps
         // the member held.
         transition DeclareIdentityEntryRoleMigrate {
-            on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot }
+            on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody }
             guard { self.lifecycle_phase == Phase::Running }
-            // The declared apply acts on Declared entries only, by this
-            // explicit check: an identity another origin holds is never
-            // declared over (no arm takes it).
-            guard "declared_entry_or_no_entry" {
-                self.identity_entry_origins.contains_key(agent_identity) == false
-                || self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Declared)
+            // The declared apply acts on the entries of the custody it
+            // declares, by this explicit check: a roster's declaration on a
+            // Declared entry or a name no entry holds, a store-owned update's
+            // on its Created entry, seated or owed its seat. An identity the
+            // other custody holds, and a Created entry archived or awaiting
+            // its host's preparation, is never declared over (no arm takes
+            // it).
+            guard "entry_of_the_declared_custody" {
+                (created_custody == false
+                    && (self.identity_entry_origins.contains_key(agent_identity) == false
+                        || self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Declared)))
+                || (created_custody == true
+                    && self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Created)
+                    && self.identity_entry_unseated.get_cloned(agent_identity) != Some(UnseatedEntryCause::Archived)
+                    && self.identity_entry_unseated.get_cloned(agent_identity) != Some(UnseatedEntryCause::PreparationPending))
             }
             // Nor a reserved name: a removed created entry's, or one whose
             // created entry row this build cannot read.
@@ -30865,14 +30925,23 @@ macro_rules! mob_catalog_machine_dsl {
         // runtime mode moves); a role move keeps it until the rotation's
         // terminal commits the new role.
         transition DeclareIdentityEntryRoleRotate {
-            on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot }
+            on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody }
             guard { self.lifecycle_phase == Phase::Running }
-            // The declared apply acts on Declared entries only, by this
-            // explicit check: an identity another origin holds is never
-            // declared over (no arm takes it).
-            guard "declared_entry_or_no_entry" {
-                self.identity_entry_origins.contains_key(agent_identity) == false
-                || self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Declared)
+            // The declared apply acts on the entries of the custody it
+            // declares, by this explicit check: a roster's declaration on a
+            // Declared entry or a name no entry holds, a store-owned update's
+            // on its Created entry, seated or owed its seat. An identity the
+            // other custody holds, and a Created entry archived or awaiting
+            // its host's preparation, is never declared over (no arm takes
+            // it).
+            guard "entry_of_the_declared_custody" {
+                (created_custody == false
+                    && (self.identity_entry_origins.contains_key(agent_identity) == false
+                        || self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Declared)))
+                || (created_custody == true
+                    && self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Created)
+                    && self.identity_entry_unseated.get_cloned(agent_identity) != Some(UnseatedEntryCause::Archived)
+                    && self.identity_entry_unseated.get_cloned(agent_identity) != Some(UnseatedEntryCause::PreparationPending))
             }
             // Nor a reserved name: a removed created entry's, or one whose
             // created entry row this build cannot read.
@@ -30931,14 +31000,23 @@ macro_rules! mob_catalog_machine_dsl {
         // way: it is recorded an entry owed its seat, and no apply seats it
         // until one declares the migration or restores the role.
         transition DeclareIdentityEntryRoleMigrationHeld {
-            on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot }
+            on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody }
             guard { self.lifecycle_phase == Phase::Running }
-            // The declared apply acts on Declared entries only, by this
-            // explicit check: an identity another origin holds is never
-            // declared over (no arm takes it).
-            guard "declared_entry_or_no_entry" {
-                self.identity_entry_origins.contains_key(agent_identity) == false
-                || self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Declared)
+            // The declared apply acts on the entries of the custody it
+            // declares, by this explicit check: a roster's declaration on a
+            // Declared entry or a name no entry holds, a store-owned update's
+            // on its Created entry, seated or owed its seat. An identity the
+            // other custody holds, and a Created entry archived or awaiting
+            // its host's preparation, is never declared over (no arm takes
+            // it).
+            guard "entry_of_the_declared_custody" {
+                (created_custody == false
+                    && (self.identity_entry_origins.contains_key(agent_identity) == false
+                        || self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Declared)))
+                || (created_custody == true
+                    && self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Created)
+                    && self.identity_entry_unseated.get_cloned(agent_identity) != Some(UnseatedEntryCause::Archived)
+                    && self.identity_entry_unseated.get_cloned(agent_identity) != Some(UnseatedEntryCause::PreparationPending))
             }
             // Nor a reserved name: a removed created entry's, or one whose
             // created entry row this build cannot read.
@@ -30997,14 +31075,23 @@ macro_rules! mob_catalog_machine_dsl {
         // A member whose spawn, wake or retirement is in flight is left to
         // the next apply: nothing is written.
         transition DeclareIdentityEntryLifecycleInFlight {
-            on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot }
+            on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody }
             guard { self.lifecycle_phase == Phase::Running }
-            // The declared apply acts on Declared entries only, by this
-            // explicit check: an identity another origin holds is never
-            // declared over (no arm takes it).
-            guard "declared_entry_or_no_entry" {
-                self.identity_entry_origins.contains_key(agent_identity) == false
-                || self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Declared)
+            // The declared apply acts on the entries of the custody it
+            // declares, by this explicit check: a roster's declaration on a
+            // Declared entry or a name no entry holds, a store-owned update's
+            // on its Created entry, seated or owed its seat. An identity the
+            // other custody holds, and a Created entry archived or awaiting
+            // its host's preparation, is never declared over (no arm takes
+            // it).
+            guard "entry_of_the_declared_custody" {
+                (created_custody == false
+                    && (self.identity_entry_origins.contains_key(agent_identity) == false
+                        || self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Declared)))
+                || (created_custody == true
+                    && self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Created)
+                    && self.identity_entry_unseated.get_cloned(agent_identity) != Some(UnseatedEntryCause::Archived)
+                    && self.identity_entry_unseated.get_cloned(agent_identity) != Some(UnseatedEntryCause::PreparationPending))
             }
             // Nor a reserved name: a removed created entry's, or one whose
             // created entry row this build cannot read.
@@ -31042,14 +31129,23 @@ macro_rules! mob_catalog_machine_dsl {
         // A worker member holds the name: refused for this identity alone,
         // and nothing is written.
         transition DeclareIdentityEntryRefusedNameHeldByWorker {
-            on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot }
+            on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody }
             guard { self.lifecycle_phase == Phase::Running }
-            // The declared apply acts on Declared entries only, by this
-            // explicit check: an identity another origin holds is never
-            // declared over (no arm takes it).
-            guard "declared_entry_or_no_entry" {
-                self.identity_entry_origins.contains_key(agent_identity) == false
-                || self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Declared)
+            // The declared apply acts on the entries of the custody it
+            // declares, by this explicit check: a roster's declaration on a
+            // Declared entry or a name no entry holds, a store-owned update's
+            // on its Created entry, seated or owed its seat. An identity the
+            // other custody holds, and a Created entry archived or awaiting
+            // its host's preparation, is never declared over (no arm takes
+            // it).
+            guard "entry_of_the_declared_custody" {
+                (created_custody == false
+                    && (self.identity_entry_origins.contains_key(agent_identity) == false
+                        || self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Declared)))
+                || (created_custody == true
+                    && self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Created)
+                    && self.identity_entry_unseated.get_cloned(agent_identity) != Some(UnseatedEntryCause::Archived)
+                    && self.identity_entry_unseated.get_cloned(agent_identity) != Some(UnseatedEntryCause::PreparationPending))
             }
             // Nor a reserved name: a removed created entry's, or one whose
             // created entry row this build cannot read.
@@ -31087,14 +31183,23 @@ macro_rules! mob_catalog_machine_dsl {
         // The identity store manages the identity (an intent row): refused,
         // and nothing is written.
         transition DeclareIdentityEntryRefusedHostAdopted {
-            on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot }
+            on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody }
             guard { self.lifecycle_phase == Phase::Running }
-            // The declared apply acts on Declared entries only, by this
-            // explicit check: an identity another origin holds is never
-            // declared over (no arm takes it).
-            guard "declared_entry_or_no_entry" {
-                self.identity_entry_origins.contains_key(agent_identity) == false
-                || self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Declared)
+            // The declared apply acts on the entries of the custody it
+            // declares, by this explicit check: a roster's declaration on a
+            // Declared entry or a name no entry holds, a store-owned update's
+            // on its Created entry, seated or owed its seat. An identity the
+            // other custody holds, and a Created entry archived or awaiting
+            // its host's preparation, is never declared over (no arm takes
+            // it).
+            guard "entry_of_the_declared_custody" {
+                (created_custody == false
+                    && (self.identity_entry_origins.contains_key(agent_identity) == false
+                        || self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Declared)))
+                || (created_custody == true
+                    && self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Created)
+                    && self.identity_entry_unseated.get_cloned(agent_identity) != Some(UnseatedEntryCause::Archived)
+                    && self.identity_entry_unseated.get_cloned(agent_identity) != Some(UnseatedEntryCause::PreparationPending))
             }
             // Nor a reserved name: a removed created entry's, or one whose
             // created entry row this build cannot read.
@@ -31132,14 +31237,23 @@ macro_rules! mob_catalog_machine_dsl {
         // A candidate composition declares nothing: refused, and nothing is
         // written.
         transition DeclareIdentityEntryRefusedNonAuthoritative {
-            on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot }
+            on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody }
             guard { self.lifecycle_phase == Phase::Running }
-            // The declared apply acts on Declared entries only, by this
-            // explicit check: an identity another origin holds is never
-            // declared over (no arm takes it).
-            guard "declared_entry_or_no_entry" {
-                self.identity_entry_origins.contains_key(agent_identity) == false
-                || self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Declared)
+            // The declared apply acts on the entries of the custody it
+            // declares, by this explicit check: a roster's declaration on a
+            // Declared entry or a name no entry holds, a store-owned update's
+            // on its Created entry, seated or owed its seat. An identity the
+            // other custody holds, and a Created entry archived or awaiting
+            // its host's preparation, is never declared over (no arm takes
+            // it).
+            guard "entry_of_the_declared_custody" {
+                (created_custody == false
+                    && (self.identity_entry_origins.contains_key(agent_identity) == false
+                        || self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Declared)))
+                || (created_custody == true
+                    && self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Created)
+                    && self.identity_entry_unseated.get_cloned(agent_identity) != Some(UnseatedEntryCause::Archived)
+                    && self.identity_entry_unseated.get_cloned(agent_identity) != Some(UnseatedEntryCause::PreparationPending))
             }
             // Nor a reserved name: a removed created entry's, or one whose
             // created entry row this build cannot read.
@@ -31175,13 +31289,16 @@ macro_rules! mob_catalog_machine_dsl {
         }
 
         // A name the declared apply never declares over, refused typed for
-        // that identity alone (the pass goes on): a Created entry's, a
-        // removed created entry's (tombstoned), or one whose created entry
-        // row this build cannot read. A candidate composition answers the
-        // same refusals: nothing is written either way.
+        // that identity alone (the pass goes on): a Created entry's under a
+        // roster's declaration (the shell answers it as the roster's quiet
+        // note: the store owns it), a removed created entry's (tombstoned),
+        // or one whose created entry row this build cannot read. A
+        // candidate composition answers the same refusals: nothing is
+        // written either way.
         transition DeclareIdentityEntryRefusedNameOwnedByCreated {
-            on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot }
+            on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody }
             guard { self.lifecycle_phase == Phase::Running }
+            guard "roster_custody" { created_custody == false }
             guard "created_entry" {
                 self.identity_entry_origins.contains_key(agent_identity) == true
                 && self.identity_entry_origins.get_cloned(agent_identity) != Some(IdentityEntryOrigin::Declared)
@@ -31196,7 +31313,7 @@ macro_rules! mob_catalog_machine_dsl {
         }
 
         transition DeclareIdentityEntryRefusedNameTombstoned {
-            on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot }
+            on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody }
             guard { self.lifecycle_phase == Phase::Running }
             guard "name_tombstoned" { self.identity_entry_tombstones.contains(agent_identity) == true }
             guard "name_readable" { self.identity_entry_unreadable.contains(agent_identity) == false }
@@ -31206,7 +31323,7 @@ macro_rules! mob_catalog_machine_dsl {
         }
 
         transition DeclareIdentityEntryRefusedNameUnreadable {
-            on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot }
+            on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody }
             guard { self.lifecycle_phase == Phase::Running }
             guard "name_unreadable" { self.identity_entry_unreadable.contains(agent_identity) == true }
             update {}
@@ -31217,7 +31334,7 @@ macro_rules! mob_catalog_machine_dsl {
         // A mob that is not running declares nothing.
         transition DeclareIdentityEntryMobNotRunning {
             per_phase [Stopped, Completed, Destroyed]
-            on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot }
+            on input DeclareIdentityEntry { agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody }
             update {}
             to Running
             emit IdentityEntryDeclared { agent_identity: agent_identity, verdict: IdentityEntryVerdict::MobNotRunning, archived_session: None }
@@ -36647,9 +36764,9 @@ pub enum MemberAdmissionVerdictKind {
 /// provenance, and the custody of its desired record. Custody decides only
 /// the recovery source, which writer persists a change of that record, the
 /// name guards and the name reservations, never the member's profile,
-/// labels, tools, grants or wiring. A Created entry is still local and
-/// created at once: nothing places one or holds its creation yet. The stored
-/// form of an entry's journal row names the origin.
+/// labels, tools, grants or wiring. A Created entry takes the declared
+/// apply's verdicts as a Declared one does, through its store-owned updates.
+/// The stored form of an entry's journal row names the origin.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum IdentityEntryOrigin {
     /// The host declared it: a spawn or a dormant seat that carried entry

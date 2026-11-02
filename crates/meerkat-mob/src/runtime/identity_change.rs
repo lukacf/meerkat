@@ -330,7 +330,8 @@ impl StoreOwnedIdentityUpdate {
 /// What a store-owned update answers: the change (committed now, with its
 /// receipt, or replayed), and what it did to the identity's member, as the
 /// declared apply answers a roster-owned identity's change of the same spec
-/// (`None` for a replay).
+/// (`None` for a replay, and for an archived identity or one awaiting its
+/// host's preparation, whose row alone changes).
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct IdentityUpdateOutcome {
@@ -1227,6 +1228,183 @@ pub(super) enum EntryChangeCommitted {
         verdict: mob_dsl::IdentityEntryChangeVerdict,
     },
     Replayed(IdentityChangeReceipt),
+}
+
+/// The change a declared apply's declaration step decides and writes with
+/// its verdicts (`MobCommand::DeclareIdentityEntries`), in the step's one
+/// store transaction: a roster-owned identity's change (its receipt), or a
+/// store-owned identity's update (its row at the next revision, and its
+/// receipt). The step decides the change's admission first, on the step's
+/// prepared authority.
+pub(super) struct DeclaredChangeWrite {
+    pub(super) operation: IdentityOperation,
+    pub(super) facts: ChangeAdmissionFacts,
+    pub(super) grant: Option<IdentityChangeGrant>,
+    pub(super) decided: bool,
+    pub(super) requester: IdentityChangeRequester,
+    pub(super) consent: IdentityChangeConsent,
+    pub(super) kind: DeclaredChangeKind,
+}
+
+/// Which change a declaration step writes ([`DeclaredChangeWrite`]).
+pub(super) enum DeclaredChangeKind {
+    /// A roster-owned identity's change, applied by a partial declared
+    /// apply: its receipt, written with the declarations it answers.
+    Roster,
+    /// A store-owned identity's update to `spec`, decided against the spec
+    /// whose digest is `expected_spec_digest`.
+    StoreOwnedUpdate {
+        spec: CreatedIdentitySpec,
+        expected_spec_digest: String,
+    },
+}
+
+impl DeclaredChangeWrite {
+    /// The declaration step's write of a roster-owned identity's change. The
+    /// host's roster writer applied the change under its own consent; the
+    /// step records it: the consent's form, with nothing of a permit left to
+    /// check, under the host's roster.
+    pub(super) fn roster(change: IdentityRosterChange) -> Self {
+        let IdentityRosterChange {
+            operation,
+            requester,
+            consent,
+        } = change;
+        let kind = match consent {
+            IdentityChangeConsent::Decided { .. } => mob_dsl::IdentityChangeConsentKind::Decided,
+            IdentityChangeConsent::Policy { .. } => mob_dsl::IdentityChangeConsentKind::Policy,
+            IdentityChangeConsent::Imported { .. } => mob_dsl::IdentityChangeConsentKind::Imported,
+        };
+        Self {
+            operation,
+            facts: ChangeAdmissionFacts {
+                consent: kind,
+                permit_binds: true,
+                permit_admits: true,
+                host_operator: true,
+            },
+            grant: None,
+            decided: false,
+            requester,
+            consent,
+            kind: DeclaredChangeKind::Roster,
+        }
+    }
+
+    /// Whether the change is a store-owned identity's update.
+    pub(super) fn is_store_owned_update(&self) -> bool {
+        matches!(self.kind, DeclaredChangeKind::StoreOwnedUpdate { .. })
+    }
+}
+
+/// What a declaration step answers of its change.
+pub(super) enum DeclaredChangeAnswer {
+    /// The change committed in the step: its receipt.
+    Committed(IdentityChangeReceipt),
+    /// The operation committed before with the same request: its receipt.
+    Replayed(IdentityChangeReceipt),
+}
+
+impl DeclaredChangeAnswer {
+    pub(super) fn receipt(&self) -> &IdentityChangeReceipt {
+        match self {
+            Self::Committed(receipt) | Self::Replayed(receipt) => receipt,
+        }
+    }
+}
+
+/// A declared identity's outcome in its change's receipt, from its verdict:
+/// `None` for a verdict that leaves the identity to the next apply or
+/// refuses it, which the receipt does not record.
+pub(super) fn declared_entry_receipt_outcome(
+    verdict: mob_dsl::IdentityEntryVerdict,
+) -> Option<IdentityChangeEntryOutcome> {
+    use mob_dsl::IdentityEntryVerdict as Verdict;
+    match verdict {
+        Verdict::Kept
+        | Verdict::SeatOwed
+        | Verdict::RuntimeModeRestamp
+        | Verdict::RoleMigrate
+        | Verdict::RoleRotate
+        | Verdict::RoleMigrationHeld => Some(IdentityChangeEntryOutcome::Committed),
+        Verdict::HostedOnFirstUse => Some(IdentityChangeEntryOutcome::HostedOnFirstUse),
+        Verdict::AwaitHeldCreation => Some(IdentityChangeEntryOutcome::AwaitingHeldCreation),
+        Verdict::LifecycleInFlight
+        | Verdict::RefusedNameHeldByWorker
+        | Verdict::RefusedHostAdopted
+        | Verdict::RefusedNonAuthoritative
+        | Verdict::MobNotRunning
+        | Verdict::RefusedNameOwnedByCreated
+        | Verdict::RefusedNameTombstoned
+        | Verdict::RefusedNameUnreadable => None,
+    }
+}
+
+/// A store-owned update's row, written at the change's final sink: the
+/// identity's current row (`current`) at its next revision with `spec`, and
+/// `pending_role_migration`, the migration the update declares, kept until
+/// the restamp commits. A row whose spec digest is not the one the change
+/// was decided against refuses it, with the current digest and revision.
+pub(super) fn store_owned_update_row(
+    spec: &CreatedIdentitySpec,
+    expected_spec_digest: &str,
+    pending_role_migration: Option<crate::identity::PendingRoleMigration>,
+    current: Option<crate::identity::CreatedIdentityObservation>,
+) -> Result<CreatedIdentityRowWrite, MobError> {
+    let invalid = |error: crate::identity::IdentityIntentError| {
+        MobError::Internal(format!("a store-owned update's row: {error}"))
+    };
+    let unknown = || {
+        refused(IdentityChangeRefusal::IdentityUnknown {
+            identity: spec.identity.clone(),
+        })
+    };
+    let row = match current {
+        Some(crate::identity::CreatedIdentityObservation::Created(row))
+            if row.presence != CreatedIdentityPresence::Removed =>
+        {
+            row
+        }
+        _ => return Err(unknown()),
+    };
+    let current_digest = row.spec_digest().map_err(invalid)?.ok_or_else(unknown)?;
+    if current_digest != expected_spec_digest {
+        return Err(refused(IdentityChangeRefusal::StaleSpec {
+            identity: spec.identity.clone(),
+            current_digest,
+            current_revision: Some(row.revision),
+        }));
+    }
+    let expected = CreatedIdentityRowExpectation::Current {
+        authority_digest: row.authority_digest.clone(),
+    };
+    let record = row
+        .updated(spec.clone(), pending_role_migration)
+        .map_err(invalid)?;
+    Ok(CreatedIdentityRowWrite { record, expected })
+}
+
+/// The answer of a store-owned update's store transaction: a row that moved
+/// since the step read it answers a stale spec (or an unknown identity).
+pub(super) fn store_owned_update_commit(commit: IdentityChangeCommit) -> Result<(), MobError> {
+    match commit {
+        IdentityChangeCommit::RowConflict { identity, current } => match current {
+            Some(crate::identity::CreatedIdentityObservation::Created(row))
+                if row.presence != CreatedIdentityPresence::Removed =>
+            {
+                match row.spec_digest() {
+                    Ok(Some(current_digest)) => Err(refused(IdentityChangeRefusal::StaleSpec {
+                        identity,
+                        current_digest,
+                        current_revision: Some(row.revision),
+                    })),
+                    _ => Err(refused(IdentityChangeRefusal::IdentityUnknown { identity })),
+                }
+            }
+            _ => Err(refused(IdentityChangeRefusal::IdentityUnknown { identity })),
+        },
+        other => committed_change_events(other).map(|_| ()),
+    }
 }
 
 /// The change kind, the receipt's outcome for the identity, and the row a
@@ -2301,27 +2479,53 @@ impl super::MobHandle {
         })
     }
 
-    /// Seat an unarchived store-owned identity Dormant, from its row's spec,
-    /// on its archived session record: its history kept, or a fresh session
-    /// with the notice when the archived session is gone from the store. An
-    /// identity whose row holds no spec is seated from its last spawn row, as
-    /// a start seats an entry owed its seat.
+    /// Seat an unarchived store-owned identity Dormant, from its row's spec
+    /// ([`Self::seat_store_owned_from_spec`]). An identity whose row holds
+    /// no spec is seated from its last spawn row, as a start seats an entry
+    /// owed its seat.
     async fn seat_restored_identity(&self, identity: &AgentIdentity) -> Result<(), MobError> {
+        match self.store_owned_spec(identity).await? {
+            Some(spec) => self.seat_store_owned_from_spec(identity, &spec).await,
+            None => {
+                self.reseat_owed_created_entries().await;
+                Ok(())
+            }
+        }
+    }
+
+    /// The spec `identity`'s store-owned row holds, if it holds one.
+    pub(super) async fn store_owned_spec(
+        &self,
+        identity: &AgentIdentity,
+    ) -> Result<Option<CreatedIdentitySpec>, MobError> {
         let store = self
             .identity_member
             .as_ref()
             .ok_or_else(|| refused(IdentityChangeRefusal::StorageUnsupported))?;
-        let spec = match store
-            .observe_created_identity(self.mob_id(), identity)
-            .await?
-        {
-            Some(crate::identity::CreatedIdentityObservation::Created(row)) => row.spec,
-            _ => None,
-        };
-        let Some(spec) = spec else {
-            self.reseat_owed_created_entries().await;
-            return Ok(());
-        };
+        Ok(
+            match store
+                .observe_created_identity(self.mob_id(), identity)
+                .await?
+            {
+                Some(crate::identity::CreatedIdentityObservation::Created(row)) => row.spec,
+                _ => None,
+            },
+        )
+    }
+
+    /// Seat a store-owned identity no member holds Dormant from `spec`, its
+    /// row's spec (an unarchive, and a start's seat of an entry owed its
+    /// seat): on its archived session record, its history kept, declaring
+    /// the migration from the role that session was last built under when
+    /// the spec names another; on a fresh session with the notice when the
+    /// archived session is gone from the store; on a fresh session when it
+    /// has none. A spec that owes a kickoff is embodied. Once the member
+    /// holds the spec's profile, the row lets its role migration go.
+    pub(super) async fn seat_store_owned_from_spec(
+        &self,
+        identity: &AgentIdentity,
+        spec: &CreatedIdentitySpec,
+    ) -> Result<(), MobError> {
         let archived = self
             .machine_state_watch_rx
             .borrow()
@@ -2334,11 +2538,15 @@ impl super::MobHandle {
                     "'{identity}' holds an invalid archived session record: {error}"
                 ))
             })?;
-        let mut seat = lower_created_spec(&spec).map_err(refused)?;
+        let mut seat = lower_created_spec(spec).map_err(refused)?;
         if let Some(session) = archived.clone() {
-            seat.launch_mode = crate::launch::MemberLaunchMode::Resume {
-                bridge_session_id: session,
-                resume_from_role: None,
+            let moved_from = self
+                .resume_session_role(&session)
+                .await?
+                .filter(|role| *role != spec.profile);
+            seat = match moved_from {
+                Some(from) => seat.with_resume_bridge_session_id_from_role(session, from),
+                None => seat.with_resume_bridge_session_id(session),
             };
         }
         let outcome = self
@@ -2346,11 +2554,11 @@ impl super::MobHandle {
             .await?
             .into_iter()
             .next()
-            .ok_or_else(|| MobError::Internal("an unarchive's seat was not answered".into()))?;
+            .ok_or_else(|| MobError::Internal("a store-owned seat was not answered".into()))?;
         match outcome {
             super::DormantSeatOutcome::Seated { .. }
             | super::DormantSeatOutcome::AlreadySeated { .. }
-            | super::DormantSeatOutcome::Embodied { .. } => Ok(()),
+            | super::DormantSeatOutcome::Embodied { .. } => {}
             // The archived session is gone from the store: the record is let
             // go, and the identity is seated fresh with the notice.
             super::DormantSeatOutcome::Refused {
@@ -2380,36 +2588,288 @@ impl super::MobHandle {
                         super::DormantSeatOutcome::Seated { .. }
                         | super::DormantSeatOutcome::AlreadySeated { .. }
                         | super::DormantSeatOutcome::Embodied { .. },
-                    ) => Ok(()),
-                    Some(other) => Err(other.into_unseated_error()),
-                    None => Err(MobError::Internal(
-                        "an unarchive's fresh seat was not answered".into(),
-                    )),
+                    ) => {}
+                    Some(other) => return Err(other.into_unseated_error()),
+                    None => {
+                        return Err(MobError::Internal(
+                            "a store-owned identity's fresh seat was not answered".into(),
+                        ));
+                    }
                 }
             }
-            other => Err(other.into_unseated_error()),
+            other => return Err(other.into_unseated_error()),
         }
+        self.settle_store_owned_role_migration(identity).await
     }
 }
 
 impl super::MobHandle {
     /// Update one store-owned identity's spec as one change (see
-    /// [`StoreOwnedIdentityUpdate`]). A retry of a committed update with the
-    /// same request answers [`IdentityChangeOutcome::Replayed`], never a
-    /// stale spec. Refused typed, with nothing written: a stale expected
-    /// spec digest ([`IdentityChangeRefusal::StaleSpec`]), an identity that
-    /// is not store-owned ([`IdentityChangeRefusal::IdentityUnknown`], or
-    /// [`IdentityChangeRefusal::OwnerReadOnly`] for a roster-owned one),
-    /// and every refusal of [`Self::create_store_owned_identities`] that
-    /// applies to a change.
+    /// [`StoreOwnedIdentityUpdate`]): a declared apply of the identity under
+    /// created custody, whose declaration step decides the change's
+    /// admission and the identity's verdict (the declared apply's own arms,
+    /// `DeclareIdentityEntry`) and writes the identity's row at its next
+    /// revision and the change's receipt in one store transaction; the
+    /// verdict is then realized as a roster-owned identity's change of the
+    /// same spec is ([`IdentityUpdateOutcome::applied`]). A descriptive
+    /// change (display name, labels, context, instructions) keeps the
+    /// member, and its next build applies it; a runtime-mode change is a
+    /// restamp on the member's own session; a profile change is the declared
+    /// migration from the member's current role, kept in the row until the
+    /// restamp commits (a crash before it is carried out by the next start);
+    /// a placement, binding or backend change is read only while no member
+    /// holds the identity. An archived identity's update, and the update of
+    /// one awaiting its host's preparation, changes its row only.
+    ///
+    /// A retry of a committed update with the same request answers
+    /// [`IdentityChangeOutcome::Replayed`], never a stale spec. Refused
+    /// typed, with nothing written: a spec digest that is not the
+    /// identity's current one ([`IdentityChangeRefusal::StaleSpec`], with
+    /// the current digest and revision), an identity that is not
+    /// store-owned ([`IdentityChangeRefusal::IdentityUnknown`], or
+    /// [`IdentityChangeRefusal::OwnerReadOnly`] for a roster-owned one), and
+    /// every refusal of [`Self::create_store_owned_identities`] that applies
+    /// to a change. An identity whose member's spawn, wake or retirement is
+    /// in flight is refused [`MobError::LifecycleOperationPending`],
+    /// retryable, and so is an update while another declared apply of the
+    /// mob runs.
     pub async fn update_store_owned_identity(
         &self,
         update: StoreOwnedIdentityUpdate,
         consent: IdentityChangeConsentInput<'_>,
     ) -> Result<IdentityUpdateOutcome, MobError> {
-        let _ = (update, consent);
-        Err(MobError::Internal(
-            "store-owned updates are not built yet".to_string(),
-        ))
+        let StoreOwnedIdentityUpdate {
+            operation,
+            requester,
+            spec,
+            expected_spec_digest,
+            preparation,
+        } = update;
+        let invalid = |problem: String| refused(IdentityChangeRefusal::InvalidRequest { problem });
+        if operation.operation_id.trim().is_empty() || operation.request_digest.trim().is_empty() {
+            return Err(invalid(
+                "a change needs an operation id and a request digest".to_string(),
+            ));
+        }
+        spec.validate()
+            .map_err(|error| invalid(error.to_string()))?;
+        if preparation != IdentityPreparationMode::None {
+            return Err(refused(IdentityChangeRefusal::Unsupported {
+                feature: "a store-owned update's host preparation".to_string(),
+            }));
+        }
+        let store = self
+            .identity_member
+            .clone()
+            .ok_or_else(|| refused(IdentityChangeRefusal::StorageUnsupported))?;
+        if !self.definition.profiles.contains_key(&spec.profile) {
+            return Err(refused(IdentityChangeRefusal::ProfileUnknown {
+                profile: spec.profile.clone(),
+            }));
+        }
+        // The identity's row: a store-owned identity's update is its row's,
+        // a roster-owned identity's is its host roster's.
+        let presence = match store
+            .observe_created_identity(self.mob_id(), &spec.identity)
+            .await?
+        {
+            Some(crate::identity::CreatedIdentityObservation::Created(row))
+                if row.presence != CreatedIdentityPresence::Removed && row.spec.is_some() =>
+            {
+                row.presence
+            }
+            _ => {
+                let roster_owned = self
+                    .machine_state_watch_rx
+                    .borrow()
+                    .identity_entry_origins
+                    .get(&mob_dsl::AgentIdentity::from_domain(&spec.identity))
+                    == Some(&mob_dsl::IdentityEntryOrigin::Declared);
+                return Err(refused(if roster_owned {
+                    IdentityChangeRefusal::OwnerReadOnly { owner: "roster" }
+                } else {
+                    IdentityChangeRefusal::IdentityUnknown {
+                        identity: spec.identity.clone(),
+                    }
+                }));
+            }
+        };
+        let attribution_facts = ChangeAttribution::facts_of(
+            consent,
+            &operation,
+            ChangeAttribution::is_host_operator(&requester),
+        );
+        let ChangeAttribution {
+            requester: requester_record,
+            grant,
+            decided,
+            consent: consent_record,
+        } = ChangeAttribution::of(requester, consent, &operation)?;
+        // The identity's declaration under created custody. An archived
+        // identity, and one awaiting its host's preparation, is declared
+        // nothing: its row changes, and its unarchive or its settle seats it
+        // from the new spec.
+        let entries = match presence {
+            CreatedIdentityPresence::Present => {
+                vec![super::DeclaredEntry::new(
+                    lower_created_spec(&spec).map_err(refused)?,
+                )]
+            }
+            _ => Vec::new(),
+        };
+        let change = DeclaredChangeWrite {
+            operation,
+            facts: attribution_facts.at(now_ms()),
+            grant,
+            decided,
+            requester: requester_record,
+            consent: consent_record,
+            kind: DeclaredChangeKind::StoreOwnedUpdate {
+                spec: spec.clone(),
+                expected_spec_digest,
+            },
+        };
+        let (mut outcome, answer) = self
+            .run_declared_apply(super::DeclaredRoster::partial(entries), Some(change))
+            .await?;
+        match answer {
+            Some(DeclaredChangeAnswer::Committed(receipt)) => {
+                let applied = outcome.entries.remove(&spec.identity);
+                // The restamp committed, or the member already holds the
+                // profile: the row lets the migration go.
+                if let Err(error) = self.settle_store_owned_role_migration(&spec.identity).await {
+                    tracing::warn!(
+                        mob_id = %self.mob_id(),
+                        agent_identity = %spec.identity,
+                        error = %error,
+                        "a store-owned update's row kept its role migration"
+                    );
+                }
+                Ok(IdentityUpdateOutcome {
+                    change: IdentityChangeOutcome::Committed { receipt },
+                    applied,
+                })
+            }
+            Some(DeclaredChangeAnswer::Replayed(receipt)) => {
+                // A retry of a committed update: what its restamp left owed
+                // is carried out now.
+                if let Err(error) = self.redeclare_store_owned_identity(&spec.identity).await {
+                    tracing::warn!(
+                        mob_id = %self.mob_id(),
+                        agent_identity = %spec.identity,
+                        error = %error,
+                        "a replayed store-owned update's restamp was not carried out"
+                    );
+                }
+                Ok(IdentityUpdateOutcome {
+                    change: IdentityChangeOutcome::Replayed { receipt },
+                    applied: None,
+                })
+            }
+            None => Err(MobError::Internal(
+                "a store-owned update's declaration step answered no change".to_string(),
+            )),
+        }
+    }
+
+    /// The role `identity`'s member holds, in the published machine state;
+    /// `None` when no member holds it.
+    fn seated_role(&self, identity: &AgentIdentity) -> Option<ProfileName> {
+        let state = self.machine_state_watch_rx.borrow();
+        let dsl_identity = mob_dsl::AgentIdentity::from_domain(identity);
+        if !state.identity_to_runtime.contains_key(&dsl_identity) {
+            return None;
+        }
+        state
+            .member_profile_names
+            .get(&dsl_identity)
+            .map(|profile| ProfileName::from(profile.as_str()))
+    }
+
+    /// Let a store-owned identity's row go of the role migration it keeps,
+    /// once the member holds the row's profile (its restamp committed): a
+    /// follow-up write of the row, checked against the row read here, that
+    /// a newer change of the row supersedes.
+    pub(super) async fn settle_store_owned_role_migration(
+        &self,
+        identity: &AgentIdentity,
+    ) -> Result<(), MobError> {
+        let store = self
+            .identity_member
+            .as_ref()
+            .ok_or_else(|| refused(IdentityChangeRefusal::StorageUnsupported))?;
+        let Some(crate::identity::CreatedIdentityObservation::Created(row)) = store
+            .observe_created_identity(self.mob_id(), identity)
+            .await?
+        else {
+            return Ok(());
+        };
+        let Some(profile) = row.spec.as_ref().map(|spec| spec.profile.clone()) else {
+            return Ok(());
+        };
+        if row.pending_role_migration.is_none()
+            || self.seated_role(identity).as_ref() != Some(&profile)
+        {
+            return Ok(());
+        }
+        let expected = CreatedIdentityRowExpectation::Current {
+            authority_digest: row.authority_digest.clone(),
+        };
+        let record = row.with_pending_role_migration(None).map_err(|error| {
+            MobError::Internal(format!("a store-owned identity's row: {error}"))
+        })?;
+        store
+            .settle_created_identity_row(&CreatedIdentityRowWrite { record, expected })
+            .await?;
+        Ok(())
+    }
+
+    /// Declare a store-owned identity again from its row's spec, under
+    /// created custody, through the declared apply's own verdicts: what an
+    /// update's restamp left owed (a crash, or a member busy at the update)
+    /// is carried out, with the migration from the role its member holds,
+    /// and nothing is written when the member already matches its spec. The
+    /// row then lets its role migration go once the member holds its
+    /// profile. An identity no member holds, an archived one and one
+    /// awaiting its host's preparation are left as they are: their seat
+    /// takes the spec.
+    pub(super) async fn redeclare_store_owned_identity(
+        &self,
+        identity: &AgentIdentity,
+    ) -> Result<(), MobError> {
+        let store = self
+            .identity_member
+            .as_ref()
+            .ok_or_else(|| refused(IdentityChangeRefusal::StorageUnsupported))?;
+        let Some(crate::identity::CreatedIdentityObservation::Created(row)) = store
+            .observe_created_identity(self.mob_id(), identity)
+            .await?
+        else {
+            return Ok(());
+        };
+        let Some(spec) = row.spec.as_ref() else {
+            return Ok(());
+        };
+        if row.presence != CreatedIdentityPresence::Present {
+            return Ok(());
+        }
+        let Some(role) = self.seated_role(identity) else {
+            return Ok(());
+        };
+        let mut roster = super::DeclaredRoster::partial([super::DeclaredEntry::new(
+            lower_created_spec(spec).map_err(refused)?,
+        )]);
+        if role != spec.profile {
+            roster = roster.with_role_migration(identity.clone(), role);
+        }
+        let (outcome, _) = self.run_declared_apply(roster, None).await?;
+        if let Some(super::DeclaredEntryOutcome::Failed { error }) = outcome
+            .entries
+            .into_iter()
+            .find_map(|(declared, answer)| (declared == *identity).then_some(answer))
+        {
+            return Err(error);
+        }
+        self.settle_store_owned_role_migration(identity).await
     }
 }

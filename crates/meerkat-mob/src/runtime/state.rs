@@ -1566,12 +1566,13 @@ pub(super) enum MobCommand {
     /// plan, its commit step, or the host's hold.
     IdentityChange(Box<super::identity_change::IdentityChangeCommand>),
     /// Decide one chunk of a declared roster's identities in one MobMachine
-    /// step (`MobHandle::apply_declared_roster`): each identity's verdict.
+    /// step (`MobHandle::apply_declared_roster`): each identity's verdict,
+    /// and the change the chunk writes with them, when it carries one (a
+    /// roster-owned identity's change, or a store-owned identity's update).
     DeclareIdentityEntries {
         declarations: Vec<super::declared_apply::IdentityDeclaration>,
-        reply_tx: oneshot::Sender<
-            Result<Vec<super::declared_apply::DeclarationVerdict>, crate::MobError>,
-        >,
+        change: Option<Box<super::identity_change::DeclaredChangeWrite>>,
+        reply_tx: oneshot::Sender<Result<super::declared_apply::DeclarationStep, crate::MobError>>,
     },
     /// Seal a complete declared roster in one MobMachine step: `desired` is
     /// every identity the roster lists.

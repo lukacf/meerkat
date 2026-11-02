@@ -31855,9 +31855,11 @@ impl MobActor {
                 }
                 MobCommand::DeclareIdentityEntries {
                     declarations,
+                    change,
                     reply_tx,
                 } => {
-                    let result = Box::pin(self.declare_identity_entries(declarations)).await;
+                    let result =
+                        Box::pin(self.declare_identity_entries(declarations, change)).await;
                     let _ = reply_tx.send(result);
                 }
                 MobCommand::SealDeclaredRoster { desired, reply_tx } => {

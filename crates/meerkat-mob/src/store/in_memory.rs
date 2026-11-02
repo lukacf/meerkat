@@ -2026,6 +2026,29 @@ impl MobIdentityMemberStore for InMemoryMobIdentityStore {
         Ok(super::IdentityChangeCommit::Committed { events: stored })
     }
 
+    async fn settle_created_identity_row(
+        &self,
+        row: &super::CreatedIdentityRowWrite,
+    ) -> Result<bool, MobStoreError> {
+        if self.event_tx.is_none() {
+            return Err(MobStoreError::IdentityMemberAtomicPersistenceUnavailable);
+        }
+        row.record
+            .validate()
+            .map_err(|error| MobStoreError::Serialization(error.to_string()))?;
+        let mut aggregate = self.aggregate.write().await;
+        let key = (row.record.mob_id.clone(), row.record.agent_identity.clone());
+        let (present, current) = created_row_observation(&aggregate.identity, &key)?;
+        if !super::created_row_matches(&row.expected, present, current.as_ref()) {
+            return Ok(false);
+        }
+        let state = &mut aggregate.identity;
+        state.intents.remove(&key);
+        state.unreadable_intents.remove(&key);
+        state.created.insert(key, row.record.clone());
+        Ok(true)
+    }
+
     async fn observe_identity_change_receipt(
         &self,
         mob_id: &MobId,

@@ -1445,7 +1445,6 @@ const ORIGIN_GUARD_TRANSITIONS: &[&str] = &[
 const ORIGIN_GUARD_INVARIANTS: &[&str] = &[
     "entry_custodies_are_disjoint",
     "retiring_entry_is_a_declared_entry",
-    "unseated_created_entry_is_preparing_or_owed",
     "archived_entry_is_store_owned",
     "entry_ending_marks_are_seated_and_disjoint",
 ];

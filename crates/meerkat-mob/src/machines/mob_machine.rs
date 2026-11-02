@@ -14148,6 +14148,9 @@ mod tests {
         resume_role: Option<&'a str>,
         /// The kind of the host's first-boot request for the identity.
         first_boot: FirstBootRequestKind,
+        /// Whether a store-owned identity's update declares it (created
+        /// custody), not a host's roster.
+        created_custody: bool,
     }
 
     impl Default for Declaration<'_> {
@@ -14162,6 +14165,7 @@ mod tests {
                 session_memory_only: false,
                 resume_role: None,
                 first_boot: FirstBootRequestKind::None,
+                created_custody: false,
             }
         }
     }
@@ -14178,6 +14182,7 @@ mod tests {
             session_memory_only: declaration.session_memory_only,
             resume_session_role: declaration.resume_role.map(str::to_string),
             first_boot: declaration.first_boot,
+            created_custody: declaration.created_custody,
         }
     }
 
@@ -16141,6 +16146,81 @@ mod tests {
                 .contains(&member.identity),
             "the seal never unlists a Created entry"
         );
+    }
+
+    /// A store-owned identity's update declares its Created entry through
+    /// the declared apply's own verdicts (created custody): the same spec
+    /// keeps it, another runtime mode restamps it, another profile with the
+    /// migration from its current role migrates it, and the entry stays
+    /// Created. A roster's declaration of the name is refused as the store's
+    /// (RefusedNameOwnedByCreated), and no arm takes a store-owned update's
+    /// declaration of a Declared entry or of an archived Created one.
+    #[test]
+    fn a_store_owned_update_takes_the_declared_apply_verdicts_under_created_custody() {
+        let (mut authority, member) = dormant_member_authority("created-updated");
+        recover_created(
+            &mut authority,
+            &member.identity,
+            RecoveredPresence::Present,
+            None,
+        );
+        let created = |declaration: Declaration<'static>| Declaration {
+            created_custody: true,
+            ..declaration
+        };
+        for (declaration, verdict) in [
+            (created(Declaration::default()), IdentityEntryVerdict::Kept),
+            (
+                created(Declaration {
+                    runtime_mode: SpawnPolicyRuntimeMode::TurnDriven,
+                    ..Declaration::default()
+                }),
+                IdentityEntryVerdict::RuntimeModeRestamp,
+            ),
+            (
+                created(Declaration {
+                    profile: "other",
+                    migration_from: Some("test"),
+                    ..Declaration::default()
+                }),
+                IdentityEntryVerdict::RoleMigrate,
+            ),
+            (
+                Declaration::default(),
+                IdentityEntryVerdict::RefusedNameOwnedByCreated,
+            ),
+        ] {
+            assert_eq!(
+                declare(&mut authority, &member.identity, declaration),
+                verdict
+            );
+            assert_eq!(
+                authority
+                    .state()
+                    .identity_entry_origins
+                    .get(&member.identity),
+                Some(&IdentityEntryOrigin::Created),
+                "the entry stays Created"
+            );
+        }
+
+        let declared = AgentIdentity::from("declared-updated");
+        assert_eq!(
+            declare(&mut authority, &declared, Declaration::default()),
+            IdentityEntryVerdict::SeatOwed
+        );
+        let archived = AgentIdentity::from("archived-updated");
+        recover_created(&mut authority, &archived, RecoveredPresence::Archived, None);
+        for identity in [&declared, &archived] {
+            assert!(
+                MobMachineMutator::apply(
+                    &mut authority,
+                    declare_input(identity, created(Declaration::default())),
+                )
+                .is_err(),
+                "no arm declares {identity:?} under created custody"
+            );
+        }
     }
 
     /// No worker reconcile spawns a removed name or retires a member whose

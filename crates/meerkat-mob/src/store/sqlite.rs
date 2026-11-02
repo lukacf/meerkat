@@ -6703,6 +6703,52 @@ impl MobIdentityMemberStore for SqliteMobIdentityStore {
         Ok(outcome)
     }
 
+    async fn settle_created_identity_row(
+        &self,
+        row: &super::CreatedIdentityRowWrite,
+    ) -> Result<bool, MobStoreError> {
+        if self.event_bus.is_none() {
+            return Err(MobStoreError::IdentityMemberAtomicPersistenceUnavailable);
+        }
+        row.record
+            .validate()
+            .map_err(|error| MobStoreError::Serialization(error.to_string()))?;
+        let path = self.path.clone();
+        let store_instance_id = self.store_instance_id.clone();
+        let row = row.clone();
+        run_sqlite_task(self.observer_owner(), move || {
+            let mut conn = open_existing_identity_write_connection(&path, &store_instance_id)?;
+            let tx = begin_identity_immediate(&mut conn, &store_instance_id)?;
+            let (present, current) =
+                query_created_row_observation(&tx, &row.record.mob_id, &row.record.agent_identity)?;
+            if !super::created_row_matches(&row.expected, present, current.as_ref()) {
+                return Ok(false);
+            }
+            let stored = serde_json::to_vec(&row.record)
+                .map_err(|error| MobStoreError::Serialization(error.to_string()))?;
+            tx.execute(
+                "INSERT INTO mob_identity_intents
+                     (mob_id, agent_identity, declaration_scope, session_id, lineage_id,
+                      record_json)
+                 VALUES (?1, ?2, NULL, NULL, NULL, ?3)
+                 ON CONFLICT(mob_id, agent_identity) DO UPDATE SET
+                     declaration_scope = NULL,
+                     session_id = NULL,
+                     lineage_id = NULL,
+                     record_json = excluded.record_json",
+                params![
+                    row.record.mob_id.as_str(),
+                    row.record.agent_identity.as_str(),
+                    stored
+                ],
+            )
+            .map_err(se)?;
+            tx.commit().map_err(se)?;
+            Ok(true)
+        })
+        .await
+    }
+
     async fn observe_identity_change_receipt(
         &self,
         mob_id: &MobId,

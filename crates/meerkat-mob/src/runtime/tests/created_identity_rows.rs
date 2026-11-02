@@ -686,9 +686,10 @@ async fn a_spawn_never_takes_a_tombstoned_or_unreadable_name() {
 /// generation.
 ///
 /// RED: drop `DeclareIdentityEntryRefusedNameOwnedByCreated` and the
-/// declared apply's origin guard (`declared_entry_or_no_entry` on the
-/// `DeclareIdentityEntry` arms): the listing of the created entry is
-/// answered `Kept`.
+/// declared apply's custody guard (`entry_of_the_declared_custody` on the
+/// `DeclareIdentityEntry` arms, a roster's declaration acting on a Declared
+/// entry or a free name only): the listing of the created entry is answered
+/// `Kept`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_declared_listing_of_a_created_name_is_refused_for_that_identity_alone() {
     let mut mob = CreatedMob::new("created-declared-listing").await;

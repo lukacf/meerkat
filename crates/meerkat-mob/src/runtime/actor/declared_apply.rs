@@ -9,9 +9,15 @@
 //! realizes each verdict with the mob's existing steps. See
 //! `runtime::declared_apply` for the apply and its answers.
 
+use super::identity_change::ChangeAdmission;
 use super::*;
 use crate::runtime::declared_apply::{
-    DecidedDeclaration, DeclarationVerdict, IdentityDeclaration, SealAnswer,
+    DecidedDeclaration, DeclarationStep, DeclarationVerdict, IdentityDeclaration, SealAnswer,
+};
+use crate::runtime::identity_change::{
+    DeclaredChangeAnswer, DeclaredChangeKind, DeclaredChangeWrite, IdentityChangeRefusal,
+    declared_entry_receipt_outcome, now_ms, refused, store_owned_update_commit,
+    store_owned_update_row,
 };
 
 impl MobActor {
@@ -20,10 +26,24 @@ impl MobActor {
     /// prepared authority and committed once. A declaration no arm takes,
     /// or whose role cannot be resolved, is answered for that identity
     /// alone. A mob that is not running answers an invalid transition.
+    ///
+    /// A step that carries a change ([`DeclaredChangeWrite`]) decides the
+    /// change's admission first, on the same prepared authority (the
+    /// store's receipt of its operation and its requester's grant, read and
+    /// checked at this final sink), and writes the change with its verdicts
+    /// in one store transaction before the machine commits: a roster-owned
+    /// identity's receipt, recording each declared identity the step
+    /// answered; or a store-owned update's row at the next revision (refused
+    /// `stale_spec` when the row's spec moved since the change was decided)
+    /// and its receipt. A replayed store-owned update decides and writes
+    /// nothing again; a replayed roster change decides its declarations and
+    /// writes nothing. A store-owned update whose identity's member step is
+    /// in flight is refused retryable, with nothing written.
     pub(super) async fn declare_identity_entries(
         &mut self,
         declarations: Vec<IdentityDeclaration>,
-    ) -> Result<Vec<DeclarationVerdict>, MobError> {
+        change: Option<Box<DeclaredChangeWrite>>,
+    ) -> Result<DeclarationStep, MobError> {
         // A spec that names no runtime mode declares its role's: each role
         // is resolved once per chunk.
         let mut role_modes: BTreeMap<ProfileName, crate::MobRuntimeMode> = BTreeMap::new();
@@ -51,9 +71,84 @@ impl MobActor {
         }
 
         let mut authority = self.dsl_authority.prepare_authority();
+        let mut replayed = None;
+        if let Some(change) = change.as_deref() {
+            match self
+                .decide_change_admission(
+                    &mut authority,
+                    &change.operation,
+                    change.facts,
+                    change.grant.as_ref(),
+                    change.decided,
+                )
+                .await?
+            {
+                // A committed update replays: nothing is decided or written
+                // again.
+                ChangeAdmission::Replayed(receipt) if change.is_store_owned_update() => {
+                    return Ok(DeclarationStep {
+                        verdicts: Vec::new(),
+                        change: Some(DeclaredChangeAnswer::Replayed(receipt)),
+                    });
+                }
+                ChangeAdmission::Replayed(receipt) => replayed = Some(receipt),
+                ChangeAdmission::Admitted => {}
+            }
+        }
+        // A store-owned update's row, read at this final sink: the migration
+        // it declares is from the role its member holds now (the row's
+        // profile for an identity no member holds), kept in the row until
+        // the restamp commits.
+        let update_row = match change.as_deref() {
+            Some(DeclaredChangeWrite {
+                kind:
+                    DeclaredChangeKind::StoreOwnedUpdate {
+                        spec,
+                        expected_spec_digest,
+                    },
+                ..
+            }) => {
+                let store = self
+                    .identity_member
+                    .as_ref()
+                    .ok_or_else(|| refused(IdentityChangeRefusal::StorageUnsupported))?;
+                let current = store
+                    .observe_created_identity(&self.definition.id, &spec.identity)
+                    .await?;
+                let dsl_identity = mob_dsl::AgentIdentity::from_domain(&spec.identity);
+                let state = authority.state();
+                let seated_role = state
+                    .identity_to_runtime
+                    .contains_key(&dsl_identity)
+                    .then(|| state.member_profile_names.get(&dsl_identity))
+                    .flatten()
+                    .map(|profile| ProfileName::from(profile.as_str()));
+                let row_profile = match &current {
+                    Some(crate::identity::CreatedIdentityObservation::Created(row)) => {
+                        row.spec.as_ref().map(|spec| spec.profile.clone())
+                    }
+                    _ => None,
+                };
+                let from = seated_role.or(row_profile);
+                let pending = from
+                    .clone()
+                    .filter(|from| *from != spec.profile)
+                    .map(crate::identity::PendingRoleMigration::new);
+                let row = store_owned_update_row(spec, expected_spec_digest, pending, current)?;
+                Some((spec.identity.clone(), from, row))
+            }
+            _ => None,
+        };
         let mut effects = Vec::new();
         let mut verdicts = Vec::with_capacity(resolved.len());
-        for (declaration, runtime_mode) in resolved {
+        for (mut declaration, runtime_mode) in resolved {
+            // A store-owned update declares the migration from the role its
+            // member holds, read on this authority.
+            if let Some((identity, from, _)) = &update_row
+                && *identity == declaration.agent_identity
+            {
+                declaration.declared_migration_from = from.clone();
+            }
             let agent_identity = declaration.agent_identity.clone();
             let runtime_mode = match runtime_mode {
                 Ok(runtime_mode) => runtime_mode,
@@ -117,12 +212,156 @@ impl MobActor {
                 }),
             });
         }
-        self.commit_prepared_dsl_input(PreparedDslInput {
+        let prepared = PreparedDslInput {
             authority,
             effects,
             phase_changed: false,
-        })?;
-        Ok(verdicts)
+        };
+        let Some(change) = change else {
+            self.commit_prepared_dsl_input(prepared)?;
+            return Ok(DeclarationStep {
+                verdicts,
+                change: None,
+            });
+        };
+        // A store-owned update's identity whose member step is in flight is
+        // left to the update's retry; a declaration no arm took refuses it.
+        // Either way nothing is written.
+        if change.is_store_owned_update()
+            && let Some(position) = verdicts.iter().position(|verdict| {
+                !matches!(
+                    &verdict.verdict,
+                    Ok(decided) if declared_entry_receipt_outcome(decided.verdict).is_some()
+                )
+            })
+        {
+            let verdict = verdicts.swap_remove(position);
+            return Err(match verdict.verdict {
+                Err(error) => error,
+                Ok(_) => MobError::LifecycleOperationPending {
+                    intent: format!(
+                        "update '{}', whose member's spawn, wake or retirement is in flight",
+                        verdict.agent_identity
+                    ),
+                },
+            });
+        }
+        if let Some(receipt) = replayed {
+            self.commit_prepared_dsl_input(prepared)?;
+            return Ok(DeclarationStep {
+                verdicts,
+                change: Some(DeclaredChangeAnswer::Replayed(receipt)),
+            });
+        }
+        // The change's receipt: each identity the step answered, with its
+        // outcome (a store-owned update's with its spec digest and revision
+        // after the change).
+        let at_ms = now_ms();
+        let mut entries = Vec::new();
+        let (kind, row) = match update_row {
+            Some((identity, _, row)) => {
+                let outcome = verdicts
+                    .iter()
+                    .find_map(|verdict| match &verdict.verdict {
+                        Ok(decided) => declared_entry_receipt_outcome(decided.verdict),
+                        Err(_) => None,
+                    })
+                    // An archived identity, or one awaiting its host's
+                    // preparation, is declared nothing: its row changes.
+                    .unwrap_or(crate::identity::IdentityChangeEntryOutcome::Committed);
+                let digest = row
+                    .record
+                    .spec_digest()
+                    .map_err(|error| MobError::Internal(format!("an update's spec: {error}")))?
+                    .ok_or_else(|| MobError::Internal("an update's row holds no spec".into()))?;
+                entries.push(
+                    crate::identity::IdentityChangeReceiptEntry::new(identity, outcome)
+                        .with_spec(digest, Some(row.record.revision)),
+                );
+                (crate::identity::IdentityChangeKind::Update, Some(row))
+            }
+            None => {
+                for verdict in &verdicts {
+                    if let Ok(decided) = &verdict.verdict
+                        && let Some(outcome) = declared_entry_receipt_outcome(decided.verdict)
+                    {
+                        entries.push(crate::identity::IdentityChangeReceiptEntry::new(
+                            verdict.agent_identity.clone(),
+                            outcome,
+                        ));
+                    }
+                }
+                (crate::identity::IdentityChangeKind::RosterApply, None)
+            }
+        };
+        // A roster change none of whose identities the step answered records
+        // nothing: its retry decides it again.
+        if entries.is_empty() {
+            self.commit_prepared_dsl_input(prepared)?;
+            return Ok(DeclarationStep {
+                verdicts,
+                change: None,
+            });
+        }
+        let store = self
+            .identity_member
+            .clone()
+            .ok_or_else(|| refused(IdentityChangeRefusal::StorageUnsupported))?;
+        let receipt = crate::identity::IdentityChangeReceipt::sealed(
+            self.definition.id.clone(),
+            change.operation.operation_id.clone(),
+            change.operation.request_digest.clone(),
+            kind,
+            entries,
+            at_ms,
+        )
+        .and_then(|receipt| {
+            receipt.with_attribution(change.requester.clone(), change.consent.clone())
+        })
+        .map_err(|error| MobError::Internal(format!("an identity change's receipt: {error}")))?;
+        let written = receipt.clone();
+        let update = row.is_some();
+        // A store-owned update's descriptive inputs, which its member's seat
+        // carries to the first build of a session no build created yet.
+        let seat_inputs = match &change.kind {
+            DeclaredChangeKind::StoreOwnedUpdate { spec, .. } => Some((
+                spec.identity.clone(),
+                spec.context.clone(),
+                spec.additional_instructions.clone(),
+            )),
+            DeclaredChangeKind::Roster => None,
+        };
+        self.commit_prepared_dsl_input_after(prepared, move || async move {
+            let commit = store
+                .commit_identity_change(&crate::store::IdentityChangeWrite {
+                    receipt: written,
+                    rows: row.into_iter().collect(),
+                    events: Vec::new(),
+                })
+                .await
+                .map_err(MobError::from)?;
+            if update {
+                store_owned_update_commit(commit)
+            } else {
+                crate::runtime::identity_change::committed_change_events(commit).map(|_| ())
+            }
+        })
+        .await?;
+        if let Some((identity, context, instructions)) = seat_inputs
+            && super::super::boot_plan::domain_member_seat_session_unborn(
+                self.dsl_authority.state(),
+                &identity,
+            )
+        {
+            self.roster
+                .write()
+                .await
+                .set_store_owned_seat_inputs(&identity, context, instructions);
+        }
+        Ok(DeclarationStep {
+            verdicts,
+            change: Some(DeclaredChangeAnswer::Committed(receipt)),
+        })
     }
 
     /// Open a declared apply (`OpenDeclaredApply`): MobMachine's verdict,

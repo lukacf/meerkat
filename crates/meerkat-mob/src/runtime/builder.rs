@@ -9304,6 +9304,8 @@ impl MobBuilder {
         let supervisor_startup_guard =
             SupervisorBridgeStartupGuard::new(Arc::clone(&supervisor_bridge));
         let post_bridge_epoch_start = epoch_start;
+        // What the start carries out from the store-owned rows it recovers.
+        let mut recovered_created_rows = super::created_identity::RecoveredCreatedRows::default();
         // Keep every fallible post-registration recovery step inside one
         // awaited result. Native startup then synchronously settles the
         // guard before returning an error; `Drop` remains only the
@@ -9419,7 +9421,7 @@ impl MobBuilder {
             if matches!(resumed_state, MobState::Running | MobState::Stopped)
                 && !destroy_storage_finalizing
             {
-                super::created_identity::recover_created_identity_entries(
+                recovered_created_rows = super::created_identity::recover_created_identity_entries(
                     initial_dsl_authority.as_mut(),
                     storage.identity.as_ref(),
                     &definition.id,
@@ -9431,6 +9433,21 @@ impl MobBuilder {
             // Roster is a projection only. Build it after the authoritative
             // carrier/event reconciliation and machine recovery have succeeded.
             let mut roster = Roster::project(&mob_events);
+            // A store-owned identity's seat whose session no build created
+            // takes its descriptive inputs from the identity's row, its
+            // record: an update after the seat applies at the first build.
+            for (identity, spec) in &recovered_created_rows.specs {
+                if super::boot_plan::domain_member_seat_session_unborn(
+                    initial_dsl_authority.state(),
+                    identity,
+                ) {
+                    roster.set_store_owned_seat_inputs(
+                        identity,
+                        spec.context.clone(),
+                        spec.additional_instructions.clone(),
+                    );
+                }
+            }
             #[cfg(not(target_arch = "wasm32"))]
             Self::normalize_sessionless_backend_runtime_modes(&mut roster);
             if resumed_state == MobState::Running
@@ -9887,9 +9904,12 @@ impl MobBuilder {
         #[cfg(target_arch = "wasm32")]
         let handle = start_result?;
         // A created entry owed its seat (a build that predates created
-        // entries retired its member) is seated again on its archived
-        // session, once the mob runs.
-        handle.reseat_owed_created_entries().await;
+        // entries retired its member) is seated again once the mob runs, and
+        // a store-owned update's role migration a crash left owed is carried
+        // out.
+        handle
+            .carry_out_store_owned_rows_at_start(recovered_created_rows.role_migrations_owed)
+            .await;
         Ok(handle)
     }
 

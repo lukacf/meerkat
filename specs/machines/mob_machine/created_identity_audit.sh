@@ -44,9 +44,11 @@
 #   (AuditNoSeatUnderReservedName).
 #
 # Every run checks every generated invariant (the created entries' among
-# them: unseated_created_entry_is_preparing_or_owed,
-# tombstone_is_never_an_entry, entry_custodies_are_disjoint,
-# worker_reconcile_spares_entries and destroyed_mob_holds_no_member_lifecycle).
+# them: tombstone_is_never_an_entry, entry_custodies_are_disjoint,
+# worker_reconcile_spares_entries and destroyed_mob_holds_no_member_lifecycle),
+# and the scan run its AuditScanUnseatedCauses (the scan records a Created
+# entry unseated only owed its seat, awaiting its host's preparation or
+# archived), in its witness and mutant runs too.
 #
 # Each run must finish without an error, reach at least its floor of distinct
 # states and fire every action of its covered list (TLC coverage): an arm
@@ -276,7 +278,7 @@ epoch_index="${view_positions#* }"
 #                  [without-totality]
 write_cfg() {
   local run="$1" cfg="$2" invariants="$3" properties="$4" totality="${5:-}"
-  local spec run_properties run_invariants section_end
+  local spec run_properties run_invariants run_safety="" section_end
   cp "${ci_cfg}" "${cfg}"
   case "${run}" in
     scan)
@@ -284,6 +286,8 @@ write_cfg() {
       run_properties=""
       run_invariants="
   AuditRecoverExactlyOne"
+      run_safety="
+  AuditScanUnseatedCauses"
       ;;
     reseat)
       spec="ReseatSpec"
@@ -352,7 +356,8 @@ INVARIANTS" "${cfg}"
     echo "error: expected the CONSTRAINTS section right after INVARIANTS in ${ci_cfg}, found '${section_end}'" >&2
     exit 1
   fi
-  replace_exact_line "CONSTRAINTS" "${run_invariants#$'\n'}${invariants}
+  local listed="${run_invariants}${run_safety}${invariants}"
+  replace_exact_line "CONSTRAINTS" "${listed#$'\n'}
 VIEW AuditView
 CONSTRAINTS" "${cfg}"
   replace_exact_line "  CiStateConstraint" "  AuditStateConstraint" "${cfg}"
@@ -612,7 +617,7 @@ PY
 
   # A Present row whose identity has no member records the entry hosted on
   # its first use instead of owed its seat.
-  mutate scan retired_records_hosted "Invariant unseated_created_entry_is_preparing_or_owed" <<'PY'
+  mutate scan retired_records_hosted "Invariant AuditScanUnseatedCauses" <<'PY'
 replace_update("RecoverCreatedIdentityEntryRetiredRunning", "identity_entry_unseated",
                'MapSet(identity_entry_unseated, agent_identity, "HostedOnFirstUse")')
 PY

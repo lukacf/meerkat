@@ -956,7 +956,7 @@ printf '%s\n' \
   'echo "Error: Action property NotAuditWitnessScanContradictedPlaced is violated."' \
   'echo "Error: Action property NotAuditWitnessReservedLadderAborted is violated."' \
   'echo "Error: Invariant AuditRecoverExactlyOne is violated."' \
-  'echo "Error: Invariant unseated_created_entry_is_preparing_or_owed is violated."' \
+  'echo "Error: Invariant AuditScanUnseatedCauses is violated."' \
   'echo "Error: Invariant tombstone_is_never_an_entry is violated."' \
   'echo "Error: Action property AuditNoLadderForReservedName is violated."' \
   'echo "Error: Action property AuditLadderCustodyMatchesOrigin is violated."' \

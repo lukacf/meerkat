@@ -2182,6 +2182,10 @@ mod tests {
             Ok(())
         }
 
+        fn redact_response_diagnostic(&self, diagnostic: &mut String) {
+            *diagnostic = diagnostic.replace(AUTHORIZATION_CANARY, "<redacted>");
+        }
+
         fn label(&self) -> &'static str {
             "canary-bearer-test"
         }
@@ -2227,6 +2231,277 @@ mod tests {
         assert!(
             !format!("{request:?}").contains(AUTHORIZATION_CANARY),
             "{request:?}"
+        );
+    }
+
+    /// Records the fields of every Meerkat event and span as text.
+    #[derive(Clone, Default)]
+    struct LogCapture(Arc<Mutex<String>>);
+
+    impl LogCapture {
+        fn text(&self) -> String {
+            self.0.lock().unwrap().clone()
+        }
+    }
+
+    struct CaptureVisitor<'a>(&'a mut String);
+
+    impl tracing::field::Visit for CaptureVisitor<'_> {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            use std::fmt::Write as _;
+            let _ = write!(self.0, " {}={value:?}", field.name());
+        }
+    }
+
+    struct CaptureSubscriber {
+        log: LogCapture,
+        next_span: std::sync::atomic::AtomicU64,
+    }
+
+    impl CaptureSubscriber {
+        fn dispatch(log: LogCapture) -> tracing::Dispatch {
+            tracing::Dispatch::new(Self {
+                log,
+                next_span: std::sync::atomic::AtomicU64::new(1),
+            })
+        }
+    }
+
+    impl tracing::Subscriber for CaptureSubscriber {
+        fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+            metadata.target().starts_with("meerkat")
+        }
+
+        fn new_span(&self, span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            span.record(&mut CaptureVisitor(&mut self.log.0.lock().unwrap()));
+            tracing::span::Id::from_u64(
+                self.next_span
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            )
+        }
+
+        fn record(&self, _span: &tracing::span::Id, values: &tracing::span::Record<'_>) {
+            values.record(&mut CaptureVisitor(&mut self.log.0.lock().unwrap()));
+        }
+
+        fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
+
+        fn event(&self, event: &tracing::Event<'_>) {
+            let mut log = self.log.0.lock().unwrap();
+            event.record(&mut CaptureVisitor(&mut log));
+            log.push('\n');
+        }
+
+        fn enter(&self, _span: &tracing::span::Id) {}
+
+        fn exit(&self, _span: &tracing::span::Id) {}
+    }
+
+    /// How the echoing upstream answers. Every answer carries the request's
+    /// Authorization value, as a proxy or gateway that echoes the request's
+    /// headers in an error does.
+    #[derive(Debug, Clone, Copy)]
+    enum Echo {
+        /// HTTP 500 whose error message carries the value.
+        RejectionBody,
+        /// HTTP 400 policy stop whose message carries the value with its
+        /// first character JSON-escaped: only the decoded message holds it.
+        EscapedPolicyStop,
+        /// HTTP 200 stream whose error envelope carries the value.
+        StreamErrorEvent,
+        /// HTTP 200 stream whose data line carries the value in JSON that
+        /// does not parse.
+        MalformedStreamLine,
+    }
+
+    async fn spawn_echoing_chat_server(echo: Echo) -> (String, tokio::task::JoinHandle<()>) {
+        fn echoed(headers: &axum::http::HeaderMap) -> String {
+            let authorization = headers
+                .get("authorization")
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or_default();
+            format!("upstream echo: {authorization}")
+        }
+        let app = Router::new()
+            .route(
+                "/chat/completions",
+                post(move |headers: axum::http::HeaderMap| async move {
+                    let message = echoed(&headers);
+                    match echo {
+                        Echo::RejectionBody => (
+                            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(serde_json::json!({"error": {"message": message}})),
+                        )
+                            .into_response(),
+                        Echo::EscapedPolicyStop => {
+                            let escaped = message.replacen(
+                                AUTHORIZATION_CANARY,
+                                &format!(
+                                    "\\u{:04x}{}",
+                                    AUTHORIZATION_CANARY.as_bytes()[0],
+                                    &AUTHORIZATION_CANARY[1..]
+                                ),
+                                1,
+                            );
+                            (
+                                axum::http::StatusCode::BAD_REQUEST,
+                                [("content-type", "application/json")],
+                                format!(
+                                    r#"{{"error":{{"code":"misalignment_policy_violation","message":"{escaped}"}}}}"#
+                                ),
+                            )
+                                .into_response()
+                        }
+                        Echo::StreamErrorEvent => {
+                            let event = serde_json::json!({"error": {"message": message}});
+                            (
+                                [("content-type", "text/event-stream")],
+                                format!("data: {event}\n\n"),
+                            )
+                                .into_response()
+                        }
+                        Echo::MalformedStreamLine => (
+                            [("content-type", "text/event-stream")],
+                            format!("data: {{\"unterminated\": \"{message}\n\n"),
+                        )
+                            .into_response(),
+                    }
+                }),
+            )
+            .route(
+                "/models",
+                axum::routing::get(|headers: axum::http::HeaderMap| async move {
+                    (
+                        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(serde_json::json!({"error": {"message": echoed(&headers)}})),
+                    )
+                }),
+            );
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind echoing server");
+        let addr = listener.local_addr().expect("local addr");
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve echoing server");
+        });
+        (format!("http://{addr}"), handle)
+    }
+
+    /// The rendered forms of `error` a caller can see: `Display`, `Debug`
+    /// and the wire JSON.
+    fn rendered_forms(error: &LlmError) -> String {
+        format!(
+            "{error} {error:?} {}",
+            serde_json::to_string(error).expect("error JSON")
+        )
+    }
+
+    /// A provider that echoes the request's Authorization value in a
+    /// rejection body, a policy stop, a stream error envelope, a data line
+    /// that does not parse or a health check rejection never puts the
+    /// authorizer's credential in the error the Chat Completions client
+    /// returns (its `Display`, `Debug` or wire JSON) or in a field it logs.
+    /// The echo itself still reaches the error, and each error keeps its
+    /// class.
+    #[tokio::test]
+    async fn echoed_authorization_stays_out_of_chat_errors_and_logs() {
+        let log = LogCapture::default();
+        let capture = CaptureSubscriber::dispatch(log.clone());
+        // A second registered dispatcher makes callsite interest come from
+        // every dispatcher, so a callsite first reached under no subscriber
+        // still reaches this one.
+        let _anchor = CaptureSubscriber::dispatch(LogCapture::default());
+        let _guard = tracing::dispatcher::set_default(&capture);
+
+        for echo in [
+            Echo::RejectionBody,
+            Echo::EscapedPolicyStop,
+            Echo::StreamErrorEvent,
+            Echo::MalformedStreamLine,
+        ] {
+            let (base_url, server) = spawn_echoing_chat_server(echo).await;
+            let client = OpenAiCompatibleClient::new_with_options(
+                OpenAiCompatibleMode::ChatCompletions,
+                "remote-model".to_string(),
+                base_url,
+                None,
+                options(true, true, true, true),
+            )
+            .with_authorizer(Arc::new(CanaryBearerAuthorizer));
+            let request = LlmRequest::new(
+                "catalog-model",
+                vec![Message::User(UserMessage::text("hello"))],
+            );
+            let events = client.stream(&request).collect::<Vec<_>>().await;
+            server.abort();
+            let error = events
+                .into_iter()
+                .find_map(|event| match event {
+                    Err(error)
+                    | Ok(LlmEvent::Done {
+                        outcome: LlmDoneOutcome::Error { error },
+                    }) => Some(error),
+                    Ok(_) => None,
+                })
+                .unwrap_or_else(|| panic!("{echo:?}: the stream ends in an error"));
+            let rendered = rendered_forms(&error);
+            assert!(
+                !rendered.contains(AUTHORIZATION_CANARY),
+                "{echo:?} leaked the credential: {rendered}"
+            );
+            assert!(
+                rendered.contains("upstream echo"),
+                "{echo:?}: the provider's message reached the error: {rendered}"
+            );
+            match echo {
+                Echo::RejectionBody => assert!(
+                    matches!(error, LlmError::ServerError { status: 500, .. }),
+                    "{echo:?}: {error:?}"
+                ),
+                Echo::EscapedPolicyStop => assert!(
+                    matches!(&error, LlmError::PolicyStop { code, .. }
+                        if code == "misalignment_policy_violation"),
+                    "{echo:?}: {error:?}"
+                ),
+                Echo::StreamErrorEvent | Echo::MalformedStreamLine => assert!(
+                    matches!(error, LlmError::StreamParseError { .. }),
+                    "{echo:?}: {error:?}"
+                ),
+            }
+        }
+
+        let (base_url, server) = spawn_echoing_chat_server(Echo::RejectionBody).await;
+        let client = OpenAiCompatibleClient::new_with_options(
+            OpenAiCompatibleMode::ChatCompletions,
+            "remote-model".to_string(),
+            base_url,
+            None,
+            options(true, true, true, true),
+        )
+        .with_authorizer(Arc::new(CanaryBearerAuthorizer));
+        let health = client.health_check().await;
+        server.abort();
+        let error = health.expect_err("the health check is rejected");
+        let rendered = rendered_forms(&error);
+        assert!(
+            !rendered.contains(AUTHORIZATION_CANARY),
+            "the health check leaked the credential: {rendered}"
+        );
+        assert!(
+            rendered.contains("upstream echo"),
+            "the health check rejection reached the error: {rendered}"
+        );
+        assert!(
+            matches!(error, LlmError::ServerError { status: 500, .. }),
+            "{error:?}"
+        );
+
+        let logged = log.text();
+        assert!(
+            !logged.contains(AUTHORIZATION_CANARY),
+            "a log field leaked the credential: {logged}"
         );
     }
 

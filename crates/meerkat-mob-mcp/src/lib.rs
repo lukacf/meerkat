@@ -20766,8 +20766,8 @@ mod tests {
 
         drop_a_verb_inside_its_re_attempt(&restored, &running).await;
         tokio::time::timeout(Duration::from_secs(10), async {
-            while !(restored.mobs.read().await.contains_key(&running)
-                && !keeps_quarantine_record(&restored, &running).await)
+            while !restored.mobs.read().await.contains_key(&running)
+                || keeps_quarantine_record(&restored, &running).await
             {
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }

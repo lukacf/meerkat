@@ -63,7 +63,9 @@
 //! in the journal: which rotation a retirement ended in and the seat the
 //! same step made (and under which role), the session of each incarnation,
 //! why Core's seal unlisted an identity, and which incarnation a fresh life
-//! or a legacy respawn's seat follows. Which retirement owes what is decided
+//! or a legacy respawn's seat follows. The one fact read against journal
+//! position is which Meta verb asked for a step, through the head of Core's
+//! journal its record keeps (below). Which retirement owes what is decided
 //! in one place ([`retirement_owes`]), the facts first; a legacy respawn's
 //! seat, whose retirement was a step of its own, owes what such a rotation
 //! owes, with the session and role of the incarnation it follows, which the
@@ -109,16 +111,19 @@
 //! ended in between): the incarnation its record names is the one Core held
 //! at its head. The seat step reads its head before the binding. The
 //! projection reads a rotation's record by the same fact ([`step_reached`]):
-//! the record
-//! answers a retirement of its incarnation, or the fresh life's seat after
-//! it, only when Core journaled that fact after the rotation's head and up
-//! to that retirement or seat. Another operation's end of the incarnation (a
-//! host's own rotation that started before the rotation asked Core, read
-//! while a rotation Core refused still holds its record, or after a restart
-//! left that record behind) owes what Core's facts say; the record is
-//! consumed with it and owes nothing. Once the cursor past the fact that
-//! consumed a record is recorded, the record goes. A roster
-//! pass that lists an identity again takes back an unlisting whose
+//! the record answers a retirement of its incarnation, or the fresh life's
+//! seat after it, only when Core journaled that fact after the record's head
+//! and up to that retirement or seat. That is a rule of journal position,
+//! which cannot tell whose fact it is. Another operation's end of the
+//! incarnation that started at or before the record's head (a host's own
+//! rotation, read while a rotation Core refused still holds its record, or
+//! after a restart left that record behind) owes what Core's facts say, and
+//! the record is consumed with it and owes nothing. Another operation's
+//! start, or fresh life's seat, journaled after the record's head (a host's
+//! rotation that starts while the verb asks Core) is read as the verb's,
+//! until Core journals which request a rotation carried out. Once the
+//! cursor past the fact that consumed a record is recorded, the record goes.
+//! A roster pass that lists an identity again takes back an unlisting whose
 //! retirement Core's standing shows never started. Whether a member is the
 //! identity's is read from the marker or the label its binding carries, in
 //! one place ([`PageMembers`]), until membership is read from Core's
@@ -158,9 +163,9 @@
 //! once in each lane (one identity's in journal order). A seat whose end
 //! its page holds reads no standing; a seat Core's standing does not show
 //! yet reads the journal after its page on to the head, once per page for
-//! all such seats. A retirement or a fresh life's seat that a rotation's
-//! record names reads the journal from the head that rotation read up to
-//! it. A start that owes a predecessor's backlog reads
+//! all such seats. A retirement onto a fresh session, or a fresh life's
+//! seat, that a rotation's record names reads the journal from the record's
+//! head up to it. A start that owes a predecessor's backlog reads
 //! the backlog's pages once more, for which identities it owes. It wakes no
 //! member: an idle journal costs one empty page read per sweep.
 //!
@@ -835,15 +840,16 @@ impl StepFirstFact {
 }
 
 /// Whether Core journaled `first`, the fact a rotation of `member` writes
-/// first, after `after`, the head of Core's journal the rotation read before
-/// it asked Core, and at or before the journal event `upto`: whether the
-/// rotation reached Core by then. The one predicate of a rotation's reach,
-/// for the rotation that failed ([`IdentityRuntime::lifecycle_step_reach`],
-/// up to the journal's head) and for the projection that reads the
-/// rotation's record at a retirement of its incarnation or at the fresh life
-/// after it (up to that fact): a fact of the member Core journaled at or
-/// before `after`, such as the start of another operation's retirement of
-/// the incarnation, is not the rotation's.
+/// first, after `after`, a head of Core's journal a rotation read before it
+/// asked Core, and at or before the journal event `upto`. The one predicate
+/// of a rotation's reach, for the rotation that failed
+/// ([`IdentityRuntime::lifecycle_step_reach`], from the head it read up to
+/// the journal's head) and for the projection that reads a rotation's record
+/// at a retirement of its incarnation or at the fresh life after it (from
+/// the record's head up to that fact): a fact of the member Core journaled
+/// at or before `after`, such as the start of another operation's
+/// retirement of the incarnation, is not the rotation's. It reads journal
+/// position only, so it cannot tell whose fact one after `after` is.
 async fn step_reached(
     bridge: &Arc<dyn SessionBridge>,
     member: &meerkat_mob::AgentIdentity,
@@ -2920,11 +2926,13 @@ impl IdentityRuntime {
                         intent.as_ref().map(|intent| intent.verb),
                     );
                     // A rotation's record decides what the retirement owes
-                    // only when the rotation started it, after the head it
-                    // read before it asked Core. Another operation's
-                    // rotation of the incarnation (a host's own, ended while
-                    // a rotation Core refused still held its record) owes
-                    // what Core's facts say.
+                    // only when Core journaled a start of the incarnation's
+                    // retirement after the record's head, up to this
+                    // retirement (rotation_record_answers): a rule of journal
+                    // position, which cannot tell whose start it is. A
+                    // rotation that started at or before that head (a host's
+                    // own, ended while a rotation Core refused still held its
+                    // record) owes what Core's facts say.
                     let mut claims = true;
                     if let (RetirementOwes::Verb(_), Some(found)) = (owes, intent.as_ref())
                         && !self
@@ -2943,8 +2951,8 @@ impl IdentityRuntime {
                             %identity,
                             generation = *generation,
                             verb = ?found.verb,
-                            "the rotation that recorded a lifecycle effect intent did not start \
-                             this retirement; the intent is consumed and owes nothing"
+                            "no start of this retirement follows the head of Core's journal a \
+                             lifecycle effect intent keeps; the intent is consumed and owes nothing"
                         );
                         owes = retirement_owes(rotation.as_ref(), role, *cause, None);
                         claims = false;
@@ -3083,8 +3091,10 @@ impl IdentityRuntime {
     /// A fresh life Core then closed again (a spawn's compensation) consumes
     /// it the same: the incarnation it follows is the one the verb named,
     /// and no later fresh life names it. The record owes the verb's side
-    /// effects only when the verb's rotation seated this fresh life, the
-    /// seat at the journal event `seat` ([`Self::rotation_record_answers`]).
+    /// effects only when this fresh life's seat, the journal event `seat`,
+    /// lies after the record's head ([`Self::rotation_record_answers`]): a
+    /// rule of journal position, so another operation's fresh life seated
+    /// after that head is read as the verb's too.
     async fn fresh_life_after(
         &self,
         incarnation: &str,
@@ -3136,9 +3146,8 @@ impl IdentityRuntime {
         if intent.incarnation != incarnation {
             return Ok(owes);
         }
-        // Another operation's fresh life after the incarnation (a host's
-        // own, seated before the rotation that recorded the intent read its
-        // head) owes that rotation nothing.
+        // A fresh life seated at or before the record's head (a host's own)
+        // owes the verb nothing.
         if !self
             .rotation_record_answers(
                 identity,
@@ -3153,8 +3162,8 @@ impl IdentityRuntime {
                 %identity,
                 predecessor,
                 verb = ?intent.verb,
-                "the rotation that recorded a fresh life's lifecycle effect intent did not seat \
-                 this fresh life; the intent is consumed and owes nothing"
+                "this fresh life's seat does not follow the head of Core's journal a fresh life's \
+                 lifecycle effect intent keeps; the intent is consumed and owes nothing"
             );
             return Ok(owes);
         }
@@ -3175,14 +3184,18 @@ impl IdentityRuntime {
     /// incarnation before it asked Core, answers the fact at the journal
     /// event `upto`: a retirement of the incarnation, or the fresh life's
     /// seat after it. A rotation's record (a reset's, a delete's, a role
-    /// move's) answers it only when the rotation reached Core with that
-    /// fact's step: Core journaled `first`, the fact the rotation writes
-    /// first, after the head the rotation read before it asked
-    /// ([`step_reached`], the predicate the rotation reads its own reach
-    /// with). So a record that Core's refusal of its rotation is about to
-    /// take back, or one a restart left behind, never claims another
-    /// operation's end of the incarnation. Any other record, and a rotation's
-    /// record with no head (an earlier build's), answers as it names.
+    /// move's) answers it only when Core journaled `first`, the fact such a
+    /// rotation writes first, after the record's head (the head the rotation
+    /// read before it asked Core, or the earlier one it kept, [`kept_head`])
+    /// and up to `upto` ([`step_reached`], the predicate the rotation reads
+    /// its own reach with). So a record that Core's refusal of its rotation
+    /// is about to take back, or one a restart left behind, claims no end of
+    /// the incarnation that another operation started at or before that
+    /// head. The rule reads journal position, so it cannot tell whose fact it
+    /// is: a start another operation journals after that head (a host's
+    /// rotation that starts while the verb asks Core) is read as the
+    /// rotation's. Any other record, and a rotation's record with no head (an
+    /// earlier build's), answers as it names.
     async fn rotation_record_answers(
         &self,
         identity: &AgentIdentity,

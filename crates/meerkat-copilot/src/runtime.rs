@@ -6965,6 +6965,121 @@ mod tests {
             assert_eq!(other_transport.request_count(), 1);
         }
 
+        /// Holds the first request until the row releases it, after telling
+        /// the row it arrived; answers every request with the next scripted
+        /// outcome.
+        struct HeldFirstRequest {
+            inner: Arc<OutcomeTransport>,
+            arrived: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+            release: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+        }
+
+        #[async_trait]
+        impl CopilotHttpTransport for HeldFirstRequest {
+            async fn get(
+                &self,
+                url: &str,
+                headers: HeaderMap,
+            ) -> Result<CopilotHttpResponse, CopilotHttpTransportError> {
+                let arrived = self.arrived.lock().take();
+                if let Some(arrived) = arrived {
+                    let _ = arrived.send(());
+                    let release = self.release.lock().take();
+                    if let Some(release) = release {
+                        let _ = release.await;
+                    }
+                }
+                self.inner.get(url, headers).await
+            }
+        }
+
+        /// GitHub's refusal of a token applies only to the publication it was
+        /// made for. Two account states share the account's lease (two
+        /// provider registries): the first one's identity lookup for the
+        /// earlier token is in flight when the second one publishes a newer
+        /// token, and GitHub refuses the earlier token only after that. The
+        /// newer publication stays valid and the second account state keeps
+        /// serving it with no further request; the first one's request fails
+        /// as `stale_credential`, and its next request reads its source again
+        /// and heals on the newer token.
+        #[tokio::test]
+        async fn a_late_refusal_of_an_earlier_token_leaves_the_newer_one_valid() {
+            let earlier = user_token("earlier");
+            let newer = user_token("newer");
+            let (arrived, lookup_in_flight) = tokio::sync::oneshot::channel();
+            let (release_lookup, release) = tokio::sync::oneshot::channel();
+            let first_transport = Arc::new(HeldFirstRequest {
+                inner: OutcomeTransport::new([
+                    Ok(json_response(
+                        401,
+                        serde_json::json!({"message": "Bad credentials"}),
+                    )),
+                    Ok(svc_bot()),
+                    Ok(models_response()),
+                ]),
+                arrived: Mutex::new(Some(arrived)),
+                release: Mutex::new(Some(release)),
+            });
+            let first = CopilotRuntime::with_transport(first_transport.clone());
+            let second_transport = OutcomeTransport::new([Ok(svc_bot()), Ok(models_response())]);
+            let second = CopilotRuntime::with_transport(second_transport.clone());
+            let operator = OperatorEnv::new();
+            operator.set("COPILOT_GITHUB_TOKEN", &earlier);
+            let first_binding = token_binding(CopilotProviderRoute::OpenAi, env_source());
+            let second_binding = token_binding(CopilotProviderRoute::Anthropic, env_source());
+
+            let first_resolution = first.resolve(&first_binding, &operator.env);
+            let newer_publication = async {
+                lookup_in_flight
+                    .await
+                    .expect("the earlier token's lookup is in flight");
+                // The source now gives the newer token, and the second account
+                // state publishes it.
+                operator.set("COPILOT_GITHUB_TOKEN", &newer);
+                let resolved = second
+                    .resolve(&second_binding, &operator.env)
+                    .await
+                    .expect("the newer token resolves");
+                release_lookup
+                    .send(())
+                    .expect("GitHub answers the earlier token's lookup");
+                resolved
+            };
+            let (first_result, second_resolved) = tokio::join!(first_resolution, newer_publication);
+
+            let lease = operator.lease();
+            assert_eq!(
+                lease.phase,
+                Some(AuthLeasePhase::Valid),
+                "a refusal of the earlier token must not withdraw the newer one"
+            );
+            assert_eq!(lease.generation, 2, "the newer token's publication");
+            let url = format!("{BUSINESS_API}/responses");
+            let (_, bearer) = authorize_once(&second_resolved.concrete_authorizer(), &url).await;
+            assert_eq!(bearer, format!("Bearer {newer}"));
+            assert_eq!(
+                second_transport.request_count(),
+                2,
+                "the second account state keeps serving the newer token"
+            );
+            assert_eq!(
+                first_result.err(),
+                Some(ProviderAuthError::Auth(AuthError::StaleCredential)),
+                "the earlier token's request fails as stale"
+            );
+
+            // The first account state's next request reads its source again.
+            let healed = first
+                .resolve(&first_binding, &operator.env)
+                .await
+                .expect("the first account state heals on the newer token");
+            let (_, bearer) = authorize_once(&healed.concrete_authorizer(), &url).await;
+            assert_eq!(bearer, format!("Bearer {newer}"));
+            assert_eq!(first_transport.inner.request_count(), 3);
+            assert_eq!(operator.lease().phase, Some(AuthLeasePhase::Valid));
+            assert_eq!(operator.lease().generation, 2);
+        }
+
         /// A command source's `refresh_interval_ms` at or below the
         /// AuthMachine's refresh window would run the command and look the
         /// account up again on every request: it is refused as

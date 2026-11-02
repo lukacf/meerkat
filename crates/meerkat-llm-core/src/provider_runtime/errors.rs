@@ -111,6 +111,52 @@ impl From<crate::LlmError> for ProviderClientError {
     }
 }
 
+/// Why the account behind a resolved route cannot serve a model that only
+/// its own model list could define: the model registry defines no such
+/// model. The runtime of a backend whose accounts state the models they serve
+/// gives it ([`crate::provider_runtime::ProviderRuntime::account_model`]).
+#[derive(Debug, Clone, Error, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum AccountModelRefusal {
+    /// The account's model list is not loaded, so it cannot define the
+    /// model.
+    #[error(
+        "the model list of credential '{credential}' is not available, so it cannot define model '{model}'; retry once the list loads"
+    )]
+    ModelsUnavailable {
+        credential: meerkat_core::AuthCredentialIdentity,
+        model: String,
+    },
+    /// The account does not offer the model: its model list does not name
+    /// it, or the account's policy disables it. `available` lists the ids
+    /// the account offers on a protocol Meerkat speaks.
+    #[error(
+        "credential '{credential}' does not offer model '{model}'{}",
+        offered_models_suffix(.available)
+    )]
+    NotOffered {
+        credential: meerkat_core::AuthCredentialIdentity,
+        model: String,
+        available: Vec<String>,
+    },
+    /// The account offers the model on no endpoint Meerkat speaks.
+    #[error("credential '{credential}' offers model '{model}' on no endpoint Meerkat speaks")]
+    UnsupportedEndpoints {
+        credential: meerkat_core::AuthCredentialIdentity,
+        model: String,
+    },
+}
+
+/// The offered ids a [`AccountModelRefusal::NotOffered`] names, as a
+/// message suffix; empty when the account offers none.
+fn offered_models_suffix(available: &[String]) -> String {
+    if available.is_empty() {
+        String::new()
+    } else {
+        format!("; it offers: {}", available.join(", "))
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {

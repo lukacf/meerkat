@@ -369,7 +369,16 @@ impl CopilotRuntime {
             env: env.clone(),
             transport: Arc::clone(&self.transport),
         });
-        authorizer.prime().await?;
+        // A token exchange that is temporarily unavailable does not fail the
+        // resolution: the account's routes resolve (without a model list when
+        // no token was minted yet) and the first request tries the exchange
+        // again, failing with a retryable error while the outage lasts. Every
+        // other failure, an account action included, fails it as before.
+        if let Err(error) = authorizer.prime().await
+            && !authorizer.is_recorded_exchange_outage(&error)
+        {
+            return Err(error);
+        }
         let metadata =
             meerkat_auth_core::resolver::finalize_auth_metadata(binding, AuthMetadata::default())?;
         Ok(CopilotResolvedAuth {
@@ -1392,6 +1401,30 @@ impl CachedCopilotToken {
         self.refresh_at = DateTime::<Utc>::MIN_UTC;
         self.expires_at = DateTime::<Utc>::MIN_UTC;
     }
+
+    /// An account whose first token exchange failed transiently: no token
+    /// serves, the API base is the default one until a token names the
+    /// account's own, and no model list is known, so the account's routes
+    /// resolve without one. The next use tries the exchange again.
+    fn awaiting_first_token(
+        generation: u64,
+        source_generation: u64,
+        source_expires_at: Option<DateTime<Utc>>,
+        exchange_unavailable: CopilotExchangeUnavailable,
+    ) -> Self {
+        Self {
+            generation,
+            token: String::new(),
+            source_generation,
+            source_expires_at,
+            refresh_at: DateTime::<Utc>::MIN_UTC,
+            expires_at: DateTime::<Utc>::MIN_UTC,
+            api_base: DEFAULT_COPILOT_API_BASE.to_string(),
+            models: None,
+            model_discovery_refresh_at: None,
+            exchange_unavailable: Some(exchange_unavailable),
+        }
+    }
 }
 
 pub struct CopilotAuthorizer {
@@ -1424,6 +1457,20 @@ impl CopilotAuthorizer {
             .read()
             .as_ref()
             .map(|cached| cached.api_base.clone())
+    }
+
+    /// Whether `error` is the transient token exchange failure the account
+    /// recorded because it left no token to serve.
+    fn is_recorded_exchange_outage(&self, error: &ProviderAuthError) -> bool {
+        let ProviderAuthError::SourceResolutionFailed(message) = error else {
+            return false;
+        };
+        self.state
+            .cache
+            .read()
+            .as_ref()
+            .and_then(|cached| cached.exchange_unavailable.as_ref())
+            .is_some_and(|unavailable| &unavailable.message == message)
     }
 
     /// Copilot refused the token of `generation` (a 401 on a request it
@@ -1590,6 +1637,22 @@ impl CopilotAuthorizer {
         let error = ProviderAuthError::SourceResolutionFailed(unavailable.message.clone());
         let mut cache = self.state.cache.write();
         let Some(cached) = cache.as_mut() else {
+            // No token was minted for this account yet. The outage is kept on
+            // an entry that serves no token, so the account's routes resolve
+            // (on the default API base, without a model list) and the next
+            // use tries the exchange again.
+            tracing::warn!(
+                credential_identity = %self.binding.credential_identity(),
+                error = %unavailable.message,
+                retryable = %unavailable.retryable,
+                "Copilot token exchange failed transiently before any token was minted; the next request tries it again"
+            );
+            *cache = Some(CachedCopilotToken::awaiting_first_token(
+                self.state.next_generation.fetch_add(1, Ordering::Relaxed),
+                source_generation,
+                source.expires_at,
+                unavailable,
+            ));
             return Err(error);
         };
         if cached.source_generation == source_generation && now < cached.expires_at {

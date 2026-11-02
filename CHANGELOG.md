@@ -1454,9 +1454,11 @@ them.
   deadline, a refused construction, a crash or the identity's removal ends
   it (`ConstructionEnd`) with the identity still pending; once accepted,
   nothing replaces the activation until its publication ends; a failed
-  publication answers the error that ended it
-  (`PreparationSettlement::PublicationEnded`'s `cause`), and a retry of the
-  settle after a crash that interrupted it answers
+  publication answers the error that ended it, typed
+  (`PreparationSettlement::PublicationEnded`'s `cause`, a
+  `ConstructionFailure`: the error's `MobFailureClass`, its wire
+  `ErrorCode` when it has one, and its text for diagnostics), and a retry
+  of the settle after a crash that interrupted it answers
   `ConstructionEnd::PublicationInterrupted`. Refusals are typed
   (`PreparationNotPending`, `NotConstructed`, `ConstructionRequired`,
   `ConstructionOpen`, `StaleAttempt`, `PreparationMismatch`,

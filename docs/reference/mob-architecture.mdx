@@ -677,7 +677,9 @@ accepted, nothing replaces the activation until its publication ends:
 published (the membership commit that seats the member ends the attempt, and
 a store-owned identity's row is present again), failed (the settle answers
 the error that ended it, `PreparationSettlement::PublicationEnded`'s
-`cause`, and the mob logs it), or interrupted by a crash (a retry of the
+`cause`: a `ConstructionFailure` with the error's failure class, its wire
+error code when it has one and its text for diagnostics, and the mob logs
+it), or interrupted by a crash (a retry of the
 settle answers `ConstructionEnd::PublicationInterrupted`), after which the
 identity stays pending and a new attempt may follow. The construction's own
 spawn opens its spawn ladder at its publication, after the settle accepted

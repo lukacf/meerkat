@@ -93,12 +93,13 @@ pub struct ConstructionFailure {
 }
 
 impl ConstructionFailure {
-    /// The typed failure of `error`. (RED: it keeps the text only.)
+    /// The typed failure of `error`: its class and wire error code as the
+    /// error itself classifies them, and its text.
     #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
     pub(crate) fn of(error: &MobError) -> Self {
         Self {
-            class: crate::MobFailureClass::Internal,
-            error_code: None,
+            class: error.failure_class(),
+            error_code: error.wire_error_code(),
             detail: error.to_string(),
         }
     }

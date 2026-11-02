@@ -1235,6 +1235,16 @@ impl std::fmt::Debug for CachedCopilotToken {
     }
 }
 
+impl CachedCopilotToken {
+    /// Copilot refused this token: it serves no further request, and the
+    /// next use mints a new one. The entry stays, with the account's API
+    /// base and model snapshot, so the routes that share the account keep
+    /// resolving while the new token is minted.
+    fn refuse(&mut self) {
+        self.refresh_at = DateTime::<Utc>::MIN_UTC;
+    }
+}
+
 pub struct CopilotAuthorizer {
     state: Arc<CopilotAccountState>,
     binding: ValidatedBinding,
@@ -1267,13 +1277,15 @@ impl CopilotAuthorizer {
             .map(|cached| cached.api_base.clone())
     }
 
-    fn invalidate_derived_token_generation(&self, generation: u64) {
+    /// Copilot refused the token of `generation` (a 401 on a request it
+    /// signed). A late refusal of an older generation leaves a newer token
+    /// alone.
+    fn refuse_derived_token_generation(&self, generation: u64) {
         let mut cache = self.state.cache.write();
-        if cache
-            .as_ref()
-            .is_some_and(|cached| cached.generation == generation)
+        if let Some(cached) = cache.as_mut()
+            && cached.generation == generation
         {
-            *cache = None;
+            cached.refuse();
         }
     }
 
@@ -1384,9 +1396,10 @@ impl CopilotAuthorizer {
                                 current.model_discovery_refresh_at =
                                     Some(model_discovery_deadline(discovery_now, retry_delay));
                             }
-                            Err(_) => {
-                                *cache = None;
-                            }
+                            // Copilot refused the token for discovery: it is
+                            // minted anew (401) or the account needs a new
+                            // login (403).
+                            Err(_) => current.refuse(),
                         }
                     }
                 }
@@ -1750,7 +1763,7 @@ impl HttpAuthorizer for CopilotAuthorizer {
                         .to_string(),
                 )
             })?;
-            self.invalidate_derived_token_generation(generation);
+            self.refuse_derived_token_generation(generation);
             return Ok(HttpAuthorizationResponseAction::RetryWithFreshAuthorization);
         }
         Ok(HttpAuthorizationResponseAction::Propagate)
@@ -3688,9 +3701,12 @@ mod tests {
                     .unwrap(),
                 HttpAuthorizationResponseAction::RetryWithFreshAuthorization
             );
-            assert!(
-                fixture.authorizer.api_base().is_none(),
-                "actual receipt observation invalidates the derived cache"
+            // The observation refuses the token (the preparation below mints
+            // a new one) but keeps the account's route resolvable.
+            assert_eq!(
+                fixture.authorizer.api_base().as_deref(),
+                Some("https://copilot.example.test"),
+                "a refused token keeps the account's API base"
             );
 
             fixture

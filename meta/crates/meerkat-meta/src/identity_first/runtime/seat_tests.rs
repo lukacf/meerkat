@@ -196,6 +196,9 @@ struct SeatCore {
     /// Holds the next rotation inside Core before any of it starts: it
     /// signals that, then waits for the release.
     rotate_gate: StdMutex<Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>>,
+    /// Holds the bridge's answer to the next rotation once Core carried the
+    /// rotation out: it signals that, then waits for the release.
+    rotated_gate: StdMutex<Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>>,
     /// The incarnations Core holds materialized in this process, as Core's
     /// residency does: a revival (a resume) builds its member, a release or a
     /// retirement drops it, and a wake or a delivery that finds its seated
@@ -647,6 +650,11 @@ impl SessionBridge for SeatCore {
         }
         if let Some(error) = lock(&self.answers_after_rotating).take() {
             return Err(error);
+        }
+        let gate = lock(&self.rotated_gate).take();
+        if let Some((rotated, release)) = gate {
+            let _ = rotated.send(());
+            let _ = release.await;
         }
         Ok(session_id)
     }
@@ -6292,6 +6300,92 @@ async fn a_host_rotation_a_refused_role_move_raced_reaches_the_hook_as_rotated()
     assert_eq!(heard.len(), 1, "{heard:?}");
     assert_eq!(heard[0].generation, 0);
     assert_eq!(heard[0].cause.as_str(), "rotated", "{heard:?}");
+}
+
+/// What the retirement hook hears of `step`'s own rotation of alice's member
+/// when a run of the lifecycle projection reaches its end while the step
+/// still waits for Core's answer: Core carried the rotation out and holds
+/// its answer. `step` is a reset, a delete, or a seat step that moves alice
+/// to another role (her session lives in memory only), as in
+/// [`heard_of_a_host_rotation_a_refused_step_raced`]; the run waits for
+/// alice's lifecycle lock, which the step holds until Core answers, at most
+/// a side effect's deadline, kept short here.
+async fn heard_of_a_step_s_rotation_read_before_it_answered(
+    step: &str,
+) -> Vec<RetiredIdentityMember> {
+    let alice = identity("personal:alice");
+    let (rotated_tx, rotated_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
+    let core = Arc::new(SeatCore {
+        rotated_gate: StdMutex::new(Some((rotated_tx, release_rx))),
+        sessions_in_memory: step == "role_move",
+        ..SeatCore::default()
+    });
+    core.core.keep_journal();
+    let runtime = runtime_over(None, &core);
+    runtime.bind_lifecycle_projection(None);
+    runtime.set_lifecycle_effect_limits(Duration::from_millis(200), 1);
+    register_live(&runtime, &core.core, spec(&alice), 0, SessionId::new())
+        .await
+        .expect("registered live");
+    let seen = recording_hook(&runtime);
+    runtime.settle_lifecycle_projection().await;
+
+    let stepping = tokio::spawn({
+        let runtime = Arc::clone(&runtime);
+        let alice = alice.clone();
+        let step = step.to_string();
+        async move {
+            match step.as_str() {
+                "reset" => runtime.reset(&alice).await.map(|_| ()),
+                "delete" => runtime.delete_identity(&alice).await.map(|_| ()),
+                _ => {
+                    let mut reviewer = spec(&alice);
+                    reviewer.profile = meerkat_mob::ProfileName::from("reviewer");
+                    runtime
+                        .seat_identities(std::slice::from_ref(&reviewer), None)
+                        .await
+                        .remove(&alice)
+                        .expect("the seat step answers alice")
+                        .map(|_| ())
+                }
+            }
+        }
+    });
+    rotated_rx
+        .await
+        .expect("Core carries the step's rotation out");
+    // A run of the projection reaches the end of the step's rotation while
+    // the step still waits for Core's answer.
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        runtime.settle_lifecycle_projection(),
+    )
+    .await
+    .expect("the projection's run answers");
+    release_tx.send(()).expect("release Core's answer");
+    let answered = stepping.await.expect("the step's task");
+    assert!(answered.is_ok(), "the {step} answers: {answered:?}");
+    runtime.settle_lifecycle_projection().await;
+    lock(&seen).clone()
+}
+
+/// A reset, a delete and a role move of alice, each read by a run of the
+/// lifecycle projection after Core carried its rotation out and while the
+/// step still waits for Core's answer: Core journaled the start of the
+/// incarnation's retirement after the head the step read, so the step's
+/// record answers the retirement, and the hook hears the step's own cause.
+/// The positive twin, in the same harness, of
+/// [`a_host_rotation_a_refused_delete_raced_reaches_the_hook_as_rotated`]
+/// and its reset and role move twins.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_step_s_own_rotation_read_before_it_answered_reaches_the_hook_as_the_step_s() {
+    for step in ["reset", "delete", "role_move"] {
+        let heard = heard_of_a_step_s_rotation_read_before_it_answered(step).await;
+        assert_eq!(heard.len(), 1, "{step}: {heard:?}");
+        assert_eq!(heard[0].generation, 0, "{step}");
+        assert_eq!(heard[0].cause.as_str(), step, "{heard:?}");
+    }
 }
 
 /// A host customizer that, while it builds `identity`'s draft, has Core

@@ -962,7 +962,10 @@ impl IdentityChangeReceiptEntry {
 /// The receipt of one identity change: one per operation, keyed by its id in
 /// its mob, inserted once, in the same store transaction as the change. A
 /// retry with the same id and request digest replays it; another digest
-/// under the same id is refused, and nothing changes.
+/// under the same id is refused, and nothing changes. It records who asked
+/// and the consent the change committed under, for every change (an
+/// identity's row keeps only the provenance of the operation that wrote it
+/// first, and its removal's).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
@@ -972,6 +975,10 @@ pub struct IdentityChangeReceipt {
     pub operation_id: String,
     pub request_digest: String,
     pub change: IdentityChangeKind,
+    /// Who asked for the change: recorded, never authority.
+    pub requester: IdentityChangeRequester,
+    /// The consent the change committed under.
+    pub consent: IdentityChangeConsent,
     pub identities: Vec<IdentityChangeReceiptEntry>,
     /// When the change committed, in UNIX milliseconds.
     pub committed_at_ms: u64,
@@ -980,7 +987,9 @@ pub struct IdentityChangeReceipt {
 }
 
 impl IdentityChangeReceipt {
-    /// A sealed receipt.
+    /// A sealed receipt of a change the host plane committed under an allow
+    /// rule ([`Self::with_attribution`] records another requester and
+    /// consent).
     pub fn sealed(
         mob_id: MobId,
         operation_id: impl Into<String>,
@@ -989,19 +998,41 @@ impl IdentityChangeReceipt {
         identities: Vec<IdentityChangeReceiptEntry>,
         committed_at_ms: u64,
     ) -> Result<Self, IdentityIntentError> {
-        let mut receipt = Self {
+        Self {
             schema_version: IDENTITY_CHANGE_RECEIPT_SCHEMA_VERSION,
             mob_id,
             operation_id: operation_id.into(),
             request_digest: request_digest.into(),
             change,
+            requester: IdentityChangeRequester::Host {
+                surface: "host".to_string(),
+            },
+            consent: IdentityChangeConsent::Policy {
+                outcome: IdentityPolicyOutcome::Allow,
+            },
             identities,
             committed_at_ms,
             authority_digest: String::new(),
-        };
-        receipt.authority_digest = receipt.canonical_authority_digest()?;
-        receipt.validate()?;
-        Ok(receipt)
+        }
+        .resealed()
+    }
+
+    /// The receipt with its requester and consent, sealed again.
+    pub fn with_attribution(
+        mut self,
+        requester: IdentityChangeRequester,
+        consent: IdentityChangeConsent,
+    ) -> Result<Self, IdentityIntentError> {
+        self.requester = requester;
+        self.consent = consent;
+        self.resealed()
+    }
+
+    fn resealed(mut self) -> Result<Self, IdentityIntentError> {
+        self.authority_digest = String::new();
+        self.authority_digest = self.canonical_authority_digest()?;
+        self.validate()?;
+        Ok(self)
     }
 
     pub fn validate(&self) -> Result<(), IdentityIntentError> {
@@ -1014,6 +1045,8 @@ impl IdentityChangeReceipt {
         validate_text("mob_id", self.mob_id.as_str())?;
         validate_text("operation_id", &self.operation_id)?;
         validate_text("request_digest", &self.request_digest)?;
+        self.requester.validate()?;
+        self.consent.validate()?;
         if self.identities.is_empty() || self.identities.len() > IDENTITY_CHANGE_BATCH_MAX {
             return Err(IdentityIntentError::InvalidOperationReceipt);
         }
@@ -1042,6 +1075,8 @@ impl IdentityChangeReceipt {
             operation_id: &'a str,
             request_digest: &'a str,
             change: IdentityChangeKind,
+            requester: &'a IdentityChangeRequester,
+            consent: &'a IdentityChangeConsent,
             identities: &'a [IdentityChangeReceiptEntry],
             committed_at_ms: u64,
         }
@@ -1052,6 +1087,8 @@ impl IdentityChangeReceipt {
             operation_id: &self.operation_id,
             request_digest: &self.request_digest,
             change: self.change,
+            requester: &self.requester,
+            consent: &self.consent,
             identities: &self.identities,
             committed_at_ms: self.committed_at_ms,
         })

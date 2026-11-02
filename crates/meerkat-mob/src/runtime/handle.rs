@@ -1260,6 +1260,12 @@ pub struct SpawnMemberAdmissionObservations {
     pub tooling_present: bool,
     /// Presence of an explicit `auth_binding` on the spawn request.
     pub auth_binding_present: bool,
+    /// Presence of an explicit runtime `binding` (a session, or an external
+    /// process) on the request: an identity spec's `binding`.
+    pub binding_present: bool,
+    /// Presence of an explicit `placement` on a member host on the request:
+    /// an identity spec's `placement`.
+    pub placement_present: bool,
 }
 
 /// Machine-decided per-mob operator admission verdict for current-mob-scoped
@@ -2888,6 +2894,11 @@ fn spawn_many_failure_observation(error: &MobError) -> mob_dsl::MobSpawnManyFail
         // a spawn without entry custody: the same family as the machine
         // refusing the requested transition.
         MobError::IdentityMember { .. } => {
+            mob_dsl::MobSpawnManyFailureObservationKind::InvalidTransition
+        }
+        // An identity change is not a spawn; its typed refusal is the same
+        // family as the machine refusing the requested transition.
+        MobError::IdentityChangeRefused { .. } => {
             mob_dsl::MobSpawnManyFailureObservationKind::InvalidTransition
         }
         MobError::NotExternallyAddressable(_) => {
@@ -20546,6 +20557,8 @@ impl MobHandle {
             tool_access_policy_present,
             tooling_present,
             auth_binding_present,
+            binding_present: _,
+            placement_present: _,
         } = observations;
         let effects = self
             .apply_machine_input_effects(mob_dsl::MobMachineInput::ResolveSpawnMemberAdmission {

@@ -690,6 +690,13 @@ pub enum MobError {
     )]
     IdentityMember { member_id: AgentIdentity },
 
+    /// An identity change was refused, typed (see
+    /// [`crate::runtime::IdentityChangeRefusal`]): nothing of it was written.
+    #[error("identity change refused: {refusal}")]
+    IdentityChangeRefused {
+        refusal: crate::runtime::IdentityChangeRefusal,
+    },
+
     /// A spawn that had not reached custody (still preparing, or staged and
     /// provisioning) was canceled by a lifecycle transition (stop, complete,
     /// reset, destroy, shutdown, or retire of the member). Nothing of it was
@@ -2755,6 +2762,11 @@ impl MobError {
                 "kind": "identity_member",
                 "member_id": member_id.as_str(),
                 "retryable": false,
+            })),
+            Self::IdentityChangeRefused { refusal } => Some(serde_json::json!({
+                "kind": "identity_change_refused",
+                "refusal": refusal.kind(),
+                "retryable": refusal.is_retryable(),
             })),
             Self::MemberRegistrationRefused {
                 member_id,

@@ -193,6 +193,12 @@ pub(crate) struct MemberResidencyConfig {
     /// records store-only at once
     /// (`MobBuilder::with_member_instruction_delivery_concurrency`).
     pub(crate) instruction_delivery_concurrency: usize,
+    /// Whether the host holds the mob's identity changes from its start
+    /// (`MobBuilder::with_identity_changes_held`).
+    pub(crate) identity_changes_held: bool,
+    /// The host's mint of a member's grant, for the reads that build nothing
+    /// (`MobBuilder::with_member_grant_mint`).
+    pub(crate) member_grant_mint: Option<Arc<dyn super::MemberGrantMint>>,
 }
 
 impl Default for MemberResidencyConfig {
@@ -213,6 +219,8 @@ impl Default for MemberResidencyConfig {
             build_preparer: None,
             instruction_delivery_concurrency:
                 super::operator_instruction_delivery::DEFAULT_DORMANT_DELIVERY_CONCURRENCY,
+            identity_changes_held: false,
+            member_grant_mint: None,
         }
     }
 }
@@ -232,7 +240,9 @@ impl std::fmt::Debug for MemberResidencyConfig {
             .field(
                 "instruction_delivery_concurrency",
                 &self.instruction_delivery_concurrency,
-            );
+            )
+            .field("identity_changes_held", &self.identity_changes_held)
+            .field("member_grant_mint", &self.member_grant_mint.is_some());
         #[cfg(feature = "runtime-adapter")]
         debug.field("build_preparer", &self.build_preparer.is_some());
         debug.finish()

@@ -245,6 +245,13 @@ mod fork_context;
 pub mod forked_participant_routing;
 mod handle;
 mod held_spawn;
+mod identity_change;
+pub use identity_change::{
+    CreatedIdentityRequest, IdentityChangeConsentInput, IdentityChangeGrant, IdentityChangeOutcome,
+    IdentityChangeRefusal, IdentityChangeRequesterInput, IdentityGrantEntry, IdentityGrantRequest,
+    IdentityNameHolder, IdentityOperation, MemberGrantMint, MemberGrantMintRequest,
+    StoreOwnedIdentityCreate,
+};
 mod identity_entry;
 mod identity_incarnation_custody;
 mod identity_local_services;

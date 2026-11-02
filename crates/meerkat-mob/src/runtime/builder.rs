@@ -8333,6 +8333,27 @@ impl MobBuilder {
         self
     }
 
+    /// Hold the mob's identity changes from its start: every store-owned
+    /// identity change is refused, typed and retryable, until the host
+    /// releases them ([`MobHandle::set_identity_changes_held`]). Not durable:
+    /// a host that holds them passes this again at its next start.
+    pub fn with_identity_changes_held(mut self, held: bool) -> Self {
+        self.member_residency.identity_changes_held = held;
+        self
+    }
+
+    /// The host's mint of a member's mob operator grant
+    /// ([`super::MemberGrantMint`]), for the reads of an identity's current
+    /// grant that build nothing: the recheck of an agent requester's identity
+    /// change at its commit. A host whose member build hook edits the members'
+    /// grants passes the same rule here, so the recheck reads what a build
+    /// would carry; without one, an identity's grant is the authority the
+    /// runtime composes for its profile.
+    pub fn with_member_grant_mint(mut self, mint: Arc<dyn super::MemberGrantMint>) -> Self {
+        self.member_residency.member_grant_mint = Some(mint);
+        self
+    }
+
     /// Bound on one member wake: the cold restore of a dormant member through
     /// its readiness and topology. Past it MobMachine resolves the attempt
     /// retryable (the member is Dormant again and the next delivery wakes it

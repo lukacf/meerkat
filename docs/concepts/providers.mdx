@@ -265,7 +265,11 @@ Copilot is also available beneath the Anthropic and Gemini provider families.
 Those routes share one account-scoped credential while preserving the model's
 provider identity and selecting the account-advertised wire dialect. Model
 entitlement is therefore an account observation, never a fixed property of the
-Meerkat model registry.
+Meerkat model registry. `[realm.<realm>.copilot]` configures the account and
+its three routes once, from one credential source; a model only the account
+lists runs on the route of the protocol its listed endpoints name, never one
+chosen by its vendor (see
+[GitHub Copilot configured once](/guides/auth#github-copilot-configured-once)).
 
 See [Auth](/guides/auth) for the full backend/auth compatibility matrix.
 
@@ -284,6 +288,10 @@ name prefixes.
 - A known provider/model mismatch fails before agent construction.
 - An uncataloged model needs an explicit typed provider/binding owner; a name
   that merely begins with `gpt-` or `claude-` is never guessed.
+- On a route of a GitHub Copilot account, a model the registry does not define
+  is defined for that build by the account's model list: its provider is the
+  family of the protocol its listed endpoints name, and its limits are the
+  account's. A model the account does not offer is refused, typed.
 
 All public session-creation surfaces use the same resolver. Inherited bindings
 retain the realm that owns their config.

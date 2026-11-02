@@ -7584,6 +7584,25 @@ fn validate_reserved_copilot_route(
     Ok(())
 }
 
+/// Refuse a Copilot login over a `[realm.global]` that configures its
+/// Copilot account once (`[realm.global.copilot]`): the section already
+/// declares the account's routes, and the login's explicit routes would
+/// declare them again. Nothing is written.
+#[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
+fn refuse_login_over_copilot_account(
+    section: &meerkat_core::RealmConfigSection,
+) -> anyhow::Result<()> {
+    if section.copilot.is_some() {
+        anyhow::bail!(
+            "[realm.global.copilot] in ~/.rkat/config.toml configures the GitHub Copilot \
+             account, with its routes global:copilot_openai, global:copilot_anthropic and \
+             global:copilot_gemini; change its source there, or remove \
+             [realm.global.copilot] to sign in with explicit routes"
+        );
+    }
+    Ok(())
+}
+
 #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
 fn ensure_cli_interactive_oauth_config(
     provider: LoginProvider,
@@ -7607,6 +7626,9 @@ fn ensure_cli_interactive_oauth_config(
         None
     };
     let section = config.realm.entry(realm_id.to_string()).or_default();
+    if provider == LoginProvider::Copilot {
+        refuse_login_over_copilot_account(section)?;
+    }
     let copilot_options = if provider == LoginProvider::Copilot {
         let account = credential_account.as_ref().ok_or_else(|| {
             anyhow::anyhow!("Copilot login target is missing its credential account")
@@ -7871,6 +7893,7 @@ fn ensure_cli_copilot_token_config(
         .realm
         .entry(CLI_INTERACTIVE_OAUTH_REALM_ID.to_string())
         .or_default();
+    refuse_login_over_copilot_account(section)?;
     let canonical_options = section
         .backend
         .get(meerkat_copilot::CopilotProviderRoute::OpenAi.binding_id())

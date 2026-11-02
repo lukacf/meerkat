@@ -538,6 +538,16 @@ declared. A session service or agent builder that wraps another forwards
 `session_comms_identity_root` to it; the method has no default, so a wrapper
 without it does not compile.
 
+A host's own `MobSessionService` wrapper also forwards the member
+operator-instruction methods (`record_member_instruction_target`,
+`release_member_instruction_target`, `read_member_instructions`) and
+`bind_seated_member_session`, as Meta's own wrappers do. Their defaults
+refuse typed, so a wrapper that keeps them blocks its members' operator
+instructions and refuses a dormant resume seat over a session the host
+wrote. It forwards `runtime_turn_lost_its_host_runtime` and
+`live_session_actor_registered` the same way. See Meerkat's
+[upgrade guide](https://docs.rkat.ai/guides/upgrading#wrappers-and-decorators).
+
 ### Fork instruction policy
 
 A fork of a member with activated host instructions does with them what the

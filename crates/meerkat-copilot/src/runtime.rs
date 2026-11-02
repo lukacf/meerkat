@@ -9480,6 +9480,56 @@ mod tests {
             );
         }
 
+        /// The routes of one credential account read its token from one
+        /// source, as they share one auth method and one configuration: a
+        /// route over a second source is refused before it makes a request,
+        /// so no token is labelled against another source's publications (a
+        /// stored token's refusal would otherwise read as superseded on every
+        /// request). Routes over the same source still share the account.
+        #[tokio::test]
+        async fn routes_of_one_account_refuse_a_second_credential_source() {
+            let harness = Harness::new([Ok(svc_bot()), Ok(models_response())]);
+            harness
+                .operator
+                .set("COPILOT_GITHUB_TOKEN", &user_token("first-source"));
+            harness
+                .operator
+                .set("SECOND_COPILOT_TOKEN", &user_token("second-source"));
+            let _first = harness
+                .resolve(CopilotProviderRoute::OpenAi)
+                .await
+                .expect("the first route resolves");
+
+            let refused = harness
+                .resolve_from(
+                    CopilotProviderRoute::Anthropic,
+                    CredentialSourceSpec::Env {
+                        env: "SECOND_COPILOT_TOKEN".to_string(),
+                        fallback: Vec::new(),
+                    },
+                )
+                .await
+                .err();
+            assert!(
+                matches!(
+                    &refused,
+                    Some(ProviderAuthError::SourceResolutionFailed(message))
+                        if message.contains("disagree on the credential source")
+                ),
+                "a second credential source on one account is refused: {refused:?}"
+            );
+            assert_eq!(
+                harness.transport.request_count(),
+                2,
+                "the refused route makes no request"
+            );
+            harness
+                .resolve(CopilotProviderRoute::Gemini)
+                .await
+                .expect("a route over the same source still shares the account");
+            assert_eq!(harness.transport.request_count(), 2);
+        }
+
         /// The device sign-in still requires its stored token, and names the
         /// token method as the way to use an operator-supplied one.
         #[tokio::test]

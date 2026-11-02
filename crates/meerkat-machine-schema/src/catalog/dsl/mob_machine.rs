@@ -30734,6 +30734,17 @@ macro_rules! mob_catalog_machine_dsl {
             on signal RecoverIdentityEntry { agent_identity, agent_runtime_id, origin }
             guard "replay_not_sealed" { self.boot_plan_sealed == false }
             guard "identity_runtime_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
+            // A replay never replaces an entry of another origin: an entry's
+            // custody never changes. The replay runs before the created
+            // entries' scan, so the entry it meets is one an earlier row of
+            // the same origin recorded; a Declared row's replay after the scan
+            // recorded the member a Created entry is refused, and the Created
+            // entry stays (replayed first, the scan's row of the Declared
+            // entry is the contradiction that reserves the name).
+            guard "entry_of_the_rows_origin" {
+                self.identity_entry_origins.contains_key(agent_identity) == false
+                || self.identity_entry_origins.get_cloned(agent_identity) == Some(origin)
+            }
             update {
                 self.identity_entry_origins.insert(agent_identity, origin);
                 self.members_to_spawn.remove(agent_identity);

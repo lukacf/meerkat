@@ -3157,34 +3157,40 @@ fn answer_kind(outcome: &crate::runtime::DeclaredEntryOutcome) -> &'static str {
 }
 
 /// Row (RED): a store-owned update and a roster-owned identity's change of
-/// the same spec answer the same: a descriptive change, a label change and
-/// a placement change keep the member, a runtime-mode change restamps it,
-/// a profile change moves it to the new profile (the store-owned one's
-/// migration declared by the update, the roster-owned one's by its roster).
+/// the same spec answer the same, and each answers its own kind: a
+/// descriptive change, a label change and a placement change keep the
+/// member, a runtime-mode change restamps it, a profile change moves it to
+/// the new profile (the store-owned one's migration declared by the update,
+/// the roster-owned one's by its roster).
 ///
 /// RED on the old tree: no store-owned update exists.
+///
+/// The kinds are pinned per change (P2-9c): two equal failures no longer
+/// pass.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn store_and_roster_updates_of_the_same_change_answer_the_same_verdict() {
     type Change = fn(CreatedIdentitySpec) -> CreatedIdentitySpec;
-    let changes: [(&str, Change); 5] = [
-        ("descriptive", |spec| spec.with_display_name("Renamed")),
-        ("labels", |spec| {
+    let changes: [(&str, &str, Change); 5] = [
+        ("descriptive", "kept", |spec| {
+            spec.with_display_name("Renamed")
+        }),
+        ("labels", "kept", |spec| {
             let mut labels = spec.labels.clone();
             labels.insert("tier".to_string(), "gold".to_string());
             spec.with_labels(labels)
         }),
-        ("runtime_mode", |spec| {
+        ("runtime_mode", "restamped", |spec| {
             spec.with_runtime_mode_override(crate::MobRuntimeMode::AutonomousHost)
         }),
-        ("profile", |mut spec| {
+        ("profile", "role_migrated", |mut spec| {
             spec.profile = ProfileName::from("lead");
             spec
         }),
-        ("placement", |spec| {
+        ("placement", "kept", |spec| {
             spec.with_placement(meerkat_contracts::WireHostRef("host-peer-1".to_string()))
         }),
     ];
-    for (label, change) in changes {
+    for (label, expected, change) in changes {
         let mob = StoreOwnedMob::new(&format!("update-parity-{label}")).await;
         let base = |name: &str| {
             CreatedIdentitySpec::new(name, "worker")
@@ -3241,7 +3247,8 @@ async fn store_and_roster_updates_of_the_same_change_answer_the_same_verdict() {
             .await
             .expect("update the store-owned identity");
         let store_kind = answer_kind(updated.applied.as_ref().expect("the update's answer"));
-        assert_eq!(store_kind, roster_kind, "{label}");
+        assert_eq!(roster_kind, expected, "{label}: the roster-owned change");
+        assert_eq!(store_kind, expected, "{label}: the store-owned update");
     }
 }
 
@@ -3377,6 +3384,58 @@ async fn an_approved_store_owned_profile_change_survives_a_restart_before_its_re
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     assert_eq!(mob.row("migrating").await.revision, 2);
+}
+
+impl StoreOwnedMob {
+    /// Write the transaction of a store-owned update of `spec`'s identity to
+    /// `spec` as the update's commit step writes it (the row at its next
+    /// revision and the receipt), with nothing after it.
+    async fn commit_update_transaction(&self, operation_id: &str, spec: CreatedIdentitySpec) {
+        let before = self.row(spec.identity.as_str()).await;
+        let after = before
+            .clone()
+            .updated(spec.clone(), None)
+            .expect("the updated row");
+        let receipt = crate::IdentityChangeReceipt::sealed(
+            self.mob_id(),
+            operation_id,
+            digest(operation_id),
+            IdentityChangeKind::Update,
+            vec![
+                crate::identity::IdentityChangeReceiptEntry::new(
+                    spec.identity.clone(),
+                    IdentityChangeEntryOutcome::Committed,
+                )
+                .with_spec(spec_digest(&spec), Some(after.revision)),
+            ],
+            1,
+        )
+        .expect("the update's receipt");
+        let store = self
+            .storage
+            .identity_member
+            .clone()
+            .expect("the built-in identity store");
+        let written = crate::store::MobIdentityMemberStore::commit_identity_change(
+            store.as_ref(),
+            &crate::store::IdentityChangeWrite {
+                receipt,
+                rows: vec![crate::store::CreatedIdentityRowWrite {
+                    record: after,
+                    expected: crate::store::CreatedIdentityRowExpectation::Current {
+                        authority_digest: before.authority_digest.clone(),
+                    },
+                }],
+                events: Vec::new(),
+            },
+        )
+        .await
+        .expect("the update's transaction");
+        assert!(matches!(
+            written,
+            crate::store::IdentityChangeCommit::Committed { .. }
+        ));
+    }
 }
 
 /// Row: a descriptive store-owned update keeps the member: no restamp (the
@@ -3679,9 +3738,11 @@ async fn a_present_store_owned_entry_retired_by_an_older_build_is_reseated_with_
     let mut labels = first.labels.clone();
     labels.insert("tier".to_string(), "gold".to_string());
     let second = first.clone().with_labels(labels.clone());
-    mob.update("update-phoenix", second, &spec_digest(&first))
-        .await
-        .expect("the label update");
+    // The label update's transaction, written as its commit step writes it
+    // (P2-9g: the row's RED leg then fails at the recovery it tests, not at
+    // an update stub).
+    mob.commit_update_transaction("update-phoenix", second)
+        .await;
     mob.handle
         .retire(id("phoenix"))
         .await
@@ -4604,53 +4665,57 @@ async fn a_store_write_failing_after_the_activation_send_ends_a_failed_publicati
 
 /// Row (RED): an accepted activation that a crash left without its
 /// publication ends `publication_interrupted` and keeps the identity
-/// pending. The settle's receipt journals the acceptance (written here as
-/// the settle's step writes it, and the process stops before the
-/// publication); after the restart, a retry of the settle replays its
-/// receipt and answers the interrupted publication, the identity is still
-/// pending, and a new held attempt can be constructed and activated.
+/// pending. The settle accepts the activation and journals its receipt;
+/// the publication is parked, and the process crashes before it. After the
+/// restart, a retry of the settle replays its receipt and answers the
+/// interrupted publication, the identity is still pending, and a new held
+/// attempt can be constructed and activated.
 ///
 /// RED on the old tree: no settle exists.
-#[tokio::test]
+///
+/// Staged with a real crash (P2-9h): the settle's own step writes the
+/// receipt, and the row waits until the receipt read answers it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_crash_between_acceptance_and_commit_ends_the_attempt_publication_interrupted_and_keeps_the_entry_pending()
  {
     let mut mob = HeldMob::new("construct-crash").await;
-    mob.create_constructed("built").await;
-    let mob_id = mob.handle.mob_id().clone();
-    let receipt = crate::IdentityChangeReceipt::sealed(
-        mob_id,
-        "settle-built",
-        digest("settle-built"),
-        IdentityChangeKind::SettlePreparation,
-        vec![crate::identity::IdentityChangeReceiptEntry::new(
-            id("built"),
-            IdentityChangeEntryOutcome::Activating,
-        )],
-        1,
-    )
-    .expect("the acceptance's receipt");
-    let store = mob
-        .storage
-        .identity_member
-        .clone()
-        .expect("the built-in identity store");
-    let written = crate::store::MobIdentityMemberStore::commit_identity_change(
-        store.as_ref(),
-        &crate::store::IdentityChangeWrite {
-            receipt,
-            rows: Vec::new(),
-            events: Vec::new(),
-        },
-    )
-    .await
-    .expect("the acceptance's transaction");
-    assert!(matches!(
-        written,
-        crate::store::IdentityChangeCommit::Committed { .. }
-    ));
+    // The publication hold is keyed by name across the test process.
+    let name = unique("crashed");
+    mob.create_constructed(&name).await;
+    let held = mob
+        .construct("construct-crashed", &name)
+        .await
+        .expect("the construction is held");
+    let attempt = held.attempt();
+    let (entered, release) = crate::runtime::held_spawn::arm_held_publication_for_test(&name);
+    let handle = mob.handle.clone();
+    let settled_name = name.clone();
+    let settling = tokio::spawn(async move {
+        settle(&handle, "settle-crashed", &settled_name, Some(attempt)).await
+    });
+    tokio::time::timeout(STEP, entered)
+        .await
+        .expect("the accepted publication parks")
+        .expect("the publication hold");
+    let deadline = tokio::time::Instant::now() + STEP;
+    while mob
+        .handle
+        .identity_operation("settle-crashed")
+        .await
+        .expect("the receipt read answers")
+        .is_none()
+    {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the settle never journaled its acceptance"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 
+    // The crash, with the publication still parked.
+    settling.abort();
     mob.restart().await;
-    let replayed = settle(&mob.handle, "settle-built", "built", Some(1))
+    let replayed = settle(&mob.handle, "settle-crashed", &name, Some(attempt))
         .await
         .expect("the retry answers");
     assert!(matches!(
@@ -4669,23 +4734,26 @@ async fn a_crash_between_acceptance_and_commit_ends_the_attempt_publication_inte
         replayed.settlement
     );
     assert_eq!(
-        mob.standing("built"),
+        mob.standing(&name),
         Some(EntryStanding::Unseated(
             UnseatedEntryCause::PreparationPending
         )),
         "the identity stays pending"
     );
-    let held = mob
-        .construct("construct-again", "built")
+    let again = mob
+        .construct("construct-again", &name)
         .await
         .expect("a new attempt is held");
-    settle(&mob.handle, "settle-again", "built", Some(held.attempt()))
+    assert_eq!(again.attempt(), attempt + 1);
+    settle(&mob.handle, "settle-again", &name, Some(again.attempt()))
         .await
         .expect("the new attempt activates");
     assert!(matches!(
-        mob.standing("built"),
+        mob.standing(&name),
         Some(EntryStanding::Seated(_))
     ));
+    // The parked publication of the crashed process is let go last.
+    drop(release);
 }
 
 /// Row (RED): a removal of an identity whose construction is held aborts
@@ -4994,17 +5062,21 @@ async fn an_activation_accepted_before_the_deadline_publishes_after_it_and_nothi
 // R2.12: the reads
 // ---------------------------------------------------------------------------
 
-/// Row (RED): the entry read shows a store-owned identity's revision, its
-/// provenance and its archive without waking it. After an update and an
-/// archive, the entry reads unseated, archived, on the session its member
-/// was bound to; its record reads the revision the update committed, the
-/// provenance its create wrote, and its archived presence; a name with no
-/// row reads none; and the reads build no member.
+/// Row (RED): the record read shows a store-owned identity's revision and
+/// provenance, and the entry read its archive, without waking it. After an
+/// update and an archive, the entry reads unseated, archived, on the
+/// session its member was bound to; its record (`identity_record`, the
+/// row's read) reads the revision the update committed, the provenance its
+/// create wrote, and its archived presence; a name with no row reads none;
+/// and the reads build no member. The entry view is a read of the published
+/// machine state: revision and provenance are the row's, read from the
+/// record (P2-9i; renamed from the entry read's name).
 ///
 /// RED on the old tree: the entry view names no archived session and the
 /// handle reads no record.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn the_entry_read_shows_revision_provenance_and_archive_without_waking() {
+async fn the_record_read_shows_revision_and_provenance_and_the_entry_read_its_archive_without_waking()
+ {
     let mob = StoreOwnedMob::new("read-record").await;
     committed(
         mob.create(host_create("create-read", &["read"]), ALLOW)

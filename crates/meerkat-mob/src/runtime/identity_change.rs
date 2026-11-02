@@ -278,6 +278,93 @@ impl IdentityArchiveChange {
     }
 }
 
+/// An update of one store-owned identity's spec, as one change. The
+/// identity's row takes the new spec at its next revision, in the change's
+/// store transaction, and its member is changed exactly as the declared
+/// apply changes a roster-owned identity's member for the same change of
+/// spec: a descriptive change keeps it, a runtime-mode change restamps it
+/// on its own session, and a profile change moves it to the new profile on
+/// its own session (the store-owned identity's migration from its current
+/// profile is declared by the update itself, and kept in its row until the
+/// restamp commits).
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct StoreOwnedIdentityUpdate {
+    pub operation: IdentityOperation,
+    pub requester: IdentityChangeRequesterInput,
+    /// The identity's new spec, whole; its identity names the identity.
+    pub spec: CreatedIdentitySpec,
+    /// The spec digest the change was decided against
+    /// ([`CreatedIdentitySpec::spec_digest`] of the spec it changes): a row
+    /// whose spec digest differs refuses the change
+    /// ([`IdentityChangeRefusal::StaleSpec`]).
+    pub expected_spec_digest: String,
+    /// How the identity's host prepares it, under its new spec.
+    pub preparation: IdentityPreparationMode,
+}
+
+impl StoreOwnedIdentityUpdate {
+    #[must_use]
+    pub fn new(
+        operation: IdentityOperation,
+        requester: IdentityChangeRequesterInput,
+        spec: CreatedIdentitySpec,
+        expected_spec_digest: impl Into<String>,
+    ) -> Self {
+        Self {
+            operation,
+            requester,
+            spec,
+            expected_spec_digest: expected_spec_digest.into(),
+            preparation: IdentityPreparationMode::None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_preparation(mut self, preparation: IdentityPreparationMode) -> Self {
+        self.preparation = preparation;
+        self
+    }
+}
+
+/// What a store-owned update answers: the change (committed now, with its
+/// receipt, or replayed), and what it did to the identity's member, as the
+/// declared apply answers a roster-owned identity's change of the same spec
+/// (`None` for a replay).
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct IdentityUpdateOutcome {
+    pub change: IdentityChangeOutcome,
+    pub applied: Option<super::DeclaredEntryOutcome>,
+}
+
+/// A roster-owned identity's change, written by its host's roster writer
+/// and applied by a partial declared apply
+/// ([`super::DeclaredRoster::with_change`]): the apply writes the change's
+/// receipt in its declaration step's transaction.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct IdentityRosterChange {
+    pub operation: IdentityOperation,
+    pub requester: IdentityChangeRequester,
+    pub consent: IdentityChangeConsent,
+}
+
+impl IdentityRosterChange {
+    #[must_use]
+    pub fn new(
+        operation: IdentityOperation,
+        requester: IdentityChangeRequester,
+        consent: IdentityChangeConsent,
+    ) -> Self {
+        Self {
+            operation,
+            requester,
+            consent,
+        }
+    }
+}
+
 /// What a committed change answers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -382,6 +469,14 @@ pub enum IdentityChangeRefusal {
     /// a roster-owned identity's archive is its host's one-entry unlist
     /// (`owner` is `roster`).
     OwnerReadOnly { owner: &'static str },
+    /// The identity's spec moved since the change was decided: its current
+    /// spec digest, and its revision (a store-owned identity's; a
+    /// roster-owned identity has none).
+    StaleSpec {
+        identity: AgentIdentity,
+        current_digest: String,
+        current_revision: Option<u64>,
+    },
 }
 
 impl IdentityChangeRefusal {
@@ -408,6 +503,7 @@ impl IdentityChangeRefusal {
             Self::IdentityUnknown { .. } => "identity_unknown",
             Self::NotArchived { .. } => "not_archived",
             Self::OwnerReadOnly { .. } => "owner_read_only",
+            Self::StaleSpec { .. } => "stale_spec",
         }
     }
 
@@ -471,6 +567,14 @@ impl std::fmt::Display for IdentityChangeRefusal {
             Self::OwnerReadOnly { owner } => write!(
                 formatter,
                 "the identity's owner ({owner}) writes this change, not the identity store"
+            ),
+            Self::StaleSpec {
+                identity,
+                current_digest,
+                ..
+            } => write!(
+                formatter,
+                "the spec of '{identity}' moved since the change was decided (now {current_digest})"
             ),
         }
     }
@@ -2285,5 +2389,27 @@ impl super::MobHandle {
             }
             other => Err(other.into_unseated_error()),
         }
+    }
+}
+
+impl super::MobHandle {
+    /// Update one store-owned identity's spec as one change (see
+    /// [`StoreOwnedIdentityUpdate`]). A retry of a committed update with the
+    /// same request answers [`IdentityChangeOutcome::Replayed`], never a
+    /// stale spec. Refused typed, with nothing written: a stale expected
+    /// spec digest ([`IdentityChangeRefusal::StaleSpec`]), an identity that
+    /// is not store-owned ([`IdentityChangeRefusal::IdentityUnknown`], or
+    /// [`IdentityChangeRefusal::OwnerReadOnly`] for a roster-owned one),
+    /// and every refusal of [`Self::create_store_owned_identities`] that
+    /// applies to a change.
+    pub async fn update_store_owned_identity(
+        &self,
+        update: StoreOwnedIdentityUpdate,
+        consent: IdentityChangeConsentInput<'_>,
+    ) -> Result<IdentityUpdateOutcome, MobError> {
+        let _ = (update, consent);
+        Err(MobError::Internal(
+            "store-owned updates are not built yet".to_string(),
+        ))
     }
 }

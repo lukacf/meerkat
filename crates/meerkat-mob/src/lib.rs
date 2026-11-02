@@ -359,8 +359,9 @@ pub use runtime::{CloseIfIdleOutcome, MobAdmissionCloseReason, MobBusy};
 pub use runtime::{
     CreatedIdentityRequest, IdentityArchiveChange, IdentityChangeConsentInput, IdentityChangeGrant,
     IdentityChangeOutcome, IdentityChangeRefusal, IdentityChangeRequesterInput, IdentityGrantEntry,
-    IdentityGrantRequest, IdentityNameHolder, IdentityOperation, IdentityRemoval, MemberGrantMint,
-    MemberGrantMintRequest, StoreOwnedIdentityCreate,
+    IdentityGrantRequest, IdentityNameHolder, IdentityOperation, IdentityRemoval,
+    IdentityRosterChange, IdentityUpdateOutcome, MemberGrantMint, MemberGrantMintRequest,
+    StoreOwnedIdentityCreate, StoreOwnedIdentityUpdate,
 };
 pub use runtime::{
     DECLARED_APPLY_CHUNK, DeclaredEntry, DeclaredEntryNote, DeclaredEntryOutcome,

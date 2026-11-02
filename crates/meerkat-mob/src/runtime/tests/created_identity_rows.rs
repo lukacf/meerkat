@@ -1540,3 +1540,54 @@ async fn unarchiving_seats_it_dormant_on_its_archived_session_with_its_history()
         .expect("the wake revives the archived session");
     assert_eq!(mob.session("keeper").await, Some(session));
 }
+
+/// R2.11 row: a store-owned row of this schema version that carries a field
+/// this build does not know reads unreadable, for that identity alone: its
+/// name is reserved (no spawn takes it) and nothing acts on it, while every
+/// other created row of the mob recovers as it is stored (a seated created
+/// entry stays seated).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_v2_row_with_a_field_this_build_does_not_know_reads_unreadable_for_that_identity_alone() {
+    let mut mob = CreatedMob::new("created-unknown-field").await;
+    mob.spawn_worker("owner").await;
+    mob.put_created("owner", CreatedIdentityPresence::Present)
+        .await;
+    let mut stored = serde_json::to_value(created_record(
+        &mob.mob_id(),
+        "later",
+        CreatedIdentityPresence::Present,
+    ))
+    .expect("encode the row");
+    stored
+        .as_object_mut()
+        .expect("a row object")
+        .insert("a_field_this_build_does_not_know".to_string(), true.into());
+    mob.put_raw(
+        "later",
+        serde_json::to_vec(&stored).expect("encode the row"),
+    )
+    .await;
+    mob.restart().await;
+
+    assert!(
+        matches!(
+            mob.read("later"),
+            IdentityEntryRead::Unreadable { member: None }
+        ),
+        "{:?}",
+        mob.read("later")
+    );
+    let error = mob
+        .handle
+        .spawn_spec(worker_spec("later"))
+        .await
+        .expect_err("no spawn takes the unreadable name");
+    assert!(is_identity_member(&error, "later"), "{error:?}");
+    assert_eq!(mob.origin("owner"), Some(IdentityEntryOrigin::Created));
+    assert!(
+        seated_session(mob.standing("owner")).is_some(),
+        "the other created entry is recovered seated"
+    );
+    let census = mob.handle.identity_census().expect("the census");
+    assert_eq!((census.created, census.unreadable), (1, 1));
+}

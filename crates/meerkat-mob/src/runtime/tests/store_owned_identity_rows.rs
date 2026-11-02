@@ -2127,3 +2127,556 @@ async fn a_pre_adopt_roster_generation_retires_nothing() {
         assert!(mob.seated_dormant("owned"), "{:?}", mob.read("owned"));
     }
 }
+
+// ---------------------------------------------------------------------------
+// R2.5: store-owned updates
+// ---------------------------------------------------------------------------
+
+impl StoreOwnedMob {
+    /// A host surface's update of `name` to `spec` as `operation_id`,
+    /// decided against the spec whose digest is `expected`.
+    async fn update(
+        &self,
+        operation_id: &str,
+        spec: CreatedIdentitySpec,
+        expected: &str,
+    ) -> Result<crate::runtime::IdentityUpdateOutcome, MobError> {
+        tokio::time::timeout(
+            STEP,
+            self.handle.update_store_owned_identity(
+                crate::runtime::StoreOwnedIdentityUpdate::new(
+                    operation(operation_id),
+                    IdentityChangeRequesterInput::host("console"),
+                    spec,
+                    expected,
+                ),
+                ALLOW,
+            ),
+        )
+        .await
+        .expect("the update answers")
+    }
+
+    async fn role(&self, name: &str) -> Option<ProfileName> {
+        self.handle
+            .get_member(&id(name))
+            .await
+            .expect("roster read")
+            .map(|entry| entry.role)
+    }
+
+    async fn generation(&self, name: &str) -> Option<crate::ids::Generation> {
+        self.handle
+            .get_member(&id(name))
+            .await
+            .expect("roster read")
+            .map(|entry| entry.generation)
+    }
+}
+
+fn spec_digest(spec: &CreatedIdentitySpec) -> String {
+    spec.spec_digest().expect("the spec's digest")
+}
+
+/// The answer's kind, for comparing a store-owned update's answer with the
+/// declared apply's.
+fn answer_kind(outcome: &crate::runtime::DeclaredEntryOutcome) -> &'static str {
+    use crate::runtime::DeclaredEntryOutcome as Outcome;
+    match outcome {
+        Outcome::Seated { .. } => "seated",
+        Outcome::Embodied { .. } => "embodied",
+        Outcome::Kept => "kept",
+        Outcome::Restamped { .. } => "restamped",
+        Outcome::RoleMigrated { .. } => "role_migrated",
+        Outcome::RoleRotated { .. } => "role_rotated",
+        Outcome::FreshLife { .. } => "fresh_life",
+        Outcome::RoleMigrationHeld { .. } => "role_migration_held",
+        Outcome::AwaitingHeldCreation => "awaiting_held_creation",
+        Outcome::HostedOnFirstUse => "hosted_on_first_use",
+        Outcome::Deferred { .. } => "deferred",
+        Outcome::Refused { .. } => "refused",
+        Outcome::Noted { .. } => "noted",
+        Outcome::Failed { .. } => "failed",
+    }
+}
+
+/// Row (RED): a store-owned update and a roster-owned identity's change of
+/// the same spec answer the same: a descriptive change, a label change and
+/// a placement change keep the member, a runtime-mode change restamps it,
+/// a profile change moves it to the new profile (the store-owned one's
+/// migration declared by the update, the roster-owned one's by its roster).
+///
+/// RED on the old tree: no store-owned update exists.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn store_and_roster_updates_of_the_same_change_answer_the_same_verdict() {
+    type Change = fn(CreatedIdentitySpec) -> CreatedIdentitySpec;
+    let changes: [(&str, Change); 5] = [
+        ("descriptive", |spec| spec.with_display_name("Renamed")),
+        ("labels", |spec| {
+            let mut labels = spec.labels.clone();
+            labels.insert("tier".to_string(), "gold".to_string());
+            spec.with_labels(labels)
+        }),
+        ("runtime_mode", |spec| {
+            spec.with_runtime_mode_override(crate::MobRuntimeMode::AutonomousHost)
+        }),
+        ("profile", |mut spec| {
+            spec.profile = ProfileName::from("lead");
+            spec
+        }),
+        ("placement", |spec| {
+            spec.with_placement(meerkat_contracts::WireHostRef("host-peer-1".to_string()))
+        }),
+    ];
+    for (label, change) in changes {
+        let mob = StoreOwnedMob::new(&format!("update-parity-{label}")).await;
+        let base = |name: &str| {
+            CreatedIdentitySpec::new(name, "worker")
+                .with_runtime_mode_override(crate::MobRuntimeMode::TurnDriven)
+        };
+        // The roster-owned identity, declared with the base spec, then with
+        // the changed one.
+        let roster_entry = |spec: &CreatedIdentitySpec| {
+            let mut lowered =
+                super::super::identity_change::lower_created_spec(spec).expect("lower the spec");
+            lowered.created_custody = false;
+            DeclaredEntry::new(lowered)
+        };
+        let roster_base = base("roster");
+        mob.handle
+            .apply_declared_roster(DeclaredRoster::partial([roster_entry(&roster_base)]))
+            .await
+            .expect("declare the roster-owned identity");
+        let roster_changed = change(roster_base.clone());
+        let mut roster = DeclaredRoster::partial([roster_entry(&roster_changed)]);
+        if roster_changed.profile != roster_base.profile {
+            roster = roster.with_role_migration("roster", roster_base.profile.clone());
+        }
+        let roster_answer = mob
+            .handle
+            .apply_declared_roster(roster)
+            .await
+            .expect("change the roster-owned identity");
+        let roster_kind = answer_kind(
+            roster_answer
+                .entries
+                .get(&id("roster"))
+                .expect("the roster-owned answer"),
+        );
+
+        let store_base = base("store");
+        committed(
+            mob.create(
+                StoreOwnedIdentityCreate::new(
+                    operation("create-store"),
+                    IdentityChangeRequesterInput::host("console"),
+                    vec![CreatedIdentityRequest::new(store_base.clone())],
+                ),
+                ALLOW,
+            )
+            .await,
+        );
+        let updated = mob
+            .update(
+                "update-store",
+                change(store_base.clone()),
+                &spec_digest(&store_base),
+            )
+            .await
+            .expect("update the store-owned identity");
+        let store_kind = answer_kind(updated.applied.as_ref().expect("the update's answer"));
+        assert_eq!(store_kind, roster_kind, "{label}");
+    }
+}
+
+/// Row (RED): a store-owned profile change restamps the identity's member on
+/// its own session under the new profile, and its row holds the new spec at
+/// the next revision with no pending migration once the restamp committed.
+///
+/// RED on the old tree: no store-owned update exists.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_store_owned_profile_change_restamps_on_the_same_session_under_the_new_profile() {
+    let mob = StoreOwnedMob::new("update-profile").await;
+    let before = spec("mover", "worker");
+    committed(
+        mob.create(host_create("create-mover", &["mover"]), ALLOW)
+            .await,
+    );
+    mob.handle
+        .ensure_member_live(&id("mover"))
+        .await
+        .expect("wake the identity");
+    let session = mob.session("mover").await;
+    let mut after = before.clone();
+    after.profile = ProfileName::from("lead");
+    let updated = mob
+        .update("update-mover", after.clone(), &spec_digest(&before))
+        .await
+        .expect("update the profile");
+    assert!(
+        matches!(
+            updated.applied,
+            Some(crate::runtime::DeclaredEntryOutcome::RoleMigrated { .. })
+        ),
+        "{updated:?}"
+    );
+    assert_eq!(mob.role("mover").await, Some(ProfileName::from("lead")));
+    assert_eq!(mob.session("mover").await, session, "the same session");
+    let row = mob.row("mover").await;
+    assert_eq!(row.revision, 2);
+    assert_eq!(row.spec, Some(after));
+    assert_eq!(row.pending_role_migration, None);
+}
+
+/// Row (RED): an approved store-owned profile change whose restamp a crash
+/// prevented is carried out after the restart. The update's transaction
+/// committed (the identity's row at its next revision under the new profile,
+/// with the migration it declares from the old one, and its receipt), and
+/// the process stopped before the restamp: the start restamps the member
+/// under the new profile on its own session, and the row lets the migration
+/// go once the restamp committed.
+///
+/// RED on the old tree: nothing reads a row's pending migration, and the
+/// member keeps its old profile.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_approved_store_owned_profile_change_survives_a_restart_before_its_restamp() {
+    let mut mob = StoreOwnedMob::new("update-profile-crash").await;
+    committed(
+        mob.create(host_create("create-migrating", &["migrating"]), ALLOW)
+            .await,
+    );
+    let session = mob.session("migrating").await;
+    // The update's transaction as its commit step writes it, and no restamp
+    // after it.
+    let before = mob.row("migrating").await;
+    let mut spec = before.spec.clone().expect("the row's spec");
+    spec.profile = ProfileName::from("lead");
+    let after = before
+        .clone()
+        .updated(
+            spec.clone(),
+            Some(crate::identity::PendingRoleMigration::new("worker")),
+        )
+        .expect("the updated row");
+    let receipt = crate::IdentityChangeReceipt::sealed(
+        mob.mob_id(),
+        "update-migrating",
+        digest("update-migrating"),
+        IdentityChangeKind::Update,
+        vec![
+            crate::identity::IdentityChangeReceiptEntry::new(
+                id("migrating"),
+                IdentityChangeEntryOutcome::Committed,
+            )
+            .with_spec(spec_digest(&spec), Some(after.revision)),
+        ],
+        1,
+    )
+    .expect("the update's receipt");
+    let store = mob
+        .storage
+        .identity_member
+        .clone()
+        .expect("the built-in identity store");
+    let written = crate::store::MobIdentityMemberStore::commit_identity_change(
+        store.as_ref(),
+        &crate::store::IdentityChangeWrite {
+            receipt,
+            rows: vec![crate::store::CreatedIdentityRowWrite {
+                record: after,
+                expected: crate::store::CreatedIdentityRowExpectation::Current {
+                    authority_digest: before.authority_digest.clone(),
+                },
+            }],
+            events: Vec::new(),
+        },
+    )
+    .await
+    .expect("the update's transaction");
+    assert!(matches!(
+        written,
+        crate::store::IdentityChangeCommit::Committed { .. }
+    ));
+    assert_eq!(
+        mob.role("migrating").await,
+        Some(ProfileName::from("worker"))
+    );
+
+    mob.restart_as(MobCompositionAuthority::Authoritative).await;
+    let deadline = tokio::time::Instant::now() + STEP;
+    while mob.role("migrating").await != Some(ProfileName::from("lead")) {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the restart never restamped the member under its new profile"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(mob.session("migrating").await, session, "the same session");
+    let deadline = tokio::time::Instant::now() + STEP;
+    while mob.row("migrating").await.pending_role_migration.is_some() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the row never let the migration go"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(mob.row("migrating").await.revision, 2);
+}
+
+/// Row: a descriptive store-owned update keeps the member: no restamp (the
+/// generation stays), and the row holds the new spec at the next revision.
+/// The member's next build applies it: the first wake of its seat builds
+/// with the updated context and instructions.
+#[tokio::test]
+async fn a_descriptive_store_owned_update_applies_at_the_next_build_and_restamps_nothing() {
+    let mob = StoreOwnedMob::new("update-descriptive").await;
+    let before = spec("quiet", "worker");
+    committed(
+        mob.create(host_create("create-quiet", &["quiet"]), ALLOW)
+            .await,
+    );
+    let generation = mob.generation("quiet").await;
+    let session = mob.session("quiet").await;
+    let after = before
+        .clone()
+        .with_display_name("Quieter")
+        .with_context(serde_json::json!({"desk": "moved"}))
+        .with_additional_instructions(vec!["Speak softly.".to_string()]);
+    let updated = mob
+        .update("update-quiet", after.clone(), &spec_digest(&before))
+        .await
+        .expect("update the descriptive facets");
+    assert!(
+        matches!(
+            updated.applied,
+            Some(crate::runtime::DeclaredEntryOutcome::Kept)
+        ),
+        "{updated:?}"
+    );
+    assert_eq!(mob.generation("quiet").await, generation, "no restamp");
+    assert_eq!(mob.builds().await, 0, "nothing was built");
+    let row = mob.row("quiet").await;
+    assert_eq!(row.revision, 2);
+    assert_eq!(row.spec, Some(after));
+
+    tokio::time::timeout(STEP, mob.handle.ensure_member_live(&id("quiet")))
+        .await
+        .expect("the wake answers")
+        .expect("the wake builds the member");
+    let builds = mob
+        .service
+        .recorded_create_requests()
+        .await
+        .into_iter()
+        .filter(|record| record.session_id == session)
+        .collect::<Vec<_>>();
+    assert_eq!(builds.len(), 1, "one build of the seat's session");
+    assert_eq!(
+        builds[0].app_context,
+        Some(serde_json::json!({"desk": "moved"})),
+        "the next build applies the updated context"
+    );
+    assert_eq!(
+        builds[0].additional_instructions,
+        Some(vec!["Speak softly.".to_string()]),
+        "the next build applies the updated instructions"
+    );
+}
+
+/// Row: an update decided against a spec that is no longer current is
+/// refused `stale_spec` with the current digest and revision, and nothing
+/// is written.
+#[tokio::test]
+async fn a_stale_expected_revision_is_refused_with_the_current_one() {
+    let mob = StoreOwnedMob::new("update-stale").await;
+    let first = spec("stale", "worker");
+    committed(
+        mob.create(host_create("create-stale", &["stale"]), ALLOW)
+            .await,
+    );
+    let second = first.clone().with_display_name("Second");
+    mob.update("update-second", second.clone(), &spec_digest(&first))
+        .await
+        .expect("the first update");
+    assert_eq!(
+        refusal(
+            mob.update(
+                "update-third",
+                first.clone().with_display_name("Third"),
+                &spec_digest(&first)
+            )
+            .await
+        ),
+        IdentityChangeRefusal::StaleSpec {
+            identity: id("stale"),
+            current_digest: spec_digest(&second),
+            current_revision: Some(2),
+        }
+    );
+    assert_eq!(mob.row("stale").await.revision, 2);
+}
+
+/// Row: a retried update that committed replays its outcome, never a stale
+/// spec, and writes nothing again.
+#[tokio::test]
+async fn a_retried_update_that_committed_replays_its_outcome() {
+    let mob = StoreOwnedMob::new("update-replay").await;
+    let first = spec("again", "worker");
+    committed(
+        mob.create(host_create("create-again", &["again"]), ALLOW)
+            .await,
+    );
+    let second = first.clone().with_display_name("Again");
+    let committed_update = mob
+        .update("update-again", second.clone(), &spec_digest(&first))
+        .await
+        .expect("the update");
+    let receipt = committed_update.change.receipt().clone();
+    let retried = mob
+        .update("update-again", second, &spec_digest(&first))
+        .await
+        .expect("the retry");
+    assert!(
+        matches!(
+            &retried.change,
+            IdentityChangeOutcome::Replayed { receipt: replayed } if *replayed == receipt
+        ),
+        "{retried:?}"
+    );
+    assert_eq!(mob.row("again").await.revision, 2);
+}
+
+// ---------------------------------------------------------------------------
+// R2.9 and R2.10: changes without a restart; a roster-owned change's receipt
+// ---------------------------------------------------------------------------
+
+/// Row: a create, an update and a removal each take effect in the running
+/// mob, with no restart.
+#[tokio::test]
+async fn create_update_and_remove_need_no_restart() {
+    let mob = StoreOwnedMob::new("change-live").await;
+    let first = spec("live", "worker");
+    committed(
+        mob.create(host_create("create-live", &["live"]), ALLOW)
+            .await,
+    );
+    assert!(mob.seated_dormant("live"));
+    let second = first.clone().with_display_name("Live");
+    mob.update("update-live", second.clone(), &spec_digest(&first))
+        .await
+        .expect("the update");
+    assert_eq!(mob.row("live").await.spec, Some(second));
+    committed(mob.remove("remove-live", "live").await);
+    mob.removed("live").await;
+}
+
+/// Row (RED): a roster-owned identity's change, applied by a partial
+/// declared apply with its operation, writes its receipt with the apply's
+/// declaration step; a change the apply answers `Kept` writes its receipt
+/// only.
+///
+/// RED on the old tree: the apply writes no receipt.
+#[tokio::test]
+async fn a_roster_owned_change_writes_its_receipt_with_the_apply() {
+    let mob = StoreOwnedMob::new("roster-receipt").await;
+    let change = |operation_id: &str| {
+        crate::runtime::IdentityRosterChange::new(
+            operation(operation_id),
+            IdentityChangeRequester::Host {
+                surface: "console".to_string(),
+            },
+            IdentityChangeConsent::Policy {
+                outcome: IdentityPolicyOutcome::Allow,
+            },
+        )
+    };
+    let seated = tokio::time::timeout(
+        STEP,
+        mob.handle.apply_declared_roster(
+            DeclaredRoster::partial([DeclaredEntry::new(roster_spec("listed"))])
+                .with_change(change("declare-listed")),
+        ),
+    )
+    .await
+    .expect("the apply answers")
+    .expect("the apply runs");
+    let receipt = seated.receipt.clone().expect("the apply's receipt");
+    assert_eq!(receipt.change, IdentityChangeKind::RosterApply);
+    assert_eq!(receipt.identities[0].identity, id("listed"));
+    assert_eq!(
+        mob.handle
+            .identity_operation("declare-listed")
+            .await
+            .expect("read the receipt"),
+        Some(receipt)
+    );
+    let kept = tokio::time::timeout(
+        STEP,
+        mob.handle.apply_declared_roster(
+            DeclaredRoster::partial([DeclaredEntry::new(roster_spec("listed"))])
+                .with_change(change("keep-listed")),
+        ),
+    )
+    .await
+    .expect("the apply answers")
+    .expect("the apply runs");
+    assert!(matches!(
+        kept.entries.get(&id("listed")),
+        Some(crate::runtime::DeclaredEntryOutcome::Kept)
+    ));
+    assert!(kept.receipt.is_some(), "a kept change writes its receipt");
+    assert!(
+        mob.rows().await.is_empty(),
+        "a roster-owned change writes no row"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// R2.11: recovery from the row's spec
+// ---------------------------------------------------------------------------
+
+/// Row (RED): a store-owned identity whose member was retired outside its
+/// changes (an older build's reconcile, here the host's own retire) is seated
+/// again at the next start from its row's spec, not from its last spawn row:
+/// a label its row took since its seat is on the new seat.
+///
+/// RED on the old tree: the start seats it from the last spawn row, whose
+/// labels predate the update.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_present_store_owned_entry_retired_by_an_older_build_is_reseated_with_its_v2_spec() {
+    let mut mob = StoreOwnedMob::new("reseat-v2").await;
+    let first = spec("phoenix", "worker");
+    committed(
+        mob.create(host_create("create-phoenix", &["phoenix"]), ALLOW)
+            .await,
+    );
+    let mut labels = first.labels.clone();
+    labels.insert("tier".to_string(), "gold".to_string());
+    let second = first.clone().with_labels(labels.clone());
+    mob.update("update-phoenix", second, &spec_digest(&first))
+        .await
+        .expect("the label update");
+    mob.handle
+        .retire(id("phoenix"))
+        .await
+        .expect("retire the member outside its changes");
+    mob.restart_as(MobCompositionAuthority::Authoritative).await;
+    let deadline = tokio::time::Instant::now() + STEP;
+    while !mob.is_member("phoenix").await {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "phoenix was never seated again"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(
+        mob.handle
+            .get_member(&id("phoenix"))
+            .await
+            .expect("roster read")
+            .expect("the seated identity")
+            .labels,
+        labels,
+        "the seat carries the row's labels"
+    );
+}

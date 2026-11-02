@@ -112,6 +112,11 @@ pub struct DeclaredRoster {
     /// apply, and the host's own creation carries out the request of an
     /// identity hosted on its first use or awaiting its held creation).
     pub first_boot_requests: BTreeMap<AgentIdentity, FirstBootRequest>,
+    /// The roster-owned identity's change this partial apply carries out,
+    /// when its host's roster writer wrote one
+    /// ([`Self::with_change`]): the apply writes its receipt in its
+    /// declaration step's transaction, a `Kept` answer included.
+    pub change: Option<super::IdentityRosterChange>,
 }
 
 impl DeclaredRoster {
@@ -145,6 +150,16 @@ impl DeclaredRoster {
         from: impl Into<ProfileName>,
     ) -> Self {
         self.role_migrations.insert(identity.into(), from.into());
+        self
+    }
+
+    /// The roster-owned identity's change this apply carries out: its
+    /// receipt is written with the apply's declaration step
+    /// ([`DeclaredRosterOutcome::receipt`]), and a retry of the same
+    /// operation answers that receipt.
+    #[must_use]
+    pub fn with_change(mut self, change: super::IdentityRosterChange) -> Self {
+        self.change = Some(change);
         self
     }
 
@@ -351,6 +366,10 @@ pub struct DeclaredRosterOutcome {
     /// host consumes exactly these requests
     /// ([`DeclaredRoster::first_boot_requests`]).
     pub first_boot_requests_carried_out: BTreeSet<AgentIdentity>,
+    /// The receipt of the change the apply carried out
+    /// ([`DeclaredRoster::with_change`]), committed with its declaration
+    /// step or before.
+    pub receipt: Option<crate::identity::IdentityChangeReceipt>,
 }
 
 /// One declaration MobMachine decides (`DeclareIdentityEntry`), with the
@@ -771,6 +790,7 @@ impl super::MobHandle {
             complete,
             role_migrations,
             first_boot_requests,
+            change: _,
         } = roster;
         let mut outcome = DeclaredRosterOutcome::default();
 

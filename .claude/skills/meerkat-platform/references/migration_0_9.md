@@ -556,6 +556,13 @@ are in `docs/guides/upgrading.mdx` ("Upgrading to 0.9.9").
   methods gain `GitHubCopilotToken`; `SessionAgentBuilder` and
   `MobSessionService` require `session_comms_identity_root`; the machine
   types gain appended variants.
+- Mobs: a persisted mob store that does not restore is quarantined instead of
+  failing every mob of the realm. A call that addresses it fails with the new
+  refusal kind `mob_quarantined`, `mob/list` names it under `quarantined`,
+  and `mob/restore_retry` re-attempts its restore. Rust:
+  `MobMcpState::unrestored_mobs` is gone (`quarantined_mobs`,
+  `mob_inventory`), `held_child_mobs` returns a `Result`, and a
+  `MobListResult` literal sets `quarantined`.
 - Text: a `policy_denied` tool error reads
   `Tool call denied (<code>): <message>`, and the compaction summary request
   names omitted media as

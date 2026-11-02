@@ -580,6 +580,15 @@ Since 0.9.8 (the 0.9.9 release):
   key pair (`session_comms_identity_root`, required, a wrapper forwards it),
   and a dormant seat reads or mints keys there unless the host declares a
   root.
+- **Quarantined mob stores.** A persisted mob store that does not restore is
+  quarantined, kept as found with no actor, and the realm's other mobs
+  restore. `MobStoreRestoreLifecycleMachine` (record-scoped, volatile,
+  clock-free) owns each quarantined store: its class (`store_unavailable`,
+  `store_unreadable`, `resume_refused`), which re-attempts it admits (an
+  explicit `mob/restore_retry` for any class, an on-demand one only while
+  the store could not serve), and the one re-attempt in flight. MobMachine
+  records a member's unrestored custody, so one member whose session read
+  fails is degraded (`custody_deferred`) instead of stopping its mob's start.
 - **Host store fence gap.** A dispatch, round commit or closing save waits
   for a stopped writer's re-acquire (`SessionCheckpointer::dispatch_fence_ready`,
   `SelfFence::dispatch_window`, `SelfFence::lost`); a gap suspends the run

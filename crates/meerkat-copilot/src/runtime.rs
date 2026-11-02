@@ -4168,8 +4168,9 @@ mod tests {
     /// (`x-ratelimit-remaining: 0` with `x-ratelimit-reset`), a 429 with no
     /// header, and the secondary rate limit, a 403 whose message says so
     /// with no header at all or a blank `Retry-After` (octokit's rule: GitHub
-    /// may send it without `Retry-After`). A 403 that names no limit is no
-    /// rate limit.
+    /// may send it without `Retry-After`), spelt "rate limit" or
+    /// "rate-limit" (octokit matches `\bsecondary rate\b`). A 403 that names
+    /// no limit is no rate limit.
     #[tokio::test]
     async fn github_rate_limits_are_read_from_real_answers() {
         let reset = Utc::now().timestamp() + 300;
@@ -4216,6 +4217,15 @@ mod tests {
                 ),
                 false,
             ),
+            (
+                "403 secondary rate-limit with no header",
+                github_answer(
+                    403,
+                    "",
+                    r#"{"message":"You have exceeded a secondary rate-limit. Please wait a few minutes before you try again."}"#,
+                ),
+                true,
+            ),
         ];
         let (base, hits) =
             spawn_github_answers(cases.iter().map(|(_, answer, _)| answer.clone()).collect()).await;
@@ -4245,6 +4255,7 @@ mod tests {
                 (cases[3].0, true, None, None),
                 (cases[4].0, true, None, None),
                 (cases[5].0, false, None, None),
+                (cases[6].0, true, None, None),
             ]
         );
         assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), cases.len());

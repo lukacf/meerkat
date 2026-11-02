@@ -597,9 +597,14 @@ them.
   continues on the account's route (moving to it, with one retry, when the
   build had no model list). A new session whose output budget comes
   from the account's model limit still fails to build until the exchange
-  answers, so no session is created with a budget the account refuses. An
-  exchange 401, or a 403 that asks for an account action, still fails the
-  build and asks for a new login.
+  answers, so no session is created with a budget the account refuses.
+  For the same reason, a controller prepared ahead of its session under a
+  known output budget is now refused with
+  `PreparedControllerRefusal::InputsChanged("output budget")` when the
+  build that consumes it takes its budget from the account's limit; builds
+  that prepare and consume a controller with the same request are
+  unaffected. An exchange 401, or a 403 that asks for an account action,
+  still fails the build and asks for a new login.
 
 - `meerkat-session`: a turn in flight when an embedding host's runtime stops
   is now treated as ended with that runtime. The check a runtime loop uses

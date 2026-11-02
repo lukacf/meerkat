@@ -1613,6 +1613,27 @@ const LARGE_UNIT_TEST_PACKAGES = new Set([
   "xtask",
 ]);
 
+// Modules of a unit test binary that run as a test target of their own, on
+// that same binary (no second compile): the unit target skips them, so each
+// gets its own test budget. The facade's host store fence rows run on real
+// time, their store fence gaps and dispatch waits at the host store
+// contract's floors, so with the rest of the facade's unit tests run
+// single-threaded they would leave the unit target too little of its 900 s.
+// `filter` is the libtest filter both targets pass: the module's path.
+const UNIT_TEST_MODULE_TARGETS = new Map([
+  [
+    "meerkat",
+    [
+      {
+        name: "meerkat_host_store_fence_unit_test",
+        filter: "service_factory::host_store_fence_tests::",
+      },
+    ],
+  ],
+]);
+// Runs a unit test binary under the libtest arguments it is given.
+const UNIT_TEST_MODULE_RUNNER = "//tools/bazel:run_rust_test_module.sh";
+
 const WORKSPACE_LINTS_BZL = "tools/bazel/workspace_lints.bzl";
 const WORKSPACE_LINTS_LOAD = `load("//tools/bazel:workspace_lints.bzl", "WORKSPACE_LINT_RUSTC_FLAGS")`;
 
@@ -2756,9 +2777,33 @@ for (const pkg of localPackages.values()) {
           `    rustc_flags = ${listExpr(unitBridgeRustcFlags)},`,
         );
       }
+      const moduleTargets = UNIT_TEST_MODULE_TARGETS.get(key) ?? [];
+      if (moduleTargets.length) {
+        const sizeIndex = unitAttrs.indexOf(`    size = ${q(unitSize)},`);
+        unitAttrs.splice(
+          sizeIndex + 1,
+          0,
+          `    args = ${listExpr(moduleTargets.flatMap((spec) => ["--skip", spec.filter]))},`,
+        );
+      }
       rules.push(`rust_test(\n${unitAttrs.join("\n")}\n)`);
       fastTestLabels.push(`//${relative(root, dir)}:${unitName}`);
       packageFastTests.push(`:${unitName}`);
+      for (const spec of moduleTargets) {
+        needsShellTestLoad = true;
+        const moduleAttrs = [
+          `    name = ${q(spec.name)},`,
+          `    srcs = ${listExpr([UNIT_TEST_MODULE_RUNNER])},`,
+          `    args = ${listExpr([`$(rootpath :${unitName})`, spec.filter])},`,
+          `    tags = ${listExpr(["fast", "unit"])},`,
+          `    size = ${q(unitSize)},`,
+          `    data = ${listExpr([`:${unitName}`, ...[...new Set(unitData)].sort()])},`,
+          `    env = {\n${unitEnv.join("\n")}\n    },`,
+        ];
+        rules.push(`sh_test(\n${moduleAttrs.join("\n")}\n)`);
+        fastTestLabels.push(`//${relative(root, dir)}:${spec.name}`);
+        packageFastTests.push(`:${spec.name}`);
+      }
     }
     for (const spec of filteredNativeTests) {
       const filteredAttrs = [...rustTestBaseAttrs];

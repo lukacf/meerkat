@@ -128,6 +128,19 @@ The decision flow:
   <Step title="Threshold evaluation">
     Compaction triggers if ANY of:
     - `last_input_tokens >= auto_compact_threshold` (input tokens from the last LLM response), OR
+    - the projected input of this request crosses `auto_compact_threshold`:
+      the provider's count for the last answered request plus an estimate of
+      only the rows appended since (a tool result, for one). The count lags by
+      exactly those rows and the estimates below under-read dense content such
+      as JSON, so the projection keeps the exact count and estimates only the
+      growth. It bypasses the cadence when the growth made the crossing (the
+      last answered request was under the threshold) and the last rewrite, if
+      any, got the history under the threshold. Its anchor is persisted
+      with the session, so an agent rebuilt from its store projects its first
+      request too; a committed rewrite (a compaction or a host's transcript
+      edit) and a fork at a point drop it until the next answer, and the
+      answer to a request that carried the run's tool results shortened
+      (see below) sets none, OR
     - `estimated_history_tokens >= auto_compact_threshold` (a conservative
       current-history estimate: text and serialized structure use a bytes/4
       heuristic, while images and video use media-aware estimates), OR
@@ -141,7 +154,17 @@ The decision flow:
     - request bytes cross four-fifths of the effective byte cap. An exact
       provider-lowered witness is preferred; otherwise an explicitly
       configured `max_request_bytes` is compared with the conservative
-      transcript request estimate.
+      transcript request estimate, OR
+    - the last request did not fit: the provider refused it for not fitting
+      the model's context, or it carried the open run's own tool results
+      shortened. A refused run still fails, and the refused request reported
+      no usage; a shortened result stays whole in the transcript. The agent
+      records either in the session's compaction cadence (committed with the
+      run's boundary, so an agent rebuilt from the store sees it too), and
+      the next check whose compaction covers the whole transcript (the next
+      run's first) compacts it once, bypassing the cadence. The attempt
+      clears the fact whether it commits or not, and so does an answered
+      request that carried every result whole (the transcript then fits).
   </Step>
 </Steps>
 

@@ -2718,6 +2718,248 @@ fn schedule_bundle_validates_with_reciprocal_ack_route() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// Bounded retention of `superseded_ack_ids` (ScheduleLifecycleMachine).
+//
+// The set holds only the acknowledgements of the latest supersession, the one
+// at the current `revision`. Read from the generated schema: every arm that
+// bumps `revision` emits SupersedePendingOccurrences and empties the set
+// before the new supersession's acknowledgements arrive; every
+// ConfirmOccurrencesSuperseded arm records `occurrence_id` only when
+// `superseding_revision` equals `revision`, so any other acknowledgement (a
+// late one of an earlier supersession, or one of a revision never reached) is
+// an idempotent no-op; no other arm writes the set. The mutants below (an arm
+// that keeps the old ids, an unconditional record, an arm that drops the
+// latest acknowledgements) must each be refused.
+// ---------------------------------------------------------------------------
+
+const SUPERSEDED_ACK_IDS: &str = "superseded_ack_ids";
+
+/// Whether `update` writes `field`, through conditionals and loops.
+fn update_writes(update: &meerkat_machine_schema::Update, field: &str) -> bool {
+    use meerkat_machine_schema::Update;
+    match update {
+        Update::Assign { field: written, .. }
+        | Update::Increment { field: written, .. }
+        | Update::Decrement { field: written, .. }
+        | Update::MapInsert { field: written, .. }
+        | Update::MapIncrement { field: written, .. }
+        | Update::MapDecrement { field: written, .. }
+        | Update::MapRemove { field: written, .. }
+        | Update::SetInsert { field: written, .. }
+        | Update::SetRemove { field: written, .. }
+        | Update::SeqAppend { field: written, .. }
+        | Update::SeqPrepend { field: written, .. }
+        | Update::SeqPopFront { field: written }
+        | Update::SeqRemoveValue { field: written, .. }
+        | Update::SeqRemoveAll { field: written, .. } => written.as_str() == field,
+        Update::Conditional {
+            then_updates,
+            else_updates,
+            ..
+        } => then_updates
+            .iter()
+            .chain(else_updates)
+            .any(|update| update_writes(update, field)),
+        Update::ForEach { updates, .. } => {
+            updates.iter().any(|update| update_writes(update, field))
+        }
+    }
+}
+
+fn superseded_ack_ids_field() -> FieldId {
+    FieldId::parse(SUPERSEDED_ACK_IDS).expect("superseded_ack_ids field id")
+}
+
+/// The one update a ConfirmOccurrencesSuperseded arm may make: record the
+/// acknowledged id when, and only when, it answers the current revision.
+fn records_only_acks_of_the_current_revision(updates: &[meerkat_machine_schema::Update]) -> bool {
+    use meerkat_machine_schema::Update;
+    let superseding_revision = Expr::Binding("superseding_revision".into());
+    let revision = Expr::Field(FieldId::parse("revision").expect("revision field id"));
+    let record = Update::SetInsert {
+        field: superseded_ack_ids_field(),
+        value: Expr::Binding("occurrence_id".into()),
+    };
+    match updates {
+        [
+            Update::Conditional {
+                condition: Expr::Eq(left, right),
+                then_updates,
+                else_updates,
+            },
+        ] => {
+            let answers_current_revision = (**left == superseding_revision && **right == revision)
+                || (**left == revision && **right == superseding_revision);
+            answers_current_revision
+                && then_updates.as_slice() == [record]
+                && else_updates.is_empty()
+        }
+        _ => false,
+    }
+}
+
+/// Every way the schedule machine's transitions break the bounded retention
+/// of `superseded_ack_ids`, each prefixed by its transition's name.
+fn superseded_ack_retention_violations(
+    schema: &meerkat_machine_schema::MachineSchema,
+) -> Vec<String> {
+    use meerkat_machine_schema::Update;
+    let mut violations = Vec::new();
+    for transition in &schema.transitions {
+        let name = transition.name.as_str();
+        let writes_ack_set = transition
+            .updates
+            .iter()
+            .filter(|update| update_writes(update, SUPERSEDED_ACK_IDS))
+            .count();
+        let bumps_revision = transition
+            .updates
+            .iter()
+            .any(|update| update_writes(update, "revision"));
+        let supersedes = transition
+            .emit
+            .iter()
+            .any(|emit| emit.variant.as_str() == "SupersedePendingOccurrences");
+        if bumps_revision != supersedes {
+            violations.push(format!(
+                "{name}: a revision bump and SupersedePendingOccurrences must come together"
+            ));
+        }
+        if bumps_revision {
+            let drops_earlier_acks = transition.updates.iter().any(|update| {
+                matches!(
+                    update,
+                    Update::Assign { field, expr: Expr::EmptySet }
+                        if field.as_str() == SUPERSEDED_ACK_IDS
+                )
+            });
+            if !drops_earlier_acks || writes_ack_set != 1 {
+                violations.push(format!(
+                    "{name}: bumps the revision without dropping every earlier acknowledgement"
+                ));
+            }
+        } else if transition.on.variant_str() == "ConfirmOccurrencesSuperseded" {
+            if !records_only_acks_of_the_current_revision(&transition.updates) {
+                violations.push(format!(
+                    "{name}: records an acknowledgement that does not answer the current revision"
+                ));
+            }
+        } else if writes_ack_set != 0 {
+            violations.push(format!(
+                "{name}: writes the acknowledgements outside a supersession or an acknowledgement"
+            ));
+        }
+    }
+    violations
+}
+
+fn transitions_named(
+    schema: &meerkat_machine_schema::MachineSchema,
+    pick: impl Fn(&meerkat_machine_schema::TransitionSchema) -> bool,
+) -> std::collections::BTreeSet<String> {
+    schema
+        .transitions
+        .iter()
+        .filter(|transition| pick(transition))
+        .map(|transition| transition.name.as_str().to_owned())
+        .collect()
+}
+
+#[test]
+fn schedule_lifecycle_keeps_only_the_latest_supersessions_acks() {
+    let schema = schedule_lifecycle_machine();
+    assert_eq!(
+        transitions_named(&schema, |transition| transition
+            .updates
+            .iter()
+            .any(|update| update_writes(update, "revision"))),
+        std::collections::BTreeSet::from(
+            [
+                "DeleteActive",
+                "DeletePaused",
+                "ReviseActive",
+                "RevisePaused"
+            ]
+            .map(String::from)
+        ),
+        "the supersessions whose acknowledgements the set answers"
+    );
+    assert_eq!(
+        transitions_named(&schema, |transition| transition.on.variant_str()
+            == "ConfirmOccurrencesSuperseded"),
+        std::collections::BTreeSet::from(
+            [
+                "ConfirmOccurrencesSupersededActive",
+                "ConfirmOccurrencesSupersededDeleted",
+                "ConfirmOccurrencesSupersededPaused",
+            ]
+            .map(String::from)
+        ),
+        "an acknowledgement is accepted in every phase"
+    );
+    assert_eq!(
+        superseded_ack_retention_violations(&schema),
+        Vec::<String>::new(),
+        "ScheduleLifecycleMachine must keep only the latest supersession's acknowledgements"
+    );
+}
+
+#[test]
+fn schedule_ack_retention_contract_refuses_its_mutants() {
+    use meerkat_machine_schema::Update;
+    let schema = schedule_lifecycle_machine();
+    let mutant = |transition_name: &str, edit: &dyn Fn(&mut Vec<Update>)| {
+        let mut mutant = schema.clone();
+        let mut edited = 0;
+        for transition in &mut mutant.transitions {
+            if transition.name.as_str() == transition_name {
+                edit(&mut transition.updates);
+                edited += 1;
+            }
+        }
+        assert_eq!(edited, 1, "mutant target {transition_name} must exist once");
+        superseded_ack_retention_violations(&mutant)
+    };
+    // A revise or delete that keeps the old ids.
+    let keep_old_ids: &dyn Fn(&mut Vec<Update>) = &|updates| {
+        updates.retain(|update| !update_writes(update, SUPERSEDED_ACK_IDS));
+    };
+    // Every acknowledgement recorded, late ones included (the unbounded set).
+    let record_every_ack: &dyn Fn(&mut Vec<Update>) = &|updates| {
+        *updates = vec![Update::SetInsert {
+            field: superseded_ack_ids_field(),
+            value: Expr::Binding("occurrence_id".into()),
+        }];
+    };
+    // An arm that drops the latest supersession's acknowledgements.
+    let drop_every_ack: &dyn Fn(&mut Vec<Update>) = &|updates| {
+        updates.push(Update::Assign {
+            field: superseded_ack_ids_field(),
+            expr: Expr::EmptySet,
+        });
+    };
+
+    for (transition_name, edit) in [
+        ("ReviseActive", keep_old_ids),
+        ("RevisePaused", keep_old_ids),
+        ("DeleteActive", keep_old_ids),
+        ("DeletePaused", keep_old_ids),
+        ("ConfirmOccurrencesSupersededActive", record_every_ack),
+        ("ConfirmOccurrencesSupersededDeleted", record_every_ack),
+        ("PauseActiveOrPaused", drop_every_ack),
+        ("DeleteDeleted", drop_every_ack),
+    ] {
+        let violations = mutant(transition_name, edit);
+        assert!(
+            violations
+                .iter()
+                .any(|violation| violation.starts_with(&format!("{transition_name}:"))),
+            "the retention contract must refuse the {transition_name} mutant, got {violations:?}"
+        );
+    }
+}
+
 /// P0 Dogma Invariant 1 (LUC-524): the recoverable-vs-fatal recovery FORK must
 /// be a MeerkatMachine-owned conclusion, not a shell verdict the machine merely
 /// records. This pins the `RecoverableFailure` transition to revalidate BOTH

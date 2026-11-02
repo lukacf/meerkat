@@ -534,10 +534,19 @@ function handleEvent(event: AgentEvent): string {
       // applies no level).
       return `${event.type}:${event.requested.disposition}:${event.outcome?.kind ?? 'none'}`;
     case 'run_resumed':
-      // A durable run resumed from its run cursor after a restart, in place
-      // of `run_started`: the same `run_id` continues from `round`, at
-      // `tools_pending` (the staged calls run again) or `awaiting_model`.
+      // A durable run resumed from its run cursor, in place of
+      // `run_started` (after a restart, or in the same process once a store
+      // fence gap that suspended it ended): the same `run_id` continues from
+      // `round`, at `tools_pending` (the staged calls run again) or
+      // `awaiting_model`.
       return `${event.type}:${event.session_id}:${event.run_id}:${event.round}:${event.resume_point}`;
+    case 'tool_results_bounded_for_request':
+      // One request carried the run's own tool results shortened for it
+      // only (the transcript keeps them whole): each call with the bytes its
+      // head kept and the whole size, and the limit (`axis`) it did not fit.
+      return `${event.type}:${event.run_id}:${event.axis}:${event.results
+        .map((result) => `${result.tool_name}/${result.tool_use_id}:${result.kept_bytes}/${result.total_bytes}`)
+        .join(',')}`;
     default: {
       const _exhaustive: never = event;
       return _exhaustive;

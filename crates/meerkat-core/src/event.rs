@@ -1183,6 +1183,7 @@ pub fn agent_event_type(event: &AgentEvent) -> &'static str {
             "turn_usage_accounting_identity_disputed"
         }
         AgentEvent::RunResumed { .. } => "run_resumed",
+        AgentEvent::ToolResultsBoundedForRequest { .. } => "tool_results_bounded_for_request",
     }
 }
 
@@ -2471,7 +2472,14 @@ impl StructuredOutputOrigin {
 #[non_exhaustive]
 pub enum AgentEvent {
     // === Session Lifecycle ===
-    /// Agent run started
+    /// Agent run started.
+    ///
+    /// A durable run that a store fence gap suspended before its first round
+    /// commit starts again from its inputs, under the same run id, once the
+    /// fence is back, and publishes `run_started` again with no terminal in
+    /// between. An observer reads a repeated `run_started` for a run id that
+    /// has no terminal yet as that run starting over, and drops what it
+    /// received for the run id before.
     RunStarted {
         session_id: SessionId,
         /// Runtime-owned transcript lineage. Older events may omit it; an
@@ -3149,8 +3157,9 @@ pub enum AgentEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         outcome: Option<crate::lifecycle::run_primitive::ReasoningLoweringOutcome>,
     },
-    /// A durable run resumed from its run cursor after a restart, in place of
-    /// `run_started`: the same run continues under its run id, and its
+    /// A durable run resumed from its run cursor, in place of `run_started`:
+    /// after a restart, or in the same process once a store fence gap that
+    /// suspended it ended. The same run continues under its run id, and its
     /// terminal follows as for any run.
     ///
     /// At `tools_pending` the run takes the round's staged assistant message
@@ -3167,6 +3176,57 @@ pub enum AgentEvent {
         round: u64,
         resume_point: RunResumePointKind,
     },
+    /// One model request of a run carried some of the run's own tool results
+    /// shortened, for that request only: with them whole the request was over
+    /// the provider's request-body cap, or its forecast was over the model's
+    /// context window, and no compaction made room (a compaction inside a run
+    /// keeps the run's request and newest round).
+    ///
+    /// Each named result kept the head of its text, media as placeholders,
+    /// with a marker naming the call that the model reads. The stored
+    /// transcript keeps every result whole. With the default compactor the
+    /// next run's first check then compacts the whole transcript once; with
+    /// compaction off the request is still bounded and nothing is recorded.
+    /// Published before the request is sent, once for each request that
+    /// carries a bound.
+    ToolResultsBoundedForRequest {
+        /// The run whose request carried the results shortened.
+        run_id: crate::lifecycle::RunId,
+        /// The results the request carried shortened, in request order.
+        results: Vec<BoundedToolResult>,
+        /// The limit that set how much of each result the request kept.
+        axis: ToolResultBoundAxis,
+    },
+}
+
+/// One tool result a model request carried shortened, as
+/// [`AgentEvent::ToolResultsBoundedForRequest`] names it.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BoundedToolResult {
+    /// The call the result answers.
+    pub tool_use_id: String,
+    /// The tool the call named.
+    pub tool_name: String,
+    /// Bytes of the result's text the request carried: its head.
+    pub kept_bytes: u64,
+    /// Bytes of the result's whole text, media as placeholders. The stored
+    /// transcript keeps the result whole.
+    pub total_bytes: u64,
+}
+
+/// The limit a model request was over with the run's own tool results
+/// whole, as [`AgentEvent::ToolResultsBoundedForRequest`] reports it.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum ToolResultBoundAxis {
+    /// The provider's request-body byte cap.
+    RequestBytes,
+    /// The model's context window less the request's output reserve, or the
+    /// model's input ceiling.
+    ContextWindow,
 }
 
 /// Where a resumed run continues, as [`AgentEvent::RunResumed`] reports it.
@@ -3578,6 +3638,26 @@ pub fn format_verbose_event_with_config(
         AgentEvent::TurnUsageAccountingIdentityDisputed { dispute, .. } => Some(format!(
             "  ⚠ Turn usage accounting identity disputed (counters kept as reported): {dispute}"
         )),
+        AgentEvent::ToolResultsBoundedForRequest { results, axis, .. } => {
+            let limit = match axis {
+                ToolResultBoundAxis::RequestBytes => "the provider's request cap",
+                ToolResultBoundAxis::ContextWindow => "the model's context window",
+            };
+            let shortened = results
+                .iter()
+                .map(|result| {
+                    format!(
+                        "{} ({}) {} of {} bytes",
+                        result.tool_name, result.tool_use_id, result.kept_bytes, result.total_bytes
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            Some(format!(
+                "  Tool results shortened for this request to fit {limit}, kept whole in the \
+                 session: {shortened}"
+            ))
+        }
         _ => None,
     }
 }
@@ -3678,6 +3758,56 @@ mod tests {
         assert_eq!(
             serde_json::to_value(RunResumePointKind::AwaitingModel).unwrap(),
             "awaiting_model"
+        );
+    }
+
+    /// A request that carried its run's own results shortened is announced
+    /// under its own wire name, naming each call, both sizes and the limit,
+    /// and reads back unchanged.
+    #[test]
+    fn tool_results_bounded_for_request_has_its_own_wire_name_and_round_trips() {
+        let run_id = crate::lifecycle::RunId::new();
+        let bounded = BoundedToolResult {
+            tool_use_id: "tc_1".to_string(),
+            tool_name: "list_records".to_string(),
+            kept_bytes: 4_096,
+            total_bytes: 400_000,
+        };
+        let event = AgentEvent::ToolResultsBoundedForRequest {
+            run_id: run_id.clone(),
+            results: vec![bounded.clone()],
+            axis: ToolResultBoundAxis::ContextWindow,
+        };
+        assert_eq!(agent_event_type(&event), "tool_results_bounded_for_request");
+        let wire = serde_json::to_value(&event).unwrap();
+        assert_eq!(
+            wire,
+            serde_json::json!({
+                "type": "tool_results_bounded_for_request",
+                "run_id": run_id,
+                "results": [{
+                    "tool_use_id": "tc_1",
+                    "tool_name": "list_records",
+                    "kept_bytes": 4_096,
+                    "total_bytes": 400_000,
+                }],
+                "axis": "context_window",
+            })
+        );
+        let AgentEvent::ToolResultsBoundedForRequest {
+            run_id: parsed_run,
+            results,
+            axis,
+        } = serde_json::from_value::<AgentEvent>(wire).unwrap()
+        else {
+            panic!("the notice reads back as itself");
+        };
+        assert_eq!(parsed_run, run_id);
+        assert_eq!(results, vec![bounded]);
+        assert_eq!(axis, ToolResultBoundAxis::ContextWindow);
+        assert_eq!(
+            serde_json::to_value(ToolResultBoundAxis::RequestBytes).unwrap(),
+            "request_bytes"
         );
     }
 
@@ -5843,6 +5973,16 @@ mod tests {
             AgentEvent::TranscriptRewriteCommitted {
                 session_id: SessionId::new(),
                 record: rewrite_record_fixture(),
+            },
+            AgentEvent::ToolResultsBoundedForRequest {
+                run_id: crate::lifecycle::RunId::new(),
+                results: vec![BoundedToolResult {
+                    tool_use_id: "tool-1".to_string(),
+                    tool_name: "search".to_string(),
+                    kept_bytes: 4_096,
+                    total_bytes: 600_000,
+                }],
+                axis: ToolResultBoundAxis::RequestBytes,
             },
         ];
 

@@ -152,9 +152,11 @@ fn find_shutdown_terminal(
 pub(crate) struct TurnAdmissionSlot {
     authority: authority::SessionTurnAdmissionMachineAuthority,
     projection: TurnAdmissionProjection,
-    /// Set with the pending interrupt when a graceful requeue stop asked for
-    /// it: the dropped run then ends suspended, not cancelled. A hard
-    /// interrupt clears it, and a new claim starts without it.
+    /// Set with the pending interrupt when a suspension asked for it (a
+    /// graceful requeue stop, or a store fence gap the session's
+    /// checkpointer met): the dropped run then ends suspended, not
+    /// cancelled. A hard interrupt clears it, and a new claim starts without
+    /// it.
     suspend_requested: bool,
 }
 
@@ -196,7 +198,8 @@ impl TurnAdmissionSlot {
     }
 
     /// Whether the pending interrupt asks the dropped run to end suspended
-    /// for a graceful requeue stop instead of cancelled.
+    /// (for a graceful requeue stop or a store fence gap) instead of
+    /// cancelled.
     pub(crate) fn suspend_requested(&self) -> bool {
         self.suspend_requested && self.interrupt_pending()
     }
@@ -299,10 +302,11 @@ impl TurnAdmissionSlot {
         Ok(wake)
     }
 
-    /// Request an interrupt that suspends the run for a graceful requeue
-    /// stop: the generated interrupt drops the turn exactly as a hard
-    /// interrupt does, and the run then ends with no terminal and no closing
-    /// write. A hard interrupt asked before it is not downgraded.
+    /// Request an interrupt that suspends the run, for a graceful requeue
+    /// stop or a store fence gap: the generated interrupt drops the turn
+    /// exactly as a hard interrupt does, and the run then ends with no
+    /// terminal and no closing write. A hard interrupt asked before it is not
+    /// downgraded.
     pub(crate) fn request_suspend(&mut self) -> Result<bool, TurnAdmissionError> {
         let hard_interrupt_pending = self.interrupt_pending() && !self.suspend_requested;
         let wake = self.request_generated_interrupt()?;

@@ -173,12 +173,14 @@ process killed during it leaves the run as a crash would.
 A host that boots over a store another host serves, holds its members' run
 starts and must hand the store back unchanged shuts down with
 `with_queued_inputs(QueuedInputsOnShutdown::Keep)`, which unregisters each
-member with `UnregisterQueuedInputs::Keep` and changes nothing it finds: a
-registration that served no live work keeps every input it recovered and
+member with `UnregisterQueuedInputs::Keep` and keeps what it finds as it is:
+a registration that served no live work keeps every input it recovered and
 the run its session left open as the Shutdown finds them, with no requeue
 mark, and one that served live work is stopped (see [Mobs](/guides/mobs)).
-The boot's ordinary recovery may still normalize a staged input whose run
-cannot continue to queued, as every start does.
+The exception is a run left open whose stop was asked after the start
+registered it: the inputs bound to it end as `stopped`, and no later start
+resumes it. The boot's ordinary recovery may still normalize a staged input
+whose run cannot continue to queued, as every start does.
 
 - **The stop does not wait for the round.** It stops the turn at once. The
   run continues from its last committed round, and the work since that
@@ -187,14 +189,17 @@ cannot continue to queued, as every start does.
   the calls [answered as interrupted](#calls-answered-as-interrupted).
 - **The inputs stay bound to the run.** Callers waiting on them get the
   answer the stop gives the queued prompts it keeps,
-  `requeued_across_stop` (`RequeuedAcrossStop`).
+  `requeued_across_stop` (`RequeuedAcrossStop`), the same answer a run that
+  a store fence gap suspends gives (see
+  [One writer, fenced](#one-writer%2C-fenced)).
 - **The run continues at the next start**, when its session is opened again
   or its mob rebuilds the member, before the kept queued prompts run.
   Meerkat does not look for such runs at start-up.
 - **The max age still applies.** If any input bound to the run is older
   than `max_age`, counted from its admission, when the next start finds it,
-  the run's inputs end as `requeue_expired` and the run does not continue:
-  it is closed as interrupted, with the rounds it committed kept.
+  the run's inputs end as `requeue_expired` (as `cancelled` when the run's
+  stop was asked after that start registered it) and the run does not
+  continue: it is closed as interrupted, with the rounds it committed kept.
   An explicit `max_age` lies between 1 millisecond and 24 hours; the default
   shutdowns above use 15 minutes (`UnregisterQueuedInputs::DEFAULT_MAX_AGE`,
   and `RequeueMaxAge::DEFAULT` for a mob Shutdown).
@@ -217,7 +222,7 @@ that is killed leaves its runs as any crash does.
 | The run has no bound inputs (a direct or machine-service turn) | Closes the run as interrupted, with its content kept |
 | The saved transcript and the run cursor disagree | Holds the session for reconciliation; an operator can resolve the hold, unless the cursor cannot be read or its saved response has calls without a message id (see [Storage Operations](/guides/storage-operations#resolve-a-durable-tail-held-for-recovery)) |
 | A durable worker's resume gate refused the run | Settles the run like a stop (see [Resume Gate](#resume-gate)), then closes it as interrupted, with its content kept |
-| A graceful stop kept the run, and an input bound to it is older than the stop's max age at the next start | Ends the run's inputs as `requeue_expired`, then closes the run as interrupted, with its content kept |
+| A graceful stop kept the run, and an input bound to it is older than the stop's max age at the next start | Ends the run's inputs as `requeue_expired` (as `cancelled` when the run's stop was asked after that start registered it), then closes the run as interrupted, with its content kept |
 | On a `jsonl` or host-store realm, the process stopped after the run's closing save of a compacted transcript and before the run ended | Closes the run as interrupted: every message it wrote is kept and its inputs do not run again, but a run that had finished still shows the interrupted notice. Without the compaction, the same stop recovers a finished run as completed |
 
 Closing a run as interrupted keeps everything the run committed. Its rounds
@@ -256,6 +261,13 @@ goes through authorization, approval review and pre- and post-tool hooks
 again; no approval given before the crash is reused. MCP tools and host callback tools
 are dispatched again the same way, and a callback request to a client is
 sent again.
+
+A run that a store fence gap suspends (see
+[One writer, fenced](#one-writer%2C-fenced)) resumes the same way, in the same
+process, once the fence is back, which can be seconds later. A tool whose
+work outlives its call (a job it started, a request still in flight) can
+then see the same call again while that work still runs: the dedupe key is
+how it tells them apart.
 
 ### The Dedupe Key
 
@@ -428,10 +440,63 @@ fence:
   background. After a failed renew, or once its self-fence window has
   closed, the holder writes nothing and dispatches nothing until it
   acquires the fence again with a new token, which it does by itself before
-  its next write; if another process took the fence or committed meanwhile,
-  the realm stops until it is opened again. A later renew never restores
-  it. A renew answered `FencedOut` means another process holds the fence,
-  and the realm stops until it is opened again.
+  its next write, one attempt at a time however many writes and runs wait
+  for it; if another process took the fence or committed meanwhile, the
+  realm stops until it is opened again. A later renew never restores it.
+  A renew answered `FencedOut` means another process holds the fence, and
+  the realm stops until it is opened again.
+- **A stop is a pause.** A run that reaches a model call or a tool call
+  while the holder is stopped (a renew failed or timed out, or its window
+  closed) waits for that new acquire, for at most one self-fence window
+  plus the acquire's own timeouts (35 s at the default timing), trying again
+  once per renew interval while the acquire fails, and goes on once it
+  succeeds. A tool call waits within its own deadline: a call whose
+  deadline passes during the wait ends as a tool timeout although it never
+  started.
+- **A longer gap suspends the run.** When no acquire succeeds within that
+  wait and no other process shows up (a store fence gap), the run is
+  suspended as a graceful stop suspends it: it stops at the wait, its
+  inputs stay bound to it without spending a stage attempt, and callers
+  waiting on them are answered `requeued_across_stop` within that one wait.
+  The runtime resumes the run once the fence is back: from its last
+  committed round, or from its inputs when it had not committed a round
+  yet. The gap may last any number of waits. A round commit that meets
+  the stopped holder waits and suspends the run the same way (the commit
+  is written again, once, when the acquire succeeds within the wait); the
+  round it was writing is done again on resume, as after a crash. A
+  closing save (the write after the run's final answer) waits and is
+  written again the same way, but it cannot suspend the run, whose turn
+  has already ended: a closing save still refused after its one wait keeps
+  the teardown class, and the turn fails. A turn that no runtime run backs
+  (a direct turn) is stopped at the gap instead: its run is suspended with
+  its stop recorded, so it never resumes and is settled as cancelled once
+  the fence is back, and the turn fails with a retryable storage error
+  after its one wait. Until the run is settled, a direct turn of the
+  session is refused with `SESSION_BUSY`, as it is while a run a restart
+  left open has not resumed or been settled: retry it.
+- **A stop asked of the run still ends it.** A cancel the run accepted
+  before the gap, an interrupt or a stop that reaches the run while the
+  holder is stopped (which suspends the run rather than interrupting it),
+  or an interrupt or a stop of the suspended run, ends the run: it never
+  resumes. Callers waiting on its inputs are answered
+  `requeued_across_stop` within the wait, as for any suspended run, and
+  once the fence is back the run is settled, its inputs abandoned as
+  cancelled. Ending it needs a write, so it ends only then. A stop of a run
+  a restart left open, not resumed yet, ends it the same way at its loop's
+  next lap. A stop of such a run returns at once and lists no contributor:
+  read the inputs' outcome later. A graceful stop that requeues, or the
+  rollback of a refused start, that comes before that settlement keeps
+  none of its inputs: it ends them as stopped, and the next start repairs
+  the run's tail as an interrupted run.
+- **Another process ends this one's runs.** When the acquire finds that
+  another process holds the fence or committed meanwhile, or a renew or a
+  commit is answered `FencedOut`, the run is refused and the live session
+  torn down, whether that is met at a dispatch, at a commit or while a
+  suspended run waits to resume. The store refuses every later write of
+  this process, so the session's inputs stay as last committed, for the
+  new owner to run, and callers waiting on them here are answered
+  `requeued_across_stop` (an ephemeral input, which no store keeps, ends
+  with the teardown instead).
 - **Self-fencing.** The holder makes no model call, dispatches no tool and
   commits nothing unless its last successful acquire or renew started less
   than the self-fence window ago. The window is the lease minus the store's
@@ -558,6 +623,49 @@ Before you run a host store in production, run the host store chapter of the
   with `extraction_required` a second time under the same run id.
 - The tools of a resumed run see no content of the current turn, as with a
   pending continuation.
+- A run that a store fence gap suspended resumes in the same process as
+  after a restart: what it did after its last round commit is done again.
+  A run suspended before its first round commit starts again from its
+  inputs, so its run-start hooks run again and `run_started` is published
+  again under the same run id, with no terminal in between: read a repeated
+  `run_started` for a run id that has no terminal yet as that run starting
+  over, and drop what you received for the run id before.
+- A mob delegation (a temporary council, a fork-off, a live delegation)
+  whose member turn a fence gap suspends reads the `requeued_across_stop`
+  answer as a stop's and ends; the member's input still runs once the fence
+  is back, with no one waiting for it.
+- A stop intent of a suspended run (a cancel it accepted before the gap,
+  or a stop or an interrupt at the fence or during the gap) is kept in
+  memory until the fence is back: a process that ends before then loses it,
+  and the next start resumes the run; another process that takes the
+  session over runs its inputs; and a host runtime that stops under the
+  session, whose registration then reloads, loses it too. A cancel at the
+  next boundary (`cancel_after_boundary`) asked while the run is suspended,
+  with the session's executor attached, stands as the run's stop intent, as
+  a stop does: the run never resumes and is settled as cancelled once the
+  fence is back. With no executor attached it finds no running turn and is
+  refused; interrupt or stop the run instead.
+  A stop that races the gap's own suspension of the run can fail with an
+  internal error naming an input whose wait was answered
+  `requeued_across_stop`; read the inputs' outcome later. A cancel at the
+  next boundary accepted just before that suspension can likewise fail when
+  its dispatch to the dropped turn fails, while the run is still settled as
+  cancelled once the fence is back.
+- A closing save still refused after its one wait (a gap that outlasts
+  the wait after a run's final answer) keeps the teardown class: the turn
+  fails and the live session is torn down. The turn's terminal is recorded
+  before that save, so the run cannot be suspended there; the wait and its
+  one retry are the protection.
+- At a gap a stop or an interrupt falls back to the hard interrupt, which
+  the gap undoes with a reload that resumes the stopped run, in three
+  cases: an executor that cannot suspend a run (every shipped persistent
+  surface suspends; a host's own executor may not), a stop that joins a
+  hard interrupt of the same run already in flight, and a run with a
+  published live-boundary join not yet retained, which the machine does
+  not suspend. A run stop has then already answered `stopped`.
+- A gap met while a run re-bases its session (after a compaction, on a
+  WholeBlob realm whose store supports it) is not suspended: the re-base's
+  outcome is unknown, so the session reloads, as before.
 - Budget counters that span the agent's lifetime, rather than the run's,
   start again with the agent after a restart, as for any session a host
   rebuilds; the run's own time budget continues.

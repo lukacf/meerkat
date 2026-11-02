@@ -1062,6 +1062,124 @@ fn marked_run_resumes_exclusively_through_prepare_then_resume_run() {
     assert_eq!(authority.state().current_run_id, Some(marked));
 }
 
+/// A direct turn's run (one the runtime did not prepare) never starts while
+/// a run is marked resumable, from any phase a direct run starts from, under
+/// a run id of its own or the marked run's: the marked run waits for its
+/// resume or its settlement (a store fence gap suspended it, or a restart
+/// left it open), and a run started beside it would commit its boundary over
+/// the marked run's provisional tail, or resume that run outside
+/// `ResumeRun`, a stopped one included. Once the mark ends, the same start
+/// is accepted. Unrun: written while Cargo is not run.
+#[test]
+fn no_direct_run_starts_while_a_run_is_marked_resumable() {
+    let marked = mm_dsl::RunId("run-marked".to_string());
+    let direct = mm_dsl::RunId("run-direct".to_string());
+    let start = |run_id: &mm_dsl::RunId| mm_dsl::MeerkatMachineInput::StartConversationRun {
+        run_id: run_id.clone(),
+        primitive_kind: mm_dsl::TurnPrimitiveKind::ConversationTurn,
+        admitted_content_shape: mm_dsl::ContentShape::Conversation,
+        vision_enabled: false,
+        image_tool_results_enabled: false,
+        max_extraction_retries: 0,
+    };
+    for phase in [
+        mm_dsl::MeerkatPhase::Idle,
+        mm_dsl::MeerkatPhase::Initializing,
+        mm_dsl::MeerkatPhase::Attached,
+    ] {
+        let state = |resumable_run_id: Option<mm_dsl::RunId>| mm_dsl::MeerkatMachineState {
+            lifecycle_phase: phase,
+            session_id: Some(mm_dsl::SessionId("session-recovery".to_string())),
+            // An Idle registration starts a direct run only with a runtime
+            // bound.
+            active_runtime_id: Some(mm_dsl::AgentRuntimeId("runtime-recovery".to_string())),
+            active_runtime_generation: Some(mm_dsl::Generation(1)),
+            turn_phase: mm_dsl::TurnPhase::Ready,
+            resumable_run_id,
+            ..Default::default()
+        };
+        for run_id in [&direct, &marked] {
+            let mut authority =
+                mm_dsl::MeerkatMachineAuthority::recover_from_state(state(Some(marked.clone())))
+                    .unwrap_or_else(|err| {
+                        panic!("{phase:?} seed state must be recoverable: {err:?}")
+                    });
+            assert!(
+                mm_dsl::MeerkatMachineMutator::apply(&mut authority, start(run_id)).is_err(),
+                "{phase:?}: no run {run_id:?} starts directly while a run is marked resumable"
+            );
+            assert_eq!(authority.state().resumable_run_id, Some(marked.clone()));
+            assert_eq!(authority.state().current_run_id, None);
+            assert_eq!(authority.state().lifecycle_phase, phase);
+        }
+        let mut authority = mm_dsl::MeerkatMachineAuthority::recover_from_state(state(None))
+            .unwrap_or_else(|err| panic!("{phase:?} seed state must be recoverable: {err:?}"));
+        mm_dsl::MeerkatMachineMutator::apply(&mut authority, start(&direct)).unwrap_or_else(
+            |err| panic!("{phase:?}: with no run marked a direct run starts: {err:?}"),
+        );
+        assert_eq!(authority.state().current_run_id, Some(direct.clone()));
+        assert_eq!(
+            authority.state().lifecycle_phase,
+            mm_dsl::MeerkatPhase::Running
+        );
+    }
+}
+
+/// A direct immediate append (a run the runtime did not prepare, which
+/// appends without a model call) never starts while a run is marked
+/// resumable either, from the phases it starts from, under a run id of its
+/// own or the marked run's, for the reasons a direct conversation run does
+/// not. Once the mark ends, the same start is accepted. Unrun: written while
+/// Cargo is not run.
+#[test]
+fn no_immediate_append_starts_while_a_run_is_marked_resumable() {
+    let marked = mm_dsl::RunId("run-marked".to_string());
+    let direct = mm_dsl::RunId("run-direct-append".to_string());
+    let start = |run_id: &mm_dsl::RunId| mm_dsl::MeerkatMachineInput::StartImmediateAppend {
+        run_id: run_id.clone(),
+    };
+    for phase in [
+        mm_dsl::MeerkatPhase::Initializing,
+        mm_dsl::MeerkatPhase::Attached,
+    ] {
+        let state = |resumable_run_id: Option<mm_dsl::RunId>| mm_dsl::MeerkatMachineState {
+            lifecycle_phase: phase,
+            session_id: Some(mm_dsl::SessionId("session-recovery".to_string())),
+            turn_phase: mm_dsl::TurnPhase::Ready,
+            resumable_run_id,
+            ..Default::default()
+        };
+        for run_id in [&direct, &marked] {
+            let mut authority =
+                mm_dsl::MeerkatMachineAuthority::recover_from_state(state(Some(marked.clone())))
+                    .unwrap_or_else(|err| {
+                        panic!("{phase:?} seed state must be recoverable: {err:?}")
+                    });
+            assert!(
+                mm_dsl::MeerkatMachineMutator::apply(&mut authority, start(run_id)).is_err(),
+                "{phase:?}: no immediate append {run_id:?} starts while a run is marked resumable"
+            );
+            assert_eq!(authority.state().resumable_run_id, Some(marked.clone()));
+            assert_eq!(authority.state().current_run_id, None);
+            assert_eq!(authority.state().lifecycle_phase, phase);
+        }
+        let mut authority = mm_dsl::MeerkatMachineAuthority::recover_from_state(state(None))
+            .unwrap_or_else(|err| panic!("{phase:?} seed state must be recoverable: {err:?}"));
+        mm_dsl::MeerkatMachineMutator::apply(&mut authority, start(&direct)).unwrap_or_else(
+            |err| panic!("{phase:?}: with no run marked an immediate append starts: {err:?}"),
+        );
+        assert_eq!(authority.state().current_run_id, Some(direct.clone()));
+        assert_eq!(
+            authority.state().primitive_kind,
+            Some(mm_dsl::TurnPrimitiveKind::ImmediateAppend)
+        );
+        assert_eq!(
+            authority.state().lifecycle_phase,
+            mm_dsl::MeerkatPhase::Running
+        );
+    }
+}
+
 /// A graceful requeue stop suspends a durable session's in-flight run: the
 /// run stops being current, the pre-run phase returns, and the run is marked
 /// resumable, with no turn terminal. A run whose turn terminal is already
@@ -1090,6 +1208,7 @@ fn requeue_stop_suspends_a_durable_in_flight_run() {
             mm_dsl::MeerkatMachineInput::SuspendRunForStop {
                 run_id: run.clone(),
                 durable_session: false,
+                cause: mm_dsl::RunSuspensionCause::RequeueStop,
             },
         )
         .is_err(),
@@ -1109,6 +1228,7 @@ fn requeue_stop_suspends_a_durable_in_flight_run() {
             mm_dsl::MeerkatMachineInput::SuspendRunForStop {
                 run_id: run.clone(),
                 durable_session: true,
+                cause: mm_dsl::RunSuspensionCause::RequeueStop,
             },
         )
         .is_err(),
@@ -1123,6 +1243,7 @@ fn requeue_stop_suspends_a_durable_in_flight_run() {
         mm_dsl::MeerkatMachineInput::SuspendRunForStop {
             run_id: run.clone(),
             durable_session: true,
+            cause: mm_dsl::RunSuspensionCause::RequeueStop,
         },
     )
     .expect("a durable session's run is suspended");
@@ -1130,6 +1251,455 @@ fn requeue_stop_suspends_a_durable_in_flight_run() {
     assert_eq!(durable.state().current_run_id, None);
     assert_eq!(durable.state().resumable_run_id, Some(run));
     assert_eq!(durable.state().turn_terminal_run_id, None);
+}
+
+/// A cancel a run accepted before a graceful requeue stop suspends it (its
+/// turn's own cancel after the boundary, or an ambient cancel whose boundary
+/// dispatch is still outstanding) stands as the suspended run's stop intent,
+/// as at a store fence gap: the stop then keeps none of the run's bound
+/// inputs, so the next start never resumes the cancelled run. A run
+/// suspended with no cancel carries no stop intent. Unrun: written while
+/// Cargo is not run.
+#[test]
+fn a_cancel_accepted_before_a_requeue_stop_stands_as_the_suspended_runs_stop_intent() {
+    let run = mm_dsl::RunId("run-in-flight".to_string());
+    let draining_running = || mm_dsl::MeerkatMachineState {
+        lifecycle_phase: mm_dsl::MeerkatPhase::Running,
+        session_id: Some(mm_dsl::SessionId("session-recovery".to_string())),
+        current_run_id: Some(run.clone()),
+        pre_run_phase: Some(mm_dsl::PreRunPhase::Idle),
+        registration_phase: mm_dsl::RegistrationPhase::Draining,
+        unregister_queued_inputs: mm_dsl::UnregisterQueuedInputsDisposition::Requeue,
+        unregister_requeue_max_age_ms: 900_000,
+        turn_phase: mm_dsl::TurnPhase::CallingLlm,
+        ..Default::default()
+    };
+    let recover = |state: mm_dsl::MeerkatMachineState| {
+        mm_dsl::MeerkatMachineAuthority::recover_from_state(state)
+            .expect("a draining running state must be recoverable")
+    };
+    let suspend = || mm_dsl::MeerkatMachineInput::SuspendRunForStop {
+        run_id: run.clone(),
+        durable_session: true,
+        cause: mm_dsl::RunSuspensionCause::RequeueStop,
+    };
+
+    // The turn's own cancel after the boundary.
+    let mut run_cancelled = recover(draining_running());
+    mm_dsl::MeerkatMachineMutator::apply(
+        &mut run_cancelled,
+        mm_dsl::MeerkatMachineInput::CancelAfterBoundaryForRun {
+            run_id: run.clone(),
+            reason: "the caller cancels the run".to_string(),
+        },
+    )
+    .expect("the run's cancel is accepted");
+    mm_dsl::MeerkatMachineMutator::apply(&mut run_cancelled, suspend())
+        .expect("the requeue stop suspends the run");
+    assert_eq!(run_cancelled.state().resumable_run_id, Some(run.clone()));
+    assert_eq!(
+        run_cancelled.state().run_stop_requested,
+        Some(run.clone()),
+        "the run's accepted cancel stands as its stop intent"
+    );
+
+    // An ambient cancel, its boundary dispatch outstanding.
+    let mut ambient = recover(draining_running());
+    mm_dsl::MeerkatMachineMutator::apply(
+        &mut ambient,
+        mm_dsl::MeerkatMachineInput::CancelAfterBoundary {
+            reason: "the caller cancels".to_string(),
+        },
+    )
+    .expect("an ambient cancel of the running run is accepted");
+    assert!(!ambient.state().cancel_after_boundary);
+    mm_dsl::MeerkatMachineMutator::apply(&mut ambient, suspend())
+        .expect("the requeue stop suspends the run");
+    assert_eq!(
+        ambient.state().run_stop_requested,
+        Some(run.clone()),
+        "the accepted ambient cancel stands as the run's stop intent"
+    );
+
+    // No cancel: no stop intent.
+    let mut plain = recover(draining_running());
+    mm_dsl::MeerkatMachineMutator::apply(&mut plain, suspend())
+        .expect("the requeue stop suspends the run");
+    assert_eq!(plain.state().resumable_run_id, Some(run.clone()));
+    assert_eq!(plain.state().run_stop_requested, None);
+}
+
+/// A store fence gap suspends a durable session's in-flight run outside any
+/// stop: the run stops being current, is marked resumable with no turn
+/// terminal, and its turn returns to `Ready`. The same registration then
+/// resumes it: `Prepare` and `ResumeRun` make it current again and its turn
+/// starts again, all under its own run id. A registration draining for its
+/// unregister suspends only for its stop, a run whose turn terminal is
+/// published is never suspended, a session without per-round commits is not
+/// suspended, and a requeue stop's cause is refused outside a stop.
+#[test]
+fn a_fence_gap_suspends_a_durable_in_flight_run_and_the_registration_resumes_it() {
+    let run = mm_dsl::RunId("run-in-flight".to_string());
+    let session = mm_dsl::SessionId("session-recovery".to_string());
+    let active_running = || mm_dsl::MeerkatMachineState {
+        lifecycle_phase: mm_dsl::MeerkatPhase::Running,
+        session_id: Some(session.clone()),
+        current_run_id: Some(run.clone()),
+        pre_run_phase: Some(mm_dsl::PreRunPhase::Idle),
+        registration_phase: mm_dsl::RegistrationPhase::Active,
+        turn_phase: mm_dsl::TurnPhase::CallingLlm,
+        ..Default::default()
+    };
+    let suspend = |durable_session: bool, cause: mm_dsl::RunSuspensionCause| {
+        mm_dsl::MeerkatMachineInput::SuspendRunForStop {
+            run_id: run.clone(),
+            durable_session,
+            cause,
+        }
+    };
+    let recover = |state: mm_dsl::MeerkatMachineState| {
+        mm_dsl::MeerkatMachineAuthority::recover_from_state(state)
+            .expect("the running state must be recoverable")
+    };
+
+    let mut not_durable = recover(active_running());
+    assert!(
+        mm_dsl::MeerkatMachineMutator::apply(
+            &mut not_durable,
+            suspend(false, mm_dsl::RunSuspensionCause::FenceGap)
+        )
+        .is_err(),
+        "a session without per-round commits is not suspended"
+    );
+
+    let mut no_stop = recover(active_running());
+    assert!(
+        mm_dsl::MeerkatMachineMutator::apply(
+            &mut no_stop,
+            suspend(true, mm_dsl::RunSuspensionCause::RequeueStop)
+        )
+        .is_err(),
+        "a requeue stop's cause needs a stop that requeues"
+    );
+
+    let mut ended = recover(mm_dsl::MeerkatMachineState {
+        turn_terminal_run_id: Some(run.clone()),
+        terminal_outcome: Some(mm_dsl::TurnTerminalOutcome::Completed),
+        ..active_running()
+    });
+    assert!(
+        mm_dsl::MeerkatMachineMutator::apply(
+            &mut ended,
+            suspend(true, mm_dsl::RunSuspensionCause::FenceGap)
+        )
+        .is_err(),
+        "a run whose turn terminal is published ended; it is never marked resumable"
+    );
+
+    let mut draining = recover(mm_dsl::MeerkatMachineState {
+        registration_phase: mm_dsl::RegistrationPhase::Draining,
+        unregister_queued_inputs: mm_dsl::UnregisterQueuedInputsDisposition::Requeue,
+        unregister_requeue_max_age_ms: 900_000,
+        ..active_running()
+    });
+    assert!(
+        mm_dsl::MeerkatMachineMutator::apply(
+            &mut draining,
+            suspend(true, mm_dsl::RunSuspensionCause::FenceGap)
+        )
+        .is_err(),
+        "a registration draining for its unregister suspends only for its stop"
+    );
+
+    let mut durable = recover(active_running());
+    mm_dsl::MeerkatMachineMutator::apply(
+        &mut durable,
+        suspend(true, mm_dsl::RunSuspensionCause::FenceGap),
+    )
+    .expect("a fence gap suspends a durable session's run");
+    assert_eq!(durable.state().lifecycle_phase, mm_dsl::MeerkatPhase::Idle);
+    assert_eq!(durable.state().current_run_id, None);
+    assert_eq!(durable.state().resumable_run_id, Some(run.clone()));
+    assert_eq!(durable.state().turn_terminal_run_id, None);
+    assert_eq!(durable.state().turn_phase, mm_dsl::TurnPhase::Ready);
+
+    mm_dsl::MeerkatMachineMutator::apply(
+        &mut durable,
+        mm_dsl::MeerkatMachineInput::Prepare {
+            session_id: session.clone(),
+            run_id: run.clone(),
+        },
+    )
+    .expect("the registration starts the marked run again");
+    mm_dsl::MeerkatMachineMutator::apply(
+        &mut durable,
+        mm_dsl::MeerkatMachineInput::ResumeRun {
+            run_id: run.clone(),
+        },
+    )
+    .expect("the marked run resumes");
+    assert_eq!(durable.state().resumable_run_id, None);
+    assert_eq!(durable.state().current_run_id, Some(run.clone()));
+    mm_dsl::MeerkatMachineMutator::apply(
+        &mut durable,
+        mm_dsl::MeerkatMachineInput::StartConversationRun {
+            run_id: run.clone(),
+            primitive_kind: mm_dsl::TurnPrimitiveKind::ConversationTurn,
+            admitted_content_shape: mm_dsl::ContentShape::Conversation,
+            vision_enabled: false,
+            image_tool_results_enabled: false,
+            max_extraction_retries: 0,
+        },
+    )
+    .expect("the resumed run's turn starts again");
+    assert_eq!(
+        durable.state().turn_phase,
+        mm_dsl::TurnPhase::ApplyingPrimitive
+    );
+}
+
+/// A cancel a run accepted before a store fence gap (its turn's own, or an
+/// ambient cancel whose boundary dispatch is still outstanding) survives the
+/// gap's suspension as the run's stop intent, and a stop of the suspended run
+/// is recorded the same way: such a run never resumes, it is never settled as
+/// a refused resume, and settling it as cancelled ends the mark. A
+/// registration draining for its unregister refuses a stop of its resumable
+/// run, which is the next start's. Unrun: written while Cargo is not run.
+#[test]
+fn a_stop_intent_survives_a_fence_gap_and_the_stopped_run_never_resumes() {
+    let run = mm_dsl::RunId("run-in-flight".to_string());
+    let session = mm_dsl::SessionId("session-recovery".to_string());
+    let active_running = || mm_dsl::MeerkatMachineState {
+        lifecycle_phase: mm_dsl::MeerkatPhase::Running,
+        session_id: Some(session.clone()),
+        current_run_id: Some(run.clone()),
+        pre_run_phase: Some(mm_dsl::PreRunPhase::Idle),
+        registration_phase: mm_dsl::RegistrationPhase::Active,
+        turn_phase: mm_dsl::TurnPhase::CallingLlm,
+        ..Default::default()
+    };
+    let recover = |state: mm_dsl::MeerkatMachineState| {
+        mm_dsl::MeerkatMachineAuthority::recover_from_state(state)
+            .expect("the state must be recoverable")
+    };
+    let suspend = || mm_dsl::MeerkatMachineInput::SuspendRunForStop {
+        run_id: run.clone(),
+        durable_session: true,
+        cause: mm_dsl::RunSuspensionCause::FenceGap,
+    };
+    let stop = || mm_dsl::MeerkatMachineInput::StopCurrentRunForRun {
+        run_id: run.clone(),
+    };
+    let prepare = || mm_dsl::MeerkatMachineInput::Prepare {
+        session_id: session.clone(),
+        run_id: run.clone(),
+    };
+    let resume = || mm_dsl::MeerkatMachineInput::ResumeRun {
+        run_id: run.clone(),
+    };
+    let ambient_cancel = || mm_dsl::MeerkatMachineInput::CancelAfterBoundary {
+        reason: "the caller cancels".to_string(),
+    };
+
+    // A cancel accepted before the gap stands as the run's stop intent.
+    let mut cancelled = recover(mm_dsl::MeerkatMachineState {
+        cancel_after_boundary: true,
+        ..active_running()
+    });
+    mm_dsl::MeerkatMachineMutator::apply(&mut cancelled, suspend())
+        .expect("a fence gap suspends a run whose cancel is pending");
+    assert_eq!(cancelled.state().resumable_run_id, Some(run.clone()));
+    assert_eq!(
+        cancelled.state().run_stop_requested,
+        Some(run.clone()),
+        "the pending cancel stands as the run's stop intent"
+    );
+    mm_dsl::MeerkatMachineMutator::apply(&mut cancelled, prepare())
+        .expect("the marked run starts again");
+    assert_eq!(
+        cancelled.state().run_stop_requested,
+        Some(run.clone()),
+        "starting the same run keeps its stop intent"
+    );
+    assert!(
+        mm_dsl::MeerkatMachineMutator::apply(&mut cancelled, resume()).is_err(),
+        "a run whose stop was asked never resumes"
+    );
+
+    // An ambient cancel accepted while the run waits at the fence (no run
+    // named: only its boundary dispatch is outstanding, the turn's own flag
+    // stays unset) stands as the stop intent too.
+    let mut ambient = recover(active_running());
+    mm_dsl::MeerkatMachineMutator::apply(&mut ambient, ambient_cancel())
+        .expect("an ambient cancel of the running run is accepted");
+    assert!(!ambient.state().cancel_after_boundary);
+    assert!(ambient.state().boundary_cancel_dispatch_pending);
+    mm_dsl::MeerkatMachineMutator::apply(&mut ambient, suspend())
+        .expect("a fence gap suspends a run whose ambient cancel is pending");
+    assert_eq!(
+        ambient.state().run_stop_requested,
+        Some(run.clone()),
+        "the pending ambient cancel stands as the run's stop intent"
+    );
+    mm_dsl::MeerkatMachineMutator::apply(&mut ambient, prepare())
+        .expect("the marked run starts again");
+    assert!(
+        mm_dsl::MeerkatMachineMutator::apply(&mut ambient, resume()).is_err(),
+        "a run cancelled while it waited at the fence never resumes"
+    );
+
+    // A run suspended with no intent resumes; a stop of it while suspended
+    // is recorded, and the run stays marked until the runtime settles it.
+    let mut suspended = recover(active_running());
+    mm_dsl::MeerkatMachineMutator::apply(&mut suspended, suspend())
+        .expect("a fence gap suspends the run");
+    assert_eq!(suspended.state().run_stop_requested, None);
+    mm_dsl::MeerkatMachineMutator::apply(&mut suspended, stop())
+        .expect("a stop of the suspended run is recorded");
+    assert_eq!(suspended.state().run_stop_requested, Some(run.clone()));
+    assert_eq!(suspended.state().resumable_run_id, Some(run.clone()));
+    assert_eq!(suspended.state().current_run_id, None);
+    let mut resumed_after_stop = recover(suspended.state().clone());
+    mm_dsl::MeerkatMachineMutator::apply(&mut resumed_after_stop, prepare())
+        .expect("the marked run starts again");
+    assert!(
+        mm_dsl::MeerkatMachineMutator::apply(&mut resumed_after_stop, resume()).is_err(),
+        "a run stopped while suspended never resumes"
+    );
+    assert!(
+        mm_dsl::MeerkatMachineMutator::apply(
+            &mut suspended,
+            mm_dsl::MeerkatMachineInput::SettleResumableRun {
+                run_id: run.clone(),
+                reason: mm_dsl::InputAbandonReason::ResumeRefused,
+            },
+        )
+        .is_err(),
+        "a run whose stop was asked is not settled as a refused resume"
+    );
+    assert_eq!(suspended.state().resumable_run_id, Some(run.clone()));
+    mm_dsl::MeerkatMachineMutator::apply(
+        &mut suspended,
+        mm_dsl::MeerkatMachineInput::SettleResumableRun {
+            run_id: run.clone(),
+            reason: mm_dsl::InputAbandonReason::Cancelled,
+        },
+    )
+    .expect("the runtime settles the stopped run");
+    assert_eq!(suspended.state().resumable_run_id, None);
+    assert_eq!(suspended.state().turn_terminal_run_id, Some(run.clone()));
+
+    // A draining registration keeps its resumable run for the next start.
+    let mut draining = recover(mm_dsl::MeerkatMachineState {
+        registration_phase: mm_dsl::RegistrationPhase::Draining,
+        unregister_queued_inputs: mm_dsl::UnregisterQueuedInputsDisposition::Requeue,
+        unregister_requeue_max_age_ms: 900_000,
+        ..suspended_state_of(&run, &session)
+    });
+    assert!(
+        mm_dsl::MeerkatMachineMutator::apply(&mut draining, stop()).is_err(),
+        "a draining registration refuses a stop of its resumable run"
+    );
+    assert_eq!(draining.state().run_stop_requested, None);
+}
+
+/// An ambient cancel (no run named) accepted while the session holds a run
+/// marked resumable, its executor attached and no run current, records the
+/// stop intent on that run, as a stop of it does: the run never resumes, and
+/// the runtime settles it as cancelled. With no resumable run the ambient
+/// cancel records nothing on any run, as before, and a registration draining
+/// for its unregister keeps its resumable run for the next start. Unrun:
+/// written while Cargo is not run.
+#[test]
+fn an_ambient_cancel_of_a_suspended_run_stands_as_its_stop_intent() {
+    let run = mm_dsl::RunId("run-in-flight".to_string());
+    let session = mm_dsl::SessionId("session-recovery".to_string());
+    let recover = |state: mm_dsl::MeerkatMachineState| {
+        mm_dsl::MeerkatMachineAuthority::recover_from_state(state)
+            .expect("the state must be recoverable")
+    };
+    let ambient_cancel = || mm_dsl::MeerkatMachineInput::CancelAfterBoundary {
+        reason: "the caller cancels".to_string(),
+    };
+    let attached_suspended = || mm_dsl::MeerkatMachineState {
+        lifecycle_phase: mm_dsl::MeerkatPhase::Attached,
+        ..suspended_state_of(&run, &session)
+    };
+
+    let mut suspended = recover(attached_suspended());
+    mm_dsl::MeerkatMachineMutator::apply(&mut suspended, ambient_cancel())
+        .expect("an ambient cancel of the attached session is accepted");
+    assert_eq!(
+        suspended.state().run_stop_requested,
+        Some(run.clone()),
+        "the ambient cancel stands as the suspended run's stop intent"
+    );
+    assert_eq!(suspended.state().resumable_run_id, Some(run.clone()));
+    let mut resumed = recover(suspended.state().clone());
+    mm_dsl::MeerkatMachineMutator::apply(
+        &mut resumed,
+        mm_dsl::MeerkatMachineInput::Prepare {
+            session_id: session.clone(),
+            run_id: run.clone(),
+        },
+    )
+    .expect("the marked run starts again");
+    assert!(
+        mm_dsl::MeerkatMachineMutator::apply(
+            &mut resumed,
+            mm_dsl::MeerkatMachineInput::ResumeRun {
+                run_id: run.clone(),
+            },
+        )
+        .is_err(),
+        "a run cancelled while suspended never resumes"
+    );
+    mm_dsl::MeerkatMachineMutator::apply(
+        &mut suspended,
+        mm_dsl::MeerkatMachineInput::SettleResumableRun {
+            run_id: run.clone(),
+            reason: mm_dsl::InputAbandonReason::Cancelled,
+        },
+    )
+    .expect("the runtime settles the cancelled run");
+    assert_eq!(suspended.state().resumable_run_id, None);
+
+    // No resumable run: nothing is recorded on any run.
+    let mut attached = recover(mm_dsl::MeerkatMachineState {
+        resumable_run_id: None,
+        ..attached_suspended()
+    });
+    mm_dsl::MeerkatMachineMutator::apply(&mut attached, ambient_cancel())
+        .expect("an ambient cancel with no run is accepted, as before");
+    assert_eq!(attached.state().run_stop_requested, None);
+    assert!(attached.state().boundary_cancel_dispatch_pending);
+
+    // A draining registration keeps its resumable run for the next start.
+    let mut draining = recover(mm_dsl::MeerkatMachineState {
+        registration_phase: mm_dsl::RegistrationPhase::Draining,
+        unregister_queued_inputs: mm_dsl::UnregisterQueuedInputsDisposition::Requeue,
+        unregister_requeue_max_age_ms: 900_000,
+        ..attached_suspended()
+    });
+    mm_dsl::MeerkatMachineMutator::apply(&mut draining, ambient_cancel())
+        .expect("an ambient cancel of a draining registration is accepted, as before");
+    assert_eq!(draining.state().run_stop_requested, None);
+}
+
+/// The state a fence gap leaves: the run marked resumable, no run current,
+/// the turn ready to start again.
+fn suspended_state_of(
+    run: &mm_dsl::RunId,
+    session: &mm_dsl::SessionId,
+) -> mm_dsl::MeerkatMachineState {
+    mm_dsl::MeerkatMachineState {
+        lifecycle_phase: mm_dsl::MeerkatPhase::Idle,
+        session_id: Some(session.clone()),
+        resumable_run_id: Some(run.clone()),
+        registration_phase: mm_dsl::RegistrationPhase::Active,
+        turn_phase: mm_dsl::TurnPhase::Ready,
+        ..Default::default()
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -641,6 +641,16 @@ fn agent_event_all_variants_roundtrip() {
             session_id: SessionId::new(),
             record: rewrite_record_fixture(),
         },
+        AgentEvent::ToolResultsBoundedForRequest {
+            run_id: meerkat_core::lifecycle::RunId::new(),
+            results: vec![meerkat_core::BoundedToolResult {
+                tool_use_id: "tool-1".to_string(),
+                tool_name: "search".to_string(),
+                kept_bytes: 4_096,
+                total_bytes: 600_000,
+            }],
+            axis: meerkat_core::ToolResultBoundAxis::RequestBytes,
+        },
     ];
 
     for event in &direct_variants {
@@ -965,6 +975,16 @@ fn documented_event_catalog_covers_core_agent_event_discriminators() {
             run_id: meerkat_core::lifecycle::RunId::new(),
             round: 2,
             resume_point: meerkat_core::RunResumePointKind::ToolsPending,
+        },
+        AgentEvent::ToolResultsBoundedForRequest {
+            run_id: meerkat_core::lifecycle::RunId::new(),
+            results: vec![meerkat_core::BoundedToolResult {
+                tool_use_id: "tool-1".to_string(),
+                tool_name: "search".to_string(),
+                kept_bytes: 4_096,
+                total_bytes: 600_000,
+            }],
+            axis: meerkat_core::ToolResultBoundAxis::ContextWindow,
         },
     ];
 

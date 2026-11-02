@@ -239,12 +239,14 @@ fn item_id<'a>(item: &'a Value, kind: &str) -> Option<&'a str> {
 /// re-issues in the terminal response.
 pub(crate) const COPILOT_ALIASED_KINDS: [&str; 2] = ["message", "reasoning"];
 
-/// Whether a completed item and a terminal item of `kind` are the same item
-/// for Copilot's re-identification: for a message, the same role, phase and
-/// full content; for reasoning, every field except the top-level id and the
-/// opaque `encrypted_content` (which must be a string on both when present),
-/// so the terminal id and ciphertext pair is taken as provider-owned.
-fn copilot_same_item(kind: &str, completed: &Value, terminal: &Value) -> bool {
+/// Whether two items of `kind` are the same item for Copilot's
+/// re-identification: for a message, the same role, phase and full content;
+/// for reasoning, every field except the top-level id and the opaque
+/// `encrypted_content` (which must be a string on both when present), so the
+/// terminal id and ciphertext pair is taken as provider-owned. On the items
+/// it accepts this is an equivalence; a reasoning item whose
+/// `encrypted_content` is not a string matches nothing, not even itself.
+fn copilot_same_item(kind: &str, left: &Value, right: &Value) -> bool {
     match kind {
         "message" => {
             let semantics = |item: &Value| {
@@ -254,7 +256,7 @@ fn copilot_same_item(kind: &str, completed: &Value, terminal: &Value) -> bool {
                     item.get("content").cloned(),
                 )
             };
-            semantics(completed) == semantics(terminal)
+            semantics(left) == semantics(right)
         }
         "reasoning" => {
             let opaque_ok = |item: &Value| {
@@ -269,7 +271,7 @@ fn copilot_same_item(kind: &str, completed: &Value, terminal: &Value) -> bool {
                 }
                 item
             };
-            opaque_ok(completed) && opaque_ok(terminal) && visible(completed) == visible(terminal)
+            opaque_ok(left) && opaque_ok(right) && visible(left) == visible(right)
         }
         _ => false,
     }
@@ -313,15 +315,41 @@ impl CopilotAliases {
 /// GitHub Copilot's Responses stream re-identifies completed messages and
 /// reasoning: an item completed by `response.output_item.done` as `F` can be
 /// carried by the terminal response as `G`. For that route only, return the
-/// aliases `F -> G` for completed items whose id the terminal output lacks,
-/// each proven one to one by [`copilot_same_item`] against exactly one
-/// terminal item of the same type that no completed item claims. Array
-/// positions are never used. Identity conflicts are refused before anything
-/// is collapsed: a completed id reused by two completed items, a terminal id
-/// carried by two terminal items, and a terminal item claimed by two aliases.
-/// A completed item with no terminal id and no unique match is refused, as a
-/// re-identification with different content when an unclaimed terminal item
-/// of its type exists, otherwise by the ordinary coverage check as omitted.
+/// aliases `F -> G` for the re-identified completed items (those whose id
+/// the terminal output lacks), each to a terminal item of the same type that
+/// no completed item claims and that [`copilot_same_item`] proves the same
+/// item. Identity conflicts are refused before anything is aliased: a
+/// completed id reused by two completed items, and a terminal id carried by
+/// two terminal items.
+///
+/// One response can hold several items of a type that differ only in their
+/// ids and ciphertext (two reasoning items without a summary, say), so items
+/// are matched by group: the group of a re-identified completed item is the
+/// k re-identified completed items and the m unclaimed terminal items that
+/// are the same item as it ([`copilot_same_item`] is an equivalence on the
+/// items it accepts). A group is aliased only when it is complete on both
+/// sides, k = m: walking the completed items in their given order, each
+/// takes the first terminal item of its group, in output order, that no
+/// earlier one took. Pairing inside a complete group is immaterial to the
+/// verdicts and the committed blocks: the blocks are lowered from the
+/// terminal items, each keeping its own id and ciphertext, and every pairing
+/// covers the same terminal ids, which carry the same visible content, so
+/// the coverage checks in the client give the same verdicts. The live events
+/// match too, unless a streamed id of one item is the terminal id of
+/// another, where the client's one-pass streamed-id reconciliation depends
+/// on the slot order. Array positions are never used to decide which items
+/// are the same; inside a complete group they only pick one of these
+/// pairings.
+///
+/// Otherwise a re-identified completed item is refused, by its group:
+/// - m = 0: as a re-identification with different content when an unclaimed
+///   terminal item of its type exists, otherwise by the ordinary coverage
+///   check as omitted;
+/// - k < m: as having no one-to-one match, since nothing tells which
+///   terminal item is the extra one;
+/// - k > m: as having no one-to-one match, at the first item of the group
+///   left without a terminal item.
+///
 /// Function calls (keyed by `call_id`) and other references are never
 /// aliased, and the terminal identity is kept.
 pub(crate) fn copilot_item_aliases<'a>(
@@ -363,36 +391,53 @@ pub(crate) fn copilot_item_aliases<'a>(
                     .is_some_and(|id| !completed_ids.contains(id))
             })
             .collect();
+        let reidentified: Vec<(&str, &Value)> = completed
+            .iter()
+            .copied()
+            .filter_map(|item| item.get("id").and_then(Value::as_str).map(|id| (id, item)))
+            .filter(|(id, _)| !terminal_ids.contains(id))
+            .collect();
         let mut kind_aliases = HashMap::new();
-        let mut aliased_targets = HashSet::new();
-        for done in completed {
-            let Some(done_id) = done.get("id").and_then(Value::as_str) else {
-                continue;
-            };
-            if terminal_ids.contains(done_id) {
-                continue;
-            }
-            let matches: Vec<&str> = unclaimed
+        let mut aliased_targets: HashSet<&str> = HashSet::new();
+        for &(done_id, done) in &reidentified {
+            // Its group: the unclaimed terminal items that are the same item,
+            // in output order, and the re-identified completed items that are.
+            let group_terminal: Vec<&str> = unclaimed
                 .iter()
                 .filter(|candidate| copilot_same_item(kind, done, candidate))
                 .filter_map(|candidate| candidate.get("id").and_then(Value::as_str))
                 .collect();
-            match matches.as_slice() {
-                [target] if aliased_targets.insert(*target) => {
-                    kind_aliases.insert(done_id.to_owned(), (*target).to_owned());
+            if group_terminal.is_empty() {
+                if unclaimed.is_empty() {
+                    continue;
                 }
-                [] if !unclaimed.is_empty() => {
-                    return Err(malformed(format!(
-                        "terminal Responses output re-identified completed {kind} item '{done_id}' with different content"
-                    )));
-                }
-                [] => {}
-                _ => {
-                    return Err(malformed(format!(
-                        "terminal Responses output has no one-to-one match for re-identified completed {kind} item '{done_id}'"
-                    )));
-                }
+                return Err(malformed(format!(
+                    "terminal Responses output re-identified completed {kind} item '{done_id}' with different content"
+                )));
             }
+            let group_completed = reidentified
+                .iter()
+                .filter(|(_, other)| copilot_same_item(kind, done, other))
+                .count();
+            // Only a complete group pairs: with more terminal items than
+            // completed ones nothing tells which one is extra, and with fewer
+            // the last completed items find none left.
+            let target = if group_completed < group_terminal.len() {
+                None
+            } else {
+                group_terminal
+                    .iter()
+                    .copied()
+                    .find(|id| !aliased_targets.contains(id))
+            };
+            let Some(target) = target else {
+                return Err(malformed(format!(
+                    "terminal Responses output has no one-to-one match for re-identified completed {kind} item '{done_id}' ({group_completed} re-identified completed and {} unclaimed terminal items with the same content)",
+                    group_terminal.len()
+                )));
+            };
+            aliased_targets.insert(target);
+            kind_aliases.insert(done_id.to_owned(), target.to_owned());
         }
         aliases.by_kind.insert(kind, kind_aliases);
     }
@@ -1006,6 +1051,315 @@ mod tests {
         assert_eq!(input[0]["encrypted_content"], "terminal-cipher");
     }
 
+    /// A Copilot response of reasoning items and then an answer: each
+    /// `(id, summary)` of `completed` completes under that id at its own
+    /// output index, and the terminal response carries `terminal` in that
+    /// order, then the answer. Every reasoning item has a ciphertext of its
+    /// own, `cipher-<id>`. With `streamed`, each completed lifecycle is first
+    /// added under its own canonical id and completes its summary in the
+    /// stream. Returns the events and the terminal output.
+    fn copilot_reasoning_response(
+        completed: &[(&str, Option<&str>)],
+        terminal: &[(&str, Option<&str>)],
+        streamed: bool,
+    ) -> (Vec<Value>, Vec<Value>) {
+        let reasoning = |id: &str, summary: Option<&str>| {
+            let summary = match summary {
+                Some(text) => json!([{"type":"summary_text","text":text}]),
+                None => json!([]),
+            };
+            json!({"type":"reasoning","id":id,"summary":summary,"encrypted_content":format!("cipher-{id}")})
+        };
+        let mut events = vec![json!({"type":"response.created","response":{"id":"resp_1"}})];
+        for (index, &(id, summary)) in completed.iter().enumerate() {
+            let event =
+                |kind: &str, item: Value| json!({"type":kind,"output_index":index,"item":item});
+            if streamed {
+                events.push(event(
+                    "response.output_item.added",
+                    reasoning(&format!("A{index}"), summary),
+                ));
+                if let Some(text) = summary {
+                    events.push(json!({"type":"response.reasoning_summary_text.delta","output_index":index,"delta":text}));
+                }
+                events.push(event(
+                    "response.reasoning_summary.done",
+                    reasoning(&format!("S{index}"), summary),
+                ));
+            }
+            events.push(event("response.output_item.done", reasoning(id, summary)));
+        }
+        let answer = message("msg_1", "final_answer", "Done.");
+        let output: Vec<Value> = terminal
+            .iter()
+            .map(|&(id, summary)| reasoning(id, summary))
+            .chain([answer.clone()])
+            .collect();
+        let index = completed.len();
+        events.extend([
+            json!({"type":"response.output_item.added","output_index":index,"item":answer}),
+            json!({"type":"response.output_text.delta","item_id":"msg_1","output_index":index,"delta":"Done."}),
+            json!({"type":"response.output_item.done","output_index":index,"item":answer}),
+            json!({"type":"response.completed","response":{"id":"resp_1","status":"completed",
+                "output":output,
+                "usage":{"input_tokens":3,"output_tokens":2,"total_tokens":5}}}),
+        ]);
+        (events, output)
+    }
+
+    /// Asserts that `assistant` replays exactly the reasoning items
+    /// `expected`, as `(id, encrypted_content)` pairs in replay order.
+    fn assert_replayed_reasoning(
+        assistant: meerkat_core::BlockAssistantMessage,
+        expected: &[(&str, &str)],
+        case: &str,
+    ) {
+        let client = OpenAiClient::new("unused".into());
+        let projected = client
+            .project_replay_messages(&[Message::BlockAssistant(assistant)])
+            .unwrap();
+        let body = client
+            .build_request_body(&LlmRequest::new("gpt-5.5", projected))
+            .unwrap();
+        let replayed: Vec<(&str, &str)> = body["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|item| item["type"] == "reasoning")
+            .map(|item| {
+                (
+                    item["id"].as_str().unwrap(),
+                    item["encrypted_content"].as_str().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            replayed, expected,
+            "{case}: each terminal reasoning id replays with its own ciphertext"
+        );
+    }
+
+    /// Two reasoning items with the same visible fields (no summary, or the
+    /// same summary), each re-identified with fresh ciphertexts, are one
+    /// group with as many completed as terminal items: accepted, the blocks
+    /// are the terminal items, and each terminal id replays with its own
+    /// ciphertext, in terminal order.
+    #[tokio::test]
+    async fn copilot_identical_reasoning_items_are_matched_as_a_group() {
+        for (shape, summary) in [
+            ("empty summaries", None),
+            ("identical summaries", Some("Plan")),
+        ] {
+            let (events, output) = copilot_reasoning_response(
+                &[("B", summary), ("C", summary)],
+                &[("I", summary), ("J", summary)],
+                false,
+            );
+            let (client, server) = copilot_stub(events).await;
+            let result = LlmClientAdapter::new(Arc::new(client), "gpt-5.5".into())
+                .stream_response(&[], &[], 1000, None, None)
+                .await;
+            server.abort();
+            let result = result.unwrap_or_else(|error| {
+                panic!("{shape}: the terminal pair is the completed pair: {error}")
+            });
+            assert_eq!(
+                result.blocks(),
+                lower_items(&output, Some("resp_1")).unwrap(),
+                "{shape}: the blocks are the terminal items"
+            );
+            assert_replayed_reasoning(
+                result.into_message(),
+                &[("I", "cipher-I"), ("J", "cipher-J")],
+                shape,
+            );
+        }
+    }
+
+    /// The same groups with streamed reasoning: each lifecycle is added under
+    /// its own canonical id and completes its summary in the stream, so the
+    /// streamed ids reconcile with the group's terminal ids. Accepted, and
+    /// each reasoning item completes once in the live events.
+    #[tokio::test]
+    async fn copilot_identical_reasoning_group_reconciles_its_streamed_ids() {
+        for (shape, summary) in [
+            ("empty summaries", None),
+            ("identical summaries", Some("Plan")),
+        ] {
+            let (events, output) = copilot_reasoning_response(
+                &[("B", summary), ("C", summary)],
+                &[("I", summary), ("J", summary)],
+                true,
+            );
+            let (client, server) = copilot_stub(events).await;
+            let (tx, mut rx) = tokio::sync::mpsc::channel(32);
+            let result =
+                LlmClientAdapter::with_event_channel(Arc::new(client), "gpt-5.5".into(), tx)
+                    .stream_response(&[], &[], 1000, None, None)
+                    .await;
+            server.abort();
+            let result = result.unwrap_or_else(|error| {
+                panic!("{shape}: the streamed group is the terminal group: {error}")
+            });
+            assert_eq!(
+                result.blocks(),
+                lower_items(&output, Some("resp_1")).unwrap(),
+                "{shape}: the blocks are the terminal items"
+            );
+            let completions = std::iter::from_fn(|| rx.try_recv().ok())
+                .filter(|event| matches!(event, meerkat_core::AgentEvent::ReasoningComplete { .. }))
+                .count();
+            assert_eq!(
+                completions, 2,
+                "{shape}: each reasoning item completes once"
+            );
+        }
+    }
+
+    /// Two identical messages, each re-identified on every event of its
+    /// lifecycle, are one group: accepted, the terminal identities are kept,
+    /// and each visible text streams once.
+    #[tokio::test]
+    async fn copilot_identical_messages_are_matched_as_a_group() {
+        let at = |id: &str| message(id, "final_answer", "Done.");
+        let output = [at("G0"), at("G1")];
+        let events = vec![
+            json!({"type":"response.created","response":{"id":"resp_1"}}),
+            json!({"type":"response.output_item.added","output_index":0,"item":at("A0")}),
+            json!({"type":"response.output_text.delta","item_id":"D0","output_index":0,"delta":"Done."}),
+            json!({"type":"response.output_item.done","output_index":0,"item":at("F0")}),
+            json!({"type":"response.output_item.added","output_index":1,"item":at("A1")}),
+            json!({"type":"response.output_text.delta","item_id":"D1","output_index":1,"delta":"Done."}),
+            json!({"type":"response.output_item.done","output_index":1,"item":at("F1")}),
+            json!({"type":"response.completed","response":{"id":"resp_1","status":"completed",
+                "output":output,
+                "usage":{"input_tokens":3,"output_tokens":2,"total_tokens":5}}}),
+        ];
+        let (client, server) = copilot_stub(events).await;
+        let (tx, mut rx) = tokio::sync::mpsc::channel(32);
+        let result = LlmClientAdapter::with_event_channel(Arc::new(client), "gpt-5.5".into(), tx)
+            .stream_response(&[], &[], 1000, None, None)
+            .await;
+        server.abort();
+        let result = result.unwrap_or_else(|error| {
+            panic!("the terminal messages are the completed messages: {error}")
+        });
+        assert_eq!(
+            result.blocks(),
+            lower_items(&output, Some("resp_1")).unwrap(),
+            "the terminal identities are kept for replay"
+        );
+        let mut visible = String::new();
+        while let Ok(event) = rx.try_recv() {
+            if let meerkat_core::AgentEvent::TextDelta { delta, .. } = event {
+                visible.push_str(&delta);
+            }
+        }
+        assert_eq!(visible, "Done.Done.", "each visible text streams once");
+    }
+
+    /// A group beside a distinct reasoning item in one response: the pair
+    /// without a summary is matched as a group and the summarized item on its
+    /// own, streamed or not.
+    #[tokio::test]
+    async fn copilot_reasoning_group_beside_a_distinct_item_is_accepted() {
+        for streamed in [false, true] {
+            let (events, output) = copilot_reasoning_response(
+                &[("B", None), ("E", Some("Plan")), ("C", None)],
+                &[("I", None), ("K", Some("Plan")), ("J", None)],
+                streamed,
+            );
+            let (client, server) = copilot_stub(events).await;
+            let result = LlmClientAdapter::new(Arc::new(client), "gpt-5.5".into())
+                .stream_response(&[], &[], 1000, None, None)
+                .await;
+            server.abort();
+            let result = result.unwrap_or_else(|error| {
+                panic!("streamed {streamed}: the group and the distinct item both match: {error}")
+            });
+            assert_eq!(
+                result.blocks(),
+                lower_items(&output, Some("resp_1")).unwrap(),
+                "streamed {streamed}: the blocks are the terminal items"
+            );
+        }
+    }
+
+    /// Distinguishable reasoning items match by content, never by position:
+    /// with the two re-identified items listed in the other order by the
+    /// terminal output, each completed item is aliased to the terminal item
+    /// with its content, and the blocks follow the terminal order with each
+    /// terminal id and ciphertext kept together.
+    #[tokio::test]
+    async fn copilot_reordered_terminal_items_match_by_content() {
+        let (events, output) = copilot_reasoning_response(
+            &[("B", Some("A plan")), ("C", Some("B plan"))],
+            &[("J", Some("B plan")), ("I", Some("A plan"))],
+            false,
+        );
+        let completed = events
+            .iter()
+            .filter(|event| event["type"] == "response.output_item.done")
+            .map(|event| &event["item"]);
+        let aliases = copilot_item_aliases(&output, completed).unwrap();
+        assert_eq!(aliases.terminal_id("reasoning", "B"), "I", "'A plan' is I");
+        assert_eq!(aliases.terminal_id("reasoning", "C"), "J", "'B plan' is J");
+        let (client, server) = copilot_stub(events).await;
+        let result = LlmClientAdapter::new(Arc::new(client), "gpt-5.5".into())
+            .stream_response(&[], &[], 1000, None, None)
+            .await;
+        server.abort();
+        let result = result
+            .unwrap_or_else(|error| panic!("each completed item has its terminal item: {error}"));
+        assert_eq!(
+            result.blocks(),
+            lower_items(&output, Some("resp_1")).unwrap(),
+            "the blocks follow the terminal order"
+        );
+        assert_replayed_reasoning(
+            result.into_message(),
+            &[("J", "cipher-J"), ("I", "cipher-I")],
+            "reordered",
+        );
+    }
+
+    /// A group with a kept member: the completed item whose id the terminal
+    /// output keeps is neither aliased nor counted, so its re-identified twin
+    /// is aliased to the one unclaimed terminal item, and the response is
+    /// accepted.
+    #[tokio::test]
+    async fn copilot_group_with_a_kept_member_aliases_only_the_reidentified_one() {
+        let (events, output) = copilot_reasoning_response(
+            &[("B", None), ("C", None)],
+            &[("B", None), ("J", None)],
+            false,
+        );
+        let completed = events
+            .iter()
+            .filter(|event| event["type"] == "response.output_item.done")
+            .map(|event| &event["item"]);
+        let aliases = copilot_item_aliases(&output, completed).unwrap();
+        assert_eq!(aliases.terminal_id("reasoning", "B"), "B", "B is kept");
+        assert_eq!(aliases.terminal_id("reasoning", "C"), "J", "C is now J");
+        let (client, server) = copilot_stub(events).await;
+        let result = LlmClientAdapter::new(Arc::new(client), "gpt-5.5".into())
+            .stream_response(&[], &[], 1000, None, None)
+            .await;
+        server.abort();
+        let result =
+            result.unwrap_or_else(|error| panic!("the kept item and its twin both match: {error}"));
+        assert_eq!(
+            result.blocks(),
+            lower_items(&output, Some("resp_1")).unwrap(),
+            "the blocks are the terminal items"
+        );
+        assert_replayed_reasoning(
+            result.into_message(),
+            &[("B", "cipher-B"), ("J", "cipher-J")],
+            "kept member",
+        );
+    }
+
     /// Copilot rotates a function call's item id on every event while its
     /// call_id stays: the call is identified by call_id, with no alias.
     #[tokio::test]
@@ -1199,6 +1553,44 @@ mod tests {
                     ])),
                 ],
                 "no one-to-one match for re-identified completed reasoning item 'B'",
+            ),
+            (
+                "group too many terminal",
+                vec![
+                    done_at(0, &reasoning("B", "Plan", "c1")),
+                    done_at(1, &reasoning("C", "Plan", "c2")),
+                    completed(json!([
+                        reasoning("I", "Plan", "c3"),
+                        reasoning("J", "Plan", "c4"),
+                        reasoning("K", "Plan", "c5")
+                    ])),
+                ],
+                "no one-to-one match for re-identified completed reasoning item 'B'",
+            ),
+            (
+                "group member changed",
+                vec![
+                    done_at(0, &reasoning("B", "Plan", "c1")),
+                    done_at(1, &reasoning("C", "Plan", "c2")),
+                    completed(json!([
+                        reasoning("I", "Plan", "c3"),
+                        reasoning("J", "Other", "c4")
+                    ])),
+                ],
+                "no one-to-one match for re-identified completed reasoning item 'C'",
+            ),
+            (
+                "group too few terminal",
+                vec![
+                    done_at(0, &reasoning("B", "Plan", "c1")),
+                    done_at(1, &reasoning("C", "Plan", "c2")),
+                    done_at(2, &reasoning("D", "Plan", "c3")),
+                    completed(json!([
+                        reasoning("I", "Plan", "c4"),
+                        reasoning("J", "Plan", "c5")
+                    ])),
+                ],
+                "no one-to-one match for re-identified completed reasoning item 'D'",
             ),
             (
                 "unrelated reasoning completion",

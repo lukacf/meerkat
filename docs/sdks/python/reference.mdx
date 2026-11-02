@@ -214,7 +214,11 @@ Stops exactly `run_id` (read it from the `run_started` event's
 including durable steers that joined it. Returns `StopRunResult` /
 `MobStopMemberRunResult` whose `receipt["outcome"]` is `stopped` (with
 `contributors`), `not_current` (the run is no longer current; nothing was
-touched), or `not_stoppable`.
+touched), or `not_stoppable`. A run a store fence gap suspended, one a restart
+left open that has not resumed yet, or one whose session store's writer is
+stopped, is stopped without waiting: `stopped` with no `contributors`, and
+its inputs end cancelled when the runtime settles it (once the store takes
+writes again, after a gap).
 
 ### `send_external_event`
 
@@ -484,7 +488,8 @@ use the raw-preserving `UnknownEvent` path, as do `reasoning_delta`,
 `reasoning_complete`, `assistant_image_appended`,
 `turn_usage_accounting_unmeasured`,
 `turn_usage_accounting_identity_disputed`, `interaction_callback_pending`,
-`peer_content_ingested`, and `provider_cache_breakpoints_discarded`. See the
+`peer_content_ingested`, `provider_cache_breakpoints_discarded`, and
+`tool_results_bounded_for_request`. See the
 [RPC event reference](/api/rpc#notifications) for their wire contracts.
 
 `live_channel_closed` has a handwritten parser class and arrives as a typed

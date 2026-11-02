@@ -100,6 +100,14 @@ Both use the grant owner's local publication ordering. They read current local
 facts without hidden network requests. A publication stamp invalidates decisions;
 it is not a second policy database.
 
+An `Unavailable` answer from either owner is final where it is asked: Core
+neither rebuilds nor retries it, and at a controller's model request it ends
+the run with nothing sent. Core waits only for contention it can name (an owner
+change in progress on the publication, or a hold of its writer). Keep
+`Unavailable` for an owner that genuinely cannot answer now, and absorb your
+own transient lock contention: wait briefly for your lock (never one your
+caller holds) or read an immutable snapshot that your writers replace.
+
 Resource-domain restrictions can be owner-scoped (0.9.4):
 `DomainRestriction::owned_by(owners)` permits every domain whose typed authority
 is one of the owners, so a parent grant can fix the application while each child
@@ -296,8 +304,18 @@ streaming tool a wait longer than the inactivity window left ends as the
 tool's inactivity timeout. The synchronous steps, the helper admission fence
 (which runs inside the WorkGraph store callback) and the host-facing entries
 that never wait answer at once, as before, and a poisoned publication is
-`Unavailable` and is never waited for. This is shell synchronization: no
-machine input or owner fact changes.
+`Unavailable` and is never waited for. The fence's contention (another
+writer's hold of the publication, or an owner change in progress there) is
+retryable at the host level:
+`GovernedHelperAdmissionFence::create_idempotent_after_owner_change` makes the
+same idempotent create through a new fence for each attempt and waits with the
+bounds above outside the store call (site `helper_admission`): on the prepared
+path only after an attempt whose fence named such a change or hold as it
+refused, and on the dispatch and entered paths after every refusal to rebuild,
+as the waiting forms above do. A fence built with `from_dispatch` reports those
+waits on the call's surface, without an operation id. Await it holding no lock
+or store transaction of your own. It answers every other refusal at once. This
+is shell synchronization: no machine input or owner fact changes.
 
 A custom `WorkAuthorization` reports a change in progress through
 `owner_change_in_progress` (provided; default `None`), a waiting hint that is

@@ -344,6 +344,20 @@ mod tests {
         serde_json::from_value(missing_target_schedule_tool_args())
     }
 
+    /// A schedule due tomorrow whose prompt is `prompt`: a started schedule
+    /// host fires nothing while a row reads it.
+    fn future_prompt_schedule_request(
+        prompt: &str,
+    ) -> Result<CreateScheduleRequest, serde_json::Error> {
+        let mut args = missing_target_schedule_tool_args();
+        args["trigger"] = json!({
+            "type": "once",
+            "due_at_utc": (Utc::now() + Duration::days(1)).to_rfc3339(),
+        });
+        args["target"]["action"]["prompt"] = json!(prompt);
+        serde_json::from_value(args)
+    }
+
     fn test_runtime(temp: &TempDir) -> Arc<SessionRuntime> {
         let factory = AgentFactory::new(temp.path().join("sessions"));
         let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
@@ -698,6 +712,60 @@ mod tests {
         assert!(schedules[0]["planning_horizon_occurrences"].is_u64());
         assert!(schedules[0]["created_at_utc"].is_string());
         assert!(schedules[0]["updated_at_utc"].is_string());
+    }
+
+    /// `schedule/list` is a host contract, not the model's tool reply: it
+    /// lists every schedule, unpaged, each the whole public wire schedule
+    /// (its full target and action, its policies and planning state), and
+    /// never machine state. Control row: the schedule tools' bounded
+    /// summaries and pages do not move it.
+    #[tokio::test]
+    async fn schedule_list_rpc_contract_keeps_every_full_public_schedule() {
+        let temp = TempDir::new().expect("temp dir");
+        let runtime = test_runtime(&temp);
+        let prompt = "full rpc listing body ".repeat(200);
+        let mut created = Vec::new();
+        for _ in 0..55 {
+            let request = future_prompt_schedule_request(&prompt).expect("valid schedule request");
+            let schedule = runtime
+                .schedule_service()
+                .create(request)
+                .await
+                .expect("create schedule");
+            created.push(schedule.schedule_id);
+        }
+
+        let raw = schedule_list_raw(json!({})).expect("raw list params");
+        let response = handle_list(Some(RpcId::Num(1)), Some(raw.as_ref()), runtime.clone()).await;
+        assert!(
+            response.error.is_none(),
+            "schedule/list should succeed: {:?}",
+            response.error
+        );
+        let result = response.result.expect("schedule/list result");
+        let value: Value = serde_json::from_str(result.get()).expect("valid json");
+        assert!(
+            value.get("page").is_none(),
+            "the RPC listing has no tool page: {value}"
+        );
+        let listed = value["schedules"].as_array().expect("schedules array");
+        assert_eq!(listed.len(), 55, "every schedule, unpaged");
+        for schedule_id in &created {
+            let stored = runtime
+                .schedule_service()
+                .get(schedule_id)
+                .await
+                .expect("stored schedule");
+            let expected =
+                serde_json::to_value(WireSchedule::from(&stored)).expect("public wire schedule");
+            let row = listed
+                .iter()
+                .find(|row| row["schedule_id"] == expected["schedule_id"])
+                .expect("every created schedule is listed");
+            assert_eq!(row, &expected, "the whole public wire schedule");
+            assert_eq!(row["target"]["action"]["prompt"], json!(prompt));
+            assert!(row.get("machine_state").is_none(), "{row}");
+        }
     }
 
     #[tokio::test]

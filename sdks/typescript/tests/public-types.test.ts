@@ -2103,6 +2103,24 @@ const canonicalHookLaunchRefusedEvent: Extract<
 void [canonicalHookFailedEvent, canonicalHookLaunchRefusedEvent];
 
 
+// A request bound notice is a generated event: each shortened result's call
+// and sizes, and the limit, from a closed axis vocabulary.
+const canonicalToolResultsBoundedEvent: Extract<
+  import("../src/generated/event_types.js").AgentEvent,
+  { type: "tool_results_bounded_for_request" }
+> = {
+  type: "tool_results_bounded_for_request",
+  run_id: "01900000-0000-7000-8000-000000000002",
+  results: [
+    { tool_use_id: "tc_1", tool_name: "list_records", kept_bytes: 87939, total_bytes: 400000 },
+  ],
+  axis: "context_window",
+};
+// @ts-expect-error The generated bound axis remains a closed union.
+const inventedBoundAxis: import("../src/generated/event_types.js").ToolResultBoundAxis = "invented_axis";
+void [canonicalToolResultsBoundedEvent, inventedBoundAxis];
+
+
 // Future native tags use an explicit SDK wrapper and retain the exact wire cause.
 const futureHookFailedReason: import("../src/index.js").HookFailureReason = {
   reason_code: "unknown", rawReasonCode: "future_guard_busy",

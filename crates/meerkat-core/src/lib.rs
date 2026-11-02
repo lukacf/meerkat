@@ -237,12 +237,12 @@ pub use comms::{
     SessionEventSubscription, StreamError, StreamScope, encoded_envelope_len,
 };
 pub use compact::{
-    COMPACTION_SUMMARY_PREFIX, CompactionConfig, CompactionContext, CompactionCurator,
-    CompactionCuratorError, CompactionDiscard, CompactionResult, CompactionRetained,
-    CompactionSummary, CompactionWindow, Compactor, CuratedCompactionSummary,
-    ProviderRequestPressure, SESSION_COMPACTION_CADENCE_KEY, SessionCompactionCadence,
-    SummarizationSource, SummarizationSourceBound, SummarizationSourceBudget,
-    SummarizationTrimStage,
+    AnsweredRequestInput, COMPACTION_SUMMARY_PREFIX, CompactionConfig, CompactionContext,
+    CompactionCurator, CompactionCuratorError, CompactionDiscard, CompactionResult,
+    CompactionRetained, CompactionSummary, CompactionWindow, Compactor, CuratedCompactionSummary,
+    InputTokenProjection, ProviderRequestPressure, SESSION_COMPACTION_CADENCE_KEY,
+    SessionCompactionCadence, SummarizationSource, SummarizationSourceBound,
+    SummarizationSourceBudget, SummarizationTrimStage,
 };
 pub use completion_feed::{
     CompletionBatch, CompletionEnrichmentData, CompletionEnrichmentProvider, CompletionEntry,
@@ -293,15 +293,15 @@ pub use digest_observability::{
 };
 pub use error::{AgentError, ToolError};
 pub use event::{
-    AgentErrorClass, AgentErrorReport, AgentEvent, AssistantImageEvent, BudgetType,
-    CompactionFailureReason, CompactionFitByteEvidence, CompactionFitTokenEvidence,
+    AgentErrorClass, AgentErrorReport, AgentEvent, AssistantImageEvent, BoundedToolResult,
+    BudgetType, CompactionFailureReason, CompactionFitByteEvidence, CompactionFitTokenEvidence,
     CompactionPreservedHistoryFit, EventEnvelope, EventSourceIdentity, ExternalToolDelta,
     ExternalToolDeltaPhase, InteractionFailureReason, LiveChannelCloseReason, RunResumePointKind,
     ScopedAgentEvent, SkillResolutionFailureReason, StreamScopeFrame, StreamTruncationReason,
     StructuredOutputOrigin, ToolCallArguments, ToolCallArgumentsError, ToolConfigChangeOperation,
-    ToolConfigChangeStatus, ToolConfigChangedPayload, ToolConfigLifecycleBit, TurnErrorMetadata,
-    VerboseEventConfig, agent_event_type, compare_event_envelopes, format_verbose_event,
-    format_verbose_event_with_config, turn_usage_summary, usage_summary,
+    ToolConfigChangeStatus, ToolConfigChangedPayload, ToolConfigLifecycleBit, ToolResultBoundAxis,
+    TurnErrorMetadata, VerboseEventConfig, agent_event_type, compare_event_envelopes,
+    format_verbose_event, format_verbose_event_with_config, turn_usage_summary, usage_summary,
 };
 pub use event_injector::{EventInjector, EventInjectorError};
 pub use event_tap::{

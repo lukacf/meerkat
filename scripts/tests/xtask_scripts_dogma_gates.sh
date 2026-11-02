@@ -351,9 +351,9 @@ trap 'rm -rf "$tlc_env_tmp"' EXIT
 # and with --mutants each seeded defect's property violated.
 # run_start_hold_audit.sh requires each of its eight reachability witnesses
 # (seven in its main run, one in its reasons run) to be reported violated.
-# requeue_across_stop_audit.sh requires each of its eight reachability
+# requeue_across_stop_audit.sh requires each of its fifteen reachability
 # witnesses to be reported violated.
-# materialization_rollback_keep_audit.sh requires each of its ten
+# materialization_rollback_keep_audit.sh requires each of its eleven
 # reachability witnesses violated, and with --mutants each seeded defect's
 # invariant, the generated keep_unregister_only_without_live_input among them.
 # live_delegation_worker_start_after_close_audit.sh requires its two goals to
@@ -441,6 +441,9 @@ trap 'rm -rf "$tlc_env_tmp"' EXIT
 # seeded defect's target property violated and its live-only delivery and
 # bound-only release mutants' runs to end without an error (the success line
 # above).
+# superseded_ack_retention_audit.sh (schedule_lifecycle) requires its three
+# witnesses violated, and with --mutants each seeded defect's invariant
+# violated.
 printf '%s\n' \
   '#!/bin/sh' \
   'printf "%s\n" "$JAVA_TOOL_OPTIONS" > "$TLC_JAVA_OPTIONS_CAPTURE"' \
@@ -482,11 +485,19 @@ printf '%s\n' \
   'echo "Error: Invariant NotAuditWitnessPlainStopAbandons is violated."' \
   'echo "Error: Invariant NotAuditWitnessRequeuedWaitAnswered is violated."' \
   'echo "Error: Invariant NotAuditWitnessSuspendedRunResumes is violated."' \
+  'echo "Error: Invariant NotAuditWitnessFenceGapRunResumes is violated."' \
+  'echo "Error: Invariant NotAuditWitnessIdleFenceGapRunResumes is violated."' \
+  'echo "Error: Invariant NotAuditWitnessStoppedSuspendedRunEnds is violated."' \
+  'echo "Error: Invariant NotAuditWitnessStoppedGapRunSettled is violated."' \
+  'echo "Error: Invariant NotAuditWitnessAmbientCancelledGapRunSettled is violated."' \
+  'echo "Error: Invariant NotAuditWitnessDirectRunStartsAfterSettlement is violated."' \
+  'echo "Error: Invariant NotAuditWitnessDirectAppendStartsAfterSettlement is violated."' \
   'echo "Error: Invariant NotAuditWitnessKeptQueuedInputRuns is violated."' \
   'echo "Error: Invariant NotAuditWitnessKeptRequeuedInputRuns is violated."' \
   'echo "Error: Invariant NotAuditWitnessAdmittedInputStoppedUnderKeep is violated."' \
   'echo "Error: Invariant NotAuditWitnessStopRollbackEndsRecoveredInput is violated."' \
   'echo "Error: Invariant AuditKeepEndsNoRecoveredInput is violated."' \
+  'echo "Error: Invariant AuditStoppedResumableRunInputNotKept is violated."' \
   'echo "Error: Invariant AuditKeepStopsWhatItAdmitted is violated."' \
   'echo "Error: Invariant AuditRollbackVerdictIsAFunction is violated."' \
   'echo "Error: Invariant AuditKeepOnlyUnderKeep is violated."' \
@@ -497,6 +508,7 @@ printf '%s\n' \
   'echo "Error: Invariant NotAuditWitnessUnservedAbortKeepsRecoveredInput is violated."' \
   'echo "Error: Invariant NotAuditWitnessUnservedRetireStopsRecoveredInput is violated."' \
   'echo "Error: Invariant NotAuditWitnessUnservedAbortAfterLiveWorkStops is violated."' \
+  'echo "Error: Invariant NotAuditWitnessStoppedResumableRunEndsUnderKeep is violated."' \
   'echo "Error: Invariant AuditRetireOverUnservedStops is violated."' \
   'echo "Error: Invariant keep_unregister_only_without_live_input is violated."' \
   'echo "Error: Action property AuditNeverUnregisters is violated."' \
@@ -984,6 +996,11 @@ printf '%s\n' \
   'echo "Error: Invariant AuditDeliversOnlyToBoundLocalBornMembers is violated."' \
   'echo "Error: Action property AuditSeatOwesTheGeneration is violated."' \
   'echo "Error: Action property AuditUnseatLeavesNoFact is violated."' \
+  'echo "Error: Invariant NotAuditWitnessReviseDropsEarlierAck is violated."' \
+  'echo "Error: Invariant NotAuditWitnessLateAckAccepted is violated."' \
+  'echo "Error: Invariant NotAuditWitnessDeleteDropsEarlierAck is violated."' \
+  'echo "Error: Invariant AuditAckSetAnswersTheLatestSupersession is violated."' \
+  'echo "Error: Invariant AuditLatestSupersessionAcksAreKept is violated."' \
   'echo "State 1: <Initial predicate>"' \
   > "$tlc_env_tmp/tlc"
 chmod +x "$tlc_env_tmp/tlc"

@@ -75,10 +75,11 @@ const RUST_MIN_STACK_ENV: &str = "RUST_MIN_STACK";
 /// Stack of each thread of the two runtimes this crate keeps for the whole
 /// process (machine cleanup and runtime-loop serving) when
 /// [`HOST_WORKER_STACK_ENV`] is unset, twice [`HOST_WORKER_STACK_BUDGET`];
-/// `RUST_MIN_STACK` raises it and never lowers it. The cleanup runtime polls
-/// the turns of runtime-backed mob members, with the tools an embedding host
-/// gives them, so these threads must not have less stack than the host's own
-/// workers.
+/// `RUST_MIN_STACK` raises it and never lowers it. These threads run Core's
+/// own machine cleanup and runtime-loop work; the turns of sessions and mob
+/// members, with the tools an embedding host gives them, run on the host's
+/// runtime. The default keeps the margin those turns needed when the cleanup
+/// runtime polled them.
 const PROCESS_RUNTIME_STACK_BUDGET: usize = 16 * 1024 * 1024;
 
 /// Tokio's own worker-count variable, read after [`HOST_WORKER_THREADS_ENV`].

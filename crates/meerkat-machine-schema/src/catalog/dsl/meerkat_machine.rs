@@ -1397,9 +1397,11 @@ pub enum RuntimeCompletionWaitFailureObservation {
     #[default]
     ChannelClosed,
     AuthorityUnavailable,
-    /// A graceful stop kept the waited input durably queued for the
-    /// session's next start (`ClassifyStopInputDisposition` answered
-    /// `Retain`). The input is not terminal.
+    /// The waited input stays durably queued and runs later: a graceful stop
+    /// kept it for the session's next start (`ClassifyStopInputDisposition`
+    /// answered `Retain`), or a store fence gap suspended its run (or
+    /// another writer took the session over) and it runs when the fence is
+    /// re-acquired or at the next start. The input is not terminal.
     RequeuedAcrossStop,
 }
 
@@ -1409,7 +1411,8 @@ pub enum RuntimeCompletionWaitFailureObservation {
 pub enum RuntimeCompletionWaitFailurePublicErrorClass {
     #[default]
     InternalError,
-    /// The session is not running: its waited input runs on the next start.
+    /// The session is not running the waited input now: it runs when the
+    /// store's fence is re-acquired or on the next start.
     SessionNotRunning,
 }
 
@@ -2910,10 +2913,27 @@ pub enum UnregisterQueuedInputsDisposition {
     /// store exactly as the store holds it, with no requeue mark: the
     /// rollback of a materialization that never served and admitted no
     /// input. An input admitted while the registration stood still ends
-    /// as stopped. A registration that served live work (an admission, a
-    /// deduplicated resubmission or a recycle) records a requested Keep as
-    /// Stop.
+    /// as stopped, and so does an input bound to a run marked resumable
+    /// whose stop was asked. A registration that served live work (an
+    /// admission, a deduplicated resubmission or a recycle) records a
+    /// requested Keep as Stop.
     Keep,
+}
+
+/// Why the runtime suspends a durable session's in-flight run
+/// (`SuspendRunForStop`). Either way the run stops being current and is
+/// marked resumable at its last committed round, with its inputs bound and
+/// their stage attempts unchanged; the cause decides who resumes it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RunSuspensionCause {
+    /// A graceful stop that keeps queued work (an unregister that
+    /// requeues): the next start resumes the run.
+    #[default]
+    RequeueStop,
+    /// A store fence gap: the session store's writer stayed stopped through
+    /// the run's whole bounded dispatch wait, and no other writer was found.
+    /// This registration resumes the run once the store's fence is restored.
+    FenceGap,
 }
 
 /// Generated verdict of a runtime stop for one non-terminal input.
@@ -7306,10 +7326,15 @@ macro_rules! meerkat_catalog_machine_dsl {
             ResumeRun { run_id: RunId },
             ReleaseResumableRun { run_id: RunId },
             SettleResumableRun { run_id: RunId, reason: Enum<InputAbandonReason> },
-            // A graceful requeue stop keeps a durable session's in-flight run
-            // resumable. `durable_session` is the shell's observation that the
-            // session commits every round (a persistent driver).
-            SuspendRunForStop { run_id: RunId, durable_session: bool },
+            // A graceful requeue stop, or a store fence gap, keeps a durable
+            // session's in-flight run resumable. `durable_session` is the
+            // shell's observation that the session commits every round (a
+            // persistent driver); `cause` is why the run stopped.
+            SuspendRunForStop {
+                run_id: RunId,
+                durable_session: bool,
+                cause: Enum<RunSuspensionCause>,
+            },
             // An Applied or AppliedPendingConsumption contributor of `run_id`
             // returns to `lane`: a failed run's replayed contributor, or a
             // kept input of a resumable run that is released.
@@ -8711,7 +8736,8 @@ macro_rules! meerkat_catalog_machine_dsl {
             ResumableRunReleased { run_id: RunId },
             // The shell abandons the run's bound inputs with `reason`.
             ResumableRunSettled { run_id: RunId, reason: Enum<InputAbandonReason> },
-            // A graceful requeue stop left the in-flight run resumable.
+            // A graceful requeue stop, or a store fence gap, left the
+            // in-flight run resumable.
             RunSuspendedForStop { run_id: RunId },
             // A session's runtime registration was released: every
             // unregister (a Session-owned registration's empty-resume teardown
@@ -9537,6 +9563,12 @@ macro_rules! meerkat_catalog_machine_dsl {
                 tool_visibility_delta, previous_capability_base_filter,
                 next_capability_base_filter,
                 previous_view_image_visible != next_view_image_visible)
+        }
+
+        // An owned copy of a run id: a field read on an assignment's right side
+        // lowers as a move, which a non-Copy run id cannot take.
+        helper owned_run_id(run: Option<RunId>) -> Option<RunId> {
+            run
         }
 
         // =====================================================================
@@ -11667,6 +11699,10 @@ macro_rules! meerkat_catalog_machine_dsl {
             on input ResumeRun { run_id }
             guard "run_is_current" { self.current_run_id == Some(run_id) }
             guard "run_is_resumable" { self.resumable_run_id == Some(run_id) }
+            // A run whose stop was asked (before a store fence gap suspended
+            // it, or while it was suspended) never resumes: the runtime
+            // settles it instead (the resumed-run plan refuses it too).
+            guard "run_not_stopped" { self.run_stop_requested != Some(run_id) }
             // A run whose kept input still waits for its controller client
             // does not resume (the resumed-run plan refuses it too).
             guard "run_inputs_not_controller_held" {
@@ -11745,11 +11781,16 @@ macro_rules! meerkat_catalog_machine_dsl {
         // `reason` (a settle, which also discards the run's provisional
         // tail), or leaves them to the lifecycle path's own sweep (retire,
         // destroy, reset). A graceful requeue stop does not settle: it keeps
-        // the run resumable.
+        // the run resumable. A run whose stop was asked ends under that stop:
+        // it is never settled as a refused resume.
         transition SettleResumableRun {
             per_phase [Initializing, Idle, Attached, Retired, Stopped]
             on input SettleResumableRun { run_id, reason }
             guard "run_is_resumable" { self.resumable_run_id == Some(run_id) }
+            guard "stopped_run_not_settled_as_refused" {
+                self.run_stop_requested != Some(run_id)
+                || reason != InputAbandonReason::ResumeRefused
+            }
             update {
                 self.resumable_run_id = None;
                 self.turn_terminal_run_id = Some(run_id);
@@ -15608,6 +15649,30 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit RequestCancellationAtBoundary
         }
 
+        // A stop (or an interrupt) of a run marked resumable (a store fence
+        // gap's, or a restart's that has not resumed yet): no run is current,
+        // so there is no turn to interrupt. The stop intent is recorded on
+        // that run as on a current one: the run never resumes (`ResumeRun`
+        // refuses it), a requeue stop or a Keep rollback keeps none of its
+        // inputs, and the runtime settles it, its bound inputs abandoned as
+        // `Cancelled`, once its store takes writes again (the shell wakes its
+        // loop). A registration draining for its unregister keeps its
+        // resumable run for the next start, whose fresh machine a stop of this
+        // registration does not reach: such a stop is refused here.
+        transition StopCurrentRunForRunResumable {
+            per_phase [Idle, Attached]
+            on input StopCurrentRunForRun { run_id }
+            guard "no_current_run" { self.current_run_id == None }
+            guard "run_is_resumable" { self.resumable_run_id == Some(run_id) }
+            guard "registration_not_draining" {
+                self.registration_phase != RegistrationPhase::Draining
+            }
+            update {
+                self.run_stop_requested = Some(run_id);
+            }
+            to Idle
+        }
+
         // ResolveUserInterruptPublicResult: generated public-result authority
         // for session interrupt surfaces. Runtime/surfaces provide typed
         // observations (accepted, noop state, destroyed/missing, or
@@ -15714,6 +15779,14 @@ macro_rules! meerkat_catalog_machine_dsl {
         // cancels take the AlreadyPending no-op arms below — this is what
         // bounds an embedder boundary handle that (wrongly) re-enters
         // MeerkatMachine::cancel_after_boundary to exactly one extra lap.
+        // With the executor attached and no run current, the session may
+        // still hold a run marked resumable (a store fence gap's, or a
+        // restart's not resumed yet): the ambient cancel then records the
+        // stop intent on that run, as `StopCurrentRunForRunResumable` does
+        // (never while the registration drains for its unregister, whose
+        // resumable run is the next start's), so the run is settled as
+        // cancelled instead of resuming. With no resumable run it records
+        // nothing on any run, as before.
         transition CancelAfterBoundaryAttached {
             on input CancelAfterBoundary { reason }
             guard { self.lifecycle_phase == Phase::Attached }
@@ -15721,6 +15794,12 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 self.boundary_cancel_dispatch_pending = true;
                 self.boundary_cancel_dispatch_generation = self.boundary_cancel_dispatch_generation + 1;
+                if self.current_run_id == None
+                    && self.resumable_run_id != None
+                    && self.registration_phase != RegistrationPhase::Draining
+                {
+                    self.run_stop_requested = owned_run_id(self.resumable_run_id);
+                }
             }
             to Attached
             emit RequestCancellationAtBoundary
@@ -22197,6 +22276,13 @@ macro_rules! meerkat_catalog_machine_dsl {
                     || admitted_content_shape == ContentShape::Empty)
             }
             guard "run_starts_not_held" { self.run_start_holds == EmptySet }
+            // While a run waits to resume (a store fence gap suspended it,
+            // or a restart left it open), no direct run starts beside it, as
+            // no other run is prepared (Prepare's guard): its boundary would
+            // commit over the marked run's provisional tail, or, under the
+            // marked run's own id, resume that run outside `ResumeRun`. The
+            // session service refuses such a turn busy before it gets here.
+            guard "no_other_resumable_run" { self.resumable_run_id == None }
             update {
                 self.current_run_id = Some(run_id);
                 if self.run_stop_requested != Some(run_id) {
@@ -22256,6 +22342,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                     || admitted_content_shape == ContentShape::Empty)
             }
             guard "run_starts_not_held" { self.run_start_holds == EmptySet }
+            // No direct run starts beside a run marked resumable (above).
+            guard "no_other_resumable_run" { self.resumable_run_id == None }
             update {
                 self.current_run_id = Some(run_id);
                 if self.run_stop_requested != Some(run_id) {
@@ -22315,6 +22403,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                     || admitted_content_shape == ContentShape::Empty)
             }
             guard "run_starts_not_held" { self.run_start_holds == EmptySet }
+            // No direct run starts beside a run marked resumable (above).
+            guard "no_other_resumable_run" { self.resumable_run_id == None }
             update {
                 self.current_run_id = Some(run_id);
                 if self.run_stop_requested != Some(run_id) {
@@ -22422,6 +22512,9 @@ macro_rules! meerkat_catalog_machine_dsl {
                 || self.turn_phase == TurnPhase::Cancelled
             }
             guard "run_starts_not_held" { self.run_start_holds == EmptySet }
+            // No direct run starts beside a run marked resumable, as for
+            // StartConversationRun above.
+            guard "no_other_resumable_run" { self.resumable_run_id == None }
             update {
                 self.current_run_id = Some(run_id);
                 if self.run_stop_requested != Some(run_id) {
@@ -22476,6 +22569,9 @@ macro_rules! meerkat_catalog_machine_dsl {
                 || self.turn_phase == TurnPhase::Cancelled
             }
             guard "run_starts_not_held" { self.run_start_holds == EmptySet }
+            // No direct run starts beside a run marked resumable, as for
+            // StartConversationRun above.
+            guard "no_other_resumable_run" { self.resumable_run_id == None }
             update {
                 self.current_run_id = Some(run_id);
                 if self.run_stop_requested != Some(run_id) {
@@ -25185,20 +25281,26 @@ macro_rules! meerkat_catalog_machine_dsl {
             to Retired
         }
 
-        // A graceful requeue stop (a deploy) keeps a durable session's
-        // in-flight run resumable at its last committed round, exactly as a
-        // crash does. The shell has already stopped the turn without a
+        // A graceful requeue stop (a deploy, `cause` RequeueStop) keeps a
+        // durable session's in-flight run resumable at its last committed
+        // round, exactly as a crash does. The shell has already stopped the turn without a
         // closing save or a boundary. The run stops being current, the
         // pre-run phase is restored, and the run is marked resumable, so the
         // stop classifier keeps its bound inputs bound and the stored cursor
         // resumes it at the next start. No turn terminal is recorded and no
-        // input changes. A run of a Retired runtime, a run whose turn
+        // input changes. A cancel the run accepted before the stop (its
+        // turn's `cancel_after_boundary`, or an ambient cancel whose boundary
+        // dispatch is still outstanding, `boundary_cancel_dispatch_pending`)
+        // stands as the run's stop intent (`run_stop_requested`), as a stop
+        // asked of it does: the stop classifier then keeps none of its bound
+        // inputs, so the next start never resumes the cancelled run. A run
+        // of a Retired runtime, a run whose turn
         // terminal is already published (completed, failed or cancelled), a
         // session without per-round commits, a stop that does not requeue,
         // or a run with a published live-boundary join is not suspended: the
         // shell ends it as before.
         transition SuspendRunForStopRunningToIdle {
-            on input SuspendRunForStop { run_id, durable_session }
+            on input SuspendRunForStop { run_id, durable_session, cause }
             guard { self.lifecycle_phase == Phase::Running }
             guard "pre_run_phase_matches_idle" { self.pre_run_phase == Some(PreRunPhase::Idle) }
             guard "current_run_id_matches_binding" { self.current_run_id == Some(run_id) }
@@ -25206,7 +25308,8 @@ macro_rules! meerkat_catalog_machine_dsl {
             // marked resumable (it would resume after its own outcome).
             guard "run_turn_not_terminal" { self.turn_terminal_run_id != Some(run_id) }
             guard "requeue_stop" {
-                self.registration_phase == RegistrationPhase::Draining
+                cause == RunSuspensionCause::RequeueStop
+                && self.registration_phase == RegistrationPhase::Draining
                 && self.unregister_queued_inputs == UnregisterQueuedInputsDisposition::Requeue
             }
             guard "durable_session" { durable_session == true }
@@ -25225,12 +25328,15 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.current_run_id = None;
                 self.pre_run_phase = None;
                 self.resumable_run_id = Some(run_id);
+                if self.cancel_after_boundary == true || self.boundary_cancel_dispatch_pending == true {
+                    self.run_stop_requested = Some(run_id);
+                }
             }
             to Idle
             emit RunSuspendedForStop { run_id: run_id }
         }
         transition SuspendRunForStopRunningToAttached {
-            on input SuspendRunForStop { run_id, durable_session }
+            on input SuspendRunForStop { run_id, durable_session, cause }
             guard { self.lifecycle_phase == Phase::Running }
             guard "pre_run_phase_matches_attached" { self.pre_run_phase == Some(PreRunPhase::Attached) }
             guard "current_run_id_matches_binding" { self.current_run_id == Some(run_id) }
@@ -25238,7 +25344,8 @@ macro_rules! meerkat_catalog_machine_dsl {
             // marked resumable (it would resume after its own outcome).
             guard "run_turn_not_terminal" { self.turn_terminal_run_id != Some(run_id) }
             guard "requeue_stop" {
-                self.registration_phase == RegistrationPhase::Draining
+                cause == RunSuspensionCause::RequeueStop
+                && self.registration_phase == RegistrationPhase::Draining
                 && self.unregister_queued_inputs == UnregisterQueuedInputsDisposition::Requeue
             }
             guard "durable_session" { durable_session == true }
@@ -25257,6 +25364,100 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.current_run_id = None;
                 self.pre_run_phase = None;
                 self.resumable_run_id = Some(run_id);
+                if self.cancel_after_boundary == true || self.boundary_cancel_dispatch_pending == true {
+                    self.run_stop_requested = Some(run_id);
+                }
+            }
+            to Attached
+            emit RunSuspendedForStop { run_id: run_id }
+        }
+
+        // A store fence gap suspends a durable session's in-flight run the
+        // same way, outside any stop: the session store's writer stayed
+        // stopped through the run's whole bounded dispatch wait and no other
+        // writer was found, so the shell dropped the turn at that wait,
+        // with no terminal and no closing write. The run stops being current
+        // and is marked resumable, its inputs stay bound with their stage
+        // attempts unchanged, and this registration's runtime loop resumes it
+        // (`ResumeRun`) once the store's fence is restored. The resume
+        // starts the run's turn again, so its turn returns to `Ready`; the
+        // requeue arms above leave the turn to the next start, whose machine
+        // is fresh. A cancel the run accepted before the gap (its turn's
+        // `cancel_after_boundary`, which that turn start would clear, or an
+        // ambient cancel whose boundary dispatch is still outstanding,
+        // `boundary_cancel_dispatch_pending`, which sets no turn flag)
+        // survives as the run's stop intent (`run_stop_requested`), as a stop
+        // asked of the run does: such a run never resumes, and the runtime
+        // settles it once the fence is restored, since ending it now would
+        // need a write the gap refuses. A registration draining for its
+        // unregister suspends only for its stop, through the arms above, and
+        // a run whose turn terminal is published, a session without
+        // per-round commits, or a run with a published live-boundary join is
+        // not suspended: the shell ends it as before.
+        transition SuspendRunForStopFenceGapRunningToIdle {
+            on input SuspendRunForStop { run_id, durable_session, cause }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "pre_run_phase_matches_idle" { self.pre_run_phase == Some(PreRunPhase::Idle) }
+            guard "current_run_id_matches_binding" { self.current_run_id == Some(run_id) }
+            guard "run_turn_not_terminal" { self.turn_terminal_run_id != Some(run_id) }
+            guard "fence_gap_outside_unregister" {
+                cause == RunSuspensionCause::FenceGap
+                && self.registration_phase != RegistrationPhase::Draining
+            }
+            guard "durable_session" { durable_session == true }
+            guard "no_other_resumable_run" { self.resumable_run_id == None }
+            guard "live_boundary_joins_retained_and_applied" {
+                for_all(joined_input_id in self.input_live_boundary_join_phase.keys(),
+                    self.input_live_boundary_join_phase.get_cloned(joined_input_id)
+                        == Some(LiveBoundaryJoinPhase::Retained)
+                    && (self.input_phases.get_cloned(joined_input_id) == Some(InputPhase::Applied)
+                        || self.input_phases.get_cloned(joined_input_id)
+                            == Some(InputPhase::AppliedPendingConsumption)))
+            }
+            update {
+                self.input_live_boundary_join_run = EmptyMap;
+                self.input_live_boundary_join_phase = EmptyMap;
+                self.current_run_id = None;
+                self.pre_run_phase = None;
+                self.resumable_run_id = Some(run_id);
+                self.turn_phase = TurnPhase::Ready;
+                if self.cancel_after_boundary == true || self.boundary_cancel_dispatch_pending == true {
+                    self.run_stop_requested = Some(run_id);
+                }
+            }
+            to Idle
+            emit RunSuspendedForStop { run_id: run_id }
+        }
+        transition SuspendRunForStopFenceGapRunningToAttached {
+            on input SuspendRunForStop { run_id, durable_session, cause }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "pre_run_phase_matches_attached" { self.pre_run_phase == Some(PreRunPhase::Attached) }
+            guard "current_run_id_matches_binding" { self.current_run_id == Some(run_id) }
+            guard "run_turn_not_terminal" { self.turn_terminal_run_id != Some(run_id) }
+            guard "fence_gap_outside_unregister" {
+                cause == RunSuspensionCause::FenceGap
+                && self.registration_phase != RegistrationPhase::Draining
+            }
+            guard "durable_session" { durable_session == true }
+            guard "no_other_resumable_run" { self.resumable_run_id == None }
+            guard "live_boundary_joins_retained_and_applied" {
+                for_all(joined_input_id in self.input_live_boundary_join_phase.keys(),
+                    self.input_live_boundary_join_phase.get_cloned(joined_input_id)
+                        == Some(LiveBoundaryJoinPhase::Retained)
+                    && (self.input_phases.get_cloned(joined_input_id) == Some(InputPhase::Applied)
+                        || self.input_phases.get_cloned(joined_input_id)
+                            == Some(InputPhase::AppliedPendingConsumption)))
+            }
+            update {
+                self.input_live_boundary_join_run = EmptyMap;
+                self.input_live_boundary_join_phase = EmptyMap;
+                self.current_run_id = None;
+                self.pre_run_phase = None;
+                self.resumable_run_id = Some(run_id);
+                self.turn_phase = TurnPhase::Ready;
+                if self.cancel_after_boundary == true || self.boundary_cancel_dispatch_pending == true {
+                    self.run_stop_requested = Some(run_id);
+                }
             }
             to Attached
             emit RunSuspendedForStop { run_id: run_id }
@@ -39937,7 +40138,8 @@ macro_rules! meerkat_catalog_machine_dsl {
         // other input is Abandon, so under the Stop disposition, or outside
         // an unregister, the verdict is today's blanket abandon. Under the
         // Keep disposition (ClassifyStopInputDispositionKeep, appended last)
-        // an input the registration recovered is Keep and every other input
+        // an input the registration recovered is Keep, unless it is bound to
+        // a run marked resumable whose stop was asked, and every other input
         // is Abandon. The shell supplies durability, directedness and the
         // objective binding; the phase, lane and kind are machine facts.
         transition ClassifyStopInputDispositionRetain {
@@ -39967,7 +40169,9 @@ macro_rules! meerkat_catalog_machine_dsl {
         // a run left open by a restart and not resumed yet, or the
         // in-flight run the stop just suspended. They keep their Staged
         // or Applied phase and their run, and the stored cursor marks the run
-        // again at the next registration.
+        // again at the next registration. A run whose stop was asked keeps
+        // nothing: its inputs end under the stop (the Abandon arm below), so
+        // the next start never resumes it.
         transition ClassifyStopInputDispositionRetainResumable {
             per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
             on input ClassifyStopInputDisposition { input_id, durability, directed, objective_bound }
@@ -39981,6 +40185,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                     || self.input_phases.get(input_id).get("value")
                         == InputPhase::AppliedPendingConsumption)
                 && self.registration_phase == RegistrationPhase::Draining
+                && self.run_stop_requested != self.resumable_run_id
             }
             update {}
             to Idle
@@ -40014,13 +40219,22 @@ macro_rules! meerkat_catalog_machine_dsl {
                         || self.input_phases.get(input_id).get("value") == InputPhase::Applied
                         || self.input_phases.get(input_id).get("value")
                             == InputPhase::AppliedPendingConsumption)
-                    && self.registration_phase == RegistrationPhase::Draining)
+                    && self.registration_phase == RegistrationPhase::Draining
+                    && self.run_stop_requested != self.resumable_run_id)
             }
             guard "not_kept_recovered_input" {
                 !(self.registration_phase == RegistrationPhase::Draining
                     && self.unregister_queued_inputs == UnregisterQueuedInputsDisposition::Keep
                     && self.input_phases.contains_key(input_id)
                     && self.recovered_admitted_inputs.contains(input_id))
+                || (self.resumable_run_id != None
+                    && self.run_stop_requested == self.resumable_run_id
+                    && self.input_run_associations.get_cloned(input_id) == self.resumable_run_id
+                    && self.input_phases.contains_key(input_id)
+                    && (self.input_phases.get(input_id).get("value") == InputPhase::Staged
+                        || self.input_phases.get(input_id).get("value") == InputPhase::Applied
+                        || self.input_phases.get(input_id).get("value")
+                            == InputPhase::AppliedPendingConsumption))
             }
             update {}
             to Idle
@@ -40068,6 +40282,15 @@ macro_rules! meerkat_catalog_machine_dsl {
         // nothing (registration_live_input_seen): its unregister records a
         // requested Keep as Stop, since a recycle's recovery or a
         // deduplicated wait mixes live inputs into the recovered witness.
+        // The inputs bound to a run marked resumable whose stop was asked
+        // (associated with it in a bound phase: Staged, Applied or
+        // AppliedPendingConsumption, as the resumed-run plan selects them)
+        // are not kept either: the Abandon arm ends them, so the next
+        // registration never resumes the stopped run. A queued input that
+        // only still names that run (a discarded live join keeps its
+        // association, and recovery restores a queued row's last run) is not
+        // the run's: it is kept like any other recovered input, as every
+        // other stop path leaves it.
         transition ClassifyStopInputDispositionKeep {
             per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
             on input ClassifyStopInputDisposition { input_id, durability, directed, objective_bound }
@@ -40076,6 +40299,16 @@ macro_rules! meerkat_catalog_machine_dsl {
                 && self.unregister_queued_inputs == UnregisterQueuedInputsDisposition::Keep
                 && self.input_phases.contains_key(input_id)
                 && self.recovered_admitted_inputs.contains(input_id)
+            }
+            guard "not_a_stopped_resumable_run_input" {
+                !(self.resumable_run_id != None
+                    && self.run_stop_requested == self.resumable_run_id
+                    && self.input_run_associations.get_cloned(input_id) == self.resumable_run_id
+                    && self.input_phases.contains_key(input_id)
+                    && (self.input_phases.get(input_id).get("value") == InputPhase::Staged
+                        || self.input_phases.get(input_id).get("value") == InputPhase::Applied
+                        || self.input_phases.get(input_id).get("value")
+                            == InputPhase::AppliedPendingConsumption))
             }
             update {}
             to Idle
@@ -40302,17 +40535,22 @@ macro_rules! meerkat_catalog_machine_dsl {
                 /// The marked run and exactly the inputs bound to it (staged
                 /// or applied, associated with the run), in admission order.
                 /// `None` unless `run_id` is the marked resumable run, no run
-                /// is current, at least one input is bound to it, no input
-                /// bound to it is held for its controller (mirrors the
-                /// `ResumeRun` guard `run_inputs_not_controller_held`), and
-                /// its destination is attached
-                /// (`resumed_run_destination_attached`).
+                /// is current, no stop of the run was asked (mirrors the
+                /// `ResumeRun` guard `run_not_stopped`), at least one input
+                /// is bound to it, no input bound to it is held for its
+                /// controller (mirrors the `ResumeRun` guard
+                /// `run_inputs_not_controller_held`), and its destination is
+                /// attached (`resumed_run_destination_attached`).
                 #[must_use]
                 pub fn authorize_resumed_run_from_state(
                     state: &MeerkatMachineState,
                     run_id: &RunId,
                 ) -> Option<ResumedRunPlan> {
                     if state.resumable_run_id.as_ref() != Some(run_id) || state.current_run_id.is_some() {
+                        return None;
+                    }
+                    // Mirrors the `ResumeRun` guard `run_not_stopped`.
+                    if state.run_stop_requested.as_ref() == Some(run_id) {
                         return None;
                     }
                     if state

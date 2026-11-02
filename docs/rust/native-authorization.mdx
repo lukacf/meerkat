@@ -817,8 +817,13 @@ bounds.
   exclusion, no owner or host lock, no store transaction), and never wait
   around an effect: read, claim or record an effect once, after the
   observation answered. A current answer, a denial and a genuine
-  `Unavailable` never wait. Dropping the wait cancels it, with nothing to
-  release. The waiting forms of the governed steps below take the same wait
+  `Unavailable` never wait. One `Unavailable` is contention instead, and a
+  host retries it: a governed helper admission fence's refusal while another
+  writer holds the publication (see the helper fence below). An `Unavailable`
+  an owner answers for itself is genuine: an installed owner never answers
+  its own transient lock contention that way, because at a controller's model
+  request that answer ends the run. Dropping the wait cancels it, with nothing
+  to release. The waiting forms of the governed steps below take the same wait
   after a step refused to rebuild.
 - The runtime waits at a model request (one deadline per model call, set at its
   first wait to 2 s or to the remaining run budget if less; the budget is
@@ -885,12 +890,42 @@ bounds.
   again enters once and issues through `GovernedHelperChildIssuance::from_entered`,
   whose steps never spend. The fence runs inside the WorkGraph store callback
   and never waits.
+- The fence's contention is retryable at the host level. While another writer
+  holds the publication its check excludes owner changes on (a reservation of
+  the writer that has not published), or an owner change is in progress
+  there, it refuses as `Unavailable` with nothing run or committed.
+  `GovernedHelperAdmissionFence::create_idempotent_after_owner_change`, given
+  the WorkGraph service, the key, the request and a budget, makes the keyed
+  create through a new fence for each attempt (a fence serves one attempt),
+  always the same idempotent `create_idempotent_with_fence`. It waits, outside
+  every lock and store transaction, and tries again after an attempt that
+  refused for one of these: on the prepared path, an exclusion refused while
+  the publication named such a change or hold; on the dispatch and entered
+  paths, a refusal to rebuild (`ReprepareRequired`), which it waits out as the
+  waiting step forms above do (for a change or hold in progress, or after a
+  1 ms pause when none is named). Every wait is `wait_after_stale_read` of one
+  `OwnerChangeChurn` per call (2 s and three free rebuilds, clamped to the
+  budget, in a tool body `ToolDispatchContext::remaining_tool_time`). A fence
+  built with `from_dispatch` waits with that dispatch context's own churn
+  (`ToolDispatchContext::owner_change_churn`), so its waits also report to the
+  host's operation refusal observer on the call's surface, without an
+  operation id; prepared and entered fences trace their waits only. Read the
+  budget right before the call (the deadline is armed after the first attempt),
+  and await the call holding no lock or store transaction of your own: its
+  waits run inside it. It answers success, `Denied` and every other
+  `Unavailable` (a refusal to rebuild inside the prepared path's own
+  exclusion, clock or custody unavailable, a poisoned publication) at once, and
+  the last `Unavailable` once a wait is not settled; `refusal()` on the fence
+  it was called on then reads the answered attempt's reason. That fence serves
+  this one admission. Dropping the future commits nothing an attempt did not
+  commit itself. `EnteredDispatchOperation::work_authorization` names the
+  entered operation's work, whose `owner_change_in_progress` it waits on.
 - `OwnerChangeWait::trace` records each wait as one `debug` event of target
   `meerkat::authz::owner_change_wait` with `site` (`model_request`,
   `compaction_summary`, `tool_dispatch`, `tool_entry`, `tool_policy_entry`,
-  `tool_step`, `tool_child_issuance` or `web_search_delegate`, or the site a
-  host passes), `operation_id`, `waited_ms` and `settled`. Each refused
-  attempt keeps its own audit record.
+  `tool_step`, `tool_child_issuance`, `helper_admission` or
+  `web_search_delegate`, or the site a host passes), `operation_id`,
+  `waited_ms` and `settled`. Each refused attempt keeps its own audit record.
 
 A host's pure check in a tool body, with the wait after a stale read:
 
@@ -939,7 +974,9 @@ let entered = context.enter_governed_operation(call)?;
 let fence = GovernedHelperAdmissionFence::from_entered(
     &entered, originals.clone(), contributors.clone(), realm_id, namespace, admission,
 );
-let created = graph.create_idempotent_with_fence(key, request, fence.clone()).await;
+let created = fence
+    .create_idempotent_after_owner_change(&graph, key, request, context.remaining_tool_time())
+    .await;
 for intent in intents {
     let child = GovernedHelperChildIssuance::from_entered(
         &entered, originals.clone(), contributors.clone(), intent,
@@ -974,9 +1011,10 @@ for intent in intents {
   settlement. Another actor's hold of the work owners' exclusion is a
   refusal to rebuild there (`ReprepareRequired`), which the witness's waiting
   forms (`run_if_current_within_after_owner_change`,
-  `issue_child_if_current_within_after_owner_change`) and
-  `GovernedHelperChildIssuance::issue_or_recover_after_owner_change` wait out
-  before they answer.
+  `issue_child_if_current_within_after_owner_change`),
+  `GovernedHelperChildIssuance::issue_or_recover_after_owner_change` and
+  `GovernedHelperAdmissionFence::create_idempotent_after_owner_change` wait
+  out before they answer.
 - The witness is the capability of exactly the call that entered; use it only
   for that call's own steps. `WorkAuthorization::run_entered_if_current_within`
   is a provided method whose default answers unavailable: a work owner, or a

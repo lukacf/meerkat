@@ -6551,6 +6551,23 @@ describe("operation observation wire compatibility", () => {
   });
 });
 
+it("a request bound notice is schema-known and keeps its whole payload", () => {
+  const raw = {
+    type: "tool_results_bounded_for_request",
+    run_id: "01900000-0000-7000-8000-000000000002",
+    results: [
+      { tool_use_id: "tc_1", tool_name: "list_records", kept_bytes: 87939, total_bytes: 400000 },
+    ],
+    axis: "context_window",
+  };
+  // In the generated inventory, without a handwritten parser case: the
+  // raw-preserving UnknownEvent path keeps every field of the notice.
+  assert.deepEqual(parseEvent(JSON.parse(JSON.stringify(raw))), raw);
+  const control = parseEvent({ type: "text_delta", delta: "continued" });
+  assert.equal(control.type, "text_delta");
+  assert.equal(control.delta, "continued");
+});
+
 it("availability wire retains ordered typed settlement companions through raw callback events", () => {
   const settlements = [
     { admission_source: "configured_gate", effect_kind: "tool_dispatch", physical_outcome: "failed", failure_kind: "operation_authorization_unavailable" },

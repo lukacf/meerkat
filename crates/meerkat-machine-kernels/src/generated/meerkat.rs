@@ -10176,6 +10176,56 @@ impl std::fmt::Display for RunStartHoldReason {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum RunSuspensionCause {
+    #[default]
+    #[serde(rename = "RequeueStop")]
+    RequeueStop,
+    #[serde(rename = "FenceGap")]
+    FenceGap,
+}
+impl RunSuspensionCause {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::RequeueStop => "RequeueStop",
+            Self::FenceGap => "FenceGap",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RunSuspensionCause {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "RequeueStop" => Ok(Self::RequeueStop),
+            "FenceGap" => Ok(Self::FenceGap),
+            other => Err(format!("invalid RunSuspensionCause value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RunSuspensionCause {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RunSuspensionCause {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum RuntimeApplyFailureCause {
     #[default]
     #[serde(rename = "Unknown")]
@@ -18994,6 +19044,7 @@ pub mod inputs {
     pub struct SuspendRunForStop {
         pub run_id: RunId,
         pub durable_session: bool,
+        pub cause: RunSuspensionCause,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ReplayAppliedRunContributor {
@@ -26021,6 +26072,10 @@ pub enum TransitionId {
     RequestUntilChangedSwitchTurnTranscriptUnsupportedIdle,
     RequestUntilChangedSwitchTurnTranscriptUnsupportedAttached,
     RequestUntilChangedSwitchTurnTranscriptUnsupportedRunning,
+    SuspendRunForStopFenceGapRunningToIdle,
+    SuspendRunForStopFenceGapRunningToAttached,
+    StopCurrentRunForRunResumableIdle,
+    StopCurrentRunForRunResumableAttached,
 }
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

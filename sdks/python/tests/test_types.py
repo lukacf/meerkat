@@ -8942,6 +8942,36 @@ def test_operation_observation_diagnostic_is_known_and_retains_exact_payload():
     assert control.delta == "continued"
 
 
+def test_tool_results_bounded_for_request_is_known_and_retains_exact_payload():
+    from meerkat.generated.event_inventory import KNOWN_AGENT_EVENT_TYPES
+    from meerkat.generated.event_types import ToolResultBoundAxis
+
+    raw = {
+        "type": "tool_results_bounded_for_request",
+        "run_id": "01900000-0000-7000-8000-000000000002",
+        "results": [
+            {
+                "tool_use_id": "tc_1",
+                "tool_name": "list_records",
+                "kept_bytes": 87939,
+                "total_bytes": 400000,
+            }
+        ],
+        "axis": "context_window",
+    }
+    assert raw["type"] in KNOWN_AGENT_EVENT_TYPES
+    assert set(get_args(ToolResultBoundAxis)) == {"request_bytes", "context_window"}
+    event = parse_event(json.loads(json.dumps(raw)))
+    # In the generated inventory, without a handwritten class: the
+    # raw-preserving UnknownEvent path keeps every field of the notice.
+    assert isinstance(event, UnknownEvent)
+    assert event.type == raw["type"]
+    assert event.data == raw
+    control = parse_event({"type": "text_delta", "delta": "continued"})
+    assert isinstance(control, TextDelta)
+    assert control.delta == "continued"
+
+
 def test_wire_tool_result_retains_typed_observation_settlement_companions():
     from dataclasses import asdict
     import json

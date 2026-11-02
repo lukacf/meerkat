@@ -5789,19 +5789,30 @@ const RELINK_WORKER_STACK_ENV: &str = "MEERKAT_TEST_FORK_RELINK_WORKER_STACK_BYT
 const RELINK_STACK_CHILD_TEST: &str = "restart_relink_on_a_sized_worker_stack_child";
 /// The child-process fixture of [`session_create_fits_the_worker_stack_budget`].
 const SESSION_CREATE_STACK_CHILD_TEST: &str = "session_create_on_a_sized_worker_stack_child";
-/// The worker stack, 1.125 MiB, that the stack-budget tests give their
-/// child processes. It is below the 2 MiB an embedding host gives its tokio
+/// The worker stack, 1.5 MiB, that the stack-budget tests give their child
+/// processes. It is below the 2 MiB an embedding host gives its tokio
 /// runtime (Tokio's default), so the paths they cover keep headroom under
-/// that limit. In a debug build the restart re-link scenario needed 1,228,800
-/// bytes of worker stack (1,212,416 overflowed) while its resume path built
-/// the resume preparation's hosted body and recovery inline. With those built
-/// in their own frames the resume path reaches 861,512 bytes, and the
-/// scenario needs 999,424 (983,040 overflows), set by its runtime delivery
-/// owner's continuation admission; session creation needs 901,120. This
-/// budget fails the 1,228,800 need and leaves about 18% (180,224 bytes) over
-/// the 999,424 one, so a regression that eats that headroom fails here long
-/// before it nears a host's 2 MiB.
-const WORKER_STACK_BUDGET: usize = 1_179_648;
+/// that limit.
+///
+/// The worst path on these workers is the member session task's turn. A
+/// member's turns run on the host's runtime, where they ran on Core's
+/// cleanup runtime before, so the fork child's text-only turn is polled on
+/// these workers, beneath the session task's own poll frame. In a debug build
+/// the restart re-link scenario needs 1,343,488 bytes for it (1,331,200
+/// overflows, at the run loop's first model-request boundary).
+///
+/// Before that move the worst path was the scenario's runtime delivery owner
+/// admitting the re-linked child's continuation: 999,424 bytes (983,040
+/// overflowed) once the resume path built the resume preparation's hosted
+/// body and recovery in their own frames (the resume path then reached
+/// 861,512), and 1,228,800 (1,212,416 overflowed) while it built them
+/// inline. The budget was 1,179,648 then. Session creation, which runs no
+/// turn, needed 901,120.
+///
+/// This budget leaves about 17% (229,376 bytes) over the 1,343,488 need and
+/// stays 25% (524,288 bytes) under a host's 2 MiB, so a regression that eats
+/// that headroom fails here before it nears a host's limit.
+const WORKER_STACK_BUDGET: usize = 1_572_864;
 /// The stack of a child's driver thread, which builds the fixture and waits
 /// on the scenario: the debug test-thread budget `.cargo/config.toml` sets.
 /// What the scenario measures runs on the workers.

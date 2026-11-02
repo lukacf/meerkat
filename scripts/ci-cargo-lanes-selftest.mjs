@@ -2396,6 +2396,9 @@ for (const path of [
   assert.match(store.integration_suites[1].test_flags, /^--test governed_realm$/);
   assert.match(store.integration_suites[0].package_flags, /^-p meerkat --features .*\bsession-store\b/);
   assert.match(store.integration_suites[0].test_flags, /--test cold_restart_resume_after_compaction\b/);
+  // The compaction rows against a model's context window (the projection,
+  // the context refusal and their stored cadence) run with them.
+  assert.match(store.integration_suites[0].test_flags, /--test compaction_context_window\b/);
   assert.deepEqual(names(planFor(["crates/meerkat-tools/src/lib.rs"])), ["meerkat-authorization"]);
   assert.deepEqual(names(planFor(["docs/index.mdx"])), []);
   assert.deepEqual(
@@ -2504,7 +2507,7 @@ for (const path of [
   assert.deepEqual(rows.map((row) => row.tests), [
     undefined,
     undefined,
-    "--test cold_restart_resume_after_compaction --test cold_restart_resume --test persistence_contract --test storage_provider_seam --test brain_swap_surface_parity",
+    "--test cold_restart_resume_after_compaction --test cold_restart_resume --test compaction_context_window --test persistence_contract --test storage_provider_seam --test brain_swap_surface_parity",
     "--test governed_realm",
     "--test gpt_live_replay",
     undefined,

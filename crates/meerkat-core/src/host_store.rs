@@ -56,12 +56,17 @@
 //!    whose commit point comes later never becomes visible, and every batch
 //!    whose commit point comes before the acquire stays visible, whether or
 //!    not its writer saw the acknowledgement: a load after the acquire shows
-//!    it. Valid ways: refuse the batch at commit
-//!    ([`HostStoreError::FencedOut`]); at load, ignore every batch whose
-//!    token is below the highest token acquired before its commit point.
-//!    The commit point is the store's own server assigned commit order (for
-//!    example its marker's commit time), never a writer's clock; commit
-//!    points that tie are ordered by a fixed rule, such as the commit id.
+//!    it. The store refuses such a batch at commit
+//!    ([`HostStoreError::FencedOut`]): the writer learns there that another
+//!    writer holds the realm, and Core ends its runs and tells their waiters
+//!    that the store keeps their inputs for the new owner. A store that only
+//!    hides such a batch at load (ignoring every batch whose token is below
+//!    the highest token acquired before its commit point) answers the stale
+//!    writer's commit `Ok`, so that writer's own answers can claim work the
+//!    realm never shows: such a store is outside this contract. The commit
+//!    point is the store's own server assigned commit order (for example its
+//!    marker's commit time), never a writer's clock; commit points that tie
+//!    are ordered by a fixed rule, such as the commit id.
 //! 6. **Logical removal.** Truncate, drop and delete take effect for loads
 //!    together with their batch. Physical cleanup may come later or never;
 //!    tombstones are fine.
@@ -79,10 +84,11 @@
 //! commits them in batches before the batch that references them; an
 //! orphaned chunk is garbage, not corruption.
 //!
-//! A store meets obligations 4 and 5 either at commit, answering
-//! [`HostStoreError::Conflict`] or [`HostStoreError::FencedOut`], or at
-//! load, by the fixed rules above. Core treats both the same way: the
-//! fenced or conflicting batch is not part of the realm.
+//! A store meets obligation 4 either at commit, answering
+//! [`HostStoreError::Conflict`], or at load, by the fixed rules above, and
+//! Core treats both the same way: the conflicting batch is not part of the
+//! realm. It meets obligation 5 at commit, answering
+//! [`HostStoreError::FencedOut`].
 //!
 //! # Fence leases
 //!
@@ -128,7 +134,11 @@
 //!   one renew interval unless the host declares another). This takes no
 //!   store I/O per round, and there is no fence check on the per round
 //!   path. Core exposes the window through [`SelfFence`], so the run loop
-//!   checks it right before each model call and each tool dispatch.
+//!   checks it right before each model call and each tool dispatch. A
+//!   stopped holder's run waits there, bounded, for the fresh acquire it
+//!   makes before its next write ([`SelfFence::dispatch_window`]; Core's
+//!   realm bounds the wait by one self-fence window plus that acquire's own
+//!   timeouts), and dispatches only once that acquire resumed it.
 //! - **The host's obligation on the margin:** it is at least one renew
 //!   interval plus twice the store's visibility lag (the time from the
 //!   start of a write until every acquire and renew sees it). A takeover
@@ -331,9 +341,34 @@ impl Default for FenceTiming {
 /// documentation). Core's host store realm implements it; the run loop asks
 /// it right before each model call and each tool dispatch, not only before
 /// commits.
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 pub trait SelfFence: Send + Sync {
     /// The writer's self-fence window now. A local clock read; no store I/O.
     fn window(&self) -> SelfFenceWindow;
+
+    /// The writer's self-fence window for a dispatch about to start: the
+    /// reading as it is while the window is open, otherwise the reading
+    /// after waiting, bounded, for the fresh acquire the writer makes
+    /// before its next write (a stopped holder re-acquires; see the writer
+    /// rules in the module documentation). The window it answers is open
+    /// only when that acquire resumed the writer. The default waits for
+    /// nothing and answers [`Self::window`].
+    async fn dispatch_window(&self) -> SelfFenceWindow {
+        self.window()
+    }
+
+    /// Whether this writer's realm lost its fence for good: another writer
+    /// holds it (a live holder, a batch this writer did not write, or a renew
+    /// or commit answered `FencedOut`), or the realm stopped itself for
+    /// another reason it cannot recover from. Such a writer never resumes,
+    /// and the store refuses its writes; its window may still read open. A
+    /// closed window of a writer that is not lost is a gap: no re-acquire
+    /// has succeeded yet, and nothing proves another owner. The default
+    /// answers `false`.
+    fn lost(&self) -> bool {
+        false
+    }
 }
 
 /// One reading of a writer's self-fence window.
@@ -848,9 +883,8 @@ pub enum HostStoreError {
         current: Option<ScopeVersion>,
     },
     /// A higher fence token than the caller's exists: the caller is fenced
-    /// out and stops writing. Answered by `renew_fence`, and by `commit` in
-    /// a store that meets obligation 5 at commit; nothing of the batch is
-    /// applied.
+    /// out and stops writing. Answered by `renew_fence`, and by `commit`
+    /// (obligation 5); nothing of the batch is applied.
     #[error("fenced out: token {current} is current")]
     FencedOut { current: FenceToken },
     /// The outcome is unknown: the batch may or may not have landed. Core

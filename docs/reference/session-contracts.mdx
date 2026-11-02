@@ -92,6 +92,12 @@ Committed create failure must not be silently rewritten to “cancelled” or cl
 
 - At most one in-flight turn per session.
 - Concurrent attempts return `SESSION_BUSY`.
+- A turn the runtime queue does not dispatch (a direct turn, such as a
+  create's first turn) also returns `SESSION_BUSY` while the session's
+  runtime holds a run that waits to resume: one a store fence gap suspended
+  (see [Durable runs](/guides/durable-runs#one-writer%2C-fenced)), or one a
+  restart left open. It goes through once the runtime has resumed or
+  settled that run.
 - Committed success must not be rewritten to cancellation.
 - Runtime-backed surfaces may hot-swap supported live settings on an existing session where the surface contract says that is allowed.
 - Runtime-backed surfaces do not race `start_turn`: they admit each turn through the session's runtime queue, so a surface turn that arrives while another is running waits behind it and then runs.
@@ -162,7 +168,15 @@ capability never changes, rejects, or rewrites the durable Session itself.
 
 `interrupt(id)` cancels an in-flight turn.
 
-- If no turn is running: `SESSION_NOT_RUNNING`.
+- If no turn is running: `SESSION_NOT_RUNNING`. A runtime-backed session
+  whose run a store fence gap suspended (or a restart marked resumable and
+  has not resumed yet) has no turn running, but its interrupt is accepted:
+  it records the run's stop, the run never resumes, and its inputs end
+  cancelled once the session's store takes writes again.
+- A runtime-backed session whose store's writer is stopped (a store fence
+  gap) has its run suspended by the interrupt, not hard-cancelled: the
+  stop is recorded the same way, since the gap would refuse the cancel's
+  writes.
 
 When a service drops an active agent execution future, cancellation reports both
 the cancellation request and the observed end of that execution to the generated
@@ -576,7 +590,14 @@ and structured data.
 Compaction is optional. Ordinary recoverable failures preserve uncompacted
 history and normally report `CompactionFailed`, allowing the run to continue.
 
-- Triggered by token thresholds and turn guards.
+- Triggered by token thresholds and turn guards, by the projected input of
+  the next request, and once after a request that did not fit: one the
+  provider refused for not fitting the model's context, or one that carried
+  the open run's own tool results shortened.
+- A request still over the provider's request-body cap or the model's input
+  budget after the compaction check carries the open run's own oversized
+  tool results shortened for that request only, and publishes
+  `tool_results_bounded_for_request`; the stored transcript keeps them whole.
 - A typed provider `PolicyStop` from the summary call terminates the run.
 - Unresolved durable compaction-stage authority or cleanup errors, such as
   `SessionDurableProjectionAuthorityUnknown`, also terminate fail-closed.
@@ -960,6 +981,34 @@ graceful shutdown that does not choose a disposition, a mob Shutdown
 included, uses this stop with a 15 minute max age for sessions that commit
 every round.
 
+A store fence gap answers the same. When a host store realm's writer stays
+stopped through a run's whole dispatch wait, or through the wait of a round
+commit that met the stopped writer, and no other process holds the fence,
+the runtime suspends the run with its inputs bound to it, and their waiters
+get `RequeuedAcrossStop` within that wait: the inputs run when the fence is
+re-acquired (the run resumes in the same process) or at the next start (an
+ephemeral input only in the same process). A run whose stop was asked (a
+cancel it accepted before the gap, an interrupt or a stop at the fence, or
+one of the suspended run) is suspended the same way and its waiters get
+the same answer, but it never resumes: once the fence is back the runtime
+settles it, its inputs abandoned as `Cancelled`. A waiter registered on
+such an input after the suspension gets the settlement's answer,
+`AuthorityUnavailable` ("the suspended run was stopped before it
+resumed").
+When another process holds the fence, however this process meets it (at a
+dispatch, at a commit or while a suspended run waits), the live session is
+torn down, the store keeps the session's inputs as last committed for that
+owner, and every waiter in this process of an input the store keeps gets
+`RequeuedAcrossStop` too (see
+[Durable runs](/guides/durable-runs#one-writer%2C-fenced)).
+
+A run the gap suspended before its first round commit starts again from its
+inputs under the same run id, and publishes `run_started` again with no
+terminal in between. An observer reads a repeated `run_started` for a run
+id that has no terminal yet as that run starting over, and drops what it
+received for the run id before; a run that resumes from a round commit
+publishes `run_resumed` instead.
+
 - The generated wait-failure resolver classes such a wait: session not
   running, reason `requeued_across_stop`, resumable, and the surface's
   pre-admission released. It answers the same after the session is gone.
@@ -1300,6 +1349,25 @@ bound. 0.9.3 and earlier re-read such an input every 25 ms.
 - If a runtime stop or teardown has taken the still-bound run between the
   compare and the stop, the call returns
   `RunStopReceipt::NotStoppable { run_id, state }` and stages nothing.
+- A run a store fence gap suspended (or a restart marked resumable and has
+  not resumed yet), and a run whose session store's writer is stopped, are
+  stopped without waiting: the stop is recorded at once (the latter run is
+  suspended, not interrupted), and the call returns
+  `RunStopReceipt::Stopped { run_id, contributors }` with no contributors.
+  The run never resumes. Its inputs end `Abandoned { reason: Cancelled }`
+  when the runtime settles it (at its loop's next lap for a restart's run,
+  once the session's store takes writes again for a gap's): read their
+  outcome later. A process that ends first, or another writer that takes
+  the session over, runs them instead. A graceful requeue stop, or a Keep
+  rollback, that begins before that settlement ends them
+  `Abandoned { reason: Stopped }` and leaves the run to the next start,
+  which repairs its tail as an interrupted run (no run terminal is
+  published for it). A stop that races the gap's own suspension of the run
+  can fail with an internal error naming an input whose wait was answered
+  `RequeuedAcrossStop`. Where the run cannot be suspended (an executor that
+  cannot suspend, a stop that joins a hard interrupt already in flight, or
+  a published live-boundary join not yet retained), the stop is a hard
+  interrupt, which the gap undoes with a reload that resumes the run.
 
 The stop intent lives in machine state and is not recovered after a crash. A
 process that dies mid-stop recovers the run's staged inputs like any other

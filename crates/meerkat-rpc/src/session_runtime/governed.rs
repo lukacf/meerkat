@@ -232,7 +232,9 @@ impl SessionRuntime {
     /// Bind and admit one governed input in an owned task that survives the
     /// caller: once the native owner accepts the input, the host's original
     /// is settled from that settlement even if the caller is gone or the
-    /// accept returns an error.
+    /// accept returns an error. A staged session's actor is materialized on
+    /// the caller's runtime, not in that task (see
+    /// [`Self::materialize_staged_actor_on`]).
     async fn admit_governed_input(
         self: &Arc<Self>,
         session_id: SessionId,
@@ -242,6 +244,7 @@ impl SessionRuntime {
         request_context: Option<RequestContext>,
     ) -> Result<GovernedAdmission, RpcError> {
         let cleanup = RuntimeCleanupTaskSpawner::acquire().map_err(runtime_driver_error_to_rpc)?;
+        let actor_runtime = tokio::runtime::Handle::try_current().ok();
         let runtime = Arc::clone(self);
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
         cleanup.clone().spawn_detached(async move {
@@ -261,6 +264,7 @@ impl SessionRuntime {
                     registration,
                     guard,
                     restored_tx,
+                    actor_runtime,
                 )
                 .await;
             let (input, original, attachment, mut custody) = match prepared {
@@ -343,6 +347,7 @@ impl SessionRuntime {
         registration: RuntimeRegistrationLockLease,
         guard: tokio::sync::OwnedMutexGuard<()>,
         restored_tx: tokio::sync::oneshot::Sender<()>,
+        actor_runtime: Option<tokio::runtime::Handle>,
     ) -> Result<
         (
             Input,
@@ -427,19 +432,8 @@ impl SessionRuntime {
                     .and_then(PendingPromotionCleanup::take_staged_capacity_admission)
                     .ok_or_else(|| runtime_driver_error_to_rpc(unsupported()))?;
                 custody.restore_permitted = false;
-                let runtime = Arc::clone(self);
-                let materialized =
-                    meerkat::surface::materialize_session_with_reserved_admission_and_actor_slot(
-                        &self.service,
-                        &self.runtime_adapter,
-                        seed,
-                        request,
-                        admission,
-                        move |id, attachment, actor_slot| {
-                            runtime
-                                .session_runtime_executor_for_actor_slot(id, attachment, actor_slot)
-                        },
-                    )
+                let materialized = self
+                    .materialize_staged_actor_on(actor_runtime, seed, request, admission)
                     .await;
                 if let Err(error) = materialized {
                     // The materialization owner performs its own rollback. A
@@ -510,6 +504,65 @@ impl SessionRuntime {
         // and the session's MCP boundary applied, before this admission
         // (`start_governed_turn`), outside the registration fence.
         Ok((input, original, attachment, custody))
+    }
+
+    /// Materialize a staged session's actor for a governed input on
+    /// `actor_runtime`, the runtime of the caller that admits the input, and
+    /// await the answer.
+    ///
+    /// The admission runs on the process-wide cleanup runtime, so that its
+    /// custody survives the caller. The actor must not be created there: its
+    /// session task is spawned on the runtime that runs the materialization,
+    /// and every turn of the session would then run on the cleanup runtime's
+    /// two workers. A materialization that ends without an answer (its
+    /// runtime shut down, or it panicked) is reported as a failed one, by
+    /// that kind only: its own report, a panic's payload included, goes to
+    /// the host's log. Outside a Tokio runtime it runs in the calling task.
+    async fn materialize_staged_actor_on(
+        self: &Arc<Self>,
+        actor_runtime: Option<tokio::runtime::Handle>,
+        seed: Session,
+        request: CreateSessionRequest,
+        admission: ActiveCapacityGuard,
+    ) -> Result<RunResult, meerkat::surface::SurfaceRuntimeMaterializeError> {
+        let runtime = Arc::clone(self);
+        let materialization = async move {
+            let executor_runtime = Arc::clone(&runtime);
+            meerkat::surface::materialize_session_with_reserved_admission_and_actor_slot(
+                &runtime.service,
+                &runtime.runtime_adapter,
+                seed,
+                request,
+                admission,
+                move |id, attachment, actor_slot| {
+                    executor_runtime
+                        .session_runtime_executor_for_actor_slot(id, attachment, actor_slot)
+                },
+            )
+            .await
+        };
+        let Some(handle) = actor_runtime else {
+            return materialization.await;
+        };
+        match handle.spawn(materialization).await {
+            Ok(materialized) => materialized,
+            Err(error) => {
+                let ended = if error.is_panic() {
+                    "panicked"
+                } else {
+                    "was cancelled: the host's runtime stopped"
+                };
+                tracing::error!(
+                    %error,
+                    "the staged session's actor materialization on the host's runtime {ended}"
+                );
+                Err(RuntimeDriverError::Internal(format!(
+                    "the staged session's actor materialization on the host's runtime {ended}; \
+                     inspect host logs"
+                ))
+                .into())
+            }
+        }
     }
 
     /// Recover a governed session this host holds neither a live

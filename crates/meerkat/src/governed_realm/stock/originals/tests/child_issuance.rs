@@ -1973,3 +1973,9 @@ async fn a_waiting_child_issuance_waits_out_a_held_exclusion_then_issues() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Waiting admission: the fence's keyed create, retried after contention.
+// ---------------------------------------------------------------------------
+
+mod admission_wait;

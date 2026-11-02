@@ -139,6 +139,7 @@ them.
   `meerkat_mob::MobEventKind::MemberRetirementStarted` gains the public field
   `rotation` (the rotation the retirement carries out, which serde skips), so
   code that builds the variant literally must set it (`None`).
+
 - `meerkat-machine-kernels`, `meerkat-machine-schema`, `meerkat-mob`: the mob
   machine records the members exempt from the mob definition's wiring rules
   (see Added). `MobMachineState` (meerkat-machine-schema and meerkat-mob) and
@@ -166,6 +167,7 @@ them.
   set it (`false` keeps the previous behaviour), and a serialized kernel input
   without the field no longer deserializes. A placed member's membership
   commit refuses `true`.
+
 - `meerkat-machine-kernels`, `meerkat-machine-schema`, `meerkat-mob`: the mob
   machine decides the declared apply (see Added). `MobMachineState`
   (meerkat-machine-schema and meerkat-mob) and the kernel `generated::mob`
@@ -242,6 +244,7 @@ them.
   either variant literally must set them (`None`, `false` and
   `MemberRetiredFacts::default()`), and an exhaustive pattern without `..`
   must name them.
+
 - `meerkat-machine-kernels`, `meerkat-machine-schema`: `MeerkatMachine`'s
   `RunStartHoldReason` (meerkat-machine-schema
   `catalog::dsl::meerkat_machine` and the kernel `generated::meerkat`) gains
@@ -250,6 +253,7 @@ them.
   must add it. The runtime's `meerkat_runtime::RunStartHoldReason` and the
   mob's `meerkat_mob::HostRunStartHoldReason` gain it too; both are
   `#[non_exhaustive]`.
+
 - `meerkat-machine-kernels`, `meerkat-machine-schema`, `meerkat-mob`: the mob
   machine recovers created identity entries (see Added). `MobMachineState`
   (meerkat-machine-schema and meerkat-mob) and the kernel `generated::mob`
@@ -300,6 +304,7 @@ them.
   `RecoverCreatedIdentityEntryUnreadableRunning` and
   `RecoverCreatedIdentityEntryUnreadableStopped`, so no existing variant's
   discriminant moves. Exhaustive matches must add the new variants.
+
 - `meerkat-machine-kernels`, `meerkat-machine-schema`, `meerkat-mob`: the mob
   machine answers the retire of an identity with no current incarnation
   (`RetireAbsent`) in a completed and in a destroyed mob too, and
@@ -362,6 +367,43 @@ them.
   window still renews the lease. Code that builds `Acquire` sets the new
   field.
 
+- `meerkat-machine-schema`, `meerkat-machine-kernels`, `meerkat-runtime`:
+  `MeerkatMachineInput::SuspendRunForStop` gains `cause`, of the new enum
+  `RunSuspensionCause` (`RequeueStop`, `FenceGap`), with the `meerkat_machine::dsl`
+  re-export and the kernel type, and the generated transition enums gain
+  `SuspendRunForStopFenceGapRunningToIdle`,
+  `SuspendRunForStopFenceGapRunningToAttached`,
+  `StopCurrentRunForRunResumableIdle` and
+  `StopCurrentRunForRunResumableAttached`, appended last. Pass
+  `RunSuspensionCause::RequeueStop` where you build the input (the 0.9.8
+  behaviour), and add the arms (or a wildcard) where you match the enums
+  exhaustively. `ResumeRun` (and the resumed-run plan) now refuses a run
+  whose stop was asked, `SettleResumableRun` refuses to settle such a run
+  as `ResumeRefused`, and `ClassifyStopInputDisposition` keeps none of the
+  inputs bound to it (Staged, Applied or AppliedPendingConsumption), under
+  `Requeue` or under `Keep` (they are answered `Abandon`); a queued input
+  that only still names the run is answered as any other input. A
+  suspension (`SuspendRunForStop`, either cause) carries a cancel the run
+  accepted before it (its turn's cancel after the boundary, or an ambient
+  `CancelAfterBoundary` whose boundary dispatch is outstanding) as the
+  run's stop intent, and an ambient `CancelAfterBoundary` of an attached
+  session that holds a run marked resumable, with no run current and no
+  unregister draining, records the stop intent on that run.
+  `StartConversationRun` from `Idle`, `Initializing` or `Attached`, and
+  `StartImmediateAppend` from `Initializing` or `Attached` (a run the
+  runtime did not prepare: a direct turn's) are refused while a run is
+  marked resumable, as `Prepare` refuses another run
+  (`no_other_resumable_run`); the session service refuses such a direct
+  turn with `SessionError::Busy` before it reaches the machine.
+
+- Behaviour-only (not measured by the gate): a host store meets obligation
+  5 (fencing) at commit: it refuses a batch whose token is below one
+  acquired before the batch's commit point with `FencedOut`. A store that
+  only hides such a batch at load answers the stale writer's commit `Ok`,
+  and is outside the host store contract; an append-only store makes its
+  fence check and its commit one transaction (see the host store SPI
+  reference). Core's own stores already fence this way.
+
 - Behaviour-only (not measured by the gate): `meerkat-core` human consent
   (R3): a route's `HumanConsentRoute::eligibility` is now also asked after
   the decision, for the same approver and the approval as decided, when
@@ -419,6 +461,43 @@ them.
   about what the agent could see. A client or test that reads the
   placeholder text must match the new form; the prompt still contains
   `CONTEXT COMPACTION`.
+
+- Behaviour-only (not measured by the gate): `meerkat-mob`, `meerkat-rpc`,
+  `meerkat`, `meerkat-session`: every turn of a runtime-backed mob member,
+  and of a session an RPC `SessionRuntime` serves, now runs on the host's
+  runtime instead of one of Core's process-wide runtimes. A member's turns
+  run on the runtime of the task that provisions it (the mob actor's), and
+  an RPC session's on the runtime the `SessionRuntime` is built on: its
+  first turn after a deferred create, its next turn after a rebuild from
+  durable state, a staged session's governed admission, and the sessions of
+  the mobs it attaches. The experimental GPT live mirror host opens a
+  channel's replacement session on the runtime it is built on. Before, the
+  actors of these sessions were created on `meerkat-machine-cleanup` or
+  `meerkat-runtime-serving` and ran every turn there. The agent loop, model
+  streaming, tool calls and whatever those tools spawn now use the host's
+  worker threads and the stack it gives them, so size them for the tools
+  you compose. A member tool that blocks its thread holds one of the host's
+  workers, and on a `current_thread` runtime it stops the host's only
+  thread. The host's member registration hooks
+  (`MemberRuntimeRegistrationHook`) are called on the host's runtime too.
+  These turns end when the host's runtime stops. A stop in the middle of a
+  turn is crash-equivalent: the interrupted input and the queued ones stay
+  non-terminal, nothing is written for them after the stop, and the next
+  start resumes them. An input that reaches an idle session after the stop,
+  from a part of the process that outlives the host's runtime, waits for the
+  next start the same way. Once the session's runtime takes such an input
+  up, as after a stop in the middle of a turn, the session's registration
+  waits for its reload, and a later input is refused until the next start,
+  with nothing kept for it (an RPC session runtime refuses it with
+  `host_runtime_stopped`, `-32032`; two inputs to the same session within
+  milliseconds of each other right after the stop can see the second
+  refused untyped instead, `-32603`, with nothing kept). On an RPC session
+  runtime, a governed input is refused instead of waiting, and so is an
+  input to a help session (`help_session_not_resumable`), which is never
+  rebuilt from storage. A turn whose session task panicked, or whose actor
+  the service retired, still fails with its error, and so does a turn its
+  caller drives directly rather than through the runtime (see Upgrade notes
+  and Fixed).
 
 - `meerkat-runtime`, `meerkat-machine-schema` and `meerkat-machine-kernels`:
   the runtime machine (`MeerkatMachine`) holds kept governed work that waits
@@ -975,6 +1054,100 @@ them.
   system-row prune (see Added). A match over `TranscriptEditError` outside
   meerkat-core needs a wildcard arm.
 
+- Behaviour-only (not measured by the gate): `meerkat-schedule`: the
+  replies of the schedule tools, for agents and for every generic call path
+  that runs them through `handle_schedule_tools_call` (RPC `schedule/call`,
+  REST `POST /schedule/call`, the MCP server's `meerkat_schedule_*` tools,
+  the Python SDK's `call_schedule_tool` and the TypeScript SDK's
+  `callScheduleTool`):
+  - `meerkat_schedule_list` returns one page of summaries,
+    `{"schedules": [...], "page": {"returned", "has_more", "next_cursor"}}`,
+    in creation order (creation time, then schedule id): 50 schedules unless
+    `limit` asks for another size, at most 200 (a larger `limit` returns 200
+    with `page.has_more`), and `cursor` takes `page.next_cursor` to
+    continue. A summary carries `schedule_id`, `name`
+    (its first 200 characters), `phase`, `revision`, `trigger` (only its
+    `type` and `timezone`, with `trigger_chars`, when its serialized form is
+    over 1,024 bytes), the target's kind and ids (`target`, each id cut to
+    its first 200 characters), `action_head` (the first 160 characters of the
+    action text: a prompt, the content a member is sent, a helper's prompt
+    or an event's type) with `action_chars` (that text's full length),
+    `created_at_utc` and `updated_at_utc`. It returned every live schedule,
+    unpaged, in the persistence shape, whose machine state repeated the
+    trigger, the whole target and every revision's superseded acks, so a
+    realm of a few dozen long-prompt schedules filled much of a context
+    window in one reply. A `limit` of 0, a negative or non-integer `limit`,
+    or a cursor this listing did not write is refused as invalid arguments.
+  - Every tool that returns one schedule (`meerkat_schedule_get`,
+    `meerkat_schedule_create`, `meerkat_schedule_update`,
+    `meerkat_schedule_pause`, `meerkat_schedule_resume` and
+    `meerkat_schedule_delete`) returns it in the public shape of
+    `schedule/get` (`meerkat_contracts::wire::Schedule`): the same fields,
+    without `machine_state`.
+  - `meerkat_schedule_occurrences` pages every list reply: 50 occurrences
+    unless `limit` asks for another size, at most 200, and a larger `limit`
+    returns 200 (it took up to 500 before, and with only `schedule_id` it
+    returned every occurrence unpaged). A page's rows are summaries by
+    default (`view: "summary"`; whole occurrences were the default before):
+    ids, phase, due time, attempts, the last receipt summarized, the
+    target's kind and ids (each cut to 200 characters), the runtime
+    outcome's `kind` with a
+    `detail_head`, and a `failure_detail_head`, each head the first 160
+    characters of its text (the summary view carried the whole outcome,
+    callback payload included, and the whole `failure_detail` before). Whole
+    occurrences (`view: "full"`, and by default an `occurrence_id` read) are
+    the public shape of `schedule/occurrences`, without `machine_state` and
+    `claim_token`. Malformed options are refused as the listing's are.
+
+  The host listings do not move: RPC `schedule/list` and `schedule/get`,
+  REST `GET /schedules`, the Python SDK's `list_schedules` and the
+  TypeScript SDK's `listSchedules` return every schedule whole, as before.
+
+- `meerkat-core`: `CompactionContext` gains `projected_input_tokens:
+  Option<InputTokenProjection>` and `last_context_refusal_boundary_index:
+  Option<u64>`, and `SessionCompactionCadence` gains
+  `last_context_refusal_boundary_index: Option<u64>` and
+  `last_answered_request: Option<AnsweredRequestInput>` (see Fixed). Both
+  structs are exhaustive: a struct literal names the new fields (`None`
+  measures as before) or, for `SessionCompactionCadence`, ends with
+  `..Default::default()`; `CompactionContext` has no `Default`.
+  `meerkat_core::agent::compact::build_compaction_context` takes the last
+  answered request (`Option<AnsweredRequestAnchor<'_>>`) as its new third
+  parameter; `None` measures as before. A custom `Compactor` may read the
+  two new context fields or ignore them; no existing field changes meaning.
+
+- Behaviour-only (not measured by the gate): `meerkat-schedule`,
+  `meerkat-machine-schema` (the generated `ScheduleLifecycleMachine`
+  authority in `catalog::dsl::schedule_lifecycle`): a schedule's
+  superseded acknowledgements (the `superseded_ack_ids` field of
+  `Schedule` and of the `Schedule` wire projection, `superseded_ack_ids` in
+  the Python SDK and `supersededAckIds` in the TypeScript SDK) list only
+  the occurrences the latest revise or delete superseded. Each revise or
+  delete drops the ids recorded before it, so after a second one the field
+  no longer lists the occurrences an earlier one superseded. An
+  acknowledgement given to `Schedule::apply`
+  (`ScheduleLifecycleInput::ConfirmOccurrencesSuperseded`) or
+  `apply_supersession_feedback` that does not answer the schedule's
+  current revision is still accepted with no effect, and is no longer
+  recorded. No shape, answer or error changes (see Fixed).
+
+- `meerkat-core`: `AgentEvent` gains the variant
+  `ToolResultsBoundedForRequest { run_id, results, axis }`, wire type
+  `tool_results_bounded_for_request`, with the new `BoundedToolResult`
+  (`tool_use_id`, `tool_name`, `kept_bytes`, `total_bytes`) and the new enum
+  `ToolResultBoundAxis` (`request_bytes`, `context_window`;
+  non-exhaustive). It is published before a model request that carries
+  some of its run's own tool results shortened for that request only (see
+  Fixed): each call, the bytes of its text the request kept and the bytes
+  of the whole result, and the limit the request did not fit with them
+  whole. Before, only the marker the model reads said so. `AgentEvent` is
+  non-exhaustive, so a Rust match already has a wildcard arm; the published
+  event catalog (`meerkat_contracts::KNOWN_AGENT_EVENT_TYPES`) lists the new
+  type, and the generated SDK inventories with it. An SDK of this version
+  surfaces the event as its unknown-event form with the whole payload
+  (Python, TypeScript) or as its generated event type (Web); an SDK of 0.9.8
+  or earlier refuses the unknown type, as for any newer contract.
+
 ### Added
 
 - `meerkat-mob`, `meerkat-mob-mcp`: identity entries. A Rust host can tell
@@ -1142,6 +1315,7 @@ them.
   member host cannot be exempt: its spawn is refused typed
   (`MobError::WiringError`). The option is Rust-only; the wire spawn
   contracts do not carry it.
+
 - `meerkat-mob`: the declared apply. `MobHandle::apply_declared_roster`
   applies a host's declarative roster of identity entries (`DeclaredRoster`:
   its `DeclaredEntry` specs, whether it is the host's complete roster, the
@@ -1384,6 +1558,44 @@ them.
   host's by d (a rounding clock, by up to half its unit) lets a decision made
   up to d before the presentation be accepted, so the ingress must bound
   that skew.
+
+- `meerkat-session`, `meerkat-mob`, `meerkat`:
+  `PersistentSessionService::runtime_turn_lost_its_host_runtime` answers
+  whether a session's task ended with the runtime it ran on, and then degrades
+  the session's registration to a cold reload, so the runtime loop leaves the
+  session's work to its next registration. `MobSessionService` gains the same
+  method, provided and answering `false`; the stock persistent service
+  overrides it, and a member's runtime executor asks it before the steps ahead
+  of a turn that need the live actor (see Fixed and Upgrade notes).
+  `PersistentSessionService::session_task_ended_with_its_runtime` answers the
+  same question without degrading anything. The live staleness judgement and
+  the turn reservation (`reserve_runtime_turn_admission`) ask it ahead of an
+  input's admission and leave such a session's actor unjudged, since it takes
+  no commands: the input is admitted, and the runtime loop's check leaves it
+  to the session's next registration. The RPC session runtime's check that
+  refuses an input which would rebuild a help session asks it as well, and
+  counts such a session as not live, so an input to a help session whose
+  actor ended that way is refused there (`help_session_not_resumable`). Its
+  executor attachment asks it too: an input to such a session whose
+  registration already waits for its reload is refused there, typed
+  (`-32032`, `data.kind` `host_runtime_stopped`), and otherwise such an actor
+  counts as not live, so the attachment does not ask it.
+
+- `meerkat-runtime`, `meerkat`:
+  `persistent_runtime_pre_dequeue_handle_with_host_runtime_check` builds the
+  shared pre-dequeue realization handle with a surface's
+  `PreDequeueHostRuntimeCheck` as its precondition, and `meerkat::surface`
+  re-exports both. Before it realizes committed model-routing handoffs, the
+  handle asks the check whether the session's task ended with the host's
+  runtime it ran on. If it did, the check degrades the session's registration
+  to a cold reload and answers a refusal, which the handle returns as
+  `CoreExecutorError::control_failed_runtime` without realizing anything, so
+  the runtime loop leaves the queued inputs to the session's next
+  registration; otherwise the handle realizes as before.
+  `persistent_runtime_pre_dequeue_handle` is unchanged. The RPC session
+  executors, a mob member's runtime executor, the facade's
+  `PersistentRuntimeExecutor` and the CLI's runtime executor pass a check that
+  asks their session service's `runtime_turn_lost_its_host_runtime`.
 
 - `meerkat-runtime`: `PromptInput::detached_job_completed_with_handling`
   admits a completion notice under the handling its producer declares,
@@ -1697,6 +1909,7 @@ them.
   not know. `SessionDocumentMachine` decides ownership, revision order, the
   slot limit, the active budget, application, deferral, the entry sequence
   and the fold source.
+
 - `meerkat-machine-schema`, `meerkat-machine-codegen`: a machine schema can
   narrow an unsigned input field's TLC samples in the CI profile alone
   (`InputFieldDomainKind::CiValues`, declared with
@@ -1918,6 +2131,66 @@ them.
   another offset, or retires a body, writes the document at envelope 5; any
   other stays at envelope 4.
 
+- `meerkat-core`: `InputTokenProjection` (the projection of a request's input
+  tokens: `anchor_tokens`, `appended_tokens` and `projected_tokens()`),
+  `AnsweredRequestInput` (the anchor a session's compaction cadence persists:
+  the last answered request's presented tokens, the transcript rows it was
+  composed from, and the provider and model that counted them, with
+  `counted_by`) and `agent::compact::AnsweredRequestAnchor` (that anchor's
+  presented tokens and the rows appended since, as `build_compaction_context`
+  measures them).
+
+- `meerkat-core`: `Agent::reload_compaction_cadence` adopts the compaction
+  cadence the agent's session carries; a host that swaps in a durable
+  snapshot of the session calls it after the swap.
+
+- `meerkat`: `GovernedHelperAdmissionFence::create_idempotent_after_owner_change`
+  (async), the host-level retry of a governed helper admission's
+  contention. The fence runs inside the WorkGraph store call and never
+  waits: while another writer holds the publication its check excludes
+  owner changes on (a reservation of the writer that has not published), or
+  an owner change is in progress there, it refuses as `Unavailable` with
+  nothing run or committed. The new form makes the keyed create through a
+  new fence for each attempt (a fence serves one attempt), always the same
+  idempotent `create_idempotent_with_fence`. It waits, outside every lock
+  and store transaction, and tries again after an attempt that refused for
+  one of these: on the prepared path, an exclusion refused while the
+  publication named such a change or hold; on the dispatch and entered
+  paths, a refusal to rebuild (`ReprepareRequired`), which, as Core's
+  waiting step forms do, it waits out for a change or hold in progress, or
+  with none named after a 1 ms pause. Every wait is `wait_after_stale_read`
+  of one `OwnerChangeChurn` per call (2 s and three free rebuilds, clamped
+  to the `budget_remaining` passed, which the caller reads right before the
+  call: the deadline is armed after the first attempt). A fence built with
+  `from_dispatch` waits with that dispatch context's own churn
+  (`ToolDispatchContext::owner_change_churn`), so its waits also report to
+  the host's operation refusal observer on the call's surface, without an
+  operation id; prepared and entered fences trace their waits only. The
+  caller awaits it holding no lock or store transaction of its own. It
+  answers success, `Denied` and every other `Unavailable` (a refusal to
+  rebuild inside the prepared path's own exclusion, clock or custody
+  unavailable, a poisoned publication) at once, and returns the last
+  `Unavailable` once a wait is not settled. `refusal()` on the fence it was
+  called on reads the answered attempt's reason, and that fence serves this
+  one admission. Each wait is traced at site `helper_admission`, and
+  dropping the future commits nothing an attempt did not commit itself.
+
+- `meerkat-core`: `EnteredDispatchOperation::work_authorization`, the
+  entered operation's governed work context: the dispatch's own, as
+  `GovernedDispatchOperation::work_authorization` returns it. Its
+  `owner_change_in_progress` names an owner change in progress on the
+  work's publication, or another actor's hold of the work owners'
+  exclusion, which a step refused to rebuild waits for; the waiting helper
+  admission reads it for entered fences.
+
+- `meerkat-llm-core`: `ResolverEnvironment::admitting_pending_account_limits`
+  lets a resolution succeed while a temporary outage keeps a provider from
+  obtaining an account's stated limits (its model list and output limits),
+  for a build that reads none of them, such as one whose output budget is
+  set before resolution; the first request then obtains them.
+  `ResolverEnvironment::admits_pending_account_limits` reads it. Off by
+  default; it has no effect on wasm32.
+
 ### Changed
 
 - `meerkat-core`: `BackendProfile::admits_mid_conversation_system_messages`
@@ -1999,6 +2272,7 @@ them.
   resume, whose start re-drives a same-session rotation from its record;
   `MobHandle::redrive_retirement`, or the call above, re-drives either. The
   mob's destroy, which ends either, is the last resort.
+
 - `meerkat-mob`, `meerkat-machine-schema`: the mob's reset commits only on an
   empty roster. MobMachine's `ResetToRunning` requires that no member holds
   an identity (`roster_empty`), so no member before a reset is a member after
@@ -2007,6 +2281,7 @@ them.
   roster, is the new pure admission input `AdmitReset`: every guard of
   `ResetToRunning` but the empty roster, changing nothing.
   `MobHandle::reset` answers as before.
+
 - `meerkat-mob`, `meerkat-machine-schema`: a mob reset (`MobHandle::reset`)
   ends every identity's retained incarnation history in MobMachine, as a
   restart after the reset does (the resume replays only the events after
@@ -2018,6 +2293,7 @@ them.
   named a pre-reset incarnation (`SeatRotation::FreshLifeAfter`) only until
   a restart. Minting is unchanged: an identity's next incarnation still
   mints above every generation it used.
+
 - `meerkat-mob`: a mob storage on the host store SPI reads its identity
   intents one entry at a time. A created entry's row is kept as one, and an
   entry whose row this build cannot decode is kept as stored, read as
@@ -2028,6 +2304,7 @@ them.
   failed the whole mob's open. An entry this build cannot attribute to an
   identity (an envelope or a key it cannot read) still fails the open, as
   an entry of any other group does.
+
 - `meerkat-mob`: on SQLite, an identity-first adoption reads the mob's
   host-adopted intent rows alone when it recomputes their wiring, so a
   created entry's row, or any row of a later schema, no longer refuses every
@@ -2065,6 +2342,191 @@ them.
   these empty in a destroyed mob. A late activation or abort of a ladder
   takes the destroyed mob's own arm, as before, and a mob created again
   under the same id starts with none of these facts, as before.
+
+- `meerkat-openai`: on the GitHub Copilot Responses route, a response with
+  two or more reasoning or message items that are identical apart from their
+  ids and ciphertext (for example reasoning without a summary) no longer
+  fails with "no one-to-one match for re-identified completed reasoning
+  item". Copilot re-identifies completed items in the terminal response,
+  and each completed item had to match exactly one terminal item, which
+  identical items cannot. Such items are now matched as a group when both
+  sides have the same count, each terminal item keeping its own id and
+  ciphertext for replay. A group with more or fewer terminal items than
+  completed ones is still refused, and distinguishable items are still
+  matched by content, never by position.
+
+- `meerkat-copilot`: a GitHub Copilot route no longer refuses governed
+  requests once the account's model list is known. The account capability
+  check in front of the route's provider client handled only plain
+  requests, so a request carrying work authorization (a governed turn, or
+  an operation review on a Copilot model) was refused as malformed, and
+  any other request lost its prepared form on the way to the provider
+  client. The check now validates the request as before and hands it on
+  as prepared.
+
+- `meerkat-copilot`: a temporary failure of the GitHub Copilot token
+  exchange no longer fails turns as an authentication error. A network
+  failure or timeout, HTTP 408 or 429, a 5xx, or a GitHub API rate limit (a
+  403 that asks for no account action) at the token's refresh point failed
+  the turn, and every turn waiting on the same refresh, with
+  "Authentication failed", although the current Copilot token was still
+  valid. The current token, when it was minted from the current GitHub
+  sign-in, now keeps serving until it expires, and the exchange is tried
+  again after its `Retry-After` (at least a second later), or after 30
+  seconds without one. Once no valid token is left, the turn fails with a
+  retryable error (rate limited with the exchange's `Retry-After`, server
+  error, network timeout, connection or unknown error), which the agent
+  loop retries, and a warning names the exchange's own failure. An
+  exchange 401, or a 403 that asks for an account action, is still an
+  authentication failure that needs a new login.
+
+- `meerkat-copilot`: a GitHub Copilot session no longer loses its route
+  when Copilot rejects its token. A 401 from a model request, or a 401 or
+  403 from the periodic account model discovery, dropped the account's API
+  base and model list together with the token. After two 401s in one
+  request, or a failed new token after a 401, every later turn of a
+  session on that account failed with "Copilot route is unavailable after
+  authorization refresh" without trying the network, and another session
+  on the account that started a turn while the token was being replaced
+  failed with an invalid request or an unknown model. The rejected token
+  is now replaced on its next use while the account's route stays
+  resolvable, and after a discovery 403 the next turn reports that the
+  account needs a new login.
+
+- `meerkat-copilot`, `meerkat`: restoring a session on a GitHub Copilot
+  route (the wake of a dormant session or mob member, or a surface
+  rebuilding it), or building one whose output budget is set explicitly
+  or in the configuration, no longer fails during a temporary token
+  exchange outage when the account has no valid token. The build minted a
+  token first, so it failed, and a woken mob member was left broken and
+  its waking message refused. The build now succeeds on the account's
+  last known model list, or without one when no token was minted yet; the
+  first request performs the exchange and fails with a retryable error
+  while the outage lasts, and once the exchange answers the session
+  continues on the account's route (moving to it, with one retry, when the
+  build had no model list). A new session whose output budget comes
+  from the account's model limit still fails to build until the exchange
+  answers, so no session is created with a budget the account refuses.
+  For the same reason, a controller prepared ahead of its session under a
+  known output budget is now refused with
+  `PreparedControllerRefusal::InputsChanged("output budget")` when the
+  build that consumes it takes its budget from the account's limit; builds
+  that prepare and consume a controller with the same request are
+  unaffected. An exchange 401, or a 403 that asks for an account action,
+  still fails the build and asks for a new login.
+
+- `meerkat-session`: a turn in flight when an embedding host's runtime stops
+  is now treated as ended with that runtime. The check a runtime loop uses
+  for this (`session_task_ended_with_its_runtime`) also required the session
+  task's command channel to be closed, but a stopping runtime drops the
+  task's future in pieces and the turn's result sender goes before the
+  command receiver. In that gap the loop read "not ended" and took the
+  failed turn's path: an ordinary run discarded its provisional tail and
+  replayed its inputs from the prompt, so tool calls that had already
+  committed ran again, and a resumed run stopped its executor, which ended
+  its inputs and the inputs queued behind it. The runtime's stop alone now
+  decides it.
+
+- `meerkat-core` and `meerkat-session`: one tool result no longer carries a
+  session's next request past the model's context window unnoticed. The
+  compaction check runs before every request, but the provider's count it
+  read (`last_input_tokens`) lagged by exactly the rows the boundary
+  appended, and the history estimate and request forecast count text bytes
+  (four a token), which under-read JSON-dense content. A session just under
+  its threshold that received a large tool result (a schedule listing, for
+  one) sent a request past the window, and the provider refused it.
+  `build_compaction_context` now projects each request's input tokens: the
+  provider's count for the last answered request plus the estimate of only
+  the rows appended since (`CompactionContext::projected_input_tokens`).
+  `DefaultCompactor` compacts when the projection reaches the threshold; the
+  cadence cannot veto a crossing the growth since the answered request made
+  (while the last rewrite left the history under the threshold, as for a
+  history crossing), and a projection whose answered request alone was over
+  the threshold waits for the cadence as the provider's count does. The
+  anchor is set by every answered request that carried the run's tool
+  results whole (not by one that carried them shortened, see below),
+  dropped by a committed rewrite (and restored when the rewrite rolls back),
+  by a host transcript edit (a rewrite, a revision restore or a system
+  prompt update) and by a fork at a point, and not used when the active
+  provider or model is not the one that counted it. It is persisted in the
+  session's compaction cadence, so an agent rebuilt from its store projects
+  its first request too, and a live session synced from the store adopts
+  the stored cadence.
+
+- `meerkat-core` and `meerkat-session`: a session whose request the provider
+  refused for not fitting the model's context no longer stays wedged. The
+  refused request reported no usage, so the next run's first check saw the
+  same counts and sent the same request again, and so did every run after
+  it. The refusal is now recorded in the session's compaction cadence
+  (`last_context_refusal_boundary_index`), and the next check whose
+  compaction covers the whole transcript (the next run's first) compacts it
+  once, whatever the thresholds and the cadence say: a turn too large for
+  the window is summarized instead of being sent again. The attempt clears
+  the fact whether it commits or not, so a refusal costs one compaction and
+  cannot loop; an answered request that carried every result whole clears
+  it too, since the transcript then fits. A check inside a run does not see
+  it, since a compaction there keeps the run's request and newest round. The
+  refused run still fails as before, and its hard-failure boundary commits
+  the fact with the session (the run's closing save, or, for a refusal of the
+  run's first request, the failed run's applied boundary), so a new agent
+  built from the store (after a restart, for a session not kept alive, for
+  a command-line resume) compacts first too, as does a session wedged by an
+  earlier release after its next refused run. A host transcript edit and a
+  fork at a point drop the fact with the anchor. A custom `Compactor`
+  receives the fact as
+  `CompactionContext::last_context_refusal_boundary_index`.
+
+- `meerkat-core`: a run whose own tool result is larger than what the
+  model's context window leaves no longer fails with a context refusal when
+  its request's forecast is over the window. A compaction inside a run keeps
+  the run's request and newest round, so the round carrying the result was
+  sent whole and refused. The request-only bound that already shortened the
+  run's own results past the provider's request-body cap now also acts on
+  the token axis: when the forecast of the composed request, after the
+  compaction check, is still over the model's input budget (the context
+  window less the output reserve, or the input ceiling), each of the run's
+  results over its share keeps the head of its text and a marker naming the
+  call, for that request only, the share sized from the token overage at two
+  bytes a token. The stored transcript keeps every result whole. On either
+  axis the bound is now announced (`tool_results_bounded_for_request`, see
+  Breaking), the answer to a bounded request no longer anchors the input
+  projection (its count understates the transcript, so the anchor stays on
+  the request before it), and the bound records the fact a context refusal
+  records, so with the default compactor the next run's first check compacts
+  the whole transcript once instead of sending the whole result again; with
+  compaction off the request is still bounded and nothing is recorded. The
+  bounded request's own answer keeps the fact; an answer to a request sent
+  whole clears it, as for a refusal. A provider cache breakpoint past the
+  first result a bounded request carried shortened is dropped unreported: it
+  anchors a prefix the transcript never held, and it was published as a
+  discarded, moved prefix (`provider_cache_breakpoints_discarded`), a
+  degradation that did not happen. The compaction check measures the request
+  as composed, before the bound, in tokens as in bytes. After a model
+  fallback the bound cuts from the whole results again, so the marker and
+  the event state each result's whole size.
+
+- `rkat`: `rkat run` and `rkat run --resume` with the default `--stdin auto`
+  no longer block forever on a stdin that is not a terminal and stays open
+  without writing, as some launchers, supervisors and agent harnesses pass.
+  The run read stdin to end of file before anything else and printed nothing.
+  Now stdin is read on its own thread; input that has not started within 2 s
+  is skipped with one warning naming `--stdin blob` and `--stdin off`, and
+  input that started is read to end of file as before. `--stdin blob` still
+  waits for end of file and prints one notice after 2 s (see Upgrade notes).
+
+- `meerkat-mob`, `meerkat-rpc`: a mob member's run kept open at a committed
+  round, by a requeue stop or a crash, whose input carries a per-turn LLM
+  selection (a model, provider, self-hosted server, provider params or auth
+  binding) now resumes at the next start, under the LLM identity that
+  selection saved with the session before the run's first round (a field
+  the member's profile lists in `resume_overrides` takes the profile's
+  value, as on any member resume). Before, the member's runtime executor
+  applied the selection again ahead of the resumed dispatch; the resumed
+  session reads as ahead of its committed boundary until the run commits,
+  so that step was refused before the turn on every attempt, and the run's
+  input never completed. A fresh run's selection is applied as before. The
+  RPC session runtime applies the same rule: it does not swap the session's
+  LLM client for a resumed run whose actor is live.
 
 - `meerkat-core`: a pending or approved human consent (R3) is now kept
   across unrelated authorization changes and past the end of its decision's
@@ -2169,6 +2631,164 @@ them.
   media unchanged, as before. Summaries written before this fix keep their
   wording: an earlier summary is part of the next summary request, so what
   it says can carry into later summaries.
+
+- `meerkat-core`, `meerkat-runtime`, `meerkat-session`: on a host store
+  realm, a stopped store writer no longer fails turns or ends their inputs
+  before their final answer.
+  A renew that fails or times out stops the realm's writer until a fresh
+  acquire, and store writes already waited for that re-acquire; the run's
+  dispatch check did not. A turn that reached a model call, a compaction
+  summary call, a decided consent's retained tool attempt, a tool round or a
+  tool call during the gap failed at once with
+  `SessionDurableProjectionAuthorityUnknown` ("self-fence window closed ...
+  renew failed: true"), the runtime tore the live session down, and the
+  turn's input and every other unfinished input of the session ended as
+  stopped. Now:
+  - the dispatch check waits for the same re-acquire, trying again once per
+    renew interval while it fails, for at most one self-fence window (the
+    lease minus the self-fence margin) plus the re-acquire's own timeouts
+    (its two acquires and its renew): 35 s at the default fence timing and
+    realm configuration. The turn goes on once the re-acquire resumed the
+    writer;
+  - a round commit or a closing save refused while the writer is stopped
+    waits for the same re-acquire and is written again, once, when it
+    succeeded;
+  - when no re-acquire succeeds within that wait and no other writer is
+    found (a store fence gap), at a dispatch or at a round commit, the
+    runtime suspends the run through the machine (`SuspendRunForStop` with
+    `RunSuspensionCause::FenceGap`): the run stops at the wait, its inputs
+    stay bound to it without spending a stage attempt, and their waiters
+    are answered `RequeuedAcrossStop` within that wait. Once the fence is
+    back the runtime resumes the run from its last round commit, or starts
+    it again from its inputs when it had not committed a round. The gap may
+    last any number of waits, so a store outage that begins before a run's
+    final answer no longer ends inputs as `MaxAttemptsExhausted` either.
+    This holds on every runtime apply path: the facade's default executor,
+    mob members, the CLI, REST, the MCP server and JSON-RPC. A direct turn
+    (no runtime run backs it) is stopped there instead: its run's stop is
+    recorded and the machine suspends it
+    (`MeerkatMachine::stop_and_suspend_service_turn_for_fence_gap`), so
+    nothing of it is written while the gap lasts, it never resumes, and the
+    runtime settles it as cancelled once the fence is back, publishing its
+    run terminal. The session keeps its live session, as for a suspended
+    runtime run, so its next direct turn runs on it, brought to the settled
+    store. The turn fails with a retryable `StoreError` after that one
+    wait, instead of the teardown class. Before, it failed only after a
+    second wait, its closing save's, and its terminal's write met the gap
+    and left the session repair-blocked. Until the run is settled, a direct
+    turn of the session is refused with `SessionError::Busy`
+    (`SESSION_BUSY`), as it is while a restart's open run has not resumed
+    or been settled. A closing save is
+    written after the run's final answer and terminal, so it cannot suspend
+    the run: a closing save still refused after its one wait keeps the
+    teardown class, and the turn fails (see Known limitations);
+  - a cancel the run accepted before the gap, and an interrupt or a stop
+    that reaches the run while its writer is stopped (which now suspends
+    the run instead of a hard interrupt, which the gap would have undone
+    with a reload), end the run: it never resumes. Its waiters are answered
+    `RequeuedAcrossStop` within the wait, like any suspended run's, and
+    once the fence is back it is settled, its inputs abandoned as
+    `Cancelled`. An interrupt or a stop of a run marked resumable ends it
+    the same way: a gap's suspended run (its waiters were answered at the
+    suspension) is settled once the fence is back, and a restart's run that
+    has not resumed yet at its loop's next lap (the stop wakes the loop), or
+    at its attachment when the start settles it there (its stop's max age
+    passed, or its first input's controller cannot be supplied again).
+    For such a run `stop_run`, `turn/stop_run` and `mob/stop_member_run`
+    return at once, `stopped` with no contributors (read the inputs'
+    outcome later), and the runtime's `hard_cancel_current_run` (a
+    surface's interrupt) succeeds although no turn runs. A graceful requeue
+    stop, or the Keep rollback of a refused start, that begins before that
+    settlement keeps none of a stopped run's inputs: it ends them
+    `Abandoned` with reason `Stopped`, and the next start repairs the run's
+    tail as an interrupted run, with no run terminal. The facade's default
+    executor and the CLI's can now suspend a run, so a graceful requeue
+    stop suspends their in-flight durable run too, as JSON-RPC, REST, the
+    MCP server and mob members already did;
+  - only another writer (a live holder, a batch this writer did not write,
+    or a renew or commit answered `FencedOut`, each of which poisons the
+    realm) still ends the session, with the teardown class, wherever this
+    process meets it first: at a dispatch, at a commit, or while a
+    suspended run waits to resume. The store refuses every later write of
+    this process, so the session's inputs stay pending for the new owner,
+    and every waiter in this process of an input the store keeps is
+    answered `RequeuedAcrossStop` instead of an abandon.
+
+  `SelfFence` gains the provided `dispatch_window` and `lost`, and
+  `SessionCheckpointer` the provided `dispatch_fence_ready`, whose defaults
+  keep the check without a wait; the run loop awaits `dispatch_fence_ready`
+  before every dispatch. Every write and dispatch that waits for a stopped
+  writer's re-acquire waits on the realm's one attempt in flight, so waits
+  that give up during an outage no longer leave a re-acquire each behind.
+  The realm logs a warning naming why a dispatch does not proceed. The
+  warning logged for a runtime turn says when its run was suspended, and
+  no longer promises the live session to the next queued
+  input when the failure requires a reload. The texts of
+  `CompletionWaitError::RequeuedAcrossStop`, `MobError::MemberInputRequeuedAcrossStop`
+  and `BoundedTurnFailure::RequeuedAcrossStop` name the store fence gap too,
+  and say the input runs when the fence is re-acquired or at the next start;
+  their kinds and codes are unchanged.
+
+- `meerkat-mob`, `meerkat-rpc`, `meerkat`: a runtime-backed member's session
+  actor is materialized on the runtime of the task that provisions the member
+  (the mob actor's, which is the host's), so the member's turns, its tool
+  calls and whatever those spawn run there, on the host's workers and with
+  their stack. Before, the actor was materialized from the owned create tail
+  on the process-wide `meerkat-machine-cleanup` runtime, and its session task,
+  and with it every turn of the member, ran on that runtime's two workers: a
+  member tool that blocked its thread stalled every session's cleanup in the
+  process, and member work that needed more stack than those threads had
+  aborted the process with a stack overflow on `meerkat-machine-cleanup`. The
+  create tail itself stays on the cleanup runtime and keeps custody of the
+  create: a materialization that ends without an answer, because its runtime
+  shut down or it panicked, fails the create and is cleaned up like any failed
+  create; the caller's error says which, and the task's own report, a panic's
+  payload included, goes to the host's log. The host's member registration
+  hooks, which the create and recovery tails called inline on the cleanup
+  runtime, are called as tasks on the host's runtime the same way, and a call
+  that ends without an answer is not recorded as a host refusal. The recovery
+  of an attached member's actor materializes on its caller's runtime the same
+  way, and so does the actor of a staged RPC session that a governed admission
+  materializes: the admission stays on the cleanup runtime, and a
+  materialization that ends without an answer is reported as a failed one. An
+  RPC `SessionRuntime` records the runtime it is built on and creates there
+  the actor of a deferred session's first turn and of a session rebuilt from
+  durable state on its next turn: the session's runtime loop applies those
+  turns from Core's `meerkat-runtime-serving` runtime, and the actor, with
+  every turn of the session, used to land there. The experimental GPT live
+  mirror host does the same for the session a channel's replacement opens. No
+  session actor is created on Core's process-wide runtimes any more, unless an
+  RPC `SessionRuntime` is built outside a Tokio runtime (see Upgrade notes).
+  Size the workers of the runtime a mob or a session runtime runs on for its
+  sessions' turns, as for the turns of the sessions the host creates directly.
+
+- `meerkat-session`, `meerkat-rpc`, `meerkat-mob`, `meerkat`: a host runtime
+  that stops in the middle of a runtime-backed session's turn, or while the
+  session is idle, is now crash-equivalent. The session's task runs on the
+  host's runtime (a member's, a session an RPC session runtime serves, or one
+  the host creates directly through a runtime-backed service), but its runtime
+  loop runs on Core's `meerkat-runtime-serving` runtime and outlives the
+  host's. The loop met the lost task as a failed apply and, after the host was
+  gone, recorded a failed run, replayed the run's inputs until it abandoned
+  them (`MaxAttemptsExhausted`) and discarded the run's provisional tail; an
+  input that reached an idle session after the stop met the same end when a
+  step ahead of its turn needed the live actor (a per-turn LLM reconfigure or
+  hot swap, the realization of a committed model-routing handoff). An executor
+  stop would not have kept the inputs either: it ends every non-terminal input
+  as stopped. Now the session service, the runtime executors before those
+  steps, and the RPC session runtime for a turn it promotes or rebuilds
+  degrade the session's registration to require a cold reload from durable
+  state before the loop sees the lost task, the degradation an undiscardable
+  failed-run tail already takes. The loop's failure handling then finds no
+  driver authority and ends within its bound without writing anything for the
+  session: no failed run, replay, stop terminal or unregister, and no tail
+  discard; the teardown watcher checks for that degradation before an
+  unregister the loop asks for. The interrupted and queued inputs stay
+  non-terminal, and the session's next registration, in this process (the same
+  machine reloads the degraded registration) or in the next one, recovers and
+  resumes the run once. A turn whose session task panicked, or whose actor the
+  service retired, still fails with its error, and so does a turn its caller
+  drives directly rather than through the runtime.
 
 - `meerkat-runtime`: an admitted governed resume of retained work (for
   example a consent notice) that a graceful requeue stop kept, or that a
@@ -2316,16 +2936,93 @@ them.
   runtimes (`meerkat-machine-cleanup` and `meerkat-runtime-serving`) take
   16 MiB again when `RKAT_WORKER_STACK_BYTES` is unset, or `RUST_MIN_STACK`
   when that asks for more. Since 0.8.39 they took the 8 MiB host worker
-  budget. The cleanup runtime polls the turns of runtime-backed mob members,
+  budget. The cleanup runtime polled the turns of runtime-backed mob members,
   with the tools an embedding host gives them and whatever those spawn, so a
-  host whose own workers run 16 MiB ran that work on half that stack, and
-  the process aborted with a stack overflow on a `meerkat-machine-cleanup`
-  thread once the work needed more than 8 MiB. `RKAT_WORKER_STACK_BYTES`
-  still sets their stack exactly, below 16 MiB included, and an invalid value
-  is refused as before, its message now naming the default these threads
-  take once it is unset. The host binaries' own workers and main future keep
-  the 8 MiB budget. The added size is virtual address space; pages are
-  committed only when touched.
+  host whose own workers run 16 MiB ran that work on half that stack, and the
+  process aborted with a stack overflow on a `meerkat-machine-cleanup` thread
+  once the work needed more than 8 MiB. Those turns now run on the host's
+  runtime (see the entry on a member's session actor above), and the two
+  runtimes keep 16 MiB for the cleanup and runtime-loop work they still run.
+  `RKAT_WORKER_STACK_BYTES` still sets their stack exactly, below 16 MiB
+  included, and an invalid value is refused as before, its message now naming
+  the default these threads take once it is unset. The host binaries' own
+  workers and main future keep the 8 MiB budget. The added size is virtual
+  address space; pages are committed only when touched.
+
+- `meerkat-schedule`, `meerkat-machine-schema`: a schedule's
+  `superseded_ack_ids` no longer grows without bound.
+  `ScheduleLifecycleMachine` recorded the id of every occurrence each
+  revise or delete superseded and never removed one, so a schedule edited
+  often carried an ever larger set in its machine state, in its stored row
+  and on the wire. The machine now keeps only the acknowledgements of the
+  latest supersession: each revise or delete drops the ids recorded so far
+  before its own supersession's acknowledgements arrive, and an
+  acknowledgement that does not answer the current revision (a late one of
+  an earlier supersession, or one of a revision the schedule never
+  reached) is accepted as before and changes nothing. A schedule stored
+  with a large set loads unchanged, and its next revise or delete drops
+  it, with no migration step. A schedule deleted before this release keeps
+  the set it was deleted with: a deleted schedule is never revised, and a
+  repeated delete changes nothing.
+
+- `meerkat-core`, `meerkat`, `meerkat-authorization`: the documentation of
+  `OwnerChangeChurn::wait_after_stale_read` said that a genuine
+  `Unavailable` is final and never waits, without naming the `Unavailable`
+  that is not genuine. A governed helper admission fence's contention (its
+  refusal while another writer holds the publication, or an owner change is
+  in progress there) is retryable at the host level: a new fence and the
+  same idempotent create after that wait, taken outside every lock and
+  store transaction, as
+  `GovernedHelperAdmissionFence::create_idempotent_after_owner_change` does.
+  The wait's documentation and `HelperAdmissionRefusal::Unavailable` now say
+  so. `AdmittedWorkPolicyOwner` and `OperationPolicyOwner` now say that an
+  `Unavailable` answer is final where it is asked (at a controller's model
+  request it ends the run with nothing sent), so an owner never answers its
+  own transient lock contention that way: it waits briefly for its own lock
+  or reads an immutable snapshot, and keeps `Unavailable` for when it
+  genuinely cannot answer.
+
+- `meerkat-core`: a logout or auth profile deletion no longer fails with
+  "controller credential custody is busy" when it meets native controller
+  custody held for a moment, as a governed session's runtime loop holds the
+  session's driver on every pass. The coordinated clear they go through
+  (`clear_tokens_and_publish_lifecycle_released_coordinated` and its
+  `_for_identity` and `_for_mode` forms) made its lease release attempt once,
+  and native controller custody answers the typed
+  `ControllerReadinessFailure::Busy` at once instead of waiting, while every
+  login and token commit already retried exactly that refusal. The clear now
+  retries it, with the same backoff, for up to two seconds, the budget a
+  login publication has; a refused attempt changes nothing. Every other veto,
+  such as a credential that unfinished work still references, returns at
+  once as before, and custody still busy at the deadline returns the same
+  refusal as before.
+
+- `meerkat-mob`: a wake that moves a member to a successor session now
+  removes the member's old endpoint from its peers. A wake takes a successor
+  when the member's bound session is gone from the store and a listed
+  session that is not archived and is bound to no member names the same mob,
+  member and role; that session's key gives the member a new endpoint.
+  MobMachine kept the old endpoint as the member's history, but the wake
+  only added the new endpoint to each live or placed peer's trust, so every
+  wired peer kept a second row under the member's name until that peer's
+  comms runtime was rebuilt (a local peer: a restart, its own release and
+  wake, or a mob resume; a placed peer: a rebuild of its runtime on its
+  host) or the member retired: its `peers` listed the member twice, and
+  every send to the old peer id failed `peer_not_found_or_not_trusted`. The
+  repair of an existing edge (a wake's topology step, an owed edge repair,
+  an idempotent `wire`) now removes each end's retained endpoints from the
+  other end, as a retirement does (a resume does it for local peers only),
+  each removal under MobMachine's
+  `AuthorizeMemberEndpointMigrationTrustCleanup`. A local peer drops the old
+  row before it trusts the new endpoint. A placed peer's host drops it
+  through a `RemovePeerTrust` it acknowledges, after the local side's trust
+  is reinstalled and before the placed side's is re-driven, so a slow or
+  refusing host never leaves the woken member without trust toward its
+  placed peer. A removal that fails fails that repair: after a wake or an
+  owed repair the edge stays owed and is retried; an explicit `wire`
+  returns the error. A member-to-member message whose delivery woke the
+  member still fails once with `PeerNotFound`, as before: it was addressed
+  to the old endpoint, which the peer's directory no longer lists.
 
 - `meerkat-anthropic`: under the `system_and_conversation` prompt-cache
   policy, a message whose content was a non-empty bare string (a text-only
@@ -2482,12 +3179,163 @@ them.
   run the operator-instruction resolution and fold, which find nothing to
   apply (the empty fold still advances the entry sequence).
 
+- A client of the generic schedule tool calls (`schedule/call`,
+  `POST /schedule/call`, the MCP server's schedule tools,
+  `call_schedule_tool`, `callScheduleTool`) that read whole schedules from
+  `meerkat_schedule_list` reads one with `meerkat_schedule_get`, or every
+  schedule whole with the host listing (`schedule/list`, `GET /schedules`);
+  one that read `machine_state` from a schedule tool reply reads the public
+  fields beside it; one that read a schedule's occurrence history with only
+  `schedule_id` now gets pages of summaries, passes `view: "full"` for
+  whole occurrences and follows `page.next_cursor`; one that passed a
+  `limit` over 200 gets pages of 200. Bulk readers of schedules and
+  occurrences use the typed host surfaces, not the agent tools: RPC
+  `schedule/list` and `schedule/occurrences`, REST `GET /schedules` and
+  `GET /schedules/{id}/occurrences`, the Python SDK's `list_schedules` and
+  `list_schedule_occurrences`, and the TypeScript SDK's `listSchedules` and
+  `listScheduleOccurrences`. See Breaking.
+
+- No storage migration. A session's compaction cadence gains two optional
+  fields, written only when set; 0.9.8 and earlier ignore them, and a cadence
+  they wrote reads without them, so its first answered request on this
+  release sets the anchor.
+
+- A host that builds `CompactionContext` or `SessionCompactionCadence` by
+  struct literal, or calls `build_compaction_context`, adds the new fields or
+  argument (see Breaking). A custom `Compactor` that wants the projection or
+  the refusal reads the new context fields; one that ignores them decides as
+  before.
+
+- A lower explicit `auto_compact_threshold` (config, or a mob profile's)
+  still widens the headroom the derived four-fifths of the context window
+  leaves for what one boundary appends.
+
+- Upgrade the SDKs with the server: a Python, TypeScript or Web SDK of
+  0.9.8 or earlier refuses the new `tool_results_bounded_for_request` event
+  type, as it does any event type newer than its contract (see Breaking). A
+  host that reads the stored cadence's `last_context_refusal_boundary_index`
+  sees it set by a bounded request too; it is kept until a compaction of the
+  whole transcript or an answered request sent whole, and the answer to a
+  bounded request keeps it.
+
+- A producer that pipes into `rkat run` but starts writing more than 2 s
+  after launch must pass `--stdin blob`; with the default `--stdin auto` that
+  late input is now skipped with a warning. Launchers that hand `rkat run`
+  an open stdin they never write can pass `--stdin off` to skip the wait.
+
+- Size the worker stacks of the runtime your mobs and RPC session runtimes
+  run on for the tools you compose: the turns of mob members and of the
+  sessions an RPC `SessionRuntime` serves now run on that runtime, as the
+  turns of the sessions you create directly through a session service
+  already did, and a tool's frames sit on top of the turn's (see Breaking).
+  Core's own host binaries run their workers on 8 MiB, and
+  `RKAT_WORKER_STACK_BYTES` sets that size for them (and for an embedding
+  that runs its main future through `meerkat_runtime::host_stack::run_host`).
+  A Tokio runtime built with default settings gives its workers 2 MiB; an
+  embedder that builds its own runtime sets the size with that runtime's
+  builder (`tokio::runtime::Builder::thread_stack_size`).
+
+- If you wrap a `MobSessionService`, forward
+  `runtime_turn_lost_its_host_runtime` to the service you wrap, as you forward
+  `live_session_actor_registered`. The provided default answers `false`, and a
+  member of a stopped host runtime served through a wrapper that keeps it
+  would have an input that reaches it after the stop recorded as a failed run.
+
+- Build an RPC `SessionRuntime` inside the Tokio runtime its sessions should
+  run on, and keep that runtime running while you serve them: the session
+  runtime records the runtime it is built on. Built outside a Tokio runtime
+  it records none, and the actor of a deferred or rebuilt session is then
+  created on Core's serving runtime, as before. Stopping the runtime ends
+  the turns that run on it, as a crash would (see Breaking).
+
 ### Known limitations
 
 - `meerkat`: a host that supplies its own stores keeps durable decisions in
   `approval_decisions.sqlite3` under its store path, as it keeps
   `approvals.json`, not in its runtime store or through the host store
   interface.
+
+- `meerkat-core`: a run whose own newest round is larger than what the
+  context window leaves once the rows before the run are folded still fails
+  with a context refusal when its request's forecast reads under the window:
+  a compaction inside a run keeps the run's request and newest round
+  verbatim, and the request-only bound acts on the composed request's
+  forecast, whose transcript estimate counts four bytes a token and so
+  under-reads dense content. The next run compacts first and continues (see
+  Fixed).
+
+- `meerkat-core`: the same forecast counts media high: each image as 1,600
+  tokens and inline video at a token per four bytes of its base64 data. A run
+  whose own tool results carry inline video, or many images, can be bounded
+  on the context window although the provider would take the request whole,
+  and that request then carries the media as placeholders. The stored
+  transcript keeps the media whole.
+
+- `meerkat-core`: a context refusal whose run's closing save or boundary
+  build fails is not persisted; the next refusal records it again.
+
+- `meerkat-runtime`, `meerkat-session`: a run a store fence gap suspended
+  resumes from its last round commit, as after a restart: what it did after
+  that commit is done again (an uncommitted model response is asked for
+  again, and the calls of an unfinished round are dispatched again with
+  their dedupe keys, possibly while a tool's own work from the first call
+  still runs), and the asynchronous operations a resumed round waited for
+  are reported to the model as lost. A run suspended before its first round
+  commit starts again from its inputs: its run-start hooks run again, and
+  `run_started` is published again for the same run id with no terminal in
+  between; an observer reads that as the run starting over and drops what
+  it received for the run id before (documented on `AgentEvent::RunStarted`).
+  A mob delegation (a temporary council, a fork-off, a live delegation)
+  whose member turn a fence gap suspends reads the `RequeuedAcrossStop`
+  answer as a stop's: the delegation ends, and the member's input still
+  runs once the fence is back. A stop intent of a suspended run (a cancel
+  it accepted before the gap, or a stop or an interrupt at the fence or
+  during the gap) is kept in memory until the fence is back: a process that
+  ends first loses it and the next start resumes the run, another writer
+  that takes the session over runs its inputs, and a host runtime that
+  stops under the session (whose registration then reloads) loses it too.
+  A cancel at the next boundary asked while the run is suspended stands as
+  its stop intent when the session's executor is attached, as a stop does;
+  with none attached it is refused (interrupt or stop the run instead), and
+  a stop that races the gap's own suspension of the run can fail with an
+  internal error naming a contributor whose wait was answered
+  `RequeuedAcrossStop`. A cancel at the next boundary accepted just before
+  that suspension can likewise fail when its dispatch to the dropped turn
+  fails, while the run is still settled as cancelled once the fence is
+  back. A gap met while a run re-bases its session is not suspended: the
+  re-base's outcome is unknown, and the session reloads as before. A
+  closing save still refused after its one wait (a gap that outlasts the
+  wait after a run's final answer) keeps the teardown class, and the turn
+  fails: the turn's terminal is recorded before that save, so the run
+  cannot be suspended there; the wait and its one retry are the
+  protection. At a gap a stop or
+  an interrupt falls back to the hard interrupt, which the gap undoes with
+  a reload that resumes the stopped run, in three cases: an executor that
+  cannot suspend a run (`CoreExecutorInterruptHandle::suspend_run_if_current`
+  answers `false`: every shipped persistent surface suspends, a host's own
+  executor may not), a stop that joins a hard interrupt of the same run
+  already in flight, and a run the machine refuses to suspend (a published
+  live-boundary join not yet retained). A run stop has then already
+  answered `stopped`.
+
+- `meerkat-core`: a tool call that waits at the fence of a stopped host
+  store writer waits within its own deadline, as it waits for its
+  concurrency permit. A call whose deadline (a per-tool override, its
+  plan's deadline or one an MCP tool declares) passes during that wait ends
+  as a tool timeout although it never started, and the model reads it as a
+  timeout of unknown outcome; a call that starts after a wait runs with what
+  is left of its deadline.
+
+- `meerkat-runtime`, `meerkat-session`: the registration a stopped host
+  runtime's session leaves degraded stays in its machine until that machine
+  reloads it, at the session's next registration there, or the process exits.
+  With realm persistence, whose hosting claims are file locks, that
+  registration keeps the session's lock: any other machine, in this process or
+  in another process, is refused the session (`ServedElsewhere`) until this
+  machine reloads it or this process exits. The stopped host's other in-memory
+  objects (its session service and machine) stay in the process until it
+  exits.
+
 - `meerkat-runtime`: a governed input admitted under its own authority
   association (a governed prompt, for example) that a graceful requeue stop
   keeps, or that a restart finds in the store, cannot run on the next
@@ -3920,7 +4768,9 @@ them.
   since 0.8.39. A tool that blocks its thread holds one of those workers, and
   with both blocked every member's turn and every session's cleanup in the
   process waits: keep member tools non-blocking (move blocking work off the
-  worker, for example with `tokio::task::spawn_blocking`).
+  worker, for example with `tokio::task::spawn_blocking`). Resolved in
+  0.9.9: a member's turns run on the runtime that provisions the member,
+  which is the host's.
 
 - `meerkat-mob`: the lift of a stopped mob (`MobHandle::resume`) applies the
   0.9.6 recovery rules to the members it rebuilds: it waits for a held hosting

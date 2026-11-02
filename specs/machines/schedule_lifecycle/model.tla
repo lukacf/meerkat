@@ -49,14 +49,14 @@ TerminalStutter ==
 
 \* Named UNCHANGED frames. One definition per distinct frame; every action
 \* that leaves those variables unchanged references the definition by name.
+UnchangedFrame_3d1791026e64249f == UNCHANGED << schedule_id, trigger_key, target_binding_key, misfire_policy, overlap_policy, missing_target_policy, planning_horizon_days, planning_horizon_occurrences, next_occurrence_ordinal >>
 UnchangedFrame_3e1dbd3ade8da21a == UNCHANGED << schedule_id, revision, trigger_key, target_binding_key, misfire_policy, overlap_policy, missing_target_policy, planning_horizon_days, planning_horizon_occurrences, planning_cursor_utc_ms, next_occurrence_ordinal >>
+UnchangedFrame_5be21f58c94c5cb2 == UNCHANGED << schedule_id, next_occurrence_ordinal >>
 UnchangedFrame_744ee7e24ed036eb == UNCHANGED << schedule_id, revision, trigger_key, target_binding_key, misfire_policy, overlap_policy, missing_target_policy, planning_horizon_days, planning_horizon_occurrences, planning_cursor_utc_ms, next_occurrence_ordinal, superseded_ack_ids >>
 UnchangedFrame_97d07d13d8ad7222 == UNCHANGED << schedule_id, revision, trigger_key, target_binding_key, misfire_policy, overlap_policy, missing_target_policy, planning_cursor_utc_ms, next_occurrence_ordinal, superseded_ack_ids >>
-UnchangedFrame_a1c364b1d70e12f2 == UNCHANGED << schedule_id, trigger_key, target_binding_key, misfire_policy, overlap_policy, missing_target_policy, planning_horizon_days, planning_horizon_occurrences, next_occurrence_ordinal, superseded_ack_ids >>
 UnchangedFrame_ac41fdf7bccba9c7 == UNCHANGED << revision, planning_cursor_utc_ms, next_occurrence_ordinal, superseded_ack_ids >>
 UnchangedFrame_b67667857bcff708 == UNCHANGED << schedule_id, revision, trigger_key, misfire_policy, overlap_policy, missing_target_policy, planning_horizon_days, planning_horizon_occurrences, planning_cursor_utc_ms, next_occurrence_ordinal, superseded_ack_ids >>
 UnchangedFrame_ecc2d6134df95dfc == UNCHANGED << schedule_id, revision, trigger_key, target_binding_key, misfire_policy, overlap_policy, missing_target_policy, planning_horizon_days, planning_horizon_occurrences, superseded_ack_ids >>
-UnchangedFrame_fcb574c5ce96dcf3 == UNCHANGED << schedule_id, next_occurrence_ordinal, superseded_ack_ids >>
 
 CreateSchedule(arg_schedule_id, arg_trigger_key, arg_target_binding_key, arg_misfire_policy, arg_overlap_policy, arg_missing_target_policy, arg_planning_horizon_days, arg_planning_horizon_occurrences) ==
     /\ phase = "Active"
@@ -86,7 +86,8 @@ ReviseActive(arg_trigger_key, arg_target_binding_key, arg_misfire_policy, arg_ov
     /\ planning_horizon_days' = arg_planning_horizon_days
     /\ planning_horizon_occurrences' = arg_planning_horizon_occurrences
     /\ planning_cursor_utc_ms' = None
-    /\ UnchangedFrame_fcb574c5ce96dcf3
+    /\ superseded_ack_ids' = {}
+    /\ UnchangedFrame_5be21f58c94c5cb2
 
 
 RevisePaused(arg_trigger_key, arg_target_binding_key, arg_misfire_policy, arg_overlap_policy, arg_missing_target_policy, arg_planning_horizon_days, arg_planning_horizon_occurrences, at_utc_ms) ==
@@ -102,7 +103,8 @@ RevisePaused(arg_trigger_key, arg_target_binding_key, arg_misfire_policy, arg_ov
     /\ planning_horizon_days' = arg_planning_horizon_days
     /\ planning_horizon_occurrences' = arg_planning_horizon_occurrences
     /\ planning_cursor_utc_ms' = None
-    /\ UnchangedFrame_fcb574c5ce96dcf3
+    /\ superseded_ack_ids' = {}
+    /\ UnchangedFrame_5be21f58c94c5cb2
 
 
 UpdatePlanningConfigActive(arg_planning_horizon_days, arg_planning_horizon_occurrences) ==
@@ -170,7 +172,8 @@ DeleteActive(at_utc_ms) ==
     /\ model_step_count' = model_step_count + 1
     /\ revision' = (revision) + 1
     /\ planning_cursor_utc_ms' = None
-    /\ UnchangedFrame_a1c364b1d70e12f2
+    /\ superseded_ack_ids' = {}
+    /\ UnchangedFrame_3d1791026e64249f
 
 
 DeletePaused(at_utc_ms) ==
@@ -179,7 +182,8 @@ DeletePaused(at_utc_ms) ==
     /\ model_step_count' = model_step_count + 1
     /\ revision' = (revision) + 1
     /\ planning_cursor_utc_ms' = None
-    /\ UnchangedFrame_a1c364b1d70e12f2
+    /\ superseded_ack_ids' = {}
+    /\ UnchangedFrame_3d1791026e64249f
 
 
 DeleteDeleted(at_utc_ms) ==
@@ -193,7 +197,7 @@ ConfirmOccurrencesSupersededActive(occurrence_id, superseding_revision) ==
     /\ phase = "Active"
     /\ phase' = "Active"
     /\ model_step_count' = model_step_count + 1
-    /\ superseded_ack_ids' = (superseded_ack_ids \cup {occurrence_id})
+    /\ superseded_ack_ids' = IF (superseding_revision = revision) THEN (superseded_ack_ids \cup {occurrence_id}) ELSE superseded_ack_ids
     /\ UnchangedFrame_3e1dbd3ade8da21a
 
 
@@ -201,7 +205,7 @@ ConfirmOccurrencesSupersededPaused(occurrence_id, superseding_revision) ==
     /\ phase = "Paused"
     /\ phase' = "Paused"
     /\ model_step_count' = model_step_count + 1
-    /\ superseded_ack_ids' = (superseded_ack_ids \cup {occurrence_id})
+    /\ superseded_ack_ids' = IF (superseding_revision = revision) THEN (superseded_ack_ids \cup {occurrence_id}) ELSE superseded_ack_ids
     /\ UnchangedFrame_3e1dbd3ade8da21a
 
 
@@ -209,7 +213,7 @@ ConfirmOccurrencesSupersededDeleted(occurrence_id, superseding_revision) ==
     /\ phase = "Deleted"
     /\ phase' = "Deleted"
     /\ model_step_count' = model_step_count + 1
-    /\ superseded_ack_ids' = (superseded_ack_ids \cup {occurrence_id})
+    /\ superseded_ack_ids' = IF (superseding_revision = revision) THEN (superseded_ack_ids \cup {occurrence_id}) ELSE superseded_ack_ids
     /\ UnchangedFrame_3e1dbd3ade8da21a
 
 

@@ -332,11 +332,12 @@ pub enum CoreExecutorError {
     #[error("Run was cancelled")]
     Cancelled,
 
-    /// The applied run was suspended by a stop that keeps the session's
-    /// queued work ([`AgentError::RunSuspended`]): it is neither cancelled
-    /// nor failed. Its turn stopped at an await point and wrote nothing more,
-    /// so its last round commit stays its resume point. The runtime loop
-    /// realizes no terminal for it and leaves its inputs as they are; it is
+    /// The applied run was suspended ([`AgentError::RunSuspended`]), by a
+    /// stop that keeps the session's queued work or by a store fence gap: it
+    /// is neither cancelled nor failed. Its turn stopped at an await point
+    /// and wrote nothing more, so its last round commit stays its resume
+    /// point. The runtime loop realizes no terminal for it and leaves its
+    /// inputs as they are, bound to it with their stage attempts; it is
     /// never a cancellation, which realizes `RunCancelled` and abandons the
     /// inputs, and never an apply failure, which requeues them.
     #[error("Run {run_id} was suspended; it resumes from its last round commit")]
@@ -1732,6 +1733,13 @@ pub trait CoreExecutorInterruptHandle: Send + Sync {
     /// suspend; the stop then hard-cancels the run. The default suspends
     /// nothing. The same exact-run comparison as
     /// [`Self::hard_cancel_run_if_current`] applies.
+    ///
+    /// A stop or an interrupt that reaches a run while the writer of its
+    /// session's fenced store is stopped (a store fence gap) needs this too:
+    /// the runtime records the stop and asks for a suspension. Without it the
+    /// stop falls back to the hard cancel, which ends the run only in memory:
+    /// the gap refuses the cancel's writes, the session reloads, and the
+    /// reload resumes the stopped run.
     async fn suspend_run_if_current(
         &self,
         expected_run_id: &RunId,

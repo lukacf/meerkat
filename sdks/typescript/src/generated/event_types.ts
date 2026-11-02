@@ -349,6 +349,17 @@ export interface BoundaryAppendsDiscarded {
 }
 
 /**
+ * One tool result a model request carried shortened, as
+ * [`AgentEvent::ToolResultsBoundedForRequest`] names it.
+ */
+export interface BoundedToolResult {
+  kept_bytes: number;
+  tool_name: string;
+  tool_use_id: string;
+  total_bytes: number;
+}
+
+/**
  * Type of budget being tracked
  */
 export type BudgetType = "tokens" | "time" | "tool_calls";
@@ -1296,6 +1307,12 @@ export type SystemNoticeMessage = {
 export type ToolCallArguments = Record<string, unknown>;
 
 /**
+ * The limit a model request was over with the run's own tool results
+ * whole, as [`AgentEvent::ToolResultsBoundedForRequest`] reports it.
+ */
+export type ToolResultBoundAxis = "request_bytes" | "context_window";
+
+/**
  * Durable correlation identity for one delegated objective.
  */
 export type ObjectiveId = string;
@@ -1728,6 +1745,11 @@ export type AgentEvent = {
   run_id: RunId;
   session_id: SessionId;
   type: "run_resumed";
+} | {
+  axis: ToolResultBoundAxis;
+  results: BoundedToolResult[];
+  run_id: RunId;
+  type: "tool_results_bounded_for_request";
 };
 
 /**

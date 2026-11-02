@@ -63,24 +63,93 @@ compaction summary is indexed as ordinary semantic memory.
 
 ## Capacity and cadence
 
-The default compactor can react to four different pressure signals:
+The default compactor can react to these pressure signals:
 
 - the last provider-reported input token count
+- the projected input of the next request: the provider's count for the last
+  answered request plus an estimate of only the rows appended since (a tool
+  result, for one)
 - an estimate of active transcript tokens
 - the whole-request token forecast, including visible tool definitions and
   output reserve
 - request-body bytes, preferably from the exact provider-lowered request
+- a request that did not fit: the provider refused it for not fitting the
+  model's context, or it carried the open run's own tool results shortened
+  (see below)
+
+The projection exists because the other token measures miss the one request
+that matters most. The provider's count lags by exactly what the boundary
+appended, and the transcript estimates count text bytes, which under-reads
+dense content such as JSON listings; the projection keeps the provider's
+exact count for everything it counted and estimates only the growth. Its
+anchor (the last answered request's count, the transcript rows it covered and
+the provider and model that counted them) rides the session's compaction
+cadence, so an agent rebuilt from its store projects its first request too.
+A committed rewrite drops the anchor until the next answer (the agent's own
+compaction, or a host's transcript edit, revision restore or system prompt
+update), as does a fork at a point; an anchor another provider or model
+counted is not used. The answer to a request that carried the open run's tool
+results shortened anchors nothing, since that request presented less than the
+transcript holds: the anchor stays on the request before it.
 
 The minimum-boundary cadence is a cost guard, not capacity authority. It may
 suppress an ordinary provider high-water mark, but it cannot veto recovery
-when request bytes cross a capacity threshold, or when live history does and
-the last rewrite got the history under the threshold. Since 0.9.4, when the
+when request bytes cross a capacity threshold, when live history does and
+the last rewrite got the history under the threshold, or when the projection
+crosses the threshold through what was appended since the last answered
+request and the last rewrite got the history under the threshold (an anchor
+already at or over the threshold waits for the cadence, like the provider's
+count). Since 0.9.4, when the
 last rewrite left the history at or above the threshold (for example because
 the System rows alone exceed an explicit `auto_compact_threshold`), a history
-crossing waits for the cadence instead of paying for a summary that recovers
-nothing, and a warning names the remedies. Under byte pressure, the compactor
-may retain fewer recent turns than the configured maximum so the rebuilt
-request actually fits.
+or projection crossing waits for the cadence instead of paying for a summary
+that recovers nothing, and a warning names the remedies. Under byte pressure,
+the compactor may retain fewer recent turns than the configured maximum so the
+rebuilt request actually fits.
+
+A request the provider refuses for not fitting the model's context still fails
+its run, and it reports no usage, so no measure moves. The agent records the
+refusal in the session's compaction cadence, and the next check whose
+compaction covers the whole transcript (the next run's first) compacts it
+once, whatever the measures and the cadence say: a turn too large for the
+window is summarized instead of being sent again. That attempt clears the
+refusal whether it commits or not, so a refusal costs one compaction and
+cannot loop; an answered request that carried every result whole clears it
+too, since the transcript then fits. A check inside a run does not see it,
+since a compaction there keeps the run's request and newest round. The refused
+run's failed boundary commits the refusal with the session, also when the
+refused request was the run's first, so an agent rebuilt from the store
+(after a restart, or for a session not kept alive) compacts first too. That
+boundary also commits the refused prompt, as a failed run's boundary always
+commits its input, and the next compaction folds it. A closing save or a
+boundary build that fails loses the refusal, and the next refusal records it
+again. A host transcript edit and a fork at a point drop it with the anchor.
+
+Because a compaction inside a run keeps the run's request and newest round, a
+round whose own tool results are larger than the provider or the model takes
+cannot be folded while the run lasts. After the compaction check, when the
+request is still over the provider's request-body cap, or the forecast of its
+composed input is still over the model's input budget (the context window less
+the output reserve, or the input ceiling), the request carries each of the
+run's own results over its share shortened, for that request only: the head of
+its text, media as placeholders, and a marker naming the call. Each result's
+share is what the rest of the request leaves the run's results; on the token
+axis it is sized from the overage at two bytes a token, so a head of dense
+text still fits. The stored transcript keeps every result whole. The agent
+publishes `tool_results_bounded_for_request` (the run, each call with the
+bytes its head kept and the whole result's size, and the limit), the answer to
+that request anchors no projection, and the bound records the same fact a
+context refusal does, so, with the default compactor, the next run's first
+check compacts the whole transcript once instead of sending the whole result
+again. With compaction off the request is still bounded, and nothing is
+recorded. The bounded request's own answer keeps the fact; an answer to a
+request sent whole clears it, as for a refusal. The compaction check itself
+measures the request as composed, before the bound. A request whose forecast
+reads under the window (its estimate counts four bytes a token) can still be
+refused, and then heals as above. The forecast also counts media high (1,600
+tokens an image, inline video at a token per four bytes of its base64), so a
+run's own images or inline video can be bounded to placeholders although the
+provider would take them whole.
 
 ## Summary authority
 

@@ -165,6 +165,11 @@ impl MemberRuntimeBuildIdentity {
 /// Optional host composition, never queue admission or permission. Both
 /// methods are required: a configured host must fail closed when it cannot
 /// select. Absence preserves the existing unscoped runtime behavior.
+///
+/// Every method runs on the runtime of the task that asks for the member
+/// (the mob actor's, which is the host's), never on Core's private
+/// process-wide runtimes: the provisioner keeps the member's transaction in
+/// its own owned task and awaits each call as a task on the host's runtime.
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 pub trait MemberRuntimeRegistrationHook: Send + Sync {
@@ -485,16 +490,23 @@ pub(super) async fn install_member_surface_gate(
 
 /// Bind the host's selected agent mandate on the member's exact registration,
 /// before its agent is built. Nothing is bound when the host selects none.
+/// The host's hook is called on `host`, its runtime.
 pub(super) async fn install_selected_agent_mandate(
+    host: &super::provisioner::MemberHostRuntime,
     machine: &MeerkatMachine,
-    hook: &dyn MemberRuntimeRegistrationHook,
+    hook: &Arc<dyn MemberRuntimeRegistrationHook>,
     registration: &RuntimeSessionRegistrationWitness,
     identity: &MemberRuntimeBuildIdentity,
     refusals: &HostRefusalSlot,
 ) -> Result<(), MobError> {
-    let Some(mandate) = hook
-        .select_agent_mandate(identity)
-        .await
+    let selected = host
+        .run_hook({
+            let hook = Arc::clone(hook);
+            let identity = identity.clone();
+            async move { hook.select_agent_mandate(&identity).await }
+        })
+        .await?;
+    let Some(mandate) = selected
         .inspect_err(|_| refusals.record(MemberRegistrationHookCall::SelectAgentMandate))?
     else {
         return Ok(());
@@ -519,19 +531,26 @@ pub(super) type MemberRegistrationComposition = Option<(
 )>;
 
 /// Select and install a newly registered member's destination on the exact
-/// registration's own machine.
+/// registration's own machine. The host's hook is called on `host`, its
+/// runtime.
 pub(super) async fn install_selected_destination(
+    host: &super::provisioner::MemberHostRuntime,
     machine: &MeerkatMachine,
-    hook: &dyn MemberRuntimeRegistrationHook,
+    hook: &Arc<dyn MemberRuntimeRegistrationHook>,
     registration: &RuntimeSessionRegistrationWitness,
     req: &meerkat_core::service::CreateSessionRequest,
     refusals: &HostRefusalSlot,
 ) -> Result<MemberRuntimeBuildIdentity, MobError> {
     require_deferred_first_turn(req)?;
     let identity = MemberRuntimeBuildIdentity::from_request(req, registration)?;
-    let target = hook
-        .select_destination(&identity)
-        .await
+    let selected = host
+        .run_hook({
+            let hook = Arc::clone(hook);
+            let identity = identity.clone();
+            async move { hook.select_destination(&identity).await }
+        })
+        .await?;
+    let target = selected
         .inspect_err(|_| refusals.record(MemberRegistrationHookCall::SelectDestination))?
         .target_for(registration, &identity)?;
     machine
@@ -559,9 +578,10 @@ fn require_deferred_first_turn(
 }
 
 /// Hand the built member's actual visible tool surface to the host before
-/// the member is published.
+/// the member is published. The host's hook is called on `host`, its runtime.
 pub(super) async fn verify_member_surface(
-    hook: &dyn MemberRuntimeRegistrationHook,
+    host: &super::provisioner::MemberHostRuntime,
+    hook: &Arc<dyn MemberRuntimeRegistrationHook>,
     session_service: &dyn super::MobSessionService,
     session_id: &meerkat_core::types::SessionId,
     identity: &MemberRuntimeBuildIdentity,
@@ -576,13 +596,17 @@ pub(super) async fn verify_member_surface(
                 "the member's session service cannot report its actual tool surface".into(),
             )
         })?;
-    hook.verify_member_surface(identity, &surface)
-        .await
-        .inspect_err(|_| {
-            if let Some(refusals) = refusals {
-                refusals.record(MemberRegistrationHookCall::VerifyMemberSurface);
-            }
-        })
+    host.run_hook({
+        let hook = Arc::clone(hook);
+        let identity = identity.clone();
+        async move { hook.verify_member_surface(&identity, &surface).await }
+    })
+    .await?
+    .inspect_err(|_| {
+        if let Some(refusals) = refusals {
+            refusals.record(MemberRegistrationHookCall::VerifyMemberSurface);
+        }
+    })
 }
 
 /// The destination the host still expects for an attached member, as the

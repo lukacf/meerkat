@@ -5207,12 +5207,13 @@ async fn completion_wait_error_to_api_error(
 /// The REST answer of a waiter failure, from its generated resolution.
 ///
 /// An internal failure answers `500` with the generated reason's code and
-/// whether the input is resumable. A session that is not running answers
-/// `409` `SESSION_NOT_RUNNING`: a graceful stop kept the input durably queued
-/// for the session's next start, and `details` names the input, the stop's
-/// time and `kind` and `reason` `requeued_across_stop`. It is no retryable
-/// unavailability: do not resubmit such an input; the same idempotency key
-/// after the restart re-attaches to it.
+/// whether the input is resumable. A session that is not running the input
+/// answers `409` `SESSION_NOT_RUNNING`: a graceful stop kept the input
+/// durably queued for the session's next start, or a store fence gap kept it
+/// queued until the store's fence is re-acquired, and `details` names the
+/// input, the stop's (or the gap's) time and `kind` and `reason`
+/// `requeued_across_stop`. It is no retryable unavailability: do not
+/// resubmit such an input; the same idempotency key re-attaches to it.
 fn runtime_completion_wait_failure_api_error(
     error: &meerkat_runtime::completion::CompletionWaitError,
     authority: meerkat_runtime::meerkat_machine::RuntimeCompletionWaitFailureAuthority,
@@ -13688,6 +13689,64 @@ mod tests {
             .await
             .expect("schedule/call should start the host and service due work");
         assert_eq!(occurrence.phase, OccurrencePhase::Misfired);
+    }
+
+    /// `GET /schedules` is a host contract, not the model's tool reply: it
+    /// lists every schedule, unpaged, each the whole public wire schedule
+    /// (its full target and action, its policies and planning state), and
+    /// never machine state. Control row: the schedule tools' bounded
+    /// summaries and pages do not move it.
+    #[tokio::test]
+    async fn rest_schedule_listing_keeps_every_full_public_schedule() {
+        let temp = TempDir::new().unwrap();
+        let state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        let prompt = "full rest listing body ".repeat(200);
+        let mut args = missing_target_schedule_tool_args();
+        args["trigger"] = json!({
+            "type": "once",
+            "due_at_utc": (Utc::now() + Duration::days(1)).to_rfc3339(),
+        });
+        args["target"]["action"]["prompt"] = json!(prompt);
+        let mut created = Vec::new();
+        for _ in 0..55 {
+            let request: meerkat::CreateScheduleRequest =
+                serde_json::from_value(args.clone()).expect("valid schedule request");
+            let schedule = state
+                .schedule_service
+                .create(request)
+                .await
+                .expect("create schedule");
+            created.push(schedule.schedule_id);
+        }
+
+        let Json(listed) = list_schedules(State(state.clone()))
+            .await
+            .expect("GET /schedules");
+        let listed = serde_json::to_value(listed).expect("listing json");
+        assert!(
+            listed.get("page").is_none(),
+            "GET /schedules has no tool page: {listed}"
+        );
+        let rows = listed["schedules"].as_array().expect("schedules array");
+        assert_eq!(rows.len(), 55, "every schedule, unpaged");
+        for schedule_id in &created {
+            let stored = state
+                .schedule_service
+                .get(schedule_id)
+                .await
+                .expect("stored schedule");
+            let expected = serde_json::to_value(meerkat_contracts::wire::Schedule::from(&stored))
+                .expect("public wire schedule");
+            let row = rows
+                .iter()
+                .find(|row| row["schedule_id"] == expected["schedule_id"])
+                .expect("every created schedule is listed");
+            assert_eq!(row, &expected, "the whole public wire schedule");
+            assert_eq!(row["target"]["action"]["prompt"], json!(prompt));
+            assert!(row.get("machine_state").is_none(), "{row}");
+        }
     }
 
     /// A schedule host shutdown that lands after a handler's host start

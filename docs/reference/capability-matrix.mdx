@@ -475,16 +475,22 @@ When `session-compaction` is enabled:
 - **Trigger**: `last_input_tokens >= threshold` OR `estimated_history_tokens >= threshold`
   OR the measured request budget for the boundary (hydrated messages + exact
   visible tool definitions + effective output reserve) crosses the threshold on
-  its input side
+  its input side OR the projected input (the last answered request's provider
+  count plus an estimate of only the rows appended since) crosses the threshold
+  OR the last request did not fit (the provider refused it for not fitting the
+  model's context, or it carried the open run's own tool results shortened)
 - **Guards**: Never at the session's first pre-LLM boundary. An ordinary
   compaction waits at least `min_turns_between_compactions` (default 3)
   pre-LLM boundaries after the last compaction or failed compaction attempt.
   Every LLM call is a boundary, including each call of a tool loop, so several
   can fall in one turn, and the session keeps the count across runs. A live
   history-token or exact provider-byte capacity crossing bypasses that cost
-  guard so an already-oversized request can recover immediately. A
-  history-token crossing bypasses it only while the last rewrite got the
-  history under the threshold, or when the request no longer fits the model
+  guard so an already-oversized request can recover immediately, and so do a
+  projection crossing made by the growth since the last answered request and a
+  request that did not fit (one compaction per refusal or bound, at the next
+  run's first boundary). A history-token or projection crossing bypasses it
+  only while the last rewrite got the history under the threshold, or when
+  the request no longer fits the model
   window and the history added since that rewrite covers the overage: when
   the rows a rewrite keeps cross the threshold on their own, compacting again
   cannot recover it, and it waits for the cadence. A

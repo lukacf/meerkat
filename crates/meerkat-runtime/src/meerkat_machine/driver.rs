@@ -7082,22 +7082,28 @@ pub(crate) fn machine_begin_resumed_run(
     Ok(ResumedRunStart::Started { input_ids })
 }
 
-/// Suspend the current run for a graceful requeue stop: the run stops being
-/// current and is marked resumable, with no turn terminal and no input
-/// change, so the stop keeps its bound inputs and the next start resumes it
-/// from its last committed round. The caller has already stopped the turn
-/// without a closing save or a boundary. `durable_session` is the caller's
-/// observation that the session commits every round.
+/// Suspend the current run: the run stops being current and is marked
+/// resumable, with no turn terminal and no input change, so its bound inputs
+/// keep their run and their stage attempts, and the run resumes from its last
+/// committed round. `cause` is why: a graceful requeue stop, whose bound
+/// inputs the stop keeps and whose run the next start resumes, or a store
+/// fence gap, whose run this registration resumes once the store's fence is
+/// restored (its turn returns to `Ready`, so that resume starts it again).
+/// The caller has already stopped the turn without a closing save or a
+/// boundary. `durable_session` is the caller's observation that the session
+/// commits every round.
 ///
-/// `Ok(false)`, with nothing changed, when the machine refuses: the stop does
-/// not requeue, the session is not durable, a live-boundary join is still
-/// published, the runtime is retiring, `run_id` is not the current run, or
-/// the run's turn terminal is already published. The caller then ends the
-/// run as before.
+/// `Ok(false)`, with nothing changed, when the machine refuses: a requeue
+/// stop's suspension outside a stop that requeues, a fence gap's while the
+/// registration drains for an unregister, a session that is not durable, a
+/// live-boundary join still published, a retiring runtime, a `run_id` that is
+/// not the current run, another run marked resumable, or a run whose turn
+/// terminal is already published. The caller then ends the run as before.
 pub(crate) fn machine_suspend_run_for_stop(
     driver: &mut DriverEntry,
     run_id: &RunId,
     durable_session: bool,
+    cause: crate::meerkat_machine::dsl::RunSuspensionCause,
 ) -> Result<bool, RuntimeDriverError> {
     let projection = {
         let authority = driver.shared_dsl_authority();
@@ -7109,6 +7115,7 @@ pub(crate) fn machine_suspend_run_for_stop(
             crate::meerkat_machine::dsl::MeerkatMachineInput::SuspendRunForStop {
                 run_id: crate::meerkat_machine::dsl::RunId::from_domain(run_id),
                 durable_session,
+                cause,
             },
         );
         if suspended.is_err() {

@@ -7616,6 +7616,30 @@ impl Session {
         metadata
     }
 
+    /// The compaction cadence `metadata` holds, without its two facts about
+    /// one exact transcript: the last answered request's input count (the
+    /// projection anchor) and a context refusal. A fork at a point and a
+    /// host transcript edit leave a transcript neither was recorded on; the
+    /// next answered request anchors again. `None` when the cadence holds
+    /// neither fact or does not decode (the agent refuses a corrupt cadence
+    /// when it loads it).
+    fn compaction_cadence_without_transcript_facts(
+        metadata: &serde_json::Map<String, serde_json::Value>,
+    ) -> Option<serde_json::Value> {
+        let value = metadata.get(crate::compact::SESSION_COMPACTION_CADENCE_KEY)?;
+        let mut cadence =
+            serde_json::from_value::<crate::compact::SessionCompactionCadence>(value.clone())
+                .ok()?;
+        if cadence.last_answered_request.is_none()
+            && cadence.last_context_refusal_boundary_index.is_none()
+        {
+            return None;
+        }
+        cadence.last_answered_request = None;
+        cadence.last_context_refusal_boundary_index = None;
+        serde_json::to_value(cadence).ok()
+    }
+
     fn remove_metadata_unchecked(&mut self, key: &str) {
         let removed = self.metadata.remove(key).is_some();
         let mut changed = removed;
@@ -9205,6 +9229,12 @@ impl Session {
         Ok(())
     }
 
+    /// Commit a host transcript edit: a generic rewrite, a revision restore
+    /// or a keyed system-prompt update. The edited transcript is not the one
+    /// the compaction cadence's input count counted or its context refusal
+    /// was recorded on, so the commit drops both; a compaction commits
+    /// through [`Self::commit_transcript_rewrite_bound`] and its agent
+    /// handles them.
     fn commit_transcript_rewrite_authorized(
         &mut self,
         selection: TranscriptRewriteSelection,
@@ -9213,14 +9243,18 @@ impl Session {
         actor: Option<String>,
         expected_parent_revision: Option<String>,
     ) -> Result<TranscriptRewriteCommit, TranscriptEditError> {
-        self.commit_transcript_rewrite_bound(
+        let commit = self.commit_transcript_rewrite_bound(
             selection,
             replacement,
             reason,
             actor,
             expected_parent_revision,
             RewriteCommitGuard::Generic,
-        )
+        )?;
+        if let Some(cadence) = Self::compaction_cadence_without_transcript_facts(&self.metadata) {
+            self.set_metadata_unchecked(crate::compact::SESSION_COMPACTION_CADENCE_KEY, cadence);
+        }
+        Ok(commit)
     }
 
     /// [`Self::commit_transcript_rewrite_authorized`] under `guard`. The
@@ -9657,6 +9691,13 @@ impl Session {
         let now = SystemTime::now();
         let truncated = self.messages[..index.min(self.messages.len())].to_vec();
         let id = SessionId::new();
+        let mut metadata = self.fork_metadata_projection();
+        if let Some(cadence) = Self::compaction_cadence_without_transcript_facts(&metadata) {
+            metadata.insert(
+                crate::compact::SESSION_COMPACTION_CADENCE_KEY.to_string(),
+                cadence,
+            );
+        }
         let mut forked = Self {
             version: session_version(),
             realtime_transcript: Box::new(SessionRealtimeTranscriptProjection::empty(&id)),
@@ -9664,7 +9705,7 @@ impl Session {
             messages: TranscriptMessages::from_fresh_branch(truncated),
             created_at: now,
             updated_at: now,
-            metadata: self.fork_metadata_projection(),
+            metadata,
             history_caches: Box::default(),
             transcript_history_metadata_validation: TranscriptHistoryMetadataValidation::Validated,
             // Usage is this session's own spend. A fork's prefix was paid for
@@ -20750,6 +20791,160 @@ mod deferred_tool_failure_tests {
             deferred_failure,
             Some(failure),
             "unrelated work cannot clear old evidence"
+        );
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod compaction_cadence_transcript_facts_tests {
+    use super::*;
+    use crate::compact::{
+        AnsweredRequestInput, SESSION_COMPACTION_CADENCE_KEY, SessionCompactionCadence,
+    };
+    use crate::types::{SystemMessage, UserMessage};
+
+    /// A cadence that holds the two facts about one exact transcript (the
+    /// last answered request's input count and a context refusal) beside
+    /// its boundary history.
+    fn cadence_with_transcript_facts() -> SessionCompactionCadence {
+        SessionCompactionCadence {
+            session_boundary_index: 7,
+            last_compaction_boundary_index: Some(2),
+            last_compaction_attempt_boundary_index: Some(4),
+            last_context_refusal_boundary_index: Some(6),
+            last_rewrite_history_tokens: Some(1_200),
+            last_answered_request: Some(AnsweredRequestInput {
+                presented_tokens: 90_000,
+                transcript_rows: 3,
+                provider: "anthropic".to_string(),
+                model: "model-a".to_string(),
+            }),
+        }
+    }
+
+    /// The same cadence without the two facts.
+    fn cadence_without_transcript_facts() -> SessionCompactionCadence {
+        SessionCompactionCadence {
+            last_context_refusal_boundary_index: None,
+            last_answered_request: None,
+            ..cadence_with_transcript_facts()
+        }
+    }
+
+    fn record_transcript_facts(session: &mut Session) {
+        session.set_metadata(
+            SESSION_COMPACTION_CADENCE_KEY,
+            serde_json::to_value(cadence_with_transcript_facts()).unwrap(),
+        );
+    }
+
+    fn session_with_transcript_facts() -> Session {
+        let mut session = Session::new();
+        session.push(Message::System(SystemMessage::new("system prompt")));
+        session.push(Message::User(UserMessage::text("first".to_string())));
+        session.push(Message::User(UserMessage::text("second".to_string())));
+        session.push(Message::User(UserMessage::text("third".to_string())));
+        record_transcript_facts(&mut session);
+        session
+    }
+
+    fn cadence(session: &Session) -> SessionCompactionCadence {
+        serde_json::from_value(session.metadata()[SESSION_COMPACTION_CADENCE_KEY].clone()).unwrap()
+    }
+
+    /// A fork at a point is another transcript: the source's input count
+    /// and its context refusal do not belong to it, so the fork keeps the
+    /// rest of the cadence without them, whichever constructor builds it. A
+    /// whole-session fork keeps the transcript, and the facts with it.
+    #[test]
+    fn a_fork_at_a_point_drops_the_input_anchor_and_the_context_refusal() {
+        let source = session_with_transcript_facts();
+        assert_eq!(
+            cadence(&source.fork_at(2)),
+            cadence_without_transcript_facts()
+        );
+        assert_eq!(
+            cadence(&source.fork_at_complete_boundary(4).unwrap()),
+            cadence_without_transcript_facts()
+        );
+        let replacing = source
+            .fork_replacing(
+                2,
+                TranscriptReplacement::Message {
+                    message: Message::User(UserMessage::text("edited".to_string())),
+                },
+            )
+            .unwrap();
+        assert_eq!(cadence(&replacing), cadence_without_transcript_facts());
+        assert_eq!(
+            cadence(&source.fork()),
+            cadence_with_transcript_facts(),
+            "a whole-session fork keeps the transcript the facts were recorded on"
+        );
+        assert_eq!(
+            cadence(&source),
+            cadence_with_transcript_facts(),
+            "the source keeps its cadence"
+        );
+    }
+
+    /// A host transcript edit (a rewrite, a revision restore, a system
+    /// prompt update) leaves a transcript the input count did not count and
+    /// the refusal was not recorded on: each commit drops both facts and
+    /// keeps the rest of the cadence.
+    #[test]
+    fn host_transcript_edits_drop_the_input_anchor_and_the_context_refusal() {
+        let mut session = session_with_transcript_facts();
+        let commit = session
+            .commit_transcript_rewrite(
+                TranscriptRewriteSelection::MessageRange { start: 3, end: 4 },
+                vec![Message::User(UserMessage::text("rewritten".to_string()))],
+                TranscriptRewriteReason::new("unit-test"),
+                Some("unit-test".to_string()),
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            cadence(&session),
+            cadence_without_transcript_facts(),
+            "a rewrite drops them"
+        );
+
+        record_transcript_facts(&mut session);
+        let rows = session
+            .retained_transcript_revision_rows(&commit.parent_revision)
+            .unwrap()
+            .expect("the parent revision is retained");
+        session
+            .commit_transcript_revision_restore(
+                rows,
+                TranscriptRewriteReason::new("unit-test"),
+                Some("unit-test".to_string()),
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            cadence(&session),
+            cadence_without_transcript_facts(),
+            "a revision restore drops them"
+        );
+
+        record_transcript_facts(&mut session);
+        session
+            .update_system_prompt(SystemPromptUpdateRequest {
+                key: crate::types::SystemPromptKey::new("main").unwrap(),
+                expected_version: None,
+                target_message_index: Some(0),
+                content: "a new system prompt".to_string(),
+                actor: Some("unit-test".to_string()),
+                expected_parent_revision: None,
+            })
+            .unwrap();
+        assert_eq!(
+            cadence(&session),
+            cadence_without_transcript_facts(),
+            "a system prompt update drops them"
         );
     }
 }

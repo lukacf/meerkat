@@ -495,12 +495,13 @@ head, which never reaches `main` before the tag.
   `CI-Plan: workspace` to plan the whole workspace.
 - There is no pre-tag prebuild (`make release-prebuild` runs on `main` only),
   so the tag run builds every binary.
-- Recovery dispatches run the tag's own workflow, which carries these rules:
-  `RELEASE_REF=vX.Y.Z VERSION=vX.Y.Z make release-assets`, and likewise
-  `release-packages` and `release-web-sdk` (inspect each first with
-  `RELEASE_WORKFLOW_DRY_RUN=true`). The default `main` ref accepts such a
-  tag only once `main` has the same rules, and `ASSETS_RUN_ID` reuse is for
-  `main` only.
+- Recovery dispatches run as for any release: the default `main` ref
+  carries these rules and accepts such a tag
+  (`VERSION=vX.Y.Z make release-assets`, and likewise `release-packages`
+  and `release-web-sdk`; inspect each first with
+  `RELEASE_WORKFLOW_DRY_RUN=true`). `RELEASE_REF=vX.Y.Z` runs the tag's own
+  workflow instead, which carries the same rules, and `ASSETS_RUN_ID` reuse
+  is for `main` only.
 - After publication, merge the tag into `main` by pull request, so that
   `main` carries the version, the stamped notes and the tag as an ancestor,
   which the next post-release semver baseline needs. Never set `main`'s

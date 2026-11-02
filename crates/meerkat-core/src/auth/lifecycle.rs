@@ -436,6 +436,13 @@ const CONTROLLER_CUSTODY_BUSY_FIRST_BACKOFF: std::time::Duration =
 #[cfg(not(target_arch = "wasm32"))]
 const CONTROLLER_CUSTODY_BUSY_MAX_BACKOFF: std::time::Duration =
     std::time::Duration::from_millis(200);
+/// How long a coordinated clear retries busy native controller custody for
+/// its lease release: the budget a login commit's lifecycle publication has
+/// (`meerkat-auth-core`), so a logout waits out the same momentary contention
+/// a login does. It bounds only the release attempts, not the coordinator's
+/// admission or the durable clear.
+#[cfg(not(target_arch = "wasm32"))]
+const CREDENTIAL_RELEASE_RETRY_BUDGET: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Outcome of a credential publication bounded by a caller deadline.
 #[cfg(not(target_arch = "wasm32"))]
@@ -555,11 +562,32 @@ async fn clear_tokens_and_publish_lifecycle_released_under_guard(
     let lease_key = LeaseKey::from_credential_identity(credential_identity);
 
     // Stage: release the lease BEFORE the durable commit, capturing the
-    // pre-stage snapshot for rollback if the commit fails.
-    let staged = handle.capture_auth_lifecycle_restore_snapshot(&lease_key);
-    handle
-        .release_lease_with_guard(&lease_key, guard)
-        .map_err(TokenLifecycleClearError::AuthMachineRelease)?;
+    // pre-stage snapshot for rollback if the commit fails. Native controller
+    // custody answers a typed Busy at once instead of waiting, and a refused
+    // attempt changed nothing, so exactly that refusal is retried within the
+    // budget, as a login publication is. Each attempt captures its snapshot
+    // right before it releases.
+    let stage = || {
+        let staged = handle.capture_auth_lifecycle_restore_snapshot(&lease_key);
+        handle
+            .release_lease_with_guard(&lease_key, guard)
+            .map(|()| staged)
+    };
+    let deadline = tokio::time::Instant::now() + CREDENTIAL_RELEASE_RETRY_BUDGET;
+    let staged = match retry_busy_controller_custody(deadline, &stage).await {
+        Ok(staged) => staged,
+        Err(
+            BoundedLifecyclePublicationError::Refused(error)
+            | BoundedLifecyclePublicationError::DeadlineExceeded {
+                last_busy: Some(error),
+            },
+        ) => return Err(TokenLifecycleClearError::AuthMachineRelease(error)),
+        // The deadline passed before any attempt: make the one attempt an
+        // unbounded release makes, so no refusal is invented.
+        Err(BoundedLifecyclePublicationError::DeadlineExceeded { last_busy: None }) => {
+            stage().map_err(TokenLifecycleClearError::AuthMachineRelease)?
+        }
+    };
 
     // Commit: one durable mutation destroys the credential and its lifecycle
     // marker together.
@@ -592,8 +620,11 @@ async fn clear_tokens_and_publish_lifecycle_released_under_guard(
 /// the coordinator transaction. A concurrent refresh can therefore run either
 /// before this operation or after it observes the cleared store, but can never
 /// commit stale bytes after a successful logout/profile deletion.
-/// A release veto precedes durable clear. Failed clear restores the captured
-/// predecessor; restoration failure remains combined with the clear failure.
+/// A release veto precedes durable clear. Native controller custody that is
+/// busy for a moment is waited out for at most two seconds, the budget a login
+/// publication has; every other veto returns at once. Failed clear restores
+/// the captured predecessor; restoration failure remains combined with the
+/// clear failure.
 /// Cancellation of this caller does not cancel the coordinator-owned operation.
 /// Status readers share the lease guard and cannot restore the predecessor
 /// while deletion or compensation is in progress.

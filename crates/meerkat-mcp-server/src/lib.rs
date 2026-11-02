@@ -258,7 +258,9 @@ async fn prepare_mcp_actor_materialization_claim(
     .await
     {
         // Nothing was admitted: the rollback keeps every input the
-        // registration recovered from the store.
+        // registration recovered from the store, except the inputs bound to a
+        // run the registration marked resumable whose stop was asked, which
+        // end as stopped.
         let rollback = prepared.rollback_now().await.err();
         let rollback = rollback
             .map(|error| format!("; exact rollback also failed: {error}"))
@@ -283,8 +285,10 @@ async fn prepare_mcp_actor_materialization_claim(
 /// keeps every input the registration recovered from the store; once the
 /// registration admitted live work (an admission, a deduplicated
 /// resubmission, a recycle), the machine stops every input instead, so a
-/// turn its caller saw refused never runs later. A direct initial turn
-/// leaves no input to keep or stop.
+/// turn its caller saw refused never runs later. The inputs bound to a run
+/// the registration marked resumable whose stop was asked end as stopped
+/// either way, so that run never resumes. A direct initial turn leaves no
+/// input to keep or stop.
 async fn release_mcp_actor_materialization(
     prepared: &mut Option<McpPreparedActorMaterialization>,
     session_id: &meerkat::SessionId,

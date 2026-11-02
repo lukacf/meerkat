@@ -180,6 +180,16 @@ impl EnteredDispatchOperation {
         }
     }
 
+    /// The governed work context this operation was prepared in: the
+    /// dispatch's own, as [`GovernedDispatchOperation::work_authorization`]
+    /// returns it. Its `owner_change_in_progress` names an owner change in
+    /// progress on the work's own publication, or another actor's hold of
+    /// the work owners' exclusion: what a step refused to rebuild waits for,
+    /// a waiting hint and never a permission.
+    pub fn work_authorization(&self) -> &crate::WorkAuthorizationContext {
+        self.0.operation.work_authorization()
+    }
+
     /// Run `operation` as one further step of the entered effect, only while
     /// this exact operation is currently permitted with `further` conjoined
     /// by the work's own retained owners, under those owners' single

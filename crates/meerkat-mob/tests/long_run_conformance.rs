@@ -1,8 +1,9 @@
 //! Core over a store through the long run, compacted long run and durable
 //! worker conformance chapters of `meerkat-store-conformance`, over the
 //! built-in SQLite realm (the first incarnation is a child process killed
-//! with SIGKILL) and over the reference host store (the first incarnation's
-//! Core objects are all dropped), plus Core's own row for a killed process's
+//! with SIGKILL) and over the reference host store (the runtime the first
+//! incarnation runs on is shut down in this process, which Core treats as a
+//! crash of that incarnation), plus Core's own row for a killed process's
 //! identity lease.
 //!
 //! Each chapter runs every row over a fresh store, so a chapter takes
@@ -219,16 +220,18 @@ impl Harness {
     /// The host store backend: the first incarnation runs on a runtime of
     /// its own, shut down at the kill point.
     ///
-    /// This approximates a process death only in part. Core runs its session
-    /// tasks (and so the turn in flight, with its tool calls) and its runtime
-    /// loops on runtimes the process owns, which this shutdown leaves
-    /// running: the killed incarnation's session lives on in this process,
-    /// blocked at its kill point and fenced out by the restart's takeover,
-    /// and commits nothing. A death would also have ended the tool process a
-    /// started call left running, by the next start's recovery; here the
-    /// call's owner is still alive, so the harness stops that process itself
-    /// at the kill (see [`kill_orphaned_process`]), which ends the call and
-    /// leaves its custody record to the restart. The SQLite backend, a child
+    /// This approximates a process death only in part. The incarnation's
+    /// session tasks, and so the turn in flight with its tool calls, run on
+    /// that runtime and end with it. Core's runtime loops run on a runtime
+    /// the process owns, which this shutdown leaves running: a loop whose
+    /// turn the shutdown took writes nothing more for the run and leaves its
+    /// session's registration to a cold reload, as a crash would, and the
+    /// killed incarnation's other Core objects stay in this process, fenced
+    /// out by the restart's takeover. A death would also have ended the tool
+    /// process a started call left running, by the next start's recovery;
+    /// this process outlives the call, so the harness stops that tool
+    /// process itself at the kill (see [`kill_orphaned_process`]) and leaves
+    /// the call's custody record to the restart. The SQLite backend, a child
     /// process killed with SIGKILL, is the proof of the death itself.
     async fn kill_in_process(store: &Store, plan: &LongRunPlan) -> Result<(), ConformanceFailure> {
         let root = store.root().to_path_buf();
@@ -278,8 +281,8 @@ impl Harness {
         incarnation_runtime.shutdown_background();
         // The started tool process the killed incarnation's call left
         // running: ended here, as the next start's recovery ends it after a
-        // death, so the still-live call returns and lets go of its custody
-        // record. The killed session itself stays blocked at its kill point.
+        // death. The call itself ended with the incarnation's runtime, and
+        // the killed session's runtime loop ends without writing.
         kill_orphaned_process(&root);
         if !reached {
             return Err(harness_failure(

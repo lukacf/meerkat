@@ -1927,9 +1927,9 @@ fn receipt_failure(
             } => ReceiptFailure::TurnFailed,
             _ => ReceiptFailure::RestartCaused,
         },
-        // A graceful stop kept the turn's input queued for the next start,
-        // or that input aged out before it ran: the stop ended it, never the
-        // turn itself.
+        // A graceful stop (or a store fence gap) kept the turn's input queued
+        // for the next start (or the fence's re-acquire), or that input aged
+        // out before it ran: the stop ended it, never the turn itself.
         BoundedTurnFailure::RequeuedAcrossStop { .. }
         | BoundedTurnFailure::RequeueExpired { .. } => ReceiptFailure::RestartCaused,
         _ => ReceiptFailure::RestartCaused,

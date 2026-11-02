@@ -975,7 +975,8 @@ impl OpenAiClient {
     /// deltas, done, terminal) while its wire `output_index` stays. Events of
     /// an added item's lifecycle are recorded under its canonical (first
     /// added) id; a completed message or reasoning item the terminal output
-    /// lacks by id is aliased to the one terminal item that is the same item
+    /// lacks by id is aliased one to one to a terminal item that is the same
+    /// item, several equal items only as a group with as many on each side
     /// (see `responses_output::copilot_item_aliases`), keeping the terminal
     /// identity (and, for reasoning, its ciphertext); and the streamed ids of
     /// each completed lifecycle are reconciled with that terminal identity.

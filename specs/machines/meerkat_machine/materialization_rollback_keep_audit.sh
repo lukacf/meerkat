@@ -5,7 +5,8 @@
 # registration stood. So does the retirement of an executor attachment that
 # never served, while a retire that meets such an attachment still stops.
 # Once the registration served live work (an admission, a deduplicated wait
-# or a recycle) its unregister keeps nothing.
+# or a recycle) its unregister keeps nothing, and the inputs bound to a run
+# the registration marked resumable whose stop was asked are not kept.
 #
 # usage: materialization_rollback_keep_audit.sh <max-steps> [--mutants] [extra tlc args...]
 #
@@ -19,8 +20,8 @@
 # specs. It checks the whole bounded space once (safety), then reruns it once
 # per reachability witness with that witness's negation as an extra invariant
 # and requires TLC to report exactly that violation, so the invariants are
-# not vacuous. With --mutants it then seeds eleven defects into a copy of the
-# generated model, and one into a copy of the audit, and requires TLC to
+# not vacuous. With --mutants it then seeds thirteen defects into a copy of
+# the generated model, and one into a copy of the audit, and requires TLC to
 # refuse each with the invariant it breaks: the machine without the Keep arm
 # (Keep stops like Stop), a Keep arm that ignores the recovery witness (with
 # admissions that leave no live-work mark), an Abandon arm that overlaps
@@ -29,9 +30,11 @@
 # recorded Keep standing, an admission, a deduplicated wait or a recycle that
 # does not mark the registration as having served live work, an
 # unserved-attachment unregister that ignores the requested disposition, one
-# that records a requested Keep after live work, and (in the audit) a retire
-# that meets the unserved attachment and requests Keep. An anchor this
-# script expects but cannot find fails the run.
+# that records a requested Keep after live work, the machine without the
+# exception for a stopped run marked resumable, the exception without its
+# stop conjunct, and (in the audit) a retire that meets the unserved
+# attachment and requests Keep. An anchor this script expects but cannot
+# find fails the run.
 set -euo pipefail
 
 usage="usage: materialization_rollback_keep_audit.sh <max-steps> [--mutants] [extra tlc args...]"
@@ -126,6 +129,7 @@ write_cfg() {
   # before either answer is recorded.
   replace_exact_line "INVARIANTS" "INVARIANTS
   AuditRollbackVerdictIsAFunction
+  AuditStoppedResumableRunInputNotKept
   AuditKeepEndsNoRecoveredInput
   AuditKeepStopsWhatItAdmitted
   AuditKeepOnlyUnderKeep
@@ -177,7 +181,7 @@ for witness in KeptQueuedInputRuns KeptRequeuedInputRuns AdmittedInputStoppedUnd
   StopRollbackEndsRecoveredInput RecycledAdmittedInputStoppedUnderKeep \
   DedupedInputStoppedUnderKeep DrainingLiveWorkStopsRecoveredInput \
   UnservedAbortKeepsRecoveredInput UnservedRetireStopsRecoveredInput \
-  UnservedAbortAfterLiveWorkStops; do
+  UnservedAbortAfterLiveWorkStops StoppedResumableRunEndsUnderKeep; do
   cfg="${work_dir}/witness-${witness}.cfg"
   write_cfg "${cfg}" "
   NotAuditWitness${witness}"
@@ -249,6 +253,13 @@ KEEP_GUARD = (
     '(input_id \\in DOMAIN input_phases) /\\ (input_id \\in recovered_admitted_inputs))'
 )
 
+# The stop conjunct of the exception for a stopped run marked resumable: the
+# Keep arm's own guard line, and the Abandon arm's Keep exclusion. (The
+# Abandon arm's resumable-run guard holds the "#" form, which does not
+# match.) Each of those lines holds it twice: the guard reads input_phases,
+# so its rendering opens with a domain-safety prefix.
+STOP_CONJUNCT = "(run_stop_requested = resumable_run_id)"
+
 # A requested Keep is recorded as Stop once the registration served live work.
 BEGIN_DOWNGRADE = (
     "unregister_queued_inputs' = IF ((queued_inputs = \"Keep\") /\\ "
@@ -279,6 +290,9 @@ def arm_start(text, arm):
 
 
 def edit_arm_lines(text, arms_env, needle, replacement):
+    # The Abandon arm's Keep exclusion holds KEEP_GUARD twice (the
+    # domain-safety prefix and the guard itself): an edit inside it must
+    # replace every occurrence.
     for arm in os.environ[arms_env].split():
         start = arm_start(text, arm)
         end = text.index("\n\n", start)
@@ -313,7 +327,7 @@ import os
 from keep_mutation import KEEP_GUARD, SEEN_SET, edit_arm_lines
 path = os.environ["MODEL"]
 text = open(path).read()
-drop = lambda line: line.replace(" /\\ (input_id \\in recovered_admitted_inputs)", "", 1)
+drop = lambda line: line.replace(" /\\ (input_id \\in recovered_admitted_inputs)", "")
 text = edit_arm_lines(text, "KEEP_ARMS", KEEP_GUARD, drop)
 text = edit_arm_lines(text, "ABANDON_ARMS", KEEP_GUARD, drop)
 text = edit_arm_lines(
@@ -339,9 +353,37 @@ import os
 from keep_mutation import KEEP_GUARD, edit_arm_lines
 path = os.environ["MODEL"]
 text = open(path).read()
-drop = lambda line: line.replace(' /\\ (unregister_queued_inputs = "Keep")', "", 1)
+drop = lambda line: line.replace(' /\\ (unregister_queued_inputs = "Keep")', "")
 text = edit_arm_lines(text, "KEEP_ARMS", KEEP_GUARD, drop)
 text = edit_arm_lines(text, "ABANDON_ARMS", KEEP_GUARD, drop)
+open(path, "w").write(text)
+PY
+
+  # The machine without the exception for a stopped run marked resumable:
+  # the Keep arm keeps, and the Abandon arm leaves, every input the
+  # registration recovered, so the input bound to the stopped run is kept
+  # and the next start would resume the run its caller was told stopped.
+  mutate keep_ignores_stop AuditStoppedResumableRunInputNotKept <<'PY'
+import os
+from keep_mutation import KEEP_GUARD, STOP_CONJUNCT, edit_arm_lines
+path = os.environ["MODEL"]
+text = open(path).read()
+text = edit_arm_lines(text, "KEEP_ARMS", STOP_CONJUNCT, lambda line: "    /\\ TRUE")
+text = edit_arm_lines(
+    text, "ABANDON_ARMS", KEEP_GUARD, lambda line: "    /\\ ~(" + KEEP_GUARD + ")")
+open(path, "w").write(text)
+PY
+
+  # The exception without its stop conjunct ends the bound input of a run
+  # marked resumable that nobody stopped.
+  mutate exception_without_stop AuditKeepEndsNoRecoveredInput <<'PY'
+import os
+from keep_mutation import STOP_CONJUNCT, edit_arm_lines
+path = os.environ["MODEL"]
+text = open(path).read()
+drop = lambda line: line.replace(STOP_CONJUNCT, "TRUE")
+text = edit_arm_lines(text, "KEEP_ARMS", STOP_CONJUNCT, drop)
+text = edit_arm_lines(text, "ABANDON_ARMS", STOP_CONJUNCT, drop)
 open(path, "w").write(text)
 PY
 

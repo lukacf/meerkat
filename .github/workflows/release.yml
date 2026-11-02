@@ -961,9 +961,18 @@ jobs:
           )"
           artifact_name="meerkat-semver-attestation-main-${tree_sha}"
           artifact_json="$(gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts?name=${artifact_name}&per_page=100")"
-          artifact_id="$(jq -r '[.artifacts[] | select(.expired == false)] | sort_by(.created_at) | last | .id // empty' <<<"${artifact_json}")"
+          # Pushes to main and to every release/** branch name their evidence
+          # after the tree, so a later push of the same tree to another
+          # release branch would win a plain newest pick: take the newest
+          # unexpired artifact uploaded by a run on main or on the release
+          # branch of this version.
+          artifact_id="$(jq -r --arg release_branch "release/${version}" \
+            '[.artifacts[] | select(.expired == false and
+               (.workflow_run.head_branch == "main" or .workflow_run.head_branch == $release_branch))]
+             | sort_by(.created_at) | last | .id // empty' \
+            <<<"${artifact_json}")"
           if [[ -z "${artifact_id}" ]]; then
-            echo "::error::No unexpired exact-tree semver evidence exists for ${tree_sha}."
+            echo "::error::No unexpired exact-tree semver evidence from a push to main or release/${version} exists for ${tree_sha}."
             echo "Run Release semver readiness before creating the tag."
             exit 1
           fi

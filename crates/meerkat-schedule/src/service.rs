@@ -44,6 +44,10 @@ pub struct ScheduleService {
 struct ExpectedScheduleTransition {
     effects: Vec<ScheduleLifecycleEffect>,
     revision_bumped: bool,
+    /// The acknowledgement set after the generated transition and before the
+    /// store feeds the supersession's acknowledgements back. A revise or
+    /// delete has already dropped the earlier supersessions' ids here, so the
+    /// commit may only add to this set.
     pre_feedback_ack_ids: BTreeSet<crate::OccurrenceId>,
 }
 
@@ -1950,6 +1954,143 @@ mod tests {
                 .all(|occurrence| occurrence.phase == OccurrencePhase::Superseded),
             "no live occurrence may outlive the deleted schedule"
         );
+        Ok(())
+    }
+
+    /// Claim the one due occurrence under a fresh executor lease, the way a
+    /// driver does before it dispatches.
+    async fn claim_one_due_occurrence(
+        store: &Arc<dyn ScheduleStore>,
+    ) -> Result<Occurrence, ScheduleDomainError> {
+        let executor_lease = match store
+            .acquire_executor_lease(crate::AcquireScheduleExecutorLeaseRequest {
+                owner_id: "test-executor".into(),
+                lease_duration: Duration::minutes(5),
+            })
+            .await?
+        {
+            crate::AcquireScheduleExecutorLeaseOutcome::Acquired(lease) => lease,
+            crate::AcquireScheduleExecutorLeaseOutcome::Busy { .. } => {
+                return Err(ScheduleDomainError::Internal("test executor busy".into()));
+            }
+        };
+        let claimed = store
+            .claim_due_occurrences(
+                &executor_lease,
+                crate::ClaimDueRequest {
+                    owner_id: "driver-owner".into(),
+                    limit: 1,
+                    lease_duration: Duration::seconds(30),
+                },
+            )
+            .await?;
+        store.release_executor_lease(executor_lease).await?;
+        let in_flight = claimed
+            .transitions
+            .into_iter()
+            .next()
+            .ok_or_else(|| {
+                ScheduleDomainError::Internal("a due occurrence should be claimed".into())
+            })?
+            .successor()
+            .clone();
+        assert_eq!(in_flight.phase, OccurrencePhase::Claimed);
+        Ok(in_flight)
+    }
+
+    /// Bounded retention of `superseded_ack_ids`: every revise below revokes
+    /// an in-flight claim, whose acknowledgement it records, and drops the
+    /// acknowledgements of every earlier revise. After any number of revises,
+    /// and after the delete that ends them, the schedule (as returned and as
+    /// stored) holds exactly the latest supersession's acknowledgements.
+    #[tokio::test]
+    async fn repeated_revises_with_in_flight_claims_keep_only_the_latest_acks()
+    -> Result<(), ScheduleDomainError> {
+        const REVISES: i64 = 4;
+        let store = Arc::new(MemoryScheduleStore::new()) as Arc<dyn ScheduleStore>;
+        let service = ScheduleService::new(store.clone());
+        // Due a second before the round's own clock reading: claimable at
+        // once, inside the Skip policy's grace. Adding the round's
+        // millisecond keeps each round's due time apart from the previous
+        // one whatever the clock resolution, so every update below is a
+        // revision-affecting change.
+        let due_this_round =
+            |round: i64| Utc::now() - Duration::seconds(1) + Duration::milliseconds(round);
+        let mut schedule = service
+            .create(CreateScheduleRequest {
+                name: Some("ack-retention".into()),
+                description: None,
+                trigger: TriggerSpec::Once {
+                    due_at_utc: due_this_round(0),
+                },
+                target: materialize_on_demand_target("initial prompt"),
+                misfire_policy: MisfirePolicy::Skip,
+                overlap_policy: OverlapPolicy::SkipIfRunning,
+                missing_target_policy: crate::MissingTargetPolicy::MarkMisfired,
+                labels: BTreeMap::new(),
+                planning_horizon_days: Some(1),
+                planning_horizon_occurrences: Some(1),
+            })
+            .await?;
+
+        let latest_supersession =
+            |occurrences: Vec<Occurrence>, revision: crate::ScheduleRevision| {
+                occurrences
+                    .into_iter()
+                    .filter(|occurrence| occurrence.superseded_by_revision == Some(revision))
+                    .map(|occurrence| occurrence.occurrence_id)
+                    .collect::<BTreeSet<_>>()
+            };
+
+        for round in 1..=REVISES {
+            let in_flight = claim_one_due_occurrence(&store).await?;
+            assert_eq!(in_flight.schedule_revision, schedule.revision);
+            schedule = service
+                .update(
+                    &schedule.schedule_id,
+                    UpdateScheduleRequest {
+                        expected_revision: Some(schedule.revision),
+                        // A new due time each round: a revision-affecting
+                        // change that plans the next claimable occurrence.
+                        trigger: Some(TriggerSpec::Once {
+                            due_at_utc: due_this_round(round),
+                        }),
+                        ..UpdateScheduleRequest::default()
+                    },
+                )
+                .await?;
+            let latest = latest_supersession(
+                service.list_occurrences(&schedule.schedule_id).await?,
+                schedule.revision,
+            );
+            assert_eq!(
+                latest,
+                BTreeSet::from([in_flight.occurrence_id]),
+                "revise {round} supersedes exactly the claim in flight"
+            );
+            assert_eq!(
+                schedule.superseded_ack_ids, latest,
+                "after revise {round} the set holds the latest supersession's acknowledgements only"
+            );
+        }
+        assert_eq!(
+            service.get(&schedule.schedule_id).await?.superseded_ack_ids,
+            schedule.superseded_ack_ids,
+            "the stored schedule holds the same bounded set"
+        );
+
+        let in_flight = claim_one_due_occurrence(&store).await?;
+        let deleted = service.delete(&schedule.schedule_id).await?;
+        assert_eq!(
+            deleted.superseded_ack_ids,
+            BTreeSet::from([in_flight.occurrence_id]),
+            "the delete drops every revise's acknowledgements and records its own"
+        );
+        let stored = store
+            .get_schedule(&schedule.schedule_id)
+            .await?
+            .ok_or_else(|| ScheduleDomainError::Internal("deleted schedule row".into()))?;
+        assert_eq!(stored.superseded_ack_ids, deleted.superseded_ack_ids);
         Ok(())
     }
 

@@ -224,7 +224,7 @@ Defaults:
 - `--verbose` also prints the active realm root
 - provider-native web search is on for models that support it; `--no-web-search` turns it off
 - text output streams by default when stdout is a TTY; JSON/HTML output and pipes/scripts do not
-- piped stdin is blob context unless `--stdin lines` (which implies `--keep-alive`)
+- piped stdin is blob context unless `--stdin lines` (which implies `--keep-alive`); with the default `--stdin auto`, input that has not started within 2 s is skipped with a warning (`--stdin blob` waits for end of file, `--stdin off` ignores stdin)
 - for a new run, `--tools` decides builtins and shell even when
   `tools.builtins_enabled` or `tools.shell_enabled` differ; `full` adds
   WorkGraph, memory and mob tools. `--resume` keeps the stored choice unless

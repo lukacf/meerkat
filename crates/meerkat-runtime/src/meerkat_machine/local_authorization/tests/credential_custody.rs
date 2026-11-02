@@ -703,6 +703,59 @@ async fn busy_publication_rechecks_references_after_fresh_custody() {
     assert_eq!(handle.snapshot(&key), before);
 }
 
+/// A logout that meets native custody held for a moment (an attached
+/// session's runtime loop takes its driver on every pass) waits it out, as a
+/// login commit does: its refused release attempts change nothing and keep no
+/// custody while it backs off, and it then releases the lease and clears the
+/// stored credential.
+#[tokio::test]
+async fn coordinated_clear_waits_for_a_held_driver_lock() {
+    let (machine, session, prompt) = pending().await;
+    let (store, handle) = commit(&machine, &prompt).await;
+    let credential = identity(&prompt);
+    let key = LeaseKey::from_credential_identity(&credential);
+    let token_key = meerkat_core::auth::TokenKey::from_credential_identity(&credential);
+    let stored = store.load(&token_key).await.unwrap();
+    assert!(stored.is_some());
+    let before = handle.snapshot(&key);
+    let driver = machine
+        .sessions
+        .read()
+        .await
+        .get(&session)
+        .unwrap()
+        .driver
+        .clone();
+    let held = driver.lock().await;
+    let clear = meerkat_core::clear_tokens_and_publish_lifecycle_released_coordinated_for_identity(
+        ProviderAuthPersistence::new(store.clone(), Arc::new(InMemoryCoordinator::new())),
+        handle.clone(),
+        credential,
+    );
+    let contention = async {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(
+            handle.snapshot(&key),
+            before,
+            "refused attempts release nothing"
+        );
+        assert_eq!(
+            store.load(&token_key).await.unwrap(),
+            stored,
+            "refused attempts clear nothing"
+        );
+        assert!(
+            session_map_is_free(&machine).await,
+            "custody is released while waiting"
+        );
+        drop(held);
+    };
+    let (cleared, ()) = tokio::join!(clear, contention);
+    cleared.expect("logout once the driver is free");
+    assert!(!handle.snapshot(&key).credential_present);
+    assert!(store.load(&token_key).await.unwrap().is_none());
+}
+
 #[tokio::test]
 async fn authority_replacement_while_waiting_requires_fresh_admission() {
     let (machine, session, prompt) = pending().await;

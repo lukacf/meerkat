@@ -906,7 +906,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ResumeRun`(run_id: RunId)
 - `ReleaseResumableRun`(run_id: RunId)
 - `SettleResumableRun`(run_id: RunId, reason: InputAbandonReason)
-- `SuspendRunForStop`(run_id: RunId, durable_session: Bool)
+- `SuspendRunForStop`(run_id: RunId, durable_session: Bool, cause: RunSuspensionCause)
 - `ReplayAppliedRunContributor`(input_id: String, run_id: RunId, lane: InputLane)
 - `AuthorizeOperatorDurableTailRepair`(session_id: SessionId, candidate_id: String, candidate_run_id: RunId, class: DurableTailRecoveryClass, observed_lifecycle: DurableRecoveryObservedLifecycle, observed_current_run: DurableRecoveryObservedRun, last_committed_sequence: u64, prior_commit: DurableRecoveryPriorCommit, input_evidence: DurableRecoveryInputEvidence)
 - `ResolveEmptyResumeRetirement`(queued_input_present: Bool)
@@ -1224,6 +1224,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `meerkat_session_llm_visibility_shape_matches`(previous_visibility_state: SessionToolVisibilityState, next_visibility_state: SessionToolVisibilityState, previous_capability_base_filter: ToolFilter, next_capability_base_filter: ToolFilter, previous_active_visibility_revision: u64, previous_staged_visibility_revision: u64, next_active_visibility_revision: u64) -> `Bool`
 - `meerkat_session_llm_visibility_delta_matches`(tool_visibility_delta: SessionToolVisibilityDelta, previous_capability_base_filter: ToolFilter, next_capability_base_filter: ToolFilter, committed_visible_set_changed: Bool) -> `Bool`
 - `meerkat_session_llm_visibility_reconfigure_plan_matches`(previous_visibility_state: SessionToolVisibilityState, next_visibility_state: SessionToolVisibilityState, previous_capability_base_filter: ToolFilter, next_capability_base_filter: ToolFilter, view_image_tool_available: Bool, previous_view_image_visible: Bool, next_view_image_visible: Bool, previous_active_visibility_revision: u64, previous_staged_visibility_revision: u64, next_active_visibility_revision: u64, tool_visibility_delta: SessionToolVisibilityDelta) -> `Bool`
+- `owned_run_id`(run: Option<RunId>) -> `Option<RunId>`
 
 ## Command Plans
 ### `AuthorizedAcceptedInputMaterialization`
@@ -1320,7 +1321,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `MarkRunResumableInitializing`: `no_current_run`, `no_other_resumable_run`
   - `MarkRunResumableIdle`: `no_current_run`, `no_other_resumable_run`
   - `MarkRunResumableAttached`: `no_current_run`, `no_other_resumable_run`
-  - `ResumeRunRunning`: `run_is_current`, `run_is_resumable`, `run_inputs_not_controller_held`, `resumed_run_destination_attached`
+  - `ResumeRunRunning`: `run_is_current`, `run_is_resumable`, `run_not_stopped`, `run_inputs_not_controller_held`, `resumed_run_destination_attached`
 - Command Effects: `ResumableRunMarked`, `ResumedRunAuthorized`
 - Emitted By Transitions: `ResumableRunMarked`, `ResumedRunAuthorized`
 
@@ -1938,6 +1939,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `run_is_current`
   - `run_is_resumable`
+  - `run_not_stopped`
   - `run_inputs_not_controller_held`
   - `resumed_run_destination_attached`
 - Emits: `ResumedRunAuthorized`
@@ -1988,6 +1990,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `SettleResumableRun`(run_id, reason)
 - Guards:
   - `run_is_resumable`
+  - `stopped_run_not_settled_as_refused`
 - Emits: `ResumableRunSettled`
 - To: `Initializing`
 
@@ -1996,6 +1999,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `SettleResumableRun`(run_id, reason)
 - Guards:
   - `run_is_resumable`
+  - `stopped_run_not_settled_as_refused`
 - Emits: `ResumableRunSettled`
 - To: `Idle`
 
@@ -2004,6 +2008,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `SettleResumableRun`(run_id, reason)
 - Guards:
   - `run_is_resumable`
+  - `stopped_run_not_settled_as_refused`
 - Emits: `ResumableRunSettled`
 - To: `Attached`
 
@@ -2012,6 +2017,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `SettleResumableRun`(run_id, reason)
 - Guards:
   - `run_is_resumable`
+  - `stopped_run_not_settled_as_refused`
 - Emits: `ResumableRunSettled`
 - To: `Retired`
 
@@ -2020,6 +2026,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `SettleResumableRun`(run_id, reason)
 - Guards:
   - `run_is_resumable`
+  - `stopped_run_not_settled_as_refused`
 - Emits: `ResumableRunSettled`
 - To: `Stopped`
 
@@ -5288,6 +5295,24 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `run_matches_current`
 - Emits: `WakeInterrupt`, `RequestCancellationAtBoundary`
 - To: `Retired`
+
+### `StopCurrentRunForRunResumableIdle`
+- From: `Idle`
+- On: `StopCurrentRunForRun`(run_id)
+- Guards:
+  - `no_current_run`
+  - `run_is_resumable`
+  - `registration_not_draining`
+- To: `Idle`
+
+### `StopCurrentRunForRunResumableAttached`
+- From: `Attached`
+- On: `StopCurrentRunForRun`(run_id)
+- Guards:
+  - `no_current_run`
+  - `run_is_resumable`
+  - `registration_not_draining`
+- To: `Attached`
 
 ### `ResolveUserInterruptPublicResultAcceptedInitializing`
 - From: `Initializing`
@@ -11183,6 +11208,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `turn_resettable`
   - `conversation_shape_matches_primitive`
   - `run_starts_not_held`
+  - `no_other_resumable_run`
 - Emits: `TurnRunStarted`
 - To: `Running`
 
@@ -11201,6 +11227,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `turn_resettable`
   - `conversation_shape_matches_primitive`
   - `run_starts_not_held`
+  - `no_other_resumable_run`
 - Emits: `TurnRunStarted`
 - To: `Running`
 
@@ -11219,6 +11246,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `turn_resettable`
   - `conversation_shape_matches_primitive`
   - `run_starts_not_held`
+  - `no_other_resumable_run`
 - Emits: `TurnRunStarted`
 - To: `Running`
 
@@ -11246,6 +11274,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `turn_resettable`
   - `run_starts_not_held`
+  - `no_other_resumable_run`
 - Emits: `TurnRunStarted`
 - To: `Running`
 
@@ -11263,6 +11292,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `turn_resettable`
   - `run_starts_not_held`
+  - `no_other_resumable_run`
 - Emits: `TurnRunStarted`
 - To: `Running`
 
@@ -12303,7 +12333,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `SuspendRunForStopRunningToIdle`
 - From: `Running`
-- On: `SuspendRunForStop`(run_id, durable_session)
+- On: `SuspendRunForStop`(run_id, durable_session, cause)
 - Guards:
   - `pre_run_phase_matches_idle`
   - `current_run_id_matches_binding`
@@ -12317,12 +12347,40 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `SuspendRunForStopRunningToAttached`
 - From: `Running`
-- On: `SuspendRunForStop`(run_id, durable_session)
+- On: `SuspendRunForStop`(run_id, durable_session, cause)
 - Guards:
   - `pre_run_phase_matches_attached`
   - `current_run_id_matches_binding`
   - `run_turn_not_terminal`
   - `requeue_stop`
+  - `durable_session`
+  - `no_other_resumable_run`
+  - `live_boundary_joins_retained_and_applied`
+- Emits: `RunSuspendedForStop`
+- To: `Attached`
+
+### `SuspendRunForStopFenceGapRunningToIdle`
+- From: `Running`
+- On: `SuspendRunForStop`(run_id, durable_session, cause)
+- Guards:
+  - `pre_run_phase_matches_idle`
+  - `current_run_id_matches_binding`
+  - `run_turn_not_terminal`
+  - `fence_gap_outside_unregister`
+  - `durable_session`
+  - `no_other_resumable_run`
+  - `live_boundary_joins_retained_and_applied`
+- Emits: `RunSuspendedForStop`
+- To: `Idle`
+
+### `SuspendRunForStopFenceGapRunningToAttached`
+- From: `Running`
+- On: `SuspendRunForStop`(run_id, durable_session, cause)
+- Guards:
+  - `pre_run_phase_matches_attached`
+  - `current_run_id_matches_binding`
+  - `run_turn_not_terminal`
+  - `fence_gap_outside_unregister`
   - `durable_session`
   - `no_other_resumable_run`
   - `live_boundary_joins_retained_and_applied`
@@ -28951,6 +29009,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `ClassifyStopInputDisposition`(input_id, durability, directed, objective_bound)
 - Guards:
   - `kept_recovered_input`
+  - `not_a_stopped_resumable_run_input`
 - Emits: `StopInputDispositionClassified`
 - To: `Initializing`
 
@@ -28959,6 +29018,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `ClassifyStopInputDisposition`(input_id, durability, directed, objective_bound)
 - Guards:
   - `kept_recovered_input`
+  - `not_a_stopped_resumable_run_input`
 - Emits: `StopInputDispositionClassified`
 - To: `Idle`
 
@@ -28967,6 +29027,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `ClassifyStopInputDisposition`(input_id, durability, directed, objective_bound)
 - Guards:
   - `kept_recovered_input`
+  - `not_a_stopped_resumable_run_input`
 - Emits: `StopInputDispositionClassified`
 - To: `Attached`
 
@@ -28975,6 +29036,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `ClassifyStopInputDisposition`(input_id, durability, directed, objective_bound)
 - Guards:
   - `kept_recovered_input`
+  - `not_a_stopped_resumable_run_input`
 - Emits: `StopInputDispositionClassified`
 - To: `Running`
 
@@ -28983,6 +29045,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `ClassifyStopInputDisposition`(input_id, durability, directed, objective_bound)
 - Guards:
   - `kept_recovered_input`
+  - `not_a_stopped_resumable_run_input`
 - Emits: `StopInputDispositionClassified`
 - To: `Retired`
 
@@ -28991,6 +29054,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `ClassifyStopInputDisposition`(input_id, durability, directed, objective_bound)
 - Guards:
   - `kept_recovered_input`
+  - `not_a_stopped_resumable_run_input`
 - Emits: `StopInputDispositionClassified`
 - To: `Stopped`
 

@@ -4374,7 +4374,9 @@ impl MeerkatMachine {
     /// authority, and a stale binding can never unregister a same-SessionId
     /// replacement. The rollback keeps every input the registration recovered
     /// from the store, unless the registration served live work, in which
-    /// case the machine stops every input
+    /// case the machine stops every input. Either way, the inputs bound to a
+    /// run the registration marked resumable whose stop was asked end as
+    /// stopped, so no later start resumes that run
     /// ([`PreparedSessionMaterialization::rollback_now`](super::PreparedSessionMaterialization::rollback_now)).
     pub async fn unregister_session_if_bindings_owned_registration(
         &self,
@@ -4463,8 +4465,10 @@ impl MeerkatMachine {
     /// materialization rollback) keeps every input the registration
     /// recovered from the store exactly as the store holds it, Stop ends
     /// every non-terminal input. The machine records a requested Keep as
-    /// Stop once the registration served live work. A claim on a registration
-    /// it did not insert only clears the claim, and the disposition is unused.
+    /// Stop once the registration served live work. Either way, the inputs
+    /// bound to a run the registration marked resumable whose stop was asked
+    /// end as stopped. A claim on a registration it did not insert only
+    /// clears the claim, and the disposition is unused.
     pub(super) async fn abort_prepared_session_materialization_claim(
         &self,
         session_id: &SessionId,
@@ -6092,7 +6096,9 @@ impl MeerkatMachine {
     /// The candidate never served, so its unregister asks to keep every input
     /// the registration recovered from the store, as a pending attachment's
     /// abort does; the machine grants that only while the registration served
-    /// no live work, and stops every input otherwise.
+    /// no live work, and stops every input otherwise. Either way, the inputs
+    /// bound to a run the registration marked resumable whose stop was asked
+    /// end as stopped.
     async fn cleanup_unserved_executor_attachment(
         self: &Arc<Self>,
         witness: &RuntimeExecutorAttachmentWitness,
@@ -8172,7 +8178,8 @@ impl MeerkatMachine {
     /// attachment never served, so its unregister asks to keep every input
     /// the registration recovered from the store; the machine grants that
     /// only while the registration served no live work, and stops every
-    /// input otherwise.
+    /// input otherwise. Either way, the inputs bound to a run the
+    /// registration marked resumable whose stop was asked end as stopped.
     pub(super) async fn abort_pending_executor_attachment(
         self: &Arc<Self>,
         witness: RuntimeExecutorAttachmentWitness,
@@ -8959,32 +8966,6 @@ impl MeerkatMachine {
         observed_teardown_slot: Arc<crate::runtime_loop::RuntimeLoopTeardownSlot>,
         disposition: crate::runtime_loop::RuntimeLoopTeardownDisposition,
     ) -> Result<RuntimeLoopTeardownWait, RuntimeDriverError> {
-        if disposition.requires_unregister() {
-            // A teardown slot is attachment-local while the runtime epoch is
-            // registration-local.  A dead A can be repaired by B without
-            // changing epochs, so an unlocked slot sample followed by an
-            // epoch-only unregister would let A tear down B.  Acquire M first,
-            // revalidate the exact slot under it, and retain M until Draining
-            // is committed.  Once Draining is visible no replacement can enter
-            // before the owned unregister saga takes over.
-            let Some(observed_epoch) = self
-                .begin_unregister_for_observed_runtime_loop_if_current(
-                    session_id,
-                    &observed_teardown_slot,
-                )
-                .await?
-            else {
-                return Ok(RuntimeLoopTeardownWait::Settled);
-            };
-            return self
-                .join_or_start_unregister_teardown_for_watcher(
-                    session_id,
-                    &observed_epoch,
-                    self.unregister_caller_wait_deadline(),
-                )
-                .await;
-        }
-
         let (
             generated_draining,
             observed_epoch,
@@ -9028,6 +9009,12 @@ impl MeerkatMachine {
             // answered now, typed, instead of waiting on a registration that
             // detached. The inputs stay durably admitted and run once the
             // session's runtime reloads.
+            //
+            // Checked before an unregister the loop's disposition asks for
+            // (a run whose completed terminal was recorded before it failed):
+            // that unregister would stage Draining over a registration whose
+            // durable writes the gate refuses, and the reload would then join
+            // the unregister instead of reloading.
             completions.lock().await.fail_all_waiters(
                 crate::completion::CompletionWaitError::AuthorityUnavailable(format!(
                     "the runtime of session {session_id} stopped serving before this input completed and must reload ({reload_required}); the input stays durably admitted and runs once the runtime reloads, so do not resubmit it"
@@ -9037,6 +9024,31 @@ impl MeerkatMachine {
                 evidence_digest: None,
                 reason: reload_required.to_string(),
             });
+        }
+        if disposition.requires_unregister() {
+            // A teardown slot is attachment-local while the runtime epoch is
+            // registration-local.  A dead A can be repaired by B without
+            // changing epochs, so an unlocked slot sample followed by an
+            // epoch-only unregister would let A tear down B.  Acquire M first,
+            // revalidate the exact slot under it, and retain M until Draining
+            // is committed.  Once Draining is visible no replacement can enter
+            // before the owned unregister saga takes over.
+            let Some(observed_epoch) = self
+                .begin_unregister_for_observed_runtime_loop_if_current(
+                    session_id,
+                    &observed_teardown_slot,
+                )
+                .await?
+            else {
+                return Ok(RuntimeLoopTeardownWait::Settled);
+            };
+            return self
+                .join_or_start_unregister_teardown_for_watcher(
+                    session_id,
+                    &observed_epoch,
+                    self.unregister_caller_wait_deadline(),
+                )
+                .await;
         }
         if generated_draining {
             return self
@@ -9074,9 +9086,10 @@ impl MeerkatMachine {
             // An attachment that never served is retired by its exact startup
             // or pending owner, whose unregister keeps every input the
             // registration recovered from the store, unless the registration
-            // served live work. A cleanup claimed here first would run the
-            // stop before that unregister began, and so end those inputs as
-            // stopped.
+            // served live work (the inputs bound to a run it marked resumable
+            // whose stop was asked end as stopped either way). A cleanup
+            // claimed here first would run the stop before that unregister
+            // began, and so end those inputs as stopped.
             return Ok(RuntimeLoopTeardownWait::Settled);
         } else {
             // A spontaneous loop exit can hand off a machine-managed executor

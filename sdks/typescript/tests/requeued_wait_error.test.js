@@ -20,7 +20,8 @@ test("a requeued wait keeps its code and whole data", () => {
   const error = meerkatErrorFromJsonRpcCode(
     -32003,
     undefined,
-    "the input stays queued across the runtime stop and runs on the next start",
+    "the input stays queued across the runtime stop or store fence gap and runs when the " +
+      "fence is re-acquired or at the next start",
     REQUEUED,
   );
   assert.ok(error instanceof MeerkatError);

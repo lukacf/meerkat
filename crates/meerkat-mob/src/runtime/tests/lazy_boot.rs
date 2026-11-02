@@ -83,17 +83,51 @@ impl CrashedMob {
         wire: bool,
         stop: bool,
     ) -> Self {
+        Self::spawn_and_crash(definition, label, members, wire, stop, None).await
+    }
+
+    /// [`Self::new`] (crashed, not stopped) with each member's comms runtime
+    /// keyed per session under `identity_root`, as the agent factory keys
+    /// it: a member that moves to another session presents another
+    /// endpoint. The mock's default keys a runtime by its comms name, which
+    /// a member's every session shares, so such a move keeps the endpoint.
+    async fn keyed_per_session(
+        label: &str,
+        members: usize,
+        wire: bool,
+        identity_root: &std::path::Path,
+    ) -> Self {
+        Self::spawn_and_crash(
+            sample_definition(),
+            label,
+            members,
+            wire,
+            false,
+            Some(identity_root),
+        )
+        .await
+    }
+
+    async fn spawn_and_crash(
+        definition: MobDefinition,
+        label: &str,
+        members: usize,
+        wire: bool,
+        stop: bool,
+        identity_root: Option<&std::path::Path>,
+    ) -> Self {
         let definition = with_unique_mob_id(definition, label);
         let service = Arc::new(MockSessionService::new());
         let _adapter = service.enable_runtime_adapter();
         let storage = MobStorage::in_memory();
         let events = storage.events.clone();
         let runtime_metadata = storage.runtime_metadata.clone();
-        let handle = MobBuilder::new(definition, storage)
-            .with_session_service(service.clone())
-            .create()
-            .await
-            .expect("create the mob");
+        let mut builder =
+            MobBuilder::new(definition, storage).with_session_service(service.clone());
+        if let Some(identity_root) = identity_root {
+            builder = builder.with_member_comms_identity_root(identity_root);
+        }
+        let handle = builder.create().await.expect("create the mob");
         let mut sessions = Vec::with_capacity(members);
         for index in 0..members {
             let identity = worker(index);
@@ -1564,6 +1598,201 @@ async fn a_lost_session_of_a_born_member_ends_broken_and_is_not_recreated() {
         mob.materialized().await.is_empty(),
         "no session was created in the lost one's place: {:?}",
         mob.materialized().await
+    );
+}
+
+/// The peer id of the endpoint MobMachine holds current for `identity`.
+fn current_peer_id(handle: &MobHandle, identity: &AgentIdentity) -> Option<String> {
+    handle
+        .machine_state_watch_rx
+        .borrow()
+        .member_peer_endpoints
+        .get(&dsl::AgentIdentity::from_domain(identity))
+        .map(|endpoint| endpoint.peer_id.0.clone())
+}
+
+/// The peer ids of the endpoints MobMachine keeps as `identity`'s history.
+fn prior_peer_ids(handle: &MobHandle, identity: &AgentIdentity) -> Vec<String> {
+    handle
+        .machine_state_watch_rx
+        .borrow()
+        .member_prior_peer_endpoints
+        .get(&dsl::AgentIdentity::from_domain(identity))
+        .map(|endpoints| {
+            endpoints
+                .iter()
+                .map(|endpoint| endpoint.peer_id.0.clone())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
+}
+
+/// The peer ids `comms` trusts under `name`, sorted: one per trust row.
+async fn trusted_under_name(comms: &Arc<dyn CoreCommsRuntime>, name: &str) -> Vec<String> {
+    let mut peer_ids = comms
+        .peers()
+        .await
+        .into_iter()
+        .filter(|peer| peer.name.as_str() == name)
+        .map(|peer| peer.peer_id.to_string())
+        .collect::<Vec<_>>();
+    peer_ids.sort();
+    peer_ids
+}
+
+/// A peer message addressed to the peer id `to` alone.
+fn peer_message_to(to: &str) -> CommsCommand {
+    CommsCommand::PeerMessage {
+        objective_id: None,
+        content_taint: None,
+        to: PeerRoute::new(PeerId::parse(to).expect("a canonical peer id")),
+        body: "a message for the woken member".to_string(),
+        blocks: None,
+        handling_mode: HandlingMode::Queue,
+        in_reply_to: None,
+    }
+}
+
+/// A wake that moves a member to a successor session leaves a live peer one
+/// trust row for the member, at its new endpoint. The member's bound session
+/// is gone and an unbound session named for the member is listed, so its
+/// wake restores it on that successor, whose key is another endpoint.
+/// MobMachine keeps the old endpoint as the member's history, and the live
+/// peer, which trusted the dormant member's durable endpoint, drops it: a
+/// send to the new peer id is handed off, and one to the old peer id finds no
+/// trusted peer (`PeerNotFound`, which the comms tools answer as
+/// `peer_not_found_or_not_trusted`). The members are keyed per session, as
+/// the agent factory keys them: keyed by comms name, which the successor
+/// shares, nothing would migrate and the row would prove nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_wake_onto_a_successor_leaves_a_live_peer_one_row_for_the_member() {
+    let keys = tempfile::tempdir().expect("a comms identity root");
+    let mob = CrashedMob::keyed_per_session("wake-successor-trust", 2, true, keys.path()).await;
+    let handle = mob
+        .resume(mob.builder().with_member_comms_identity_root(keys.path()))
+        .await;
+    let moved = worker(0);
+    let peer = worker(1);
+    let moved_name = crate::runtime::actor::render_member_comms_name(
+        handle.mob_id().as_str(),
+        "worker",
+        moved.as_str(),
+    )
+    .expect("the moved member's comms name");
+
+    // The peer's wake trusts the dormant member's durable endpoint.
+    tokio::time::timeout(LAZY_STEP, handle.ensure_member_live(&peer))
+        .await
+        .expect("the peer's wake answers")
+        .expect("the peer wakes");
+    assert_eq!(
+        phase_of(&handle, &moved),
+        Some(dsl::MemberMaterializationPhase::Dormant)
+    );
+    let old_peer_id = current_peer_id(&handle, &moved).expect("the member's durable endpoint");
+    let peer_comms = mob
+        .service
+        .comms_runtime(&mob.session(1))
+        .await
+        .expect("the peer's comms runtime");
+    assert_eq!(
+        trusted_under_name(&peer_comms, &moved_name).await,
+        vec![old_peer_id.clone()],
+        "the peer trusts the dormant member's durable endpoint"
+    );
+
+    // The member's bound session is gone, and an unbound session named for
+    // the member is persisted and listed, not live.
+    mob.service.delete_persisted_session(&mob.session(0)).await;
+    let successor = mob
+        .service
+        .create_session(CreateSessionRequest {
+            injected_context: Vec::new(),
+            model: "claude-sonnet-4-5".to_string(),
+            prompt: "successor".to_string().into(),
+            system_prompt: meerkat_core::SystemPromptOverride::Inherit,
+            max_tokens: None,
+            event_tx: None,
+            build: Some(meerkat_core::service::SessionBuildOptions {
+                comms_name: Some(moved_name.clone()),
+                mob_member_binding: None,
+                ..Default::default()
+            }),
+            initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
+            deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
+            labels: None,
+        })
+        .await
+        .expect("persist a successor session")
+        .session_id;
+    let listed = mob
+        .service
+        .live_session_data
+        .read()
+        .await
+        .get(&successor)
+        .cloned()
+        .expect("the successor's session data");
+    MobSessionService::discard_live_session(mob.service.as_ref(), &successor)
+        .await
+        .expect("discard the successor's live session");
+    mob.service
+        .live_session_data
+        .write()
+        .await
+        .insert(successor.clone(), listed);
+
+    tokio::time::timeout(LAZY_STEP, handle.ensure_member_live(&moved))
+        .await
+        .expect("the member's wake answers")
+        .expect("the member wakes on its successor");
+    assert_eq!(
+        handle.resolve_bridge_session_id(&moved).await,
+        Some(successor.clone()),
+        "the wake moved the member to its successor"
+    );
+    let new_peer_id = mob
+        .service
+        .comms_runtime(&successor)
+        .await
+        .expect("the successor's comms runtime")
+        .peer_id()
+        .expect("the successor's peer id")
+        .to_string();
+    assert_ne!(
+        new_peer_id, old_peer_id,
+        "the successor's key is another endpoint"
+    );
+    assert_eq!(
+        current_peer_id(&handle, &moved),
+        Some(new_peer_id.clone()),
+        "MobMachine holds the successor's endpoint current"
+    );
+    assert_eq!(
+        prior_peer_ids(&handle, &moved),
+        vec![old_peer_id.clone()],
+        "MobMachine keeps the old endpoint as the member's history"
+    );
+
+    let peer_comms = mob
+        .service
+        .comms_runtime(&mob.session(1))
+        .await
+        .expect("the peer's comms runtime");
+    assert_eq!(
+        trusted_under_name(&peer_comms, &moved_name).await,
+        vec![new_peer_id.clone()],
+        "the peer trusts the member once, at its new endpoint, and no longer at its old one"
+    );
+    let to_new = CoreCommsRuntime::send(&*peer_comms, peer_message_to(&new_peer_id)).await;
+    assert!(
+        matches!(to_new, Ok(SendReceipt::PeerMessageSent { .. })),
+        "a send to the new peer id is handed off: {to_new:?}"
+    );
+    let to_old = CoreCommsRuntime::send(&*peer_comms, peer_message_to(&old_peer_id)).await;
+    assert!(
+        matches!(to_old, Err(SendError::PeerNotFound(_))),
+        "a send to the old peer id finds no trusted peer: {to_old:?}"
     );
 }
 

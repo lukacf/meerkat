@@ -130,7 +130,11 @@ timestamp_ms, payload}`; `payload.type` is the event type.
   `model_fallback_committed`, `model_fallback_target_failed`,
   `request_reasoning_lowered`, `provider_cache_breakpoints_discarded`,
   `turn_usage_accounting_unmeasured`,
-  `turn_usage_accounting_identity_disputed`, `operation_observation_failed`.
+  `turn_usage_accounting_identity_disputed`, `operation_observation_failed`,
+  `tool_results_bounded_for_request` (a request carried the run's own tool
+  results shortened for it only: `run_id`, `results` with `tool_use_id`,
+  `tool_name`, `kept_bytes`, `total_bytes`, and `axis` `request_bytes` or
+  `context_window`; the transcript keeps them whole).
 - Reasoning: `run_started.request_reasoning` appears only when a host set a
   request-local reasoning preference (in 0.9.0 only GPT Live delegated member
   turns; no public turn input accepts it; `minimal` is refused). It holds the

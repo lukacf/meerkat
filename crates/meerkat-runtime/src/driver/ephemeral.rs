@@ -5292,7 +5292,8 @@ impl EphemeralRuntimeDriver {
     /// yet, which stays Staged or Applied and bound to its run) keeps its
     /// phase and payload and is durably marked with the stop's time and max
     /// age. An input it keeps (the rollback of a materialization that never
-    /// served keeps every input its registration recovered) stays exactly
+    /// served keeps every input its registration recovered, but the inputs
+    /// bound to a run marked resumable whose stop was asked) stays exactly
     /// as the store holds it, with no mark. Every other input ends as
     /// stopped. Returns the retained and kept inputs.
     ///
@@ -9443,6 +9444,7 @@ mod tests {
     #[tokio::test]
     async fn a_suspended_run_is_marked_before_the_stop_classifies_and_keeps_its_inputs() {
         use crate::meerkat_machine::driver::{DriverEntry, machine_suspend_run_for_stop};
+        let requeue_stop = mm_dsl::RunSuspensionCause::RequeueStop;
 
         let (driver, durable_id, ephemeral_id, staged_id) =
             stop_classification_fixture("suspend-before-classification").await;
@@ -9451,7 +9453,8 @@ mod tests {
             .expect("the fixture's run is current");
         let mut entry = DriverEntry::Ephemeral(driver);
         assert!(
-            !machine_suspend_run_for_stop(&mut entry, &run_id, true).expect("the machine answers"),
+            !machine_suspend_run_for_stop(&mut entry, &run_id, true, requeue_stop)
+                .expect("the machine answers"),
             "no requeue stop is draining"
         );
         let DriverEntry::Ephemeral(mut driver) = entry else {
@@ -9464,11 +9467,13 @@ mod tests {
         );
         let mut entry = DriverEntry::Ephemeral(driver);
         assert!(
-            !machine_suspend_run_for_stop(&mut entry, &run_id, false).expect("the machine answers"),
+            !machine_suspend_run_for_stop(&mut entry, &run_id, false, requeue_stop)
+                .expect("the machine answers"),
             "a session without durable rounds is not suspended"
         );
         assert!(
-            machine_suspend_run_for_stop(&mut entry, &run_id, true).expect("the machine answers")
+            machine_suspend_run_for_stop(&mut entry, &run_id, true, requeue_stop)
+                .expect("the machine answers")
         );
         let DriverEntry::Ephemeral(mut driver) = entry else {
             panic!("the entry stays ephemeral");
@@ -9500,6 +9505,192 @@ mod tests {
                 .unwrap()
                 .stop_requeue
                 .is_some()
+        );
+    }
+
+    /// A stop recorded on a run a store fence gap suspended stands at a
+    /// graceful requeue stop that begins later: the stop classifier keeps
+    /// none of the stopped run's inputs (they end under the stop) and still
+    /// keeps the session's eligible queued prompt. The resumed-run plan
+    /// refuses the stopped run as well (it mirrors `ResumeRun`'s
+    /// `run_not_stopped`). Before, the requeue stop kept the stopped run's
+    /// input bound for the next start, whose fresh machine resumed the run.
+    /// Unrun: written while Cargo is not run.
+    #[tokio::test]
+    async fn a_requeue_stop_keeps_no_input_of_a_suspended_run_whose_stop_was_asked() {
+        use crate::meerkat_machine::driver::{DriverEntry, machine_suspend_run_for_stop};
+        use crate::meerkat_machine::dsl::command_capabilities::AuthorizedResumedRun;
+
+        let (mut driver, durable_id, _ephemeral_id, staged_id) =
+            stop_classification_fixture("stopped-suspended-run-requeue").await;
+        let run_id = driver
+            .current_run_id()
+            .expect("the fixture's run is current");
+        let dsl_run = mm_dsl::RunId::from_domain(&run_id);
+        driver
+            .dsl_apply(
+                mm_dsl::MeerkatMachineInput::StartConversationRun {
+                    run_id: dsl_run.clone(),
+                    primitive_kind: mm_dsl::TurnPrimitiveKind::ConversationTurn,
+                    admitted_content_shape: mm_dsl::ContentShape::Conversation,
+                    vision_enabled: false,
+                    image_tool_results_enabled: false,
+                    max_extraction_retries: 0,
+                },
+                "StartConversationRun",
+            )
+            .expect("the run's turn starts");
+        let mut entry = DriverEntry::Ephemeral(driver);
+        assert!(
+            machine_suspend_run_for_stop(
+                &mut entry,
+                &run_id,
+                true,
+                mm_dsl::RunSuspensionCause::FenceGap
+            )
+            .expect("the machine answers"),
+            "a fence gap suspends the run"
+        );
+        let DriverEntry::Ephemeral(mut driver) = entry else {
+            panic!("the entry stays ephemeral");
+        };
+        driver
+            .dsl_apply(
+                mm_dsl::MeerkatMachineInput::StopCurrentRunForRun {
+                    run_id: dsl_run.clone(),
+                },
+                "StopCurrentRunForRun",
+            )
+            .expect("a stop of the suspended run is recorded");
+        assert!(
+            driver.with_dsl_state(|state| {
+                AuthorizedResumedRun::authorize_resumed_run_from_state(state, &dsl_run).is_none()
+            }),
+            "the resumed-run plan refuses a run whose stop was asked"
+        );
+
+        begin_unregister_with(
+            &mut driver,
+            mm_dsl::UnregisterQueuedInputsDisposition::Requeue,
+            900_000,
+        );
+        let active = driver.active_input_ids();
+        let retained = driver.stop_retained_input_ids(&active).unwrap();
+        assert!(
+            !retained.contains(&staged_id),
+            "the stopped run's input is not kept for the next start: {retained:?}"
+        );
+        assert!(
+            retained.contains(&durable_id),
+            "the eligible queued prompt is still kept: {retained:?}"
+        );
+    }
+
+    /// A store fence gap suspends the in-flight run outside any stop: the
+    /// run stops being current and is marked resumable, and its staged input
+    /// keeps its phase, its run and its stage attempts, with no stop mark.
+    /// A requeue stop's cause is refused outside a stop, a fence gap is
+    /// refused while the registration drains for its unregister, and a
+    /// session without durable rounds is not suspended. Unrun: written while
+    /// Cargo is not run.
+    #[tokio::test]
+    async fn a_fence_gap_suspends_the_run_outside_a_stop_and_keeps_its_input_bound() {
+        use crate::meerkat_machine::driver::{DriverEntry, machine_suspend_run_for_stop};
+        let fence_gap = mm_dsl::RunSuspensionCause::FenceGap;
+
+        let (mut driver, _durable_id, _ephemeral_id, staged_id) =
+            stop_classification_fixture("fence-gap-suspension").await;
+        let run_id = driver
+            .current_run_id()
+            .expect("the fixture's run is current");
+        // The gap comes once the run's turn is under way.
+        driver
+            .dsl_apply(
+                mm_dsl::MeerkatMachineInput::StartConversationRun {
+                    run_id: mm_dsl::RunId::from_domain(&run_id),
+                    primitive_kind: mm_dsl::TurnPrimitiveKind::ConversationTurn,
+                    admitted_content_shape: mm_dsl::ContentShape::Conversation,
+                    vision_enabled: false,
+                    image_tool_results_enabled: false,
+                    max_extraction_retries: 0,
+                },
+                "StartConversationRun",
+            )
+            .expect("the run's turn starts");
+        assert_eq!(
+            driver.with_dsl_state(|state| state.turn_phase),
+            mm_dsl::TurnPhase::ApplyingPrimitive,
+            "the run's turn is under way when the gap comes"
+        );
+        let attempts_before = driver.with_dsl_state(|state| state.input_attempt_counts.clone());
+        let mut entry = DriverEntry::Ephemeral(driver);
+        assert!(
+            !machine_suspend_run_for_stop(
+                &mut entry,
+                &run_id,
+                true,
+                mm_dsl::RunSuspensionCause::RequeueStop
+            )
+            .expect("the machine answers"),
+            "a requeue stop's suspension needs a stop that requeues"
+        );
+        assert!(
+            !machine_suspend_run_for_stop(&mut entry, &run_id, false, fence_gap)
+                .expect("the machine answers"),
+            "a session without durable rounds is not suspended"
+        );
+        assert!(
+            machine_suspend_run_for_stop(&mut entry, &run_id, true, fence_gap)
+                .expect("the machine answers"),
+            "a fence gap suspends the run outside any stop"
+        );
+        let DriverEntry::Ephemeral(driver) = entry else {
+            panic!("the entry stays ephemeral");
+        };
+        assert_eq!(driver.current_run_id(), None);
+        assert_eq!(
+            driver.with_dsl_state(|state| state.resumable_run_id.clone()),
+            Some(mm_dsl::RunId::from_domain(&run_id))
+        );
+        assert_eq!(
+            driver.with_dsl_state(|state| state.turn_phase),
+            mm_dsl::TurnPhase::Ready,
+            "the resume can start the run's turn again"
+        );
+        assert_eq!(
+            driver.input_phase(&staged_id),
+            Some(InputLifecycleState::Staged)
+        );
+        assert_eq!(driver.input_last_run_id(&staged_id), Some(run_id));
+        assert_eq!(
+            driver.with_dsl_state(|state| state.input_attempt_counts.clone()),
+            attempts_before,
+            "no stage attempt is spent on the suspension"
+        );
+        assert!(
+            driver
+                .ledger
+                .get(&staged_id)
+                .unwrap()
+                .stop_requeue
+                .is_none(),
+            "a fence gap is no stop: the input carries no stop mark"
+        );
+
+        let (mut driver, _, _, _) = stop_classification_fixture("fence-gap-while-draining").await;
+        let run_id = driver
+            .current_run_id()
+            .expect("the fixture's run is current");
+        begin_unregister_with(
+            &mut driver,
+            mm_dsl::UnregisterQueuedInputsDisposition::Requeue,
+            900_000,
+        );
+        let mut entry = DriverEntry::Ephemeral(driver);
+        assert!(
+            !machine_suspend_run_for_stop(&mut entry, &run_id, true, fence_gap)
+                .expect("the machine answers"),
+            "a draining registration suspends only for its stop"
         );
     }
 

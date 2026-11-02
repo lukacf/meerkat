@@ -1249,7 +1249,8 @@ impl RuntimeStore for SpiRuntimeStore {
 
     /// The realm's self-fence: its window closes when a renew fails or the
     /// last successful acquire or renew started more than the lease minus
-    /// the host-declared margin ago.
+    /// the host-declared margin ago, and a dispatch waits on a closed one
+    /// for the realm's re-acquire.
     fn self_fence(&self) -> Option<Arc<dyn meerkat_core::host_store::SelfFence>> {
         Some(Arc::clone(&self.realm) as Arc<dyn meerkat_core::host_store::SelfFence>)
     }

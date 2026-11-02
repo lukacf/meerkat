@@ -24,7 +24,8 @@ def test_a_requeued_wait_keeps_its_code_and_whole_data() -> None:
     error = meerkat_error_from_jsonrpc_code(
         -32003,
         None,
-        "the input stays queued across the runtime stop and runs on the next start",
+        "the input stays queued across the runtime stop or store fence gap and runs when the "
+        "fence is re-acquired or at the next start",
         REQUEUED,
     )
     assert type(error) is MeerkatError

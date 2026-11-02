@@ -65,4 +65,9 @@ pub const KNOWN_AGENT_EVENT_TYPES: &[&str] = &[
     // `run_started`: its run id, the cursor's round and where it continues
     // (`tools_pending` or `awaiting_model`).
     "run_resumed",
+    // One model request carried some of its run's own tool results shortened
+    // for that request only: the run id, each result's call (`tool_use_id`,
+    // `tool_name`) with `kept_bytes` and `total_bytes`, and the limit it did
+    // not fit with them whole (`axis`: `request_bytes` or `context_window`).
+    "tool_results_bounded_for_request",
 ];

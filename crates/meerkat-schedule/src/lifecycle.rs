@@ -4418,6 +4418,266 @@ mod tests {
         Ok(())
     }
 
+    /// Revise `schedule` (a trigger change, so a new revision), supersede
+    /// `outstanding` at that revision through the occurrence authority, and
+    /// feed the acknowledgements back the way a store commit does.
+    fn revise_superseding(
+        schedule: Schedule,
+        outstanding: Vec<Occurrence>,
+    ) -> Result<(Schedule, Vec<OccurrenceSupersessionAck>), Box<dyn std::error::Error>> {
+        let at_utc = Utc::now();
+        let due_offset_minutes = i64::try_from(schedule.revision.0)? + 1;
+        let revised = Schedule::apply(
+            Some(schedule.clone()),
+            ScheduleLifecycleInput::Update {
+                request: UpdateScheduleRequest {
+                    expected_revision: Some(schedule.revision),
+                    trigger: Some(TriggerSpec::Once {
+                        due_at_utc: at_utc + Duration::minutes(due_offset_minutes),
+                    }),
+                    ..UpdateScheduleRequest::default()
+                },
+                at_utc,
+            },
+        )?
+        .into_schedule();
+        let mut acks = Vec::new();
+        for occurrence in outstanding {
+            let (_superseded, _effects, occurrence_acks) = occurrence
+                .apply(OccurrenceLifecycleInput::Supersede {
+                    superseded_by_revision: revised.revision,
+                    at_utc,
+                })?
+                .into_parts_with_supersession_feedback();
+            acks.extend(occurrence_acks);
+        }
+        let schedule = crate::store::apply_supersession_feedback(revised, acks.clone())?;
+        Ok((schedule, acks))
+    }
+
+    /// A late acknowledgement of an occurrence the latest revise superseded
+    /// (that supersession's own acknowledgement, delivered again) keeps
+    /// today's answer: accepted, effectless, no revision bump, the id still
+    /// recorded. The latest supersession's ids are the only ones recorded.
+    #[test]
+    fn late_ack_for_the_latest_supersession_keeps_its_answer()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let schedule = sample_schedule();
+        let first = Occurrence::planned_from_schedule(
+            &schedule,
+            OccurrenceOrdinal(0),
+            Utc::now() + Duration::hours(1),
+        )?;
+        let (schedule, _first_acks) = revise_superseding(schedule, vec![first])?;
+        let second = Occurrence::planned_from_schedule(
+            &schedule,
+            OccurrenceOrdinal(1),
+            Utc::now() + Duration::hours(2),
+        )?;
+        let second_id = second.occurrence_id.clone();
+        let (schedule, second_acks) = revise_superseding(schedule, vec![second])?;
+        assert_eq!(second_acks.len(), 1);
+        assert_eq!(
+            schedule.superseded_ack_ids,
+            BTreeSet::from([second_id.clone()]),
+            "the second revise must drop the first supersession's acknowledgement"
+        );
+
+        let late = Schedule::apply(
+            Some(schedule.clone()),
+            ScheduleLifecycleInput::ConfirmOccurrencesSuperseded {
+                ack: second_acks[0].clone(),
+            },
+        )?;
+        assert!(late.effects().is_empty());
+        assert!(!late.revision_bumped());
+        let after = late.into_effectless_schedule()?;
+        assert_eq!(
+            after, schedule,
+            "a repeated acknowledgement of the latest supersession changes nothing"
+        );
+        assert!(after.superseded_ack_ids.contains(&second_id));
+        validate_schedule_machine_projection(&after)?;
+        Ok(())
+    }
+
+    /// A late acknowledgement of an occurrence two revisions back, whose id a
+    /// later revise dropped, ends in the documented answer: it is accepted as
+    /// an idempotent no-op through the schedule authority and through the
+    /// store's feedback seam, and the id stays dropped. The schedule copy and
+    /// the machine copy stay equal, and the schedule still round-trips.
+    #[test]
+    fn late_ack_for_a_dropped_occurrence_is_an_idempotent_noop()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut schedule = sample_schedule();
+        let mut acks_by_revise = Vec::new();
+        let mut latest_id = None;
+        for ordinal in 0..3_u64 {
+            let occurrence = Occurrence::planned_from_schedule(
+                &schedule,
+                OccurrenceOrdinal(ordinal),
+                Utc::now() + Duration::hours(i64::try_from(ordinal)? + 1),
+            )?;
+            latest_id = Some(occurrence.occurrence_id.clone());
+            let (revised, acks) = revise_superseding(schedule, vec![occurrence])?;
+            assert_eq!(acks.len(), 1);
+            acks_by_revise.push(acks);
+            schedule = revised;
+        }
+        let latest_id = latest_id.ok_or("three revises supersede three occurrences")?;
+        assert_eq!(schedule.revision, ScheduleRevision(4));
+        assert_eq!(
+            schedule.superseded_ack_ids,
+            BTreeSet::from([latest_id]),
+            "after three revises the set holds the third supersession's acknowledgement only"
+        );
+
+        let dropped = acks_by_revise[0][0].clone();
+        assert_eq!(dropped.superseding_revision(), ScheduleRevision(2));
+        let late = Schedule::apply(
+            Some(schedule.clone()),
+            ScheduleLifecycleInput::ConfirmOccurrencesSuperseded {
+                ack: dropped.clone(),
+            },
+        )?;
+        assert!(late.effects().is_empty());
+        assert!(!late.revision_bumped());
+        let after = late.into_effectless_schedule()?;
+        assert_eq!(after, schedule, "the late acknowledgement changes nothing");
+        assert!(!after.superseded_ack_ids.contains(dropped.occurrence_id()));
+        validate_schedule_machine_projection(&after)?;
+
+        let fed = crate::store::apply_supersession_feedback(
+            schedule.clone(),
+            vec![dropped, acks_by_revise[1][0].clone()],
+        )?;
+        assert_eq!(
+            fed, schedule,
+            "late acknowledgements through the store's feedback seam change nothing"
+        );
+
+        let round_trip: Schedule = serde_json::from_value(serde_json::to_value(&after)?)?;
+        assert_eq!(round_trip.superseded_ack_ids, after.superseded_ack_ids);
+        assert_eq!(round_trip.machine_state, after.machine_state);
+        Ok(())
+    }
+
+    /// Delete supersedes like a revise: it drops the earlier supersessions'
+    /// ids and records its own acknowledgements. A late acknowledgement of a
+    /// dropped id changes nothing on the deleted schedule, and a repeated
+    /// delete keeps the delete's own acknowledgements.
+    #[test]
+    fn delete_drops_earlier_acks_and_records_its_own() -> Result<(), Box<dyn std::error::Error>> {
+        let schedule = sample_schedule();
+        let first = Occurrence::planned_from_schedule(
+            &schedule,
+            OccurrenceOrdinal(0),
+            Utc::now() + Duration::hours(1),
+        )?;
+        let (schedule, first_acks) = revise_superseding(schedule, vec![first])?;
+        let second = Occurrence::planned_from_schedule(
+            &schedule,
+            OccurrenceOrdinal(1),
+            Utc::now() + Duration::hours(2),
+        )?;
+        let second_id = second.occurrence_id.clone();
+
+        let at_utc = Utc::now();
+        let deleted = Schedule::apply(Some(schedule), ScheduleLifecycleInput::Delete { at_utc })?
+            .into_schedule();
+        assert_eq!(deleted.phase, SchedulePhase::Deleted);
+        assert!(
+            deleted.superseded_ack_ids.is_empty(),
+            "delete must drop the revise's acknowledgements, found {:?}",
+            deleted.superseded_ack_ids
+        );
+        validate_schedule_machine_projection(&deleted)?;
+
+        let (_superseded, _effects, delete_acks) = second
+            .apply(OccurrenceLifecycleInput::Supersede {
+                superseded_by_revision: deleted.revision,
+                at_utc,
+            })?
+            .into_parts_with_supersession_feedback();
+        let deleted = crate::store::apply_supersession_feedback(deleted, delete_acks)?;
+        assert_eq!(
+            deleted.superseded_ack_ids,
+            BTreeSet::from([second_id.clone()])
+        );
+
+        let late = crate::store::apply_supersession_feedback(deleted.clone(), first_acks)?;
+        assert_eq!(late, deleted);
+
+        let repeated = Schedule::apply(
+            Some(deleted),
+            ScheduleLifecycleInput::Delete { at_utc: Utc::now() },
+        )?;
+        assert!(repeated.effects().is_empty());
+        assert_eq!(
+            repeated.schedule().superseded_ack_ids,
+            BTreeSet::from([second_id])
+        );
+        Ok(())
+    }
+
+    /// A schedule stored before the bound (0.9.8 and earlier) carries the
+    /// acknowledgements of every earlier supersession in both copies. It
+    /// loads unchanged, with no migration, and its next revise or its delete
+    /// drops them; the schedule copy follows the machine copy through the
+    /// drop.
+    #[test]
+    fn stored_schedule_with_a_large_ack_set_loads_and_its_next_revise_drops_it()
+    -> Result<(), Box<dyn std::error::Error>> {
+        const STORED_ACKS: usize = 256;
+        const STORED_REVISION: u64 = 41;
+        let mut row = serde_json::to_value(sample_schedule())?;
+        let stored_ids: Vec<String> = (0..STORED_ACKS)
+            .map(|_| Uuid::now_v7().to_string())
+            .collect();
+        row["revision"] = serde_json::json!(STORED_REVISION);
+        row["machine_state"]["revision"] = serde_json::json!(STORED_REVISION);
+        row["superseded_ack_ids"] = serde_json::json!(stored_ids);
+        row["machine_state"]["superseded_ack_ids"] = serde_json::json!(stored_ids);
+
+        let stored: Schedule = serde_json::from_value(row)?;
+        assert_eq!(stored.revision, ScheduleRevision(STORED_REVISION));
+        assert_eq!(
+            stored
+                .superseded_ack_ids
+                .iter()
+                .map(ToString::to_string)
+                .collect::<BTreeSet<_>>(),
+            stored_ids.iter().cloned().collect::<BTreeSet<_>>(),
+            "the stored set loads unchanged"
+        );
+        assert_eq!(stored.machine_state.superseded_ack_ids.len(), STORED_ACKS);
+        validate_schedule_machine_projection(&stored)?;
+
+        let (revised, acks) = revise_superseding(stored.clone(), Vec::new())?;
+        assert!(acks.is_empty());
+        assert_eq!(revised.revision, ScheduleRevision(STORED_REVISION + 1));
+        assert!(
+            revised.superseded_ack_ids.is_empty(),
+            "the next revise must drop the stored acknowledgements, found {}",
+            revised.superseded_ack_ids.len()
+        );
+        assert!(revised.machine_state.superseded_ack_ids.is_empty());
+        validate_schedule_machine_projection(&revised)?;
+
+        let deleted = Schedule::apply(
+            Some(stored),
+            ScheduleLifecycleInput::Delete { at_utc: Utc::now() },
+        )?
+        .into_schedule();
+        assert!(
+            deleted.superseded_ack_ids.is_empty(),
+            "the next delete must drop the stored acknowledgements, found {}",
+            deleted.superseded_ack_ids.len()
+        );
+        validate_schedule_machine_projection(&deleted)?;
+        Ok(())
+    }
+
     #[test]
     fn config_only_update_emits_no_machine_effects() -> Result<(), Box<dyn std::error::Error>> {
         let schedule = sample_schedule();

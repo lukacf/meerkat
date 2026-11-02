@@ -1832,6 +1832,73 @@ impl MeerkatMachine {
         }
     }
 
+    /// Stop and suspend the run of a direct SessionService turn that a store
+    /// fence gap met: the session store's writer stayed stopped through the
+    /// run's whole dispatch wait (or a round commit's), no other writer was
+    /// found, and the session task dropped the turn there, with no terminal
+    /// and no closing write. The stop is recorded on the run
+    /// (`StopCurrentRunForRun`) and the machine suspends it for the gap
+    /// (`SuspendRunForStop` with the `FenceGap` cause), which keeps that stop:
+    /// the run stops being current and is marked resumable, it never resumes,
+    /// and the runtime loop, woken here, settles it as cancelled once the
+    /// store's fence is restored. Until then no direct run starts beside it.
+    /// Nothing is written: a write would meet the gap.
+    ///
+    /// `false`, with the stop possibly recorded, when the machine refuses
+    /// the suspension: a registration that drains for its unregister
+    /// suspends only for its stop, and a run with a published live-boundary
+    /// join, or one that is no longer current, is not suspended.
+    pub async fn stop_and_suspend_service_turn_for_fence_gap(
+        &self,
+        turn_identity: &super::MachineServiceTurnIdentity,
+        run_id: &RunId,
+    ) -> Result<bool, RuntimeDriverError> {
+        let session_id = &turn_identity.session_id;
+        let driver = Arc::clone(&turn_identity.driver);
+        let _mutation_guard = self
+            .lock_current_session_driver_gate(session_id, &driver)
+            .await?;
+        let wake_tx = {
+            let sessions = self.sessions.read().await;
+            let Some(entry) = sessions.get(session_id).filter(|entry| {
+                Arc::ptr_eq(&entry.driver, &driver)
+                    && entry.generated_service_turn_binding_open(session_id)
+            }) else {
+                return Err(RuntimeDriverError::NotReady {
+                    state: RuntimeState::Destroyed,
+                });
+            };
+            entry.wake_sender()
+        };
+        let suspended = {
+            let mut d = driver.lock().await;
+            if Self::stage_dsl_transition_on_authority(
+                &d.shared_dsl_authority(),
+                crate::meerkat_machine::dsl::MeerkatMachineInput::StopCurrentRunForRun {
+                    run_id: crate::meerkat_machine::dsl::RunId::from_domain(run_id),
+                },
+                "StopCurrentRunForRun",
+            )
+            .is_err()
+            {
+                return Ok(false);
+            }
+            let durable_session = matches!(&*d, DriverEntry::Persistent(_));
+            crate::meerkat_machine::driver::machine_suspend_run_for_stop(
+                &mut d,
+                run_id,
+                durable_session,
+                crate::meerkat_machine::dsl::RunSuspensionCause::FenceGap,
+            )?
+        };
+        if suspended && let Some(wake_tx) = wake_tx {
+            // The loop's resumable lap waits for the fence, then settles the
+            // stopped run. A full buffer already holds a wake.
+            let _ = wake_tx.try_send(());
+        }
+        Ok(suspended)
+    }
+
     /// Compare-and-remove the reconstructable in-memory registration inserted
     /// by archive preparation itself.
     ///

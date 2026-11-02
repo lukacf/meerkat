@@ -702,8 +702,9 @@ impl ShutdownOptions {
     /// [`QueuedInputsOnShutdown::Requeue`] keeps only the eligible queued
     /// inputs: an input bound to an objective, such as a member's kickoff,
     /// still ends as stopped. [`QueuedInputsOnShutdown::Stop`] is the
-    /// behavior before 0.9.5. [`QueuedInputsOnShutdown::Keep`] changes no
-    /// input it finds, for a host that served its members nothing.
+    /// behavior before 0.9.5. [`QueuedInputsOnShutdown::Keep`] keeps the
+    /// inputs it finds as they are, but those of a run whose stop was asked,
+    /// for a host that served its members nothing.
     #[must_use]
     pub fn with_queued_inputs(mut self, queued_inputs: QueuedInputsOnShutdown) -> Self {
         self.queued_inputs = queued_inputs;
@@ -770,7 +771,7 @@ pub enum QueuedInputsOnShutdown {
     /// running turn is cancelled, before its runtime stops; that input then
     /// belongs to the cancelled run and is not kept.
     Requeue(RequeueMaxAge),
-    /// Change nothing of the members' work the Shutdown finds, for the next
+    /// Keep the members' work the Shutdown finds as it is, for the next
     /// start: the runtime unregister's
     /// [`UnregisterQueuedInputs::Keep`](meerkat_runtime::UnregisterQueuedInputs::Keep).
     /// For a host that boots over a store another host serves and must hand
@@ -787,9 +788,12 @@ pub enum QueuedInputsOnShutdown {
     /// staged input whose run cannot continue to queued; the Keep leaves
     /// that as it is.) An
     /// autonomous member's kickoff stays open too, as under [`Self::Requeue`].
-    /// A member whose registration served live work is stopped instead, as
-    /// under [`Self::Stop`]: the keep is exact only for work this process
-    /// never touched.
+    /// The exception is a run the registration marked resumable whose stop
+    /// was asked before the Shutdown (a stop of the member's run needs no
+    /// executor): the inputs bound to it end as stopped, and the next start
+    /// does not resume it. A member whose registration served live work is
+    /// stopped instead, as under [`Self::Stop`]: the keep is exact only for
+    /// work this process never touched.
     Keep,
 }
 

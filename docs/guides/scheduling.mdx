@@ -417,6 +417,15 @@ Occurrence phase is more detailed:
 - `superseded`
 - `delivery_failed`
 
+An update that changes the trigger, the target or a policy is a revise: the
+schedule's `revision` goes up, and every outstanding occurrence of an older
+revision, claimed and in-flight ones included, becomes `superseded`. A delete
+does the same at its own revision. Each superseded occurrence is acknowledged
+back to the schedule, and the schedule's `superseded_ack_ids` lists the
+occurrences the latest revise or delete superseded; the next revise or delete
+replaces the list. A delivery that finishes after its occurrence was
+superseded is recorded on that occurrence and leaves the schedule as it is.
+
 Use `schedule/occurrences` or `GET /schedules/{id}/occurrences` to inspect what actually fired and why.
 
 ## Executor Lease And Crash Recovery
@@ -501,7 +510,11 @@ When scheduling is exposed inside a running agent, the canonical tool names are:
 
 These are distinct from the host APIs (`schedule/*` over RPC and `/schedules/*` over REST).
 
-A schedule with many occurrences has a long history, and `meerkat_schedule_occurrences` with only `schedule_id` returns all of it in full. To read less, pass `occurrence_id` (that one occurrence with all of its delivery receipts), `due_after_utc` / `due_before_utc` (inclusive, RFC 3339 with any offset), `phase`, `limit` (default 100 once any of these options or `view: "summary"` is given, maximum 500; `view: "full"` alone keeps the full unpaged reply) with the opaque `cursor` from `page.next_cursor`, or `view: "summary"` (no trigger, target action, prompt or machine state, and summarized receipts). To cover one local day, pass its first instant and its last instant, for example `2026-03-29T00:00:00+01:00` and `2026-03-29T23:59:59.999+02:00`. A receipt with stage `completed` means delivery finished, not that the target's work succeeded.
+Every schedule tool that returns one schedule (`meerkat_schedule_get`, `meerkat_schedule_create`, `meerkat_schedule_update`, `meerkat_schedule_pause`, `meerkat_schedule_resume` and `meerkat_schedule_delete`) returns it in the public shape of `schedule/get`: the full trigger and target, policies, planning state and configuration, without the persistence machine state.
+
+`meerkat_schedule_list` returns one page of summaries, in creation order: `schedule_id`, `name`, `phase`, `revision`, `trigger` (only its `type` and `timezone`, with `trigger_chars`, when its serialized form is over 1,024 bytes), the target's kind and ids (each cut to its first 200 characters), the first 160 characters of the action text (`action_head`, with its full length in `action_chars`), and the created and updated times. Deleted schedules are not listed. The page holds 50 schedules unless `limit` asks for another size, at most 200 (a larger `limit` returns 200, and `page.has_more` says more follow); pass the reply's opaque `page.next_cursor` as `cursor` to continue. A `limit` of 0, a negative or non-integer `limit`, or a cursor this listing did not write is refused. Read a schedule's whole action, policies and options with `meerkat_schedule_get`. The host listings (`schedule/list` over RPC and `GET /schedules` over REST) are unchanged: every schedule, whole. Bulk readers use them and the typed occurrence listing (`schedule/occurrences`, `GET /schedules/{id}/occurrences`) rather than the agent tools.
+
+A schedule with many occurrences has a long history, and `meerkat_schedule_occurrences` returns it one page of summaries at a time, in due order: 50 occurrences unless `limit` asks for another size, at most 200 (a larger `limit` returns 200), with the opaque `cursor` from `page.next_cursor` to continue. A summary (`view: "summary"`, the default for a page) carries the occurrence's identity, timing and delivery state, the target's kind and ids, the last receipt summarized, and the first 160 characters of a runtime outcome or failure detail (`runtime_outcome.detail_head`, `failure_detail_head`): no trigger, target action or prompt. `view: "full"` returns each occurrence whole, with its trigger and target once. To read less, pass `occurrence_id` (that one occurrence whole, with all of its delivery receipts; add `view: "summary"` to shorten it), `due_after_utc` / `due_before_utc` (inclusive, RFC 3339 with any offset) or `phase`. To cover one local day, pass its first instant and its last instant, for example `2026-03-29T00:00:00+01:00` and `2026-03-29T23:59:59.999+02:00`. A receipt with stage `completed` means delivery finished, not that the target's work succeeded.
 
 Agent-authored `spawn_helper` and `fork_helper` schedules capture the creator's
 effective tool-access policy at creation time. This prevents a scheduled

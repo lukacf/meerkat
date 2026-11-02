@@ -129,7 +129,7 @@ truncates a value and never commits part of a change.
 | `HostStoreError` | Meaning | Applied |
 |------------------|---------|---------|
 | `Conflict { scope, current }` | The store refused the batch at commit: `scope` is at version `current` (`None`: it does not exist), not at the update's `previous`. Only a store that meets obligation 4 at commit answers it | Nothing |
-| `FencedOut { current }` | A token higher than the caller's exists. Answered by `renew_fence`, and by `commit` in a store that meets obligation 5 at commit | Nothing |
+| `FencedOut { current }` | A token higher than the caller's exists. Answered by `renew_fence`, and by `commit` (obligation 5) | Nothing |
 | `Indeterminate(detail)` | The outcome is unknown: the batch may or may not have landed | Unknown |
 | `Invalid(detail)` | The request breaks a limit or is malformed | Nothing |
 | `Unavailable(detail)` | The store cannot be reached or cannot serve now | Nothing |
@@ -193,11 +193,17 @@ updates or transactions.
 5. **Fencing.** After a token is acquired, a batch carrying a lower token
    whose commit point comes later never becomes visible. Every batch whose
    commit point comes before the acquire stays visible, whether or not its
-   writer saw the acknowledgement: a load after the acquire shows it. Valid
-   ways:
-   - refuse the batch at commit with `FencedOut`;
-   - at load, ignore every batch whose token is below the highest token
-     acquired before its commit point.
+   writer saw the acknowledgement: a load after the acquire shows it. The
+   store refuses such a batch at commit with `FencedOut`. The writer learns
+   there that another process holds the realm: Core ends its runs, and
+   tells the callers waiting on them that the store keeps their inputs for
+   the new owner.
+
+   A store that only hides such a batch at load (ignoring every batch whose
+   token is below the highest token acquired before its commit point) keeps
+   loads consistent, but answers the stale writer's commit `Ok`, so that
+   writer's own answers can claim work the realm never shows. Such a store
+   is outside this contract.
 
    The commit point is the store's own server-assigned commit order (for
    example its marker's commit time), never a writer's clock. Commit points
@@ -214,9 +220,10 @@ updates or transactions.
 9. **Listing.** A scope is listed once its creating batch is visible, and
    not after its deletion.
 
-A store meets obligations 4 and 5 either at commit, answering `Conflict` or
-`FencedOut`, or at load, by the fixed rules above. Core treats both the same
-way: the fenced or conflicting batch is not part of the realm.
+A store meets obligation 4 either at commit, answering `Conflict`, or at
+load, by the fixed rules above, and Core treats both the same way: the
+conflicting batch is not part of the realm. It meets obligation 5 at
+commit, answering `FencedOut`.
 
 ## Fence Leases
 
@@ -299,14 +306,27 @@ The store relies on Core keeping these rules:
   again. It never resumes on a later renew. The rule is Core's: a store
   answers a renew of the current token even when the holder's lease lapsed,
   and refuses only a token that was superseded or that it never issued.
+  A stop is a pause, not a failure: a run that reaches a model call or a
+  tool call while the holder is stopped waits for that fresh acquire, for
+  at most one self-fence window plus the acquire's own timeouts (its two
+  acquires and its renew, 35 s at the default timing), trying again once
+  per renew interval while it fails, and goes on once it resumed the
+  holder. A round commit refused while the holder is stopped waits the same
+  way and is written again, once, when the acquire succeeds. When no
+  acquire succeeds in that time and no other process shows up (a fence
+  gap), the runtime suspends the run with its inputs bound to it and
+  resumes it once the fence is back; the gap may last as long as the store
+  does not answer. Only another process ends the run and the session's live
+  state here: one an acquire finds, or one a renew or a commit answered
+  `FencedOut` reveals, wherever Core meets it first.
 - **Self-fencing.** The holder fences itself on its own clock: it makes no
   model call, dispatches nothing and commits nothing unless its last
   successful acquire or renew started less than the self-fence window ago.
   It checks the clock before each commit, before each model call, and right
   before each tool call starts, after the round's pre-tool hooks; a call
-  refused there never starts, and the round commits none of its results. A
-  check takes no store request; the per-round path sends no fence request to
-  the store.
+  refused there never starts, and the round commits none of its results.
+  While the window is open, a check takes no store request; the per-round
+  path sends no fence request to the store.
 - **Takeover wait.** After an acquire that supersedes a live holder, the new
   holder waits out `FenceGrant::superseded_lease` before it makes a model
   call or dispatches anything. By then the old holder has fenced itself: the
@@ -479,7 +499,15 @@ on the database's clock, in a row of their own.
 
 - **Commit.** Append the batch with one pending-stream batch commit, or
   append its rows tagged with the commit id and close them with a marker
-  row.
+  row. Before the commit (or the marker), read the fence rows and answer
+  `FencedOut` when a token higher than the batch's was acquired
+  (obligation 5). A takeover that lands between that read and the commit
+  is not seen there: the load below still drops the batch, and Core's
+  writer learns of the takeover at its next renew, within one renew
+  interval, but answers it gave in between can claim that batch. That
+  window does not meet obligation 5, which asks that the commit itself be
+  refused: keep it short, or make the fence check and the commit one
+  transaction (a write conditional on the fence row).
 - **Retries.** A streaming insert can fail in transport under a burst of
   commits. Retry it a bounded number of times with jittered backoff.
   Per-row insert ids, and a load that keeps one copy of a repeated commit id
@@ -526,7 +554,9 @@ realm, which starts empty:
   store's clock or by waiting.
 
 The chapter kills a process by dropping its handle, with any commit it has in
-flight. Where an obligation can be met at commit or at load, it accepts both.
+flight. Where an obligation can be met at commit or at load, it accepts both;
+for obligation 5, a store that fences only at load passes the chapter but is
+outside the contract.
 Its rows run in order:
 
 | Row | What it checks |

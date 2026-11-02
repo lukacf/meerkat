@@ -2262,6 +2262,14 @@ pub struct Schedule {
     pub missing_target_policy: MissingTargetPolicy,
     pub next_occurrence_ordinal: OccurrenceOrdinal,
     pub planning_cursor_utc: Option<DateTime<Utc>>,
+    /// The occurrences whose supersession by the latest revise or delete
+    /// (the one at `revision`) the occurrence authority acknowledged. The
+    /// generated ScheduleLifecycleMachine owns the set: each revise or delete
+    /// drops the ids of earlier supersessions, and an acknowledgement that
+    /// does not answer `revision` is accepted without being recorded. A set
+    /// stored before this bound loads unchanged and is dropped at the next
+    /// revise or delete of a live schedule; a schedule deleted before the
+    /// bound keeps the set it was deleted with.
     pub superseded_ack_ids: BTreeSet<OccurrenceId>,
     pub config: ScheduleConfig,
 }

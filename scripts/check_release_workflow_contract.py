@@ -24,8 +24,9 @@ rustdoc, or letting a dispatch save a cache (also inside a local action, or
 from another workflow) that a token-holding or attesting job restores all
 fail and name the defect.
 
-Only the Python standard library is used, so the doctor and its contract test
-run wherever `python3` does.
+Only the Python standard library is used, plus `node` for the one
+actions/github-script step it runs (require_ci_green's exact-commit CI
+lookup), so the doctor and its contract test run wherever both do.
 """
 
 from __future__ import annotations
@@ -36,6 +37,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -190,6 +192,32 @@ class Step:
                 body.append(candidate)
             width = min((_indent(line) for line in body if line.strip()), default=0)
             return "\n".join(line[width:] for line in body).strip("\n") + "\n"
+        return ""
+
+    def raw_with(self, name: str) -> str:
+        """The `with.<name>` block scalar (a github-script `script`) as the
+        action receives it, relative indentation and blank lines kept; empty
+        when the step has none."""
+        for index, line in enumerate(self.lines):
+            match = KEY_LINE.match(line)
+            if not (match and len(match.group(1)) == 8 and match.group(2) == "with"):
+                continue
+            for inner_index in range(index + 1, len(self.lines)):
+                inner = self.lines[inner_index]
+                if inner.strip() and _indent(inner) <= 8:
+                    break
+                key = KEY_LINE.match(inner)
+                if not (key and len(key.group(1)) == 10 and key.group(2) == name):
+                    continue
+                if not re.fullmatch(r"\s*\|[+-]?\s*", key.group(3)):
+                    return ""
+                body: list[str] = []
+                for candidate in self.lines[inner_index + 1 :]:
+                    if candidate.strip() and _indent(candidate) <= 10:
+                        break
+                    body.append(candidate)
+                width = min((_indent(line) for line in body if line.strip()), default=0)
+                return "\n".join(line[width:] for line in body).strip("\n") + "\n"
         return ""
 
     @property
@@ -1225,15 +1253,365 @@ def _check_attestation_refs(ci_block: list[str]) -> list[str]:
     return violations
 
 
-def _run_evidence_step(step: Step, evidence: dict, run: dict) -> tuple[int, str]:
+# require_ci_green's step that waits for the release commit's CI run: an
+# actions/github-script step whose outputs name the run and attempt whose
+# attestation a tag then verifies.
+CI_RUN_STEP_ID = "ci_run"
+GITHUB_SCRIPT_ACTION = "actions/github-script@"
+# The release commit the lookup scenarios wait for (release_ref's `sha`).
+LOOKUP_RELEASE_SHA = "1" * 40
+LOOKUP_MODES = {
+    True: "the API applying its own filters",
+    False: "the API ignoring every filter, so that only the script's own filter binds",
+}
+
+# Runs a github-script body as actions/github-script v7 does: the body of an
+# AsyncFunction(require, github, context, core) whose `require` is v7's
+# wrapper (src/wrap-require.ts). Each scenario runs in its own checkout
+# against a stub of the runs API that serves the scenario's runs for the
+# current poll (its last list stays), either applying the API's filters
+# (workflow, branch, event, head_sha, status) or none of them, and a fake
+# clock that each poll's sleep advances, so a lookup that never finds a run
+# it accepts reaches its timeout at once.
+# Usage: node <harness> <script> <scenarios.json> <results.json>.
+_GITHUB_SCRIPT_HARNESS = r"""
+"use strict";
+const fs = require("fs");
+const path = require("path");
+
+const [scriptPath, scenariosPath, resultsPath] = process.argv.slice(2);
+const body = fs.readFileSync(scriptPath, "utf8");
+const scenarios = JSON.parse(fs.readFileSync(scenariosPath, "utf8"));
+const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor;
+const wrapRequire = new Proxy(require, {
+  apply: (target, thisArg, [moduleID]) => {
+    if (moduleID.startsWith(".")) {
+      return target.apply(thisArg, [path.resolve(moduleID)]);
+    }
+    const modulePath = target.resolve.apply(thisArg, [moduleID, { paths: [process.cwd()] }]);
+    return target.apply(thisArg, [modulePath]);
+  },
+});
+
+// A lookup still polling after this many API calls reaches no verdict.
+const MAX_CALLS = 50000;
+const START = 1000000;
+const clock = { now: START, sleeps: 0 };
+Date.now = () => clock.now;
+globalThis.setTimeout = (callback, ms, ...args) => {
+  clock.now += Number(ms) || 0;
+  clock.sleeps += 1;
+  setImmediate(() => callback(...args));
+  return 0;
+};
+
+function served(scenario, params) {
+  const { timeline } = scenario;
+  const runs = timeline[Math.min(clock.sleeps, timeline.length - 1)];
+  if (!scenario.filtered) return runs;
+  return runs.filter(
+    (run) =>
+      params.workflow_id === "ci.yml" &&
+      (params.branch === undefined || run.head_branch === params.branch) &&
+      (params.event === undefined || run.event === params.event) &&
+      (params.head_sha === undefined || run.head_sha === params.head_sha) &&
+      (params.status === undefined || run.status === params.status || run.conclusion === params.status)
+  );
+}
+
+async function judge(scenario) {
+  process.chdir(scenario.dir);
+  clock.now = START;
+  clock.sleeps = 0;
+  let calls = 0;
+  const result = { outputs: {}, failed: null, warnings: [], error: null, hung: false };
+  const core = {
+    debug: () => {},
+    info: () => {},
+    notice: () => {},
+    error: () => {},
+    warning: (message) => result.warnings.push(String(message)),
+    setFailed: (message) => {
+      if (result.failed === null) result.failed = String(message);
+    },
+    setOutput: (name, value) => {
+      result.outputs[name] = String(value);
+    },
+  };
+  const listWorkflowRuns = async (params) => {
+    calls += 1;
+    if (calls > MAX_CALLS) {
+      result.hung = true;
+      throw new Error(`no verdict after ${MAX_CALLS} API calls`);
+    }
+    const runs = served(scenario, params).map((run) => ({ ...run }));
+    return { data: { total_count: runs.length, workflow_runs: runs } };
+  };
+  const github = { rest: { actions: { listWorkflowRuns } } };
+  const context = { repo: { owner: "example", repo: "meerkat" } };
+  try {
+    await new AsyncFunction("require", "github", "context", "core", body)(wrapRequire, github, context, core);
+  } catch (error) {
+    result.error = String((error && error.stack) || error);
+  }
+  return result;
+}
+
+(async () => {
+  const results = [];
+  for (const scenario of scenarios) results.push(await judge(scenario));
+  fs.writeFileSync(resultsPath, JSON.stringify(results));
+})().catch((error) => {
+  process.stderr.write(`${(error && error.stack) || error}\n`);
+  process.exit(1);
+});
+"""
+
+
+@dataclass(frozen=True)
+class _LookupScenario:
+    """One situation the exact-commit CI lookup judges: the runs of ci.yml
+    the API lists at each poll (the last list stays), the checkout's
+    Cargo.toml, and the run id and attempt the lookup must select, or None
+    when it must fail."""
+
+    label: str
+    timeline: tuple[tuple[dict, ...], ...]
+    selects: tuple[str, str] | None
+    cargo: str = f'[workspace.package]\nversion = "{BINDING_VERSION}"\n'
+    # The run is cancelled first: the lookup must say how to re-run it.
+    warns: bool = False
+
+
+def _ci_run(run_id: int, branch: str, **overrides: object) -> dict:
+    """A run of ci.yml as the runs API lists it; by default a successful
+    push run at the release commit on `branch`."""
+    return {
+        "id": run_id,
+        "run_attempt": 1,
+        "head_sha": LOOKUP_RELEASE_SHA,
+        "head_branch": branch,
+        "event": "push",
+        "status": "completed",
+        "conclusion": "success",
+        "html_url": f"https://example.invalid/runs/{run_id}",
+        **overrides,
+    }
+
+
+def _lookup_scenarios() -> list[_LookupScenario]:
+    release_branch = f"release/{BINDING_VERSION}"
+    pending = {"status": "in_progress", "conclusion": None}
+    scenarios = [
+        _LookupScenario(
+            f"the successful CI run of {label}",
+            ((_ci_run(1 + index, github_ref_name(ref)),),),
+            (str(1 + index), "1"),
+        )
+        for index, (label, ref) in enumerate(TRUSTED_PUSHES)
+    ]
+    scenarios += [
+        _LookupScenario(
+            f"the successful CI run of a push to {release_branch} while the main run of that commit "
+            "is still in progress",
+            ((_ci_run(3, "main", **pending), _ci_run(4, release_branch)),),
+            ("4", "1"),
+        ),
+        _LookupScenario(
+            f"a push run on {release_branch} that is missing, then in progress, then successful",
+            ((), (_ci_run(5, release_branch, **pending),), (_ci_run(5, release_branch),)),
+            ("5", "1"),
+        ),
+        _LookupScenario(
+            f"a cancelled push run on {release_branch} whose re-run succeeds",
+            (
+                (_ci_run(6, release_branch, conclusion="cancelled"),),
+                (_ci_run(6, release_branch, run_attempt=2, **pending),),
+                (_ci_run(6, release_branch, run_attempt=2),),
+            ),
+            ("6", "2"),
+            warns=True,
+        ),
+        _LookupScenario(
+            f"the successful CI run of a push to {release_branch}, the workspace version following "
+            "other tables",
+            ((_ci_run(7, release_branch),),),
+            ("7", "1"),
+            cargo=(
+                "[workspace]\nmembers = []\n\n"
+                f'[workspace.package]\nedition = "2024"\nversion = "{BINDING_VERSION}"\n\n'
+                '[workspace.dependencies]\nversion = "9.9.9"\n'
+            ),
+        ),
+    ]
+    scenarios += [
+        _LookupScenario(
+            f"the successful CI run of {label}",
+            ((_ci_run(10 + index, github_ref_name(ref)),),),
+            None,
+        )
+        for index, (label, ref) in enumerate(UNTRUSTED_PUSHES)
+    ]
+    scenarios += [
+        _LookupScenario(
+            f"a successful dispatch run on {release_branch}",
+            ((_ci_run(20, release_branch, event="workflow_dispatch"),),),
+            None,
+        ),
+        _LookupScenario(
+            f"a successful pull_request run on {release_branch}",
+            ((_ci_run(21, release_branch, event="pull_request"),),),
+            None,
+        ),
+        _LookupScenario(
+            f"a successful push run on {release_branch} at another commit",
+            ((_ci_run(22, release_branch, head_sha="2" * 40),),),
+            None,
+        ),
+        _LookupScenario(
+            f"a failed push run on {release_branch}",
+            ((_ci_run(23, release_branch, conclusion="failure"),),),
+            None,
+        ),
+        _LookupScenario(
+            f"the successful CI run of a push to {release_branch} while the checked-out version is 9.9.9",
+            ((_ci_run(24, release_branch),),),
+            None,
+            cargo='[workspace.package]\nversion = "9.9.9"\n',
+        ),
+        _LookupScenario(
+            f"the successful CI run of a push to {release_branch} while the checked-out Cargo.toml "
+            "has no workspace version",
+            ((_ci_run(25, release_branch),),),
+            None,
+            cargo='[package]\nname = "binding"\nversion = "9.9.9"\n',
+        ),
+    ]
+    return scenarios
+
+
+def _run_github_script(step: Step, scenarios: list[dict]) -> list[dict]:
+    """Run an actions/github-script step's script once per scenario (its
+    `cargo`, `timeline` and `filtered`) in one node process, each in a
+    scratch checkout. One result per scenario: the outputs the script set,
+    its failure, its warnings, an error it threw, and whether it kept
+    polling."""
+    node = shutil.which("node")
+    if node is None:
+        raise ContractError(f"step `{step.name}` is a github-script step, and node is not on PATH to run it")
+    script = step.raw_with("script")
+    if not script.strip():
+        raise ContractError(f"step `{step.name}` has no `with.script` block to run")
+    context = EventContext(
+        label=TAG_PUSH.label,
+        event_name="push",
+        step_outputs={"release_ref.sha": LOOKUP_RELEASE_SHA, "release_ref.tree": "2" * 40},
+    )
+    env = {key: render_strict(value, context) for key, value in step.env.items()}
+    with tempfile.TemporaryDirectory(prefix="release-ci-lookup-") as scratch:
+        root = Path(scratch)
+        Path(root, "script.js").write_text(script, encoding="utf-8")
+        Path(root, "harness.cjs").write_text(_GITHUB_SCRIPT_HARNESS, encoding="utf-8")
+        plan = []
+        for index, scenario in enumerate(scenarios):
+            checkout = Path(root, f"checkout-{index}")
+            checkout.mkdir()
+            Path(checkout, "Cargo.toml").write_text(scenario["cargo"], encoding="utf-8")
+            plan.append({"dir": str(checkout), "filtered": scenario["filtered"], "timeline": scenario["timeline"]})
+        Path(root, "scenarios.json").write_text(json.dumps(plan), encoding="utf-8")
+        results = Path(root, "results.json")
+        try:
+            finished = subprocess.run(
+                [node, str(root / "harness.cjs"), str(root / "script.js"), str(root / "scenarios.json"), str(results)],
+                cwd=root,
+                env={**_runner_env(context), **env},
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=300,
+            )
+        except subprocess.TimeoutExpired:
+            raise ContractError(f"step `{step.name}`'s script did not finish its scenarios in 300 seconds") from None
+        if finished.returncode != 0 or not results.exists():
+            raise ContractError(
+                f"cannot run step `{step.name}`'s script under node: "
+                + " | ".join(line for line in (finished.stderr + finished.stdout).splitlines() if line.strip())
+            )
+        return json.loads(results.read_text(encoding="utf-8"))
+
+
+def _check_ci_run_lookup(ci_block: list[str]) -> list[str]:
+    """require_ci_green waits for CI of the release commit on a trusted push.
+
+    Its `ci_run` step must select a successful push run of ci.yml at exactly
+    the release commit on main or on release/<version>, the version read
+    from the checked-out Cargo.toml, and fail on every other run: another
+    version's release branch or a near miss of this one, another commit, a
+    pull request, a dispatch or a failed run. The step runs under node as
+    actions/github-script v7 runs it, against a stub of the runs API and a
+    fake clock: once with the API applying its own filters, and once with an
+    API that ignores them, where the script's own filter alone must bind.
+    """
+    steps = [step for step in job_steps(ci_block) if step.fields.get("id") == CI_RUN_STEP_ID]
+    if len(steps) != 1:
+        return [f"job `{CI_GREEN_JOB}` has {len(steps)} steps with `id: {CI_RUN_STEP_ID}`"]
+    step = steps[0]
+    violations: list[str] = []
+    if not step_runs(step, TAG_PUSH):
+        violations.append(f"step `{step.name}` does not run on {TAG_PUSH.label}")
+    if not step.fields.get("uses", "").startswith(GITHUB_SCRIPT_ACTION):
+        violations.append(f"step `{step.name}` is not an `{GITHUB_SCRIPT_ACTION}` step, the only kind this check runs")
+        return violations
+    cases = [(scenario, filtered) for scenario in _lookup_scenarios() for filtered in (True, False)]
+    results = _run_github_script(
+        step,
+        [
+            {"cargo": scenario.cargo, "timeline": scenario.timeline, "filtered": filtered}
+            for scenario, filtered in cases
+        ],
+    )
+    if len(results) != len(cases):
+        raise ContractError(f"step `{step.name}`'s script judged {len(results)} of {len(cases)} scenarios")
+    for (scenario, filtered), result in zip(cases, results):
+        where = f"{scenario.label}, {LOOKUP_MODES[filtered]}"
+        if result["hung"]:
+            violations.append(f"step `{step.name}` keeps polling on {where} and reaches no verdict")
+            continue
+        failure = result["failed"] if result["failed"] is not None else result["error"]
+        if scenario.selects is None:
+            if failure is None:
+                violations.append(f"step `{step.name}` accepts {where}; {TRUSTED_ONLY}")
+            continue
+        if failure is not None:
+            violations.append(f"step `{step.name}` refuses {where}: {(failure.splitlines() or [''])[0]}")
+            continue
+        selected = (result["outputs"].get("run_id"), result["outputs"].get("run_attempt"))
+        if selected != scenario.selects:
+            violations.append(
+                f"step `{step.name}` selects run {selected[0]} attempt {selected[1]} on {where}; "
+                f"expected run {scenario.selects[0]} attempt {scenario.selects[1]}"
+            )
+        if scenario.warns and not result["warnings"]:
+            violations.append(
+                f"step `{step.name}` gives no warning on {where}, where re-running the cancelled run recovers"
+            )
+    return violations
+
+
+def _run_evidence_step(
+    step: Step, evidence: dict, run: dict, newer: tuple[dict, dict] | None = None
+) -> tuple[int, str]:
     """Run the semver gate's evidence step on one readiness artifact.
 
     The release tree is a scratch checkout of BINDING_VERSION. A stub `gh`
     answers the step's API reads as GitHub would: the unexpired artifact
     named after that tree, its zip (an attestation.json that `evidence`
     overrides, and the report it hashes) and the run that uploaded it, which
-    `run` overrides. `python3` is this interpreter, which has tomllib.
-    Returns the step's exit and log.
+    `run` overrides; the artifact listing names that run and its branch.
+    `newer`, an (evidence, run) pair, adds a second artifact of the same name
+    uploaded later, as a push of the same tree to another branch uploads it.
+    `python3` is this interpreter, which has tomllib. Returns the step's exit
+    and log.
     """
     env = {key: render_strict(value, TAG_PUSH) for key, value in step.env.items()}
     script = render_strict(step.raw_run, TAG_PUSH)
@@ -1265,50 +1643,62 @@ def _run_evidence_step(step: Step, evidence: dict, run: dict) -> tuple[int, str]
         git("add", "Cargo.toml")
         git("commit", "-q", "-m", "release")
         tree = git("rev-parse", "HEAD^{tree}")
+        commit = git("rev-parse", "HEAD")
 
         api = Path(scratch, "api")
         api.mkdir()
         report = b"semver report\n"
-        document = {
-            "schema_version": 1,
-            "repository": "example/meerkat",
-            "tree_sha": tree,
-            "commit_sha": git("rev-parse", "HEAD"),
-            "version": BINDING_VERSION,
-            "workflow": "Release semver readiness",
-            "workflow_run_id": "21",
-            "workflow_run_attempt": "1",
-            "event": "push",
-            "ref": "refs/heads/main",
-            "result": "success",
-            "report_sha256": hashlib.sha256(report).hexdigest(),
-            **evidence,
-        }
-        with zipfile.ZipFile(api / "evidence.zip", "w") as archive:
-            archive.writestr("attestation.json", json.dumps(document))
-            archive.writestr("report.txt", report)
-        listing = {
-            "total_count": 1,
-            "artifacts": [
+        uploads = [("2026-01-01T00:00:00Z", evidence, run)]
+        if newer is not None:
+            uploads.append(("2026-01-02T00:00:00Z", *newer))
+        artifacts: list[dict] = []
+        routes: list[str] = []
+        for index, (created_at, attested, producing) in enumerate(uploads):
+            artifact_id, run_id = 7 + index, 21 + index
+            document = {
+                "schema_version": 1,
+                "repository": "example/meerkat",
+                "tree_sha": tree,
+                "commit_sha": commit,
+                "version": BINDING_VERSION,
+                "workflow": "Release semver readiness",
+                "workflow_run_id": str(run_id),
+                "workflow_run_attempt": "1",
+                "event": "push",
+                "ref": "refs/heads/main",
+                "result": "success",
+                "report_sha256": hashlib.sha256(report).hexdigest(),
+                **attested,
+            }
+            with zipfile.ZipFile(api / f"evidence-{artifact_id}.zip", "w") as archive:
+                archive.writestr("attestation.json", json.dumps(document))
+                archive.writestr("report.txt", report)
+            producer = {
+                "id": run_id,
+                "name": "Release semver readiness",
+                "event": "push",
+                "head_branch": "main",
+                "conclusion": "success",
+                **producing,
+            }
+            Path(api, f"run-{run_id}.json").write_text(json.dumps(producer), encoding="utf-8")
+            # Newest first, as GitHub lists them.
+            artifacts.insert(
+                0,
                 {
-                    "id": 7,
+                    "id": artifact_id,
                     "name": f"{EVIDENCE_ARTIFACT_PREFIX}{tree}",
                     "expired": False,
-                    "created_at": "2026-01-01T00:00:00Z",
-                    "workflow_run": {"id": 21},
-                }
-            ],
-        }
+                    "created_at": created_at,
+                    "workflow_run": {"id": run_id, "head_branch": producer["head_branch"]},
+                },
+            )
+            routes.append(
+                f'  "api "*"/actions/artifacts/{artifact_id}/zip") cat "$api/evidence-{artifact_id}.zip" ;;\n'
+                f'  "api "*"/actions/runs/{run_id}") cat "$api/run-{run_id}.json" ;;\n'
+            )
+        listing = {"total_count": len(artifacts), "artifacts": artifacts}
         Path(api, "artifacts.json").write_text(json.dumps(listing), encoding="utf-8")
-        producer = {
-            "id": 21,
-            "name": "Release semver readiness",
-            "event": "push",
-            "head_branch": "main",
-            "conclusion": "success",
-            **run,
-        }
-        Path(api, "run.json").write_text(json.dumps(producer), encoding="utf-8")
 
         tools = Path(scratch, "bin")
         tools.mkdir()
@@ -1318,9 +1708,8 @@ def _run_evidence_step(step: Step, evidence: dict, run: dict) -> tuple[int, str]
             f"api={shlex.quote(str(api))}\n"
             'case "$1 $2" in\n'
             f'  "api "*"/actions/artifacts?name={EVIDENCE_ARTIFACT_PREFIX}{tree}"*) cat "$api/artifacts.json" ;;\n'
-            '  "api "*"/actions/artifacts/7/zip") cat "$api/evidence.zip" ;;\n'
-            '  "api "*"/actions/runs/21") cat "$api/run.json" ;;\n'
-            '  *) echo "unexpected gh call: $*" >&2; exit 2 ;;\n'
+            + "".join(routes)
+            + '  *) echo "unexpected gh call: $*" >&2; exit 2 ;;\n'
             "esac\n",
             encoding="utf-8",
         )
@@ -1352,7 +1741,9 @@ def _check_evidence_refs(step: Step) -> list[str]:
 
     Its attestation's ref and its run's branch must each be main or the
     release branch of the tag's version (a maintenance release); evidence
-    from another branch, a pull request or a dispatch never qualifies.
+    from another branch, a pull request or a dispatch never qualifies. Every
+    such push names its evidence after the tree, so newer evidence of the
+    same tree from another branch must not hide the trusted push's.
     """
     violations: list[str] = []
     for label, ref in TRUSTED_PUSHES:
@@ -1360,6 +1751,18 @@ def _check_evidence_refs(step: Step) -> list[str]:
         if status != 0:
             violations.append(
                 f"step `{step.name}` refuses the readiness evidence of {label}: "
+                + " | ".join(line for line in log.splitlines() if line.strip())
+            )
+        status, log = _run_evidence_step(
+            step,
+            {"ref": ref},
+            {"head_branch": github_ref_name(ref)},
+            newer=({"ref": "refs/heads/release/9.9.9"}, {"head_branch": "release/9.9.9"}),
+        )
+        if status != 0:
+            violations.append(
+                f"step `{step.name}` refuses the readiness evidence of {label} once a push of the same "
+                "tree to release/9.9.9 (another version's release branch) uploaded newer evidence: "
                 + " | ".join(line for line in log.splitlines() if line.strip())
             )
     refused = [
@@ -1407,7 +1810,9 @@ def check_tag_validation(text: str) -> list[str]:
     the tag validates with Cargo, and manual dispatches keep their lane. The
     attestation itself must come from a push to main or to the release
     branch of the tag's version (a maintenance release), never from another
-    branch, a pull request or a dispatch.
+    branch, a pull request or a dispatch, and so must the CI run
+    require_ci_green waits for: a successful push run of ci.yml at exactly
+    the release commit.
     """
     violations: list[str] = []
 
@@ -1483,6 +1888,10 @@ def check_tag_validation(text: str) -> list[str]:
     # 1b. The attestation itself comes from a push to main or to the release
     #     branch of the tag's version, and from nothing else.
     violations.extend(_check_attestation_refs(ci_block))
+
+    # 1c. So does the CI run it is read from: the lookup that waits for a
+    #     successful push run of ci.yml at exactly the release commit.
+    violations.extend(_check_ci_run_lookup(ci_block))
 
     # 2. The Cargo validation job is skipped exactly where the attestation
     #    stands in for it.

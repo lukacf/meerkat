@@ -755,6 +755,14 @@ impl SessionAgent for FactoryAgent {
                 ))
             })?;
         *self.agent.session_mut() = session;
+        // The live cadence follows the synced transcript: an input anchor or
+        // a context refusal the agent held belongs to the transcript the
+        // snapshot replaced.
+        self.agent.reload_compaction_cadence().map_err(|err| {
+            meerkat_core::error::AgentError::InternalError(format!(
+                "failed to reload the compaction cadence during live session sync: {err}"
+            ))
+        })?;
 
         Ok(())
     }

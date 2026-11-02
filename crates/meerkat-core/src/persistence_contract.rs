@@ -349,6 +349,15 @@ pub trait SessionCheckpointer: Send + Sync {
     /// made durable: a round's first commit that gets it fails the round
     /// before any of its tools runs. Only a session that never committed a
     /// boundary has no base to chain a provisional tail from.
+    ///
+    /// A round commit or a closing save refused while the writer of a fenced
+    /// store is stopped may wait for its re-acquire, as
+    /// [`Self::dispatch_fence_ready`] does, and be written again once. When
+    /// the writer stays stopped (a store fence gap), a checkpointer whose
+    /// host dispatched the run may have it suspended at a round commit
+    /// instead of answering, so the run resumes from its last round commit
+    /// and does the refused round again; a closing save, written after the
+    /// run's terminal, answers its refusal.
     async fn checkpoint_run(
         &self,
         session: &mut crate::Session,
@@ -395,23 +404,55 @@ pub trait SessionCheckpointer: Send + Sync {
         )))
     }
 
-    /// Whether this writer may still act on the session now.
+    /// Whether this writer may still act on the session now, read without
+    /// waiting.
     ///
     /// A checkpointer over a host store answers from its fence handle's
     /// self-fence window: past it, another process may already own the
-    /// session, and nothing this process dispatches may run. The agent asks
-    /// right before each model request, right after a tool round's first
-    /// commit, before any tool of the round is admitted, and right before
-    /// each tool call starts, because a pause between a commit and a
-    /// dispatch writes nothing that would meet the write path's own fence
-    /// check. An error stops the run there, as a refused commit does: no
-    /// later call of the round starts and the round's results are not
-    /// committed. Return the teardown-required class
+    /// session, and nothing this process dispatches may run. A refusal
+    /// returns the teardown-required class
     /// ([`AgentError::session_durable_projection_authority_unknown`]) so the
     /// live actor reloads instead of continuing on stale authority. Called
-    /// synchronously, with no I/O. The default allows.
+    /// synchronously, with no I/O. The agent asks
+    /// [`Self::dispatch_fence_ready`], whose default asks this check. The
+    /// default allows.
     fn dispatch_fence_check(&self) -> Result<(), AgentError> {
         Ok(())
+    }
+
+    /// Whether this writer may dispatch now, after any wait its fence needs.
+    ///
+    /// The agent awaits it right before each model request, right after a
+    /// tool round's first commit, before any tool of the round is admitted,
+    /// and right before each tool call starts, because a pause between a
+    /// commit and a dispatch writes nothing that would meet the write path's
+    /// own fence check. An error stops the run there, as a refused commit
+    /// does: no later call of the round starts and the round's results are
+    /// not committed.
+    ///
+    /// A checkpointer over a host store whose writer stopped (a renew failed
+    /// or timed out, or its window closed) waits here, bounded, for the
+    /// fresh acquire the writer makes before its next write
+    /// ([`crate::host_store::SelfFence::dispatch_window`]), and allows once
+    /// that acquire resumed the writer. When another writer is proven
+    /// ([`crate::host_store::SelfFence::lost`]), it refuses as
+    /// [`Self::dispatch_fence_check`] does, with the teardown class. When no
+    /// acquire resumed the writer within the wait and no other writer is
+    /// proven (a store fence gap), nothing is lost yet: `suspendable_run` is
+    /// the run asking, when the agent could suspend it (a run that takes
+    /// round commits and has not written its closing save), and a
+    /// checkpointer whose host dispatched that run may have it suspended
+    /// there instead of answering, so it resumes from its last round commit
+    /// (or starts again from its inputs, before its first) once the fence is
+    /// back. Otherwise it refuses with a retryable error, which requires no
+    /// teardown. The default asks [`Self::dispatch_fence_check`] and never
+    /// waits.
+    async fn dispatch_fence_ready(
+        &self,
+        suspendable_run: Option<&RunId>,
+    ) -> Result<(), AgentError> {
+        let _ = suspendable_run;
+        self.dispatch_fence_check()
     }
 
     /// Record how far the live session retired its transcript history once

@@ -231,6 +231,75 @@ mod tests {
         assert!(public.get("machine_state").is_none());
     }
 
+    /// The schedule tools (`meerkat_schedule_get`, the reply of every tool
+    /// that returns one schedule, and `schedule/call`) answer with exactly
+    /// this public projection, so the model and every host surface see one
+    /// shape of a schedule. The tools live below this crate and cannot
+    /// convert into it; this row keeps the two in step, over a revised
+    /// schedule whose superseded acks and planning state are populated.
+    #[tokio::test]
+    async fn schedule_tool_get_reply_is_the_public_wire_schedule() {
+        let service = meerkat_schedule::ScheduleService::new(std::sync::Arc::new(
+            meerkat_schedule::MemoryScheduleStore::default(),
+        ));
+        let prompt_target = |prompt: &str| {
+            meerkat_schedule::TargetBinding::session(
+                meerkat_schedule::SessionTargetBinding::ExactSession {
+                    session_id: meerkat_core::SessionId::new(),
+                    action: meerkat_schedule::ScheduledSessionAction::Prompt {
+                        prompt: meerkat_core::ContentInput::from(prompt),
+                        system_prompt: None,
+                        render_metadata: None,
+                        skill_refs: Vec::new(),
+                        additional_instructions: Vec::new(),
+                    },
+                },
+            )
+        };
+        let created = service
+            .create(meerkat_schedule::CreateScheduleRequest {
+                name: Some("parity".to_string()),
+                description: Some("tool and wire parity".to_string()),
+                trigger: meerkat_schedule::TriggerSpec::Interval(
+                    meerkat_schedule::IntervalTriggerSpec {
+                        start_at_utc: Utc::now() + chrono::Duration::minutes(1),
+                        every_seconds: 60,
+                        end_at_utc: None,
+                    },
+                ),
+                target: prompt_target("first parity prompt"),
+                misfire_policy: meerkat_schedule::MisfirePolicy::default(),
+                overlap_policy: meerkat_schedule::OverlapPolicy::default(),
+                missing_target_policy: meerkat_schedule::MissingTargetPolicy::default(),
+                labels: BTreeMap::from([("team".to_string(), "platform".to_string())]),
+                planning_horizon_days: Some(1),
+                planning_horizon_occurrences: Some(3),
+            })
+            .await
+            .unwrap();
+        service
+            .update(
+                &created.schedule_id,
+                meerkat_schedule::UpdateScheduleRequest {
+                    target: Some(prompt_target("second parity prompt")),
+                    ..meerkat_schedule::UpdateScheduleRequest::default()
+                },
+            )
+            .await
+            .unwrap();
+        let stored = service.get(&created.schedule_id).await.unwrap();
+        assert!(!stored.superseded_ack_ids.is_empty());
+
+        let tool = meerkat_schedule::handle_schedule_tools_call(
+            &service,
+            "meerkat_schedule_get",
+            &serde_json::json!({ "schedule_id": created.schedule_id.to_string() }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(tool, serde_json::to_value(Schedule::from(&stored)).unwrap());
+    }
+
     #[test]
     fn domain_occurrence_projects_exact_public_keys_without_lease_authority() {
         let schedule = meerkat_schedule::Schedule::new(meerkat_schedule::CreateScheduleRequest {

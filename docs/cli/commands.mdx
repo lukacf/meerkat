@@ -267,8 +267,8 @@ remains available.
 
 `rkat` treats piped stdin as a first-class interface:
 
-- `auto` default: if stdin is piped, read it as one blob of context
-- `blob`: always read full stdin to EOF before running
+- `auto` default: if stdin is piped, read it as one blob of context; input that has not started within 2 s is skipped with a warning, so an open, silent stdin never blocks the run
+- `blob`: always read full stdin to EOF before running, however long the producer takes to start
 - `lines`: keep stdin open and process one line at a time
 - `off`: ignore stdin even if something is piped in
 

@@ -62,6 +62,7 @@ KNOWN_AGENT_EVENT_TYPES: frozenset[str] = frozenset({
     "live_channel_closed",
     "request_reasoning_lowered",
     "run_resumed",
+    "tool_results_bounded_for_request",
 })
 
 

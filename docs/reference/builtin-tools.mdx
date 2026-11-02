@@ -69,12 +69,12 @@ may apply explicit presets of their own.
 | `mob_profile_list_sources` | Mob profile | Conditional | profile store + snapshot provider | List visible tool sources for profile authoring |
 | `meerkat_schedule_create` | Schedule | Yes | `schedule` | Create a new schedule |
 | `meerkat_schedule_get` | Schedule | Yes | `schedule` | Read one schedule |
-| `meerkat_schedule_list` | Schedule | Yes | `schedule` | List active and paused schedules |
+| `meerkat_schedule_list` | Schedule | Yes | `schedule` | List active and paused schedules as a page of summaries (`limit`, `cursor`) |
 | `meerkat_schedule_update` | Schedule | Yes | `schedule` | Update trigger, target, or policies |
 | `meerkat_schedule_pause` | Schedule | Yes | `schedule` | Pause a schedule |
 | `meerkat_schedule_resume` | Schedule | Yes | `schedule` | Resume a paused schedule |
 | `meerkat_schedule_delete` | Schedule | Yes | `schedule` | Delete a schedule |
-| `meerkat_schedule_occurrences` | Schedule | Yes | `schedule` | List occurrences for a schedule (optional exact id, due range, phase, paging, summary view) |
+| `meerkat_schedule_occurrences` | Schedule | Yes | `schedule` | List a page of occurrence summaries for a schedule (optional exact id, due range, phase, `limit` / `cursor`, full view) |
 | `workgraph_create` | WorkGraph | No | `work_graph` | Create a work item |
 | `workgraph_get` | WorkGraph | No | `work_graph` | Read one item |
 | `workgraph_list` | WorkGraph | No | `work_graph` | List items |
@@ -665,13 +665,13 @@ Schedule tools are the agent-facing scheduler surface. They are distinct from th
 | Tool | Purpose |
 |------|---------|
 | `meerkat_schedule_create` | Create a durable schedule with trigger, target, and policies |
-| `meerkat_schedule_get` | Read one schedule by `schedule_id` |
-| `meerkat_schedule_list` | List active and paused schedules in the active realm |
+| `meerkat_schedule_get` | Read one schedule by `schedule_id`: the full trigger, target, policies and planning state |
+| `meerkat_schedule_list` | List active and paused schedules in the active realm, one page of summaries at a time (50 by default, at most 200: a larger `limit` returns 200; `cursor` from `page.next_cursor`); each summary carries the first 160 characters of the action text |
 | `meerkat_schedule_update` | Update trigger, target, policies, or labels |
 | `meerkat_schedule_pause` | Pause a schedule |
 | `meerkat_schedule_resume` | Resume a paused schedule |
 | `meerkat_schedule_delete` | Delete a schedule |
-| `meerkat_schedule_occurrences` | List occurrences for a schedule; optionally one occurrence with its receipts, a due range, a phase, a page (`limit` / `cursor`) or `view: "summary"` |
+| `meerkat_schedule_occurrences` | List a schedule's occurrences one page of summaries at a time (50 by default, at most 200: a larger `limit` returns 200; `cursor` from `page.next_cursor`); `view: "full"` for whole occurrences; optionally one occurrence, whole, with its receipts, a due range or a phase |
 
 These tools are provided by `ScheduleToolDispatcher` in `meerkat-schedule` and are gated by the scheduler capability.
 </Accordion>

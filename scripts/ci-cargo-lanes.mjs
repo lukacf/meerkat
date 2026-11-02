@@ -556,6 +556,7 @@ export const INTEGRATION_SUITES = [
     tests: [
       "cold_restart_resume_after_compaction",
       "cold_restart_resume",
+      "compaction_context_window",
       "persistence_contract",
       "storage_provider_seam",
       "brain_swap_surface_parity",

@@ -6,13 +6,13 @@ use meerkat_core::{ContentInput, SessionId};
 use meerkat_schedule::{
     ClaimDueRequest, CreateScheduleRequest, MisfirePolicy, MissingTargetPolicy, Occurrence,
     OccurrenceFilter, OccurrenceOrdinal, OccurrencePhase, OverlapPolicy, Schedule,
-    ScheduleLifecycleInput, ScheduleLifecycleMutator, SchedulePhase, ScheduleStore,
-    ScheduledSessionAction, SessionTargetBinding, TargetBinding, TriggerSpec,
+    ScheduleLifecycleInput, ScheduleLifecycleMutator, SchedulePhase, ScheduleService,
+    ScheduleStore, ScheduledSessionAction, SessionTargetBinding, TargetBinding, TriggerSpec,
     UpdateScheduleRequest,
 };
 use meerkat_store::SqliteScheduleStore;
 use rusqlite::Connection;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 fn sample_schedule_request() -> CreateScheduleRequest {
@@ -315,5 +315,111 @@ async fn sqlite_schedule_writes_keep_phase_column_coherent()
     assert_eq!(schedule_commit.successor().phase, SchedulePhase::Deleted);
     assert!(occurrence_commits.is_empty());
     assert_eq!(column_phase(&path)?, "deleted");
+    Ok(())
+}
+
+/// A schedule row written before the bound on `superseded_ack_ids` (0.9.8 and
+/// earlier) carries the acknowledgements of every earlier supersession in
+/// both copies of its JSON. The store loads it unchanged, with no migration,
+/// and the next revise through the service drops them durably, keeping only
+/// its own supersession's acknowledgements.
+#[tokio::test]
+async fn sqlite_stored_large_ack_set_loads_and_the_next_revise_drops_it()
+-> Result<(), Box<dyn std::error::Error>> {
+    const STORED_ACKS: usize = 256;
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("schedule.sqlite3");
+    let store = Arc::new(SqliteScheduleStore::open(&path)?) as Arc<dyn ScheduleStore>;
+    let service = ScheduleService::new(store.clone());
+    let created = service.create(sample_schedule_request()).await?;
+    let revised = service
+        .update(
+            &created.schedule_id,
+            UpdateScheduleRequest {
+                expected_revision: Some(created.revision),
+                trigger: Some(TriggerSpec::Once {
+                    due_at_utc: Utc::now() + Duration::minutes(20),
+                }),
+                ..UpdateScheduleRequest::default()
+            },
+        )
+        .await?;
+
+    // The row as a 0.9.8 store left it after many edits: the acknowledgements
+    // of this revise and of every earlier one, in both copies.
+    let mut stored_ids = revised
+        .superseded_ack_ids
+        .iter()
+        .map(ToString::to_string)
+        .collect::<BTreeSet<_>>();
+    while stored_ids.len() < STORED_ACKS {
+        stored_ids.insert(uuid::Uuid::now_v7().to_string());
+    }
+    let schedule_key = revised.schedule_id.to_string();
+    let conn = Connection::open(&path)?;
+    let bytes: Vec<u8> = conn.query_row(
+        "SELECT schedule_json FROM schedule_schedules WHERE schedule_id = ?1",
+        [schedule_key.as_str()],
+        |row| row.get(0),
+    )?;
+    let mut row: serde_json::Value = serde_json::from_slice(&bytes)?;
+    row["superseded_ack_ids"] = serde_json::json!(stored_ids);
+    row["machine_state"]["superseded_ack_ids"] = serde_json::json!(stored_ids);
+    let changed = conn.execute(
+        "UPDATE schedule_schedules SET schedule_json = ?1 WHERE schedule_id = ?2",
+        rusqlite::params![serde_json::to_vec(&row)?, schedule_key],
+    )?;
+    assert_eq!(changed, 1);
+    drop(conn);
+
+    let loaded = service.get(&revised.schedule_id).await?;
+    assert_eq!(loaded.revision, revised.revision);
+    assert_eq!(
+        loaded
+            .superseded_ack_ids
+            .iter()
+            .map(ToString::to_string)
+            .collect::<BTreeSet<_>>(),
+        stored_ids,
+        "the stored set loads unchanged"
+    );
+
+    let next = service
+        .update(
+            &revised.schedule_id,
+            UpdateScheduleRequest {
+                expected_revision: Some(loaded.revision),
+                trigger: Some(TriggerSpec::Once {
+                    due_at_utc: Utc::now() + Duration::minutes(30),
+                }),
+                ..UpdateScheduleRequest::default()
+            },
+        )
+        .await?;
+    let latest = store
+        .list_occurrences(OccurrenceFilter {
+            schedule_id: Some(next.schedule_id.clone()),
+            include_terminal: true,
+            ..OccurrenceFilter::default()
+        })
+        .await?
+        .into_iter()
+        .filter(|occurrence| occurrence.superseded_by_revision == Some(next.revision))
+        .map(|occurrence| occurrence.occurrence_id)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        latest.len(),
+        1,
+        "the next revise supersedes the pending occurrence of the previous revision"
+    );
+    assert_eq!(
+        next.superseded_ack_ids, latest,
+        "the next revise drops the stored acknowledgements and keeps its own"
+    );
+    let reloaded = store
+        .get_schedule(&next.schedule_id)
+        .await?
+        .expect("revised schedule row");
+    assert_eq!(reloaded.superseded_ack_ids, next.superseded_ack_ids);
     Ok(())
 }

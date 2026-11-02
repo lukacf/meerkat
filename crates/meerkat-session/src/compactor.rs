@@ -589,6 +589,25 @@ impl Compactor for DefaultCompactor {
                 ),
             };
         let byte_trigger = byte_threshold.is_some_and(|threshold| request_bytes >= threshold);
+        // The projected input of this request: the provider's own count for
+        // the last answered request plus the transcript estimate of only the
+        // rows appended since. `last_input_tokens` lags by exactly those rows
+        // (one tool result can be most of a window), and the two estimates
+        // above count text bytes, which under-reads dense content such as
+        // JSON listings; the projection keeps the exact count for everything
+        // the provider counted and estimates only the growth.
+        let projection = ctx.projected_input_tokens;
+        let projection_trigger = projection.is_some_and(|projection| {
+            projection.projected_tokens() >= self.config.auto_compact_threshold
+        });
+        // A request that did not fit: the provider refused it for the model's
+        // context (it reported no usage, so no measure above moved since it
+        // was sent), or it carried the open run's own tool results shortened
+        // for that request only (the transcript keeps them whole). Either way,
+        // without compacting, the next request carries the same content again.
+        // The agent shows the fact only at a check whose compaction covers the
+        // whole transcript.
+        let context_refused = ctx.last_context_refusal_boundary_index.is_some();
 
         // Cadence is a cost policy, not recovery authority. It may suppress a
         // provider-reported high-water mark while the current transcript is
@@ -627,6 +646,23 @@ impl Compactor for DefaultCompactor {
         // unless the System rows alone approach the provider's request cap,
         // which also puts the history far over the token threshold and the
         // request over the model window.
+        //
+        // A projection crossing is recoverable when the growth since the last
+        // answered request made it: that request presented under the
+        // threshold, and what was appended since is what a rewrite removes.
+        // When the anchor alone is at or over the threshold (the answered
+        // request already held the newest round a rewrite keeps), the
+        // projection is a provider-reported high-water mark like
+        // `last_input_tokens`, and waits for the cadence. A committed rewrite
+        // drops the anchor, so the next answer re-anchors with what the
+        // rewrite left. The floor rule of a history crossing holds too: when
+        // the last rewrite left the history at or above the threshold, a
+        // growth crossing waits for the cadence unless that growth covers the
+        // window overage.
+        //
+        // A request that did not fit is recovery by definition, so it bypasses
+        // the threshold and the cadence. The attempt it causes clears it,
+        // committed or not, so one refusal or bound costs one attempt.
         let history_floor_crosses = ctx
             .last_rewrite_history_tokens
             .is_some_and(|left| left >= self.config.auto_compact_threshold);
@@ -658,7 +694,13 @@ impl Compactor for DefaultCompactor {
                  derives from the model window, or shrink the System rows"
             );
         }
-        let requires_capacity_recovery = history_recovers || byte_trigger;
+        let projection_recovers = projection_trigger
+            && projection.is_some_and(|projection| {
+                projection.anchor_tokens < self.config.auto_compact_threshold
+            })
+            && (!history_floor_crosses || removable_growth_covers_overage);
+        let requires_capacity_recovery =
+            history_recovers || byte_trigger || projection_recovers || context_refused;
         if !requires_capacity_recovery
             && let Some(last) = ctx.last_compaction_boundary_index
             && ctx.session_boundary_index.saturating_sub(last)
@@ -666,10 +708,19 @@ impl Compactor for DefaultCompactor {
         {
             return false;
         }
-        if input_trigger || history_trigger || byte_trigger || forecast_trigger {
+        let fires = input_trigger
+            || history_trigger
+            || byte_trigger
+            || forecast_trigger
+            || projection_trigger
+            || context_refused;
+        if fires {
             tracing::trace!(
                 input_tokens = ctx.last_input_tokens,
                 estimated_history_tokens = ctx.estimated_history_tokens,
+                projected_input_tokens = projection.map(|projection| projection.projected_tokens()),
+                projection_anchor_tokens = projection.map(|projection| projection.anchor_tokens),
+                last_context_refusal_boundary_index = ctx.last_context_refusal_boundary_index,
                 request_forecast_tokens,
                 request_forecast_provenance = ctx
                     .request_context_budget
@@ -683,7 +734,9 @@ impl Compactor for DefaultCompactor {
                 threshold = self.config.auto_compact_threshold,
                 byte_threshold,
                 request_measurement,
-                branch = if input_trigger {
+                branch = if context_refused {
+                    "context_refusal"
+                } else if input_trigger {
                     "last_input_tokens"
                 } else if history_trigger {
                     "estimated_history_tokens_fallback"
@@ -691,13 +744,15 @@ impl Compactor for DefaultCompactor {
                     "provider_request_bytes"
                 } else if byte_trigger {
                     "estimated_request_bytes"
+                } else if projection_trigger {
+                    "projected_input_tokens"
                 } else {
                     "request_context_budget_forecast"
                 },
                 "compaction trigger fired",
             );
         }
-        input_trigger || history_trigger || byte_trigger || forecast_trigger
+        fires
     }
 
     fn prepare_for_summarization(
@@ -1025,6 +1080,8 @@ mod tests {
             last_compaction_boundary_index: None,
             session_boundary_index: 0,
             last_rewrite_history_tokens: None,
+            projected_input_tokens: None,
+            last_context_refusal_boundary_index: None,
         };
         assert!(!c.should_compact(&ctx));
     }
@@ -1042,6 +1099,8 @@ mod tests {
             last_compaction_boundary_index: Some(5),
             session_boundary_index: 7, // Only 2 boundaries since last compaction, threshold is 3
             last_rewrite_history_tokens: None,
+            projected_input_tokens: None,
+            last_context_refusal_boundary_index: None,
         };
         assert!(!c.should_compact(&ctx));
     }
@@ -1059,6 +1118,8 @@ mod tests {
             last_compaction_boundary_index: Some(5),
             session_boundary_index: 6,
             last_rewrite_history_tokens: None,
+            projected_input_tokens: None,
+            last_context_refusal_boundary_index: None,
         };
         assert!(
             c.should_compact(&ctx),
@@ -1084,6 +1145,8 @@ mod tests {
             last_compaction_boundary_index: Some(5),
             session_boundary_index: 6,
             last_rewrite_history_tokens: Some(101_000),
+            projected_input_tokens: None,
+            last_context_refusal_boundary_index: None,
         };
         assert!(
             !c.should_compact(&just_after),
@@ -1114,8 +1177,166 @@ mod tests {
             last_compaction_boundary_index: Some(5),
             session_boundary_index: 6,
             last_rewrite_history_tokens: Some(40_000),
+            projected_input_tokens: None,
+            last_context_refusal_boundary_index: None,
         };
         assert!(c.should_compact(&ctx));
+    }
+
+    /// A context whose measures stay under the 100k threshold of
+    /// `make_config` except, possibly, the projection of this request's input:
+    /// `anchor` presented tokens of the last answered request plus `appended`
+    /// estimated tokens of the rows since, one boundary after the last
+    /// compaction unless `boundary` says otherwise. No last input tokens, as
+    /// for an agent restored from its session store.
+    fn projected_context(anchor: u64, appended: u64, boundary: u64) -> CompactionContext {
+        CompactionContext {
+            last_input_tokens: 0,
+            message_count: 10,
+            estimated_history_tokens: 40_000,
+            estimated_request_bytes: 0,
+            request_context_budget: None,
+            provider_request_pressure: None,
+            last_compaction_boundary_index: Some(5),
+            session_boundary_index: boundary,
+            last_rewrite_history_tokens: None,
+            projected_input_tokens: Some(meerkat_core::InputTokenProjection {
+                anchor_tokens: anchor,
+                appended_tokens: appended,
+            }),
+            last_context_refusal_boundary_index: None,
+        }
+    }
+
+    /// The reported shape: the last answered request presented 90k tokens,
+    /// under the threshold, and what was appended since (one tool result)
+    /// projects the next request over it. That growth is what a rewrite can
+    /// remove, so the crossing is capacity recovery: the cadence cannot veto
+    /// it, one boundary after the last compaction included.
+    #[test]
+    fn projection_crossing_from_growth_bypasses_the_cadence() {
+        let c = DefaultCompactor::new(make_config());
+        assert!(c.should_compact(&projected_context(90_000, 15_000, 6)));
+        assert!(
+            c.should_compact(&projected_context(90_000, 10_000, 6)),
+            "the threshold itself is a crossing"
+        );
+        assert!(
+            !c.should_compact(&projected_context(90_000, 9_999, 6)),
+            "a projection under the threshold does not fire"
+        );
+    }
+
+    /// When the anchor alone is at or over the threshold (the request a
+    /// rewrite cannot shrink below, its newest round included, was already
+    /// answered), the projection is a provider-reported high-water mark the
+    /// cadence may hold back, as the last input tokens are: compacting again
+    /// at once could not get under it.
+    #[test]
+    fn projection_from_the_anchor_alone_waits_for_the_cadence() {
+        let c = DefaultCompactor::new(make_config());
+        assert!(
+            !c.should_compact(&projected_context(101_000, 1_000, 6)),
+            "one boundary after the last compaction the cadence holds"
+        );
+        assert!(
+            c.should_compact(&projected_context(101_000, 1_000, 8)),
+            "once the cadence allows it the projection fires"
+        );
+        let first = CompactionContext {
+            last_compaction_boundary_index: None,
+            ..projected_context(101_000, 0, 1)
+        };
+        assert!(
+            c.should_compact(&first),
+            "a restored agent's first request compacts on its persisted anchor"
+        );
+    }
+
+    /// The floor rule of a history crossing holds for a projection crossing
+    /// too: when the last rewrite left the history at or above the threshold,
+    /// compacting again cannot get under it, so a crossing the growth made
+    /// waits for the cadence instead of paying for a summary at every
+    /// boundary. A rewrite that got under the threshold keeps the bypass.
+    #[test]
+    fn projection_crossing_waits_for_the_cadence_when_the_last_rewrite_left_the_history_over() {
+        let c = DefaultCompactor::new(make_config());
+        let floor_over = CompactionContext {
+            last_rewrite_history_tokens: Some(100_000),
+            ..projected_context(90_000, 15_000, 6)
+        };
+        assert!(
+            !c.should_compact(&floor_over),
+            "one boundary after a rewrite that left the history over the threshold the cadence holds"
+        );
+        let after_cadence = CompactionContext {
+            session_boundary_index: 8,
+            ..floor_over
+        };
+        assert!(
+            c.should_compact(&after_cadence),
+            "once the cadence allows it the projection fires"
+        );
+        let floor_under = CompactionContext {
+            last_rewrite_history_tokens: Some(99_999),
+            ..projected_context(90_000, 15_000, 6)
+        };
+        assert!(
+            c.should_compact(&floor_under),
+            "a rewrite that got under the threshold keeps the bypass"
+        );
+    }
+
+    /// Without an anchor (before the first answered request, after a
+    /// rewrite, after a model or provider change, or for a session last
+    /// written before the anchor existed) the existing triggers decide alone.
+    #[test]
+    fn no_anchor_keeps_the_existing_triggers() {
+        let c = DefaultCompactor::new(make_config());
+        let unanchored = CompactionContext {
+            projected_input_tokens: None,
+            ..projected_context(90_000, 15_000, 6)
+        };
+        assert!(!c.should_compact(&unanchored));
+        let history = CompactionContext {
+            estimated_history_tokens: 100_000,
+            ..unanchored
+        };
+        assert!(
+            c.should_compact(&history),
+            "a history crossing still recovers at once"
+        );
+    }
+
+    /// A request the provider refused for context forces one capacity
+    /// compaction at the next check, whatever the measures and the cadence
+    /// say: the refused request reported no usage, so no measure moved, and
+    /// without the refusal fact the next run sends the same request again.
+    #[test]
+    fn a_context_refusal_forces_one_capacity_compaction() {
+        let c = DefaultCompactor::new(make_config());
+        let quiet = CompactionContext {
+            projected_input_tokens: None,
+            ..projected_context(10_000, 0, 6)
+        };
+        assert!(!c.should_compact(&quiet));
+        let refused = CompactionContext {
+            last_context_refusal_boundary_index: Some(5),
+            ..quiet
+        };
+        assert!(
+            c.should_compact(&refused),
+            "the refusal bypasses the thresholds and the cadence"
+        );
+        let first_ever = CompactionContext {
+            last_compaction_boundary_index: None,
+            session_boundary_index: 0,
+            ..refused
+        };
+        assert!(
+            !c.should_compact(&first_ever),
+            "the first-ever boundary still never compacts"
+        );
     }
 
     /// With the floor over the threshold, the bypass returns only when the
@@ -1144,6 +1365,7 @@ mod tests {
         let ctx = meerkat_core::agent::compact::build_compaction_context(
             &messages,
             0,
+            None,
             Some(budget),
             None,
             Some(5),
@@ -1198,6 +1420,8 @@ mod tests {
             last_compaction_boundary_index: Some(5),
             session_boundary_index: 6,
             last_rewrite_history_tokens: Some(101_000),
+            projected_input_tokens: None,
+            last_context_refusal_boundary_index: None,
         };
         assert!(c.should_compact(&ctx));
     }
@@ -1215,6 +1439,8 @@ mod tests {
             last_compaction_boundary_index: None,
             session_boundary_index: 1,
             last_rewrite_history_tokens: None,
+            projected_input_tokens: None,
+            last_context_refusal_boundary_index: None,
         };
         assert!(c.should_compact(&ctx));
     }
@@ -1234,6 +1460,8 @@ mod tests {
             last_compaction_boundary_index: None,
             session_boundary_index: 5,
             last_rewrite_history_tokens: None,
+            projected_input_tokens: None,
+            last_context_refusal_boundary_index: None,
         };
         assert!(c.should_compact(&ctx));
 
@@ -1248,6 +1476,8 @@ mod tests {
             last_compaction_boundary_index: None,
             session_boundary_index: 5,
             last_rewrite_history_tokens: None,
+            projected_input_tokens: None,
+            last_context_refusal_boundary_index: None,
         };
         assert!(c.should_compact(&ctx2));
     }
@@ -1270,6 +1500,8 @@ mod tests {
             last_compaction_boundary_index: None,
             session_boundary_index: 42,
             last_rewrite_history_tokens: None,
+            projected_input_tokens: None,
+            last_context_refusal_boundary_index: None,
         };
         assert!(
             c.should_compact(&ctx),
@@ -1295,6 +1527,8 @@ mod tests {
             last_compaction_boundary_index: None,
             session_boundary_index: 5,
             last_rewrite_history_tokens: None,
+            projected_input_tokens: None,
+            last_context_refusal_boundary_index: None,
         };
         assert!(!c.should_compact(&ctx));
     }
@@ -1318,6 +1552,8 @@ mod tests {
             last_compaction_boundary_index: None,
             session_boundary_index: 5,
             last_rewrite_history_tokens: None,
+            projected_input_tokens: None,
+            last_context_refusal_boundary_index: None,
         };
         assert!(
             c.should_compact(&ctx),
@@ -1347,6 +1583,8 @@ mod tests {
             last_compaction_boundary_index: None,
             session_boundary_index: 5,
             last_rewrite_history_tokens: None,
+            projected_input_tokens: None,
+            last_context_refusal_boundary_index: None,
         };
         assert!(
             !c.should_compact(&ctx),
@@ -1378,6 +1616,8 @@ mod tests {
             last_compaction_boundary_index: Some(5),
             session_boundary_index: 6,
             last_rewrite_history_tokens: None,
+            projected_input_tokens: None,
+            last_context_refusal_boundary_index: None,
         };
         assert!(
             c.should_compact(&ctx),
@@ -1474,6 +1714,7 @@ mod tests {
         let ctx = meerkat_core::agent::compact::build_compaction_context(
             &messages,
             0,
+            None,
             Some(budget),
             None,
             None,
@@ -1525,6 +1766,7 @@ mod tests {
         let ctx = meerkat_core::agent::compact::build_compaction_context(
             &messages,
             0,
+            None,
             Some(budget),
             None,
             None,
@@ -1561,6 +1803,7 @@ mod tests {
         let ctx = meerkat_core::agent::compact::build_compaction_context(
             &messages,
             0,
+            None,
             Some(budget),
             None,
             Some(5),
@@ -1590,6 +1833,8 @@ mod tests {
             last_compaction_boundary_index: None,
             session_boundary_index: 5,
             last_rewrite_history_tokens: None,
+            projected_input_tokens: None,
+            last_context_refusal_boundary_index: None,
         };
         assert!(!c.should_compact(&neither));
 
@@ -2190,6 +2435,8 @@ mod tests {
             last_compaction_boundary_index: Some(boundary - 1),
             session_boundary_index: boundary,
             last_rewrite_history_tokens: Some(10_000),
+            projected_input_tokens: None,
+            last_context_refusal_boundary_index: None,
         }
     }
 

@@ -474,6 +474,8 @@ match event {
     AgentEvent::CompactionStarted { input_tokens, estimated_history_tokens, message_count } => {}
     AgentEvent::CompactionCompleted { summary_tokens, messages_before, messages_after, summary_source, estimated_history_tokens_after } => {}
     AgentEvent::CompactionFailed { reason } => {}
+    // A request carried the run's own tool results shortened for it only
+    AgentEvent::ToolResultsBoundedForRequest { run_id, results, axis } => {}
 
     // Budget
     AgentEvent::BudgetWarning { budget_type, used, limit, percent } => {}

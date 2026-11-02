@@ -4291,13 +4291,10 @@ async fn keep_admitted_prompt(
 }
 
 /// [`keep_admitted_resume`], then what a graceful stop that kept a durable
-/// run of that resume leaves in `store`, seeded as `recovery_contract`'s
-/// `a_kept_run_of` seeds it: the session's committed document, a continuable
-/// provisional tail whose run cursor binds the resume (the staged call only
-/// in the cursor), and the resume's row bound to that run, applied and
-/// pending its consumption. The registration that opens the session again
-/// marks the run resumable, with the resume bound to it. Returns the
-/// destination, the resume's id and the kept run.
+/// run of that resume leaves in `store` ([`bind_kept_input_to_open_run`]).
+/// The registration that opens the session again marks the run resumable,
+/// with the resume bound to it. Returns the destination, the resume's id and
+/// the kept run.
 async fn keep_resume_in_open_run(
     store: &InMemoryRuntimeStore,
     blobs: &Arc<MemoryBlobStore>,
@@ -4309,6 +4306,47 @@ async fn keep_resume_in_open_run(
     InputId,
     RunId,
 ) {
+    let (destination, resume_id, _identity) =
+        keep_admitted_resume(store, blobs, owners, session, template).await;
+    let run_id = bind_kept_input_to_open_run(store, session, &resume_id).await;
+    (destination, resume_id, run_id)
+}
+
+/// [`keep_admitted_prompt`], then what a graceful stop that kept a durable
+/// run of that prompt leaves in `store` ([`bind_kept_input_to_open_run`]):
+/// the run's first input is kept governed work whose controller client
+/// cannot be supplied again without a fresh authentication of its caller.
+/// The registration that opens the session again marks the run resumable,
+/// with the prompt bound to it. Returns the destination, the prompt's id and
+/// the kept run.
+async fn keep_prompt_in_open_run(
+    store: &InMemoryRuntimeStore,
+    blobs: &Arc<MemoryBlobStore>,
+    owners: &HostOwners,
+    session: &SessionId,
+    template: &Input,
+) -> (
+    meerkat_authorization_contracts::work_association::NativeWorkTarget,
+    InputId,
+    RunId,
+) {
+    let (destination, prompt_id) =
+        keep_admitted_prompt(store, blobs, owners, session, template).await;
+    let run_id = bind_kept_input_to_open_run(store, session, &prompt_id).await;
+    (destination, prompt_id, run_id)
+}
+
+/// What a graceful stop that kept a durable run of `input_id`, an input
+/// `store` holds queued, leaves in `store`, seeded as `recovery_contract`'s
+/// `a_kept_run_of` seeds it: the session's committed document, a continuable
+/// provisional tail whose run cursor binds the input (the staged call only
+/// in the cursor), and the input's row bound to that run, applied and
+/// pending its consumption. Returns the kept run.
+async fn bind_kept_input_to_open_run(
+    store: &InMemoryRuntimeStore,
+    session: &SessionId,
+    input_id: &InputId,
+) -> RunId {
     use crate::store::{PreparedRuntimeSessionCommit, PreparedWholeBlobProvisionalTail};
     use meerkat_core::lifecycle::core_executor::BoundSessionCommit;
     use meerkat_core::types::{
@@ -4316,8 +4354,6 @@ async fn keep_resume_in_open_run(
         UserMessage,
     };
 
-    let (destination, resume_id, _identity) =
-        keep_admitted_resume(store, blobs, owners, session, template).await;
     let runtime = LogicalRuntimeId::for_session(session);
     let run_id = RunId::new();
     let mut committed = meerkat_core::Session::with_id(session.clone());
@@ -4357,13 +4393,13 @@ async fn keep_resume_in_open_run(
     round
         .set_run_cursor(&meerkat_core::SessionRunCursor::new(
             run_id.clone(),
-            vec![resume_id.clone()],
+            vec![input_id.clone()],
             0,
             meerkat_core::RunResumePoint::ToolsPending {
                 assistant_message: staged,
             },
         ))
-        .expect("the run cursor binds the resume");
+        .expect("the run cursor binds the input");
     store
         .write_prepared_whole_blob_provisional_tail(
             &runtime,
@@ -4378,10 +4414,10 @@ async fn keep_resume_in_open_run(
         .await
         .expect("the kept run's provisional tail");
     let mut row = store
-        .load_input_state(&runtime, &resume_id)
+        .load_input_state(&runtime, input_id)
         .await
         .expect("row read")
-        .expect("the kept resume's row");
+        .expect("the kept input's row");
     row.seed.phase = InputLifecycleState::AppliedPendingConsumption;
     row.seed.last_run_id = Some(run_id.clone());
     row.seed.last_boundary_sequence = Some(1);
@@ -4394,8 +4430,8 @@ async fn keep_resume_in_open_run(
                 .expect("an applied row passes the stored-seed authority"),
         )
         .await
-        .expect("the resume's row bound to the kept run");
-    (destination, resume_id, run_id)
+        .expect("the input's row bound to the kept run");
+    run_id
 }
 
 /// `input_id`'s row once it is terminal, within bound.
@@ -5306,6 +5342,286 @@ async fn a_kept_runs_resume_waits_for_its_destination_and_then_reads_under_it() 
         "the resumed run's destination-scoped read runs under the destination bound again"
     );
     assert_eq!(effects.load(Ordering::SeqCst), 1, "the run resumed once");
+    hold.notify_waiters();
+}
+
+/// A stop of a run marked resumable whose loop is parked (a kept run's
+/// resume that waits for its destination) wakes the loop, and the loop
+/// settles the stopped run at once: its resume ends abandoned as cancelled
+/// and the run's mark clears, with no bind and no other wake, and the run
+/// never resumes. Before round 4 the stop was recorded, but the parked loop
+/// slept until its next wake.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stop_of_a_parked_resumable_run_wakes_its_loop_and_settles_it() {
+    let (owners, template, domain) = reading_host();
+    let store = InMemoryRuntimeStore::new();
+    let blobs = Arc::new(MemoryBlobStore::new());
+    let session = SessionId::new();
+    let (_destination, resume_id, run_id) =
+        keep_resume_in_open_run(&store, &blobs, &owners, &session, &template).await;
+
+    let machine = open(&store, &blobs, &owners).await;
+    machine
+        .register_session(session.clone())
+        .await
+        .expect("the registration marks the kept run resumable");
+    machine
+        .prepare_bindings(session.clone())
+        .await
+        .expect("actual runtime binding");
+    let hold = Arc::new(tokio::sync::Notify::new());
+    let (effects, mut applied) = attach_registered_reading(
+        &machine,
+        &session,
+        "resumed run",
+        Arc::clone(&hold),
+        &domain,
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        machine.resumable_run_id(&session).await,
+        Some(run_id.clone()),
+        "the run waits, marked, for its destination"
+    );
+
+    machine
+        .hard_cancel_current_run(&session, "the user stops the parked run")
+        .await
+        .expect("the stop of the run marked resumable is accepted");
+    let row = terminal_row(&machine, &session, &resume_id).await;
+    assert_eq!(
+        row.seed.terminal_outcome,
+        Some(crate::input_state::InputTerminalOutcome::Abandoned {
+            reason: crate::input_state::InputAbandonReason::Cancelled,
+        }),
+        "the stopped run's resume ends abandoned as cancelled"
+    );
+    assert_eq!(
+        machine.resumable_run_id(&session).await,
+        None,
+        "the stopped run's mark is cleared"
+    );
+    assert!(applied.try_recv().is_err(), "the stopped run never resumed");
+    assert_eq!(effects.load(Ordering::SeqCst), 0, "nothing was applied");
+    hold.notify_waiters();
+}
+
+/// A run a restart left open whose first input is a kept governed prompt (its
+/// controller client cannot be supplied again without a fresh authentication
+/// of its caller), and whose stop was asked once the restart registered it,
+/// is settled by the attachment as stopped: the prompt ends
+/// `Abandoned { Cancelled }`, and its runtime-termination receipt carries the
+/// stop's reason, as the settlement's durable carrier does, not the reason of
+/// a refused kept governed input. RED while the attachment published the
+/// stopped run's carriers with the kept-governed reason, which the
+/// receipt's finalization took. Unrun: written while Cargo is not run.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stopped_kept_run_of_a_governed_prompt_ends_with_the_stop_reason() {
+    let (configuration, template, _account, _publication) = mutable_controller_configuration(true);
+    let owners = owners_of(&configuration, &template);
+    drop(configuration);
+    let store = InMemoryRuntimeStore::new();
+    let blobs = Arc::new(MemoryBlobStore::new());
+    let session = SessionId::new();
+    let (_destination, prompt_id, run_id) =
+        keep_prompt_in_open_run(&store, &blobs, &owners, &session, &template).await;
+
+    let machine = open(&store, &blobs, &owners).await;
+    machine
+        .register_session(session.clone())
+        .await
+        .expect("the registration marks the kept run resumable");
+    machine
+        .prepare_bindings(session.clone())
+        .await
+        .expect("actual runtime binding");
+    assert_eq!(
+        machine.resumable_run_id(&session).await,
+        Some(run_id.clone()),
+        "the registration keeps the run resumable, its prompt bound to it"
+    );
+    // The resumable branch of a stop needs no executor: the stop is recorded
+    // before anything is attached.
+    let stop = machine
+        .stop_run(&session, &run_id, "the caller stops the kept run")
+        .await
+        .expect("the stop of the run marked resumable is recorded");
+    assert!(
+        matches!(
+            &stop,
+            crate::run_stop::RunStopReceipt::Stopped { contributors, .. } if contributors.is_empty()
+        ),
+        "a run marked resumable is stopped at once, with no contributors: {stop:?}"
+    );
+    let hold = Arc::new(tokio::sync::Notify::new());
+    let (effects, mut applied) =
+        attach_registered_holding(&machine, &session, "never runs", Arc::clone(&hold)).await;
+
+    let row = terminal_row(&machine, &session, &prompt_id).await;
+    assert_eq!(
+        row.seed.terminal_outcome,
+        Some(crate::input_state::InputTerminalOutcome::Abandoned {
+            reason: crate::input_state::InputAbandonReason::Cancelled,
+        }),
+        "the stopped run's prompt ends abandoned as cancelled"
+    );
+    let wait = tokio::time::timeout(
+        BOUND,
+        machine.wait_input_terminal_receipt(&session, &prompt_id),
+    )
+    .await
+    .expect("its receipt within bound")
+    .expect("receipt read")
+    .expect("the session holds the prompt");
+    let InputTerminalReceiptWait::Resolved(read) = wait else {
+        panic!("the ended prompt's receipt resolves")
+    };
+    let InputTerminalReceiptRead::Finalized(receipt) = read.report else {
+        panic!(
+            "a finalized runtime-termination receipt, not {:?}",
+            read.report
+        )
+    };
+    let CompletionOutcome::RuntimeTerminated { reason, .. } = receipt.outcome() else {
+        panic!("a runtime termination, not {:?}", receipt.outcome())
+    };
+    assert_eq!(
+        reason.as_str(),
+        crate::runtime_loop::STOPPED_RESUMABLE_RUN_TERMINATION_REASON,
+        "the receipt carries the stop's reason"
+    );
+    assert_eq!(
+        machine.resumable_run_id(&session).await,
+        None,
+        "the stopped run is settled"
+    );
+    assert_eq!(effects.load(Ordering::SeqCst), 0, "nothing ran");
+    assert!(
+        applied.try_recv().is_err(),
+        "the executor was never entered"
+    );
+    hold.notify_waiters();
+}
+
+/// A store's self-fence a row opens and closes, whose wait answers at once:
+/// at a closed fence, only the runtime loop's own repoll floor paces a lap.
+struct ToggledFence(std::sync::atomic::AtomicBool);
+
+impl ToggledFence {
+    fn closed() -> Arc<Self> {
+        Arc::new(Self(std::sync::atomic::AtomicBool::new(false)))
+    }
+
+    fn open(&self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+
+impl meerkat_core::host_store::SelfFence for ToggledFence {
+    fn window(&self) -> meerkat_core::host_store::SelfFenceWindow {
+        let open = self.0.load(Ordering::SeqCst);
+        meerkat_core::host_store::SelfFenceWindow {
+            elapsed: Duration::from_secs(if open { 1 } else { 3 }),
+            window: Duration::from_secs(2),
+            renew_failed: !open,
+        }
+    }
+}
+
+/// A run a restart left open, whose input is a kept resume its host supplies
+/// no client for any more (`Readiness(UnsupportedScope)`), meets a store
+/// fence gap at its settlement: each lap's controller re-ask refuses the
+/// run, and its settlement, which would write through the closed fence,
+/// changes nothing and answers again. The re-ask path then waits for the
+/// fence, with no guard held, before it goes round: the host is asked at
+/// most once per repoll floor of elapsed time, never in a spin, and the run
+/// stays marked, its resume bound and not terminal. Once the fence opens,
+/// the next lap settles the run as a refused resume. The fence answers its
+/// own wait at once, so the floor alone paces the laps; the host's asks
+/// count them. RED while the re-ask path went round at the gap without that
+/// wait: the lap asked the host again at once, many times per floor. Unrun:
+/// written while Cargo is not run.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_kept_runs_refused_settlement_at_a_store_fence_gap_asks_once_per_repoll() {
+    let (configuration, template, _account, _publication) = mutable_controller_configuration(true);
+    let owners = owners_of(&configuration, &template);
+    drop(configuration);
+    let store = InMemoryRuntimeStore::new();
+    let blobs = Arc::new(MemoryBlobStore::new());
+    let session = SessionId::new();
+    let (_destination, resume_id, run_id) =
+        keep_resume_in_open_run(&store, &blobs, &owners, &session, &template).await;
+
+    owners.controllers.withdraw_clients();
+    let machine = open(&store, &blobs, &owners).await;
+    machine
+        .register_session(session.clone())
+        .await
+        .expect("the registration marks the kept run resumable");
+    machine
+        .prepare_bindings(session.clone())
+        .await
+        .expect("actual runtime binding");
+    assert_eq!(
+        machine.resumable_run_id(&session).await,
+        Some(run_id.clone()),
+        "the registration keeps the run resumable, its resume bound to it"
+    );
+    // The session store's fence closes before the runtime loop's first lap.
+    let fence = ToggledFence::closed();
+    store.set_self_fence_for_test(Some(
+        Arc::clone(&fence) as Arc<dyn meerkat_core::host_store::SelfFence>
+    ));
+    let started = std::time::Instant::now();
+    let asked = owners.controllers.asks();
+    let hold = Arc::new(tokio::sync::Notify::new());
+    let (effects, mut applied) =
+        attach_registered_holding(&machine, &session, "never runs", Arc::clone(&hold)).await;
+    tokio::time::sleep(Duration::from_millis(2_500)).await;
+
+    let laps = owners.controllers.asks() - asked;
+    let elapsed = started.elapsed();
+    let floors = elapsed.as_millis() / crate::runtime_loop::FENCE_GAP_REPOLL.as_millis();
+    assert!(laps >= 1, "the runtime loop asked the host at the gap");
+    assert!(
+        laps as u128 <= floors + 2,
+        "one ask per repoll floor at the gap, not a spin: {laps} asks in {elapsed:?}"
+    );
+    assert_eq!(
+        machine.resumable_run_id(&session).await,
+        Some(run_id.clone()),
+        "the run stays marked while the fence is closed"
+    );
+    let waiting = machine
+        .input_state(&session, &resume_id)
+        .await
+        .expect("row read")
+        .expect("the resume's row");
+    assert!(
+        waiting.seed.terminal_outcome.is_none(),
+        "nothing is settled through the closed fence"
+    );
+
+    fence.open();
+    let row = terminal_row(&machine, &session, &resume_id).await;
+    assert_eq!(
+        row.seed.terminal_outcome,
+        Some(crate::input_state::InputTerminalOutcome::Abandoned {
+            reason: crate::input_state::InputAbandonReason::ResumeRefused,
+        }),
+        "once the fence opens, the next lap settles the run as a refused resume"
+    );
+    assert_eq!(
+        machine.resumable_run_id(&session).await,
+        None,
+        "the run is settled, not resumable any more"
+    );
+    assert_eq!(effects.load(Ordering::SeqCst), 0, "nothing was applied");
+    assert!(
+        applied.try_recv().is_err(),
+        "the executor was never entered"
+    );
     hold.notify_waiters();
 }
 

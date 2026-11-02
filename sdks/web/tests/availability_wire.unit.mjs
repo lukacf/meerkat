@@ -86,3 +86,18 @@ test('availability wire keeps callback settlement order and separate audit diagn
   assert.deepEqual(actualAudit, audit);
   assert.deepEqual(session.subscribe().poll(), [pending, audit]);
 });
+
+test('a request bound notice survives session polling with its whole payload', () => {
+  const bound = {
+    type: 'tool_results_bounded_for_request',
+    run_id: '00000000-0000-4000-8000-000000000002',
+    results: [
+      { tool_use_id: 'tc_1', tool_name: 'list_records', kept_bytes: 87939, total_bytes: 400000 },
+    ],
+    axis: 'context_window',
+  };
+  const control = { type: 'text_delta', delta: 'ordinary text' };
+  const session = sessionWith([bound, control]);
+  assert.deepEqual(session.pollEvents(), [bound, control]);
+  assert.deepEqual(session.subscribe().poll(), [bound, control]);
+});

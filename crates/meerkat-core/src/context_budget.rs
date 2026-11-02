@@ -6,8 +6,11 @@
 //! exact visible tool set and output reserve into one typed, side-effect-free
 //! fact. Hosts can observe the
 //! projection without maintaining a second model-limit table. Forecasts never
-//! authorize runtime behavior; only exact provider-issued token evidence may
-//! authorize pre-dispatch refusal.
+//! authorize a refusal: only exact provider-issued token evidence may
+//! authorize pre-dispatch refusal. The one runtime behavior a forecast drives
+//! is the request-only bound of the open run's own tool results, which
+//! shortens a request over the model's input budget for that request only
+//! and refuses nothing.
 
 use crate::{Message, ModelProfileWitness, ProviderRequestPressure, Session, ToolDef, ToolName};
 use serde::{Deserialize, Serialize};

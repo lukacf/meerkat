@@ -195,6 +195,13 @@ impl MeerkatMachine {
         result
     }
 
+    /// Hard-cancel the session's current run. A run whose session store's
+    /// fence reads closed (a store fence gap) is stopped through a
+    /// suspension instead, and a run marked resumable while no run is
+    /// current (a gap's, or a restart's not resumed yet) has its stop
+    /// recorded: either run never resumes, and its inputs end cancelled once
+    /// the store takes writes again. Refused with `NotReady` when no run is
+    /// current and none is marked.
     pub async fn hard_cancel_current_run(
         &self,
         session_id: &SessionId,
@@ -264,6 +271,36 @@ impl MeerkatMachine {
     ///
     /// A run with no runtime-loop contributors (a direct service turn) is
     /// interrupted and reported as `Stopped` with no contributors.
+    ///
+    /// A run a store fence gap suspended (or one a restart marked resumable
+    /// that has not resumed yet), and a run whose session store's fence
+    /// reads closed while it runs, are stopped without waiting: the stop is
+    /// recorded at once and the call returns `Stopped` with no contributors.
+    /// Such a run never resumes. Its inputs end `Abandoned` with reason
+    /// `Cancelled` when the runtime settles it (at its next lap for a
+    /// restart's run, once the store takes writes again for a gap's): read
+    /// their outcome later. A process that ends first, or another writer
+    /// that takes the session over, runs them instead. A graceful requeue
+    /// stop, or the Keep rollback of a start refused before it served
+    /// ([`crate::UnregisterQueuedInputs::Keep`]), that begins before that
+    /// settlement ends them `Abandoned` with reason `Stopped`, and leaves the
+    /// run itself to the next start, which repairs its tail as an interrupted
+    /// run; no run terminal is published for it. A stop that races the gap's
+    /// own suspension of the run may fail
+    /// with an internal error naming a contributor whose wait was answered
+    /// `RequeuedAcrossStop`. A cancel at the next boundary accepted just
+    /// before that suspension can likewise fail when its dispatch to the
+    /// dropped turn fails, while the run is still settled as cancelled.
+    ///
+    /// At a store fence gap the stop falls back to the hard interrupt in
+    /// three cases: the surface cannot suspend a run
+    /// ([`meerkat_core::lifecycle::CoreExecutorInterruptHandle::suspend_run_if_current`]
+    /// answers `false`), the stop joins a hard interrupt of the same run
+    /// already in flight, or the machine refuses the suspension (a published
+    /// live-boundary join not yet retained). The cancel is then realized only
+    /// in memory: the gap refuses its writes, the session reloads, and the
+    /// reload resumes the stopped run, although the call already answered
+    /// `Stopped`.
     pub async fn stop_run(
         &self,
         session_id: &SessionId,

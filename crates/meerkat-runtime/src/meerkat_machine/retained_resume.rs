@@ -2146,6 +2146,198 @@ mod tests {
         );
     }
 
+    /// A Keep rollback (the unregister of a registration refused before it
+    /// served) keeps every input the registration recovered, but not an
+    /// input of the run marked resumable whose stop was asked: the Abandon
+    /// arm answers it, so the stop ends it and the next registration never
+    /// resumes the stopped run. RED on the round 4 kernel: the Keep arm kept
+    /// it. Unrun: written while Cargo is not run.
+    #[test]
+    fn a_keep_rollback_keeps_no_input_of_a_resumable_run_whose_stop_was_asked() {
+        use crate::meerkat_machine::dsl::{
+            InputDurabilityKind, MeerkatMachineAuthority, MeerkatMachineEffect,
+            MeerkatMachineInput, MeerkatMachineMutator, MeerkatMachineState, MeerkatPhase,
+            RegistrationPhase, RunId, SessionId, StopInputDisposition,
+            UnregisterQueuedInputsDisposition,
+        };
+        let open = RunId::from("open-run");
+        let verdict = |stopped: bool| {
+            let mut state = MeerkatMachineState {
+                lifecycle_phase: MeerkatPhase::Idle,
+                session_id: Some(SessionId::from("resumed-session")),
+                registration_phase: RegistrationPhase::Active,
+                resumable_run_id: Some(open.clone()),
+                ..Default::default()
+            };
+            bound_kept_input(&mut state, "bound", &open);
+            let mut authority =
+                MeerkatMachineAuthority::recover_from_state(state).expect("a valid machine state");
+            if stopped {
+                MeerkatMachineMutator::apply(
+                    &mut authority,
+                    MeerkatMachineInput::StopCurrentRunForRun {
+                        run_id: open.clone(),
+                    },
+                )
+                .expect("a stop of the resumable run is recorded");
+            }
+            let begin = authority.state().clone();
+            MeerkatMachineMutator::apply(
+                &mut authority,
+                MeerkatMachineInput::BeginUnregisterSession {
+                    session_id: SessionId::from("resumed-session"),
+                    agent_runtime_id: begin.active_runtime_id.clone(),
+                    fence_token: begin.active_fence_token,
+                    generation: begin.active_runtime_generation,
+                    runtime_epoch_id: begin.active_runtime_epoch_id.clone(),
+                    queued_inputs: UnregisterQueuedInputsDisposition::Keep,
+                    requeue_max_age_ms: 0,
+                },
+            )
+            .expect("the rollback's unregister begins");
+            MeerkatMachineMutator::apply(
+                &mut authority,
+                MeerkatMachineInput::ClassifyStopInputDisposition {
+                    input_id: "bound".to_string(),
+                    durability: InputDurabilityKind::Durable,
+                    directed: false,
+                    objective_bound: false,
+                },
+            )
+            .expect("the stop classifies the input")
+            .into_effects()
+            .into_iter()
+            .find_map(|effect| match effect {
+                MeerkatMachineEffect::StopInputDispositionClassified { disposition, .. } => {
+                    Some(disposition)
+                }
+                _ => None,
+            })
+        };
+        assert_eq!(
+            verdict(false),
+            Some(StopInputDisposition::Keep),
+            "a Keep rollback keeps the input it recovered"
+        );
+        assert_eq!(
+            verdict(true),
+            Some(StopInputDisposition::Abandon),
+            "but not the input of a resumable run whose stop was asked"
+        );
+    }
+
+    /// The classifier's verdict for each of `inputs`, in order, under a Keep
+    /// rollback of the machine recovered from `state` (a registered session
+    /// whose run `run` is marked resumable), after a recorded stop of `run`
+    /// when `stopped`.
+    fn keep_rollback_verdicts(
+        state: crate::meerkat_machine::dsl::MeerkatMachineState,
+        run: &crate::meerkat_machine::dsl::RunId,
+        stopped: bool,
+        inputs: &[&str],
+    ) -> Vec<Option<crate::meerkat_machine::dsl::StopInputDisposition>> {
+        use crate::meerkat_machine::dsl::{
+            InputDurabilityKind, MeerkatMachineAuthority, MeerkatMachineEffect,
+            MeerkatMachineInput, MeerkatMachineMutator, SessionId,
+            UnregisterQueuedInputsDisposition,
+        };
+        let mut authority =
+            MeerkatMachineAuthority::recover_from_state(state).expect("a valid machine state");
+        if stopped {
+            MeerkatMachineMutator::apply(
+                &mut authority,
+                MeerkatMachineInput::StopCurrentRunForRun {
+                    run_id: run.clone(),
+                },
+            )
+            .expect("a stop of the resumable run is recorded");
+        }
+        let begin = authority.state().clone();
+        MeerkatMachineMutator::apply(
+            &mut authority,
+            MeerkatMachineInput::BeginUnregisterSession {
+                session_id: SessionId::from("resumed-session"),
+                agent_runtime_id: begin.active_runtime_id.clone(),
+                fence_token: begin.active_fence_token,
+                generation: begin.active_runtime_generation,
+                runtime_epoch_id: begin.active_runtime_epoch_id.clone(),
+                queued_inputs: UnregisterQueuedInputsDisposition::Keep,
+                requeue_max_age_ms: 0,
+            },
+        )
+        .expect("the rollback's unregister begins");
+        inputs
+            .iter()
+            .map(|input_id| {
+                MeerkatMachineMutator::apply(
+                    &mut authority,
+                    MeerkatMachineInput::ClassifyStopInputDisposition {
+                        input_id: (*input_id).to_string(),
+                        durability: InputDurabilityKind::Durable,
+                        directed: false,
+                        objective_bound: false,
+                    },
+                )
+                .expect("the stop classifies the input")
+                .into_effects()
+                .into_iter()
+                .find_map(|effect| match effect {
+                    MeerkatMachineEffect::StopInputDispositionClassified {
+                        disposition, ..
+                    } => Some(disposition),
+                    _ => None,
+                })
+            })
+            .collect()
+    }
+
+    /// The Keep exception of a stopped run marked resumable ends that run's
+    /// own inputs only, the inputs bound to it (Staged, Applied or
+    /// AppliedPendingConsumption), as every other stop path does. A queued
+    /// input the registration recovered that only still names the run (a
+    /// discarded live join keeps its association, and recovery restores a
+    /// queued row's last run) is kept like any other recovered input. RED
+    /// while the exception had no phase test: the rollback ended the queued
+    /// input as stopped too. Unrun: written while Cargo is not run.
+    #[test]
+    fn a_keep_rollback_after_a_stop_keeps_a_queued_input_that_only_names_the_run() {
+        use crate::meerkat_machine::dsl::{
+            MeerkatMachineState, MeerkatPhase, RegistrationPhase, RunId, SessionId,
+            StopInputDisposition,
+        };
+        let open = RunId::from("open-run");
+        let mut state = MeerkatMachineState {
+            lifecycle_phase: MeerkatPhase::Idle,
+            session_id: Some(SessionId::from("resumed-session")),
+            registration_phase: RegistrationPhase::Active,
+            resumable_run_id: Some(open.clone()),
+            ..Default::default()
+        };
+        bound_kept_input(&mut state, "bound", &open);
+        // Recovered by the registration, queued, and still naming the run.
+        queued_input(&mut state, "stray", 2, true, true);
+        state
+            .input_run_associations
+            .insert("stray".to_string(), open.clone());
+        assert_eq!(
+            keep_rollback_verdicts(state.clone(), &open, false, &["bound", "stray"]),
+            vec![
+                Some(StopInputDisposition::Keep),
+                Some(StopInputDisposition::Keep)
+            ],
+            "a Keep rollback keeps every input the registration recovered"
+        );
+        assert_eq!(
+            keep_rollback_verdicts(state, &open, true, &["bound", "stray"]),
+            vec![
+                Some(StopInputDisposition::Abandon),
+                Some(StopInputDisposition::Keep)
+            ],
+            "after a stop of the run, the rollback ends the input bound to it and keeps \
+             the queued input that only names it"
+        );
+    }
+
     /// The destination wait counts the governed inputs bound to the run only.
     /// On a document that requires a destination and has none bound, a run
     /// whose bound input is ungoverned resumes, whatever governed queued

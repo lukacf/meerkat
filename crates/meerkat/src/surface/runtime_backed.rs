@@ -599,8 +599,10 @@ async fn run_runtime_backed_initial_turn_with_machine_boundary_mode<
 /// recovery, a failed agent build) ends nothing a later start would run. If
 /// the registration admitted live work (an admission, a deduplicated
 /// resubmission, a recycle), the machine stops every input instead, so a
-/// turn its caller saw refused never runs later. A direct initial turn
-/// leaves no input to keep or stop.
+/// turn its caller saw refused never runs later. The inputs bound to a run
+/// the registration marked resumable whose stop was asked end as stopped
+/// either way, so that run never resumes. A direct initial turn leaves no
+/// input to keep or stop.
 async fn rollback_prepared_runtime_registration(
     prepared: &mut meerkat_runtime::PreparedSessionMaterialization,
 ) {
@@ -1235,7 +1237,8 @@ async fn materialize_prepared_session_actor_transaction_with_admission<
         .await;
     // Refused before it admitted anything: the rollback keeps every input the
     // registration recovered, so a held durable tail stays held with its
-    // inputs open.
+    // inputs open. The inputs bound to a run the registration marked
+    // resumable whose stop was asked still end as stopped.
     let result = match create_result {
         Ok(result) => result,
         Err(error) => {
@@ -1848,9 +1851,22 @@ pub fn persistent_runtime_post_stop_cleanup_handle_for_actor_slot<
 /// It lives there because the handle needs only the `MeerkatMachine` and the
 /// session id, and because the mob provisioner must return the SAME handle
 /// while depending on the runtime rather than on this crate's `session-store`
-/// feature. Keeping this name here preserves the one helper every surface
-/// calls.
+/// feature. Keeping this name here, with its `_with_host_runtime_check`
+/// variant below, preserves the one helper every surface calls.
 pub use meerkat_runtime::persistent_runtime_pre_dequeue_handle;
+
+/// Build the same shared pre-dequeue realization handle with a surface's
+/// lost host runtime check as its precondition.
+///
+/// Re-exported from `meerkat_runtime` beside the handle it builds: the one
+/// implementation asks the check before it realizes anything, so a surface
+/// whose sessions run on the host's runtime supplies the check instead of
+/// wrapping the handle.
+pub use meerkat_runtime::persistent_runtime_pre_dequeue_handle_with_host_runtime_check;
+
+/// A surface's lost host runtime check for the shared pre-dequeue handle,
+/// re-exported from `meerkat_runtime`.
+pub use meerkat_runtime::PreDequeueHostRuntimeCheck;
 
 /// Build the endpoint that records typed system notices in one session's
 /// durable transcript without a turn.
@@ -2143,6 +2159,28 @@ impl<B: SessionAgentBuilder + 'static> CoreExecutorInterruptHandle
             })
             .map_err(|error| CoreExecutorError::control_failed_runtime(error.to_string()))
     }
+
+    /// Suspend the exact run, as a graceful requeue stop asks and a stop at a
+    /// store fence gap does: the turn is dropped as a hard interrupt drops
+    /// it, and the run ends suspended, its last round commit kept.
+    async fn suspend_run_if_current(
+        &self,
+        expected_run_id: &meerkat_core::RunId,
+        _reason: String,
+    ) -> Result<bool, CoreExecutorError> {
+        self.service
+            .suspend_run_with_machine_authority(
+                &self.session_id,
+                expected_run_id,
+                self.adapter.session_control_authority(),
+            )
+            .await
+            .or_else(|error| match error {
+                SessionError::NotRunning { .. } => Ok(false),
+                error => Err(error),
+            })
+            .map_err(|error| CoreExecutorError::control_failed_runtime(error.to_string()))
+    }
 }
 
 impl<B: SessionAgentBuilder + 'static> PersistentRuntimeExecutor<B> {
@@ -2311,6 +2349,37 @@ fn start_turn_request_from_primitive(
     })
 }
 
+/// A session's lost host runtime check, the precondition of its shared
+/// pre-dequeue handle (the runtime's realization of committed model-routing
+/// handoffs): the session service checks that the session's task did not end
+/// with the host's runtime it ran on. A realization reconfigures the live
+/// actor, so for a session whose host's runtime stopped it would fail, and the
+/// runtime loop's cleanup would then end the queued inputs as stopped; the
+/// check degrades the registration first, so the loop leaves them to the
+/// session's next registration.
+struct PersistentSessionHostRuntimeCheck<B: SessionAgentBuilder> {
+    service: Arc<PersistentSessionService<B>>,
+    session_id: SessionId,
+}
+
+#[async_trait::async_trait]
+impl<B: SessionAgentBuilder + 'static> PreDequeueHostRuntimeCheck
+    for PersistentSessionHostRuntimeCheck<B>
+{
+    async fn lost_host_runtime_refusal(&self) -> Option<String> {
+        self.service
+            .runtime_turn_lost_its_host_runtime(&self.session_id, None)
+            .await
+            .then(|| {
+                format!(
+                    "session '{}' lost its session task to the runtime it ran on; its queued work \
+                     is left to the session's next registration",
+                    self.session_id
+                )
+            })
+    }
+}
+
 #[async_trait::async_trait]
 impl<B: SessionAgentBuilder + 'static> CoreExecutor for PersistentRuntimeExecutor<B> {
     fn supports_work_authorization(&self) -> bool {
@@ -2361,13 +2430,21 @@ impl<B: SessionAgentBuilder + 'static> CoreExecutor for PersistentRuntimeExecuto
         ))
     }
 
+    /// The one shared realization handle, with the session's lost host
+    /// runtime check as its precondition.
     fn pre_dequeue_handle(
         &self,
     ) -> Option<Arc<dyn meerkat_core::lifecycle::CoreExecutorPreDequeueHandle>> {
-        Some(persistent_runtime_pre_dequeue_handle(
-            Arc::clone(&self.adapter),
-            self.session_id.clone(),
-        ))
+        Some(
+            persistent_runtime_pre_dequeue_handle_with_host_runtime_check(
+                Arc::clone(&self.adapter),
+                self.session_id.clone(),
+                Arc::new(PersistentSessionHostRuntimeCheck {
+                    service: Arc::clone(&self.service),
+                    session_id: self.session_id.clone(),
+                }),
+            ),
+        )
     }
 
     fn transcript_notice_handle(
@@ -2384,6 +2461,21 @@ impl<B: SessionAgentBuilder + 'static> CoreExecutor for PersistentRuntimeExecuto
         run_id: meerkat_core::lifecycle::RunId,
         primitive: RunPrimitive,
     ) -> Result<CoreApplyOutput, CoreExecutorError> {
+        // A session whose task ended with the host's runtime cannot run this
+        // turn: the session service degrades its registration, so the runtime
+        // loop leaves the run to the session's next registration instead of
+        // recording a step that fails on the lost actor as a failed run.
+        if self
+            .service
+            .runtime_turn_lost_its_host_runtime(&self.session_id, Some(&run_id))
+            .await
+        {
+            return Err(CoreExecutorError::apply_failed_runtime_turn(format!(
+                "session {} lost its session task to the runtime it ran on; run {run_id} is \
+                 left to the session's next registration",
+                self.session_id
+            )));
+        }
         validate_workgraph_attention_primitive(self.workgraph_service.as_ref(), &primitive).await?;
         if let Some(reason) = primitive.peer_response_terminal_apply_intent_violation() {
             return Err(CoreExecutorError::apply_failed_primitive_rejected(

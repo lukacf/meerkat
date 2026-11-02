@@ -1160,6 +1160,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `StopCurrentRunForRunRetired`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `StopCurrentRunForRunResumableIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `StopCurrentRunForRunResumableAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveUserInterruptPublicResultAcceptedInitializing`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -3396,6 +3402,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `SuspendRunForStopRunningToAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SuspendRunForStopFenceGapRunningToIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SuspendRunForStopFenceGapRunningToAttached`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `RecycleFromIdleOrRetired`

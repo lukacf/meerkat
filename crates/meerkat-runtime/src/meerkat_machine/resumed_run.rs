@@ -13,6 +13,47 @@ use crate::resumed_run_admission::ResumedRunAdmission;
 use crate::traits::RuntimeDriverError;
 
 impl MeerkatMachine {
+    /// The self-fence of this machine's store, when its writes hold a host
+    /// store fence ([`crate::store::RuntimeStore::self_fence`]): a run that
+    /// a store fence gap suspended resumes only once its window is open.
+    pub(crate) fn store_self_fence(&self) -> Option<Arc<dyn meerkat_core::host_store::SelfFence>> {
+        self.store.as_ref().and_then(|store| store.self_fence())
+    }
+
+    /// Whether `session_id`'s store holds a provisional tail of `run_id`:
+    /// the run made a round commit, so it resumes from the cursor the tail
+    /// carries. A run with none (a store fence gap suspended it before its
+    /// first round commit) starts again from its bound inputs instead. A
+    /// tail that cannot be read counts as held: the resume then reads it
+    /// again, through the session layer, and fails as a resume does.
+    pub(crate) async fn run_holds_provisional_tail(
+        &self,
+        session_id: &meerkat_core::types::SessionId,
+        run_id: &meerkat_core::lifecycle::RunId,
+    ) -> bool {
+        let Some(store) = self.store.as_ref() else {
+            return false;
+        };
+        let runtime_id = crate::identifiers::LogicalRuntimeId::for_session(session_id);
+        match store.session_persistence_profile() {
+            crate::store::RuntimeSessionPersistenceProfile::HeadCanonicalV1 => {
+                match store
+                    .load_head_canonical_provisional_tail(&runtime_id)
+                    .await
+                {
+                    Ok(tail) => tail.is_some_and(|authority| authority.run_id() == run_id),
+                    Err(_) => true,
+                }
+            }
+            crate::store::RuntimeSessionPersistenceProfile::WholeBlobV1 => {
+                match store.load_whole_blob_provisional_tail(&runtime_id).await {
+                    Ok(tail) => tail.is_some_and(|tail| tail.authority().run_id() == run_id),
+                    Err(_) => true,
+                }
+            }
+        }
+    }
+
     /// The run `session_id`'s durable tail left open, as its registration
     /// observes it before input recovery.
     ///
@@ -371,10 +412,41 @@ impl super::driver::DriverEntry {
             crate::meerkat_machine::dsl::MeerkatMachineInput::SuspendRunForStop {
                 run_id: crate::meerkat_machine::dsl::RunId::from_domain(run_id),
                 durable_session,
+                cause: crate::meerkat_machine::dsl::RunSuspensionCause::RequeueStop,
             },
             "SuspendRunForStop",
         )
         .is_ok()
+    }
+
+    /// Whether a stop was asked of the run marked resumable (the machine's
+    /// stop intent names it): a cancel the run accepted before a store fence
+    /// gap suspended it, a stop or an interrupt of it at the fence, or one of
+    /// it while it was marked resumable (suspended by the gap, or left open
+    /// by a restart). Such a run never resumes; the runtime settles it.
+    pub(crate) fn resumable_run_stop_requested(&self) -> bool {
+        let authority = self.shared_dsl_authority();
+        let authority = authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let state = authority.state();
+        state.resumable_run_id.is_some() && state.run_stop_requested == state.resumable_run_id
+    }
+
+    /// The session's unfinished inputs its store keeps: every active input
+    /// but an ephemeral one, which no store holds (an input whose row does
+    /// not say counts as kept).
+    pub(crate) fn store_kept_input_ids(&self) -> Vec<meerkat_core::lifecycle::InputId> {
+        let driver = self.as_driver();
+        driver
+            .active_input_ids()
+            .into_iter()
+            .filter(|input_id| {
+                driver.stored_input_state(input_id).is_none_or(|stored| {
+                    stored.state.durability != Some(crate::input::InputDurability::Ephemeral)
+                })
+            })
+            .collect()
     }
 
     /// Whether the registration is draining for an unregister: its runtime is
@@ -391,9 +463,10 @@ impl super::driver::DriverEntry {
     /// Whether this runtime's stop keeps its queued work for the next start:
     /// a graceful unregister that requeues, or the rollback of a
     /// materialization that never served, which keeps every input its
-    /// registration recovered. Such a stop leaves a run the session left
-    /// open to the next registration, which finds it open again; every
-    /// other stop ends that run with the stop.
+    /// registration recovered (either way, the inputs bound to a run marked
+    /// resumable whose stop was asked end as stopped). Such a stop leaves a
+    /// run the session left open to the next registration, which finds it
+    /// open again; every other stop ends that run with the stop.
     pub(crate) fn stop_keeps_queued_work(&self) -> bool {
         let authority = self.shared_dsl_authority();
         let authority = authority

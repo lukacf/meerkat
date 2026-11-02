@@ -626,6 +626,8 @@ impl SessionAgent for CompactionSessionAgent {
             last_compaction_boundary_index: None,
             session_boundary_index: self.boundary_index,
             last_rewrite_history_tokens: None,
+            projected_input_tokens: None,
+            last_context_refusal_boundary_index: None,
         };
         if self.compactor.should_compact(&context) {
             self.seen_last_user_messages

@@ -2034,6 +2034,54 @@ pub async fn observe_resumable_run(
     }))
 }
 
+/// A durable session's open run as its provisional tail holds it: the tail
+/// itself, run cursor included, the run, and the receipt the run's next
+/// checkpoint chains from (its digest the tail's transcript content digest),
+/// as a registration's actor would be seeded with them.
+#[derive(Debug, Clone)]
+pub struct OpenRunContinuation {
+    /// The provisional tail, run cursor included.
+    pub candidate: Box<Session>,
+    /// The run the tail continues.
+    pub run_id: RunId,
+    /// The receipt the run's next checkpoint chains from.
+    pub receipt: RunCheckpointReceipt,
+}
+
+/// Observe the continuation of the session's open run, with the same source
+/// preparation and classifier as [`observe_resumable_run`]: `Some` only when
+/// the durable tail is a continuable open run. This only observes; nothing is
+/// written.
+///
+/// A host that resumes, in the same process, a run it suspended (a store
+/// fence gap dropped the run at its dispatch wait) seeds the run's live actor
+/// from it again, as a restart's registration seeds a new actor: the dropped
+/// attempt's uncommitted content is gone, and the run continues from its last
+/// round commit.
+pub async fn observe_open_run_continuation(
+    store: &dyn RuntimeStore,
+    session_id: &SessionId,
+) -> Result<Option<OpenRunContinuation>, DurableTailRecoveryError> {
+    let runtime_id = LogicalRuntimeId::for_session(session_id);
+    let RecoveryCandidatePreparation::Prepared(candidate) =
+        load_recovery_preparation(store, &runtime_id, session_id, PreparationMode::Recovery)
+            .await?
+    else {
+        return Ok(None);
+    };
+    if candidate.class != DurableTailRecoveryClass::ContinuableCandidate {
+        return Ok(None);
+    }
+    let Some(continuation) = candidate.continuation else {
+        return Ok(None);
+    };
+    Ok(Some(OpenRunContinuation {
+        candidate: Box::new(continuation.candidate.as_ref().clone()),
+        run_id: candidate.candidate_run_id,
+        receipt: continuation.receipt,
+    }))
+}
+
 /// The session's last committed snapshot while a HeadCanonical provisional
 /// tail sits ahead of it.
 ///

@@ -159,9 +159,10 @@ fn live_worker_failure_terminal(
         meerkat_mob::BoundedTurnFailure::Cancelled { .. } => {
             LiveDelegationWorkerTerminalKind::Cancelled
         }
-        // A graceful stop ended the worker's turn in this process: its input
-        // stays queued for the next start, or aged out before it ran. The
-        // turn did not fail.
+        // A graceful stop (or a store fence gap) ended the worker's turn in
+        // this process: its input stays queued for the next start (or the
+        // fence's re-acquire), or aged out before it ran. The turn did not
+        // fail.
         meerkat_mob::BoundedTurnFailure::RequeuedAcrossStop { .. }
         | meerkat_mob::BoundedTurnFailure::RequeueExpired { .. } => {
             LiveDelegationWorkerTerminalKind::Cancelled

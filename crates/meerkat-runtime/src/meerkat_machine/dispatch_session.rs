@@ -1994,6 +1994,57 @@ impl MeerkatMachine {
         if let Some(capture) = stop.as_deref_mut() {
             capture.current_run_id = current_run_id.clone();
         }
+        // A run marked resumable (a store fence gap's, or a restart's that has
+        // not resumed yet) has no run current, so there is no turn to
+        // interrupt: an interrupt or a stop of it records the run's stop
+        // intent instead (the machine refuses it while the registration drains
+        // for its unregister, whose next start resumes the run), and the
+        // runtime settles the run, its inputs abandoned as cancelled, once its
+        // store takes writes again. A stop's receipt then lists no
+        // contributor: the run ends only with that settlement.
+        let resumable = if current_run_id.is_none() {
+            let authority = authority
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            crate::meerkat_machine::dsl_authority::resumable_run_id_from_authority(&authority)
+        } else {
+            None
+        };
+        if let Some(resumable) = resumable
+            && expected_run_id.is_none_or(|expected| expected == &resumable)
+            && Self::stage_dsl_transition_on_authority(
+                &authority,
+                crate::meerkat_machine::dsl::MeerkatMachineInput::StopCurrentRunForRun {
+                    run_id: crate::meerkat_machine::dsl::RunId::from_domain(&resumable),
+                },
+                "StopCurrentRunForRun",
+            )
+            .is_ok()
+        {
+            tracing::info!(
+                %session_id,
+                run_id = %resumable,
+                "a stop of a run marked resumable is recorded; the run is settled once its \
+                 store takes writes again"
+            );
+            // The run's loop may be parked (a restart's resumable run that
+            // waits for its controller or its destination): wake it, so it
+            // settles the stopped run at its next lap.
+            let wake = self
+                .sessions
+                .read()
+                .await
+                .get(session_id)
+                .and_then(|entry| entry.wake_sender());
+            if let Some(wake) = wake {
+                let _ = wake.try_send(());
+            }
+            if let Some(capture) = stop.as_deref_mut() {
+                capture.current_run_id = Some(resumable);
+                capture.staged = true;
+            }
+            return Ok(true);
+        }
         if let Some(expected_run_id) = expected_run_id {
             if !matches!(phase, RuntimeState::Running | RuntimeState::Retired)
                 || current_run_id.as_ref() != Some(expected_run_id)
@@ -2040,6 +2091,22 @@ impl MeerkatMachine {
             )
         };
 
+        // A run whose session store's fence reads closed with no other writer
+        // proven (a store fence gap, or its start) is stopped through a
+        // suspension, not a hard interrupt: the stop is recorded on the run
+        // (`StopCurrentRunForRun`, which the gap's suspension keeps) and the
+        // session is asked to suspend the run. The run then never resumes,
+        // its waiters are answered at the suspension, and it is settled, its
+        // inputs abandoned as cancelled, once the store takes writes again. A
+        // hard interrupt there would cancel the run only in memory: the gap
+        // refuses the cancel's writes, the session reloads from the store,
+        // and the reload would resume the stopped run. A run stop registers
+        // no contributor waits on this path (its receipt lists none: the
+        // inputs end only at that settlement), and a surface that cannot
+        // suspend the run is interrupted as before.
+        let stop_at_fence_gap = self
+            .store_self_fence()
+            .is_some_and(|fence| !fence.lost() && !fence.window().is_open());
         if let Some(capture) = stop.as_deref_mut() {
             // Linearize the stop before joining any in-flight interrupt
             // dispatch: from here the run admits no durable join, and its
@@ -2069,30 +2136,43 @@ impl MeerkatMachine {
                 return Ok(false);
             }
             capture.staged = true;
-            let driver_guard = captured_driver.lock().await;
-            let contributor_ids = driver_guard
-                .as_driver()
-                .active_input_ids()
-                .into_iter()
-                .filter(|input_id| {
-                    driver_guard
-                        .as_driver()
-                        .stored_input_state(input_id)
-                        .is_some_and(|stored| {
-                            stored.seed.phase == crate::input_state::InputLifecycleState::Staged
-                                && stored.seed.last_run_id.as_ref() == Some(&expected_run_id)
-                        })
-                })
-                .collect::<Vec<_>>();
-            let mut completions = captured_completions.lock().await;
-            capture.contributors = contributor_ids
-                .into_iter()
-                .map(|input_id| {
-                    let waiter = completions.register(input_id.clone());
-                    (input_id, waiter)
-                })
-                .collect();
+            if !stop_at_fence_gap {
+                let driver_guard = captured_driver.lock().await;
+                let contributor_ids = driver_guard
+                    .as_driver()
+                    .active_input_ids()
+                    .into_iter()
+                    .filter(|input_id| {
+                        driver_guard
+                            .as_driver()
+                            .stored_input_state(input_id)
+                            .is_some_and(|stored| {
+                                stored.seed.phase == crate::input_state::InputLifecycleState::Staged
+                                    && stored.seed.last_run_id.as_ref() == Some(&expected_run_id)
+                            })
+                    })
+                    .collect::<Vec<_>>();
+                let mut completions = captured_completions.lock().await;
+                capture.contributors = contributor_ids
+                    .into_iter()
+                    .map(|input_id| {
+                        let waiter = completions.register(input_id.clone());
+                        (input_id, waiter)
+                    })
+                    .collect();
+            }
         }
+        // An interrupt at a store fence gap records the stop the same way.
+        let suspend_first = stop_at_fence_gap
+            && (stop.is_some()
+                || Self::stage_dsl_transition_on_authority(
+                    &captured_authority,
+                    crate::meerkat_machine::dsl::MeerkatMachineInput::StopCurrentRunForRun {
+                        run_id: crate::meerkat_machine::dsl::RunId::from_domain(&expected_run_id),
+                    },
+                    "StopCurrentRunForRun",
+                )
+                .is_ok());
 
         let joined_result = {
             let sessions = self.sessions.read().await;
@@ -2197,21 +2277,25 @@ impl MeerkatMachine {
         drop(gate_guard);
         drop(member_lease);
         cleanup_spawner.spawn(async move {
-            let callback_result = match std::panic::AssertUnwindSafe(
-                handle.hard_cancel_run_if_current(&owned_run_id, reason),
-            )
-            .catch_unwind()
-            .await
-            {
-                Ok(Ok(delivered)) => Ok(delivered),
-                Ok(Err(error)) => Err(RuntimeDriverError::Internal(format!(
-                    "failed to hard cancel exact run {owned_run_id}: {error}"
-                ))),
-                Err(payload) => Err(RuntimeDriverError::InterruptDispatchPanicked {
-                    run_id: owned_run_id.clone(),
-                    reason: meerkat_core::panic_payload::panic_payload_detail(payload.as_ref()),
-                }),
-            };
+            let callback_result =
+                match std::panic::AssertUnwindSafe(Self::interrupt_or_suspend_run(
+                    handle.as_ref(),
+                    &owned_run_id,
+                    reason,
+                    suspend_first,
+                ))
+                .catch_unwind()
+                .await
+                {
+                    Ok(Ok(delivered)) => Ok(delivered),
+                    Ok(Err(error)) => Err(RuntimeDriverError::Internal(format!(
+                        "failed to hard cancel exact run {owned_run_id}: {error}"
+                    ))),
+                    Err(payload) => Err(RuntimeDriverError::InterruptDispatchPanicked {
+                        run_id: owned_run_id.clone(),
+                        reason: meerkat_core::panic_payload::panic_payload_detail(payload.as_ref()),
+                    }),
+                };
             let result = machine
                 .reconcile_user_interrupt_dispatch(
                     &owned_session_id,
@@ -2232,6 +2316,31 @@ impl MeerkatMachine {
 
         self.await_user_interrupt_dispatch(result_rx, &expected_run_id)
             .await
+    }
+
+    /// Interrupt `run_id` through the executor's `handle`: when
+    /// `suspend_first` (a stop at a store fence gap, already recorded on the
+    /// run), ask the session to suspend the run, and hard-cancel it only when
+    /// the surface cannot suspend it or the suspension failed.
+    async fn interrupt_or_suspend_run(
+        handle: &dyn meerkat_core::lifecycle::CoreExecutorInterruptHandle,
+        run_id: &meerkat_core::RunId,
+        reason: String,
+        suspend_first: bool,
+    ) -> Result<bool, meerkat_core::lifecycle::core_executor::CoreExecutorError> {
+        if suspend_first {
+            match handle.suspend_run_if_current(run_id, reason.clone()).await {
+                Ok(true) => return Ok(true),
+                Ok(false) => {}
+                Err(error) => tracing::debug!(
+                    %run_id,
+                    %error,
+                    "the suspension of a run stopped at a store fence gap failed; it is \
+                     interrupted instead"
+                ),
+            }
+        }
+        handle.hard_cancel_run_if_current(run_id, reason).await
     }
 
     /// Classify a generated-machine rejection of a session lifecycle input.

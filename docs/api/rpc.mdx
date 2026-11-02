@@ -1331,10 +1331,12 @@ input or its readiness is unavailable (the typed detail is in `data`),
 `-32001` when the runtime driver has no runtime under the session's id,
 `-32002` when another runtime owner hosts the session or its runtime
 teardown is still running, `-32032` when its runtime authority is
-unavailable, and `-32600` when the runtime's lifecycle state admits no new
-input (a retired runtime, or the destroyed runtime of a session that is
-gone; the message names the state). Only a mechanical failure is
-`-32603`.
+unavailable (`data.kind` `runtime_shutting_down` once the session runtime's
+shutdown began, `host_runtime_stopped` once the host's runtime the session ran
+on stopped and its registration waits for its reload), and `-32600` when the
+runtime's lifecycle state admits no new input (a retired runtime, or the
+destroyed runtime of a session that is gone; the message names the state).
+Only a mechanical failure is `-32603`.
 
 <ParamField body="session_id" type="string" required>
   Session ID to continue.
@@ -1498,7 +1500,12 @@ The call returns once every contributor has reached its terminal. The receipt
 - `stopped`: the run was current. `contributors` lists every input bound to it,
   with the delivered `completion` class and the committed `terminal` class. A
   cancelled joined steer reports `completion: "runtime_terminated"` with
-  `terminal: "cancelled"`; read `terminal` for the lifecycle fact.
+  `terminal: "cancelled"`; read `terminal` for the lifecycle fact. A run a
+  store fence gap suspended, one a restart left open that has not resumed
+  yet, or one whose session store's writer is stopped, is stopped without
+  waiting: `contributors` is empty, the run never resumes, and its inputs
+  end `cancelled` when the runtime settles it (once the store takes writes
+  again, after a gap); read their outcome later.
 - `not_current`: the run is no longer (or never was) current. Nothing was
   touched, and newer runs and queued input are not interrupted.
 - `not_stoppable`: the run is still bound, but a runtime stop or teardown owns
@@ -3371,8 +3378,8 @@ live transport's realtime observations. See
 
 | Event | Description |
 |-------|-------------|
-| `run_started` | Agent execution began |
-| `run_resumed` | Since 0.9.5: a run continued after a restart from its last committed round, under its original run id; carries `run_id`, `round` and `resume_point` (`tools_pending` or `awaiting_model`). See [Durable runs](/guides/durable-runs#after-a-crash) |
+| `run_started` | Agent execution began. A repeated `run_started` for a run id that has no terminal yet means that run started over from its inputs (a durable run a store fence gap suspended before its first round commit, run again once the fence is back): drop what you received for that run id before |
+| `run_resumed` | Since 0.9.5: a run continued from its last committed round, under its original run id, after a restart or, in the same process, once a store fence gap that suspended it ended; carries `run_id`, `round` and `resume_point` (`tools_pending` or `awaiting_model`). See [Durable runs](/guides/durable-runs#after-a-crash) |
 | `run_completed` | Agent run finished |
 | `extraction_succeeded` | Structured-output extraction succeeded after a completed run; `request_usage` has one usage row per extraction request |
 | `extraction_failed` | Structured-output extraction failed after a completed run; `request_usage` has one usage row per answered extraction request |
@@ -3395,6 +3402,7 @@ live transport's realtime observations. See
 | `compaction_started` | Context compaction began |
 | `compaction_completed` | Compaction finished. Since 0.9.4 it carries `summary_source` (who wrote the summary: `{"kind": "provider_call", "source_bound": ...}` with bound `whole`, `trimmed` (`through`) or `requests_only` (`kept`, `of`), `{"kind": "host_curator"}` or `{"kind": "mechanical_fallback"}`) and optional `estimated_history_tokens_after`, in the unit of `compaction_started`'s `estimated_history_tokens` |
 | `compaction_failed` | Compaction failed |
+| `tool_results_bounded_for_request` | A model request carried some of its run's own tool results shortened, for that request only: with them whole it was over the provider's request-body cap, or its forecast was over the model's context window, and no compaction made room (a compaction inside a run keeps the run's request and newest round). Carries `run_id`, `results` (each `tool_use_id`, `tool_name`, `kept_bytes` and `total_bytes`) and `axis` (`request_bytes` or `context_window`). Published before the request is sent; the stored transcript keeps every result whole. With the default compactor the next run's first check then compacts the whole transcript once; with compaction off the request is still bounded and nothing is recorded |
 | `budget_warning` | Approaching resource limits |
 | `retrying` | Retrying after transient error; the retry reuses `assistant_message_id`, so discard that id's live buffer |
 | `model_fallback_skipped` | A fallback candidate was skipped with its typed target/reason |
@@ -3621,7 +3629,7 @@ and `data`, never on the message text.
 | -32029 | Member reload required | Member registration is durability-degraded; only an explicit registration reload repairs it |
 | -32030 | Input refused | The native owner declined an unaccepted input |
 | -32031 | Input not ready | Native input readiness is currently unavailable; `data` is `{"type": "not_ready", "reason": {"kind": ...}}`. Since 0.9.4 the kind `original_admission_pending` means an original the input names is still waiting on its source owner's admission: retry later |
-| -32032 | Session runtime unavailable | Runtime authority is unavailable before a session operation starts |
+| -32032 | Session runtime unavailable | Runtime authority is unavailable before a session operation starts. On the session runtime, `data.kind` `runtime_shutting_down` refuses work that reaches admission or registration after the runtime's shutdown began, and `host_runtime_stopped` refuses an input to a session whose task ended with the host's runtime it ran on once the session's registration waits for its reload. Nothing of the request was admitted, so nothing is kept; send it again after the next start |
 | -32033 | Approval store unavailable | The approval store committed nothing; a fresh retry is valid |
 | -32034 | Approval conflict | Another owner changed the approval first; reconcile it before reuse |
 | -32035 | Approval commit unknown | The store cannot confirm the commit; reconcile from the store, never resend |

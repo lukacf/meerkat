@@ -146,7 +146,11 @@ impl OperationRefusalObservation {
     }
 
     /// The refused operation's id, as its authorization audit records it;
-    /// `None` for an operation outside governed work.
+    /// `None` for an operation outside governed work, and for the waits of
+    /// a governed helper admission built from a dispatch
+    /// (`GovernedHelperAdmissionFence::create_idempotent_after_owner_change`
+    /// in the `meerkat` facade), which it reports on its call's surface
+    /// without the dispatch's operation id.
     pub fn operation_id(&self) -> Option<&OperationId> {
         self.operation_id.as_ref()
     }

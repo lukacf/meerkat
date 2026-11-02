@@ -1,5 +1,8 @@
 exports_files(
-    ["workspace_lints.bzl"],
+    [
+        "run_rust_test_module.sh",
+        "workspace_lints.bzl",
+    ],
     visibility = ["//visibility:public"],
 )
 

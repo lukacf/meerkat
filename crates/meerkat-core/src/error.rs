@@ -891,13 +891,17 @@ pub enum AgentError {
     )]
     StagedPromptDirectedTurnRefused,
 
-    /// The run was suspended by a stop that keeps the session's queued work
-    /// (a host draining and requeueing, for a deploy): its turn stopped at an
-    /// await point and wrote nothing more, so its last round commit stays its
-    /// resume point. It is neither a cancellation nor a failure: no terminal
-    /// is published for it, and the run resumes at the session's next start.
+    /// The run was suspended: its turn stopped at an await point and wrote
+    /// nothing more, so its last round commit stays its resume point. A stop
+    /// that keeps the session's queued work (a host draining and requeueing,
+    /// for a deploy) suspends it for the session's next start; a store fence
+    /// gap (the session store's writer stayed stopped through the run's
+    /// bounded dispatch wait, and no other writer was found) suspends it for
+    /// the same registration, which resumes it once the store's fence is
+    /// restored. It is neither a cancellation nor a failure: no terminal is
+    /// published for it.
     #[error(
-        "run {run_id} was suspended by a requeueing stop; it resumes from its last round commit"
+        "run {run_id} was suspended by a requeueing stop or a store fence gap; it resumes from its last round commit"
     )]
     RunSuspended { run_id: crate::lifecycle::RunId },
 }

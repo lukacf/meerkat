@@ -1946,11 +1946,12 @@ pub enum MobError {
         refusal: MemberSendIdempotencyRefusal,
     },
 
-    /// A graceful Shutdown kept the member input durably queued: it runs on
-    /// the mob's next start. It is not failed. Do not resubmit it; a
-    /// same-key replay after the restart re-attaches to it.
+    /// A graceful Shutdown, or a store fence gap, kept the member input
+    /// durably queued: it runs on the mob's next start, or once the member
+    /// session store's fence is re-acquired. It is not failed. Do not
+    /// resubmit it; a same-key replay re-attaches to it.
     #[error(
-        "input {input_id} in session {session_id} stays queued across the stop and runs on the next start; re-attach with the same delivery key, do not resubmit"
+        "input {input_id} in session {session_id} stays queued across the stop or store fence gap and runs when the fence is re-acquired or on the next start; re-attach with the same delivery key, do not resubmit"
     )]
     MemberInputRequeuedAcrossStop {
         session_id: meerkat_core::SessionId,

@@ -78,17 +78,37 @@ pub enum CompletionWaitError {
         "the durable outcome of run {run_id} is unknown: its store did not answer within its commit deadline; read the input after its session reloads"
     )]
     DurableOutcomeUnknown { run_id: RunId },
-    /// The input was still queued when its runtime stopped, and the stop's
-    /// unregister kept it durably queued for the next start
-    /// ([`UnregisterQueuedInputs::Requeue`](crate::UnregisterQueuedInputs::Requeue)).
-    /// It is neither failed nor consumed: the next start runs it, or ends it
-    /// as abandoned with reason `requeue_expired` when it is older than the
-    /// stop's max age by then. Do not resubmit it; read it after the restart.
+    /// The input stays durably queued across a runtime stop or a store fence
+    /// gap, and runs later. It is neither failed nor consumed.
+    ///
+    /// - A runtime stop: the input was still queued when its runtime stopped,
+    ///   and the stop's unregister kept it durably queued for the next start
+    ///   ([`UnregisterQueuedInputs::Requeue`](crate::UnregisterQueuedInputs::Requeue)).
+    ///   The next start runs it, or ends it as abandoned with reason
+    ///   `requeue_expired` when it is older than the stop's max age by then.
+    /// - A store fence gap: the session store's writer stayed stopped through
+    ///   a dispatch wait or a round commit of the run the input is bound to,
+    ///   or a stop reached the run at the stopped writer's fence, and the run
+    ///   was suspended with the input still bound to it. The input runs when
+    ///   the fence is re-acquired (the run resumes) or at the next start; an
+    ///   ephemeral input, which no store keeps, runs only in this process,
+    ///   once the fence is re-acquired. When the run's stop was asked (a
+    ///   cancel it accepted before the gap, a stop or an interrupt at the
+    ///   fence, or one asked after this answer), the run never resumes: the
+    ///   input ends abandoned as cancelled once the fence is back, unless the
+    ///   process ends first or another writer takes the session over, which
+    ///   then runs it.
+    /// - Another writer took the session over (its store refuses this
+    ///   process's writes): the store keeps the input as last committed, and
+    ///   the new owner resumes or repairs its run and runs it. This process
+    ///   runs nothing more of the session.
+    ///
+    /// Do not resubmit it; read it later.
     #[error(
-        "the input stays queued across the runtime stop at {stopped_at} and runs on the next start; do not resubmit it"
+        "the input stays queued across the runtime stop or store fence gap at {stopped_at} and runs when the fence is re-acquired or at the next start; do not resubmit it"
     )]
     RequeuedAcrossStop {
-        /// When the stop kept the input queued.
+        /// When the stop or the fence gap kept the input queued.
         stopped_at: chrono::DateTime<chrono::Utc>,
     },
     /// The input joined run `run_id` at a model boundary, and a round commit

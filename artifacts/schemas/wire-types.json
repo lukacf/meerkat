@@ -616,7 +616,7 @@
         "description": "Events emitted during agent execution\n\nThese events form the streaming API for consumers.",
         "oneOf": [
           {
-            "description": "Agent run started",
+            "description": "Agent run started.\n\nA durable run that a store fence gap suspended before its first round\ncommit starts again from its inputs, under the same run id, once the\nfence is back, and publishes `run_started` again with no terminal in\nbetween. An observer reads a repeated `run_started` for a run id that\nhas no terminal yet as that run starting over, and drops what it\nreceived for the run id before.",
             "properties": {
               "identity": {
                 "$ref": "#/$defs/TranscriptMessageIdentity",
@@ -2151,7 +2151,7 @@
             "type": "object"
           },
           {
-            "description": "A durable run resumed from its run cursor after a restart, in place of\n`run_started`: the same run continues under its run id, and its\nterminal follows as for any run.\n\nAt `tools_pending` the run takes the round's staged assistant message\nas the model's response and dispatches its tool calls again under\ntheir call ids; nothing is published again for the staged message (no\n`tool_call_requested`, no `turn_completed`). At `awaiting_model` the\nrun continues with its next model call, after the last committed\nround.",
+            "description": "A durable run resumed from its run cursor, in place of `run_started`:\nafter a restart, or in the same process once a store fence gap that\nsuspended it ended. The same run continues under its run id, and its\nterminal follows as for any run.\n\nAt `tools_pending` the run takes the round's staged assistant message\nas the model's response and dispatches its tool calls again under\ntheir call ids; nothing is published again for the staged message (no\n`tool_call_requested`, no `turn_completed`). At `awaiting_model` the\nrun continues with its next model call, after the last committed\nround.",
             "properties": {
               "resume_point": {
                 "$ref": "#/$defs/RunResumePointKind"
@@ -2179,6 +2179,37 @@
               "run_id",
               "round",
               "resume_point"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "One model request of a run carried some of the run's own tool results\nshortened, for that request only: with them whole the request was over\nthe provider's request-body cap, or its forecast was over the model's\ncontext window, and no compaction made room (a compaction inside a run\nkeeps the run's request and newest round).\n\nEach named result kept the head of its text, media as placeholders,\nwith a marker naming the call that the model reads. The stored\ntranscript keeps every result whole. With the default compactor the\nnext run's first check then compacts the whole transcript once; with\ncompaction off the request is still bounded and nothing is recorded.\nPublished before the request is sent, once for each request that\ncarries a bound.",
+            "properties": {
+              "axis": {
+                "$ref": "#/$defs/ToolResultBoundAxis",
+                "description": "The limit that set how much of each result the request kept."
+              },
+              "results": {
+                "description": "The results the request carried shortened, in request order.",
+                "items": {
+                  "$ref": "#/$defs/BoundedToolResult"
+                },
+                "type": "array"
+              },
+              "run_id": {
+                "$ref": "#/$defs/RunId",
+                "description": "The run whose request carried the results shortened."
+              },
+              "type": {
+                "const": "tool_results_bounded_for_request",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "run_id",
+              "results",
+              "axis"
             ],
             "type": "object"
           }
@@ -2536,6 +2567,38 @@
           "session_id",
           "run_id",
           "input_ids"
+        ],
+        "type": "object"
+      },
+      "BoundedToolResult": {
+        "description": "One tool result a model request carried shortened, as\n[`AgentEvent::ToolResultsBoundedForRequest`] names it.",
+        "properties": {
+          "kept_bytes": {
+            "description": "Bytes of the result's text the request carried: its head.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "tool_name": {
+            "description": "The tool the call named.",
+            "type": "string"
+          },
+          "tool_use_id": {
+            "description": "The call the result answers.",
+            "type": "string"
+          },
+          "total_bytes": {
+            "description": "Bytes of the result's whole text, media as placeholders. The stored\ntranscript keeps the result whole.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "tool_use_id",
+          "tool_name",
+          "kept_bytes",
+          "total_bytes"
         ],
         "type": "object"
       },
@@ -7773,6 +7836,21 @@
               "kind"
             ],
             "type": "object"
+          }
+        ]
+      },
+      "ToolResultBoundAxis": {
+        "description": "The limit a model request was over with the run's own tool results\nwhole, as [`AgentEvent::ToolResultsBoundedForRequest`] reports it.",
+        "oneOf": [
+          {
+            "const": "request_bytes",
+            "description": "The provider's request-body byte cap.",
+            "type": "string"
+          },
+          {
+            "const": "context_window",
+            "description": "The model's context window less the request's output reserve, or the\nmodel's input ceiling.",
+            "type": "string"
           }
         ]
       },
@@ -26523,7 +26601,7 @@
         "description": "Events emitted during agent execution\n\nThese events form the streaming API for consumers.",
         "oneOf": [
           {
-            "description": "Agent run started",
+            "description": "Agent run started.\n\nA durable run that a store fence gap suspended before its first round\ncommit starts again from its inputs, under the same run id, once the\nfence is back, and publishes `run_started` again with no terminal in\nbetween. An observer reads a repeated `run_started` for a run id that\nhas no terminal yet as that run starting over, and drops what it\nreceived for the run id before.",
             "properties": {
               "identity": {
                 "$ref": "#/$defs/TranscriptMessageIdentity",
@@ -28058,7 +28136,7 @@
             "type": "object"
           },
           {
-            "description": "A durable run resumed from its run cursor after a restart, in place of\n`run_started`: the same run continues under its run id, and its\nterminal follows as for any run.\n\nAt `tools_pending` the run takes the round's staged assistant message\nas the model's response and dispatches its tool calls again under\ntheir call ids; nothing is published again for the staged message (no\n`tool_call_requested`, no `turn_completed`). At `awaiting_model` the\nrun continues with its next model call, after the last committed\nround.",
+            "description": "A durable run resumed from its run cursor, in place of `run_started`:\nafter a restart, or in the same process once a store fence gap that\nsuspended it ended. The same run continues under its run id, and its\nterminal follows as for any run.\n\nAt `tools_pending` the run takes the round's staged assistant message\nas the model's response and dispatches its tool calls again under\ntheir call ids; nothing is published again for the staged message (no\n`tool_call_requested`, no `turn_completed`). At `awaiting_model` the\nrun continues with its next model call, after the last committed\nround.",
             "properties": {
               "resume_point": {
                 "$ref": "#/$defs/RunResumePointKind"
@@ -28086,6 +28164,37 @@
               "run_id",
               "round",
               "resume_point"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "One model request of a run carried some of the run's own tool results\nshortened, for that request only: with them whole the request was over\nthe provider's request-body cap, or its forecast was over the model's\ncontext window, and no compaction made room (a compaction inside a run\nkeeps the run's request and newest round).\n\nEach named result kept the head of its text, media as placeholders,\nwith a marker naming the call that the model reads. The stored\ntranscript keeps every result whole. With the default compactor the\nnext run's first check then compacts the whole transcript once; with\ncompaction off the request is still bounded and nothing is recorded.\nPublished before the request is sent, once for each request that\ncarries a bound.",
+            "properties": {
+              "axis": {
+                "$ref": "#/$defs/ToolResultBoundAxis",
+                "description": "The limit that set how much of each result the request kept."
+              },
+              "results": {
+                "description": "The results the request carried shortened, in request order.",
+                "items": {
+                  "$ref": "#/$defs/BoundedToolResult"
+                },
+                "type": "array"
+              },
+              "run_id": {
+                "$ref": "#/$defs/RunId",
+                "description": "The run whose request carried the results shortened."
+              },
+              "type": {
+                "const": "tool_results_bounded_for_request",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "run_id",
+              "results",
+              "axis"
             ],
             "type": "object"
           }
@@ -28443,6 +28552,38 @@
           "session_id",
           "run_id",
           "input_ids"
+        ],
+        "type": "object"
+      },
+      "BoundedToolResult": {
+        "description": "One tool result a model request carried shortened, as\n[`AgentEvent::ToolResultsBoundedForRequest`] names it.",
+        "properties": {
+          "kept_bytes": {
+            "description": "Bytes of the result's text the request carried: its head.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "tool_name": {
+            "description": "The tool the call named.",
+            "type": "string"
+          },
+          "tool_use_id": {
+            "description": "The call the result answers.",
+            "type": "string"
+          },
+          "total_bytes": {
+            "description": "Bytes of the result's whole text, media as placeholders. The stored\ntranscript keeps the result whole.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "tool_use_id",
+          "tool_name",
+          "kept_bytes",
+          "total_bytes"
         ],
         "type": "object"
       },
@@ -33844,6 +33985,21 @@
               "kind"
             ],
             "type": "object"
+          }
+        ]
+      },
+      "ToolResultBoundAxis": {
+        "description": "The limit a model request was over with the run's own tool results\nwhole, as [`AgentEvent::ToolResultsBoundedForRequest`] reports it.",
+        "oneOf": [
+          {
+            "const": "request_bytes",
+            "description": "The provider's request-body byte cap.",
+            "type": "string"
+          },
+          {
+            "const": "context_window",
+            "description": "The model's context window less the request's output reserve, or the\nmodel's input ceiling.",
+            "type": "string"
           }
         ]
       },
@@ -41360,7 +41516,7 @@
         "description": "Events emitted during agent execution\n\nThese events form the streaming API for consumers.",
         "oneOf": [
           {
-            "description": "Agent run started",
+            "description": "Agent run started.\n\nA durable run that a store fence gap suspended before its first round\ncommit starts again from its inputs, under the same run id, once the\nfence is back, and publishes `run_started` again with no terminal in\nbetween. An observer reads a repeated `run_started` for a run id that\nhas no terminal yet as that run starting over, and drops what it\nreceived for the run id before.",
             "properties": {
               "identity": {
                 "$ref": "#/$defs/TranscriptMessageIdentity",
@@ -42895,7 +43051,7 @@
             "type": "object"
           },
           {
-            "description": "A durable run resumed from its run cursor after a restart, in place of\n`run_started`: the same run continues under its run id, and its\nterminal follows as for any run.\n\nAt `tools_pending` the run takes the round's staged assistant message\nas the model's response and dispatches its tool calls again under\ntheir call ids; nothing is published again for the staged message (no\n`tool_call_requested`, no `turn_completed`). At `awaiting_model` the\nrun continues with its next model call, after the last committed\nround.",
+            "description": "A durable run resumed from its run cursor, in place of `run_started`:\nafter a restart, or in the same process once a store fence gap that\nsuspended it ended. The same run continues under its run id, and its\nterminal follows as for any run.\n\nAt `tools_pending` the run takes the round's staged assistant message\nas the model's response and dispatches its tool calls again under\ntheir call ids; nothing is published again for the staged message (no\n`tool_call_requested`, no `turn_completed`). At `awaiting_model` the\nrun continues with its next model call, after the last committed\nround.",
             "properties": {
               "resume_point": {
                 "$ref": "#/$defs/RunResumePointKind"
@@ -42923,6 +43079,37 @@
               "run_id",
               "round",
               "resume_point"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "One model request of a run carried some of the run's own tool results\nshortened, for that request only: with them whole the request was over\nthe provider's request-body cap, or its forecast was over the model's\ncontext window, and no compaction made room (a compaction inside a run\nkeeps the run's request and newest round).\n\nEach named result kept the head of its text, media as placeholders,\nwith a marker naming the call that the model reads. The stored\ntranscript keeps every result whole. With the default compactor the\nnext run's first check then compacts the whole transcript once; with\ncompaction off the request is still bounded and nothing is recorded.\nPublished before the request is sent, once for each request that\ncarries a bound.",
+            "properties": {
+              "axis": {
+                "$ref": "#/$defs/ToolResultBoundAxis",
+                "description": "The limit that set how much of each result the request kept."
+              },
+              "results": {
+                "description": "The results the request carried shortened, in request order.",
+                "items": {
+                  "$ref": "#/$defs/BoundedToolResult"
+                },
+                "type": "array"
+              },
+              "run_id": {
+                "$ref": "#/$defs/RunId",
+                "description": "The run whose request carried the results shortened."
+              },
+              "type": {
+                "const": "tool_results_bounded_for_request",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "run_id",
+              "results",
+              "axis"
             ],
             "type": "object"
           }
@@ -43305,6 +43492,38 @@
           "session_id",
           "run_id",
           "input_ids"
+        ],
+        "type": "object"
+      },
+      "BoundedToolResult": {
+        "description": "One tool result a model request carried shortened, as\n[`AgentEvent::ToolResultsBoundedForRequest`] names it.",
+        "properties": {
+          "kept_bytes": {
+            "description": "Bytes of the result's text the request carried: its head.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "tool_name": {
+            "description": "The tool the call named.",
+            "type": "string"
+          },
+          "tool_use_id": {
+            "description": "The call the result answers.",
+            "type": "string"
+          },
+          "total_bytes": {
+            "description": "Bytes of the result's whole text, media as placeholders. The stored\ntranscript keeps the result whole.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "tool_use_id",
+          "tool_name",
+          "kept_bytes",
+          "total_bytes"
         ],
         "type": "object"
       },
@@ -51308,6 +51527,21 @@
           }
         ]
       },
+      "ToolResultBoundAxis": {
+        "description": "The limit a model request was over with the run's own tool results\nwhole, as [`AgentEvent::ToolResultsBoundedForRequest`] reports it.",
+        "oneOf": [
+          {
+            "const": "request_bytes",
+            "description": "The provider's request-body byte cap.",
+            "type": "string"
+          },
+          {
+            "const": "context_window",
+            "description": "The model's context window less the request's output reserve, or the\nmodel's input ceiling.",
+            "type": "string"
+          }
+        ]
+      },
       "TranscriptEditRewriteRange": {
         "additionalProperties": false,
         "description": "Opaque current-format range carried by an ordinary transcript edit.",
@@ -57678,7 +57912,7 @@
         "description": "Events emitted during agent execution\n\nThese events form the streaming API for consumers.",
         "oneOf": [
           {
-            "description": "Agent run started",
+            "description": "Agent run started.\n\nA durable run that a store fence gap suspended before its first round\ncommit starts again from its inputs, under the same run id, once the\nfence is back, and publishes `run_started` again with no terminal in\nbetween. An observer reads a repeated `run_started` for a run id that\nhas no terminal yet as that run starting over, and drops what it\nreceived for the run id before.",
             "properties": {
               "identity": {
                 "$ref": "#/$defs/TranscriptMessageIdentity",
@@ -59213,7 +59447,7 @@
             "type": "object"
           },
           {
-            "description": "A durable run resumed from its run cursor after a restart, in place of\n`run_started`: the same run continues under its run id, and its\nterminal follows as for any run.\n\nAt `tools_pending` the run takes the round's staged assistant message\nas the model's response and dispatches its tool calls again under\ntheir call ids; nothing is published again for the staged message (no\n`tool_call_requested`, no `turn_completed`). At `awaiting_model` the\nrun continues with its next model call, after the last committed\nround.",
+            "description": "A durable run resumed from its run cursor, in place of `run_started`:\nafter a restart, or in the same process once a store fence gap that\nsuspended it ended. The same run continues under its run id, and its\nterminal follows as for any run.\n\nAt `tools_pending` the run takes the round's staged assistant message\nas the model's response and dispatches its tool calls again under\ntheir call ids; nothing is published again for the staged message (no\n`tool_call_requested`, no `turn_completed`). At `awaiting_model` the\nrun continues with its next model call, after the last committed\nround.",
             "properties": {
               "resume_point": {
                 "$ref": "#/$defs/RunResumePointKind"
@@ -59241,6 +59475,37 @@
               "run_id",
               "round",
               "resume_point"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "One model request of a run carried some of the run's own tool results\nshortened, for that request only: with them whole the request was over\nthe provider's request-body cap, or its forecast was over the model's\ncontext window, and no compaction made room (a compaction inside a run\nkeeps the run's request and newest round).\n\nEach named result kept the head of its text, media as placeholders,\nwith a marker naming the call that the model reads. The stored\ntranscript keeps every result whole. With the default compactor the\nnext run's first check then compacts the whole transcript once; with\ncompaction off the request is still bounded and nothing is recorded.\nPublished before the request is sent, once for each request that\ncarries a bound.",
+            "properties": {
+              "axis": {
+                "$ref": "#/$defs/ToolResultBoundAxis",
+                "description": "The limit that set how much of each result the request kept."
+              },
+              "results": {
+                "description": "The results the request carried shortened, in request order.",
+                "items": {
+                  "$ref": "#/$defs/BoundedToolResult"
+                },
+                "type": "array"
+              },
+              "run_id": {
+                "$ref": "#/$defs/RunId",
+                "description": "The run whose request carried the results shortened."
+              },
+              "type": {
+                "const": "tool_results_bounded_for_request",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "run_id",
+              "results",
+              "axis"
             ],
             "type": "object"
           }
@@ -59674,6 +59939,38 @@
           "session_id",
           "run_id",
           "input_ids"
+        ],
+        "type": "object"
+      },
+      "BoundedToolResult": {
+        "description": "One tool result a model request carried shortened, as\n[`AgentEvent::ToolResultsBoundedForRequest`] names it.",
+        "properties": {
+          "kept_bytes": {
+            "description": "Bytes of the result's text the request carried: its head.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "tool_name": {
+            "description": "The tool the call named.",
+            "type": "string"
+          },
+          "tool_use_id": {
+            "description": "The call the result answers.",
+            "type": "string"
+          },
+          "total_bytes": {
+            "description": "Bytes of the result's whole text, media as placeholders. The stored\ntranscript keeps the result whole.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "tool_use_id",
+          "tool_name",
+          "kept_bytes",
+          "total_bytes"
         ],
         "type": "object"
       },
@@ -72281,6 +72578,21 @@
           }
         ]
       },
+      "ToolResultBoundAxis": {
+        "description": "The limit a model request was over with the run's own tool results\nwhole, as [`AgentEvent::ToolResultsBoundedForRequest`] reports it.",
+        "oneOf": [
+          {
+            "const": "request_bytes",
+            "description": "The provider's request-body byte cap.",
+            "type": "string"
+          },
+          {
+            "const": "context_window",
+            "description": "The model's context window less the request's output reserve, or the\nmodel's input ceiling.",
+            "type": "string"
+          }
+        ]
+      },
       "TranscriptEditRewriteRange": {
         "additionalProperties": false,
         "description": "Opaque current-format range carried by an ordinary transcript edit.",
@@ -82132,7 +82444,7 @@
         "description": "Events emitted during agent execution\n\nThese events form the streaming API for consumers.",
         "oneOf": [
           {
-            "description": "Agent run started",
+            "description": "Agent run started.\n\nA durable run that a store fence gap suspended before its first round\ncommit starts again from its inputs, under the same run id, once the\nfence is back, and publishes `run_started` again with no terminal in\nbetween. An observer reads a repeated `run_started` for a run id that\nhas no terminal yet as that run starting over, and drops what it\nreceived for the run id before.",
             "properties": {
               "identity": {
                 "$ref": "#/$defs/TranscriptMessageIdentity",
@@ -83667,7 +83979,7 @@
             "type": "object"
           },
           {
-            "description": "A durable run resumed from its run cursor after a restart, in place of\n`run_started`: the same run continues under its run id, and its\nterminal follows as for any run.\n\nAt `tools_pending` the run takes the round's staged assistant message\nas the model's response and dispatches its tool calls again under\ntheir call ids; nothing is published again for the staged message (no\n`tool_call_requested`, no `turn_completed`). At `awaiting_model` the\nrun continues with its next model call, after the last committed\nround.",
+            "description": "A durable run resumed from its run cursor, in place of `run_started`:\nafter a restart, or in the same process once a store fence gap that\nsuspended it ended. The same run continues under its run id, and its\nterminal follows as for any run.\n\nAt `tools_pending` the run takes the round's staged assistant message\nas the model's response and dispatches its tool calls again under\ntheir call ids; nothing is published again for the staged message (no\n`tool_call_requested`, no `turn_completed`). At `awaiting_model` the\nrun continues with its next model call, after the last committed\nround.",
             "properties": {
               "resume_point": {
                 "$ref": "#/$defs/RunResumePointKind"
@@ -83695,6 +84007,37 @@
               "run_id",
               "round",
               "resume_point"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "One model request of a run carried some of the run's own tool results\nshortened, for that request only: with them whole the request was over\nthe provider's request-body cap, or its forecast was over the model's\ncontext window, and no compaction made room (a compaction inside a run\nkeeps the run's request and newest round).\n\nEach named result kept the head of its text, media as placeholders,\nwith a marker naming the call that the model reads. The stored\ntranscript keeps every result whole. With the default compactor the\nnext run's first check then compacts the whole transcript once; with\ncompaction off the request is still bounded and nothing is recorded.\nPublished before the request is sent, once for each request that\ncarries a bound.",
+            "properties": {
+              "axis": {
+                "$ref": "#/$defs/ToolResultBoundAxis",
+                "description": "The limit that set how much of each result the request kept."
+              },
+              "results": {
+                "description": "The results the request carried shortened, in request order.",
+                "items": {
+                  "$ref": "#/$defs/BoundedToolResult"
+                },
+                "type": "array"
+              },
+              "run_id": {
+                "$ref": "#/$defs/RunId",
+                "description": "The run whose request carried the results shortened."
+              },
+              "type": {
+                "const": "tool_results_bounded_for_request",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "run_id",
+              "results",
+              "axis"
             ],
             "type": "object"
           }
@@ -84077,6 +84420,38 @@
           "session_id",
           "run_id",
           "input_ids"
+        ],
+        "type": "object"
+      },
+      "BoundedToolResult": {
+        "description": "One tool result a model request carried shortened, as\n[`AgentEvent::ToolResultsBoundedForRequest`] names it.",
+        "properties": {
+          "kept_bytes": {
+            "description": "Bytes of the result's text the request carried: its head.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "tool_name": {
+            "description": "The tool the call named.",
+            "type": "string"
+          },
+          "tool_use_id": {
+            "description": "The call the result answers.",
+            "type": "string"
+          },
+          "total_bytes": {
+            "description": "Bytes of the result's whole text, media as placeholders. The stored\ntranscript keeps the result whole.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "tool_use_id",
+          "tool_name",
+          "kept_bytes",
+          "total_bytes"
         ],
         "type": "object"
       },
@@ -92932,6 +93307,21 @@
           }
         ]
       },
+      "ToolResultBoundAxis": {
+        "description": "The limit a model request was over with the run's own tool results\nwhole, as [`AgentEvent::ToolResultsBoundedForRequest`] reports it.",
+        "oneOf": [
+          {
+            "const": "request_bytes",
+            "description": "The provider's request-body byte cap.",
+            "type": "string"
+          },
+          {
+            "const": "context_window",
+            "description": "The model's context window less the request's output reserve, or the\nmodel's input ceiling.",
+            "type": "string"
+          }
+        ]
+      },
       "TranscriptEditRewriteRange": {
         "additionalProperties": false,
         "description": "Opaque current-format range carried by an ordinary transcript edit.",
@@ -99309,7 +99699,7 @@
         "description": "Events emitted during agent execution\n\nThese events form the streaming API for consumers.",
         "oneOf": [
           {
-            "description": "Agent run started",
+            "description": "Agent run started.\n\nA durable run that a store fence gap suspended before its first round\ncommit starts again from its inputs, under the same run id, once the\nfence is back, and publishes `run_started` again with no terminal in\nbetween. An observer reads a repeated `run_started` for a run id that\nhas no terminal yet as that run starting over, and drops what it\nreceived for the run id before.",
             "properties": {
               "identity": {
                 "$ref": "#/$defs/TranscriptMessageIdentity",
@@ -100844,7 +101234,7 @@
             "type": "object"
           },
           {
-            "description": "A durable run resumed from its run cursor after a restart, in place of\n`run_started`: the same run continues under its run id, and its\nterminal follows as for any run.\n\nAt `tools_pending` the run takes the round's staged assistant message\nas the model's response and dispatches its tool calls again under\ntheir call ids; nothing is published again for the staged message (no\n`tool_call_requested`, no `turn_completed`). At `awaiting_model` the\nrun continues with its next model call, after the last committed\nround.",
+            "description": "A durable run resumed from its run cursor, in place of `run_started`:\nafter a restart, or in the same process once a store fence gap that\nsuspended it ended. The same run continues under its run id, and its\nterminal follows as for any run.\n\nAt `tools_pending` the run takes the round's staged assistant message\nas the model's response and dispatches its tool calls again under\ntheir call ids; nothing is published again for the staged message (no\n`tool_call_requested`, no `turn_completed`). At `awaiting_model` the\nrun continues with its next model call, after the last committed\nround.",
             "properties": {
               "resume_point": {
                 "$ref": "#/$defs/RunResumePointKind"
@@ -100872,6 +101262,37 @@
               "run_id",
               "round",
               "resume_point"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "One model request of a run carried some of the run's own tool results\nshortened, for that request only: with them whole the request was over\nthe provider's request-body cap, or its forecast was over the model's\ncontext window, and no compaction made room (a compaction inside a run\nkeeps the run's request and newest round).\n\nEach named result kept the head of its text, media as placeholders,\nwith a marker naming the call that the model reads. The stored\ntranscript keeps every result whole. With the default compactor the\nnext run's first check then compacts the whole transcript once; with\ncompaction off the request is still bounded and nothing is recorded.\nPublished before the request is sent, once for each request that\ncarries a bound.",
+            "properties": {
+              "axis": {
+                "$ref": "#/$defs/ToolResultBoundAxis",
+                "description": "The limit that set how much of each result the request kept."
+              },
+              "results": {
+                "description": "The results the request carried shortened, in request order.",
+                "items": {
+                  "$ref": "#/$defs/BoundedToolResult"
+                },
+                "type": "array"
+              },
+              "run_id": {
+                "$ref": "#/$defs/RunId",
+                "description": "The run whose request carried the results shortened."
+              },
+              "type": {
+                "const": "tool_results_bounded_for_request",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "run_id",
+              "results",
+              "axis"
             ],
             "type": "object"
           }
@@ -101229,6 +101650,38 @@
           "session_id",
           "run_id",
           "input_ids"
+        ],
+        "type": "object"
+      },
+      "BoundedToolResult": {
+        "description": "One tool result a model request carried shortened, as\n[`AgentEvent::ToolResultsBoundedForRequest`] names it.",
+        "properties": {
+          "kept_bytes": {
+            "description": "Bytes of the result's text the request carried: its head.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "tool_name": {
+            "description": "The tool the call named.",
+            "type": "string"
+          },
+          "tool_use_id": {
+            "description": "The call the result answers.",
+            "type": "string"
+          },
+          "total_bytes": {
+            "description": "Bytes of the result's whole text, media as placeholders. The stored\ntranscript keeps the result whole.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "tool_use_id",
+          "tool_name",
+          "kept_bytes",
+          "total_bytes"
         ],
         "type": "object"
       },
@@ -106555,6 +107008,21 @@
               "kind"
             ],
             "type": "object"
+          }
+        ]
+      },
+      "ToolResultBoundAxis": {
+        "description": "The limit a model request was over with the run's own tool results\nwhole, as [`AgentEvent::ToolResultsBoundedForRequest`] reports it.",
+        "oneOf": [
+          {
+            "const": "request_bytes",
+            "description": "The provider's request-body byte cap.",
+            "type": "string"
+          },
+          {
+            "const": "context_window",
+            "description": "The model's context window less the request's output reserve, or the\nmodel's input ceiling.",
+            "type": "string"
           }
         ]
       },
@@ -165900,7 +166368,7 @@
         "description": "Events emitted during agent execution\n\nThese events form the streaming API for consumers.",
         "oneOf": [
           {
-            "description": "Agent run started",
+            "description": "Agent run started.\n\nA durable run that a store fence gap suspended before its first round\ncommit starts again from its inputs, under the same run id, once the\nfence is back, and publishes `run_started` again with no terminal in\nbetween. An observer reads a repeated `run_started` for a run id that\nhas no terminal yet as that run starting over, and drops what it\nreceived for the run id before.",
             "properties": {
               "identity": {
                 "$ref": "#/$defs/TranscriptMessageIdentity",
@@ -167435,7 +167903,7 @@
             "type": "object"
           },
           {
-            "description": "A durable run resumed from its run cursor after a restart, in place of\n`run_started`: the same run continues under its run id, and its\nterminal follows as for any run.\n\nAt `tools_pending` the run takes the round's staged assistant message\nas the model's response and dispatches its tool calls again under\ntheir call ids; nothing is published again for the staged message (no\n`tool_call_requested`, no `turn_completed`). At `awaiting_model` the\nrun continues with its next model call, after the last committed\nround.",
+            "description": "A durable run resumed from its run cursor, in place of `run_started`:\nafter a restart, or in the same process once a store fence gap that\nsuspended it ended. The same run continues under its run id, and its\nterminal follows as for any run.\n\nAt `tools_pending` the run takes the round's staged assistant message\nas the model's response and dispatches its tool calls again under\ntheir call ids; nothing is published again for the staged message (no\n`tool_call_requested`, no `turn_completed`). At `awaiting_model` the\nrun continues with its next model call, after the last committed\nround.",
             "properties": {
               "resume_point": {
                 "$ref": "#/$defs/RunResumePointKind"
@@ -167463,6 +167931,37 @@
               "run_id",
               "round",
               "resume_point"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "One model request of a run carried some of the run's own tool results\nshortened, for that request only: with them whole the request was over\nthe provider's request-body cap, or its forecast was over the model's\ncontext window, and no compaction made room (a compaction inside a run\nkeeps the run's request and newest round).\n\nEach named result kept the head of its text, media as placeholders,\nwith a marker naming the call that the model reads. The stored\ntranscript keeps every result whole. With the default compactor the\nnext run's first check then compacts the whole transcript once; with\ncompaction off the request is still bounded and nothing is recorded.\nPublished before the request is sent, once for each request that\ncarries a bound.",
+            "properties": {
+              "axis": {
+                "$ref": "#/$defs/ToolResultBoundAxis",
+                "description": "The limit that set how much of each result the request kept."
+              },
+              "results": {
+                "description": "The results the request carried shortened, in request order.",
+                "items": {
+                  "$ref": "#/$defs/BoundedToolResult"
+                },
+                "type": "array"
+              },
+              "run_id": {
+                "$ref": "#/$defs/RunId",
+                "description": "The run whose request carried the results shortened."
+              },
+              "type": {
+                "const": "tool_results_bounded_for_request",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "run_id",
+              "results",
+              "axis"
             ],
             "type": "object"
           }
@@ -167820,6 +168319,38 @@
           "session_id",
           "run_id",
           "input_ids"
+        ],
+        "type": "object"
+      },
+      "BoundedToolResult": {
+        "description": "One tool result a model request carried shortened, as\n[`AgentEvent::ToolResultsBoundedForRequest`] names it.",
+        "properties": {
+          "kept_bytes": {
+            "description": "Bytes of the result's text the request carried: its head.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "tool_name": {
+            "description": "The tool the call named.",
+            "type": "string"
+          },
+          "tool_use_id": {
+            "description": "The call the result answers.",
+            "type": "string"
+          },
+          "total_bytes": {
+            "description": "Bytes of the result's whole text, media as placeholders. The stored\ntranscript keeps the result whole.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "tool_use_id",
+          "tool_name",
+          "kept_bytes",
+          "total_bytes"
         ],
         "type": "object"
       },
@@ -173095,6 +173626,21 @@
               "kind"
             ],
             "type": "object"
+          }
+        ]
+      },
+      "ToolResultBoundAxis": {
+        "description": "The limit a model request was over with the run's own tool results\nwhole, as [`AgentEvent::ToolResultsBoundedForRequest`] reports it.",
+        "oneOf": [
+          {
+            "const": "request_bytes",
+            "description": "The provider's request-body byte cap.",
+            "type": "string"
+          },
+          {
+            "const": "context_window",
+            "description": "The model's context window less the request's output reserve, or the\nmodel's input ceiling.",
+            "type": "string"
           }
         ]
       },

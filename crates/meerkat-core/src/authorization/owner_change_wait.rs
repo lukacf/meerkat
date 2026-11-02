@@ -184,7 +184,9 @@ impl OwnerChangeChurn {
     /// - [`OwnerChangeWait::NotSettled`]: stop. The deadline passed, or every
     ///   free rebuild is spent. Answer the observation as stale and keep it
     ///   typed (for an operation, `ReprepareRequired`), never as
-    ///   unavailability.
+    ///   unavailability. A governed helper admission (below) answers with
+    ///   its fence's own last refusal instead, `Unavailable`, the only
+    ///   non-denial its refusal type has.
     ///
     /// Call it only after a stale read, between attempts of the same pure
     /// observation, and hold nothing across it: no publication guard or
@@ -192,6 +194,29 @@ impl OwnerChangeChurn {
     /// around an effect: read, claim or record an effect once, after the
     /// observation answered. Any other answer (current, a denial, a genuine
     /// `Unavailable`) is final and never waits.
+    ///
+    /// One `Unavailable` is contention, not genuine, and is retryable at the
+    /// host level: a governed helper admission fence
+    /// (`GovernedHelperAdmissionFence` in the `meerkat` facade) refuses as
+    /// `Unavailable`, with nothing run or committed, while another writer
+    /// holds the publication its check excludes owner changes on (a
+    /// reservation of the writer that has not published) or an owner change
+    /// is in progress there. The fence runs inside the store call and never
+    /// waits. Wait here instead, after that call returned, outside every lock
+    /// and store transaction, then make the same idempotent create again with
+    /// a new fence (a fence serves one attempt). The refused attempt ran no
+    /// effect and the admission key keeps the create idempotent, so this is
+    /// no wait around an effect.
+    /// `GovernedHelperAdmissionFence::create_idempotent_after_owner_change`
+    /// does exactly that. On the prepared path it waits only when the fence
+    /// named such a change or hold as it refused; on the dispatch paths it
+    /// waits after every refusal to rebuild, as the waiting step forms do
+    /// (`GovernedDispatchOperation::run_if_current_within_after_owner_change`).
+    /// Any other `Unavailable` (a refusal to rebuild inside the prepared
+    /// path's own exclusion, clock or custody unavailable, a poisoned
+    /// publication) it answers at once. An `Unavailable` an owner answers for
+    /// itself is genuine: an owner never answers its own transient lock
+    /// contention that way.
     ///
     /// The first wait of this churn arms its one deadline,
     /// [`OWNER_CHANGE_WAIT_BOUND`] from then, clamped to `budget_remaining`

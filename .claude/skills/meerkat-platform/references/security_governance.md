@@ -169,7 +169,8 @@ denial. Since 0.9.4:
   refuses to rebuild. A denial and malformed facts stay `Denied`.
 - Each wait is one `debug` event of target `meerkat::authz::owner_change_wait`
   with `site` (`model_request`, `compaction_summary`, `tool_dispatch`,
-  `tool_entry`, `tool_policy_entry` or `web_search_delegate`),
+  `tool_entry`, `tool_policy_entry` or `web_search_delegate`, and since 0.9.9
+  `tool_step`, `tool_child_issuance` or `helper_admission`),
   `operation_id`, `waited_ms` and `settled`. Each refused attempt keeps its
   own audit record.
 - What the model sees (0.9.4): the `operation_refused` row of the error table
@@ -178,6 +179,27 @@ denial. Since 0.9.4:
   carries the bare kind, so its receiver reads `"unknown"`, and an upcall
   refusal whose data is absent or names no known kind now decodes as
   `operation_authorization_unavailable`, not `operation_refused`.
+
+#### Retrying a governed helper admission (0.9.9)
+
+The helper admission fence never waits: while another writer holds the
+authorization publication (a reservation that has not published) or an owner
+change is in progress, it refuses at once as `Unavailable`, with nothing run or
+committed. That contention is retryable at the host level:
+`GovernedHelperAdmissionFence::create_idempotent_after_owner_change` makes the
+same idempotent create through a new fence for each attempt and waits between
+attempts outside every lock (`OwnerChangeChurn::wait_after_stale_read`: 2 s and
+three free rebuilds, clamped to the budget passed, read right before the call;
+site `helper_admission`). Await it holding no lock or store transaction of your
+own. On a dispatch or entered fence it retries every refusal to rebuild, as
+the waiting dispatch steps do, and a fence built from a dispatch reports its
+waits to the host's refusal observer on the call's surface, without an
+operation id. It answers success, `Denied` and every other `Unavailable` (a
+refusal to rebuild inside the prepared path's own exclusion, clock or custody
+unavailable, a poisoned publication) at once, and the last `Unavailable` once
+the bounds are spent. An installed owner's own `Unavailable` is final instead
+(at a controller's model request it ends the run), so an owner never answers
+its own transient lock contention that way.
 
 ### Serving a governed realm over JSON-RPC
 

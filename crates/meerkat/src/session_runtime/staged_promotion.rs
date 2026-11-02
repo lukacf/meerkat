@@ -208,15 +208,16 @@ pub fn is_pre_run_apply_runtime_turn_failure(
     )
 }
 
-/// Pure predicate: did a stop suspend the run `apply_runtime_turn` drove
+/// Pure predicate: was the run `apply_runtime_turn` drove suspended
 /// ([`meerkat_core::error::AgentError::RunSuspended`])?
 ///
 /// A suspended run is neither a failure nor a cancellation: a graceful stop
-/// that keeps queued work stopped it at an await point, its inputs stay bound
-/// to it, and it resumes at the session's next start. A first turn that a stop
-/// suspended has therefore not failed: its session stays materialized, and
-/// the staged slot is never restored for it, so the suspension reaches the
-/// runtime as the suspension it is.
+/// that keeps queued work, or a store fence gap, stopped it at an await
+/// point, its inputs stay bound to it, and it resumes at the session's next
+/// start (a stop) or once the store's fence is back (a fence gap). A first
+/// turn that was suspended has therefore not failed: its session stays
+/// materialized, and the staged slot is never restored for it, so the
+/// suspension reaches the runtime as the suspension it is.
 fn is_suspended_apply_runtime_turn(result: &Result<CoreApplyOutput, SessionError>) -> bool {
     match result {
         Err(error) => match error.primary_error() {

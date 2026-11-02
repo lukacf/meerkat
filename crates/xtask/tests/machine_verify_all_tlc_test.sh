@@ -248,7 +248,7 @@ fi
 # phase, a release that clears every hold, a resume that ignores the
 # destination and a resume that keeps the previous staged run and context.
 # 14 steps reach every witness. It runs in shard audits-h, with the
-# instruction boundary audit.
+# instruction boundary audit and the superseded-ack retention audit below.
 input_controller_hold_audit="${workspace_root}/specs/machines/meerkat_machine/input_controller_hold_audit.sh"
 if [[ ! -x "${input_controller_hold_audit}" ]]; then
   echo "error: input controller hold audit runner is missing from workspace runfiles: ${input_controller_hold_audit}" >&2
@@ -257,6 +257,32 @@ fi
 if run_part audits-h; then
   echo "running bounded input controller hold TLC audit"
   TLC_WORKERS="${tlc_workers}" "${input_controller_hold_audit}" "${INPUT_CONTROLLER_HOLD_AUDIT_MAX_STEPS:-14}" --mutants
+fi
+
+# The bounded retention of the ScheduleLifecycleMachine's superseded_ack_ids
+# (the set holds only the acknowledgements of the latest supersession) is
+# model-checked by a hand-written audit over the generated schedule model:
+# one schedule through revises and deletes from Active and Paused, the
+# repeated delete, pause and resume, and acknowledgements of two occurrence
+# ids for every revision the bound reaches and one past it, in every phase,
+# under every generated invariant plus two history invariants (every recorded
+# id was acknowledged at the current revision; every acknowledgement of the
+# current revision is recorded). It requires three witnesses reached (a
+# revise and a delete that drop an earlier acknowledgement while recording
+# their own, a late acknowledgement of a dropped id accepted without effect)
+# and refuses eight seeded defects (--mutants): each revise and delete arm
+# keeping the old ids, the Active and Paused acknowledgement arms recording
+# late acknowledgements, and the Paused and Deleted ones dropping current
+# acknowledgements. 6 steps reach every witness and mutant with room to
+# spare. It runs in shard audits-h.
+superseded_ack_retention_audit="${workspace_root}/specs/machines/schedule_lifecycle/superseded_ack_retention_audit.sh"
+if [[ ! -x "${superseded_ack_retention_audit}" ]]; then
+  echo "error: superseded-ack retention audit runner is missing from workspace runfiles: ${superseded_ack_retention_audit}" >&2
+  exit 1
+fi
+if run_part audits-h; then
+  echo "running bounded superseded-ack retention TLC audit"
+  TLC_WORKERS="${tlc_workers}" "${superseded_ack_retention_audit}" "${SUPERSEDED_ACK_RETENTION_AUDIT_MAX_STEPS:-6}" --mutants
 fi
 
 # The run-start hold (#1500: a mob Stop holds member run starts so an input
@@ -299,10 +325,24 @@ fi
 # never runs once expired or before its settlement, and is kept only under
 # Requeue and only when eligible (never objective-bound), that exactly one
 # verdict arm answers each input, and that the requeued wait-failure arm has
-# no session guard and changes no state. It requires seven witnesses reached,
-# a graceful end and a crash among them; its --mutants mode (by hand) refuses
-# fifteen seeded defects. 32 steps reach the deepest witness, and 36 the whole
-# reachable space.
+# no session guard and changes no state. A store fence gap suspends the
+# in-flight run of the first process instead, outside any stop, with an
+# executor attached or none: the audit checks that the run's turn returns to
+# Ready, that its input stays staged and bound with its stage attempts, that
+# no fence-gap suspension comes while the registration drains, that a cancel
+# (the run's own or an ambient one) or stop the run accepted before the gap
+# stands as its stop intent, as an ambient cancel of the suspended run does,
+# that a run whose stop was asked never resumes and is settled only as
+# cancelled, that a requeue stop keeps nothing of a run whose stop or
+# ambient cancel was asked, and that no direct run (a conversation run or an
+# immediate append) starts while the suspended run is marked resumable (each
+# starts once it is settled), while the same process resumes any other
+# suspended run and starts its turn again. It requires fifteen witnesses
+# reached, a graceful end and a crash among them; its --mutants mode (by
+# hand) refuses seventeen seeded defects against every invariant but the
+# two stop-intent ones and twelve stop-intent, fence-gap and direct-start
+# defects each against its target invariant alone. 32 steps reach the
+# deepest witness.
 requeue_across_stop_audit="${workspace_root}/specs/machines/meerkat_machine/requeue_across_stop_audit.sh"
 if [[ ! -x "${requeue_across_stop_audit}" ]]; then
   echo "error: requeue-across-stop audit runner is missing from workspace runfiles: ${requeue_across_stop_audit}" >&2
@@ -316,24 +356,29 @@ fi
 # The Keep disposition: a materialization refused before it served (a durable
 # tail held for recovery, a failed agent build) rolls its registration back
 # with an unregister that keeps every input the registration recovered from
-# the store, exactly as the store holds it, and still stops an input admitted
+# the store, exactly as the store holds it, except the inputs bound to a run
+# marked resumable whose stop was asked, and still stops an input admitted
 # while the registration stood; so does the retirement of an executor
 # attachment that never served, while a retire that meets one still stops;
 # once the registration served live work (an admission, a deduplicated wait
 # or a recycle) its unregister keeps nothing. A hand-written audit over the
 # same generated model runs three processes: the first crashes with one
 # input staged and one queued under a key, the second recovers both through
-# the generated recovery arms, may admit a third, resolve a resubmission as a
-# duplicate or take a recycle, and rolls back with Keep (or, as the control,
-# Stop), or attaches an executor that never serves and unregisters it
-# through the unserved-attachment arm with its abort's Keep or a retire's
-# Stop, and the third recovers and serves. It checks that exactly one
-# verdict arm answers each input, that Keep stops no recovered input and
-# keeps no admitted one, that only Keep keeps, that a kept input survives
-# the rollback, that live work forfeits the keep and that a retire over the
-# unserved attachment keeps nothing, and requires ten witnesses reached; its
-# --mutants mode refuses twelve seeded defects, the machine without the Keep
-# arm, an unregister begin that keeps after live work and a retire that
+# the generated recovery arms, either marking the first's run resumable
+# first (its staged input stays bound to it, and a stop of the run may be
+# recorded) or not, then, unmarked, may admit a third, resolve a
+# resubmission as a duplicate or take a recycle, and rolls back with Keep
+# (or, as the control, Stop), or attaches an executor that never serves and
+# unregisters it through the unserved-attachment arm with its abort's Keep
+# or a retire's Stop, and the third recovers and serves. It checks that
+# exactly one verdict arm answers each input, that the input bound to a
+# stopped marked run is never kept, that Keep stops no other recovered input
+# and keeps no admitted one, that only Keep keeps, that a kept input
+# survives the rollback, that live work forfeits the keep and that a retire
+# over the unserved attachment keeps nothing, and requires eleven witnesses
+# reached; its --mutants mode refuses fourteen seeded defects, the machine
+# without the Keep arm, an unregister begin that keeps after live work, the
+# machine without the exception for a stopped marked run and a retire that
 # requests Keep among them. 44 steps reach the deepest witness, and 50 the
 # whole reachable space.
 materialization_rollback_keep_audit="${workspace_root}/specs/machines/meerkat_machine/materialization_rollback_keep_audit.sh"
@@ -1190,7 +1235,10 @@ run_machine_verify() {
 # run takes the shard past 10 minutes, the audit moves to a shard of its
 # own); the SessionDocumentMachine activation-body retirement audit with
 # --mutants joined it later (twelve runs over the same model: a safety run,
-# three witness runs and eight mutant runs; not yet measured);
+# three witness runs and eight mutant runs; not yet measured); the
+# ScheduleLifecycleMachine superseded-ack retention audit with --mutants
+# joined it too: its safety run (1382 distinct states at 6 steps), three
+# witness runs and eight mutant runs took about 5 s on a 4-worker local run;
 # audits-i = member residency's witness runs (--part witnesses), alone: its
 # 44 witness runs took 212 s locally with 4 TLC workers, each run's JVM start
 # and model parse most of it;

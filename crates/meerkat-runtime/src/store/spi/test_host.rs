@@ -70,8 +70,18 @@ pub(crate) struct Faults {
     pub(crate) conflict: u32,
     /// Renews that answer `Unavailable`.
     pub(crate) renew_unavailable: u32,
+    /// Renews that never answer: the realm's renew timeout gives up on
+    /// them.
+    pub(crate) renew_hang: u32,
     /// Acquires that answer `Unavailable`.
     pub(crate) acquire_unavailable: u32,
+    /// Acquires that never answer and grant nothing: the realm's acquire
+    /// timeout gives up on them.
+    pub(crate) acquire_hang: u32,
+    /// How long every acquire takes to answer: the host decides when the
+    /// call arrives, and the answer reaches the caller this much later, as
+    /// over a slow network.
+    pub(crate) acquire_delay: Option<Duration>,
     /// Head loads that answer `Unavailable`.
     pub(crate) load_head_unavailable: u32,
     /// Retries of a batch that already landed that answer `Unavailable`
@@ -257,19 +267,9 @@ impl TestHost {
     pub(crate) fn commit_count(&self) -> u64 {
         self.state().commits
     }
-}
 
-#[async_trait]
-impl HostStore for TestHost {
-    async fn acquire_fence(&self, mode: AcquireMode) -> Result<FenceGrant, HostStoreError> {
-        self.record(HostCall::AcquireFence);
-        {
-            let mut faults = self.faults();
-            if faults.acquire_unavailable > 0 {
-                faults.acquire_unavailable -= 1;
-                return Err(HostStoreError::Unavailable("injected".into()));
-            }
-        }
+    /// An acquire's answer, decided when the call arrives.
+    fn decide_acquire(&self, mode: AcquireMode) -> Result<FenceGrant, HostStoreError> {
         let now = Instant::now();
         let mut state = self.state();
         let remaining = state
@@ -291,17 +291,51 @@ impl HostStore for TestHost {
             superseded_lease: remaining.unwrap_or(Duration::ZERO),
         })
     }
+}
+
+#[async_trait]
+impl HostStore for TestHost {
+    async fn acquire_fence(&self, mode: AcquireMode) -> Result<FenceGrant, HostStoreError> {
+        self.record(HostCall::AcquireFence);
+        let (delay, hang) = {
+            let mut faults = self.faults();
+            if faults.acquire_unavailable > 0 {
+                faults.acquire_unavailable -= 1;
+                return Err(HostStoreError::Unavailable("injected".into()));
+            }
+            let hang = faults.acquire_hang > 0;
+            if hang {
+                faults.acquire_hang -= 1;
+            }
+            (faults.acquire_delay, hang)
+        };
+        if hang {
+            std::future::pending::<()>().await;
+        }
+        let answer = self.decide_acquire(mode);
+        if let Some(delay) = delay {
+            tokio::time::sleep(delay).await;
+        }
+        answer
+    }
 
     async fn renew_fence(&self, token: FenceToken) -> Result<(), HostStoreError> {
         self.record(HostCall::RenewFence);
-        let delay = {
+        let (delay, hang) = {
             let mut faults = self.faults();
             if faults.renew_unavailable > 0 {
                 faults.renew_unavailable -= 1;
                 return Err(HostStoreError::Unavailable("injected".into()));
             }
-            faults.renew_delay
+            let hang = faults.renew_hang > 0;
+            if hang {
+                faults.renew_hang -= 1;
+            }
+            (faults.renew_delay, hang)
         };
+        if hang {
+            std::future::pending::<()>().await;
+        }
         if let Some(delay) = delay {
             tokio::time::sleep(delay).await;
         }

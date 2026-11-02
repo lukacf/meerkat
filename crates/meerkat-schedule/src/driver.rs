@@ -6540,6 +6540,129 @@ mod tests {
         Ok(())
     }
 
+    /// The deleted-schedule late-completion path above keeps its answer when
+    /// the delete also drops an earlier revise's acknowledgements: a revise
+    /// revokes revision 1's in-flight delivery, the delete revokes revision
+    /// 2's, the deleted schedule records only the delete's acknowledgement,
+    /// and each waiter that resolves afterwards lands as the typed
+    /// late-arrival record without touching the schedule's acknowledgements.
+    #[tokio::test]
+    async fn delete_after_a_revise_keeps_only_its_acks_and_late_completions_land_typed()
+    -> Result<(), ScheduleDomainError> {
+        let store = Arc::new(MemoryScheduleStore::new()) as Arc<dyn ScheduleStore>;
+        let service = ScheduleService::new(store.clone());
+        let schedule = service
+            .create(CreateScheduleRequest {
+                name: Some("delete-after-revise-acks".into()),
+                description: None,
+                trigger: TriggerSpec::Once {
+                    due_at_utc: Utc::now() - Duration::seconds(1),
+                },
+                target: materialize_on_demand_target("scheduled prompt"),
+                misfire_policy: MisfirePolicy::Skip,
+                overlap_policy: OverlapPolicy::SkipIfRunning,
+                missing_target_policy: MissingTargetPolicy::MarkMisfired,
+                labels: BTreeMap::new(),
+                planning_horizon_days: Some(1),
+                planning_horizon_occurrences: Some(1),
+            })
+            .await?;
+        let delivery = Arc::new(ControlledCompletionDelivery::default());
+        let driver = ScheduleDriver::new(
+            service.clone(),
+            store.clone(),
+            Arc::new(ReadyProbe),
+            delivery.clone(),
+            "driver-owner",
+            ScheduleDriverConfig {
+                claim_limit: 8,
+                lease_duration: Duration::seconds(30),
+            },
+        );
+
+        // Revision 1's delivery is in flight when the revise commits.
+        driver.tick_once().await?;
+        wait_for_sender_count(&delivery, 1).await;
+        let first = wait_for_occurrence_phase(
+            &service,
+            &schedule.schedule_id,
+            OccurrencePhase::AwaitingCompletion,
+        )
+        .await?;
+        let revised = service
+            .update(
+                &schedule.schedule_id,
+                UpdateScheduleRequest {
+                    expected_revision: Some(schedule.revision),
+                    trigger: Some(TriggerSpec::Once {
+                        due_at_utc: Utc::now() - Duration::seconds(1),
+                    }),
+                    ..UpdateScheduleRequest::default()
+                },
+            )
+            .await?;
+        assert_eq!(
+            revised.superseded_ack_ids,
+            BTreeSet::from([first.occurrence_id.clone()])
+        );
+        delivery
+            .senders
+            .lock()
+            .await
+            .remove(0)
+            .send(DeliveryTerminal::completed(None))
+            .expect("first completion receiver should be open");
+        let first_late =
+            wait_for_late_completion_of(&service, &schedule.schedule_id, &first.occurrence_id)
+                .await?;
+        assert_eq!(first_late.superseded_by_revision, Some(revised.revision));
+
+        // Revision 2's delivery is in flight when the delete commits.
+        driver.tick_once().await?;
+        wait_for_sender_count(&delivery, 1).await;
+        let second = wait_for_occurrence_phase(
+            &service,
+            &schedule.schedule_id,
+            OccurrencePhase::AwaitingCompletion,
+        )
+        .await?;
+        assert_eq!(second.schedule_revision, revised.revision);
+        let deleted = service.delete(&schedule.schedule_id).await?;
+        assert_eq!(
+            deleted.superseded_ack_ids,
+            BTreeSet::from([second.occurrence_id.clone()]),
+            "the delete drops the revise's acknowledgement and records its own revocation"
+        );
+
+        // The waiter resolves after the delete: the typed late-arrival record,
+        // as without the earlier revise.
+        delivery
+            .senders
+            .lock()
+            .await
+            .remove(0)
+            .send(DeliveryTerminal::completed(None))
+            .expect("second completion receiver should be open");
+        let late =
+            wait_for_late_completion_of(&service, &schedule.schedule_id, &second.occurrence_id)
+                .await?;
+        assert_eq!(late.phase, OccurrencePhase::Superseded);
+        assert_eq!(late.superseded_by_revision, Some(deleted.revision));
+        assert_eq!(
+            late.machine_state.late_completion_resolution,
+            Some(crate::machines::occurrence_lifecycle::LateCompletionResolutionClass::DeliveryCompleted)
+        );
+        let stored = store
+            .get_schedule(&schedule.schedule_id)
+            .await?
+            .ok_or_else(|| ScheduleDomainError::Internal("deleted schedule row".to_string()))?;
+        assert_eq!(
+            stored.superseded_ack_ids, deleted.superseded_ack_ids,
+            "late completions never touch the schedule's acknowledgements"
+        );
+        Ok(())
+    }
+
     /// STAGE B (RED until wired): delete supersedes a CLAIMED (pre-dispatch)
     /// occurrence at commit; the driver's subsequent reconcile of its held
     /// claim is a benign idempotent no-op — no probe, no delivery, no
@@ -6794,6 +6917,29 @@ mod tests {
         Err(ScheduleDomainError::Internal(
             "timed out waiting for typed late-completion record".to_string(),
         ))
+    }
+
+    async fn wait_for_late_completion_of(
+        service: &ScheduleService,
+        schedule_id: &crate::ScheduleId,
+        occurrence_id: &crate::OccurrenceId,
+    ) -> Result<Occurrence, ScheduleDomainError> {
+        for _ in 0..50 {
+            let occurrences = service.list_occurrences(schedule_id).await?;
+            if let Some(occurrence) = occurrences.into_iter().find(|occurrence| {
+                occurrence.occurrence_id == *occurrence_id
+                    && occurrence
+                        .machine_state
+                        .late_completion_resolution
+                        .is_some()
+            }) {
+                return Ok(occurrence);
+            }
+            sleep(std::time::Duration::from_millis(10)).await;
+        }
+        Err(ScheduleDomainError::Internal(format!(
+            "timed out waiting for the typed late-completion record of {occurrence_id}"
+        )))
     }
 
     async fn loop_until_stale_arrival_recorded(

@@ -15,6 +15,309 @@ use thiserror::Error;
 const TOOL_PROVENANCE_TYPE: &str = "ToolProvenance";
 const TOOL_VISIBILITY_WITNESS_TYPE: &str = "ToolVisibilityWitness";
 
+/// Native helpers this test oracle implements, each with the number of
+/// arguments it takes.
+///
+/// [`GeneratedMachineKernel`] dispatches every native helper call through
+/// this table: a helper it does not list is refused as unknown, and a call
+/// with another argument count is refused before the helper's arm runs. The
+/// `native_helper_arity` integration test checks every native helper call in
+/// every canonical machine schema against it, so a DSL call site and this
+/// oracle cannot disagree on a helper's arity unnoticed.
+pub const KERNEL_NATIVE_HELPERS: &[(&str, usize)] = &[
+    ("meerkat_machine_session_id_matches_string", 2),
+    (
+        "meerkat_machine_live_bridge_authority_rows_without_operation",
+        3,
+    ),
+    (
+        "meerkat_machine_live_bridge_authorities_without_operation",
+        3,
+    ),
+    ("meerkat_machine_run_contributor_count", 3),
+    ("meerkat_machine_run_contributor_limit", 0),
+    ("mob_machine_external_peer_identity_absent", 2),
+    ("mob_machine_next_respawn_generation", 2),
+    ("mob_machine_next_minted_generation", 3),
+    ("mob_machine_u64_is_exact_successor", 2),
+    ("mob_machine_optional_u64_is_exact_successor", 2),
+    ("mob_machine_members_to_spawn", 2),
+    ("mob_machine_members_to_retire", 3),
+    ("mob_machine_placed_cleanup_absent_for_identity", 2),
+    ("mob_machine_placed_cleanup_obligation", 7),
+];
+
+const PLACED_CUSTODY_GAP: &str = "placed-member custody predicate on runtime-internal inputs and \
+     signals; the Mob parity probes place no member, so no audited row reaches it";
+const FLOW_REDUCER_GAP: &str = "flow run or frame reducer fold on runtime-internal flow inputs; \
+     the RunFlow arm the Mob parity audit drives calls none of them";
+const MEMBER_PEER_GAP: &str = "member peer registration or migration fold on runtime-internal \
+     inputs and signals no Mob parity probe drives";
+const PEER_BOOKKEEPING_GAP: &str = "wiring or external-peer bookkeeping on retire, respawn and \
+     repair arms no Mob parity probe triggers";
+const COORDINATION_GAP: &str =
+    "mob coordination lease predicate on coordination inputs no Mob parity probe drives";
+const MEERKAT_PEER_DIRECTORY_GAP: &str = "MeerkatMachine peer-directory predicate; the oracle \
+     refuses `unknown helper` on any row that reaches it";
+
+/// Native helpers that canonical machine schemas call and this test oracle
+/// does not implement, each with the reason it is still missing.
+///
+/// A transition that reaches one of them is refused with `unknown helper`,
+/// so a row that depends on it is visibly blind, never a silent pass. The
+/// `native_helper_arity` integration test fails when a listed helper is
+/// implemented or no longer called, and when a canonical schema calls a
+/// native helper that is in neither this list nor [`KERNEL_NATIVE_HELPERS`].
+pub const KERNEL_UNIMPLEMENTED_NATIVE_HELPERS: &[(&str, &str)] = &[
+    // Reached by the Mob parity audit: these rows are kernel-blind today.
+    (
+        "mob_machine_adaptive_lifecycle_drained",
+        "guard of Stop, Complete, Reset, Destroy, Shutdown and RetireAll; the Mob parity audit \
+         reaches it in every probed phase, so those rows are kernel-blind until it is implemented",
+    ),
+    (
+        "mob_machine_session_bound_live_runtime_ids_match",
+        "guard of SubscribeAllAgentEvents and SubscribeMobEvents; the Mob parity audit reaches it \
+         in every probed phase",
+    ),
+    (
+        "mob_machine_external_peer_key_matches_edge",
+        "first guard of the WireExternalPeer and UnwireExternalPeer arms; the Mob parity audit \
+         reaches it in Running",
+    ),
+    (
+        "mob_machine_wiring_edge_a",
+        "edge endpoint projection in the WireMembers and WireMembersWithTrust guards; the Mob \
+         parity audit reaches it on WireMembers in Running",
+    ),
+    (
+        "mob_machine_wiring_edge_matches_members",
+        "WireMembersWithTrust guard; the Mob parity audit reaches it in Running",
+    ),
+    // On a probed input's arms, behind a guard the audit's projected
+    // pre-state fails first.
+    (
+        "mob_machine_wiring_edge_b",
+        "edge endpoint projection next to mob_machine_wiring_edge_a in the WireMembers guards; \
+         reached once mob_machine_wiring_edge_a is implemented",
+    ),
+    (
+        "mob_machine_external_peer_edge_local",
+        "local-member projection in the WireExternalPeer and UnwireExternalPeer guards, after \
+         the key check",
+    ),
+    (
+        "mob_machine_external_peer_edge_peer_id",
+        "peer id projection in the WireExternalPeer and UnwireExternalPeer trust effects",
+    ),
+    (
+        "mob_machine_identity_has_session_binding",
+        "SubscribeAgentEvents guard behind identity_present, which the audit's projected \
+         pre-state (no identity_to_runtime) fails first",
+    ),
+    (
+        "mob_machine_member_peer_endpoint_peer_id",
+        "peer id projection in the AuthorizeMemberPeerRebind, AuthorizeMemberPeerOverlay and \
+         remote CommitSpawnMembership guards, behind identity checks the audit's projected \
+         pre-state fails first",
+    ),
+    (
+        "mob_machine_host_id_matches_peer_id",
+        "remote CommitSpawnMembership guard; the Mob parity probes place no member",
+    ),
+    (
+        "mob_machine_member_peer_overlay",
+        "AuthorizeMemberPeerOverlay effect payload, behind identity_present",
+    ),
+    (
+        "mob_machine_member_peer_overlay_complete",
+        "AuthorizeMemberPeerOverlay guard behind identity_present",
+    ),
+    (
+        "mob_machine_member_peer_overlay_peer_ids_unique",
+        "AuthorizeMemberPeerOverlay guard behind identity_present",
+    ),
+    (
+        "mob_machine_placed_carrier_binding_active",
+        "placed-member guard of SubmitWork, Retire, ForceCancel and the event subscription arms; \
+         the Mob parity probes place no member",
+    ),
+    (
+        "mob_machine_placed_carrier_binding_confirmed_revoked",
+        "placed-member Retire guard; the Mob parity probes place no member",
+    ),
+    // No Mob parity probe triggers an arm that calls these.
+    (
+        "mob_machine_adaptive_run_custody_drained",
+        "adaptive-run custody guard on runtime-internal adaptive inputs no Mob parity probe drives",
+    ),
+    (
+        "mob_machine_host_binding_generation_tombstone",
+        "placed-host binding tombstone on host-binding inputs; the Mob parity probes bind no host",
+    ),
+    ("mob_machine_remote_turn_custody_admits", PLACED_CUSTODY_GAP),
+    (
+        "mob_machine_placed_completion_obligation_well_formed",
+        PLACED_CUSTODY_GAP,
+    ),
+    (
+        "mob_machine_placed_completion_custody_admits",
+        PLACED_CUSTODY_GAP,
+    ),
+    (
+        "mob_machine_placed_kickoff_obligation_well_formed",
+        PLACED_CUSTODY_GAP,
+    ),
+    (
+        "mob_machine_finalized_placed_kickoff_recovery_well_formed",
+        PLACED_CUSTODY_GAP,
+    ),
+    (
+        "mob_machine_placed_kickoff_correlation_available",
+        PLACED_CUSTODY_GAP,
+    ),
+    (
+        "mob_machine_placed_kickoff_custody_absent_for_identity",
+        PLACED_CUSTODY_GAP,
+    ),
+    (
+        "mob_machine_placed_kickoff_custody_absent_for_host",
+        PLACED_CUSTODY_GAP,
+    ),
+    (
+        "mob_machine_remote_turn_input_id_available_to_kickoff",
+        PLACED_CUSTODY_GAP,
+    ),
+    (
+        "mob_machine_member_peer_id_available_for_identity",
+        MEMBER_PEER_GAP,
+    ),
+    (
+        "mob_machine_member_has_no_external_peer_edges",
+        MEMBER_PEER_GAP,
+    ),
+    (
+        "mob_machine_member_prior_peer_endpoints_after_migration",
+        MEMBER_PEER_GAP,
+    ),
+    (
+        "mob_machine_member_endpoint_migration_cleanup_peer_id",
+        MEMBER_PEER_GAP,
+    ),
+    (
+        "mob_machine_member_peer_overlay_without_identity",
+        MEMBER_PEER_GAP,
+    ),
+    (
+        "mob_machine_member_peer_overlay_without_identity_complete",
+        MEMBER_PEER_GAP,
+    ),
+    (
+        "mob_machine_member_peer_overlay_without_identity_peer_ids_unique",
+        MEMBER_PEER_GAP,
+    ),
+    (
+        "mob_machine_external_peer_edge_has_matching_key",
+        PEER_BOOKKEEPING_GAP,
+    ),
+    (
+        "mob_machine_external_peer_edges_by_key_without_identity",
+        PEER_BOOKKEEPING_GAP,
+    ),
+    (
+        "mob_machine_external_peer_edges_without_identity",
+        PEER_BOOKKEEPING_GAP,
+    ),
+    (
+        "mob_machine_external_peer_key_matches_local",
+        PEER_BOOKKEEPING_GAP,
+    ),
+    (
+        "mob_machine_wiring_edge_contains_identity",
+        PEER_BOOKKEEPING_GAP,
+    ),
+    ("mob_machine_wiring_contains_pair", PEER_BOOKKEEPING_GAP),
+    (
+        "mob_machine_wiring_edges_without_identity",
+        PEER_BOOKKEEPING_GAP,
+    ),
+    ("mob_machine_run_step_status_after_set", FLOW_REDUCER_GAP),
+    (
+        "mob_machine_run_step_status_after_cancel_unfinished",
+        FLOW_REDUCER_GAP,
+    ),
+    ("mob_machine_run_step_bool_after_set", FLOW_REDUCER_GAP),
+    (
+        "mob_machine_run_step_condition_result_after_set",
+        FLOW_REDUCER_GAP,
+    ),
+    ("mob_machine_run_step_u64_after_set", FLOW_REDUCER_GAP),
+    ("mob_machine_run_step_u64_after_increment", FLOW_REDUCER_GAP),
+    (
+        "mob_machine_run_retry_count_after_increment",
+        FLOW_REDUCER_GAP,
+    ),
+    ("mob_machine_frame_node_bool_after_set", FLOW_REDUCER_GAP),
+    (
+        "mob_machine_frame_node_status_after_admit",
+        FLOW_REDUCER_GAP,
+    ),
+    (
+        "mob_machine_frame_ready_queue_after_admit",
+        FLOW_REDUCER_GAP,
+    ),
+    (
+        "mob_machine_frame_node_status_after_terminal",
+        FLOW_REDUCER_GAP,
+    ),
+    (
+        "mob_machine_frame_ready_queue_after_terminal",
+        FLOW_REDUCER_GAP,
+    ),
+    (
+        "mob_machine_step_status_from_frame_node_status",
+        FLOW_REDUCER_GAP,
+    ),
+    ("mob_coordination_work_intent_unexpired", COORDINATION_GAP),
+    (
+        "mob_coordination_resource_claim_unexpired",
+        COORDINATION_GAP,
+    ),
+    (
+        "mob_coordination_resource_claim_active_at",
+        COORDINATION_GAP,
+    ),
+    (
+        "mob_coordination_resource_claim_inactive_at",
+        COORDINATION_GAP,
+    ),
+    (
+        "meerkat_peer_endpoint_set_cardinality_matches",
+        MEERKAT_PEER_DIRECTORY_GAP,
+    ),
+    (
+        "meerkat_peer_endpoint_set_contains_peer_id",
+        MEERKAT_PEER_DIRECTORY_GAP,
+    ),
+    (
+        "meerkat_peer_endpoint_option_peer_id_matches",
+        MEERKAT_PEER_DIRECTORY_GAP,
+    ),
+    (
+        "meerkat_peer_endpoint_peer_id_matches",
+        MEERKAT_PEER_DIRECTORY_GAP,
+    ),
+    (
+        "meerkat_peer_endpoint_set_peer_ids_unique",
+        MEERKAT_PEER_DIRECTORY_GAP,
+    ),
+    (
+        "runtime_delivery_recipient_outcomes_after_set",
+        "RuntimeDeliveryMachine recipient-outcome fold; the oracle refuses `unknown helper` on \
+         any row that reaches it",
+    ),
+];
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum KernelValue {
     Bool(bool),
@@ -369,6 +672,15 @@ impl GeneratedMachineKernel {
     #[must_use]
     pub fn new(schema: MachineSchema) -> Self {
         Self { schema }
+    }
+
+    /// The typed default this kernel gives `ty`: what [`Self::initial_state`]
+    /// seeds a state field with before its declared initializer runs (the
+    /// first declared variant of a closed enum, `None`, an empty collection,
+    /// zero, false or the empty string, wrapped in its named type).
+    #[must_use]
+    pub fn default_value(&self, ty: &TypeRef) -> KernelValue {
+        self.default_value_for_type(ty)
     }
 
     pub fn initial_state(&self) -> Result<KernelState, TransitionRefusal> {
@@ -1319,7 +1631,27 @@ impl GeneratedMachineKernel {
         transition_name: &TransitionId,
     ) -> Result<KernelValue, TransitionRefusal> {
         // Test-oracle support for native helpers whose production semantics
-        // live in the generated/Rust machine owner.
+        // live in the generated/Rust machine owner. `KERNEL_NATIVE_HELPERS` is
+        // the one list of what this oracle implements: an unlisted helper is
+        // unknown, and a call with another argument count is refused here,
+        // before the helper's arm runs. Every arm refuses a count it cannot
+        // destructure as "<helper> expects <count> args"; the table test pins
+        // each arm to the table through that wording.
+        let Some(&(_, arity)) = KERNEL_NATIVE_HELPERS
+            .iter()
+            .find(|(name, _)| *name == helper)
+        else {
+            return Err(self.eval_error(transition_name, format!("unknown helper `{helper}`")));
+        };
+        if args.len() != arity {
+            return Err(self.eval_error(
+                transition_name,
+                format!(
+                    "native helper `{helper}` expects {arity} args, found {}",
+                    args.len()
+                ),
+            ));
+        }
         match helper {
             "meerkat_machine_session_id_matches_string" => {
                 self.eval_meerkat_machine_session_id_matches_string(args, transition_name)
@@ -2844,8 +3176,9 @@ mod tests {
     };
 
     use super::{
-        GeneratedMachineKernel, KernelInput, KernelSignal, KernelValue, TransitionRefusal,
-        default_value_for_type, option_some, value_matches_type,
+        GeneratedMachineKernel, KERNEL_NATIVE_HELPERS, KERNEL_UNIMPLEMENTED_NATIVE_HELPERS,
+        KernelInput, KernelSignal, KernelValue, TransitionRefusal, default_value_for_type,
+        option_some, value_matches_type,
     };
 
     fn input_id(slug: &str) -> InputVariantId {
@@ -5255,6 +5588,65 @@ mod tests {
             option_some(named_u64("Generation", 10))
         );
         assert_eq!(mint(None, Some(u64::MAX)), KernelValue::None);
+    }
+
+    /// Every helper `KERNEL_NATIVE_HELPERS` lists has a dispatch arm that
+    /// takes exactly the listed argument count, the table refuses any other
+    /// count before the arm runs, and every helper
+    /// `KERNEL_UNIMPLEMENTED_NATIVE_HELPERS` lists is refused as unknown.
+    #[test]
+    fn kernel_native_helper_table_matches_the_helper_arms() {
+        let kernel = GeneratedMachineKernel::new(mob_machine());
+        let transition = transition_id("native_helper_table_probe");
+        let mut listed = BTreeSet::new();
+        for &(helper, arity) in KERNEL_NATIVE_HELPERS {
+            assert!(listed.insert(helper), "`{helper}` is listed twice");
+            match kernel.eval_native_helper(helper, vec![KernelValue::None; arity + 1], &transition)
+            {
+                Err(TransitionRefusal::EvaluationError { reason, .. }) => assert_eq!(
+                    reason,
+                    format!(
+                        "native helper `{helper}` expects {arity} args, found {}",
+                        arity + 1
+                    )
+                ),
+                other => panic!(
+                    "`{helper}` called with {} args must be refused by the table, got {other:?}",
+                    arity + 1
+                ),
+            }
+            // The listed count reaches the arm. Placeholder arguments may be
+            // refused for their type ("expected ..."), never for their count
+            // ("expects ...") and never as an unknown helper.
+            if let Err(refusal) =
+                kernel.eval_native_helper(helper, vec![KernelValue::None; arity], &transition)
+            {
+                let TransitionRefusal::EvaluationError { reason, .. } = &refusal else {
+                    panic!("`{helper}` refused with a non-evaluation error: {refusal:?}");
+                };
+                assert!(
+                    !reason.contains(" expects ") && !reason.starts_with("unknown helper"),
+                    "`{helper}` takes {arity} args in KERNEL_NATIVE_HELPERS but its arm \
+                     refuses that count: {reason}"
+                );
+            }
+        }
+        for &(helper, gap_reason) in KERNEL_UNIMPLEMENTED_NATIVE_HELPERS {
+            assert!(
+                !gap_reason.trim().is_empty(),
+                "`{helper}` needs a written reason"
+            );
+            assert!(
+                listed.insert(helper),
+                "`{helper}` is both implemented and listed as a gap, or listed twice"
+            );
+            match kernel.eval_native_helper(helper, Vec::new(), &transition) {
+                Err(TransitionRefusal::EvaluationError { reason, .. }) => {
+                    assert_eq!(reason, format!("unknown helper `{helper}`"));
+                }
+                other => panic!("`{helper}` is listed as unimplemented, got {other:?}"),
+            }
+        }
     }
 
     #[allow(clippy::expect_used)]

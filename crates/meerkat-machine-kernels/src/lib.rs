@@ -73,7 +73,8 @@ pub(crate) mod ids {
 #[cfg(feature = "test-oracle")]
 pub mod test_oracle {
     pub use crate::runtime::{
-        GeneratedMachineKernel, KernelEffect, KernelInput, KernelSignal, KernelState, KernelValue,
-        TransitionOutcome, TransitionRefusal,
+        GeneratedMachineKernel, KERNEL_NATIVE_HELPERS, KERNEL_UNIMPLEMENTED_NATIVE_HELPERS,
+        KernelEffect, KernelInput, KernelSignal, KernelState, KernelValue, TransitionOutcome,
+        TransitionRefusal,
     };
 }

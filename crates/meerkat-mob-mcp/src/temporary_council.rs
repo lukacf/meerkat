@@ -3130,7 +3130,7 @@ fn describe_turn_failure(failure: &BoundedTurnFailure) -> String {
             format!("the turn was abandoned: {reason}")
         }
         BoundedTurnFailure::RequeuedAcrossStop { .. } => {
-            "a graceful stop kept the turn's input queued; it runs when the mob starts again"
+            "a graceful stop or a store fence gap kept the turn's input queued; it runs when the store's fence is back or when the mob starts again"
                 .to_string()
         }
         BoundedTurnFailure::RequeueExpired { .. } => {

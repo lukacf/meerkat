@@ -1520,7 +1520,9 @@ pub enum RuntimeSessionUnregisterAdmission {
 /// [`Self::Keep`] keeps every non-terminal input the registration recovered
 /// from the store exactly as the store holds it, for the next registration
 /// to recover again, while the registration served no live work; once it did,
-/// the unregister stops every input, as [`Self::Stop`] does.
+/// the unregister stops every input, as [`Self::Stop`] does. Either way, the
+/// inputs bound to a run marked resumable whose stop was asked end as
+/// stopped, so no later start resumes the stopped run.
 /// An unregister already in progress keeps the disposition it began with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
@@ -1538,7 +1540,10 @@ pub enum UnregisterQueuedInputs {
     /// as the store holds it, unless the registration served live work (an
     /// admission, a deduplicated resubmission or a recycle): an unregister
     /// of a registration a host refused before it served, so the refusal
-    /// ends nothing a later start would run.
+    /// ends nothing a later start would run. The exception is a run the
+    /// registration marked resumable whose stop was asked (a stop needs no
+    /// executor): the inputs bound to it end as stopped, so no later start
+    /// resumes it.
     Keep,
 }
 
@@ -1628,10 +1633,11 @@ impl UnregisterDisposition {
     /// served (a pending attachment's abort, a failed startup's cleanup), and
     /// a host's refusal of a restored registration
     /// ([`UnregisterQueuedInputs::Keep`]).
-    /// An input admitted while the registration stood still ends as stopped.
-    /// The machine grants the keep only to a registration that served no
-    /// live work: after an admission, a deduplicated resubmission or a recycle
-    /// it records the unregister as Stop.
+    /// An input admitted while the registration stood still ends as stopped,
+    /// and so does an input bound to a run marked resumable whose stop was
+    /// asked. The machine grants the keep only to a registration that served
+    /// no live work: after an admission, a deduplicated resubmission or a
+    /// recycle it records the unregister as Stop.
     pub(crate) const KEEP: Self = Self {
         queued_inputs: dsl::UnregisterQueuedInputsDisposition::Keep,
         requeue_max_age_ms: 0,
@@ -3306,10 +3312,11 @@ impl MachineCleanupTaskSpawner {
         }
 
         // Machine cleanup restores and reduces the same generated DSL state
-        // as the host runtime and runs session and mob work for the whole
-        // process, the turns of runtime-backed mob members and the host tools
-        // they call included, so its threads get the process-runtime stack:
-        // 16 MiB, or what the host stack knobs set (see `crate::host_stack`).
+        // as the host runtime and runs session and mob cleanup and custody
+        // work for the whole process (the turns of sessions and mob members
+        // run on the host's runtime), so its threads get the process-runtime
+        // stack: 16 MiB, or what the host stack knobs set (see
+        // `crate::host_stack`).
         let stack_bytes = crate::host_stack::process_runtime_stack_bytes().map_err(|error| {
             RuntimeDriverError::Internal(format!(
                 "failed to start machine cleanup runtime: {error}"
@@ -4252,8 +4259,10 @@ impl PendingRuntimeExecutorAttachment {
     /// registration, its inputs still bound to it) is checked first, as a
     /// whole: when any of its inputs is over the stop's max age, the run is
     /// settled with the same reason (`DriverEntry::settle_resumable_run`)
-    /// instead of resumed. Its inputs are Staged or Applied, never queued,
-    /// so the per-input sweep would not see them.
+    /// instead of resumed, or as cancelled when its stop was asked since
+    /// this registration marked it, as every settlement of a stopped run
+    /// is. Its inputs are Staged or Applied, never queued, so the per-input
+    /// sweep would not see them.
     pub(crate) async fn settle_expired_stop_requeued_inputs(
         &mut self,
         now: chrono::DateTime<chrono::Utc>,
@@ -4267,9 +4276,10 @@ impl PendingRuntimeExecutorAttachment {
         // swept.
         let mut settled_run = None;
         // The runtime-termination carriers the expired run's settlement
-        // committed, and the run's own terminal, published once the driver
-        // is released.
+        // committed, the reason they carry, and the run's own terminal,
+        // published once the driver is released.
         let mut settled_batches = Vec::new();
+        let mut settled_reason = EXPIRED_KEPT_RUN_TERMINATION_REASON;
         let mut settled_terminal = None;
         let expired = {
             let mut driver = driver.lock().await;
@@ -4277,24 +4287,37 @@ impl PendingRuntimeExecutorAttachment {
             if let Some(run_id) = driver.resumable_run_id()
                 && driver.resumable_run_stop_requeue_expired(&run_id, now)
             {
+                // A stop asked of the run since its registration (the
+                // resumable branch of a stop needs no executor) ends it as
+                // stopped, as every settlement of a stopped run does.
+                let stopped = driver.resumable_run_stop_requested();
+                let (reason, termination_reason) = if stopped {
+                    (
+                        crate::input_state::InputAbandonReason::Cancelled,
+                        crate::runtime_loop::STOPPED_RESUMABLE_RUN_TERMINATION_REASON,
+                    )
+                } else {
+                    (
+                        crate::input_state::InputAbandonReason::RequeueExpired,
+                        EXPIRED_KEPT_RUN_TERMINATION_REASON,
+                    )
+                };
                 let crate::meerkat_machine::driver::SettledResumableRun {
                     abandoned: settled,
                     batches,
                     terminal,
                 } = driver
-                    .settle_resumable_run_with_terminals(
-                        &run_id,
-                        crate::input_state::InputAbandonReason::RequeueExpired,
-                        EXPIRED_KEPT_RUN_TERMINATION_REASON,
-                    )
+                    .settle_resumable_run_with_terminals(&run_id, reason, termination_reason)
                     .await?;
                 settled_batches = batches;
+                settled_reason = termination_reason;
                 settled_terminal = terminal;
                 tracing::info!(
                     session_id = %self.witness.session_id(),
                     %run_id,
                     inputs = settled.len(),
-                    "a run a graceful stop kept open outlived the stop's max age; settled instead of resumed"
+                    stopped,
+                    "a run a graceful stop kept open outlived the stop's max age; settled (as stopped when its stop was asked) instead of resumed"
                 );
                 if !settled.is_empty() {
                     // Committed: told once this attachment releases its
@@ -4402,7 +4425,7 @@ impl PendingRuntimeExecutorAttachment {
                         Some(&completions),
                         publication_handle.as_deref(),
                         &settled_batches,
-                        EXPIRED_KEPT_RUN_TERMINATION_REASON,
+                        settled_reason,
                         Some(deadline),
                     )
                     .await
@@ -4457,6 +4480,9 @@ impl PendingRuntimeExecutorAttachment {
         let mut settled_batches = Vec::new();
         let mut settled_terminal = None;
         let mut settled_inputs = Vec::new();
+        // The reason the settled run's carriers are published with: the one
+        // its settlement wrote into them.
+        let mut settled_run_reason = KEPT_GOVERNED_INPUT_TERMINATION_REASON;
         let ended = {
             let mut driver = driver.lock().await;
             let mut ended = Vec::new();
@@ -4464,24 +4490,38 @@ impl PendingRuntimeExecutorAttachment {
             if let Some(run_id) = driver.resumable_run_id()
                 && driver.resumed_run_first_input_lacks_controller(&run_id)
             {
+                // A stop asked of the run since its registration (the
+                // resumable branch of a stop needs no executor) ends it as
+                // stopped: the machine refuses to settle a stopped run as a
+                // refused resume.
+                let stopped = driver.resumable_run_stop_requested();
+                let (reason, termination_reason) = if stopped {
+                    (
+                        crate::input_state::InputAbandonReason::Cancelled,
+                        crate::runtime_loop::STOPPED_RESUMABLE_RUN_TERMINATION_REASON,
+                    )
+                } else {
+                    (
+                        crate::input_state::InputAbandonReason::ResumeRefused,
+                        KEPT_GOVERNED_INPUT_TERMINATION_REASON,
+                    )
+                };
                 let crate::meerkat_machine::driver::SettledResumableRun {
                     abandoned,
                     batches,
                     terminal,
                 } = driver
-                    .settle_resumable_run_with_terminals(
-                        &run_id,
-                        crate::input_state::InputAbandonReason::ResumeRefused,
-                        KEPT_GOVERNED_INPUT_TERMINATION_REASON,
-                    )
+                    .settle_resumable_run_with_terminals(&run_id, reason, termination_reason)
                     .await?;
                 settled_batches = batches;
                 settled_terminal = terminal;
+                settled_run_reason = termination_reason;
                 tracing::warn!(
                     session_id = %self.witness.session_id(),
                     %run_id,
                     inputs = abandoned.len(),
-                    "a kept run's first input is kept governed work whose controller cannot be supplied again; settled as a refused resume instead of resumed"
+                    stopped,
+                    "a kept run's first input is kept governed work whose controller cannot be supplied again; settled (as stopped when its stop was asked) instead of resumed"
                 );
                 if !abandoned.is_empty() {
                     // Committed: told once this attachment releases its
@@ -4568,7 +4608,7 @@ impl PendingRuntimeExecutorAttachment {
                         Some(&completions),
                         publication_handle.as_deref(),
                         &settled_batches,
-                        KEPT_GOVERNED_INPUT_TERMINATION_REASON,
+                        settled_run_reason,
                         Some(deadline),
                     )
                     .await
@@ -4576,7 +4616,7 @@ impl PendingRuntimeExecutorAttachment {
                     tracing::warn!(
                         %session_id,
                         %error,
-                        "the refused kept run's terminals were not published; their outboxes stay for the next drain"
+                        "the settled kept run's terminals were not published; their outboxes stay for the next drain"
                     );
                 }
                 for (input_id, directed_owner) in &settled_inputs {
@@ -6453,7 +6493,8 @@ impl PreparedSessionMaterialization {
     /// registration to recover again. A refused materialization (a durable tail
     /// held for recovery, a failed agent build) so ends nothing a later start
     /// would run. An input admitted while the registration stood still ends as
-    /// stopped.
+    /// stopped, and so do the inputs bound to a run the registration marked
+    /// resumable whose stop was asked, so no later start resumes that run.
     ///
     /// The machine decides whether the keep stands: a registration that
     /// served live work (an input admitted to it, a resubmission

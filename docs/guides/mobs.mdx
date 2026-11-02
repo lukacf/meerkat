@@ -1553,13 +1553,15 @@ a bound under one millisecond, zero included, or over 24 hours with
 which ends every queued input as stopped and cancels running turns, as in
 0.9.4.
 
-`.with_queued_inputs(QueuedInputsOnShutdown::Keep)` changes nothing the
-Shutdown finds, for a host that boots over a store another host serves,
+`.with_queued_inputs(QueuedInputsOnShutdown::Keep)` keeps what the Shutdown
+finds as it is, for a host that boots over a store another host serves,
 holds its members' run starts and admits nothing to them (a candidate
-launch). A member whose runtime registration served no live work keeps
-every input the registration recovered as the Shutdown finds it, with no
-requeue mark, and the run its session left open, and an autonomous member's
-kickoff stays open: the next start recovers and resumes them. The boot's
+launch). A member whose runtime registration served no live work keeps every
+input the registration recovered as the Shutdown finds it, with no requeue
+mark, and the run its session left open, and an autonomous member's kickoff
+stays open: the next start recovers and resumes them. A run left open whose
+stop was asked after the start registered it is the exception: the inputs
+bound to it end as stopped, and no later start resumes it. The boot's
 ordinary recovery, which every start runs, may still normalize a staged
 input whose run cannot continue to queued before the Shutdown; the Keep
 leaves that as it is. A member whose registration served live work (an

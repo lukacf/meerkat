@@ -2399,9 +2399,11 @@ pub enum RuntimeCompletionWaitFailureObservation {
     #[default]
     ChannelClosed,
     AuthorityUnavailable,
-    /// A graceful stop kept the waited input durably queued for the
-    /// session's next start (`ClassifyStopInputDisposition` answered
-    /// `Retain`). The input is not terminal.
+    /// The waited input stays durably queued and runs later: a graceful stop
+    /// kept it for the session's next start (`ClassifyStopInputDisposition`
+    /// answered `Retain`), or a store fence gap suspended its run (or
+    /// another writer took the session over) and it runs when the fence is
+    /// re-acquired or at the next start. The input is not terminal.
     RequeuedAcrossStop,
 }
 
@@ -2411,7 +2413,8 @@ pub enum RuntimeCompletionWaitFailureObservation {
 pub enum RuntimeCompletionWaitFailurePublicErrorClass {
     #[default]
     InternalError,
-    /// The session is not running: its waited input runs on the next start.
+    /// The session is not running the waited input now: it runs when the
+    /// store's fence is re-acquired or on the next start.
     SessionNotRunning,
 }
 
@@ -3014,8 +3017,8 @@ pub enum LiveContextRowDisposition {
 pub use meerkat_machine_schema::catalog::dsl::meerkat_machine::{
     DurableRecoveryOwnership, LiveContextDeliveryReadiness, LiveContextPayloadAvailability,
     LiveContextPreparationFailure, LiveContextPreparationPhase, LiveContextRowAuthor,
-    LiveContextRowSource, LiveConversationStartCause, RunStartHoldReason, StopInputDisposition,
-    UnregisterQueuedInputsDisposition,
+    LiveContextRowSource, LiveConversationStartCause, RunStartHoldReason, RunSuspensionCause,
+    StopInputDisposition, UnregisterQueuedInputsDisposition,
 };
 pub use meerkat_machine_schema::catalog::dsl::meerkat_machine::{
     EmptyResumeRetirementVerdict, SessionResidencyOwner,

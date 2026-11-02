@@ -23,12 +23,18 @@
 \* non-terminal rows. Process 2 registers and recovers each durable row
 \* through the generated recovery arms (the durability classifier discards an
 \* Ephemeral row, the staged A is queued again, and B's key is registered
-\* again). It may then serve live work, each at most once: admit a new input
-\* C, resolve a resubmission D under B's key as a duplicate of B (D waits on
-\* B), or take a host recycle, whose recovery admits every active input to
-\* the recovered witness again, C included. Its materialization is refused
-\* before it serves: the host rolls the registration back with an unregister
-\* that begins with Keep, or, as the control, with Stop. Or the host attaches
+\* again). Or its registration finds process 1's run continuable and marks
+\* it resumable before any row is normalized (MarkRunResumable): A then
+\* stays Staged and bound to that run, and a stop of the marked run
+\* (StopCurrentRunForRun, which needs no executor) may be recorded before
+\* the materialization is refused, with no runtime loop to settle it. A
+\* process 2 that did not mark the run may then serve live work, each at
+\* most once: admit a new input C, resolve a resubmission D under B's key
+\* as a duplicate of B (D waits on B), or take a host recycle, whose
+\* recovery admits every active input to the recovered witness again, C
+\* included. Its materialization is refused before it serves: the host
+\* rolls the registration back with an unregister that begins with Keep,
+\* or, as the control, with Stop. Or the host attaches
 \* an executor that never serves (C's admission and D's resolution may land
 \* while it is pending), and the unserved-attachment unregister begins with
 \* the Keep its abort asks for, or with the Stop of a retire that meets it.
@@ -46,9 +52,14 @@
 \*   AuditRollbackVerdictIsAFunction: during the rollback's stop exactly one
 \*     verdict arm (Retain, Keep or Abandon) answers each input still to
 \*     classify.
+\*   AuditStoppedResumableRunInputNotKept: once a stop of the run process 2
+\*     marked resumable is recorded, A, the input bound to that run, is
+\*     never answered Keep or kept, so no later start resumes the stopped
+\*     run.
 \*   AuditKeepEndsNoRecoveredInput: under Keep, when process 2 served no
 \*     live work, no input it recovered is answered Abandon, gets a runless
-\*     carrier or ends stopped.
+\*     carrier or ends stopped, but for A once the run it is bound to was
+\*     stopped.
 \*   AuditKeepStopsWhatItAdmitted: an input admitted in process 2 is never
 \*     answered Keep and never runs in process 3.
 \*   AuditKeepOnlyUnderKeep: every Keep answer came from an unregister the
@@ -63,7 +74,7 @@
 \*
 \* AuditWitness* operators are reachability goals the runner checks as
 \* expected violations, so the invariants are not vacuous. The runner's
-\* --mutants mode seeds eleven defects into a copy of the generated model
+\* --mutants mode seeds thirteen defects into a copy of the generated model
 \* and one into a copy of this audit, and requires TLC to refuse each with
 \* the invariant it breaks: the machine without the Keep arm (Keep stops
 \* like Stop), a Keep arm that ignores the recovery witness (with admissions
@@ -75,14 +86,18 @@
 \* mark the registration as having served live work, an unserved-attachment
 \* unregister that ignores the requested disposition (it always stops, as
 \* before the attachment's abort asked to keep), one that records a
-\* requested Keep after live work, and, in this audit, a retire that meets
-\* the unserved attachment and requests Keep.
+\* requested Keep after live work, the machine without the exception for a
+\* stopped run marked resumable (its bound input is kept as before), the
+\* exception without its stop conjunct (it also ends the bound input of a
+\* marked run nobody stopped), and, in this audit, a retire that meets the
+\* unserved attachment and requests Keep.
 \*
 \* The TLC config is DERIVED from the generated ci.cfg on every run by
 \* materialization_rollback_keep_audit.sh. No audit step repeats, so the
 \* reachable space is finite: the lane's bound of 50 steps explores all of it
-\* (32,682 distinct states; a deeper bound finds no new state), and 44 steps
-\* reach the deepest witness. Check that by hand with:
+\* (a deeper bound finds no new state; the lane records the distinct-state
+\* count here, 32,682 before the marked-run branch), and 44 steps reach the
+\* deepest witness. Check that by hand with:
 \*   specs/machines/meerkat_machine/materialization_rollback_keep_audit.sh 80
 \*
 \* Scope limits: the requeue mark, the waiter answers, the runless carriers
@@ -93,10 +108,15 @@
 \* changes no verdict input. The unserved-attachment route is driven from
 \* Attached only, and a recycle from Idle only: the unserved arm's Idle and
 \* Running variants and RecycleFromAttached rest on the machine's ci TLC
-\* run. The meerkat facade rows pin the shell: a refused restart keeps the
+\* run. The marked run is process 2's only: process 3 queues a kept bound
+\* input again, as a registration that finds no continuable tail does (the
+\* requeue-across-stop audit resumes a marked run), and a process 2 that
+\* marked the run serves no live work, which would forfeit the keep anyway.
+\* The meerkat facade rows pin the shell: a refused restart keeps the
 \* stranded input, the dry run still names it, and the next start runs it
 \* once; after an admission, a recycle or a deduplicated resubmission the
-\* rollback keeps nothing.
+\* rollback keeps nothing. Machine rows pin the exception's scope: a queued
+\* input that only still names the stopped run is kept.
 EXTENDS materialization_rollback_keep_fresh
 
 CONSTANTS AuditMaxSteps
@@ -108,6 +128,7 @@ VARIABLES
     audit_route,          \* how process 2's registration was unregistered
     audit_c_planned,      \* process 2's admission of C was planned
     audit_admitted_p2,    \* inputs admitted while process 2's registration stood
+    audit_p2_stop,        \* a stop of the run process 2 marked resumable was recorded
     audit_live_p2,        \* live work process 2 served before its stop opened
     audit_draining_live,  \* some of it landed after the unregister began
     audit_recycle_pending, \* active inputs process 2's recycle has yet to recover
@@ -124,7 +145,8 @@ VARIABLES
     audit_recovered_p2,   \* inputs process 2 recovered from the store
     audit_staged_p3       \* inputs staged into a run of process 3
 
-setupVars == <<audit_facts, audit_disposition, audit_route, audit_c_planned, audit_admitted_p2>>
+setupVars == <<audit_facts, audit_disposition, audit_route, audit_c_planned, audit_admitted_p2,
+               audit_p2_stop>>
 liveVars == <<audit_live_p2, audit_draining_live, audit_recycle_pending, audit_rerecovered>>
 regionVars == <<audit_pending, audit_pre_verdict, audit_post_verdict, audit_abandoned>>
 historyVars == <<audit_kept, audit_carriers, audit_stopped>>
@@ -239,7 +261,8 @@ AuditSetup ==
                 /\ AdmitPlan(AuditB, kind)
                 /\ audit_facts' = audit_facts @@ (AuditB :> [kind |-> kind, durability |-> d])
           /\ UNCHANGED <<audit_stage, audit_disposition, audit_route, audit_c_planned,
-                         audit_admitted_p2, liveVars, regionVars, historyVars, restartVars>>
+                         audit_admitted_p2, audit_p2_stop, liveVars, regionVars, historyVars,
+                         restartVars>>
        \/ model_step_count = 8 /\ QueueAcceptedRunning(AuditB) /\ AuditUnchanged
        \/ model_step_count = 9
           /\ RegisterAcceptedIdempotencyRunning(AuditB, AuditKey)
@@ -290,11 +313,26 @@ RecoveryStep(i, next) ==
 
 Unrecovered == {i \in DOMAIN audit_recovery : audit_recovery[i] \notin {"Recovered", "Discarded"}}
 
+\* Process 2's registration may find process 1's run continuable (the audit
+\* takes a round of it as committed before the crash) and mark it resumable
+\* before any row is normalized, as the shell's registration does. A,
+\* staged into that run, then stays Staged and bound to it.
+AuditMarkResumableRun ==
+    /\ audit_stage = "P2Recover"
+    /\ resumable_run_id = None
+    /\ AuditA \in DOMAIN audit_rows
+    /\ audit_rows[AuditA].phase = "Staged"
+    /\ \A i \in DOMAIN audit_recovery : audit_recovery[i] = "Durability"
+    /\ MarkRunResumableIdle(AuditRun)
+    /\ AuditUnchanged
+
 \* Cold recovery of each durable non-terminal row through the generated arms,
 \* one row at a time in the fixed order: the durability classifier (an
 \* Ephemeral row is discarded), the normalization classifier for the row's
-\* phase (a Staged row is queued again), then the admitted input, its
-\* Queued lifecycle and, for a row with one, its idempotency key.
+\* phase (a Staged row is queued again, unless the run it is staged into is
+\* marked resumable: the stored cursor binds it, and it stays Staged), then
+\* the admitted input, its lifecycle (Queued, or Staged and bound to the
+\* marked run) and, for a row with one, its idempotency key.
 AuditRecoverRow ==
     /\ audit_stage \in {"P2Recover", "P3Recover"}
     /\ Unrecovered # {}
@@ -308,16 +346,31 @@ AuditRecoverRow ==
              \/ ClassifyRecoveredInputDurabilityDiscardEphemeralIdle(i, f.durability)
                 /\ RecoveryStep(i, "Discarded")
        \/ /\ audit_recovery[i] = "Normalize"
-          /\ \/ r.phase = "Queued" /\ NormalizeRecoveredInputQueuedIdle(i, r.phase, None, FALSE)
-             \/ r.phase = "Staged" /\ NormalizeRecoveredInputStagedIdle(i, r.phase, None, FALSE)
-          /\ RecoveryStep(i, "Admit")
-       \/ /\ audit_recovery[i] = "Admit"
+          /\ \/ /\ r.phase = "Queued"
+                /\ NormalizeRecoveredInputQueuedIdle(i, r.phase, None, FALSE)
+                /\ RecoveryStep(i, "Admit")
+             \/ /\ r.phase = "Staged"
+                /\ resumable_run_id = None
+                /\ NormalizeRecoveredInputStagedIdle(i, r.phase, None, FALSE)
+                /\ RecoveryStep(i, "Admit")
+             \/ /\ r.phase = "Staged"
+                /\ resumable_run_id = Some(AuditRun)
+                /\ NormalizeRecoveredInputStagedResumableIdle(i, r.phase, None, TRUE)
+                /\ RecoveryStep(i, "AdmitBound")
+       \/ /\ audit_recovery[i] \in {"Admit", "AdmitBound"}
           /\ RecoverAdmittedInputIdle(i, f.kind, r.boundary, r.exec, None, r.lane)
-          /\ RecoveryStep(i, "Lifecycle")
+          /\ RecoveryStep(i, IF audit_recovery[i] = "Admit" THEN "Lifecycle"
+                                                           ELSE "LifecycleBound")
        \/ /\ audit_recovery[i] = "Lifecycle"
           /\ RecoverInputLifecycleIdle(i, "Queued", None, None, None, None, 0,
                 r.attempts, None, None, Some(r.seq), None, Some(r.lane),
                 Some(r.lane), Some(r.boundary), Some(r.exec), None, r.is_prompt)
+          /\ RecoveryStep(i, IF r.key = "" THEN "Recovered" ELSE "Key")
+       \* A row the marked run binds stays Staged, associated with its run.
+       \/ /\ audit_recovery[i] = "LifecycleBound"
+          /\ RecoverInputLifecycleIdle(i, "Staged", None, None, None, None, 0,
+                r.attempts, Some(AuditRun), None, Some(r.seq), None, Some(r.lane),
+                None, None, None, None, FALSE)
           /\ RecoveryStep(i, IF r.key = "" THEN "Recovered" ELSE "Key")
        \/ /\ audit_recovery[i] = "Key"
           /\ RegisterAcceptedIdempotencyIdle(i, r.key)
@@ -345,27 +398,31 @@ LiveWork(kind) ==
 
 \* A caller plans C while the registration stands (an executor attachment
 \* may be pending), and admits it then or once the unregister began (once).
+\* Live work, here and below, comes only where no run is marked resumable.
 AuditAdmitInProcess2 ==
-    \/ /\ audit_stage \in {"P2Ready", "P2Attached"}
-       /\ ~audit_c_planned
-       /\ AdmitPlan(AuditC, "Prompt")
-       /\ audit_c_planned' = TRUE
-       /\ UNCHANGED <<audit_stage, audit_facts, audit_disposition, audit_route,
-                      audit_admitted_p2, liveVars, regionVars, historyVars, restartVars>>
-    \/ /\ audit_stage \in {"P2Ready", "P2Attached", "P2Draining"}
-       /\ audit_c_planned
-       /\ audit_admitted_p2 = {}
-       /\ QueueAcceptedIdle(AuditC) \/ QueueAcceptedAttached(AuditC)
-       /\ audit_admitted_p2' = {AuditC}
-       /\ LiveWork("Admit")
-       /\ UNCHANGED <<audit_stage, audit_facts, audit_disposition, audit_route,
-                      audit_c_planned, audit_recycle_pending, audit_rerecovered, regionVars,
-                      historyVars, restartVars>>
+    /\ resumable_run_id = None
+    /\ \/ /\ audit_stage \in {"P2Ready", "P2Attached"}
+          /\ ~audit_c_planned
+          /\ AdmitPlan(AuditC, "Prompt")
+          /\ audit_c_planned' = TRUE
+          /\ UNCHANGED <<audit_stage, audit_facts, audit_disposition, audit_route,
+                         audit_admitted_p2, audit_p2_stop, liveVars, regionVars, historyVars,
+                         restartVars>>
+       \/ /\ audit_stage \in {"P2Ready", "P2Attached", "P2Draining"}
+          /\ audit_c_planned
+          /\ audit_admitted_p2 = {}
+          /\ QueueAcceptedIdle(AuditC) \/ QueueAcceptedAttached(AuditC)
+          /\ audit_admitted_p2' = {AuditC}
+          /\ LiveWork("Admit")
+          /\ UNCHANGED <<audit_stage, audit_facts, audit_disposition, audit_route,
+                         audit_c_planned, audit_p2_stop, audit_recycle_pending,
+                         audit_rerecovered, regionVars, historyVars, restartVars>>
 
 \* A caller resubmits B under its key: the machine resolves it as a
 \* duplicate of B, which it then waits on (once).
 AuditDedupeInProcess2 ==
     /\ audit_stage \in {"P2Ready", "P2Attached", "P2Draining"}
+    /\ resumable_run_id = None
     /\ "Dedupe" \notin audit_live_p2
     /\ \/ ResolveAdmissionIdempotencyDuplicateIdle(AuditD, Some(AuditKey))
        \/ ResolveAdmissionIdempotencyDuplicateAttached(AuditD, Some(AuditKey))
@@ -378,6 +435,7 @@ AuditDedupeInProcess2 ==
 \* at a time in the fixed order.
 AuditRecycleInProcess2 ==
     /\ audit_stage = "P2Ready"
+    /\ resumable_run_id = None
     /\ "Recycle" \notin audit_live_p2
     /\ RecycleFromIdleOrRetired
     /\ audit_stage' = "P2Recycle"
@@ -404,6 +462,19 @@ AuditRecycleDone ==
     /\ UNCHANGED vars
     /\ UNCHANGED <<setupVars, liveVars, regionVars, historyVars, restartVars>>
 
+\* A stop of the run process 2 marked resumable (turn/stop_run reaches any
+\* registered session): the machine records it on the run, Idle or with an
+\* executor attached that never serves, while the registration stands
+\* (once). No runtime loop settles it before the materialization is refused.
+AuditStopResumableRun ==
+    /\ audit_stage \in {"P2Ready", "P2Attached"}
+    /\ ~audit_p2_stop
+    /\ \/ StopCurrentRunForRunResumableIdle(AuditRun)
+       \/ StopCurrentRunForRunResumableAttached(AuditRun)
+    /\ audit_p2_stop' = TRUE
+    /\ UNCHANGED <<audit_stage, audit_facts, audit_disposition, audit_route, audit_c_planned,
+                   audit_admitted_p2, liveVars, regionVars, historyVars, restartVars>>
+
 \* The materialization is refused: the host rolls its registration back with
 \* an unregister that begins with Keep, or, as the control, with Stop. The
 \* registration never attached an executor, so its runtime is Idle.
@@ -414,8 +485,8 @@ AuditBeginRollback ==
           /\ audit_disposition' = disp
     /\ audit_route' = "Rollback"
     /\ audit_stage' = "P2Draining"
-    /\ UNCHANGED <<audit_facts, audit_c_planned, audit_admitted_p2, liveVars, regionVars,
-                   historyVars, restartVars>>
+    /\ UNCHANGED <<audit_facts, audit_c_planned, audit_admitted_p2, audit_p2_stop, liveVars,
+                   regionVars, historyVars, restartVars>>
 
 \* Or the host attaches an executor that never serves: the attachment is
 \* pending (its startup failed or its owner has not committed it).
@@ -437,8 +508,8 @@ AuditBeginUnservedUnregister ==
           /\ audit_disposition' = disp
           /\ audit_route' = route
     /\ audit_stage' = "P2Draining"
-    /\ UNCHANGED <<audit_facts, audit_c_planned, audit_admitted_p2, liveVars, regionVars,
-                   historyVars, restartVars>>
+    /\ UNCHANGED <<audit_facts, audit_c_planned, audit_admitted_p2, audit_p2_stop, liveVars,
+                   regionVars, historyVars, restartVars>>
 
 \* The rollback's stop transaction. The open step is the shell taking the
 \* driver lock.
@@ -536,6 +607,7 @@ AuditNext ==
     \/ AuditSetup
     \/ AuditCrashProcess1
     \/ AuditStartProcess2
+    \/ AuditMarkResumableRun
     \/ AuditRecoverRow
     \/ AuditRecoveryDone
     \/ AuditAdmitInProcess2
@@ -543,6 +615,7 @@ AuditNext ==
     \/ AuditRecycleInProcess2
     \/ AuditRecycleRecover
     \/ AuditRecycleDone
+    \/ AuditStopResumableRun
     \/ AuditBeginRollback
     \/ AuditAttachUnserved
     \/ AuditBeginUnservedUnregister
@@ -566,6 +639,7 @@ AuditInit ==
     /\ audit_route = "None"
     /\ audit_c_planned = FALSE
     /\ audit_admitted_p2 = {}
+    /\ audit_p2_stop = FALSE
     /\ audit_live_p2 = {}
     /\ audit_draining_live = FALSE
     /\ audit_recycle_pending = {}
@@ -600,11 +674,19 @@ AuditRollbackVerdictIsAFunction ==
                 a == IF ENABLED AbandonArm(i, d, FALSE, FALSE) THEN 1 ELSE 0
             IN r + k + a = 1
 
+\* A stop of the run process 2 marked resumable ends A, the input bound to
+\* it, under Keep too.
+StoppedRunInputs == IF audit_p2_stop THEN {AuditA} ELSE {}
+
+AuditStoppedResumableRunInputNotKept ==
+    audit_p2_stop => AuditA \notin OpenAnswers("Keep") \cup audit_kept
+
 AuditKeepEndsNoRecoveredInput ==
     (audit_disposition = "Keep" /\ audit_live_p2 = {}) =>
-        /\ audit_recovered_p2 \cap OpenAnswers("Abandon") = {}
-        /\ audit_recovered_p2 \cap audit_carriers = {}
-        /\ audit_recovered_p2 \cap audit_stopped = {}
+        LET recovered == audit_recovered_p2 \ StoppedRunInputs IN
+        /\ recovered \cap OpenAnswers("Abandon") = {}
+        /\ recovered \cap audit_carriers = {}
+        /\ recovered \cap audit_stopped = {}
 
 AuditKeepStopsWhatItAdmitted ==
     /\ audit_admitted_p2 \cap (OpenAnswers("Keep") \cup audit_kept) = {}
@@ -685,6 +767,16 @@ AuditWitnessUnservedAbortAfterLiveWorkStops ==
     /\ ~audit_draining_live
     /\ AuditB \in audit_stopped
 
+\* Process 2 marks process 1's run resumable and its stop is recorded: the
+\* Keep rollback (or the unserved attachment's abort) ends A, bound to the
+\* stopped run, as stopped, and still keeps the recovered B.
+AuditWitnessStoppedResumableRunEndsUnderKeep ==
+    /\ audit_p2_stop
+    /\ audit_disposition = "Keep"
+    /\ audit_live_p2 = {}
+    /\ AuditA \in audit_stopped
+    /\ AuditB \in audit_kept
+
 NotAuditWitnessKeptQueuedInputRuns == ~AuditWitnessKeptQueuedInputRuns
 NotAuditWitnessKeptRequeuedInputRuns == ~AuditWitnessKeptRequeuedInputRuns
 NotAuditWitnessAdmittedInputStoppedUnderKeep == ~AuditWitnessAdmittedInputStoppedUnderKeep
@@ -700,4 +792,6 @@ NotAuditWitnessUnservedRetireStopsRecoveredInput ==
     ~AuditWitnessUnservedRetireStopsRecoveredInput
 NotAuditWitnessUnservedAbortAfterLiveWorkStops ==
     ~AuditWitnessUnservedAbortAfterLiveWorkStops
+NotAuditWitnessStoppedResumableRunEndsUnderKeep ==
+    ~AuditWitnessStoppedResumableRunEndsUnderKeep
 ====

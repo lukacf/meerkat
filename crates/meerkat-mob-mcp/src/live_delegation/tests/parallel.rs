@@ -1524,7 +1524,11 @@ async fn a_continuation_that_misses_the_workers_last_model_call_is_not_delivered
     // The clock is paused around the steer: a steer that waited for the
     // boundary would leave the runtime idle, the paused clock would advance
     // straight to the deadline, and the test fails at once (a deadlock
-    // detector, not a wall-clock margin).
+    // detector, not a wall-clock margin). The worker's turn runs on this
+    // runtime too (a member's actor lives on the runtime that provisions
+    // it), so it shares the paused clock; its held model call's
+    // stream-inactivity window (a minute at least) is longer than `WAIT`, so
+    // the paused clock still reaches the steer's deadline first.
     tokio::time::pause();
     let steered = tokio::time::timeout(
         WAIT,

@@ -749,6 +749,20 @@ impl ToolGrantTables {
     }
 }
 
+/// Test support: the self-fence an [`InMemoryRuntimeStore`] reports
+/// ([`InMemoryRuntimeStore::set_self_fence_for_test`]), shared by every clone
+/// of the store.
+#[cfg(test)]
+#[derive(Clone, Default)]
+struct SelfFenceForTest(Arc<StdMutex<Option<Arc<dyn meerkat_core::host_store::SelfFence>>>>);
+
+#[cfg(test)]
+impl std::fmt::Debug for SelfFenceForTest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SelfFenceForTest").finish_non_exhaustive()
+    }
+}
+
 /// In-memory runtime store. Thread-safe via `tokio::sync::Mutex`, except the
 /// ops lifecycle state, which is behind its own std mutex (see
 /// `OpsLifecycleState`).
@@ -814,6 +828,9 @@ pub struct InMemoryRuntimeStore {
     /// Observability seam for the length-gate regression tests only.
     #[cfg(test)]
     snapshot_byte_probe_bytes: Arc<std::sync::atomic::AtomicU64>,
+    /// The self-fence a row set for the store to report.
+    #[cfg(test)]
+    self_fence_for_test: SelfFenceForTest,
 }
 
 impl InMemoryRuntimeStore {
@@ -994,6 +1011,23 @@ impl InMemoryRuntimeStore {
             .store(true, Ordering::Release);
     }
 
+    /// Report `fence` as this store's self-fence
+    /// ([`RuntimeStore::self_fence`]) on every clone of the store, or none
+    /// again: a store whose writes hold a host store fence, for rows of the
+    /// runtime's waits at a store fence gap. The store's own writes do not
+    /// consult it.
+    #[cfg(test)]
+    pub(crate) fn set_self_fence_for_test(
+        &self,
+        fence: Option<Arc<dyn meerkat_core::host_store::SelfFence>>,
+    ) {
+        *self
+            .self_fence_for_test
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = fence;
+    }
+
     /// Hold the store's shared state lock, as any store operation does while
     /// it runs. Test support for the persistence-wait deadlock shape (#1654).
     #[cfg(test)]
@@ -1100,6 +1134,8 @@ impl InMemoryRuntimeStore {
             direct_member_high_water_before: Arc::new(StdMutex::new(None)),
             #[cfg(test)]
             snapshot_byte_probe_bytes: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            #[cfg(test)]
+            self_fence_for_test: SelfFenceForTest::default(),
         }
     }
 
@@ -3029,6 +3065,18 @@ fn compare_and_swap_runtime_delivery_authority_locked(
 impl RuntimeStore for InMemoryRuntimeStore {
     fn session_authority_ops(&self) -> &dyn super::RuntimeSessionAuthorityOps {
         self
+    }
+
+    /// Test support: the self-fence a row set
+    /// ([`InMemoryRuntimeStore::set_self_fence_for_test`]); none otherwise,
+    /// as the trait's default.
+    #[cfg(test)]
+    fn self_fence(&self) -> Option<Arc<dyn meerkat_core::host_store::SelfFence>> {
+        self.self_fence_for_test
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     /// No other process can open an in-memory store: this process is the

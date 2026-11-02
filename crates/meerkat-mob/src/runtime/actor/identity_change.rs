@@ -16,8 +16,9 @@ use super::super::identity_change::{
     ChangeAdmissionFacts, CreateCommit, CreateCommitted, CreatePlan, CreatePlanAnswer,
     CreatePlanEntry, CreatedEntryFacts, CreatedIdentityPlanItem, EntryChangeCommit,
     EntryChangeCommitted, IdentityChangeCommand, IdentityChangeGrant, IdentityChangeRefusal,
-    IdentityOperation, admission_refusal, committed_change_events, create_rows_and_receipt,
-    entry_change_answer, entry_change_row, grant_current_at_the_sink, now_ms, record_refusal,
+    IdentityGrantRequest, IdentityOperation, admission_refusal, change_target_profile,
+    committed_change_events, create_rows_and_receipt, entry_change_answer, entry_change_row,
+    entry_change_stale, grant_covers_the_commit, grant_current_at_the_sink, now_ms, record_refusal,
     refused,
 };
 use super::dormant_seat::{SeatCommitScope, SeatCommitWrite, SeatPlanMode};
@@ -40,6 +41,7 @@ impl MobActor {
                 facts,
                 grant,
                 decided,
+                grant_request,
                 items,
                 reply_tx,
             } => {
@@ -48,6 +50,7 @@ impl MobActor {
                     facts,
                     grant.as_ref(),
                     decided,
+                    &grant_request,
                     items,
                 ))
                 .await;
@@ -262,16 +265,18 @@ impl MobActor {
         Ok(causes)
     }
 
-    /// Plan a store-owned create: its admission and its entries' records
-    /// probed on a fork, and each identity's seat planned under created
-    /// custody as the dormant seat plans one (a spec that owes a kickoff is
-    /// embodied by a spawn after the commit).
+    /// Plan a store-owned create: its admission (and the cover of its specs,
+    /// `grant_request`, by an agent's grant) and its entries' records probed
+    /// on a fork, and each identity's seat planned under created custody as
+    /// the dormant seat plans one (a spec that owes a kickoff is embodied by
+    /// a spawn after the commit).
     async fn plan_store_owned_create(
         &mut self,
         operation: &IdentityOperation,
         facts: ChangeAdmissionFacts,
         grant: Option<&IdentityChangeGrant>,
         decided: bool,
+        grant_request: &IdentityGrantRequest,
         items: Vec<CreatedIdentityPlanItem>,
     ) -> Result<CreatePlanAnswer, MobError> {
         let mut probe = self.dsl_authority.fork();
@@ -282,6 +287,7 @@ impl MobActor {
             ChangeAdmission::Replayed(receipt) => return Ok(CreatePlanAnswer::Replayed(receipt)),
             ChangeAdmission::Admitted => {}
         }
+        grant_covers_the_commit(grant, Some(grant_request))?;
         let causes = Self::record_created_entries(
             &mut probe,
             mob_dsl::MobMachineAuthority::state,
@@ -359,10 +365,11 @@ impl MobActor {
 
     /// Commit a store-owned create in one actor step: MobMachine decides its
     /// admission (the requester's grant checked current here, the final
-    /// sink), records each new entry and stages each seat on one prepared
-    /// authority, all or nothing; the change's store transaction writes its
-    /// identities' rows, the seats' journal rows and its receipt; and only
-    /// then does the machine commit. A refusal anywhere writes nothing.
+    /// sink, and covering the specs committed), records each new entry and
+    /// stages each seat on one prepared authority, all or nothing; the
+    /// change's store transaction writes its identities' rows, the seats'
+    /// journal rows and its receipt; and only then does the machine commit.
+    /// A refusal anywhere writes nothing.
     async fn commit_store_owned_create(
         &mut self,
         commit: CreateCommit,
@@ -386,6 +393,12 @@ impl MobActor {
             ChangeAdmission::Replayed(receipt) => return Ok(CreateCommitted::Replayed(receipt)),
             ChangeAdmission::Admitted => {}
         }
+        grant_covers_the_commit(
+            commit.grant.as_ref(),
+            Some(&IdentityGrantRequest::for_specs(
+                commit.identities.iter().map(|(request, _)| &request.spec),
+            )),
+        )?;
         let causes = Self::record_created_entries(
             &mut authority,
             mob_dsl::MobMachinePreparedAuthority::state,
@@ -416,12 +429,15 @@ impl MobActor {
     /// step: MobMachine decides the change's admission and its verdict on one
     /// prepared authority; the change's store transaction writes its receipt
     /// and the identity's row (the tombstone, the archived row, or the row
-    /// present again); and only then does the machine commit. The member's
-    /// retirement a Retiring or Archiving verdict owes runs after, on the
-    /// handle, and its start row records the mark's cause. A removal that
-    /// ended a held construction in its step (`Removed`) sends the abort to
-    /// the construction's hold once committed, and answers the report of
-    /// the hold's end.
+    /// present again); and only then does the machine commit. The row is
+    /// read first: a change decided against a spec the row no longer holds
+    /// is stale, which the admission answers after a replay. An agent's
+    /// grant must cover the identity's current profile (its row's, or its
+    /// member's). The member's retirement a Retiring or Archiving verdict
+    /// owes runs after, on the handle, and its start row records the mark's
+    /// cause. A removal that ended a held construction in its step
+    /// (`Removed`) sends the abort to the construction's hold once
+    /// committed, and answers the report of the hold's end.
     async fn commit_identity_entry_change(
         &mut self,
         commit: EntryChangeCommit,
@@ -430,6 +446,14 @@ impl MobActor {
             .identity_member
             .clone()
             .ok_or_else(|| refused(IdentityChangeRefusal::StorageUnsupported))?;
+        let current = store
+            .observe_created_identity(&self.definition.id, &commit.identity)
+            .await?;
+        let stale = entry_change_stale(
+            &commit.identity,
+            commit.expected_spec_digest.as_deref(),
+            current.as_ref(),
+        );
         let mut authority = self.dsl_authority.prepare_authority();
         match self
             .decide_change_admission(
@@ -438,7 +462,7 @@ impl MobActor {
                 commit.facts,
                 commit.grant.as_ref(),
                 commit.decided,
-                None,
+                stale,
             )
             .await?
         {
@@ -506,6 +530,27 @@ impl MobActor {
         };
         let (change, outcome) =
             entry_change_answer(commit.kind, verdict, &commit.identity, open_attempt)?;
+        // An expected spec digest names a store-owned identity's row spec: a
+        // roster-owned identity's spec is its host roster's to check.
+        let row_spec = match &current {
+            Some(crate::identity::CreatedIdentityObservation::Created(row)) => row.spec.as_ref(),
+            _ => None,
+        };
+        if commit.expected_spec_digest.is_some() && row_spec.is_none() {
+            return Err(refused(IdentityChangeRefusal::InvalidRequest {
+                problem: format!(
+                    "'{}' holds no store-owned spec to check the expected digest against: \
+                     its host's roster checks its spec",
+                    commit.identity
+                ),
+            }));
+        }
+        grant_covers_the_commit(
+            commit.grant.as_ref(),
+            change_target_profile(authority.state(), &commit.identity, row_spec)
+                .map(IdentityGrantRequest::for_identity)
+                .as_ref(),
+        )?;
         // The session an archive records: the seated member's, or the
         // unseated entry's archived session record.
         let archived_session = {
@@ -523,9 +568,6 @@ impl MobActor {
                     ))
                 })?
         };
-        let current = store
-            .observe_created_identity(&self.definition.id, &commit.identity)
-            .await?;
         let at_ms = now_ms();
         let row = entry_change_row(
             &self.definition.id,

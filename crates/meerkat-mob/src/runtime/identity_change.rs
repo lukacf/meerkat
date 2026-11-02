@@ -32,13 +32,21 @@
 //! [`PreparedOperationCheck`], bound to the operation and the requester
 //! identity, whose owner answers from that identity's current grant (its
 //! current profile and the host's build mint, [`MemberGrantMint`]), for a
-//! dormant identity too, without waking it. The commit is the final sink:
-//! it checks the prepared check current (re-preparing it for a decided
-//! change, which waited for its decision), and a grant revoked meanwhile
-//! ends the change [`IdentityChangeRefusal::GrantRevoked`] with nothing
-//! written. Dormancy, a new activation and a session reset of the requester
-//! revoke nothing: the check reads its identity, never its session. Host and
-//! human requests carry no grant.
+//! dormant identity too, without waking it. The grant keeps the request its
+//! admission checked and the operation's request digest. The commit is the
+//! final sink: it checks the prepared check current (re-preparing it for a
+//! decided change, which waited for its decision), and a grant revoked
+//! meanwhile ends the change [`IdentityChangeRefusal::GrantRevoked`] with
+//! nothing written; and it commits only what the admitted request covers
+//! (each identity it creates or updates, by profile and privileged fields,
+//! and the current profile of each identity it updates, removes, archives,
+//! unarchives or settles), refusing anything else
+//! [`IdentityChangeRefusal::InvalidRequest`]. Dormancy, a new activation and
+//! a session reset of the requester revoke nothing: the check reads its
+//! identity, never its session. A change that waits across a restart is
+//! admitted again by its executor from the recorded requester identity
+//! ([`super::MobHandle::identity_change_grant_for`]), reading no session and
+//! waking nothing. Host and human requests carry no grant.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -761,6 +769,17 @@ impl IdentityGrantEntry {
             placement_present: false,
         }
     }
+
+    /// Whether a grant admitted for this entry admits `needed`: the same
+    /// profile, and every privileged field `needed` sets set here too.
+    #[must_use]
+    pub fn covers(&self, needed: &IdentityGrantEntry) -> bool {
+        self.profile == needed.profile
+            && (self.runtime_mode_present || !needed.runtime_mode_present)
+            && (self.backend_present || !needed.backend_present)
+            && (self.binding_present || !needed.binding_present)
+            && (self.placement_present || !needed.placement_present)
+    }
 }
 
 impl IdentityGrantRequest {
@@ -795,30 +814,50 @@ impl IdentityGrantRequest {
         }
         Self { entries }
     }
+
+    /// Whether a grant admitted for this request admits `needed`: each of
+    /// its entries is covered by an entry here
+    /// ([`IdentityGrantEntry::covers`]).
+    #[must_use]
+    pub fn covers(&self, needed: &IdentityGrantRequest) -> bool {
+        needed
+            .entries
+            .iter()
+            .all(|needed| self.entries.iter().any(|admitted| admitted.covers(needed)))
+    }
 }
 
 /// An agent requester's grant for one identity change, admitted by the
 /// ordinary spawn grant ([`super::MobHandle::admit_identity_change_grant`]):
 /// the change's prepared check, bound to the change's operation and the
-/// requester identity. The check's owner answers from that identity's current
-/// grant, and the change's commit checks it current. Process-local: it has
-/// no serde, and a change that waits across a restart is admitted again.
+/// requester identity, with the request its admission checked and the
+/// operation's request digest. The check's owner answers from that
+/// identity's current grant, and the change's commit checks it current and
+/// commits only what the admitted request covers. Process-local: it has no
+/// serde, and an executor admits a change that waits across a restart again
+/// from its recorded requester identity
+/// ([`super::MobHandle::identity_change_grant_for`]).
 #[derive(Clone)]
 pub struct IdentityChangeGrant {
     requester: AgentIdentity,
     operation_id: String,
+    request_digest: String,
+    request: IdentityGrantRequest,
     check: PreparedOperationCheck,
 }
 
 impl IdentityChangeGrant {
     pub(super) fn new(
         requester: AgentIdentity,
-        operation_id: String,
+        operation: &IdentityOperation,
+        request: IdentityGrantRequest,
         check: PreparedOperationCheck,
     ) -> Self {
         Self {
             requester,
-            operation_id,
+            operation_id: operation.operation_id.clone(),
+            request_digest: operation.request_digest.clone(),
+            request,
             check,
         }
     }
@@ -835,6 +874,19 @@ impl IdentityChangeGrant {
         &self.operation_id
     }
 
+    /// The request digest of the operation the grant admits.
+    #[must_use]
+    pub fn request_digest(&self) -> &str {
+        &self.request_digest
+    }
+
+    /// The request the grant's admission checked: what the change may
+    /// commit.
+    #[must_use]
+    pub fn request(&self) -> &IdentityGrantRequest {
+        &self.request
+    }
+
     /// The change's prepared check.
     #[must_use]
     pub fn check(&self) -> &PreparedOperationCheck {
@@ -848,6 +900,8 @@ impl std::fmt::Debug for IdentityChangeGrant {
             .debug_struct("IdentityChangeGrant")
             .field("requester", &self.requester)
             .field("operation_id", &self.operation_id)
+            .field("request_digest", &self.request_digest)
+            .field("request", &self.request)
             .finish_non_exhaustive()
     }
 }
@@ -1230,6 +1284,86 @@ pub(super) fn grant_current_at_the_sink(
     }
 }
 
+/// Whether an agent's change commits only what its grant's admission
+/// checked, at the commit, the final sink: each identity of `needed` (what
+/// the step commits) is covered by the admitted request
+/// ([`IdentityGrantRequest::covers`]). `needed` is `None` when the step
+/// holds no profile of its target to check the grant against (a
+/// roster-owned identity no member holds, whose spec only its host's roster
+/// holds), which an agent's change does not commit. Refused
+/// [`IdentityChangeRefusal::InvalidRequest`]; a host or human change
+/// carries no grant.
+pub(super) fn grant_covers_the_commit(
+    grant: Option<&IdentityChangeGrant>,
+    needed: Option<&IdentityGrantRequest>,
+) -> Result<(), MobError> {
+    let Some(grant) = grant else {
+        return Ok(());
+    };
+    match needed {
+        Some(needed) if grant.request().covers(needed) => Ok(()),
+        Some(_) => Err(refused(IdentityChangeRefusal::InvalidRequest {
+            problem: "the requester's grant was admitted for another change than the one \
+                      committed"
+                .to_string(),
+        })),
+        None => Err(refused(IdentityChangeRefusal::InvalidRequest {
+            problem: "no profile of the identity is held here to check the requester's \
+                      grant against: its host's roster holds its spec"
+                .to_string(),
+        })),
+    }
+}
+
+/// The current profile of the identity a change targets, as its grant is
+/// checked against it: its store-owned row's spec's (`row_spec`), else its
+/// seated member's (`state`); `None` when this mob holds neither (a
+/// roster-owned identity no member holds).
+pub(super) fn change_target_profile(
+    state: &mob_dsl::MobMachineState,
+    identity: &AgentIdentity,
+    row_spec: Option<&CreatedIdentitySpec>,
+) -> Option<ProfileName> {
+    if let Some(spec) = row_spec {
+        return Some(spec.profile.clone());
+    }
+    let dsl_identity = mob_dsl::AgentIdentity::from_domain(identity);
+    state
+        .identity_to_runtime
+        .contains_key(&dsl_identity)
+        .then(|| state.member_profile_names.get(&dsl_identity))
+        .flatten()
+        .map(|profile| ProfileName::from(profile.as_str()))
+}
+
+/// The stale refusal of a removal, archive or unarchive decided against the
+/// spec whose digest is `expected`: a store-owned identity's row whose spec
+/// digest differs answers [`IdentityChangeRefusal::StaleSpec`] with its
+/// current digest and revision, which MobMachine's admission answers after
+/// a replay. `None` without an expected digest, for the current one, and
+/// for a row that is removed, unreadable, absent or holds no spec (the
+/// change's verdict answers those, and an expected digest with no row spec
+/// to check is refused at the step).
+pub(super) fn entry_change_stale(
+    identity: &AgentIdentity,
+    expected: Option<&str>,
+    current: Option<&crate::identity::CreatedIdentityObservation>,
+) -> Option<IdentityChangeRefusal> {
+    let expected = expected?;
+    let Some(crate::identity::CreatedIdentityObservation::Created(row)) = current else {
+        return None;
+    };
+    if row.presence == CreatedIdentityPresence::Removed {
+        return None;
+    }
+    let current_digest = row.spec_digest().ok().flatten()?;
+    (current_digest != expected).then(|| IdentityChangeRefusal::StaleSpec {
+        identity: identity.clone(),
+        current_digest,
+        current_revision: Some(row.revision),
+    })
+}
+
 // ---------------------------------------------------------------------------
 // A change's requester and consent, as its commit takes them
 // ---------------------------------------------------------------------------
@@ -1271,7 +1405,8 @@ impl ConsentFacts<'_> {
 
 impl ChangeAttribution {
     /// The attribution of a change of `operation` by `requester` under
-    /// `consent`; an agent's grant must admit this very operation.
+    /// `consent`; an agent's grant must admit this very operation and
+    /// request.
     pub(super) fn of(
         requester: IdentityChangeRequesterInput,
         consent: IdentityChangeConsentInput<'_>,
@@ -1282,6 +1417,13 @@ impl ChangeAttribution {
                 if grant.operation_id() != operation.operation_id {
                     return Err(refused(IdentityChangeRefusal::InvalidRequest {
                         problem: "the requester's grant admits another operation".to_string(),
+                    }));
+                }
+                if grant.request_digest() != operation.request_digest {
+                    return Err(refused(IdentityChangeRefusal::InvalidRequest {
+                        problem: "the requester's grant admits another request under its \
+                                  operation"
+                            .to_string(),
                     }));
                 }
                 (
@@ -1439,6 +1581,8 @@ pub(super) enum IdentityChangeCommand {
         facts: ChangeAdmissionFacts,
         grant: Option<IdentityChangeGrant>,
         decided: bool,
+        /// What the create asks of a grant: its specs.
+        grant_request: IdentityGrantRequest,
         items: Vec<CreatedIdentityPlanItem>,
         reply_tx: oneshot::Sender<Result<CreatePlanAnswer, MobError>>,
     },
@@ -1513,6 +1657,8 @@ pub(super) enum IdentityChangeCommand {
 pub(super) struct EntryChangeCommit {
     pub(super) kind: mob_dsl::IdentityEntryChangeKind,
     pub(super) identity: AgentIdentity,
+    /// The spec digest the change was decided against, if any.
+    pub(super) expected_spec_digest: Option<String>,
     pub(super) operation: IdentityOperation,
     pub(super) facts: ChangeAdmissionFacts,
     pub(super) grant: Option<IdentityChangeGrant>,
@@ -2251,18 +2397,7 @@ impl super::MobHandle {
         operation: &IdentityOperation,
         request: &IdentityGrantRequest,
     ) -> Result<IdentityChangeGrant, MobError> {
-        if request.entries.is_empty() {
-            return Err(refused(IdentityChangeRefusal::InvalidRequest {
-                problem: "the change names no identity".to_string(),
-            }));
-        }
-        for entry in &request.entries {
-            if !self.definition.profiles.contains_key(&entry.profile) {
-                return Err(refused(IdentityChangeRefusal::ProfileUnknown {
-                    profile: entry.profile.clone(),
-                }));
-            }
-        }
+        self.validate_grant_request(request)?;
         let first_profile = request.entries[0].profile.clone();
         let Some((requester, _)) = self.member_of_session(origin_session).await else {
             // A session no member of this mob holds holds no grant here.
@@ -2313,6 +2448,92 @@ impl super::MobHandle {
                 }));
             }
         }
+        // The requester identity's grant, read now as the commit will read it
+        // again: a host whose mint disagrees with the grant its build hook
+        // minted is refused here, typed.
+        let Some(check) = self
+            .prepare_identity_change_check(&requester, operation, request)
+            .await?
+        else {
+            return Err(refused(IdentityChangeRefusal::ProfileNotAllowed {
+                profile: first_profile,
+            }));
+        };
+        Ok(IdentityChangeGrant::new(
+            requester,
+            operation,
+            request.clone(),
+            check,
+        ))
+    }
+
+    /// The executor's re-admission of a change admitted before: the grant
+    /// of `requester`'s change `operation`, asking `request` of its grant,
+    /// rebuilt from the recorded requester identity, after a restart (the
+    /// grant is process-local) or in a settlement-first recovery. It
+    /// prepares the change's check exactly as the admission does, bound to
+    /// the operation and the requester identity, whose owner answers from
+    /// that identity's current grant (its current profile and the host's
+    /// build mint), for a dormant identity too: it reads no session and
+    /// wakes nothing. The commit checks it current at its sink, as any
+    /// grant.
+    ///
+    /// Refused typed: a malformed request
+    /// ([`IdentityChangeRefusal::InvalidRequest`]), a profile the mob lacks
+    /// ([`IdentityChangeRefusal::ProfileUnknown`]), and a grant the
+    /// identity no longer holds for the request (revoked by its host, its
+    /// profile moved, or no member holds the identity):
+    /// [`IdentityChangeRefusal::GrantRevoked`].
+    pub async fn identity_change_grant_for(
+        &self,
+        requester: &AgentIdentity,
+        operation: &IdentityOperation,
+        request: &IdentityGrantRequest,
+    ) -> Result<IdentityChangeGrant, MobError> {
+        self.validate_grant_request(request)?;
+        let Some(check) = self
+            .prepare_identity_change_check(requester, operation, request)
+            .await?
+        else {
+            return Err(refused(IdentityChangeRefusal::GrantRevoked));
+        };
+        Ok(IdentityChangeGrant::new(
+            requester.clone(),
+            operation,
+            request.clone(),
+            check,
+        ))
+    }
+
+    /// Refuse a grant request that names no identity or a profile the mob
+    /// lacks.
+    fn validate_grant_request(&self, request: &IdentityGrantRequest) -> Result<(), MobError> {
+        if request.entries.is_empty() {
+            return Err(refused(IdentityChangeRefusal::InvalidRequest {
+                problem: "the change names no identity".to_string(),
+            }));
+        }
+        for entry in &request.entries {
+            if !self.definition.profiles.contains_key(&entry.profile) {
+                return Err(refused(IdentityChangeRefusal::ProfileUnknown {
+                    profile: entry.profile.clone(),
+                }));
+            }
+        }
+        Ok(())
+    }
+
+    /// The change's prepared check, bound to `operation` and the identity
+    /// `requester`, whose owner answers from that identity's current grant
+    /// for `request`; `None` when the owner refuses it now. The owner reads
+    /// the roster without waiting; a read that met the actor's write is
+    /// asked again.
+    async fn prepare_identity_change_check(
+        &self,
+        requester: &AgentIdentity,
+        operation: &IdentityOperation,
+        request: &IdentityGrantRequest,
+    ) -> Result<Option<PreparedOperationCheck>, MobError> {
         let owner = IdentityChangeGrantOwner {
             reader: self.member_grant_reader().await?,
             requester: requester.clone(),
@@ -2321,23 +2542,15 @@ impl super::MobHandle {
         };
         let context =
             WorkAuthorizationContext::new(Arc::new(owner), OperationExecutionScope::Domain);
-        // The requester identity's grant, read now as the commit will read it
-        // again: a host whose mint disagrees with the grant its build hook
-        // minted is refused here, typed. The owner reads the roster without
-        // waiting; a read that met the actor's write is asked again.
         const GRANT_READ_ATTEMPTS: usize = 8;
         let mut attempt = 0;
-        let check = loop {
+        loop {
             attempt += 1;
             let binding =
-                identity_change_binding(self.mob_id(), &operation.operation_id, &requester)?;
+                identity_change_binding(self.mob_id(), &operation.operation_id, requester)?;
             match PreparedOperationCheck::prepare(context.clone(), binding) {
-                Ok(check) => break check,
-                Err(OperationAuthorizationError::Refused(_)) => {
-                    return Err(refused(IdentityChangeRefusal::ProfileNotAllowed {
-                        profile: first_profile,
-                    }));
-                }
+                Ok(check) => return Ok(Some(check)),
+                Err(OperationAuthorizationError::Refused(_)) => return Ok(None),
                 Err(OperationAuthorizationError::Unavailable) if attempt < GRANT_READ_ATTEMPTS => {
                     crate::tokio::task::yield_now().await;
                 }
@@ -2347,26 +2560,7 @@ impl super::MobHandle {
                     )));
                 }
             }
-        };
-        Ok(IdentityChangeGrant::new(
-            requester,
-            operation.operation_id.clone(),
-            check,
-        ))
-    }
-
-    /// The grant of a change `requester` asked for and an approval admitted
-    /// before, rebuilt from the recorded requester identity.
-    pub async fn identity_change_grant_for(
-        &self,
-        requester: &AgentIdentity,
-        operation: &IdentityOperation,
-        request: &IdentityGrantRequest,
-    ) -> Result<IdentityChangeGrant, MobError> {
-        let _ = (requester, operation, request);
-        Err(MobError::Internal(
-            "a change's grant cannot be rebuilt from its requester identity yet".to_string(),
-        ))
+        }
     }
 
     /// Commit a create of store-owned identities as one change: each
@@ -2393,9 +2587,12 @@ impl super::MobHandle {
     /// operation, a changes hold (retryable), a candidate composition, a
     /// custom storage composition, a mob that is not running, a decision's
     /// permit that does not bind the change or is past its deadline,
-    /// imported consent from anyone but the host operator, and an agent
-    /// requester's grant that no longer admits the change at the commit. A
-    /// retry of a committed operation with the same request answers
+    /// imported consent from anyone but the host operator, an agent
+    /// requester's grant that no longer admits the change at the commit
+    /// ([`IdentityChangeRefusal::GrantRevoked`]), and one admitted for
+    /// another request or other specs than the change commits
+    /// ([`IdentityChangeRefusal::InvalidRequest`]). A retry of a committed
+    /// operation with the same request answers
     /// [`IdentityChangeOutcome::Replayed`].
     pub async fn create_store_owned_identities(
         &self,
@@ -2441,6 +2638,8 @@ impl super::MobHandle {
             consent: consent_record,
         } = ChangeAttribution::of(requester, consent, &operation)?;
         let facts = |now_ms: u64| attribution_facts.at(now_ms);
+        let grant_request =
+            IdentityGrantRequest::for_specs(identities.iter().map(|request| &request.spec));
 
         // The plan: the change's admission and its entries' records probed,
         // and each identity's seat planned.
@@ -2451,6 +2650,7 @@ impl super::MobHandle {
                     facts: facts(now_ms()),
                     grant: grant.clone(),
                     decided,
+                    grant_request,
                     items,
                     reply_tx,
                 }))
@@ -2562,11 +2762,14 @@ impl super::MobHandle {
     }
 
     /// The receipt of the change committed under `operation_id` in this mob,
-    /// read from the identity store; `None` when none committed.
+    /// read from the identity store; `None` when none committed. It carries
+    /// the requester and the consent, so it needs the List scope, as the
+    /// record reads do ([`MobError::ScopeDenied`]).
     pub async fn identity_operation(
         &self,
         operation_id: &str,
     ) -> Result<Option<IdentityChangeReceipt>, MobError> {
+        self.read_published_machine_state(crate::ControlScope::List, |_| ())?;
         let store = self
             .identity_member
             .as_ref()
@@ -2702,6 +2905,17 @@ impl super::MobHandle {
     /// answers [`IdentityChangeOutcome::Replayed`]) or the mob's next start
     /// retires the member again.
     ///
+    /// Decided against a spec ([`IdentityRemoval::with_expected_spec_digest`]),
+    /// a store-owned identity's removal is refused
+    /// [`IdentityChangeRefusal::StaleSpec`] when its row's spec moved since;
+    /// a roster-owned identity's spec is its host roster's to check, and a
+    /// removal of one naming a digest is refused
+    /// [`IdentityChangeRefusal::InvalidRequest`]. An agent requester's
+    /// removal commits only against the identity's current profile its
+    /// grant's admission checked (its row's, or its member's): a
+    /// roster-owned identity no member holds has no profile here to check,
+    /// and its host removes it.
+    ///
     /// Refused typed, with nothing written: no identity of this mob holds the
     /// name ([`IdentityChangeRefusal::IdentityUnknown`]), and every refusal of
     /// [`Self::create_store_owned_identities`] that applies to a change.
@@ -2714,11 +2928,12 @@ impl super::MobHandle {
             operation,
             requester,
             identity,
-            ..
+            expected_spec_digest,
         } = removal;
         self.change_identity_entry(
             mob_dsl::IdentityEntryChangeKind::Remove,
             identity,
+            expected_spec_digest,
             operation,
             requester,
             consent,
@@ -2737,8 +2952,10 @@ impl super::MobHandle {
     /// preparation is not archived: refused
     /// [`IdentityChangeRefusal::HostPreparationPending`] (retryable, naming
     /// its open construction attempt), with nothing written, until its
-    /// preparation is settled, or the identity removed. Answers once the
-    /// member's retirement ended, as a removal does.
+    /// preparation is settled, or the identity removed. Decided against a
+    /// spec ([`IdentityArchiveChange::with_expected_spec_digest`]), it is
+    /// refused [`IdentityChangeRefusal::StaleSpec`] when the row's spec moved
+    /// since. Answers once the member's retirement ended, as a removal does.
     pub async fn archive_identity(
         &self,
         change: IdentityArchiveChange,
@@ -2748,11 +2965,12 @@ impl super::MobHandle {
             operation,
             requester,
             identity,
-            ..
+            expected_spec_digest,
         } = change;
         self.change_identity_entry(
             mob_dsl::IdentityEntryChangeKind::Archive,
             identity,
+            expected_spec_digest,
             operation,
             requester,
             consent,
@@ -2764,8 +2982,10 @@ impl super::MobHandle {
     /// present again, and it is seated Dormant on its archived session, its
     /// history kept, or on a fresh session with the notice when that session
     /// is gone from the store. Refused [`IdentityChangeRefusal::NotArchived`]
-    /// for an identity that is not archived. A seat that fails leaves the
-    /// identity owed its seat, which the mob's next start seats.
+    /// for an identity that is not archived, and
+    /// [`IdentityChangeRefusal::StaleSpec`] when decided against a spec the
+    /// row no longer holds. A seat that fails leaves the identity owed its
+    /// seat, which the mob's next start seats.
     pub async fn unarchive_identity(
         &self,
         change: IdentityArchiveChange,
@@ -2775,11 +2995,12 @@ impl super::MobHandle {
             operation,
             requester,
             identity,
-            ..
+            expected_spec_digest,
         } = change;
         self.change_identity_entry(
             mob_dsl::IdentityEntryChangeKind::Unarchive,
             identity,
+            expected_spec_digest,
             operation,
             requester,
             consent,
@@ -2793,6 +3014,7 @@ impl super::MobHandle {
         &self,
         kind: mob_dsl::IdentityEntryChangeKind,
         identity: AgentIdentity,
+        expected_spec_digest: Option<String>,
         operation: IdentityOperation,
         requester: IdentityChangeRequesterInput,
         consent: IdentityChangeConsentInput<'_>,
@@ -2819,6 +3041,7 @@ impl super::MobHandle {
         let commit = EntryChangeCommit {
             kind,
             identity: identity.clone(),
+            expected_spec_digest,
             operation,
             facts: consent_facts.at(now_ms()),
             grant,
@@ -3046,10 +3269,14 @@ impl super::MobHandle {
     /// starting point.
     ///
     /// A retry of a committed update with the same request answers
-    /// [`IdentityChangeOutcome::Replayed`], never a stale spec. Refused
-    /// typed, with nothing written: a spec digest that is not the
-    /// identity's current one ([`IdentityChangeRefusal::StaleSpec`], with
-    /// the current digest and revision), an identity that is not
+    /// [`IdentityChangeOutcome::Replayed`], never a stale spec. An agent
+    /// requester's update commits only what its grant's admission checked
+    /// ([`IdentityGrantRequest::for_update`]: the new spec and the
+    /// identity's current profile). Refused typed, with nothing written: a
+    /// spec digest that is not the identity's current one
+    /// ([`IdentityChangeRefusal::StaleSpec`], with the current digest and
+    /// revision), an agent's grant admitted for another change
+    /// ([`IdentityChangeRefusal::InvalidRequest`]), an identity that is not
     /// store-owned ([`IdentityChangeRefusal::IdentityUnknown`], or
     /// [`IdentityChangeRefusal::OwnerReadOnly`] for a roster-owned one), and
     /// every refusal of [`Self::create_store_owned_identities`] that applies

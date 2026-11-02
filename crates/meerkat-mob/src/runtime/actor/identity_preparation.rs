@@ -11,7 +11,8 @@
 //! before MobMachine commits; a refusal writes nothing.
 
 use super::super::identity_change::{
-    IdentityChangeRefusal, committed_change_events, now_ms, refused,
+    IdentityChangeRefusal, IdentityGrantRequest, change_target_profile, committed_change_events,
+    grant_covers_the_commit, now_ms, refused,
 };
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 use super::super::identity_preparation::{
@@ -236,6 +237,19 @@ impl MobActor {
         ) {
             return Err(refused(refusal));
         }
+        // An agent's grant covers the identity's current profile (its row's;
+        // a roster-owned identity's is its host roster's, and its host
+        // settles it).
+        grant_covers_the_commit(
+            commit.grant.as_ref(),
+            change_target_profile(
+                authority.state(),
+                &commit.identity,
+                row.as_ref().and_then(|row| row.spec.as_ref()),
+            )
+            .map(IdentityGrantRequest::for_identity)
+            .as_ref(),
+        )?;
         let at_ms = now_ms();
         let receipt = |outcome: IdentityChangeEntryOutcome| {
             let mut entry = IdentityChangeReceiptEntry::new(commit.identity.clone(), outcome);

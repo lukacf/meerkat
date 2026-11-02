@@ -867,9 +867,13 @@ impl super::MobHandle {
     /// ([`IdentityChangeRefusal::PreparationMismatch`]), an activation
     /// already accepted ([`IdentityChangeRefusal::ActivationPending`]), a
     /// roster-owned identity's `required` preparation (its host's
-    /// declaration settles it, [`IdentityChangeRefusal::OwnerReadOnly`]),
-    /// and every refusal of [`Self::create_store_owned_identities`] that
-    /// applies to a change.
+    /// declaration settles it, [`IdentityChangeRefusal::OwnerReadOnly`]), an
+    /// agent requester's settle whose grant was not admitted for the
+    /// identity's current profile, its row's
+    /// ([`IdentityChangeRefusal::InvalidRequest`]; a roster-owned identity's
+    /// profile is its host roster's, and its host settles it), and every
+    /// refusal of [`Self::create_store_owned_identities`] that applies to a
+    /// change.
     pub async fn settle_identity_preparation(
         &self,
         settle: IdentityPreparationSettle,

@@ -3547,9 +3547,10 @@ macro_rules! mob_catalog_machine_dsl {
         // refuses it, retryable; a decided change needs its permit to bind
         // the change and admit a commit now; imported consent comes only
         // with the host operator; an agent requester's grant must be
-        // current at this final sink; and a store-owned update decided
-        // against another spec than its identity's current one is stale.
-        // Otherwise the change is admitted.
+        // current at this final sink; and a store-owned identity's change
+        // (an update, a removal, an archive or an unarchive) decided against
+        // another spec than its row's current one is stale. Otherwise the
+        // change is admitted.
         helper identity_change_admission(
             composition_authoritative: bool,
             receipt: Enum<IdentityChangeReceiptKind>,

@@ -2215,8 +2215,15 @@ fn identity_entry_origin_is_read_only_by_the_custody_guards() {
 /// through the change's prepared check at the commit, its final sink, and
 /// through nothing else. The commit calls `current` on the check (a decided
 /// change's `reprepared`); the runtime's receiver, which reads a session's
-/// live grant, is read at the admission only; and the identity's current
-/// grant is computed only by the check's owner.
+/// live grant, is read at the admission only; the identity's current grant
+/// is computed only by the check's owner; and a grant is minted only by the
+/// admission and the executor's re-admission
+/// (`identity_change_grant_for`), both through the one preparation of the
+/// change's check, whose owner reads the requester identity, never its
+/// session.
+///
+/// Updated with the re-admission (P1-5): the grant's mint sites and the
+/// owner's one construction are now listed.
 #[test]
 fn the_recheck_runs_through_the_prepared_check_at_the_final_sink() {
     use super::fail_stop_cause::{function_body, line_of, shipped_sources};
@@ -2263,9 +2270,39 @@ fn the_recheck_runs_through_the_prepared_check_at_the_final_sink() {
             }
         }
     }
+    let identity_change_grants = [
+        "pub async fn admit_identity_change_grant(",
+        "pub async fn identity_change_grant_for(",
+    ];
+    for (path, code) in &sources {
+        for (mint, allowed_in) in [
+            ("IdentityChangeGrant::new(", &identity_change_grants[..]),
+            (
+                "IdentityChangeGrantOwner {",
+                &["async fn prepare_identity_change_check("][..],
+            ),
+        ] {
+            for (at, _) in code.match_indices(mint) {
+                let declaration = code[..at].trim_end().ends_with("struct")
+                    || code[..at].trim_end().ends_with("impl")
+                    || code[..at].trim_end().ends_with("for");
+                if declaration {
+                    continue;
+                }
+                let allowed = path == "runtime/identity_change.rs"
+                    && allowed_in.iter().any(|function| {
+                        function_body(code, function).is_some_and(|body| body.contains(&at))
+                    });
+                if !allowed {
+                    strays.push(format!("{path}:{} {mint}", line_of(code, at)));
+                }
+            }
+        }
+    }
     assert!(
         strays.is_empty(),
-        "a grant read outside the admission and the prepared check's owner: {strays:?}"
+        "a grant read outside the admission and the prepared check's owner, or minted \
+         outside the admission and the re-admission: {strays:?}"
     );
 }
 

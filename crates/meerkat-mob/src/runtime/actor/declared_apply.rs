@@ -16,8 +16,8 @@ use crate::runtime::declared_apply::{
 };
 use crate::runtime::identity_change::{
     DeclaredChangeAnswer, DeclaredChangeKind, DeclaredChangeWrite, IdentityChangeRefusal,
-    declared_entry_receipt_outcome, now_ms, refused, store_owned_update_commit,
-    store_owned_update_row,
+    IdentityGrantRequest, declared_entry_receipt_outcome, grant_covers_the_commit, now_ms, refused,
+    store_owned_update_commit, store_owned_update_row,
 };
 
 impl MobActor {
@@ -35,7 +35,9 @@ impl MobActor {
     /// identity's receipt, recording each declared identity the step
     /// answered; or a store-owned update's row at the next revision (refused
     /// `stale_spec` when the row's spec moved since the change was decided)
-    /// and its receipt. MobMachine routes a store-owned update from this
+    /// and its receipt. An agent requester's update commits only what its
+    /// grant's admission covered: the new spec and the identity's current
+    /// profile (its row's). MobMachine routes a store-owned update from this
     /// step's state: an archived identity, or one awaiting its host's
     /// preparation, is answered record only (its row is the whole change).
     /// A replayed store-owned update decides and writes nothing again; a
@@ -78,10 +80,11 @@ impl MobActor {
         // A store-owned update's row, read at this final sink: the migration
         // it declares is from the role its member holds now (the row's
         // profile for an identity no member holds), kept in the row until
-        // the restamp commits; and a row whose spec moved since the change
-        // was decided makes the change stale, which MobMachine's admission
-        // answers after a replay.
-        let (update_row, stale) = match change.as_deref() {
+        // the restamp commits; a row whose spec moved since the change was
+        // decided makes the change stale, which MobMachine's admission
+        // answers after a replay; and what the update asks of an agent's
+        // grant is the new spec and the row's profile.
+        let (update_row, stale, grant_request) = match change.as_deref() {
             Some(DeclaredChangeWrite {
                 kind:
                     DeclaredChangeKind::StoreOwnedUpdate {
@@ -113,6 +116,9 @@ impl MobActor {
                 };
                 let roster_owned = state.identity_entry_origins.get(&dsl_identity)
                     == Some(&mob_dsl::IdentityEntryOrigin::Declared);
+                let grant_request = row_profile
+                    .as_ref()
+                    .map(|current| IdentityGrantRequest::for_update(current, spec));
                 let from = seated_role.or(row_profile);
                 let pending = from
                     .clone()
@@ -127,11 +133,15 @@ impl MobActor {
                     current,
                     roster_owned,
                 ) {
-                    Ok((row, stale)) => (Some(Ok((spec.identity.clone(), from, row))), stale),
-                    Err(error) => (Some(Err(error)), None),
+                    Ok((row, stale)) => (
+                        Some(Ok((spec.identity.clone(), from, row))),
+                        stale,
+                        grant_request,
+                    ),
+                    Err(error) => (Some(Err(error)), None, None),
                 }
             }
-            _ => (None, None),
+            _ => (None, None, None),
         };
         let mut replayed = None;
         if let Some(change) = change.as_deref() {
@@ -159,6 +169,11 @@ impl MobActor {
             }
         }
         let update_row = update_row.transpose()?;
+        if let Some(change) = change.as_deref()
+            && change.is_store_owned_update()
+        {
+            grant_covers_the_commit(change.grant.as_ref(), grant_request.as_ref())?;
+        }
         let mut effects = Vec::new();
         let mut verdicts = Vec::with_capacity(resolved.len());
         for (mut declaration, runtime_mode) in resolved {

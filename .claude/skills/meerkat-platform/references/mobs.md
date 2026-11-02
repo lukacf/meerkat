@@ -306,7 +306,8 @@ under `quarantined`. `MobMcpState::mob_inventory` reads the managed, held and qu
 mobs in one read (each id in exactly one), and `quarantined_mobs` and
 `held_child_mobs` fail rather than answer empty when the restore fails. A
 quarantined store's roster still counts for provenance, so a create by a
-session it names is refused with `ProvenanceUnavailable`. An empty store
+session it names is refused with `ProvenanceUnavailable` (every session
+create, while the roster cannot be read). An empty store
 whose creation record is not finalized is quarantined the same way
 (`resume_refused`: `IncarnationInconsistent`, `RecordWithoutCreation`;
 `MobStorage::unfinalized_creation_mob` reads it). Only a root that cannot be

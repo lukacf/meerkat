@@ -2587,7 +2587,7 @@ export class MeerkatClient {
   async listQuarantinedMobs(): Promise<QuarantinedMobSummary[]> {
     this.requireCapability("mob");
     const result = await this.request("mob/list", {});
-    const raw = (result as Record<string, unknown>).quarantined;
+    const raw: unknown = result.quarantined;
     if (raw === undefined || raw === null) {
       return [];
     }

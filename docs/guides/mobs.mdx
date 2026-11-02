@@ -1348,7 +1348,10 @@ The class says why a mob is quarantined:
   degrades nothing.
 
 A quarantined store's roster still counts for member lookups: a create by a
-session that roster names is refused with `ProvenanceUnavailable`. A host
+session that roster names is refused with `ProvenanceUnavailable`, and so is
+every create by a session while the roster cannot be read at all (a
+`store_unreadable` store), since that session may be one of its members.
+Repair or remove such a store to admit them again. A host
 decides what a quarantine means for its own boot; Meerkat Meta, for example,
 fails its boot when its own mob is quarantined and lists every other
 quarantined mob in its hosted set and gateway status.

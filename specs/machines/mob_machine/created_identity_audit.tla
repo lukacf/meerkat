@@ -39,6 +39,7 @@
 \*     spawn ladder for member 1 without custody, seated on session 1, and
 \*     one for member 2 with each pair of custodies, seated on its revival
 \*     record (session 2) or a fresh session (session 3); their aborts; the
+\*     worker ensure of either member, refused for a reserved name; the
 \*     worker reconcile of both members or of none; the forced destroy.
 \*   names (NamesSpec): member 1 recovered and bound (in the boot's order,
 \*     as in the scan run), its Declared entry row replayed or not; member 2
@@ -317,6 +318,7 @@ ReseatNext ==
     \/ CROpen
     \/ CRSeat
     \/ \E d \in {{}, CreatedIds} : ReconcileRunning(d, TRUE)
+    \/ \E id \in CreatedIds : EnsureMemberRunningExisting(id) \/ EnsureMemberRunningMissing(id)
     \/ AuditQuiesceDestroy
     \/ DestroyFromAny
 
@@ -394,6 +396,16 @@ AuditWitnessReconcileSparesReserved ==
     /\ Id1 \in identity_entry_tombstones
     /\ ReconcileRunning(CreatedIds, TRUE)
     /\ Id1 \notin members_to_spawn'
+\* The worker ensure refuses a reserved name that is no entry and no
+\* member, while it records a plain name for a spawn in the same state: the
+\* name's reservation is all that refuses it.
+AuditWitnessEnsureSparesReserved ==
+    /\ Reserved(Id1)
+    /\ Origin(Id1) = None
+    /\ Id1 \notin DOMAIN identity_to_runtime
+    /\ ~ENABLED EnsureMemberRunningMissing(Id1)
+    /\ EnsureMemberRunningMissing(Id2)
+    /\ Id2 \in members_to_spawn'
 \* The forced destroy clears the reserved names.
 AuditWitnessDestroyClearsReserved ==
     /\ identity_entry_tombstones # {}
@@ -407,6 +419,7 @@ NotAuditWitnessCreatedCustodyAborted == [][~AuditWitnessCreatedCustodyAborted]_v
 NotAuditWitnessScanContradictedLadder == [][~AuditWitnessScanContradictedLadder]_vars
 NotAuditWitnessReservedLadderAborted == [][~AuditWitnessReservedLadderAborted]_vars
 NotAuditWitnessReconcileSparesReserved == [][~AuditWitnessReconcileSparesReserved]_vars
+NotAuditWitnessEnsureSparesReserved == [][~AuditWitnessEnsureSparesReserved]_vars
 NotAuditWitnessDestroyClearsReserved == [][~AuditWitnessDestroyClearsReserved]_vars
 
 (***************************************************************************)

@@ -94,7 +94,40 @@ them.
   kernel `Signal` and `SignalKind` gain `RecordMemberCustodyUnrestored {
   agent_identity, restore, cause }` and `ResolveMemberCustodyRestored {
   agent_identity }`, appended last, so no existing variant's discriminant
-  moves. Exhaustive matches must add them.
+  moves. Exhaustive matches must add them. The kernel
+  `generated::mob::TransitionId` gains
+  `RecordMemberCustodyUnrestoredSeatedRunning`,
+  `RecordMemberCustodyUnrestoredSeatedStopped`,
+  `RecordMemberCustodyUnrestoredSeatedCompleted`,
+  `RecordMemberCustodyUnrestoredNotSeatedRunning`,
+  `RecordMemberCustodyUnrestoredNotSeatedStopped`,
+  `RecordMemberCustodyUnrestoredNotSeatedCompleted`,
+  `RecordMemberCustodyUnrestoredDestroyed`,
+  `ResolveMemberCustodyRestoredRecordedRunning`,
+  `ResolveMemberCustodyRestoredRecordedStopped`,
+  `ResolveMemberCustodyRestoredRecordedCompleted`,
+  `ResolveMemberCustodyRestoredUnrecordedRunning`,
+  `ResolveMemberCustodyRestoredUnrecordedStopped`,
+  `ResolveMemberCustodyRestoredUnrecordedCompleted` and
+  `ResolveMemberCustodyRestoredUnrecordedDestroyed`, inserted before
+  `RetireMemberArchiveOnly`, so the discriminants of
+  `RetireMemberArchiveOnly`, `AdmitDestroyMemberRetireArchiveOnlyRunning`,
+  `AdmitDestroyMemberRetireArchiveOnlyStopped`,
+  `WireExternalPeerDormantRunning`, `WireExternalPeerAlreadyWiredDormant`,
+  `UnwireExternalPeerDormantRunning`, `RetireRunningReleasingArchiveOnly`,
+  `RetireRunningPreservingBindingArchiveOnly`,
+  `RetireStoppedReleasingArchiveOnly`,
+  `RetireStoppedPreservingBindingArchiveOnly`,
+  `ResolveMemberRevivalSessionCreatedRunning`,
+  `ResolveMemberRevivalSessionCreatedStaleRunning`,
+  `ResolveMemberRevivalSessionCreatedStaleStopped`,
+  `ResolveMemberRevivalSessionCreatedStaleCompleted`,
+  `ResolveMemberRevivalSessionCreatedStaleDestroyed`,
+  `RecoverMemberSeatSessionUnbornRunning`,
+  `RecoverMemberSeatSessionBornRunning` and
+  `AuthorizeSpawnProfileSeatedRunning` move. `TransitionId` has no repr and
+  (de)serializes by variant name, so only an integer cast observes the moved
+  discriminants.
 - Behaviour-only (not measured by the gate): every mob surface and the
   Python, TypeScript and Web SDKs: a call that addresses a quarantined
   persisted mob by id (a create of that id included) fails with the new

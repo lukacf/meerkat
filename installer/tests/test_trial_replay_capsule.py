@@ -5,6 +5,7 @@ acceptance, deployment, or live adapter behavior.
 """
 import copy
 import asyncio
+from contextlib import contextmanager
 import hashlib
 import json
 import os
@@ -154,7 +155,11 @@ def replay_fixture(tmp_path):
     async def get(identity):
         assert identity == guide_id
         return copy.deepcopy(state)
-    guide = SimpleNamespace(get=get)
+    @contextmanager
+    def build_admission(identity):
+        assert identity == guide_id
+        yield copy.deepcopy(state)
+    guide = SimpleNamespace(get=get, build_admission=build_admission)
     implementation = ImplementationService(tmp_path, guide)
     rehearsal = RehearsalService(tmp_path, guide, implementation=implementation)
     fixture = SimpleNamespace(guide_id=guide_id, trial_id=trial_id, state=state,

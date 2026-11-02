@@ -124,11 +124,15 @@ def test_worker_whose_stop_hangs_after_owner_loss_ends_its_own_group_at_the_boun
         assert bound - .6 <= elapsed < bound + 5
         # SIGTERM to its own group first when its stop handler absorbs it,
         # and SIGKILL to that group always.
-        assert process.returncode == -signal.SIGKILL
+        # The timer's explicit _exit(1) can win the race with delivery of its
+        # own SIGKILL. Either exit is valid only when the whole group is gone.
+        assert process.returncode in (-signal.SIGKILL, 1)
         deadline = time.monotonic() + 5
         while not absent(helper):
             assert time.monotonic() < deadline, "the worker's own group outlived its bound"
             time.sleep(.02)
+        with pytest.raises(ProcessLookupError):
+            os.killpg(process.pid, 0)
     finally:
         if process.poll() is None:
             os.killpg(process.pid, signal.SIGKILL)

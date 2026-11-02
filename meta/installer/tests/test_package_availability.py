@@ -4,6 +4,7 @@ Only synthetic interviews, private temporary source workspaces and inert worker
 substitutions are used. No model, SDK, native process or installed app executes.
 """
 import asyncio
+from contextlib import contextmanager
 from copy import deepcopy
 import hashlib
 import json
@@ -122,6 +123,11 @@ class StaticGuide:
     async def get(self, identity):
         assert identity == self.state["id"]
         return deepcopy(self.state)
+
+    @contextmanager
+    def build_admission(self, identity):
+        assert identity == self.state["id"]
+        yield deepcopy(self.state)
 
 
 class InertService(ImplementationService):

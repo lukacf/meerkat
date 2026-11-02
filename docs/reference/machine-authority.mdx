@@ -213,9 +213,9 @@ every such row
 (`RecoverIdentityEntryRetiring`, which marks only the identity's seated
 Declared incarnation and takes a no-op arm for any other row). The end of an
 entry's retirement records the session it archived, and ends the entry
-only when the seal or a one-entry unlist marked it (a removal's mark also
-tombstones the name, and an archive's leaves the entry unseated,
-`Archived`); any other end keeps the entry unseated, owed its seat (hosted
+when the seal, a one-entry unlist or a removal marked it (a removal's end
+also tombstones the name); an archive's mark leaves the entry unseated,
+`Archived`; any other end keeps the entry unseated, owed its seat (hosted
 on its first use when placed or externally bound). The
 dormant seat passes its raw observation that the session is archived and
 revivable, and its guard binds an archived session only when it is the

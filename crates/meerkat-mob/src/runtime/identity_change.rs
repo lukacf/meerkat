@@ -867,6 +867,7 @@ pub(super) struct ChangeAdmissionFacts {
 pub(super) fn admission_refusal(
     verdict: mob_dsl::IdentityChangeAdmissionKind,
     operation_id: &str,
+    stale: Option<IdentityChangeRefusal>,
 ) -> Option<IdentityChangeRefusal> {
     use mob_dsl::IdentityChangeAdmissionKind as Verdict;
     match verdict {
@@ -883,6 +884,10 @@ pub(super) fn admission_refusal(
         Verdict::ImportedNotHostOperator => Some(IdentityChangeRefusal::ImportRefused),
         Verdict::GrantRevoked => Some(IdentityChangeRefusal::GrantRevoked),
         Verdict::MobNotRunning => Some(IdentityChangeRefusal::MobNotRunning),
+        // The step observed the stale spec, and names its current digest.
+        Verdict::StaleSpec => Some(stale.unwrap_or(IdentityChangeRefusal::InvalidRequest {
+            problem: "the change's spec is not its identity's current one".to_string(),
+        })),
     }
 }
 
@@ -1343,20 +1348,27 @@ pub(super) fn declared_entry_receipt_outcome(
 /// A store-owned update's row, written at the change's final sink: the
 /// identity's current row (`current`) at its next revision with `spec`, and
 /// `pending_role_migration`, the migration the update declares, kept until
-/// the restamp commits. A row whose spec digest is not the one the change
-/// was decided against refuses it, with the current digest and revision.
+/// the restamp commits; and, when the row's spec digest is not the one the
+/// change was decided against, the stale refusal (with the current digest
+/// and revision) MobMachine's admission answers.
 pub(super) fn store_owned_update_row(
     spec: &CreatedIdentitySpec,
     expected_spec_digest: &str,
     pending_role_migration: Option<crate::identity::PendingRoleMigration>,
     current: Option<crate::identity::CreatedIdentityObservation>,
-) -> Result<CreatedIdentityRowWrite, MobError> {
+    roster_owned: bool,
+) -> Result<(CreatedIdentityRowWrite, Option<IdentityChangeRefusal>), MobError> {
     let invalid = |error: crate::identity::IdentityIntentError| {
         MobError::Internal(format!("a store-owned update's row: {error}"))
     };
+    // A roster-owned identity's change is its host roster's.
     let unknown = || {
-        refused(IdentityChangeRefusal::IdentityUnknown {
-            identity: spec.identity.clone(),
+        refused(if roster_owned {
+            IdentityChangeRefusal::OwnerReadOnly { owner: "roster" }
+        } else {
+            IdentityChangeRefusal::IdentityUnknown {
+                identity: spec.identity.clone(),
+            }
         })
     };
     let row = match current {
@@ -1368,20 +1380,19 @@ pub(super) fn store_owned_update_row(
         _ => return Err(unknown()),
     };
     let current_digest = row.spec_digest().map_err(invalid)?.ok_or_else(unknown)?;
-    if current_digest != expected_spec_digest {
-        return Err(refused(IdentityChangeRefusal::StaleSpec {
+    let stale =
+        (current_digest != expected_spec_digest).then(|| IdentityChangeRefusal::StaleSpec {
             identity: spec.identity.clone(),
             current_digest,
             current_revision: Some(row.revision),
-        }));
-    }
+        });
     let expected = CreatedIdentityRowExpectation::Current {
         authority_digest: row.authority_digest.clone(),
     };
     let record = row
         .updated(spec.clone(), pending_role_migration)
         .map_err(invalid)?;
-    Ok(CreatedIdentityRowWrite { record, expected })
+    Ok((CreatedIdentityRowWrite { record, expected }, stale))
 }
 
 /// The answer of a store-owned update's store transaction: a row that moved
@@ -2667,8 +2678,10 @@ impl super::MobHandle {
                 profile: spec.profile.clone(),
             }));
         }
-        // The identity's row: a store-owned identity's update is its row's,
-        // a roster-owned identity's is its host roster's.
+        // The identity's row's presence. An identity with no store-owned row
+        // is declared nothing, and the declaration step answers it: a retry
+        // of an update that committed replays, and anything else is refused
+        // (a roster-owned identity's change is its host roster's).
         let presence = match store
             .observe_created_identity(self.mob_id(), &spec.identity)
             .await?
@@ -2676,23 +2689,9 @@ impl super::MobHandle {
             Some(crate::identity::CreatedIdentityObservation::Created(row))
                 if row.presence != CreatedIdentityPresence::Removed && row.spec.is_some() =>
             {
-                row.presence
+                Some(row.presence)
             }
-            _ => {
-                let roster_owned = self
-                    .machine_state_watch_rx
-                    .borrow()
-                    .identity_entry_origins
-                    .get(&mob_dsl::AgentIdentity::from_domain(&spec.identity))
-                    == Some(&mob_dsl::IdentityEntryOrigin::Declared);
-                return Err(refused(if roster_owned {
-                    IdentityChangeRefusal::OwnerReadOnly { owner: "roster" }
-                } else {
-                    IdentityChangeRefusal::IdentityUnknown {
-                        identity: spec.identity.clone(),
-                    }
-                }));
-            }
+            _ => None,
         };
         let attribution_facts = ChangeAttribution::facts_of(
             consent,
@@ -2710,7 +2709,7 @@ impl super::MobHandle {
         // nothing: its row changes, and its unarchive or its settle seats it
         // from the new spec.
         let entries = match presence {
-            CreatedIdentityPresence::Present => {
+            Some(CreatedIdentityPresence::Present) => {
                 vec![super::DeclaredEntry::new(
                     lower_created_spec(&spec).map_err(refused)?,
                 )]

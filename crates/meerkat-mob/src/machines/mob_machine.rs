@@ -16148,6 +16148,62 @@ mod tests {
         );
     }
 
+    /// The admission of one identity change answers in its precedence: a
+    /// receipt of the same request replays it even when its spec is no
+    /// longer current, a changes hold refuses it first, and a store-owned
+    /// update decided against another spec than its identity's current one
+    /// is stale only once everything else admits it.
+    #[test]
+    fn an_identity_change_admission_answers_a_stale_spec_after_a_replay() {
+        let (mut authority, _) = dormant_member_authority("change-admission");
+        let admit = |authority: &mut MobMachineAuthority,
+                     receipt: IdentityChangeReceiptKind,
+                     spec_current: bool| {
+            let transition = MobMachineMutator::apply(
+                authority,
+                MobMachineInput::AdmitIdentityChange {
+                    receipt,
+                    consent: IdentityChangeConsentKind::Policy,
+                    permit_binds: false,
+                    permit_admits: false,
+                    host_operator: false,
+                    grant_current: true,
+                    spec_current,
+                },
+            )
+            .expect("the admission answers every change");
+            transition
+                .effects()
+                .iter()
+                .find_map(|effect| match effect {
+                    MobMachineEffect::IdentityChangeAdmissionResolved { verdict } => Some(*verdict),
+                    _ => None,
+                })
+                .expect("the admission's verdict")
+        };
+        assert_eq!(
+            admit(&mut authority, IdentityChangeReceiptKind::Absent, true),
+            IdentityChangeAdmissionKind::Admitted
+        );
+        assert_eq!(
+            admit(&mut authority, IdentityChangeReceiptKind::Absent, false),
+            IdentityChangeAdmissionKind::StaleSpec
+        );
+        assert_eq!(
+            admit(&mut authority, IdentityChangeReceiptKind::Same, false),
+            IdentityChangeAdmissionKind::Replayed
+        );
+        MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::SetIdentityChangesHeld { held: true },
+        )
+        .expect("the host holds the changes");
+        assert_eq!(
+            admit(&mut authority, IdentityChangeReceiptKind::Absent, false),
+            IdentityChangeAdmissionKind::ChangesHeld
+        );
+    }
+
     /// A store-owned identity's update declares its Created entry through
     /// the declared apply's own verdicts (created custody): the same spec
     /// keeps it, another runtime mode restamps it, another profile with the

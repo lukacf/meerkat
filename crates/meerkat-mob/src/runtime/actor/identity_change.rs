@@ -109,8 +109,10 @@ impl MobActor {
     }
 
     /// MobMachine's admission of a change on `authority`, from its facts:
-    /// the store's receipt, read now, and the requester's grant, checked
-    /// current now (a host or human request carries none).
+    /// the store's receipt, read now, the requester's grant, checked current
+    /// now (a host or human request carries none), and, for a store-owned
+    /// update, the stale refusal its row read answers (`None` when its spec
+    /// is current, and for every other change).
     pub(super) async fn decide_change_admission<M: mob_dsl::MobMachineMutator>(
         &self,
         authority: &mut M,
@@ -118,6 +120,7 @@ impl MobActor {
         facts: ChangeAdmissionFacts,
         grant: Option<&IdentityChangeGrant>,
         decided: bool,
+        stale: Option<IdentityChangeRefusal>,
     ) -> Result<ChangeAdmission, MobError> {
         let (receipt, replayed) = self.observe_change_receipt(operation).await?;
         let grant_current = match grant {
@@ -132,6 +135,7 @@ impl MobActor {
                 permit_admits: facts.permit_admits,
                 host_operator: facts.host_operator,
                 grant_current,
+                spec_current: stale.is_none(),
             })
             .map_err(|error| MobError::MobMachineRejected {
                 context: "admit_identity_change",
@@ -149,7 +153,7 @@ impl MobActor {
             .ok_or_else(|| {
                 MobError::Internal("MobMachine admitted an identity change with no verdict".into())
             })?;
-        if let Some(refusal) = admission_refusal(verdict, &operation.operation_id) {
+        if let Some(refusal) = admission_refusal(verdict, &operation.operation_id, stale) {
             return Err(refused(refusal));
         }
         match (verdict, replayed) {
@@ -214,7 +218,7 @@ impl MobActor {
     ) -> Result<CreatePlanAnswer, MobError> {
         let mut probe = self.dsl_authority.fork();
         match self
-            .decide_change_admission(&mut probe, operation, facts, grant, decided)
+            .decide_change_admission(&mut probe, operation, facts, grant, decided, None)
             .await?
         {
             ChangeAdmission::Replayed(receipt) => return Ok(CreatePlanAnswer::Replayed(receipt)),
@@ -313,6 +317,7 @@ impl MobActor {
                 commit.facts,
                 commit.grant.as_ref(),
                 commit.decided,
+                None,
             )
             .await?
         {
@@ -366,6 +371,7 @@ impl MobActor {
                 commit.facts,
                 commit.grant.as_ref(),
                 commit.decided,
+                None,
             )
             .await?
         {

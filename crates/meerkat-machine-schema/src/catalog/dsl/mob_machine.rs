@@ -2159,10 +2159,13 @@ macro_rules! mob_catalog_machine_dsl {
             // shell observed for it there: the store's receipt of its
             // operation, its consent's form, whether a decision's permit
             // binds the change and admits a commit now, whether the
-            // requester is the host operator, and whether an agent
+            // requester is the host operator, whether an agent
             // requester's grant is current at this final sink (its prepared
-            // check). A pure verdict.
-            AdmitIdentityChange { receipt: Enum<IdentityChangeReceiptKind>, consent: Enum<IdentityChangeConsentKind>, permit_binds: bool, permit_admits: bool, host_operator: bool, grant_current: bool },
+            // check), and whether the spec the change was decided against is
+            // the identity's current one (a store-owned update's expected
+            // spec digest is its row's; true for every other change). A pure
+            // verdict.
+            AdmitIdentityChange { receipt: Enum<IdentityChangeReceiptKind>, consent: Enum<IdentityChangeConsentKind>, permit_binds: bool, permit_admits: bool, host_operator: bool, grant_current: bool, spec_current: bool },
             // A store-owned identity's entry, recorded by its create's
             // commit step before its seat, in the same prepared step, with
             // the cause it is unseated for until its seat (SeatOwed) or its
@@ -3443,8 +3446,10 @@ macro_rules! mob_catalog_machine_dsl {
         // replayed, and one of another request refuses it; a changes hold
         // refuses it, retryable; a decided change needs its permit to bind
         // the change and admit a commit now; imported consent comes only
-        // with the host operator; and an agent requester's grant must be
-        // current at this final sink. Otherwise the change is admitted.
+        // with the host operator; an agent requester's grant must be
+        // current at this final sink; and a store-owned update decided
+        // against another spec than its identity's current one is stale.
+        // Otherwise the change is admitted.
         helper identity_change_admission(
             composition_authoritative: bool,
             receipt: Enum<IdentityChangeReceiptKind>,
@@ -3453,7 +3458,8 @@ macro_rules! mob_catalog_machine_dsl {
             permit_binds: bool,
             permit_admits: bool,
             host_operator: bool,
-            grant_current: bool
+            grant_current: bool,
+            spec_current: bool
         ) -> Enum<IdentityChangeAdmissionKind> {
             if composition_authoritative == false {
                 IdentityChangeAdmissionKind::NonAuthoritative
@@ -3479,8 +3485,11 @@ macro_rules! mob_catalog_machine_dsl {
             if grant_current == false {
                 IdentityChangeAdmissionKind::GrantRevoked
             } else {
+            if spec_current == false {
+                IdentityChangeAdmissionKind::StaleSpec
+            } else {
                 IdentityChangeAdmissionKind::Admitted
-            }}}}}}}}
+            }}}}}}}}}
         }
 
         // The verdict of one new store-owned entry's record
@@ -31765,7 +31774,7 @@ macro_rules! mob_catalog_machine_dsl {
 
         // An admitted change: the commit step goes on to its records and seats.
         transition AdmitIdentityChangeAdmitted {
-            on input AdmitIdentityChange { receipt, consent, permit_binds, permit_admits, host_operator, grant_current }
+            on input AdmitIdentityChange { receipt, consent, permit_binds, permit_admits, host_operator, grant_current, spec_current }
             guard { self.lifecycle_phase == Phase::Running }
             guard "admission_admitted" {
                 identity_change_admission(
@@ -31776,7 +31785,8 @@ macro_rules! mob_catalog_machine_dsl {
                     permit_binds,
                     permit_admits,
                     host_operator,
-                    grant_current) == IdentityChangeAdmissionKind::Admitted
+                    grant_current,
+                    spec_current) == IdentityChangeAdmissionKind::Admitted
             }
             update {}
             to Running
@@ -31785,7 +31795,7 @@ macro_rules! mob_catalog_machine_dsl {
 
         // A receipt of the same request: the change committed before, and nothing is written again.
         transition AdmitIdentityChangeReplayed {
-            on input AdmitIdentityChange { receipt, consent, permit_binds, permit_admits, host_operator, grant_current }
+            on input AdmitIdentityChange { receipt, consent, permit_binds, permit_admits, host_operator, grant_current, spec_current }
             guard { self.lifecycle_phase == Phase::Running }
             guard "admission_replayed" {
                 identity_change_admission(
@@ -31796,7 +31806,8 @@ macro_rules! mob_catalog_machine_dsl {
                     permit_binds,
                     permit_admits,
                     host_operator,
-                    grant_current) == IdentityChangeAdmissionKind::Replayed
+                    grant_current,
+                    spec_current) == IdentityChangeAdmissionKind::Replayed
             }
             update {}
             to Running
@@ -31805,7 +31816,7 @@ macro_rules! mob_catalog_machine_dsl {
 
         // A receipt of another request under the operation id: refused.
         transition AdmitIdentityChangeOperationReused {
-            on input AdmitIdentityChange { receipt, consent, permit_binds, permit_admits, host_operator, grant_current }
+            on input AdmitIdentityChange { receipt, consent, permit_binds, permit_admits, host_operator, grant_current, spec_current }
             guard { self.lifecycle_phase == Phase::Running }
             guard "admission_operation_reused" {
                 identity_change_admission(
@@ -31816,7 +31827,8 @@ macro_rules! mob_catalog_machine_dsl {
                     permit_binds,
                     permit_admits,
                     host_operator,
-                    grant_current) == IdentityChangeAdmissionKind::OperationReused
+                    grant_current,
+                    spec_current) == IdentityChangeAdmissionKind::OperationReused
             }
             update {}
             to Running
@@ -31825,7 +31837,7 @@ macro_rules! mob_catalog_machine_dsl {
 
         // A candidate composition: refused, nothing is written.
         transition AdmitIdentityChangeNonAuthoritative {
-            on input AdmitIdentityChange { receipt, consent, permit_binds, permit_admits, host_operator, grant_current }
+            on input AdmitIdentityChange { receipt, consent, permit_binds, permit_admits, host_operator, grant_current, spec_current }
             guard { self.lifecycle_phase == Phase::Running }
             guard "admission_non_authoritative" {
                 identity_change_admission(
@@ -31836,7 +31848,8 @@ macro_rules! mob_catalog_machine_dsl {
                     permit_binds,
                     permit_admits,
                     host_operator,
-                    grant_current) == IdentityChangeAdmissionKind::NonAuthoritative
+                    grant_current,
+                    spec_current) == IdentityChangeAdmissionKind::NonAuthoritative
             }
             update {}
             to Running
@@ -31845,7 +31858,7 @@ macro_rules! mob_catalog_machine_dsl {
 
         // The host holds the mob's identity changes: refused, retryable.
         transition AdmitIdentityChangeChangesHeld {
-            on input AdmitIdentityChange { receipt, consent, permit_binds, permit_admits, host_operator, grant_current }
+            on input AdmitIdentityChange { receipt, consent, permit_binds, permit_admits, host_operator, grant_current, spec_current }
             guard { self.lifecycle_phase == Phase::Running }
             guard "admission_changes_held" {
                 identity_change_admission(
@@ -31856,7 +31869,8 @@ macro_rules! mob_catalog_machine_dsl {
                     permit_binds,
                     permit_admits,
                     host_operator,
-                    grant_current) == IdentityChangeAdmissionKind::ChangesHeld
+                    grant_current,
+                    spec_current) == IdentityChangeAdmissionKind::ChangesHeld
             }
             update {}
             to Running
@@ -31865,7 +31879,7 @@ macro_rules! mob_catalog_machine_dsl {
 
         // A decided change whose permit binds another operation or request: refused.
         transition AdmitIdentityChangeDecisionUnbound {
-            on input AdmitIdentityChange { receipt, consent, permit_binds, permit_admits, host_operator, grant_current }
+            on input AdmitIdentityChange { receipt, consent, permit_binds, permit_admits, host_operator, grant_current, spec_current }
             guard { self.lifecycle_phase == Phase::Running }
             guard "admission_decision_unbound" {
                 identity_change_admission(
@@ -31876,7 +31890,8 @@ macro_rules! mob_catalog_machine_dsl {
                     permit_binds,
                     permit_admits,
                     host_operator,
-                    grant_current) == IdentityChangeAdmissionKind::DecisionUnbound
+                    grant_current,
+                    spec_current) == IdentityChangeAdmissionKind::DecisionUnbound
             }
             update {}
             to Running
@@ -31885,7 +31900,7 @@ macro_rules! mob_catalog_machine_dsl {
 
         // A decided change whose permit is past its deadline: refused.
         transition AdmitIdentityChangeDecisionExpired {
-            on input AdmitIdentityChange { receipt, consent, permit_binds, permit_admits, host_operator, grant_current }
+            on input AdmitIdentityChange { receipt, consent, permit_binds, permit_admits, host_operator, grant_current, spec_current }
             guard { self.lifecycle_phase == Phase::Running }
             guard "admission_decision_expired" {
                 identity_change_admission(
@@ -31896,7 +31911,8 @@ macro_rules! mob_catalog_machine_dsl {
                     permit_binds,
                     permit_admits,
                     host_operator,
-                    grant_current) == IdentityChangeAdmissionKind::DecisionExpired
+                    grant_current,
+                    spec_current) == IdentityChangeAdmissionKind::DecisionExpired
             }
             update {}
             to Running
@@ -31905,7 +31921,7 @@ macro_rules! mob_catalog_machine_dsl {
 
         // Imported consent from anyone but the host operator: refused.
         transition AdmitIdentityChangeImportedNotHostOperator {
-            on input AdmitIdentityChange { receipt, consent, permit_binds, permit_admits, host_operator, grant_current }
+            on input AdmitIdentityChange { receipt, consent, permit_binds, permit_admits, host_operator, grant_current, spec_current }
             guard { self.lifecycle_phase == Phase::Running }
             guard "admission_imported_not_host_operator" {
                 identity_change_admission(
@@ -31916,7 +31932,8 @@ macro_rules! mob_catalog_machine_dsl {
                     permit_binds,
                     permit_admits,
                     host_operator,
-                    grant_current) == IdentityChangeAdmissionKind::ImportedNotHostOperator
+                    grant_current,
+                    spec_current) == IdentityChangeAdmissionKind::ImportedNotHostOperator
             }
             update {}
             to Running
@@ -31925,7 +31942,7 @@ macro_rules! mob_catalog_machine_dsl {
 
         // An agent requester's grant no longer admits the change at this final sink: refused.
         transition AdmitIdentityChangeGrantRevoked {
-            on input AdmitIdentityChange { receipt, consent, permit_binds, permit_admits, host_operator, grant_current }
+            on input AdmitIdentityChange { receipt, consent, permit_binds, permit_admits, host_operator, grant_current, spec_current }
             guard { self.lifecycle_phase == Phase::Running }
             guard "admission_grant_revoked" {
                 identity_change_admission(
@@ -31936,17 +31953,40 @@ macro_rules! mob_catalog_machine_dsl {
                     permit_binds,
                     permit_admits,
                     host_operator,
-                    grant_current) == IdentityChangeAdmissionKind::GrantRevoked
+                    grant_current,
+                    spec_current) == IdentityChangeAdmissionKind::GrantRevoked
             }
             update {}
             to Running
             emit IdentityChangeAdmissionResolved { verdict: IdentityChangeAdmissionKind::GrantRevoked }
         }
 
+        // A store-owned update decided against another spec than its
+        // identity's current one: refused, with the current spec's digest.
+        transition AdmitIdentityChangeStaleSpec {
+            on input AdmitIdentityChange { receipt, consent, permit_binds, permit_admits, host_operator, grant_current, spec_current }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "admission_stale_spec" {
+                identity_change_admission(
+                    self.composition_authority == CompositionAuthorityKind::Authoritative,
+                    receipt,
+                    self.identity_changes_held,
+                    consent,
+                    permit_binds,
+                    permit_admits,
+                    host_operator,
+                    grant_current,
+                    spec_current) == IdentityChangeAdmissionKind::StaleSpec
+            }
+            update {}
+            to Running
+            emit IdentityChangeAdmissionResolved { verdict: IdentityChangeAdmissionKind::StaleSpec }
+        }
+
         // A mob that is not running admits no change.
         transition AdmitIdentityChangeMobNotRunning {
             per_phase [Stopped, Completed, Destroyed]
-            on input AdmitIdentityChange { receipt, consent, permit_binds, permit_admits, host_operator, grant_current }
+            on input AdmitIdentityChange { receipt, consent, permit_binds, permit_admits, host_operator, grant_current, spec_current }
             update {}
             to Running
             emit IdentityChangeAdmissionResolved { verdict: IdentityChangeAdmissionKind::MobNotRunning }
@@ -36953,6 +36993,9 @@ pub enum IdentityChangeAdmissionKind {
     GrantRevoked,
     /// The mob is not running.
     MobNotRunning,
+    /// A store-owned update was decided against another spec than its
+    /// identity's current one.
+    StaleSpec,
 }
 
 /// The verdict of one new store-owned entry's record

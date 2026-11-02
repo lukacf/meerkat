@@ -940,6 +940,9 @@ const MACHINE_TRANSITION_ENUM_LATE_TAILS: &[(&str, &[&str])] = &[
             "RecoverCreatedIdentityEntryArchivingStopped",
             "RecoverCreatedIdentityEntryArchivedRunning",
             "RecoverCreatedIdentityEntryArchivedStopped",
+            // Identity changes (0.9.9): a store-owned update decided against
+            // a spec that is no longer its identity's.
+            "AdmitIdentityChangeStaleSpec",
         ],
     ),
     // The entered-step arms of the review attempt lifecycle (0.9.7), after

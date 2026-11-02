@@ -71,35 +71,13 @@ impl MobActor {
         }
 
         let mut authority = self.dsl_authority.prepare_authority();
-        let mut replayed = None;
-        if let Some(change) = change.as_deref() {
-            match self
-                .decide_change_admission(
-                    &mut authority,
-                    &change.operation,
-                    change.facts,
-                    change.grant.as_ref(),
-                    change.decided,
-                )
-                .await?
-            {
-                // A committed update replays: nothing is decided or written
-                // again.
-                ChangeAdmission::Replayed(receipt) if change.is_store_owned_update() => {
-                    return Ok(DeclarationStep {
-                        verdicts: Vec::new(),
-                        change: Some(DeclaredChangeAnswer::Replayed(receipt)),
-                    });
-                }
-                ChangeAdmission::Replayed(receipt) => replayed = Some(receipt),
-                ChangeAdmission::Admitted => {}
-            }
-        }
         // A store-owned update's row, read at this final sink: the migration
         // it declares is from the role its member holds now (the row's
         // profile for an identity no member holds), kept in the row until
-        // the restamp commits.
-        let update_row = match change.as_deref() {
+        // the restamp commits; and a row whose spec moved since the change
+        // was decided makes the change stale, which MobMachine's admission
+        // answers after a replay.
+        let (update_row, stale) = match change.as_deref() {
             Some(DeclaredChangeWrite {
                 kind:
                     DeclaredChangeKind::StoreOwnedUpdate {
@@ -129,16 +107,54 @@ impl MobActor {
                     }
                     _ => None,
                 };
+                let roster_owned = state.identity_entry_origins.get(&dsl_identity)
+                    == Some(&mob_dsl::IdentityEntryOrigin::Declared);
                 let from = seated_role.or(row_profile);
                 let pending = from
                     .clone()
                     .filter(|from| *from != spec.profile)
                     .map(crate::identity::PendingRoleMigration::new);
-                let row = store_owned_update_row(spec, expected_spec_digest, pending, current)?;
-                Some((spec.identity.clone(), from, row))
+                // An identity whose row is gone is answered after the
+                // admission: a retry of an update that committed replays.
+                match store_owned_update_row(
+                    spec,
+                    expected_spec_digest,
+                    pending,
+                    current,
+                    roster_owned,
+                ) {
+                    Ok((row, stale)) => (Some(Ok((spec.identity.clone(), from, row))), stale),
+                    Err(error) => (Some(Err(error)), None),
+                }
             }
-            _ => None,
+            _ => (None, None),
         };
+        let mut replayed = None;
+        if let Some(change) = change.as_deref() {
+            match self
+                .decide_change_admission(
+                    &mut authority,
+                    &change.operation,
+                    change.facts,
+                    change.grant.as_ref(),
+                    change.decided,
+                    stale,
+                )
+                .await?
+            {
+                // A committed update replays: nothing is decided or written
+                // again.
+                ChangeAdmission::Replayed(receipt) if change.is_store_owned_update() => {
+                    return Ok(DeclarationStep {
+                        verdicts: Vec::new(),
+                        change: Some(DeclaredChangeAnswer::Replayed(receipt)),
+                    });
+                }
+                ChangeAdmission::Replayed(receipt) => replayed = Some(receipt),
+                ChangeAdmission::Admitted => {}
+            }
+        }
+        let update_row = update_row.transpose()?;
         let mut effects = Vec::new();
         let mut verdicts = Vec::with_capacity(resolved.len());
         for (mut declaration, runtime_mode) in resolved {

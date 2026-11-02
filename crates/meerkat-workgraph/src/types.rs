@@ -2367,6 +2367,11 @@ pub struct WorkItemFilter {
     pub include_terminal: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<usize>,
+    /// Continue a walk: the `next_cursor` the previous page of this read
+    /// returned. The page holds the rows after the cursor's position, in the
+    /// same order.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -2395,6 +2400,11 @@ pub struct ReadyWorkFilter {
     pub labels: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<usize>,
+    /// Continue a walk: the `next_cursor` the previous page of this read
+    /// returned. The page holds the rows after the cursor's position, in the
+    /// same order.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -2414,6 +2424,11 @@ pub struct WorkGraphSnapshotFilter {
     pub include_terminal: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<usize>,
+    /// Continue a walk: the `next_cursor` the previous page of this read
+    /// returned. The page holds the rows after the cursor's position, in the
+    /// same order.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
 }
 
 /// Parameters identifying a single WorkGraph item by id within an optional
@@ -2443,8 +2458,8 @@ pub struct WorkGraphSnapshot {
     #[serde(default)]
     pub attention: Vec<WorkAttentionBinding>,
     pub ready_item_ids: Vec<WorkItemId>,
-    /// Items that matched the filter in this snapshot, before `limit` cut
-    /// them. Absent only from a server that predates the field.
+    /// Items that matched the filter in this snapshot, before the cursor and
+    /// `limit` cut them. Absent only from a server that predates the field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub total_items: Option<usize>,
     /// Matching items exist after the last item returned. Absent only from a
@@ -2452,6 +2467,23 @@ pub struct WorkGraphSnapshot {
     /// complete.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub truncated: Option<bool>,
+    /// Pass back as `cursor` for the next page. Present exactly when
+    /// `truncated` is true, except on a `limit: 0` page, which returns only
+    /// the totals.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+    /// The event ledger's high-water mark when the walk began: the first
+    /// page's own `event_high_water_mark`, then carried by the cursor. Absent
+    /// when the ledger had no event then, and from a server that predates the
+    /// field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor_event_seq: Option<i64>,
+    /// The ledger has moved past `anchor_event_seq`: an item can have
+    /// changed or appeared since the walk began, and a later page can miss
+    /// it. `events` with `after_seq` set to `anchor_event_seq` names every
+    /// such item. Absent only from a server that predates the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub changed_since_anchor: Option<bool>,
 }
 
 /// One page of work items: `list` (most recently updated first) or `ready`
@@ -2461,8 +2493,8 @@ pub struct WorkGraphSnapshot {
 pub struct WorkGraphItemsResponse {
     pub items: Vec<WorkItem>,
     /// Items that matched the filter at this read (for `ready`, the ready
-    /// items), before `limit` cut them. Absent only from a server that
-    /// predates the field.
+    /// items), before the cursor and `limit` cut them. Absent only from a
+    /// server that predates the field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub total_items: Option<usize>,
     /// Matching items exist after the last item returned. Absent only from a
@@ -2470,12 +2502,44 @@ pub struct WorkGraphItemsResponse {
     /// complete.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub truncated: Option<bool>,
+    /// Pass back as `cursor` for the next page. Present exactly when
+    /// `truncated` is true, except on a `limit: 0` page, which returns only
+    /// the totals.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+    /// The event ledger's high-water mark when the walk began: read before
+    /// the first page's rows, then carried by the cursor. Absent when the
+    /// ledger had no event then, and from a server that predates the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor_event_seq: Option<i64>,
+    /// The ledger has moved past `anchor_event_seq`: an item can have
+    /// changed or appeared since the walk began, and a later page can miss
+    /// it. `events` with `after_seq` set to `anchor_event_seq` names every
+    /// such item. Absent only from a server that predates the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub changed_since_anchor: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct WorkGraphEventsResponse {
     pub events: Vec<WorkGraphEvent>,
+    /// Matching events exist after the last event returned. Absent only from
+    /// a server that predates the field, which does not mean the page is
+    /// complete.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub truncated: Option<bool>,
+    /// Pass back as `after_seq` for the next page: the `seq` of the last
+    /// event returned. Present exactly when `truncated` is true, except on a
+    /// `limit: 0` page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_after_seq: Option<i64>,
+    /// The ledger's highest sequence in the namespace at this read, internal
+    /// execution events included, so it can pass the last public event.
+    /// Absent when the ledger is empty, and from a server that predates the
+    /// field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_high_water_mark: Option<i64>,
 }
 
 #[cfg(test)]

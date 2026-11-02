@@ -26,10 +26,6 @@ pub(super) const LIVE_DELEGATION_CHANNEL_WORKER_CAP: usize =
 /// Label every voice delegation item carries.
 pub(super) const VOICE_WORK_LABEL: &str = "voice";
 
-/// Voice items one scheduling snapshot reads: the most recently updated ones
-/// (the WorkGraph maximum). A snapshot that cut older voice items warns.
-const VOICE_SNAPSHOT_LIMIT: usize = 1000;
-
 const WORK_TITLE_CHARS: usize = 200;
 const NARRATION_TITLE_CHARS: usize = 120;
 
@@ -365,14 +361,13 @@ impl std::fmt::Display for WorkItemCloseFailure {
     }
 }
 
-/// The voice items a scheduling decision reads, terminal ones included
-/// (blockers may have finished, and may belong to another channel), most
-/// recently updated first.
+/// The voice items a scheduling decision reads: every voice item of every
+/// channel, terminal ones included (blockers may have finished, and may
+/// belong to another channel).
 fn voice_snapshot_filter() -> WorkGraphSnapshotFilter {
     WorkGraphSnapshotFilter {
         labels: vec![VOICE_WORK_LABEL.to_string()],
         include_terminal: true,
-        limit: Some(VOICE_SNAPSHOT_LIMIT),
         ..WorkGraphSnapshotFilter::default()
     }
 }
@@ -381,9 +376,6 @@ fn voice_snapshot_filter() -> WorkGraphSnapshotFilter {
 #[derive(Clone)]
 pub(super) struct VoiceWorkGraph {
     service: WorkGraphService,
-    /// Set once a cut voice snapshot has been warned about for this voice
-    /// request; its clones share it.
-    snapshot_cut_warned: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Namespace snapshots taken to classify a worker's item (test count).
     #[cfg(test)]
     classification_snapshots: std::sync::Arc<std::sync::atomic::AtomicUsize>,
@@ -396,7 +388,6 @@ impl VoiceWorkGraph {
     pub(super) fn new(service: WorkGraphService) -> Self {
         Self {
             service,
-            snapshot_cut_warned: std::sync::Arc::default(),
             #[cfg(test)]
             classification_snapshots: std::sync::Arc::default(),
             #[cfg(test)]
@@ -514,27 +505,14 @@ impl VoiceWorkGraph {
             .expect("conflicting evidence");
     }
 
-    /// Warn at most once per voice request when a scheduling snapshot cut
-    /// voice items: each admitted request builds its own voice graph, which
-    /// its pending operation, the schedule pump and its worker share as
-    /// clones. The snapshot read only the most recently updated voice items,
-    /// so an older open item is not offered and an older blocker is not
-    /// named. Closed voice items count too, so past the limit every
-    /// scheduling pass would warn again.
-    fn warn_once_when_snapshot_cut(&self, snapshot: &WorkGraphSnapshot, read: &'static str) {
-        if snapshot.truncated == Some(true)
-            && let Some(total_items) = snapshot.total_items
-            && !self
-                .snapshot_cut_warned
-                .swap(true, std::sync::atomic::Ordering::Relaxed)
-        {
-            tracing::warn!(
-                read,
-                total_items,
-                limit = VOICE_SNAPSHOT_LIMIT,
-                "voice work snapshot read the {VOICE_SNAPSHOT_LIMIT} most recently updated of {total_items} voice items; an older open item is not offered and an older blocker is not named (warned once per voice request)"
-            );
-        }
+    /// Every voice item in one uncut namespace observation, however many the
+    /// mob holds: each scheduling decision reads one consistent snapshot of
+    /// the items, their edges and their readiness.
+    async fn voice_snapshot(&self) -> Result<WorkGraphSnapshot, String> {
+        self.service
+            .snapshot_uncut(voice_snapshot_filter())
+            .await
+            .map_err(|error| error.to_string())
     }
 
     async fn get(&self, id: &WorkItemId) -> Result<WorkItem, String> {
@@ -552,11 +530,9 @@ impl VoiceWorkGraph {
         channel_id: &LiveChannelId,
     ) -> Result<ChannelReadiness, String> {
         let snapshot = self
-            .service
-            .snapshot(voice_snapshot_filter())
+            .voice_snapshot()
             .await
             .map_err(|error| format!("voice work readiness snapshot failed: {error}"))?;
-        self.warn_once_when_snapshot_cut(&snapshot, "readiness");
         let channel_label = channel_work_label(channel_id);
         let items_by_id = snapshot
             .items
@@ -652,11 +628,9 @@ impl VoiceWorkGraph {
         self.classification_snapshots
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let snapshot = self
-            .service
-            .snapshot(voice_snapshot_filter())
+            .voice_snapshot()
             .await
             .map_err(|error| format!("voice work snapshot failed: {error}"))?;
-        self.warn_once_when_snapshot_cut(&snapshot, "classification");
         let items_by_id = snapshot
             .items
             .iter()
@@ -790,6 +764,8 @@ impl VoiceWorkGraph {
     reason = "focused template tests use explicit assertion messages"
 )]
 mod tests {
+    use meerkat::WorkGraphStore as _;
+
     use super::*;
 
     async fn voice_workgraph() -> VoiceWorkGraph {
@@ -850,6 +826,208 @@ mod tests {
             workgraph.disposition_after_worker_turn(&item).await,
             Ok(WorkItemDisposition::ReleasedReady)
         );
+    }
+
+    /// The scheduling reads see every voice item: an open voice item and a
+    /// blocker with more newer voice items in front of them than a WorkGraph
+    /// page holds are both seen.
+    #[tokio::test]
+    async fn an_open_voice_item_and_a_blocker_past_the_first_page_are_both_seen() {
+        let workgraph = voice_workgraph().await;
+        let old_open = voice_item(&workgraph, "the old request").await;
+        let blocker = voice_item(&workgraph, "the old blocker").await;
+        // As many newer voice items as the largest WorkGraph page (1000).
+        for index in 0..1000 {
+            voice_item(&workgraph, &format!("newer request {index}")).await;
+        }
+        let waiting = voice_item(&workgraph, "the waiting request").await;
+        workgraph
+            .service
+            .link(meerkat::LinkWorkItemsRequest {
+                realm_id: None,
+                namespace: None,
+                kind: WorkEdgeKind::Blocks,
+                from_id: blocker.clone(),
+                to_id: waiting.clone(),
+            })
+            .await
+            .expect("blocks edge");
+
+        let readiness = workgraph
+            .channel_readiness(&LiveChannelId::new("schedule-test-channel"))
+            .await
+            .expect("channel readiness");
+        assert!(
+            readiness.ready.contains(&old_open),
+            "the old open voice item is offered"
+        );
+        assert_eq!(
+            workgraph.disposition_after_worker_turn(&waiting).await,
+            Ok(WorkItemDisposition::Waiting {
+                blockers: vec![(blocker, "the old blocker".to_string())],
+                explicit_block: false,
+            }),
+            "the old blocker is named"
+        );
+    }
+
+    /// A memory store that counts the namespace snapshots it serves.
+    struct CountingSnapshotStore {
+        inner: meerkat::MemoryWorkGraphStore,
+        snapshots: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl meerkat::WorkGraphStore for CountingSnapshotStore {
+        fn kind(&self) -> meerkat::WorkGraphStoreKind {
+            self.inner.kind()
+        }
+
+        async fn get_store_time_utc(
+            &self,
+        ) -> Result<chrono::DateTime<chrono::Utc>, meerkat::WorkGraphError> {
+            self.inner.get_store_time_utc().await
+        }
+
+        async fn insert_item(
+            &self,
+            item: meerkat::WorkItem,
+            event: meerkat::WorkGraphEvent,
+        ) -> Result<meerkat::WorkItem, meerkat::WorkGraphError> {
+            self.inner.insert_item(item, event).await
+        }
+
+        async fn update_item_cas(
+            &self,
+            item: meerkat::WorkItem,
+            expected_previous_revision: u64,
+            event: meerkat::WorkGraphEvent,
+        ) -> Result<meerkat::WorkItem, meerkat::WorkGraphError> {
+            self.inner
+                .update_item_cas(item, expected_previous_revision, event)
+                .await
+        }
+
+        async fn update_item_and_attention_cas(
+            &self,
+            item: meerkat::WorkItem,
+            expected_previous_revision: u64,
+            item_event: meerkat::WorkGraphEvent,
+            attention_updates: Vec<(meerkat::WorkAttentionBinding, u64, meerkat::WorkGraphEvent)>,
+        ) -> Result<meerkat::WorkItem, meerkat::WorkGraphError> {
+            self.inner
+                .update_item_and_attention_cas(
+                    item,
+                    expected_previous_revision,
+                    item_event,
+                    attention_updates,
+                )
+                .await
+        }
+
+        async fn get_item(
+            &self,
+            realm_id: &str,
+            namespace: &meerkat::WorkNamespace,
+            id: &meerkat::WorkItemId,
+        ) -> Result<Option<meerkat::WorkItem>, meerkat::WorkGraphError> {
+            self.inner.get_item(realm_id, namespace, id).await
+        }
+
+        async fn list_items(
+            &self,
+            filter: meerkat::WorkItemFilter,
+        ) -> Result<Vec<meerkat::WorkItem>, meerkat::WorkGraphError> {
+            self.inner.list_items(filter).await
+        }
+
+        async fn read_namespace_snapshot(
+            &self,
+            realm_id: &str,
+            namespace: &meerkat::WorkNamespace,
+        ) -> Result<meerkat::WorkGraphNamespaceRead, meerkat::WorkGraphError> {
+            self.snapshots
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.inner
+                .read_namespace_snapshot(realm_id, namespace)
+                .await
+        }
+
+        async fn list_attention_matching_bounded(
+            &self,
+            filter: meerkat::AttentionListRequest,
+            observed_at: chrono::DateTime<chrono::Utc>,
+            limit: usize,
+        ) -> Result<Vec<meerkat::WorkAttentionBinding>, meerkat::WorkGraphError> {
+            self.inner
+                .list_attention_matching_bounded(filter, observed_at, limit)
+                .await
+        }
+
+        async fn insert_edge(
+            &self,
+            edge: meerkat::WorkEdge,
+            event: meerkat::WorkGraphEvent,
+        ) -> Result<meerkat::WorkEdge, meerkat::WorkGraphError> {
+            self.inner.insert_edge(edge, event).await
+        }
+
+        async fn list_edges(
+            &self,
+            realm_id: &str,
+            namespace: &meerkat::WorkNamespace,
+        ) -> Result<Vec<meerkat::WorkEdge>, meerkat::WorkGraphError> {
+            self.inner.list_edges(realm_id, namespace).await
+        }
+
+        async fn list_events(
+            &self,
+            filter: meerkat::WorkGraphEventFilter,
+        ) -> Result<Vec<meerkat::WorkGraphEvent>, meerkat::WorkGraphError> {
+            self.inner.list_events(filter).await
+        }
+
+        async fn latest_event_seq(
+            &self,
+            filter: meerkat::WorkGraphEventFilter,
+        ) -> Result<Option<i64>, meerkat::WorkGraphError> {
+            self.inner.latest_event_seq(filter).await
+        }
+    }
+
+    /// A scheduling pass reads every voice item, however many, in one
+    /// namespace observation: past 1000 voice items readiness and
+    /// classification each read the namespace once, and the oldest item is
+    /// seen by both.
+    #[tokio::test]
+    async fn a_voice_scheduling_pass_reads_every_voice_item_in_one_observation() {
+        let store = std::sync::Arc::new(CountingSnapshotStore {
+            inner: meerkat::MemoryWorkGraphStore::new(),
+            snapshots: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let workgraph = VoiceWorkGraph::new(WorkGraphService::new(store.clone()));
+        let oldest = voice_item(&workgraph, "the oldest request").await;
+        for index in 0..1000 {
+            voice_item(&workgraph, &format!("newer request {index}")).await;
+        }
+        let reads = || store.snapshots.load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(reads(), 0);
+
+        let readiness = workgraph
+            .channel_readiness(&LiveChannelId::new("schedule-test-channel"))
+            .await
+            .expect("channel readiness");
+        assert!(
+            readiness.ready.contains(&oldest),
+            "the oldest of 1001 voice items is offered"
+        );
+        assert_eq!(reads(), 1, "readiness reads the namespace once");
+
+        assert_eq!(
+            workgraph.disposition_after_worker_turn(&oldest).await,
+            Ok(WorkItemDisposition::ReleasedReady)
+        );
+        assert_eq!(reads(), 2, "classification reads the namespace once");
     }
 
     /// #1820 follow-up: the four simple statuses come from the item alone. A

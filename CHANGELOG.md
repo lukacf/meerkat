@@ -946,12 +946,19 @@ them.
   not a break.
 
 - `meerkat-workgraph`, `meerkat-contracts`: WorkGraph reads report their cut
-  (see Added). `WorkGraphSnapshot` and `WorkGraphItemsResponse`
-  (meerkat-workgraph, re-exported by `meerkat`) and `WorkItemsResult`
-  (meerkat-contracts) gain the public fields `total_items: Option<usize>` and
-  `truncated: Option<bool>`, so code that builds one of them literally must
-  set them. Serde reads a payload without them as `None` (a server before
-  this release) and writes nothing for `None`.
+  and page with a cursor (see Added). `WorkGraphSnapshot` and
+  `WorkGraphItemsResponse` (meerkat-workgraph, re-exported by `meerkat`) and
+  `WorkItemsResult` (meerkat-contracts) gain the public fields
+  `total_items: Option<usize>`, `truncated: Option<bool>`,
+  `next_cursor: Option<String>`, `anchor_event_seq: Option<i64>` and
+  `changed_since_anchor: Option<bool>`; `WorkGraphEventsResponse` and
+  `WorkEventsResult` gain `truncated: Option<bool>`,
+  `next_after_seq: Option<i64>` and `event_high_water_mark: Option<i64>`; and
+  the filters `WorkItemFilter`, `ReadyWorkFilter` and
+  `WorkGraphSnapshotFilter` gain `cursor: Option<String>`. Code that builds
+  one of them literally must set them; a filter literal that ends with
+  `..Default::default()` keeps compiling. Serde reads a payload without them
+  as `None` (a server before this release) and writes nothing for `None`.
 
 - Behaviour-only (not measured by the gate): `meerkat-workgraph`:
   `WorkGraphService::list` and `snapshot` return the most recently updated
@@ -1902,6 +1909,39 @@ them.
   with `--json` carry them. A result without them comes from an older server
   and may still have been cut.
 
+- `meerkat-workgraph`: WorkGraph list, ready and snapshot reads page with a
+  cursor. A page that ended early names `next_cursor`, an opaque, versioned
+  string (`wg1.` and base64url) that continues the same read when passed back
+  as `cursor`: on `WorkItemFilter`, `ReadyWorkFilter` and
+  `WorkGraphSnapshotFilter`, the `workgraph_list`, `workgraph_ready` and
+  `workgraph_snapshot` tools, `workgraph/list`, `ready` and `snapshot`, the
+  REST `cursor` query parameter of `GET /workgraph/items`, `/workgraph/ready`
+  and `/workgraph/snapshot`, and `rkat workgraph list`, `ready` and
+  `snapshot --cursor`. The continuation returns the rows strictly after the
+  last row's order key in the read's own order, so rows never shift between
+  pages. A cursor that does not decode, has another version or belongs to
+  another read is invalid input (`invalid_arguments`, `INVALID_PARAMS`, 400);
+  it is not authority, since the namespace grant scopes every page. Every
+  page reports `anchor_event_seq`, the event ledger's high-water mark when
+  the walk began, and `changed_since_anchor`; the events after the anchor
+  name every item a walk can have missed. A snapshot continuation carries
+  the edges from its items to the items before the cursor, so a walk sees
+  each edge between the items it returned once. `WorkGraphService::events_page`
+  returns the events with `truncated`, `next_after_seq` and
+  `event_high_water_mark` (`WorkGraphEventsResponse`); the `workgraph_events`
+  tool, `workgraph/events`, REST `GET /workgraph/events` and
+  `rkat workgraph events` return it, and `events` keeps its signature. The
+  CLI text ends with `N of M, more with --cursor <c>` or
+  `more with --after-seq <n>`.
+
+- `meerkat-workgraph`: `WorkGraphService::snapshot_uncut` returns one
+  observation with every item a snapshot filter selects, built from the
+  snapshot body with no `limit` cut and no cursor (it ignores both). It is
+  for trusted in-process callers that need the whole selection in one
+  consistent read, such as live delegation scheduling; no tool, RPC method,
+  REST route, CLI command or Meta method offers it, and those keep the
+  bounded pages.
+
 - `meerkat-core`: a compaction retires the body of every instruction
   activation row that a later activation row of its key follows.
   `SessionDocumentMachine` decides which rows; the newest row of every key
@@ -2435,9 +2475,18 @@ them.
   history. Its scheduling snapshots read 100 voice items, terminal ones
   included, least recently updated first, so past 100 voice items a new item
   was never offered (the channel's queue stalled) and a worker's item failed
-  classification as missing from its namespace. They now read the 1,000 most
-  recently updated voice items. Once a cut leaves older voice items out,
-  they log at most one warning per voice request, with the voice item count.
+  classification as missing from its namespace. They now read every voice
+  item in one uncut namespace observation
+  (`WorkGraphService::snapshot_uncut`), so an open voice item is offered and
+  a blocker is named however many voice items the mob holds.
+
+- `meerkat-workgraph`: the `WorkGraphStore::list_public_events` default
+  fills its page with public events. It read one batch of `limit` events and
+  then dropped the execution events, so on a store that keeps the default an
+  events read could come back short while public events remained. It now
+  pages through `list_events` until it holds `limit` public events or the
+  ledger ends. The trait says that a store which serves pages should
+  override it and `latest_event_seq`, as the built-in stores do.
 
 ### Upgrade notes
 

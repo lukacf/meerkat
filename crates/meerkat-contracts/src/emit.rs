@@ -1198,6 +1198,7 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
                 rest_query_parameter("labels", string_array()),
                 rest_query_parameter("include_terminal", boolean()),
                 rest_query_parameter("limit", integer()),
+                rest_query_parameter("cursor", string()),
             ],
             "/workgraph/items/{id}" => vec![
                 rest_query_parameter("realm_id", string()),
@@ -1208,6 +1209,7 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
                 rest_query_parameter("namespace", string()),
                 rest_query_parameter("labels", string_array()),
                 rest_query_parameter("limit", integer()),
+                rest_query_parameter("cursor", string()),
             ],
             "/workgraph/events" => vec![
                 rest_query_parameter("realm_id", string()),
@@ -2570,6 +2572,7 @@ mod tests {
             "labels",
             "include_terminal",
             "limit",
+            "cursor",
         ] {
             assert!(
                 workgraph_item_query_names.contains(expected),

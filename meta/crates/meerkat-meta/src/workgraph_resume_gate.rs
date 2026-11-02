@@ -47,23 +47,30 @@
 //! and was taken by another worker while it was down. It holds no claim any
 //! more, so the gate cannot see the move and the run continues. Its later
 //! WorkGraph writes are still revision-checked and conflict.
+//!
+//! The claim scan pages through every open item with the WorkGraph list
+//! cursor and does not use the pages' `changed_since_anchor`. A claimed item
+//! that a write moves ahead of the cursor before the scan reaches it is not
+//! seen, so the run continues, as in the known limit, and its later writes
+//! conflict on revision. An item comes back twice only after the store clock
+//! moved back; the scan then keeps the newest claimed sighting.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use chrono::{DateTime, Utc};
 use meerkat::{
     AttentionBindingRequest, AttentionContextProjection, ObserveLeaseExpiryRequest,
     WorkAttentionTarget, WorkClaim, WorkGraphError, WorkGraphService, WorkItem, WorkItemFilter,
-    WorkOwnerKey, WorkStatus,
+    WorkItemId, WorkOwnerKey, WorkStatus,
 };
 use meerkat_core::SessionId;
 use meerkat_core::lifecycle::RunId;
 
-/// How many non-terminal items the claim scan reads: the WorkGraph's
-/// largest list page. A realm with more open items is scanned up to here,
-/// with a warning.
-const CLAIM_SCAN_LIMIT: usize = 1000;
+/// How many non-terminal items one page of the claim scan reads: the
+/// WorkGraph's largest list page. The scan pages through every open item
+/// with the list cursor.
+const CLAIM_SCAN_PAGE: usize = 1000;
 
 /// How many superseded runs the gate remembers. A superseded run is settled
 /// and never resumed again, so only the attempts of a resume still in
@@ -332,7 +339,8 @@ impl WorkGraphResumeGate {
         Ok(ResumeCheck::Continue)
     }
 
-    /// The run named no item: every claim the worker holds decides.
+    /// The run named no item: every claim the worker holds decides. The scan
+    /// pages through every open item with the list cursor.
     async fn decide_by_claims(
         &self,
         keys: &WorkerKeys<'_>,
@@ -341,28 +349,40 @@ impl WorkGraphResumeGate {
         if keys.member.is_none() && keys.session.is_none() {
             return Ok(ResumeCheck::Continue);
         }
-        let items = self
-            .service
-            .list(WorkItemFilter {
-                limit: Some(CLAIM_SCAN_LIMIT),
-                ..WorkItemFilter::default()
-            })
-            .await?;
-        if items.len() >= CLAIM_SCAN_LIMIT {
-            tracing::warn!(
-                realm = self.service.default_realm_id(),
-                limit = CLAIM_SCAN_LIMIT,
-                "durable resume gate: the realm has at least {CLAIM_SCAN_LIMIT} open items; \
-                 claims beyond the first page are not checked"
-            );
+        // The worker's claimed items by id. A walk returns an item twice only
+        // when a write moved it back past the cursor; the newer revision
+        // decides.
+        let mut held = BTreeMap::<WorkItemId, WorkItem>::new();
+        let mut cursor = None;
+        loop {
+            let page = self
+                .service
+                .list_page(WorkItemFilter {
+                    limit: Some(CLAIM_SCAN_PAGE),
+                    cursor,
+                    ..WorkItemFilter::default()
+                })
+                .await?;
+            // A page that took no item cannot move the walk on.
+            let advanced = !page.items.is_empty();
+            for item in page.items {
+                let claimed = item
+                    .claim
+                    .as_ref()
+                    .is_some_and(|claim| keys.names(&claim.owner.key));
+                if claimed
+                    && held
+                        .get(&item.id)
+                        .is_none_or(|seen| seen.revision < item.revision)
+                {
+                    held.insert(item.id.clone(), item);
+                }
+            }
+            match page.next_cursor {
+                Some(next) if advanced => cursor = Some(next),
+                _ => break,
+            }
         }
-        let held = items
-            .iter()
-            .filter_map(|item| {
-                let claim = item.claim.as_ref()?;
-                keys.names(&claim.owner.key).then_some((item, claim))
-            })
-            .collect::<Vec<_>>();
         if held.is_empty() {
             return Ok(ResumeCheck::Continue);
         }
@@ -370,7 +390,10 @@ impl WorkGraphResumeGate {
         // Observe every lapsed claim, not only the first: the superseded run
         // gives all of them up.
         let mut verdict = ResumeCheck::Continue;
-        for (item, claim) in held {
+        for item in held.values() {
+            let Some(claim) = item.claim.as_ref() else {
+                continue;
+            };
             if let Some(lapsed) = self.lapsed_claim(item, claim, now, run).await
                 && verdict == ResumeCheck::Continue
             {
@@ -950,6 +973,31 @@ mod tests {
             .await
             .expect("read the live item");
         assert!(kept.claim.is_some(), "a live claim is left alone");
+    }
+
+    /// A lapsed claim on an item past the first page of the claim scan still
+    /// supersedes the run: the scan reads every page.
+    #[tokio::test]
+    async fn resume_gate_checks_claims_past_the_first_page() {
+        let service = service();
+        let worker = Worker::named(WORKER);
+        let lapsed = plain_item(&service).await;
+        claim(&service, &lapsed, member_key(WORKER), lapsing_soon()).await;
+        // A full page of newer open items (the WorkGraph maximum, 1000) puts
+        // the claimed item on the second page.
+        for _ in 0..1000 {
+            plain_item(&service).await;
+        }
+        let_the_lease_lapse().await;
+
+        let gate = WorkGraphResumeGate::new(service.clone());
+        let check = gate.check_worker(worker.resuming(None)).await;
+        assert!(superseded_reason(&check).contains("lapsed"), "{check:?}");
+        let after = service
+            .get(None, None, lapsed.id.clone())
+            .await
+            .expect("read the item");
+        assert_eq!(after.claim, None, "the lapsed claim is observed");
     }
 
     #[tokio::test]

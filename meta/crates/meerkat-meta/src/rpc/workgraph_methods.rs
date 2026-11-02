@@ -623,11 +623,11 @@ pub(crate) async fn handle_workgraph_method(
         }
         "meta/workgraph/events" => {
             let filter: WorkGraphEventFilter = parse_request(object)?;
-            let events = service
-                .events(filter)
+            let page = service
+                .events_page(filter)
                 .await
                 .map_err(workgraph_error_to_rpc)?;
-            Ok(serde_json::json!({ "events": events }))
+            Ok(to_result_value(&page))
         }
         "meta/workgraph/facts" => {
             let request: FactsParams = parse_request(object)?;

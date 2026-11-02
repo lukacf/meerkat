@@ -708,8 +708,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   server reports complete no longer shows "the runtime holds more", which
   the panel now says only for a runtime that sends no `truncated`.
 
+- `meta/workgraph/list`, `meta/workgraph/ready` and `meta/workgraph/snapshot`
+  page with Meerkat 0.9.9's cursor: a page that ended early names a
+  `next_cursor` to pass back as `cursor` for the next page, and every page
+  reports `anchor_event_seq` and `changed_since_anchor`. A cursor of another
+  method, of another version, or one that does not decode is `-32602`.
+  `meta/workgraph/events` returns the events with `truncated`,
+  `next_after_seq` and `event_high_water_mark`.
+
 ### Fixed
 
+- The durable resume gate checks every WorkGraph claim a resumed worker
+  holds: it pages through every open item with the WorkGraph list cursor.
+  It read one page of 1,000 open items and warned that a claim past it went
+  unchecked, so a lapsed claim on an older item let the run resume; it now
+  supersedes the run as a lapsed claim on a newer item does.
 - `POST /console/send` on a Console with no local runtime records the
   members of its aggregator's runtimes before it decides the send, as every
   route with a runtime does: a send to a spawned member or a side chat is

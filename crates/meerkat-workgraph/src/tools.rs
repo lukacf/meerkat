@@ -7,8 +7,7 @@ use crate::store::WorkGraphEventFilter;
 use crate::types::{
     AddEvidenceRequest, AttentionReassignRequest, ClaimWorkItemRequest, CloseWorkItemRequest,
     LinkWorkItemsRequest, PolicyEscalateRequest, ReadyWorkFilter, ReleaseWorkItemRequest,
-    UpdateWorkItemRequest, WorkGraphItemsResponse, WorkGraphSnapshotFilter, WorkItemFilter,
-    WorkItemId, WorkNamespace,
+    UpdateWorkItemRequest, WorkGraphSnapshotFilter, WorkItemFilter, WorkItemId, WorkNamespace,
 };
 use crate::{CreateWorkItemRequest, WorkGraphError, WorkGraphService};
 
@@ -121,10 +120,18 @@ impl WorkGraphToolContract {
         match self {
             Self::Create => "Create a durable WorkGraph item.",
             Self::Get => "Read one WorkGraph item.",
-            Self::List => "List WorkGraph items.",
-            Self::Ready => "List ready, claimable WorkGraph items.",
-            Self::Snapshot => "Read a WorkGraph observability snapshot.",
-            Self::Events => "Read WorkGraph event history.",
+            Self::List => {
+                "List WorkGraph items, most recently updated first. A result that ends early has `truncated: true` and a `next_cursor` to pass back as `cursor`."
+            }
+            Self::Ready => {
+                "List ready, claimable WorkGraph items by priority (highest first), then age (oldest first). A result that ends early has `truncated: true` and a `next_cursor` to pass back as `cursor`."
+            }
+            Self::Snapshot => {
+                "Read a WorkGraph observability snapshot, most recently updated items first. A snapshot that ends early has `truncated: true` and a `next_cursor` to pass back as `cursor`."
+            }
+            Self::Events => {
+                "Read WorkGraph event history in sequence order. A result that ends early has `truncated: true` and a `next_after_seq` to pass back as `after_seq`."
+            }
             Self::Claim => "Claim a ready WorkGraph item with CAS revision checking.",
             Self::Release => "Release a claimed WorkGraph item.",
             Self::Update => "Update non-terminal WorkGraph item fields.",
@@ -403,11 +410,11 @@ pub(crate) async fn handle_workgraph_tools_call(
         }
         WorkGraphToolContract::Events => {
             let filter: WorkGraphEventFilterParams = parse(arguments)?;
-            service
-                .events(filter.into())
+            let page = service
+                .events_page(filter.into())
                 .await
-                .map(|events| json!({ "events": events }))
-                .map_err(map_error)
+                .map_err(map_error)?;
+            page_value(&page)
         }
     }
 }
@@ -457,9 +464,9 @@ impl From<WorkGraphEventFilterParams> for WorkGraphEventFilter {
     }
 }
 
-/// A list or ready page in the shape RPC, REST and Meta send: the rows,
-/// then `total_items` and `truncated`, each omitted when absent.
-fn page_value(page: &WorkGraphItemsResponse) -> Result<Value, WorkGraphToolError> {
+/// A list, ready or events page in the shape RPC, REST and Meta send: the
+/// rows, then the page fields, each omitted when absent.
+fn page_value<T: Serialize>(page: &T) -> Result<Value, WorkGraphToolError> {
     serde_json::to_value(page).map_err(|err| {
         WorkGraphToolError::new(
             WorkGraphToolErrorCode::InternalError,
@@ -704,6 +711,7 @@ fn list_schema() -> Value {
             "limit".to_string(),
             json!({ "type": "integer", "minimum": 1 }),
         ),
+        ("cursor".to_string(), json!({ "type": "string" })),
     ]);
     object(properties, &[])
 }
@@ -719,6 +727,7 @@ fn ready_schema() -> Value {
             "limit".to_string(),
             json!({ "type": "integer", "minimum": 1 }),
         ),
+        ("cursor".to_string(), json!({ "type": "string" })),
     ]);
     object(properties, &[])
 }

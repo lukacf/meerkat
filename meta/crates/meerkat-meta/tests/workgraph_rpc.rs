@@ -219,6 +219,46 @@ async fn unknown_workgraph_method_is_method_not_found() {
 // Item lifecycle
 // ---------------------------------------------------------------------------
 
+/// `meta/workgraph/list` continues a walk from the `next_cursor` its
+/// previous page returned.
+#[tokio::test(flavor = "multi_thread")]
+async fn meta_workgraph_list_cursor_round_trip() {
+    let runtime = build_runtime().await;
+    let mut created = Vec::new();
+    for title in ["first", "second", "third"] {
+        let item = create_item(&runtime, title).await;
+        created.push(item["id"].as_str().expect("item id").to_string());
+    }
+    created.sort();
+
+    let response = rpc(&runtime, "meta/workgraph/list", json!({ "limit": 2 })).await;
+    let first = result(&response).clone();
+    assert_eq!(first["truncated"], json!(true), "{first}");
+    let cursor = first["next_cursor"]
+        .as_str()
+        .unwrap_or_else(|| panic!("a truncated page names its next cursor: {first}"))
+        .to_string();
+    let response = rpc(
+        &runtime,
+        "meta/workgraph/list",
+        json!({ "limit": 2, "cursor": cursor }),
+    )
+    .await;
+    let second = result(&response).clone();
+    assert_eq!(second["truncated"], json!(false), "{second}");
+    assert!(second.get("next_cursor").is_none(), "{second}");
+    let mut walked = first["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .chain(second["items"].as_array().unwrap())
+        .map(|item| item["id"].as_str().unwrap().to_string())
+        .collect::<Vec<_>>();
+    walked.sort();
+    assert_eq!(walked, created);
+    runtime.mob_handle().stop().await.expect("stop");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn item_lifecycle_end_to_end() {
     let runtime = build_runtime().await;

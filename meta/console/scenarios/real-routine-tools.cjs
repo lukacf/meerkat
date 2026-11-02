@@ -15,7 +15,7 @@ function expectedTools(runId) {
     ["files", "list_files", {}, "late-review.txt\nrelease-notes.txt\n", false],
     ["missing", "read_file", { path: "missing.txt" }, "Cannot read missing.txt: NotFound", true],
     ["late", "read_file", { path: "late-review.txt" }, "Late review: all release artifacts match.\n", false],
-    ["ready", "workgraph_ready", {}, '{"items":[],"total_items":0,"truncated":false}', false],
+    ["ready", "workgraph_ready", {}, '{"changed_since_anchor":false,"items":[],"total_items":0,"truncated":false}', false],
   ].map(([step, name, args, result, error]) => ({ id: `fixture-${runId}-${step}`, step, name, args, result, error }));
 }
 function textContent(value) { return typeof value === "string" ? value : (value || []).filter(block => block.type === "text").map(block => block.text).join(""); }

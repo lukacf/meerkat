@@ -3299,6 +3299,10 @@ enum WorkGraphCommands {
         /// Maximum number of items (default 100, at most 1000)
         #[arg(long)]
         limit: Option<usize>,
+        /// Continue a walk: the cursor the previous page printed (its
+        /// `next_cursor`)
+        #[arg(long)]
+        cursor: Option<String>,
         /// Output as JSON
         #[arg(long)]
         json: bool,
@@ -3327,6 +3331,10 @@ enum WorkGraphCommands {
         /// Maximum number of items (default 100, at most 1000)
         #[arg(long)]
         limit: Option<usize>,
+        /// Continue a walk: the cursor the previous page printed (its
+        /// `next_cursor`)
+        #[arg(long)]
+        cursor: Option<String>,
         /// Output as JSON
         #[arg(long)]
         json: bool,
@@ -3354,6 +3362,10 @@ enum WorkGraphCommands {
         /// Maximum number of items (default 100, at most 1000)
         #[arg(long)]
         limit: Option<usize>,
+        /// Continue a walk: the cursor the previous page printed (its
+        /// `next_cursor`)
+        #[arg(long)]
+        cursor: Option<String>,
         /// Output as JSON
         #[arg(long)]
         json: bool,
@@ -10533,6 +10545,7 @@ async fn handle_workgraph_command(
             labels,
             include_terminal,
             limit,
+            cursor,
             json,
         } => {
             let page = service
@@ -10544,6 +10557,7 @@ async fn handle_workgraph_command(
                     labels,
                     include_terminal,
                     limit,
+                    cursor,
                 })
                 .await?;
             print_workgraph_items(page, json)
@@ -10571,6 +10585,7 @@ async fn handle_workgraph_command(
             namespace,
             labels,
             limit,
+            cursor,
             json,
         } => {
             let page = service
@@ -10579,6 +10594,7 @@ async fn handle_workgraph_command(
                     namespace: parse_work_namespace(namespace)?,
                     labels,
                     limit,
+                    cursor,
                 })
                 .await?;
             print_workgraph_items(page, json)
@@ -10590,6 +10606,7 @@ async fn handle_workgraph_command(
             labels,
             include_terminal,
             limit,
+            cursor,
             json,
         } => {
             let snapshot = service
@@ -10601,6 +10618,7 @@ async fn handle_workgraph_command(
                     labels,
                     include_terminal,
                     limit,
+                    cursor,
                 })
                 .await?;
             if json {
@@ -10634,6 +10652,13 @@ async fn handle_workgraph_command(
                             .join(", ")
                     );
                 }
+                print_workgraph_page_footer(
+                    snapshot.items.len(),
+                    snapshot.total_items,
+                    snapshot.next_cursor.as_deref(),
+                    snapshot.changed_since_anchor,
+                    snapshot.anchor_event_seq,
+                );
             }
             Ok(())
         }
@@ -10644,8 +10669,8 @@ async fn handle_workgraph_command(
             limit,
             json,
         } => {
-            let events = service
-                .events(meerkat::WorkGraphEventFilter {
+            let page = service
+                .events_page(meerkat::WorkGraphEventFilter {
                     realm_id: None,
                     namespace: parse_work_namespace(namespace)?,
                     all_namespaces,
@@ -10654,12 +10679,15 @@ async fn handle_workgraph_command(
                 })
                 .await?;
             if json {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&serde_json::json!({ "events": events }))?
-                );
+                println!("{}", serde_json::to_string_pretty(&page)?);
             } else {
-                print_workgraph_events(&events);
+                print_workgraph_events(&page.events);
+                if let Some(next_after_seq) = page.next_after_seq {
+                    println!(
+                        "{} events, more with --after-seq {next_after_seq}",
+                        page.events.len()
+                    );
+                }
             }
             Ok(())
         }
@@ -10858,14 +10886,14 @@ fn parse_work_namespace(
 }
 
 /// `--json` prints the page as the service returns it: the rows, then
-/// `total_items` and `truncated`.
+/// `total_items`, `truncated`, `next_cursor` and the walk's anchor. The text
+/// ends with the continuation when the page ended early.
 fn print_workgraph_items(page: meerkat::WorkGraphItemsResponse, json: bool) -> anyhow::Result<()> {
     if json {
         println!("{}", serde_json::to_string_pretty(&page)?);
         return Ok(());
     }
-    let items = page.items;
-    if items.is_empty() {
+    if page.items.is_empty() {
         println!("No WorkGraph items found.");
         return Ok(());
     }
@@ -10874,7 +10902,7 @@ fn print_workgraph_items(page: meerkat::WorkGraphItemsResponse, json: bool) -> a
         "ID", "STATUS", "PRIORITY", "UPDATED"
     );
     println!("{}", "-".repeat(110));
-    for item in items {
+    for item in &page.items {
         println!(
             "{:<42} {:<12} {:<8} {:<18} {}",
             item.id,
@@ -10884,7 +10912,39 @@ fn print_workgraph_items(page: meerkat::WorkGraphItemsResponse, json: bool) -> a
             item.title
         );
     }
+    print_workgraph_page_footer(
+        page.items.len(),
+        page.total_items,
+        page.next_cursor.as_deref(),
+        page.changed_since_anchor,
+        page.anchor_event_seq,
+    );
     Ok(())
+}
+
+/// The text end of a list, ready or snapshot page: when the page ended early,
+/// how many rows it shows of how many matched and the cursor that continues
+/// it; when the WorkGraph changed since the walk began, where to read what
+/// changed.
+fn print_workgraph_page_footer(
+    shown: usize,
+    total_items: Option<usize>,
+    next_cursor: Option<&str>,
+    changed_since_anchor: Option<bool>,
+    anchor_event_seq: Option<i64>,
+) {
+    if let Some(cursor) = next_cursor {
+        match total_items {
+            Some(total) => println!("{shown} of {total}, more with --cursor {cursor}"),
+            None => println!("{shown} shown, more with --cursor {cursor}"),
+        }
+    }
+    if changed_since_anchor == Some(true) {
+        println!(
+            "The WorkGraph changed since this walk began: rkat workgraph events --after-seq {} lists the changes.",
+            anchor_event_seq.unwrap_or(0)
+        );
+    }
 }
 
 fn print_workgraph_item(item: &meerkat::WorkItem) {
@@ -29818,6 +29878,27 @@ default_model = "gemma"
                 || err.to_string().contains("Found argument '--full'"),
             "unexpected parse error for --full: {err}"
         );
+    }
+
+    #[test]
+    fn cli_workgraph_list_accepts_cursor() {
+        for read in ["list", "ready", "snapshot"] {
+            let cli =
+                Cli::try_parse_from(["rkat", "workgraph", read, "--cursor", "wg1.e30", "--json"])
+                    .unwrap_or_else(|error| {
+                        panic!("rkat workgraph {read} --cursor should parse: {error}")
+                    });
+            let cursor = match cli.command.expect("test invocation parses a subcommand") {
+                Commands::WorkGraph {
+                    command:
+                        WorkGraphCommands::List { cursor, .. }
+                        | WorkGraphCommands::Ready { cursor, .. }
+                        | WorkGraphCommands::Snapshot { cursor, .. },
+                } => cursor,
+                _ => unreachable!("expected rkat workgraph {read}"),
+            };
+            assert_eq!(cursor.as_deref(), Some("wg1.e30"), "{read}");
+        }
     }
 
     #[test]

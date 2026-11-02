@@ -921,13 +921,35 @@ fn workgraph_events_turn(recorded: &RecordedTurn<'_>) -> Result<Turn, String> {
     )])? {
         return Ok(turn);
     }
-    if recorded.result("events-empty")? != Some(json!({"events": []})) {
+    if !recorded
+        .result("events-empty")?
+        .as_ref()
+        .is_some_and(is_exactly_empty_event_page)
+    {
         return Err("event poll after the observed watermark must be exactly empty".into());
     }
     Ok(Turn::Text(format!(
         "## WorkGraph event review complete\n\nThe runtime returned the same recorded events for item `{}` in both overlapping polls. No newer events were returned after sequence `{after_seq}`.",
         item.id,
     )))
+}
+
+/// An events page with no event that did not end early. Besides `events`
+/// it carries only `truncated` (false) and the ledger's
+/// `event_high_water_mark`.
+fn is_exactly_empty_event_page(value: &Value) -> bool {
+    value.as_object().is_some_and(|page| {
+        page.get("events")
+            .and_then(Value::as_array)
+            .is_some_and(Vec::is_empty)
+            && page.get("truncated") == Some(&Value::Bool(false))
+            && page.keys().all(|key| {
+                matches!(
+                    key.as_str(),
+                    "events" | "truncated" | "event_high_water_mark"
+                )
+            })
+    })
 }
 
 fn workgraph_event_watermark(value: &Value, item_id: &str) -> Result<i64, String> {
@@ -1733,7 +1755,11 @@ mod tests {
         assert_eq!(empty[0].id, scenario.call_id("events-empty"));
         assert_eq!(empty[0].name, "workgraph_events");
         assert_eq!(empty[0].args, json!({"limit": 100, "after_seq": 23}));
-        messages.push(result(&scenario, "events-empty", json!({"events": []})));
+        messages.push(result(
+            &scenario,
+            "events-empty",
+            json!({"events": [], "truncated": false, "event_high_water_mark": 23}),
+        ));
         let Turn::Text(text) = scenario_turn(&scenario, &messages).unwrap() else {
             panic!("completed polling must produce an observed summary");
         };
@@ -1792,7 +1818,12 @@ mod tests {
         );
         messages.pop();
         messages.push(result(&scenario, "events-repeat", events.clone()));
-        for invalid in [events, json!({}), json!({"events": [], "unexpected": true})] {
+        for invalid in [
+            events,
+            json!({}),
+            json!({"events": [], "truncated": false, "unexpected": true}),
+            json!({"events": [], "truncated": true, "next_after_seq": 23}),
+        ] {
             messages.push(result(&scenario, "events-empty", invalid));
             assert!(
                 scenario_turn(&scenario, &messages)

@@ -357,6 +357,9 @@ depend on it.
   are the audit rows; it is read on its first use in a process, never at open.
   A grant's lifecycle change and its audit row commit in one batch.
 - Chunks of large values are scopes of their own.
+- Durable decisions are not kept in the host store: a host that supplies its
+  own stores keeps them in `approval_decisions.sqlite3` under its store path,
+  as it keeps `approvals.json`.
 
 A realm therefore holds a few scopes per session and per mob, and listing
 and the bulk load at open read every head once.

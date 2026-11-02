@@ -488,7 +488,13 @@ Rust host API changes in 0.9.4 (hosts that embed the crates):
   attachment, an actor materialization), so compare uses for equality only;
   `observe_unregister_session_registration_if_use_unchanged` starts or joins
   the exact unregister only while the use is unchanged
-  (`RuntimeSessionUnregisterUseAdmission`: `Admitted`, `Changed`);
+  (`RuntimeSessionUnregisterUseAdmission`: `Admitted`, `Changed`); since
+  0.9.9 `RuntimeSessionUnregisterObserver::queued_inputs` reads the
+  disposition the machine recorded for the unregister (a joined one keeps
+  its own; a keep is recorded as a stop for a registration that served live
+  work), and
+  `unregister_session_registration_until_terminal_reporting_queued_inputs_if_current`
+  answers it on completion;
   `reload_required_registration_settlement_if_current`
   (`ReloadRequiredRegistrationUseSettlement`: `NotCurrent`, `NotDegraded`,
   `Discarded { successor, successor_use }`, `Changed`) discards a

@@ -170,6 +170,17 @@ stops: `UnregisterQueuedInputs::default()` is `Stop`. The suspend does not
 wait for the round, so a long tool call does not hold up a shutdown, and a
 process killed during it leaves the run as a crash would.
 
+The machine records the disposition each unregister carries out, which can
+differ from the one asked: a call that joins an unregister already in
+progress keeps the disposition that unregister began with, a `Keep` is
+recorded as a stop for a registration that served live work, and an unserved
+attachment's unregister records a stop for a requeue. Since 0.9.9 the caller
+reads the recorded disposition from its own answer, without polling:
+`RuntimeSessionUnregisterObserver::queued_inputs` (`None` until the machine
+began the unregister), or
+`MeerkatMachine::unregister_session_registration_until_terminal_reporting_queued_inputs_if_current`
+for the until-terminal unregister.
+
 A host that boots over a store another host serves, holds its members' run
 starts and must hand the store back unchanged shuts down with
 `with_queued_inputs(QueuedInputsOnShutdown::Keep)`, which unregisters each

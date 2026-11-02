@@ -69,7 +69,7 @@ may apply explicit presets of their own.
 | `mob_profile_list_sources` | Mob profile | Conditional | profile store + snapshot provider | List visible tool sources for profile authoring |
 | `meerkat_schedule_create` | Schedule | Yes | `schedule` | Create a new schedule |
 | `meerkat_schedule_get` | Schedule | Yes | `schedule` | Read one schedule |
-| `meerkat_schedule_list` | Schedule | Yes | `schedule` | List active and paused schedules as a page of summaries (`limit`, `cursor`) |
+| `meerkat_schedule_list` | Schedule | Yes | `schedule` | List active and paused schedules as a page of summaries (`limit`, `cursor`; filters `phase`, `target_id`) |
 | `meerkat_schedule_update` | Schedule | Yes | `schedule` | Update trigger, target, or policies |
 | `meerkat_schedule_pause` | Schedule | Yes | `schedule` | Pause a schedule |
 | `meerkat_schedule_resume` | Schedule | Yes | `schedule` | Resume a paused schedule |
@@ -666,7 +666,7 @@ Schedule tools are the agent-facing scheduler surface. They are distinct from th
 |------|---------|
 | `meerkat_schedule_create` | Create a durable schedule with trigger, target, and policies |
 | `meerkat_schedule_get` | Read one schedule by `schedule_id`: the full trigger, target, policies and planning state |
-| `meerkat_schedule_list` | List active and paused schedules in the active realm, one page of summaries at a time (50 by default, at most 200: a larger `limit` returns 200; `cursor` from `page.next_cursor`); each summary carries the first 160 characters of the action text |
+| `meerkat_schedule_list` | List active and paused schedules in the active realm, one page of summaries at a time (50 by default, at most 200: a larger `limit` returns 200; `cursor` from `page.next_cursor`; `phase` and `target_id` list only matching schedules); each summary carries the first 160 characters of the action text |
 | `meerkat_schedule_update` | Update trigger, target, policies, or labels |
 | `meerkat_schedule_pause` | Pause a schedule |
 | `meerkat_schedule_resume` | Resume a paused schedule |

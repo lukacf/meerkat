@@ -4222,7 +4222,22 @@ mod tests {
             env: &ResolverEnvironment,
             factory: CopilotRouteClientFactory,
         ) -> Arc<dyn meerkat_llm_core::LlmClient> {
-            let resolved = runtime.resolve(binding, env).await.unwrap();
+            try_routed_session(runtime, binding, env, factory)
+                .await
+                .unwrap()
+        }
+
+        /// The provider seam of an agent build: resolve the session's auth on
+        /// `runtime`, then build its routed client over `factory`'s adapter.
+        /// A resolution that fails is returned; the routed client must build
+        /// once the resolution succeeded.
+        async fn try_routed_session(
+            runtime: &Arc<CopilotRuntime>,
+            binding: &ValidatedBinding,
+            env: &ResolverEnvironment,
+            factory: CopilotRouteClientFactory,
+        ) -> Result<Arc<dyn meerkat_llm_core::LlmClient>, ProviderAuthError> {
+            let resolved = runtime.resolve(binding, env).await?;
             let connection = meerkat_llm_core::provider_runtime::ResolvedConnection {
                 provider: Provider::OpenAI,
                 backend: binding.backend(),
@@ -4236,14 +4251,14 @@ mod tests {
                     ),
                 ),
             };
-            routed_client(
+            Ok(routed_client(
                 Arc::clone(runtime),
                 connection,
                 Provider::OpenAI,
                 "gpt-test".to_string(),
                 factory,
             )
-            .unwrap()
+            .expect("the routed client builds once its auth resolved"))
         }
 
         /// Which entry of the route's adapter a request reached.
@@ -4631,6 +4646,25 @@ mod tests {
                 }
             }
 
+            /// A turn as the agent loop runs it when the route changes: an
+            /// attempt that fails with the retryable
+            /// `AuthorizationRouteChanged` is prepared again on the route the
+            /// account now resolves, and sent again.
+            async fn turn_across_a_route_change(
+                &self,
+            ) -> Vec<Result<meerkat_llm_core::LlmEvent, meerkat_llm_core::LlmError>> {
+                let events = self.turn().await;
+                if matches!(
+                    events.as_slice(),
+                    [Err(
+                        meerkat_llm_core::LlmError::AuthorizationRouteChanged { .. }
+                    )]
+                ) {
+                    return self.turn().await;
+                }
+                events
+            }
+
             fn bearers(&self) -> Vec<String> {
                 self.bearers.lock().clone()
             }
@@ -4665,6 +4699,15 @@ mod tests {
 
             /// Resolve a session whose stand-in adapter answers `statuses`.
             async fn session(&self, statuses: impl IntoIterator<Item = u16>) -> RouteSession {
+                self.try_session(statuses).await.unwrap()
+            }
+
+            /// Build a session as an agent build does (resolution, then its
+            /// routed client), its stand-in adapter answering `statuses`.
+            async fn try_session(
+                &self,
+                statuses: impl IntoIterator<Item = u16>,
+            ) -> Result<RouteSession, ProviderAuthError> {
                 let statuses = Arc::new(Mutex::new(statuses.into_iter().collect::<VecDeque<_>>()));
                 let bearers = Arc::new(Mutex::new(Vec::new()));
                 let signed = Arc::clone(&bearers);
@@ -4679,10 +4722,11 @@ mod tests {
                         bearers: Arc::clone(&signed),
                     }))
                 });
-                RouteSession {
-                    client: routed_session(&self.runtime, &self.binding, &self.env, factory).await,
+                Ok(RouteSession {
+                    client: try_routed_session(&self.runtime, &self.binding, &self.env, factory)
+                        .await?,
                     bearers,
-                }
+                })
             }
 
             fn source_phase(&self) -> Option<meerkat_core::handles::AuthLeasePhase> {
@@ -5163,6 +5207,111 @@ mod tests {
                 ) && !retried(error),
                 "a later failure that is not transient must not be reported as the earlier outage: {error:?}"
             );
+            assert_eq!(transport.request_count(), 4);
+        }
+
+        #[tokio::test]
+        async fn a_session_builds_during_an_exchange_outage_before_any_token() {
+            let clock = TestClock::new();
+            let transport = Arc::new(ScriptedTransport::new([json_response(
+                503,
+                serde_json::json!({"message": "unavailable"}),
+            )]));
+            let account = RouteAccount::new(transport.clone(), &clock).await;
+
+            let session = account.try_session([]).await;
+            assert!(
+                session.is_ok(),
+                "a transient token exchange outage must not fail the session's build: {:?}",
+                session.as_ref().err()
+            );
+            assert_eq!(transport.request_count(), 1);
+            assert_eq!(
+                account.source_phase(),
+                Some(meerkat_core::handles::AuthLeasePhase::Valid),
+                "an outage marks nothing on the sign-in"
+            );
+        }
+
+        #[tokio::test]
+        async fn another_session_builds_during_an_exchange_outage_after_expiry() {
+            let clock = TestClock::new();
+            let transport = Arc::new(ScriptedTransport::new([
+                token_at("derived-one", clock.at(3600), 200),
+                models_response(),
+                json_response(503, serde_json::json!({"message": "unavailable"})),
+            ]));
+            let account = RouteAccount::new(transport.clone(), &clock).await;
+            let _first = account.session([]).await;
+
+            // The account's token has expired and the exchange is down.
+            clock.set(3700);
+            let second = account.try_session([]).await;
+            assert!(
+                second.is_ok(),
+                "a transient token exchange outage must not fail another session's build: {:?}",
+                second.as_ref().err()
+            );
+            assert_eq!(transport.request_count(), 3);
+        }
+
+        #[tokio::test]
+        async fn an_exchange_refusal_still_fails_the_build_and_marks_reauthorization() {
+            let clock = TestClock::new();
+            let transport = Arc::new(ScriptedTransport::new([json_response(
+                401,
+                serde_json::json!({"message": "Bad credentials"}),
+            )]));
+            let account = RouteAccount::new(transport.clone(), &clock).await;
+
+            let Err(error) = account.try_session([]).await else {
+                panic!("an exchange refusal must fail the build");
+            };
+            assert!(
+                matches!(
+                    error,
+                    ProviderAuthError::Auth(AuthError::UserReauthRequired)
+                ),
+                "{error:?}"
+            );
+            assert_eq!(
+                account.source_phase(),
+                Some(meerkat_core::handles::AuthLeasePhase::ReauthRequired)
+            );
+            assert_eq!(transport.request_count(), 1);
+        }
+
+        #[tokio::test]
+        async fn the_first_turn_after_an_exchange_outage_mints_and_succeeds() {
+            let clock = TestClock::new();
+            let transport = Arc::new(ScriptedTransport::new([
+                json_response(503, serde_json::json!({"message": "unavailable"})),
+                json_response(503, serde_json::json!({"message": "unavailable"})),
+                token_at("derived-one", clock.at(3600), 200),
+                models_response(),
+            ]));
+            let account = RouteAccount::new(transport.clone(), &clock).await;
+            let session = account.try_session([]).await;
+            assert!(
+                session.is_ok(),
+                "a transient token exchange outage must not fail the session's build: {:?}",
+                session.as_ref().err()
+            );
+            let session = session.unwrap();
+
+            // While the outage lasts, a turn fails with a retryable error.
+            let events = session.turn().await;
+            let [Err(error)] = events.as_slice() else {
+                panic!("the turn fails once: {events:?}");
+            };
+            assert!(retried(error), "{error:?}");
+            assert!(session.bearers().is_empty());
+
+            // Once the exchange answers, the turn mints a token, moves to
+            // the route the account's model list gives, and succeeds.
+            let events = session.turn_across_a_route_change().await;
+            assert!(events.is_empty(), "{events:?}");
+            assert_eq!(session.bearers(), ["Bearer derived-one"]);
             assert_eq!(transport.request_count(), 4);
         }
     }

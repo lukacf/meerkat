@@ -1004,6 +1004,33 @@ try {
 }
 ```
 
+### Quarantined mobs
+
+A call that addresses a quarantined mob (a persisted mob whose store did not
+restore; see [Quarantined mobs and degraded members](/guides/mobs#quarantined-mobs-and-degraded-members))
+rejects with `details` of kind `mob_quarantined`. `mobQuarantined(err)`
+returns a `MobQuarantinedRefusal` (`mobId`, `quarantineClass`, `retryable`,
+`cause`, `code`), or `undefined` for any other error. A `store_unavailable`
+mob is re-attempted by the next call that addresses it; repair the store of
+any other class, then call `mobRestoreRetry(mobId)`. `listQuarantinedMobs()`
+lists the quarantined mobs (`listMobs()` lists only the managed ones).
+`@rkat/web` exports `mobQuarantined` too.
+
+```typescript
+import { mobQuarantined } from "@rkat/sdk";
+
+try {
+  await client.mobStatus(mobId);
+} catch (err) {
+  const refusal = mobQuarantined(err);
+  if (refusal === undefined) throw err;
+  if (!refusal.retryable) {
+    // After repairing the store:
+    await client.mobRestoreRetry(refusal.mobId);
+  }
+}
+```
+
 ---
 
 ## Skills

@@ -6118,7 +6118,14 @@ async def test_wait_mob_members_carry_registration_refusal():
 @pytest.mark.asyncio
 @pytest.mark.parametrize("restore", ["startup_binding", "cleanup_delivery"])
 @pytest.mark.parametrize(
-    "cause", ["served_elsewhere", "hosting_unavailable", "durable_tail_unprovable"]
+    "cause",
+    [
+        "served_elsewhere",
+        "hosting_unavailable",
+        "durable_tail_unprovable",
+        "store_unavailable",
+        "store_unreadable",
+    ],
 )
 async def test_mob_member_status_surfaces_custody_deferred(restore, cause):
     client = MeerkatClient()

@@ -5659,6 +5659,43 @@ mod tests {
             assert!(first.bearers().is_empty(), "{:?}", first.bearers());
             assert_eq!(transport.request_count(), 4);
         }
+
+        #[tokio::test]
+        async fn a_session_restored_after_expiry_recovers_once_the_exchange_answers() {
+            let clock = TestClock::new();
+            let transport = Arc::new(ScriptedTransport::new([
+                token_at("derived-one", clock.at(3600), 200),
+                models_response(),
+                json_response(503, serde_json::json!({"message": "unavailable"})),
+                json_response(503, serde_json::json!({"message": "unavailable"})),
+                token_at("derived-two", clock.at(3700 + 3600), 200),
+                models_response(),
+            ]));
+            let account = RouteAccount::admitting_pending_limits(transport.clone(), &clock).await;
+            let _first = account.session([]).await;
+
+            // The account's token expired while the session was dormant, and
+            // the exchange is down when it is restored: it builds on the
+            // account's last known route.
+            clock.set(3700);
+            let restored = account.try_session([]).await;
+            assert!(restored.is_ok(), "{:?}", restored.as_ref().err());
+            let restored = restored.unwrap();
+
+            // While the outage lasts, a turn fails with a retryable error.
+            let events = restored.turn().await;
+            let [Err(error)] = events.as_slice() else {
+                panic!("the turn fails once: {events:?}");
+            };
+            assert!(retried(error), "{error:?}");
+
+            // Once the exchange answers, the turn mints a token and succeeds
+            // on the same route.
+            let events = restored.turn().await;
+            assert!(events.is_empty(), "{events:?}");
+            assert_eq!(restored.bearers(), ["Bearer derived-two"]);
+            assert_eq!(transport.request_count(), 6);
+        }
     }
 }
 

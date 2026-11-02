@@ -1173,6 +1173,50 @@ async fn changed_definition_refuses_instead_of_booting_stale() {
     }
 }
 
+/// A root mob whose stored state cannot be read fails the boot with the
+/// typed quarantine, never an untyped error: the boot names the class
+/// (`store_unreadable`, which needs a repair before a restart can pass) and
+/// the failure, and the store is kept as found.
+#[tokio::test]
+async fn a_root_mob_whose_store_cannot_be_read_fails_the_boot_quarantined() {
+    const MOB_ID: &str = "persistence-quarantined-root";
+    let temp = tempfile::tempdir().expect("temp dir");
+    let mob_path = temp.path().join("mob.sqlite3");
+    let session_root = temp.path().join("sessions");
+
+    let first = boot(&mob_path, &session_root, base_definition_for(MOB_ID))
+        .await
+        .expect("first bootstrap");
+    drop(first);
+
+    // The mob's creation event no longer decodes.
+    let connection = rusqlite::Connection::open(&mob_path).expect("open the mob store");
+    let changed = connection
+        .execute(
+            "UPDATE mob_events SET event_json = ?1 \
+             WHERE cursor = (SELECT MIN(cursor) FROM mob_events)",
+            [b"not an event".to_vec()],
+        )
+        .expect("corrupt the creation event");
+    assert_eq!(changed, 1, "the store held its creation event");
+    drop(connection);
+
+    match boot(&mob_path, &session_root, base_definition_for(MOB_ID)).await {
+        Err(MobRuntimeError::Mob(meerkat_mob::MobError::MobQuarantined {
+            mob_id, class, ..
+        })) => {
+            assert_eq!(mob_id.as_str(), MOB_ID);
+            assert_eq!(class, meerkat_mob::MobQuarantineClass::StoreUnreadable);
+        }
+        Err(other) => panic!("expected the typed quarantine, got: {other}"),
+        Ok(_) => panic!("a root mob whose store cannot be read booted"),
+    }
+    assert!(
+        std::fs::metadata(&mob_path).is_ok(),
+        "the quarantined store is kept as found"
+    );
+}
+
 /// A `lead` profile, optionally carrying keys the TOML parse warns about and
 /// ignores, one in each shape that warning takes: an unknown key on the profile
 /// table, and an unknown key under its `tools` table (`mob_tasks`, which configs

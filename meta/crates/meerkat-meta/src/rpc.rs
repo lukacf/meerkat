@@ -2500,6 +2500,19 @@ async fn handle_unified_rpc_json_inner(
                 result["broken_members"] =
                     crate::unified_runtime::http::broken_members_json(&broken_members);
             }
+            // Persisted child mobs whose stores did not restore: hosted
+            // here, kept quarantined, not running. A restore that failed as
+            // a whole is named instead of an empty list.
+            match runtime.quarantined_mobs().await {
+                Ok(quarantined) if quarantined.is_empty() => {}
+                Ok(quarantined) => {
+                    result["quarantined_mobs"] =
+                        crate::mob_handle_runtime::quarantined_mobs_json(&quarantined);
+                }
+                Err(error) => {
+                    result["quarantined_mobs_error"] = Value::String(error.to_string());
+                }
+            }
             // Principals the Console accepted a token without `exp` for:
             // the principal and the flag, never a token.
             if let Some(non_expiring) =

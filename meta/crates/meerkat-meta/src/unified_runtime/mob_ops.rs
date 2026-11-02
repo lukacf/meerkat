@@ -88,6 +88,17 @@ impl UnifiedRuntime {
         crate::mob_handle_runtime::broken_members_of(&self.mob_handle()).await
     }
 
+    /// The persisted child mobs whose stores did not restore, kept
+    /// quarantined: hosted here, not running, each with its class and the
+    /// failure its last restore attempt met. They do not fail the boot, and
+    /// `meta/status` lists them. See
+    /// [`crate::mob_handle_runtime::MobRuntime::quarantined_mobs`].
+    pub async fn quarantined_mobs(
+        &self,
+    ) -> Result<Vec<meerkat_mob_mcp::QuarantinedMob>, meerkat_mob::MobError> {
+        self.mob_runtime().quarantined_mobs().await
+    }
+
     /// Access the underlying `MobRuntime` (owns the session service + ephemeral dir).
     /// It is the mob's public owner: clones of it keep the mob publicly owned.
     pub fn mob_runtime(&self) -> &crate::mob_handle_runtime::MobRuntime {

@@ -829,6 +829,120 @@ fn assert_root_owned(dir: &Path) {
     );
 }
 
+/// A durable child mob store that does not restore does not fail the boot:
+/// Meerkat quarantines it (kept as found, no actor), the root mob runs, and
+/// the quarantined child is hosted here (in the hosted set, among the mobs
+/// that do not run) and listed for the gateway status with its class.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_child_store_that_does_not_restore_is_quarantined_and_the_boot_goes_on() {
+    let dir = tempfile::tempdir().expect("state dir");
+    let root = crate::child_mob_storage::child_mob_root(dir.path());
+    std::fs::create_dir_all(&root).expect("child root");
+    let broken = root.join("mob--broken-child.db");
+    std::fs::write(&broken, b"not a sqlite database").expect("plant an undecodable child store");
+    let host = Host::new();
+    let mob_id = unique("quarantined-child");
+    let runtime = lifetime(dir.path(), &mob_id, &host, |spec| {
+        spec.with_child_mob_storage(durable(dir.path()))
+    })
+    .await
+    .expect("a quarantined child mob does not fail the boot");
+
+    let quarantined = runtime
+        .quarantined_mobs()
+        .await
+        .expect("the quarantined child mobs read");
+    assert_eq!(quarantined.len(), 1, "{quarantined:?}");
+    assert_eq!(quarantined[0].mob_id.as_str(), "broken-child");
+    assert_eq!(
+        quarantined[0].class,
+        meerkat_mob::MobQuarantineClass::StoreUnreadable
+    );
+    let status = quarantined_mobs_json(&quarantined);
+    assert_eq!(status[0]["mob_id"], json!("broken-child"), "{status}");
+    assert_eq!(status[0]["class"], json!("store_unreadable"), "{status}");
+    assert_eq!(status[0]["retryable"], json!(false), "{status}");
+
+    let state = runtime.agent_mob_mcp_state().expect("agent mob state");
+    let hosted = crate::mob_announcements::native::hosted_set(&*state)
+        .await
+        .expect("the hosted set reads");
+    assert!(hosted.contains("broken-child"), "{hosted:?}");
+    let (idle, running) = crate::mob_announcements::native::hosted_handles(&*state)
+        .await
+        .expect("the hosted handles read");
+    assert!(idle.contains("broken-child"), "{idle:?}");
+    assert!(
+        running.iter().all(|(id, _)| id.as_str() != "broken-child"),
+        "a quarantined child does not run"
+    );
+    assert!(
+        std::fs::metadata(&broken).is_ok(),
+        "the quarantined store is kept as found"
+    );
+    stand_down_released(runtime, 0).await;
+}
+
+/// The boot answer of a root mob whose stored state could not be restored:
+/// a store fault or records that disagree become the typed quarantine (its
+/// class from the typed failure, the failure as its cause); any other
+/// failure, such as a definition that changed under the boot, stays as it
+/// is.
+#[test]
+fn a_root_mob_store_fault_fails_the_boot_with_the_typed_quarantine() {
+    let mob_id = MobId::from("root");
+    let quarantine =
+        |error: MobError| match root_mob_restore_failure(&mob_id, MobRuntimeError::Mob(error)) {
+            MobRuntimeError::Mob(MobError::MobQuarantined {
+                mob_id: quarantined,
+                class,
+                cause,
+            }) => {
+                assert_eq!(quarantined.as_str(), "root");
+                Some((class, cause))
+            }
+            _ => None,
+        };
+
+    let unreadable = MobError::StorageError(Box::new(
+        meerkat_mob::store::MobStoreError::Serialization("bad event".to_string()),
+    ));
+    let (class, cause) = quarantine(unreadable).expect("an unreadable store is quarantined");
+    assert_eq!(class, meerkat_mob::MobQuarantineClass::StoreUnreadable);
+    assert!(
+        matches!(cause.as_ref(), MobError::StorageError(_)),
+        "{cause:?}"
+    );
+
+    let unavailable = MobError::SessionError(meerkat_core::service::SessionError::Store(Box::new(
+        meerkat_core::SessionStoreError::Internal("the store cannot serve now".to_string()),
+    )));
+    let (class, _) = quarantine(unavailable).expect("an unavailable store is quarantined");
+    assert_eq!(class, meerkat_mob::MobQuarantineClass::StoreUnavailable);
+    assert!(class.is_retryable());
+
+    let disagreeing = MobError::IncarnationInconsistent {
+        mob_id: mob_id.clone(),
+        inconsistency: meerkat_mob::IncarnationInconsistency::RecordWithoutCreation,
+    };
+    let (class, _) = quarantine(disagreeing).expect("records that disagree are quarantined");
+    assert_eq!(class, meerkat_mob::MobQuarantineClass::ResumeRefused);
+
+    let changed = MobError::MobDefinitionAuthorityChanged {
+        expected_epoch: 1,
+        expected_event_cursor: 1,
+        actual_epoch: Some(2),
+        actual_event_cursor: Some(4),
+    };
+    assert!(
+        matches!(
+            root_mob_restore_failure(&mob_id, MobRuntimeError::Mob(changed)),
+            MobRuntimeError::Mob(MobError::MobDefinitionAuthorityChanged { .. })
+        ),
+        "a definition that changed under the boot keeps its own refusal"
+    );
+}
+
 /// A durable child root that holds the production predecessor's empty,
 /// unversioned realm profile store boots: the composition adopts exactly
 /// that shape under the root claim, and Meerkat initializes it as new.

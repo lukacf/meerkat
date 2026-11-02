@@ -8063,9 +8063,12 @@ async fn a_put_past_a_child_member_limit_is_refused_typed() {
 // ---------------------------------------------------------------------------
 
 /// The agent mob tool state's listings as Meerkat answers them:
-/// - `mob_list`, `held_child_mobs` and `mob_handles_snapshot` fail until
-///   the restore is done, through `ensure_restored`;
-/// - activation registers a held mob as managed before it drops the hold.
+/// - `mob_list`, `held_child_mobs`, `quarantined_mobs` and
+///   `mob_handles_snapshot` fail until the restore is done, through
+///   `ensure_restored`;
+/// - activation registers a held mob as managed before it drops the hold,
+///   and a restore re-attempt registers a quarantined mob before it drops
+///   the quarantine.
 ///
 /// This gateway's own mob `root` runs, `running` runs, `gone` is destroyed
 /// but still managed, and `child` is held after a restart. Calls are
@@ -8081,6 +8084,10 @@ struct CoreListingState {
     restored: bool,
     managed: BTreeMap<String, meerkat_mob::MobState>,
     held: BTreeSet<String>,
+    quarantined: BTreeSet<String>,
+    /// The quarantined mobs are restored (managed) right after the call so
+    /// numbered.
+    restore_quarantined_after_call: usize,
 }
 
 impl CoreListings {
@@ -8096,7 +8103,20 @@ impl CoreListings {
                 ("gone".to_string(), meerkat_mob::MobState::Destroyed),
             ]),
             held: BTreeSet::from(["child".to_string()]),
+            quarantined: BTreeSet::new(),
+            restore_quarantined_after_call: usize::MAX,
         }))
+    }
+
+    /// The same listings with `mob_id` kept quarantined, restored right
+    /// after the call numbered `restore_after_call`.
+    fn with_quarantined(self, mob_id: &str, restore_after_call: usize) -> Self {
+        {
+            let mut state = self.0.lock().unwrap();
+            state.quarantined.insert(mob_id.to_string());
+            state.restore_quarantined_after_call = restore_after_call;
+        }
+        self
     }
 
     /// One listing call: it tries the restore until one attempt is done,
@@ -8122,6 +8142,18 @@ impl CoreListings {
             }
             for mob_id in &activated {
                 state.held.remove(mob_id);
+            }
+        }
+        if state.calls == state.restore_quarantined_after_call {
+            let restored = state.quarantined.clone();
+            // Managed first; only then is the quarantine dropped.
+            for mob_id in &restored {
+                state
+                    .managed
+                    .insert(mob_id.clone(), meerkat_mob::MobState::Running);
+            }
+            for mob_id in &restored {
+                state.quarantined.remove(mob_id);
             }
         }
         answered
@@ -8175,6 +8207,19 @@ impl super::native::HostedListings for CoreListings {
         .ok_or_else(restore_failed)
     }
 
+    async fn quarantined_mobs(
+        &self,
+    ) -> std::result::Result<Vec<meerkat_mob::MobId>, meerkat_mob::MobError> {
+        self.call(|state| {
+            state
+                .quarantined
+                .iter()
+                .map(|mob_id| meerkat_mob::MobId::from(mob_id.as_str()))
+                .collect()
+        })
+        .ok_or_else(restore_failed)
+    }
+
     async fn mob_handles_snapshot(
         &self,
     ) -> std::result::Result<Vec<(meerkat_mob::MobId, ())>, meerkat_mob::MobError> {
@@ -8194,21 +8239,22 @@ fn listed(values: &[&str]) -> BTreeSet<String> {
     values.iter().map(ToString::to_string).collect()
 }
 
-/// The first call is the managed listing that finishes the restore; the
-/// held mob activates right after the second. Read held first, it is held
-/// in the one listing and managed in the next. Read the other way round,
-/// it would be in neither.
+/// The first call is the managed listing that finishes the restore, the
+/// second the quarantined listing; the held mob activates right after the
+/// third, the held listing. Read held first, it is held in the one listing
+/// and managed in the next. Read the other way round, it would be in
+/// neither.
 #[tokio::test]
 async fn a_held_mob_that_activates_between_the_listings_stays_hosted() {
-    let listings = CoreListings::new(2, 0);
+    let listings = CoreListings::new(3, 0);
     assert_eq!(
         super::native::hosted_set(&listings).await.unwrap(),
         listed(&["child", "root", "running"])
     );
-    assert_eq!(listings.calls(), 3);
+    assert_eq!(listings.calls(), 4);
 
     // The order the origin of a mob and a member's own mob are read in.
-    let listings = CoreListings::new(2, 0);
+    let listings = CoreListings::new(3, 0);
     let (held, running) = super::native::hosted_handles(&listings).await.unwrap();
     let running = running
         .into_iter()
@@ -8218,7 +8264,40 @@ async fn a_held_mob_that_activates_between_the_listings_stays_hosted() {
         held.contains("child") || running.contains("child"),
         "held {held:?}, running {running:?}"
     );
-    assert_eq!(listings.calls(), 3);
+    assert_eq!(listings.calls(), 4);
+}
+
+/// A persisted mob whose store did not restore, kept quarantined, is hosted
+/// here: in the hosted set, and among the mobs that do not run. One whose
+/// restore re-attempt lands between the listings, right after the
+/// quarantined read, stays hosted: the re-attempt registers it as managed
+/// before it drops the quarantine.
+#[tokio::test]
+async fn a_quarantined_mob_is_hosted_and_stays_hosted_when_it_restores_between_the_listings() {
+    let listings = CoreListings::new(usize::MAX, 0).with_quarantined("broken", usize::MAX);
+    assert_eq!(
+        super::native::hosted_set(&listings).await.unwrap(),
+        listed(&["broken", "child", "root", "running"])
+    );
+
+    let listings = CoreListings::new(usize::MAX, 0).with_quarantined("broken", usize::MAX);
+    let (idle, running) = super::native::hosted_handles(&listings).await.unwrap();
+    assert!(idle.contains("broken"), "{idle:?}");
+    assert!(
+        running
+            .iter()
+            .all(|(mob_id, ())| mob_id.as_str() != "broken"),
+        "a quarantined mob does not run"
+    );
+
+    let listings = CoreListings::new(usize::MAX, 0).with_quarantined("broken", 2);
+    assert!(
+        super::native::hosted_set(&listings)
+            .await
+            .unwrap()
+            .contains("broken"),
+        "restored between the listings, it is managed in the next one"
+    );
 }
 
 /// A restore that fails fails the read, never answers without the held

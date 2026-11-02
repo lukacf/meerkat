@@ -4246,9 +4246,8 @@ async fn rb_cl2_4a_store_owned_member_fixture() {
 /// Rollback row RB-CL2-4b, first leg (without Apply now), in-process: a
 /// label change after the member's seat takes the row at once, while the
 /// seat row a predecessor replays keeps the labels it was seated with, and
-/// the record census counts the seat stale. The second leg (with Apply
-/// now) waits for the Apply now ruling: no change writes the row's labels
-/// into a seat row yet.
+/// the record census counts the seat stale. The second leg (with Apply now)
+/// is `rb_cl2_4b_apply_now_writes_the_rows_labels_into_the_seat_row`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rb_cl2_4b_a_label_change_leaves_the_seat_row_a_predecessor_reads_stale() {
     let mob = StoreOwnedMob::new("rb-cl2-4b").await;
@@ -4295,8 +4294,9 @@ async fn rb_cl2_4b_a_label_change_leaves_the_seat_row_a_predecessor_reads_stale(
 /// This build writes the fixture: `desk`, a store-owned identity seated
 /// Dormant, whose labels an update moved after its seat. The lane serves it
 /// with the pair and checks: `desk` runs with the labels of its seat row;
-/// rolled forward, its row's labels apply at its next build, and the record
-/// census counts it in `seats_stale` until then.
+/// rolled forward, the seat keeps those labels, and the record census counts
+/// it in `seats_stale`, until it is seated again or respawned with its row's
+/// labels (Apply now, the second leg's fixture below).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "lane:rollback - writes the fixture the published pairs run"]
 async fn rb_cl2_4b_stale_seat_fixture() {
@@ -4338,6 +4338,186 @@ async fn rb_cl2_4b_stale_seat_fixture() {
                 )
                 .await
                 .expect("the update commits");
+        },
+    )
+    .await;
+}
+
+/// The record census's count of seats whose row moved since their seat.
+async fn seats_stale(mob: &StoreOwnedMob) -> usize {
+    mob.handle
+        .identity_record_census()
+        .await
+        .expect("the census answers")
+        .seats_stale
+}
+
+/// Rollback row RB-CL2-4b, second leg (with Apply now), in-process: after
+/// a label change left the seat stale, the host's Apply now respawns the
+/// member with its row's labels on its own session: the new seat row (the
+/// last `MemberSpawned` row) carries the row's labels, the generation
+/// advances by one, and the record census counts no stale seat.
+///
+/// RED on the old tree: the respawn keeps the member's labels.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rb_cl2_4b_apply_now_writes_the_rows_labels_into_the_seat_row() {
+    let mob = StoreOwnedMob::new("rb-cl2-4b-apply-now").await;
+    committed(
+        mob.create(host_create("create-desk", &["desk"]), ALLOW)
+            .await,
+    );
+    mob.update(
+        "relabel-desk",
+        spec("desk", "worker")
+            .with_labels(BTreeMap::from([("team".to_string(), "beta".to_string())])),
+        &spec_digest(&spec("desk", "worker")),
+    )
+    .await
+    .expect("the update commits");
+    assert_eq!(seats_stale(&mob).await, 1);
+    let session = mob.session("desk").await;
+    let generation = mob.generation("desk").await.expect("desk is a member");
+    let row_labels = mob
+        .row("desk")
+        .await
+        .spec
+        .expect("the row holds its spec")
+        .labels;
+
+    let receipt = tokio::time::timeout(
+        STEP,
+        mob.handle.respawn_member(
+            id("desk"),
+            crate::runtime::MemberRespawn::new().with_labels(row_labels.clone()),
+        ),
+    )
+    .await
+    .expect("the respawn answers")
+    .expect("the respawn commits");
+    assert_eq!(
+        Some(receipt.runtime_id().generation),
+        generation.next(),
+        "the next generation"
+    );
+    assert_eq!(
+        mob.spawn_row("desk").await.labels,
+        row_labels,
+        "the new seat row carries the row's labels"
+    );
+    assert_eq!(mob.session("desk").await, session, "the same session");
+    assert_eq!(seats_stale(&mob).await, 0, "no seat is stale");
+}
+
+/// Row: a respawn that names no labels keeps the member's own: Apply now
+/// is the respawn with the row's labels, never a default.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_respawn_without_labels_keeps_the_members_labels() {
+    let mob = StoreOwnedMob::new("respawn-keeps-labels").await;
+    committed(
+        mob.create(host_create("create-desk", &["desk"]), ALLOW)
+            .await,
+    );
+    let seated_with = mob.spawn_row("desk").await.labels;
+    tokio::time::timeout(
+        STEP,
+        mob.handle
+            .respawn_member(id("desk"), crate::runtime::MemberRespawn::new()),
+    )
+    .await
+    .expect("the respawn answers")
+    .expect("the respawn commits");
+    assert_eq!(mob.spawn_row("desk").await.labels, seated_with);
+}
+
+/// Row (RED): a store-owned update that restamps its member (another
+/// runtime mode) and moves its labels seats the next incarnation with the
+/// row's labels: the restamp's seat row carries them, and no seat is stale.
+///
+/// RED on the old tree: the restamp keeps the member's labels, and the
+/// census counts the seat stale.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_store_owned_restamp_seats_the_rows_labels() {
+    let mob = StoreOwnedMob::new("restamp-labels").await;
+    let before = spec("desk", "worker");
+    committed(
+        mob.create(host_create("create-desk", &["desk"]), ALLOW)
+            .await,
+    );
+    let moved = BTreeMap::from([("team".to_string(), "gamma".to_string())]);
+    let after = before
+        .clone()
+        .with_runtime_mode_override(crate::MobRuntimeMode::AutonomousHost)
+        .with_labels(moved.clone());
+    let updated = mob
+        .update("restamp-desk", after, &spec_digest(&before))
+        .await
+        .expect("the update commits");
+    assert!(
+        matches!(
+            updated.applied,
+            Some(crate::runtime::DeclaredEntryOutcome::Restamped { .. })
+        ),
+        "{updated:?}"
+    );
+    assert_eq!(mob.spawn_row("desk").await.labels, moved);
+    assert_eq!(seats_stale(&mob).await, 0, "no seat is stale");
+}
+
+/// Rollback row RB-CL2-4b, second leg, lane-run:
+/// `a_stale_seat_after_apply_now_under_<pair>_runs_with_the_rows_labels`
+/// for each published pair.
+///
+/// This build writes the fixture: `desk`, a store-owned identity whose
+/// labels an update moved after its seat, respawned by the host's Apply
+/// now with its row's labels. The lane serves it with the pair and checks:
+/// `desk` runs with the row's labels (its last seat row's); rolled forward,
+/// the record census counts no stale seat.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "lane:rollback - writes the fixture the published pairs run"]
+async fn rb_cl2_4b_apply_now_fixture() {
+    let name = "store-owned-apply-now";
+    let dir = super::created_identity_rows::rollback_fixture_dir(name);
+    super::identity_entry_rows::write_rollback_fixture(
+        &dir,
+        &format!("rollback-{name}"),
+        |handle| async move {
+            let seated = spec("desk", "worker")
+                .with_runtime_mode_override(crate::MobRuntimeMode::TurnDriven);
+            let expected = spec_digest(&seated);
+            committed(
+                handle
+                    .create_store_owned_identities(
+                        StoreOwnedIdentityCreate::new(
+                            operation("create-desk"),
+                            IdentityChangeRequesterInput::host("console"),
+                            vec![CreatedIdentityRequest::new(seated)],
+                        ),
+                        ALLOW,
+                    )
+                    .await,
+            );
+            let labels = BTreeMap::from([("team".to_string(), "beta".to_string())]);
+            handle
+                .update_store_owned_identity(
+                    crate::runtime::StoreOwnedIdentityUpdate::new(
+                        operation("relabel-desk"),
+                        IdentityChangeRequesterInput::host("console"),
+                        spec("desk", "worker")
+                            .with_runtime_mode_override(crate::MobRuntimeMode::TurnDriven)
+                            .with_labels(labels.clone()),
+                        &expected,
+                    ),
+                    ALLOW,
+                )
+                .await
+                .expect("the update commits");
+            handle
+                .respawn_member(
+                    id("desk"),
+                    crate::runtime::MemberRespawn::new().with_labels(labels),
+                )
+                .await
+                .expect("Apply now respawns the member with its row's labels");
         },
     )
     .await;

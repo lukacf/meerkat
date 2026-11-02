@@ -224,6 +224,8 @@ pub struct MemberRespawn {
     pub profile: Option<ProfileName>,
     /// The next incarnation's runtime mode; `None` keeps the member's.
     pub runtime_mode: Option<MobRuntimeMode>,
+    /// The next incarnation's labels; `None` keeps the member's.
+    pub labels: Option<BTreeMap<String, String>>,
     /// Wake the next incarnation before answering
     /// ([`super::MobHandle::ensure_member_live`]); otherwise it stays Dormant
     /// until its next delivery or owed kickoff wakes it.
@@ -256,6 +258,14 @@ impl MemberRespawn {
     #[must_use]
     pub fn with_runtime_mode(mut self, runtime_mode: MobRuntimeMode) -> Self {
         self.runtime_mode = Some(runtime_mode);
+        self
+    }
+
+    /// Seat the next incarnation with `labels` (a store-owned identity's
+    /// row labels, say, which its seat takes again).
+    #[must_use]
+    pub fn with_labels(mut self, labels: BTreeMap<String, String>) -> Self {
+        self.labels = Some(labels);
         self
     }
 

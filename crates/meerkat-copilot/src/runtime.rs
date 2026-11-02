@@ -4446,6 +4446,202 @@ mod tests {
             assert_eq!(transport.request_count(), 3);
             assert_eq!(session.bearers(), ["Bearer derived-one"]);
         }
+
+        /// Answers like `ScriptedTransport`, but holds request number
+        /// `hold_at` (counted from zero) until the test releases it.
+        struct HeldTransport {
+            inner: ScriptedTransport,
+            hold_at: u64,
+            calls: AtomicU64,
+            held: tokio::sync::Notify,
+            release: tokio::sync::Notify,
+        }
+
+        #[async_trait]
+        impl CopilotHttpTransport for HeldTransport {
+            async fn get(
+                &self,
+                url: &str,
+                headers: HeaderMap,
+            ) -> Result<CopilotHttpResponse, CopilotHttpTransportError> {
+                if self.calls.fetch_add(1, Ordering::SeqCst) == self.hold_at {
+                    self.held.notify_one();
+                    self.release.notified().await;
+                }
+                self.inner.get(url, headers).await
+            }
+        }
+
+        #[tokio::test]
+        async fn a_turn_after_two_model_401s_mints_a_new_token_instead_of_failing_at_projection() {
+            let clock = TestClock::new();
+            let transport = Arc::new(ScriptedTransport::new([
+                token_response("derived-one"),
+                models_response(),
+                token_response("derived-two"),
+                models_response(),
+                token_response("derived-three"),
+                models_response(),
+            ]));
+            let account = RouteAccount::new(transport.clone(), &clock).await;
+            let session = account.session([401, 401]).await;
+
+            let events = session.turn().await;
+            assert!(
+                matches!(
+                    events.as_slice(),
+                    [Err(meerkat_llm_core::LlmError::AuthenticationFailed { .. })]
+                ),
+                "{events:?}"
+            );
+            assert_eq!(
+                transport.request_count(),
+                4,
+                "the first 401 minted one new token"
+            );
+
+            let events = session.turn().await;
+            assert!(
+                events.is_empty(),
+                "the next turn must mint a new token, not fail before it reaches the network: {events:?}"
+            );
+            assert_eq!(transport.request_count(), 6);
+            assert_eq!(
+                session.bearers(),
+                [
+                    "Bearer derived-one",
+                    "Bearer derived-two",
+                    "Bearer derived-three"
+                ]
+            );
+        }
+
+        #[tokio::test]
+        async fn a_second_session_keeps_its_route_while_the_first_mints_a_new_token() {
+            let clock = TestClock::new();
+            let transport = Arc::new(HeldTransport {
+                inner: ScriptedTransport::new([
+                    token_response("derived-one"),
+                    models_response(),
+                    token_response("derived-two"),
+                    models_response(),
+                ]),
+                // The token exchange the first session's 401 starts.
+                hold_at: 2,
+                calls: AtomicU64::new(0),
+                held: tokio::sync::Notify::new(),
+                release: tokio::sync::Notify::new(),
+            });
+            let account = RouteAccount::new(transport.clone(), &clock).await;
+            let first = account.session([401]).await;
+            let second = account.session([]).await;
+            assert_eq!(
+                transport.inner.request_count(),
+                2,
+                "both sessions share one token"
+            );
+
+            let second_turn = async {
+                transport.held.notified().await;
+                // The first session's new token is being minted now.
+                let prepared = second.prepare();
+                transport.release.notify_one();
+                let events = match &prepared {
+                    Ok(request) => {
+                        second
+                            .client
+                            .stream_prepared(request)
+                            .collect::<Vec<_>>()
+                            .await
+                    }
+                    Err(_) => Vec::new(),
+                };
+                (prepared.map(|_| ()), events)
+            };
+            let (first_events, (second_prepared, second_events)) =
+                tokio::join!(first.turn(), second_turn);
+
+            assert!(
+                second_prepared.is_ok(),
+                "a session must keep its route while another session mints the shared token anew: {second_prepared:?}"
+            );
+            assert!(first_events.is_empty(), "{first_events:?}");
+            assert!(second_events.is_empty(), "{second_events:?}");
+            assert_eq!(
+                first.bearers(),
+                ["Bearer derived-one", "Bearer derived-two"]
+            );
+            assert_eq!(second.bearers(), ["Bearer derived-two"]);
+            assert_eq!(transport.inner.request_count(), 4);
+        }
+
+        #[tokio::test]
+        async fn a_turn_after_a_discovery_403_reports_the_reauthorization_instead_of_a_lost_route()
+        {
+            let clock = TestClock::new();
+            let transport = Arc::new(ScriptedTransport::new([
+                token_response("derived-one"),
+                models_response(),
+                json_response(403, serde_json::json!({"message": "forbidden"})),
+            ]));
+            let account = RouteAccount::new(transport.clone(), &clock).await;
+            let session = account.session([]).await;
+
+            // Model discovery is due again (300 s); the token is still fresh.
+            clock.set(301);
+            let events = session.turn().await;
+            assert!(
+                matches!(
+                    events.as_slice(),
+                    [Err(meerkat_llm_core::LlmError::AuthenticationFailed { .. })]
+                ),
+                "{events:?}"
+            );
+            assert_eq!(
+                account.source_phase(),
+                Some(meerkat_core::handles::AuthLeasePhase::ReauthRequired)
+            );
+
+            let events = session.turn().await;
+            assert!(
+                matches!(
+                    events.as_slice(),
+                    [Err(meerkat_llm_core::LlmError::AuthenticationFailed { .. })]
+                ),
+                "the next turn must report the reauthorization the account needs, not a lost route: {events:?}"
+            );
+            assert_eq!(transport.request_count(), 3);
+        }
+
+        #[tokio::test]
+        async fn a_turn_after_a_discovery_401_mints_a_new_token_instead_of_failing_at_projection() {
+            let clock = TestClock::new();
+            let transport = Arc::new(ScriptedTransport::new([
+                token_response("derived-one"),
+                models_response(),
+                json_response(401, serde_json::json!({"message": "expired"})),
+                json_response(503, serde_json::json!({"message": "unavailable"})),
+                token_response("derived-two"),
+                models_response(),
+            ]));
+            let account = RouteAccount::new(transport.clone(), &clock).await;
+            let session = account.session([]).await;
+
+            // Model discovery is due again (300 s) and refuses the token;
+            // the token exchange is unavailable for the new one.
+            clock.set(301);
+            let events = session.turn().await;
+            assert!(matches!(events.as_slice(), [Err(_)]), "{events:?}");
+            assert_eq!(transport.request_count(), 4);
+
+            let events = session.turn().await;
+            assert!(
+                events.is_empty(),
+                "the next turn must mint a new token, not fail before it reaches the network: {events:?}"
+            );
+            assert_eq!(transport.request_count(), 6);
+            assert_eq!(session.bearers(), ["Bearer derived-two"]);
+        }
     }
 }
 

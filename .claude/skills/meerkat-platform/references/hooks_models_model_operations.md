@@ -236,7 +236,15 @@ history_retained_rewrites = 4      # older pre-compaction bodies are retired
   `SummarizationSource` that states its bound; returning
   `SummarizationSource::whole(meerkat_core::materialize_latest_system_prompt_versions(messages))`
   keeps the 0.9.3 behaviour. `CompactionContext.last_rewrite_history_tokens`
-  feeds `should_compact`; `None` keeps the 0.9.3 decisions.
+  feeds `should_compact`; `None` keeps the 0.9.3 decisions. Since 0.9.9
+  `CompactionContext` also carries `projected_input_tokens` (an
+  `InputTokenProjection`: the answered request's count plus the rows appended
+  since) and `last_context_refusal_boundary_index` (a recorded context
+  refusal or bounded request); a custom `Compactor` may read or ignore them,
+  and `None` measures as before. `build_compaction_context` takes the last
+  answered request (`Option<AnsweredRequestAnchor>`) as its third parameter,
+  and a host that swaps in a durable snapshot of a session calls
+  `Agent::reload_compaction_cadence` after the swap.
 - Anthropic server-side compaction is separate: `provider_params`
   `{"provider_tag": {"provider": "anthropic", "compaction": {"kind": "auto"}}}`.
 

@@ -368,18 +368,26 @@ fn github_rate_limited(status: u16, remaining: Option<&str>, has_retry_after: bo
 
 /// Whether GitHub's answer says it exceeded a secondary rate limit: its
 /// `message` (or, for a body that is not GitHub's JSON, the body's text)
-/// names one, case-insensitively, as GitHub's own client recognises it
-/// (octokit's throttling rule), since GitHub can send it as a 403 with no
-/// `Retry-After` and no rate-limit header. With no stated time the wait is
-/// the minute GitHub asks for at least ([`rate_limit_until`]).
+/// names one as GitHub's own client recognises it (octokit's throttling
+/// rule, `\bsecondary rate\b` case-insensitively, so "secondary rate limit"
+/// and "secondary rate-limit" alike), since GitHub can send it as a 403
+/// with no `Retry-After` and no rate-limit header. With no stated time the
+/// wait is the minute GitHub asks for at least ([`rate_limit_until`]).
 fn github_secondary_rate_limit(body: &[u8]) -> bool {
+    const PHRASE: &str = "secondary rate";
     let message = serde_json::from_slice::<GitHubErrorEnvelope>(body)
         .ok()
         .and_then(|envelope| envelope.message)
-        .unwrap_or_else(|| String::from_utf8_lossy(body).into_owned());
-    message
-        .to_ascii_lowercase()
-        .contains("secondary rate limit")
+        .unwrap_or_else(|| String::from_utf8_lossy(body).into_owned())
+        .to_ascii_lowercase();
+    let word = |character: char| character.is_ascii_alphanumeric() || character == '_';
+    message.match_indices(PHRASE).any(|(start, _)| {
+        !message[..start].chars().next_back().is_some_and(word)
+            && !message[start + PHRASE.len()..]
+                .chars()
+                .next()
+                .is_some_and(word)
+    })
 }
 
 pub struct CopilotRuntime {

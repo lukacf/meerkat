@@ -8010,7 +8010,7 @@ KickoffCancelRequestedDestroyed(member_id) ==
 
 ProbeMemberAdmissionDuplicateRunning(agent_identity) ==
     /\ phase = "Running"
-    /\ (IF ((agent_identity \in DOMAIN identity_to_runtime) = TRUE) THEN TRUE ELSE (IF ((agent_identity \in DOMAIN member_session_bindings) = TRUE) THEN TRUE ELSE ((agent_identity \in DOMAIN pending_spawn_sessions) = TRUE)))
+    /\ (IF ((agent_identity \in DOMAIN identity_to_runtime) = TRUE) THEN TRUE ELSE (IF ((agent_identity \in DOMAIN member_session_bindings) = TRUE) THEN TRUE ELSE (IF ((agent_identity \in DOMAIN pending_spawn_sessions) = TRUE) THEN TRUE ELSE ((agent_identity \in DOMAIN spawn_exec_phase) = TRUE))))
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_17f7fb9ca245cd61
@@ -8018,7 +8018,7 @@ ProbeMemberAdmissionDuplicateRunning(agent_identity) ==
 
 ProbeMemberAdmissionDuplicateStopped(agent_identity) ==
     /\ phase = "Stopped"
-    /\ (IF ((agent_identity \in DOMAIN identity_to_runtime) = TRUE) THEN TRUE ELSE (IF ((agent_identity \in DOMAIN member_session_bindings) = TRUE) THEN TRUE ELSE ((agent_identity \in DOMAIN pending_spawn_sessions) = TRUE)))
+    /\ (IF ((agent_identity \in DOMAIN identity_to_runtime) = TRUE) THEN TRUE ELSE (IF ((agent_identity \in DOMAIN member_session_bindings) = TRUE) THEN TRUE ELSE (IF ((agent_identity \in DOMAIN pending_spawn_sessions) = TRUE) THEN TRUE ELSE ((agent_identity \in DOMAIN spawn_exec_phase) = TRUE))))
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_17f7fb9ca245cd61
@@ -8026,7 +8026,7 @@ ProbeMemberAdmissionDuplicateStopped(agent_identity) ==
 
 ProbeMemberAdmissionDuplicateCompleted(agent_identity) ==
     /\ phase = "Completed"
-    /\ (IF ((agent_identity \in DOMAIN identity_to_runtime) = TRUE) THEN TRUE ELSE (IF ((agent_identity \in DOMAIN member_session_bindings) = TRUE) THEN TRUE ELSE ((agent_identity \in DOMAIN pending_spawn_sessions) = TRUE)))
+    /\ (IF ((agent_identity \in DOMAIN identity_to_runtime) = TRUE) THEN TRUE ELSE (IF ((agent_identity \in DOMAIN member_session_bindings) = TRUE) THEN TRUE ELSE (IF ((agent_identity \in DOMAIN pending_spawn_sessions) = TRUE) THEN TRUE ELSE ((agent_identity \in DOMAIN spawn_exec_phase) = TRUE))))
     /\ phase' = "Completed"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_17f7fb9ca245cd61
@@ -8034,7 +8034,7 @@ ProbeMemberAdmissionDuplicateCompleted(agent_identity) ==
 
 ProbeMemberAdmissionDuplicateDestroyed(agent_identity) ==
     /\ phase = "Destroyed"
-    /\ (IF ((agent_identity \in DOMAIN identity_to_runtime) = TRUE) THEN TRUE ELSE (IF ((agent_identity \in DOMAIN member_session_bindings) = TRUE) THEN TRUE ELSE ((agent_identity \in DOMAIN pending_spawn_sessions) = TRUE)))
+    /\ (IF ((agent_identity \in DOMAIN identity_to_runtime) = TRUE) THEN TRUE ELSE (IF ((agent_identity \in DOMAIN member_session_bindings) = TRUE) THEN TRUE ELSE (IF ((agent_identity \in DOMAIN pending_spawn_sessions) = TRUE) THEN TRUE ELSE ((agent_identity \in DOMAIN spawn_exec_phase) = TRUE))))
     /\ phase' = "Destroyed"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_17f7fb9ca245cd61
@@ -8042,7 +8042,7 @@ ProbeMemberAdmissionDuplicateDestroyed(agent_identity) ==
 
 ProbeMemberAdmissionAdmittedRunning(agent_identity) ==
     /\ phase = "Running"
-    /\ (((agent_identity \in DOMAIN identity_to_runtime) = FALSE) /\ ((agent_identity \in DOMAIN member_session_bindings) = FALSE) /\ ((agent_identity \in DOMAIN pending_spawn_sessions) = FALSE))
+    /\ (((agent_identity \in DOMAIN identity_to_runtime) = FALSE) /\ ((agent_identity \in DOMAIN member_session_bindings) = FALSE) /\ ((agent_identity \in DOMAIN pending_spawn_sessions) = FALSE) /\ ((agent_identity \in DOMAIN spawn_exec_phase) = FALSE))
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_17f7fb9ca245cd61
@@ -8050,7 +8050,7 @@ ProbeMemberAdmissionAdmittedRunning(agent_identity) ==
 
 ProbeMemberAdmissionAdmittedStopped(agent_identity) ==
     /\ phase = "Stopped"
-    /\ (((agent_identity \in DOMAIN identity_to_runtime) = FALSE) /\ ((agent_identity \in DOMAIN member_session_bindings) = FALSE) /\ ((agent_identity \in DOMAIN pending_spawn_sessions) = FALSE))
+    /\ (((agent_identity \in DOMAIN identity_to_runtime) = FALSE) /\ ((agent_identity \in DOMAIN member_session_bindings) = FALSE) /\ ((agent_identity \in DOMAIN pending_spawn_sessions) = FALSE) /\ ((agent_identity \in DOMAIN spawn_exec_phase) = FALSE))
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_17f7fb9ca245cd61
@@ -8058,7 +8058,7 @@ ProbeMemberAdmissionAdmittedStopped(agent_identity) ==
 
 ProbeMemberAdmissionAdmittedCompleted(agent_identity) ==
     /\ phase = "Completed"
-    /\ (((agent_identity \in DOMAIN identity_to_runtime) = FALSE) /\ ((agent_identity \in DOMAIN member_session_bindings) = FALSE) /\ ((agent_identity \in DOMAIN pending_spawn_sessions) = FALSE))
+    /\ (((agent_identity \in DOMAIN identity_to_runtime) = FALSE) /\ ((agent_identity \in DOMAIN member_session_bindings) = FALSE) /\ ((agent_identity \in DOMAIN pending_spawn_sessions) = FALSE) /\ ((agent_identity \in DOMAIN spawn_exec_phase) = FALSE))
     /\ phase' = "Completed"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_17f7fb9ca245cd61
@@ -8066,7 +8066,7 @@ ProbeMemberAdmissionAdmittedCompleted(agent_identity) ==
 
 ProbeMemberAdmissionAdmittedDestroyed(agent_identity) ==
     /\ phase = "Destroyed"
-    /\ (((agent_identity \in DOMAIN identity_to_runtime) = FALSE) /\ ((agent_identity \in DOMAIN member_session_bindings) = FALSE) /\ ((agent_identity \in DOMAIN pending_spawn_sessions) = FALSE))
+    /\ (((agent_identity \in DOMAIN identity_to_runtime) = FALSE) /\ ((agent_identity \in DOMAIN member_session_bindings) = FALSE) /\ ((agent_identity \in DOMAIN pending_spawn_sessions) = FALSE) /\ ((agent_identity \in DOMAIN spawn_exec_phase) = FALSE))
     /\ phase' = "Destroyed"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_17f7fb9ca245cd61

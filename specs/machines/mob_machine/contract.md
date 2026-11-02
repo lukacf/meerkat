@@ -107,6 +107,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `concluded_objective_ids`: `Set<String>`
 - `member_restore_failures`: `Map<AgentIdentity, String>`
 - `member_restore_failure_codes`: `Map<AgentIdentity, String>`
+- `member_custody_unrestored`: `Map<AgentIdentity, MemberCustodyRestoreKind>`
+- `member_custody_unrestored_causes`: `Map<AgentIdentity, MemberCustodyCauseKind>`
 - `runtime_retire_refusal_codes`: `Map<AgentRuntimeId, String>`
 - `runtime_retire_refusal_reasons`: `Map<AgentRuntimeId, String>`
 - `runtime_retire_pending_sessions`: `Map<AgentRuntimeId, SessionId>`
@@ -683,6 +685,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RecordMemberInstructionTarget`(agent_identity: AgentIdentity, session_id: SessionId, generation: u64)
 - `RefuseMemberInstructionTarget`(agent_identity: AgentIdentity, session_id: SessionId, generation: u64, block: MemberInstructionBlock)
 - `ResolveMemberInstructionRelease`(agent_identity: AgentIdentity, session_id: SessionId, disposal: MemberSessionDisposal)
+- `RecordMemberCustodyUnrestored`(agent_identity: AgentIdentity, restore: MemberCustodyRestoreKind, cause: MemberCustodyCauseKind)
+- `ResolveMemberCustodyRestored`(agent_identity: AgentIdentity)
 
 ## Effects
 - `HoldMemberRunStarts`
@@ -1067,6 +1071,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `entry_custody_ladder_is_open`
 - `owed_edge_repairs_join_seated_members`
 - `destroyed_mob_holds_no_member_lifecycle`
+- `custody_unrestored_members_are_seated`
 - `operator_instruction_records_lockstep`
 - `operator_instruction_records_well_formed`
 - `operator_instruction_slot_count_bounded`
@@ -19125,6 +19130,102 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `MemberInstructionReleaseNotNeeded`
 - To: `Destroyed`
 
+### `RecordMemberCustodyUnrestoredSeatedRunning`
+- From: `Running`
+- On: `RecordMemberCustodyUnrestored`(agent_identity, restore, cause)
+- Guards:
+  - `member_seated`
+- To: `Running`
+
+### `RecordMemberCustodyUnrestoredSeatedStopped`
+- From: `Stopped`
+- On: `RecordMemberCustodyUnrestored`(agent_identity, restore, cause)
+- Guards:
+  - `member_seated`
+- To: `Stopped`
+
+### `RecordMemberCustodyUnrestoredSeatedCompleted`
+- From: `Completed`
+- On: `RecordMemberCustodyUnrestored`(agent_identity, restore, cause)
+- Guards:
+  - `member_seated`
+- To: `Completed`
+
+### `RecordMemberCustodyUnrestoredNotSeatedRunning`
+- From: `Running`
+- On: `RecordMemberCustodyUnrestored`(agent_identity, restore, cause)
+- Guards:
+  - `member_not_seated`
+- To: `Running`
+
+### `RecordMemberCustodyUnrestoredNotSeatedStopped`
+- From: `Stopped`
+- On: `RecordMemberCustodyUnrestored`(agent_identity, restore, cause)
+- Guards:
+  - `member_not_seated`
+- To: `Stopped`
+
+### `RecordMemberCustodyUnrestoredNotSeatedCompleted`
+- From: `Completed`
+- On: `RecordMemberCustodyUnrestored`(agent_identity, restore, cause)
+- Guards:
+  - `member_not_seated`
+- To: `Completed`
+
+### `RecordMemberCustodyUnrestoredDestroyed`
+- From: `Destroyed`
+- On: `RecordMemberCustodyUnrestored`(agent_identity, restore, cause)
+- To: `Destroyed`
+
+### `ResolveMemberCustodyRestoredRecordedRunning`
+- From: `Running`
+- On: `ResolveMemberCustodyRestored`(agent_identity)
+- Guards:
+  - `custody_recorded`
+- To: `Running`
+
+### `ResolveMemberCustodyRestoredRecordedStopped`
+- From: `Stopped`
+- On: `ResolveMemberCustodyRestored`(agent_identity)
+- Guards:
+  - `custody_recorded`
+- To: `Stopped`
+
+### `ResolveMemberCustodyRestoredRecordedCompleted`
+- From: `Completed`
+- On: `ResolveMemberCustodyRestored`(agent_identity)
+- Guards:
+  - `custody_recorded`
+- To: `Completed`
+
+### `ResolveMemberCustodyRestoredUnrecordedRunning`
+- From: `Running`
+- On: `ResolveMemberCustodyRestored`(agent_identity)
+- Guards:
+  - `custody_not_recorded`
+- To: `Running`
+
+### `ResolveMemberCustodyRestoredUnrecordedStopped`
+- From: `Stopped`
+- On: `ResolveMemberCustodyRestored`(agent_identity)
+- Guards:
+  - `custody_not_recorded`
+- To: `Stopped`
+
+### `ResolveMemberCustodyRestoredUnrecordedCompleted`
+- From: `Completed`
+- On: `ResolveMemberCustodyRestored`(agent_identity)
+- Guards:
+  - `custody_not_recorded`
+- To: `Completed`
+
+### `ResolveMemberCustodyRestoredUnrecordedDestroyed`
+- From: `Destroyed`
+- On: `ResolveMemberCustodyRestored`(agent_identity)
+- Guards:
+  - `custody_not_recorded`
+- To: `Destroyed`
+
 ## Coverage
 ### Code Anchors
 - `mob_handle_surface` (machine `MobMachine`): `crates/meerkat-mob/src/runtime/handle.rs` — identity-first public MobMachine handle surface for ensure member, reconcile, and member command routing
@@ -19145,6 +19246,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `coordination-board-records-and-overlap` — record coordination work intent and resource claim, update coordination work intent and resource claim status across planned active blocked completed cancelled released expired, and observe coordination resource claim overlap with recomputed revision and event sequence
 - `spawn-work-terminal` — member spawn, ensure member, reconcile, runtime-ready observation, work submission, and terminal work closure
 - `retire-recover-destroy` — member retires, the retire of an absent identity is answered in every phase, durable incarnation recovery preserves monotone identity history, stops/stopped, resumes, shuts down, and destroys cleanly
+- `member-custody-degraded` — a mob start that cannot restore a seated member's custody for a cause of the member's own records the member degraded (the restore and its cause) in every live phase, a later record replaces the cause, a re-attempt that restores it resolves the record, a record for an unseated identity or in a destroyed mob changes nothing, and an ended seat or a destroy takes the record (crates/meerkat-machine-schema/tests/mob_machine_member_custody_region.rs)
 - `wiring-and-session-binding` — wire and unwire members, enforce known identity for session bindings, expose pending spawn, member session binding changed, and wiring lifecycle notices
 - `flow-and-run-lifecycle` — run flow, start flow, create run, create frame seed, create loop seed, project frame phase, project loop state, start run, complete flow, finish run, mark completed, kickoff resolve started or failed, kickoff clear, flow terminalized, and force cancel running work
 - `event-subscriptions-and-notices` — subscribe agent, all agent, and mob events; emit member, run, flow, progress, terminal, and wiring notices

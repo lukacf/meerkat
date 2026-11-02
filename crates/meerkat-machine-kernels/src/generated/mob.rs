@@ -3919,6 +3919,118 @@ impl std::fmt::Display for MemberBootObligationCause {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum MemberCustodyCauseKind {
+    #[default]
+    #[serde(rename = "ServedElsewhere")]
+    ServedElsewhere,
+    #[serde(rename = "HostingUnavailable")]
+    HostingUnavailable,
+    #[serde(rename = "DurableTailUnprovable")]
+    DurableTailUnprovable,
+    #[serde(rename = "StoreUnavailable")]
+    StoreUnavailable,
+    #[serde(rename = "StoreUnreadable")]
+    StoreUnreadable,
+}
+impl MemberCustodyCauseKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::ServedElsewhere => "ServedElsewhere",
+            Self::HostingUnavailable => "HostingUnavailable",
+            Self::DurableTailUnprovable => "DurableTailUnprovable",
+            Self::StoreUnavailable => "StoreUnavailable",
+            Self::StoreUnreadable => "StoreUnreadable",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for MemberCustodyCauseKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "ServedElsewhere" => Ok(Self::ServedElsewhere),
+            "HostingUnavailable" => Ok(Self::HostingUnavailable),
+            "DurableTailUnprovable" => Ok(Self::DurableTailUnprovable),
+            "StoreUnavailable" => Ok(Self::StoreUnavailable),
+            "StoreUnreadable" => Ok(Self::StoreUnreadable),
+            other => Err(format!("invalid MemberCustodyCauseKind value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for MemberCustodyCauseKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for MemberCustodyCauseKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum MemberCustodyRestoreKind {
+    #[default]
+    #[serde(rename = "StartupBinding")]
+    StartupBinding,
+    #[serde(rename = "CleanupDelivery")]
+    CleanupDelivery,
+}
+impl MemberCustodyRestoreKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::StartupBinding => "StartupBinding",
+            Self::CleanupDelivery => "CleanupDelivery",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for MemberCustodyRestoreKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "StartupBinding" => Ok(Self::StartupBinding),
+            "CleanupDelivery" => Ok(Self::CleanupDelivery),
+            other => Err(format!("invalid MemberCustodyRestoreKind value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for MemberCustodyRestoreKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for MemberCustodyRestoreKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum MemberHealthClass {
     #[default]
     #[serde(rename = "Healthy")]
@@ -8958,6 +9070,10 @@ pub struct State {
     pub concluded_objective_ids: std::collections::BTreeSet<String>,
     pub member_restore_failures: std::collections::BTreeMap<AgentIdentity, String>,
     pub member_restore_failure_codes: std::collections::BTreeMap<AgentIdentity, String>,
+    pub member_custody_unrestored:
+        std::collections::BTreeMap<AgentIdentity, MemberCustodyRestoreKind>,
+    pub member_custody_unrestored_causes:
+        std::collections::BTreeMap<AgentIdentity, MemberCustodyCauseKind>,
     pub runtime_retire_refusal_codes: std::collections::BTreeMap<AgentRuntimeId, String>,
     pub runtime_retire_refusal_reasons: std::collections::BTreeMap<AgentRuntimeId, String>,
     pub runtime_retire_pending_sessions: std::collections::BTreeMap<AgentRuntimeId, SessionId>,
@@ -12111,6 +12227,16 @@ pub mod signals {
         pub session_id: SessionId,
         pub disposal: MemberSessionDisposal,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecordMemberCustodyUnrestored {
+        pub agent_identity: AgentIdentity,
+        pub restore: MemberCustodyRestoreKind,
+        pub cause: MemberCustodyCauseKind,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveMemberCustodyRestored {
+        pub agent_identity: AgentIdentity,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -12218,6 +12344,8 @@ pub enum Signal {
     RecordMemberInstructionTarget(signals::RecordMemberInstructionTarget),
     RefuseMemberInstructionTarget(signals::RefuseMemberInstructionTarget),
     ResolveMemberInstructionRelease(signals::ResolveMemberInstructionRelease),
+    RecordMemberCustodyUnrestored(signals::RecordMemberCustodyUnrestored),
+    ResolveMemberCustodyRestored(signals::ResolveMemberCustodyRestored),
 }
 impl Signal {
     pub fn kind(&self) -> SignalKind {
@@ -12361,6 +12489,8 @@ impl Signal {
             Self::RecordMemberInstructionTarget(_) => SignalKind::RecordMemberInstructionTarget,
             Self::RefuseMemberInstructionTarget(_) => SignalKind::RefuseMemberInstructionTarget,
             Self::ResolveMemberInstructionRelease(_) => SignalKind::ResolveMemberInstructionRelease,
+            Self::RecordMemberCustodyUnrestored(_) => SignalKind::RecordMemberCustodyUnrestored,
+            Self::ResolveMemberCustodyRestored(_) => SignalKind::ResolveMemberCustodyRestored,
         }
     }
 }
@@ -12465,6 +12595,8 @@ pub enum SignalKind {
     RecordMemberInstructionTarget,
     RefuseMemberInstructionTarget,
     ResolveMemberInstructionRelease,
+    RecordMemberCustodyUnrestored,
+    ResolveMemberCustodyRestored,
 }
 
 pub mod effects {
@@ -15582,6 +15714,20 @@ pub enum TransitionId {
     ResolveExternalEdgeRealizationStaleStopped,
     ResolveExternalEdgeRealizationStaleCompleted,
     ResolveExternalEdgeRealizationStaleDestroyed,
+    RecordMemberCustodyUnrestoredSeatedRunning,
+    RecordMemberCustodyUnrestoredSeatedStopped,
+    RecordMemberCustodyUnrestoredSeatedCompleted,
+    RecordMemberCustodyUnrestoredNotSeatedRunning,
+    RecordMemberCustodyUnrestoredNotSeatedStopped,
+    RecordMemberCustodyUnrestoredNotSeatedCompleted,
+    RecordMemberCustodyUnrestoredDestroyed,
+    ResolveMemberCustodyRestoredRecordedRunning,
+    ResolveMemberCustodyRestoredRecordedStopped,
+    ResolveMemberCustodyRestoredRecordedCompleted,
+    ResolveMemberCustodyRestoredUnrecordedRunning,
+    ResolveMemberCustodyRestoredUnrecordedStopped,
+    ResolveMemberCustodyRestoredUnrecordedCompleted,
+    ResolveMemberCustodyRestoredUnrecordedDestroyed,
     RetireMemberArchiveOnly,
     AdmitDestroyMemberRetireArchiveOnlyRunning,
     AdmitDestroyMemberRetireArchiveOnlyStopped,
@@ -15979,6 +16125,8 @@ pub fn initial_state() -> State {
         concluded_objective_ids: Default::default(),
         member_restore_failures: Default::default(),
         member_restore_failure_codes: Default::default(),
+        member_custody_unrestored: Default::default(),
+        member_custody_unrestored_causes: Default::default(),
         runtime_retire_refusal_codes: Default::default(),
         runtime_retire_refusal_reasons: Default::default(),
         runtime_retire_pending_sessions: Default::default(),

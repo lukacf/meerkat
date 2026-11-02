@@ -26,6 +26,7 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `coordination-board-records-and-overlap` — record coordination work intent and resource claim, update coordination work intent and resource claim status across planned active blocked completed cancelled released expired, and observe coordination resource claim overlap with recomputed revision and event sequence
 - `spawn-work-terminal` — member spawn, ensure member, reconcile, runtime-ready observation, work submission, and terminal work closure
 - `retire-recover-destroy` — member retires, the retire of an absent identity is answered in every phase, durable incarnation recovery preserves monotone identity history, stops/stopped, resumes, shuts down, and destroys cleanly
+- `member-custody-degraded` — a mob start that cannot restore a seated member's custody for a cause of the member's own records the member degraded (the restore and its cause) in every live phase, a later record replaces the cause, a re-attempt that restores it resolves the record, a record for an unseated identity or in a destroyed mob changes nothing, and an ended seat or a destroy takes the record (crates/meerkat-machine-schema/tests/mob_machine_member_custody_region.rs)
 - `wiring-and-session-binding` — wire and unwire members, enforce known identity for session bindings, expose pending spawn, member session binding changed, and wiring lifecycle notices
 - `flow-and-run-lifecycle` — run flow, start flow, create run, create frame seed, create loop seed, project frame phase, project loop state, start run, complete flow, finish run, mark completed, kickoff resolve started or failed, kickoff clear, flow terminalized, and force cancel running work
 - `event-subscriptions-and-notices` — subscribe agent, all agent, and mob events; emit member, run, flow, progress, terminal, and wiring notices
@@ -5370,6 +5371,48 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ResolveMemberInstructionReleaseNotNeededDestroyed`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `RecordMemberCustodyUnrestoredSeatedRunning`
+  - anchors: (unclaimed)
+  - scenarios: `member-custody-degraded`
+- `RecordMemberCustodyUnrestoredSeatedStopped`
+  - anchors: (unclaimed)
+  - scenarios: `member-custody-degraded`
+- `RecordMemberCustodyUnrestoredSeatedCompleted`
+  - anchors: (unclaimed)
+  - scenarios: `member-custody-degraded`
+- `RecordMemberCustodyUnrestoredNotSeatedRunning`
+  - anchors: (unclaimed)
+  - scenarios: `member-custody-degraded`
+- `RecordMemberCustodyUnrestoredNotSeatedStopped`
+  - anchors: (unclaimed)
+  - scenarios: `member-custody-degraded`
+- `RecordMemberCustodyUnrestoredNotSeatedCompleted`
+  - anchors: (unclaimed)
+  - scenarios: `member-custody-degraded`
+- `RecordMemberCustodyUnrestoredDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: `member-custody-degraded`
+- `ResolveMemberCustodyRestoredRecordedRunning`
+  - anchors: (unclaimed)
+  - scenarios: `member-custody-degraded`
+- `ResolveMemberCustodyRestoredRecordedStopped`
+  - anchors: (unclaimed)
+  - scenarios: `member-custody-degraded`
+- `ResolveMemberCustodyRestoredRecordedCompleted`
+  - anchors: (unclaimed)
+  - scenarios: `member-custody-degraded`
+- `ResolveMemberCustodyRestoredUnrecordedRunning`
+  - anchors: (unclaimed)
+  - scenarios: `member-custody-degraded`
+- `ResolveMemberCustodyRestoredUnrecordedStopped`
+  - anchors: (unclaimed)
+  - scenarios: `member-custody-degraded`
+- `ResolveMemberCustodyRestoredUnrecordedCompleted`
+  - anchors: (unclaimed)
+  - scenarios: `member-custody-degraded`
+- `ResolveMemberCustodyRestoredUnrecordedDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: `member-custody-degraded`
 
 ### Effects
 - `HoldMemberRunStarts`
@@ -6211,6 +6254,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `destroyed_mob_holds_no_member_lifecycle`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `custody_unrestored_members_are_seated`
+  - anchors: (unclaimed)
+  - scenarios: `member-custody-degraded`
 - `operator_instruction_records_lockstep`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)

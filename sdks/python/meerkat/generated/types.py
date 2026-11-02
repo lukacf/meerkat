@@ -2478,9 +2478,26 @@ class MobCreateResult:
 
 
 @dataclass
+class WireQuarantinedMob:
+    """One quarantined persisted mob on `mob/list`: its store did not restore
+and is kept exactly as found, with no actor. A lookup of its id answers
+the `mob_quarantined` refusal this row carries (`message`, `code`,
+`structured_data`); `mob/restore_retry` re-attempts its restore."""
+    class_: WireMobQuarantineClass
+    message: str
+    mob_id: str
+    retryable: bool
+    attempts: Optional[int] = None
+    code: Optional[Literal['SESSION_NOT_FOUND', 'SCHEDULE_NOT_FOUND', 'SESSION_BUSY', 'SESSION_NOT_RUNNING', 'REQUEST_CANCELLED', 'PROVIDER_ERROR', 'BUDGET_EXHAUSTED', 'HOOK_DENIED', 'AGENT_ERROR', 'CAPABILITY_UNAVAILABLE', 'SKILL_NOT_FOUND', 'SKILL_RESOLUTION_FAILED', 'INVALID_PARAMS', 'INTERNAL_ERROR', 'DUPLICATE_INPUT', 'SUPERVISOR_ROTATION_INCOMPLETE'] | Literal['SCOPE_DENIED'] | Literal['HOST_UNAVAILABLE'] | Literal['STALE_CURSOR'] | Literal['STALE_FENCE'] | Literal['MEMBER_RELOAD_REQUIRED'] | Literal['INPUT_REFUSED'] | Literal['INPUT_NOT_READY'] | Literal['SESSION_RUNTIME_UNAVAILABLE'] | Literal['APPROVAL_STORE_UNAVAILABLE'] | Literal['APPROVAL_CONFLICT'] | Literal['APPROVAL_COMMIT_UNKNOWN'] | Literal['STALE_DELIVERY_SCOPE'] | Literal['FORK_INSTRUCTION_REFUSED']] = None
+    retrying: Optional[bool] = None
+    structured_data: Optional[Any] = None
+
+
+@dataclass
 class MobListResult:
     """Response payload for `mob/list`."""
     mobs: list[dict[str, Any]]
+    quarantined: Optional[list[WireQuarantinedMob]] = None
 
 
 @dataclass
@@ -3326,6 +3343,13 @@ class MobRotateSupervisorResult:
     mob_id: str
     ok: bool
     report: SupervisorRotationReportWire
+
+
+@dataclass
+class MobRestoreRetryResult:
+    """Response payload for `mob/restore_retry`."""
+    mob_id: str
+    outcome: WireMobRestoreRetryOutcome
 
 
 @dataclass
@@ -7365,7 +7389,15 @@ WireMemberCustodyRestore = Literal['startup_binding', 'cleanup_delivery']
 # The cause a deferred member custody restore last met. The vocabulary
 # may grow: a reader surfaces a cause it does not know instead of
 # refusing it.
-WireMemberCustodyDeferralCause = Literal['served_elsewhere', 'hosting_unavailable', 'durable_tail_unprovable']
+WireMemberCustodyDeferralCause = Literal['served_elsewhere', 'hosting_unavailable', 'durable_tail_unprovable', 'store_unavailable', 'store_unreadable']
+
+# Why a persisted mob store is quarantined. The vocabulary may grow: a
+# reader surfaces a class it does not know instead of refusing it.
+WireMobQuarantineClass = Literal['store_unavailable', 'store_unreadable', 'resume_refused']
+
+# How a `mob/restore_retry` ended. A re-attempt that fails answers the
+# `mob_quarantined` refusal instead.
+WireMobRestoreRetryOutcome = Literal['restored', 'held', 'settled', 'not_quarantined']
 
 # Lifecycle status of a flow run on the wire. Mirrors
 # `meerkat_mob::MobRunStatus` so consumers branch on a closed type rather than

@@ -8018,7 +8018,7 @@ async fn check_copilot_operator_token(
     token: String,
     options: serde_json::Value,
 ) -> anyhow::Result<CopilotTokenCheck> {
-    let config = meerkat_copilot::CopilotBackendConfig::from_options(&options)
+    let config = meerkat_copilot::CopilotBackendConfig::from_token_options(&options)
         .map_err(|error| anyhow::anyhow!("invalid Copilot backend options: {error}"))?;
     let identity = meerkat_copilot::verify_operator_token(&token, &config)
         .await

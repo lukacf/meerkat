@@ -459,8 +459,17 @@ impl CopilotRuntime {
             ));
         }
 
-        let config = CopilotBackendConfig::from_options(&binding.backend_profile().options)
-            .map_err(|error| ProviderAuthError::SourceResolutionFailed(error.to_string()))?;
+        // A token route sends the integration id the Copilot API accepts for
+        // a GitHub token unless its options name one; the device sign-in
+        // keeps its own default.
+        let options = &binding.backend_profile().options;
+        let config = match mode {
+            CopilotCredentialMode::OperatorToken => {
+                CopilotBackendConfig::from_token_options(options)
+            }
+            CopilotCredentialMode::DeviceSignIn => CopilotBackendConfig::from_options(options),
+        }
+        .map_err(|error| ProviderAuthError::SourceResolutionFailed(error.to_string()))?;
         let state = self.account_state(
             persistence.authority_id(),
             binding.credential_identity(),
@@ -3159,7 +3168,8 @@ async fn lookup_operator_identity(
 }
 
 /// Headers of the identity lookup: the GitHub token as the bearer, GitHub's
-/// API version and the configured User-Agent.
+/// API version, the configured User-Agent and the route's integration id, as
+/// on every other request that carries the token.
 fn copilot_user_headers(
     config: &CopilotBackendConfig,
     token: &str,
@@ -3173,6 +3183,11 @@ fn copilot_user_headers(
         &config.token_api_version,
     )?;
     insert_header(&mut headers, "User-Agent", &config.user_agent)?;
+    insert_header(
+        &mut headers,
+        "Copilot-Integration-Id",
+        &config.integration_id,
+    )?;
     Ok(headers)
 }
 
@@ -3444,7 +3459,9 @@ fn credential_source_kind(source: &CredentialSourceSpec) -> &'static str {
 /// with the token as the Copilot API bearer. A host calls it before it stores
 /// a token, so a token GitHub or Copilot refuses is never stored. The token
 /// goes only to `api.github.com` and a `githubcopilot.com` API host, and no
-/// error carries it.
+/// error carries it. `config` is the token routes' configuration,
+/// [`CopilotBackendConfig::from_token_options`] of their backend options, so
+/// the check sends the integration id the routes send.
 pub async fn verify_operator_token(
     token: &str,
     config: &CopilotBackendConfig,

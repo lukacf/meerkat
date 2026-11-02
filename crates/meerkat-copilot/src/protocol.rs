@@ -12,6 +12,12 @@ pub const GITHUB_COPILOT_AUTHORIZER_LABEL: &str = "github-copilot";
 pub const GITHUB_COPILOT_CREDENTIAL_ACCOUNT_ID: &str = "github_copilot";
 
 const DEFAULT_INTEGRATION_ID: &str = "vscode-chat";
+/// The `Copilot-Integration-Id` a `github_copilot_token` route sends when its
+/// backend options set none: the integration id the Copilot API accepts for a
+/// GitHub token sent as its bearer, a personal access token and an OAuth token
+/// alike (GitHub Copilot CLI's). The API refuses `vscode-chat`, the device
+/// sign-in's default, for such a token.
+const OPERATOR_TOKEN_INTEGRATION_ID: &str = "copilot-developer-cli";
 const DEFAULT_USER_AGENT: &str = meerkat_auth_core::github_copilot::GITHUB_COPILOT_USER_AGENT;
 const DEFAULT_EDITOR_VERSION: &str = "vscode/1.107.0";
 const DEFAULT_EDITOR_PLUGIN_VERSION: &str = "copilot-chat/0.35.0";
@@ -298,6 +304,22 @@ impl CopilotBackendConfig {
         Ok(config)
     }
 
+    /// The configuration of a `github_copilot_token` route: as
+    /// [`Self::from_options`], except that options which set no
+    /// `integration_id` send `copilot-developer-cli`, the integration id the
+    /// Copilot API accepts for a GitHub token sent as its bearer (it refuses
+    /// `vscode-chat`, the device sign-in's default, for a personal access
+    /// token). An `integration_id` the options set is kept, whatever its
+    /// value. Pass this configuration to `verify_operator_token` to
+    /// check a token the way the token routes use it.
+    pub fn from_token_options(options: &serde_json::Value) -> Result<Self, CopilotProtocolError> {
+        let mut config = Self::from_options(options)?;
+        if configured_integration_id(options).is_none() {
+            config.integration_id = OPERATOR_TOKEN_INTEGRATION_ID.to_string();
+        }
+        Ok(config)
+    }
+
     pub fn endpoints(&self) -> Result<GitHubCopilotEndpoints, CopilotProtocolError> {
         GitHubCopilotEndpoints::public()
     }
@@ -319,6 +341,15 @@ impl CopilotBackendConfig {
         }
         Ok(())
     }
+}
+
+/// The `integration_id` a route's backend options set, if any. A resolved
+/// [`CopilotBackendConfig`] always holds one, so only the options tell a value
+/// the operator chose from the default of the route's auth method.
+fn configured_integration_id(options: &serde_json::Value) -> Option<&str> {
+    options
+        .get("integration_id")
+        .and_then(serde_json::Value::as_str)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -751,6 +782,50 @@ mod tests {
         let insecure = serde_json::json!({"github_host": "http://github.example.test"});
         assert!(matches!(
             CopilotBackendConfig::from_options(&insecure),
+            Err(CopilotProtocolError::InvalidBackendOptions(_))
+        ));
+    }
+
+    /// A token route defaults to `copilot-developer-cli`, the device sign-in
+    /// to `vscode-chat`; an `integration_id` the options set is kept on a
+    /// token route, the device sign-in's default value included, and is
+    /// still validated as a header value.
+    #[test]
+    fn token_routes_default_to_the_cli_integration_id() {
+        let token_default = |options: serde_json::Value| {
+            CopilotBackendConfig::from_token_options(&options)
+                .expect("valid token route options")
+                .integration_id
+        };
+        assert_eq!(
+            token_default(serde_json::Value::Null),
+            "copilot-developer-cli"
+        );
+        assert_eq!(
+            token_default(serde_json::json!({"editor_version": "vscode/1.200.0"})),
+            "copilot-developer-cli"
+        );
+        assert_eq!(
+            token_default(serde_json::json!({"integration_id": "enterprise-approved"})),
+            "enterprise-approved"
+        );
+        assert_eq!(
+            token_default(serde_json::json!({"integration_id": "vscode-chat"})),
+            "vscode-chat"
+        );
+        assert_eq!(
+            CopilotBackendConfig::from_options(&serde_json::Value::Null)
+                .expect("valid device route options")
+                .integration_id,
+            "vscode-chat"
+        );
+        let other_fields = CopilotBackendConfig::from_token_options(&serde_json::json!({
+            "editor_version": "vscode/1.200.0"
+        }))
+        .expect("valid token route options");
+        assert_eq!(other_fields.editor_version, "vscode/1.200.0");
+        assert!(matches!(
+            CopilotBackendConfig::from_token_options(&serde_json::json!({"integration_id": " "})),
             Err(CopilotProtocolError::InvalidBackendOptions(_))
         ));
     }

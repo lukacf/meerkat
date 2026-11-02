@@ -1489,7 +1489,9 @@ RecoveredNext ==
     \/ \E presence \in {"Present", "Tombstone", "Archived"} : RecoverArm(Id1, presence, None)
     \/ SealBootMaterializationPlan
     \/ CStop
-    \/ ARetire(AFirst)
+    \* The shell retires the member a recovered mark owes once the start
+    \* sealed its boot plan, so no row is scanned after the retirement.
+    \/ boot_plan_sealed = TRUE /\ ARetire(AFirst)
     \/ AArchive(AFirst)
     \/ AArchiveStopped
 

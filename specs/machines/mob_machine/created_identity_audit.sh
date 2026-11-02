@@ -105,7 +105,8 @@
 #   (AuditRecordTakesFreeNames).
 # - recovered: a seated store-owned identity whose Present row is followed
 #   by a removal's or an archive's row, and the retirement the recovered
-#   mark owes to its terminal, running or stopped: exactly one arm answers
+#   mark owes, once the boot plan is sealed, to its terminal, running or
+#   stopped: exactly one arm answers
 #   every row (AuditRecoverExactlyOne), the removal's end tombstones the
 #   name (AuditRemovalTombstones), and the archived identity keeps it
 #   (AuditArchivedKeepsItsName, AuditArchivedNeverSeated).
@@ -1320,9 +1321,10 @@ PY
 
   # A removal marks an unseated entry's ending as a seated one's (the
   # verdict's seated branch taken for every removal), so no retirement ever
-  # ends it.
+  # ends it. The anchor names the change verdict's Remove branch: the
+  # unlist verdict ends in the same seated branch.
   mutate removal removal_marks_an_unseated_entry "Invariant entry_ending_marks_are_seated_and_disjoint" <<'PY'
-replace_text('(IF (seated = TRUE) THEN "Retiring" ELSE "Removed")', '"Retiring"')
+replace_text('(IF (kind = "Remove") THEN (IF (seated = TRUE) THEN "Retiring" ELSE "Removed")', '(IF (kind = "Remove") THEN "Retiring"')
 PY
 
   # Two arms answer a removal: the unreadable refusal answers every removal
@@ -1474,11 +1476,12 @@ PY
 drop_guard("UnlistIdentityEntryNonAuthoritative", '"NonAuthoritative")')
 PY
 
-  # The replay of a removal's row marks no removal: the retirement then
-  # keeps the entry unseated, and a recovered removal never reaches its
-  # terminal.
+  # The replay of a removal's row marks no removal, in a running or a
+  # stopped mob: the retirement then keeps the entry unseated, and a
+  # recovered removal never reaches its terminal.
   mutate_unreached recovered recovered_removal_unmarked RecoveredRemovalEnds <<'PY'
 keep_var("RecoverCreatedIdentityEntryRemovingRunning", "identity_entry_removing")
+keep_var("RecoverCreatedIdentityEntryRemovingStopped", "identity_entry_removing")
 PY
 fi
 echo "created identity audit passed"

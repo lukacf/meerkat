@@ -495,6 +495,34 @@ the session its retirement archived. Applies of one mob run one at a time
 (`MobError::LifecycleOperationPending`). Apply the complete roster after every
 start, before the host wakes or seats its identities.
 
+Store-owned identity changes (since 0.9.9, Rust only): Core writes
+store-owned identities itself, one change at a time:
+`create_store_owned_identities` (a batch, all or nothing),
+`update_store_owned_identity`, `archive_identity`, `unarchive_identity` and
+`remove_identity` (either custody); `unlist_declared_identity` unlists one
+roster-owned identity. Each change names its operation (`IdentityOperation`:
+an id and the request's digest), its requester (the host, a human principal,
+or an agent admitted by its ordinary spawn grant, asked again at the commit)
+and its consent, and commits its identity rows, journal rows and receipt
+(`IdentityChangeReceipt`, read back with `identity_operation`) in one store
+transaction. MobMachine admits each change: a repeat answers `Replayed`, and
+a refusal is a typed `IdentityChangeRefusal` (`OperationReused`,
+`GrantRevoked`, `StaleSpec` with the identity's current spec digest,
+`NameTaken`, `OwnerReadOnly`, `ChangesHeld`, ...) with nothing written. A
+removal is permanent: it tombstones the name (`identity_tombstones`), so drop
+a removed identity from the host's roster; unlist instead to take one out
+and list it again later. Deliveries to an archived identity are refused
+`MobError::IdentityArchived`. A roster that lists a store-owned name is
+answered `DeclaredEntryOutcome::Noted` (`DeclaredEntryNote::OwnedByStore`),
+a steady state that changes nothing. An identity whose profile requires its
+host's preparation (`IdentityPreparationMode::Required` or `Constructed`)
+waits unseated, refusing deliveries retryable, until
+`settle_identity_preparation` (after `construct_identity` for a held
+construction; `abort_identity_construction` ends an attempt).
+`identity_record` reads one identity's record, and `identity_record_census`
+counts what a downgrade must settle first: a mob that holds such rows has no
+supported downgrade to 0.9.8 before they are exported and purged.
+
 Same-session respawn (since 0.9.9): `respawn_member(identity, MemberRespawn)`
 retires the member's incarnation and seats its next one Dormant at the next
 generation on the same session, keeping its conversation, comms key and

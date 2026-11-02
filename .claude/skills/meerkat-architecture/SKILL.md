@@ -553,6 +553,16 @@ Since 0.9.8 (the 0.9.9 release):
   and blocked delivery facts, and a reset that commits only on an empty
   roster (`AdmitReset` is its pure preflight). Operator-instruction events
   journal at mob event schema 10.
+- **Store-owned identity changes.** Core writes store-owned identities
+  itself (create, update, archive, unarchive, and removal of either
+  custody), each change admitted by MobMachine in its commit step
+  (`AdmitIdentityChange`) and committed with its rows, journal rows and
+  receipt in one store transaction; an agent's change rides its ordinary
+  spawn grant, checked again at the commit. Host preparation
+  (`IdentityPreparationMode`) holds an identity unseated, and a held
+  construction (`BeginPreparationConstruction`, `SettleHostPreparation`,
+  `EndPreparationConstruction`) publishes its member only once the host
+  accepts the activation.
 - **AuthMachine** records the credential material a source-read publication
   carries (`ResolveSourceCredentialPublication`), so a value that was
   refused or logged out is not published again until a different one

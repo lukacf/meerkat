@@ -403,7 +403,11 @@ returned with `include_terminal`.
 
 Every list, ready, and snapshot call reads the whole namespace, closed history
 included, so its cost grows with the namespace, and a walk of several pages
-reads it once per page. Scope long-lived work across deliberately scoped
+reads it once per page. A trusted in-process Rust caller that needs the whole
+selection in one consistent read, such as live delegation scheduling, uses
+`WorkGraphService::snapshot_uncut`: one observation with every item a snapshot
+filter selects, with no `limit` cut and no cursor (it ignores both). No tool,
+RPC method, REST route or CLI command offers it; they keep the bounded pages. Scope long-lived work across deliberately scoped
 realms or namespaces issued by an embedding Rust host. A caller-supplied
 namespace string cannot widen the service's grant; there is no item-delete,
 namespace-rename, or graph-compaction API.

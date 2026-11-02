@@ -416,7 +416,9 @@ merge or delimiter-join distinct canonical System rows.
 
 A session's resolved `supports_mid_conversation_system_messages` capability is
 the model's catalog row as the session's backend serves it: through the private
-ChatGPT backend it is `false`, whatever the row says. Instruction activation
+ChatGPT backend it is `false`, whatever the row says, and since 0.9.9 so it is
+through an OpenAI backend kind this version does not know, as for a binding the
+config does not resolve. Instruction activation
 refuses on it with `UnsupportedCurrentLowering` before anything is appended. A
 model change or binding clear is planned with the binding the session's client
 resolution selects, so one that would put recorded activations on such a

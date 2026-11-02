@@ -268,8 +268,12 @@ GitHub's identity lookup may not answer a fine-grained personal access token
 that the Copilot API accepts (it can answer 403 or 404). The route then uses
 the default Copilot API host, `https://api.githubcopilot.com`, with no login
 or plan, and only once the account's model list loads there: a token that
-cannot list the models is never used, and a 401 from that list refuses the
-token. `rkat auth test` then reports that GitHub named no account.
+cannot list the models is never used. A 401 or 403 from that list is Copilot
+refusing the token (a missing Copilot Requests permission or seat, a policy),
+not a revoked token: the request fails as `refresh_failed`, the same token is
+asked about again after a minute, and it works once that is fixed. Only the
+identity lookup's own 401 marks a token revoked. Once such a route serves,
+`rkat auth test` reports that GitHub named no account.
 
 Write the three routes once, then provide the token in the environment:
 

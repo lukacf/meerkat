@@ -520,7 +520,11 @@ jobs:
   fmt-governance:
     name: Format + governance
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    # On the monorepo workspace the planner selftests alone take about 15
+    # minutes on a hosted runner (make ci-lanes-selftest 13 minutes on
+    # PR #2011's first run, then path-classifier-selftest), past the old
+    # 20-minute cap. Splitting them into a job of their own is a follow-up.
+    timeout-minutes: 45
     env:
       RUSTC_WRAPPER: sccache
     steps:

@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+Forge 0.3.0's agent teams pin the Meta 0.9.6 runtime; the 0.9.5 notes said 0.9.4.
+
 ### Breaking
 
 - A host's own `MobSessionService` wrapper (around the session service it
@@ -158,6 +160,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   exit interview again each time its retirement's side effects run again
   after a restart. Implement it keyed by `retired_at_ms` to queue it once, as
   `SqliteAgentMemoryStore` does.
+
+- Pre-release Forge dynamic-roster installations prepared without the installed
+  Console `authentication_domain` and `event_domain` pair must be installed
+  fresh before using member-class Add with a newer Connect release that
+  requires the pair. Fresh preparation now selects both fields, even with no
+  initial members. Restore preserves the original preparation and refuses Add
+  when the pair is absent; a source or SDK refresh does not migrate it.
+  Dynamic rosters cannot be updated in place. Static-roster installations do
+  not use member-class Add and are unaffected by this requirement.
 
 ### Added
 
@@ -716,6 +727,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `meta/workgraph/events` returns the events with `truncated`,
   `next_after_seq` and `event_high_water_mark`.
 
+- Forge's console accepts Meta 0.9.6's `outcome_unknown` send completion (a
+  send whose outcome a recovery could not confirm) instead of refusing it.
+- Runtime updates retain native files of up to 1 GiB each (512 MiB before), as
+  Meta 0.9.6's x86_64 Linux rpc_gateway is 520 MiB. A legacy ordinary
+  application's continuation verifies its ordinary Meta gateway by streaming
+  it, instead of reading the whole file under the 16 MiB input bound.
+- Every generated package README, like Forge's own README and the application
+  contract of its implementation agent, points at
+  `identity_resolved_tools_detail(identity)` and its `tools_source`: a member
+  that is not built yet can answer `no_build_recorded` with an empty tools
+  list, so warm or wake it first (`identity_warm` where the selected SDK
+  offers it).
+
 ### Fixed
 
 - The durable resume gate checks every WorkGraph claim a resumed worker
@@ -969,6 +993,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   refuses `meta/compact_member`: the verb rewrites a member's session
   transcript, which is the authoritative launch's to change. Before, a
   candidate ran it.
+
+- A shell-started 0.8 application package runs `start.sh --smoke` again with
+  a MobKit SDK from 0.8.43 on (generated packages pin 0.8.47): its host's
+  `send` accepts and forwards the SDK's `track_turn` keyword instead of
+  raising a TypeError.
+- A retry or reinstall on a remote destination whose `python3` is CPython
+  3.14 no longer fails with "must be an ordinary path owned by the remote
+  user": the destination accepts the extra interpreter alias that CPython
+  3.14's venv adds.
+- A runtime update no longer refuses to retain the previous environment of an
+  application whose `.venv` was created by `python3` on a CPython 3.14 host,
+  as a package's install.sh does by default: retention accepts CPython 3.14's
+  extra interpreter alias whenever it resolves to the environment's own
+  Python, where it required a link to python3.14.
 
 ### Known limitations
 

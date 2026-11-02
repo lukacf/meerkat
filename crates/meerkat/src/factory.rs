@@ -10514,6 +10514,21 @@ impl AgentFactory {
                         for (handle, resolver) in &self.external_auth_resolvers {
                             env = env.with_external_resolver(handle.clone(), resolver.clone());
                         }
+                        // A build whose output budget is fixed before
+                        // resolution (an explicit or configured budget, or
+                        // the one a restored session persisted) reads none of
+                        // the account's stated limits, so its resolution may
+                        // admit an account whose limits are pending, such as
+                        // one whose credential exchange is temporarily
+                        // unavailable; the first request completes it. A
+                        // budget taken from the account's limit needs those
+                        // limits, so that build still fails until they are
+                        // known.
+                        if build_config.max_tokens.is_some()
+                            || config.configured_max_tokens().is_some()
+                        {
+                            env = env.admitting_pending_account_limits();
+                        }
                         let explicit_auth_binding = build_config.auth_binding.is_some();
                         let provider_registry = Arc::clone(&self.provider_registry);
                         let mut first_resolution_error: Option<

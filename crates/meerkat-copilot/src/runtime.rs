@@ -40,6 +40,8 @@ const MODEL_DISCOVERY_MAX_RETRY_SECONDS: u64 = 3600;
 /// still serves, the next attempt waits this long unless the exchange sent
 /// its own `Retry-After`.
 const TOKEN_EXCHANGE_RETRY_SECONDS: u64 = 30;
+/// The shortest wait before that next attempt, whatever `Retry-After` says.
+const TOKEN_EXCHANGE_MIN_RETRY_SECONDS: u64 = 1;
 const BEARER_SCHEME: &str = "Bearer";
 const COPILOT_HTTP_TIMEOUT: StdDuration = StdDuration::from_secs(30);
 const MAX_COPILOT_HTTP_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
@@ -2187,13 +2189,16 @@ fn model_discovery_deadline(now: DateTime<Utc>, delay: StdDuration) -> DateTime<
 
 /// When to try the token exchange again after it failed transiently while
 /// the current token still serves: after the exchange's `Retry-After`, or a
-/// short delay without one, and no later than the token's expiry.
+/// short delay without one, never sooner than a second (a `Retry-After: 0`
+/// cannot switch the wait off) and no later than the token's expiry.
 fn exchange_retry_at(
     now: DateTime<Utc>,
     retry_after: Option<StdDuration>,
     expires_at: DateTime<Utc>,
 ) -> DateTime<Utc> {
-    let delay = retry_after.unwrap_or(StdDuration::from_secs(TOKEN_EXCHANGE_RETRY_SECONDS));
+    let delay = retry_after
+        .unwrap_or(StdDuration::from_secs(TOKEN_EXCHANGE_RETRY_SECONDS))
+        .max(StdDuration::from_secs(TOKEN_EXCHANGE_MIN_RETRY_SECONDS));
     Duration::from_std(delay)
         .ok()
         .and_then(|delay| now.checked_add_signed(delay))

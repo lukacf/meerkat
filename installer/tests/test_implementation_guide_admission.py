@@ -1,5 +1,6 @@
 """The final guide fence also protects continuation of saved application work."""
 import asyncio
+from contextlib import contextmanager
 import sqlite3
 from types import SimpleNamespace
 
@@ -35,6 +36,21 @@ async def test_publication_excludes_saved_guide_writers(service, monkeypatch, jo
             update_receipt(service._directory(created["id"]), status="failed", ready_to_package=False)
 
         excluded = []
+        committed_after = []
+        original_admission = store.build_admission
+
+        @contextmanager
+        def admission_with_waiting_writer(identity):
+            with original_admission(identity) as current:
+                yield current
+            # Model a waiting writer winning immediately when the reservation
+            # ends. A second reservation cannot hide a commit between the
+            # final comparison and publication of the original worker.
+            with sqlite3.connect(database, timeout=0) as writer:
+                assert writer.execute("UPDATE guided_setups SET body=body WHERE id=?", (identity,)).rowcount == 1
+            committed_after.append(list(excluded))
+
+        monkeypatch.setattr(store, "build_admission", admission_with_waiting_writer)
 
         def require_writer_excluded(publication):
             writer = sqlite3.connect(database, timeout=0)
@@ -64,6 +80,7 @@ async def test_publication_excludes_saved_guide_writers(service, monkeypatch, jo
             publication_patch.setattr(implementation_module, "write_private", publish)
             admitted = await service.submit(created["id"], 1, expected_selected_build_id=selected)
         assert excluded == ["receipt.json", "latest.json", "task"]
+        assert committed_after == [["receipt.json", "latest.json", "task"]]
         assert admitted["build_id"] in service.tasks
         assert store.get(created["id"]) == created
         # A writer can commit after admission; the reservation did not leak.

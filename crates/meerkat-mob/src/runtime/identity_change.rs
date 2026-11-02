@@ -248,6 +248,10 @@ pub struct IdentityRemoval {
     pub operation: IdentityOperation,
     pub requester: IdentityChangeRequesterInput,
     pub identity: AgentIdentity,
+    /// The spec digest the removal was decided against, if any: a
+    /// store-owned identity whose row's spec digest differs refuses it
+    /// ([`IdentityChangeRefusal::StaleSpec`]).
+    pub expected_spec_digest: Option<String>,
 }
 
 impl IdentityRemoval {
@@ -261,7 +265,15 @@ impl IdentityRemoval {
             operation,
             requester,
             identity: identity.into(),
+            expected_spec_digest: None,
         }
+    }
+
+    /// Decide the removal against the spec whose digest is `digest`.
+    #[must_use]
+    pub fn with_expected_spec_digest(mut self, digest: impl Into<String>) -> Self {
+        self.expected_spec_digest = Some(digest.into());
+        self
     }
 }
 
@@ -277,6 +289,10 @@ pub struct IdentityArchiveChange {
     pub operation: IdentityOperation,
     pub requester: IdentityChangeRequesterInput,
     pub identity: AgentIdentity,
+    /// The spec digest the change was decided against, if any: an identity
+    /// whose row's spec digest differs refuses it
+    /// ([`IdentityChangeRefusal::StaleSpec`]).
+    pub expected_spec_digest: Option<String>,
 }
 
 impl IdentityArchiveChange {
@@ -290,7 +306,15 @@ impl IdentityArchiveChange {
             operation,
             requester,
             identity: identity.into(),
+            expected_spec_digest: None,
         }
+    }
+
+    /// Decide the change against the spec whose digest is `digest`.
+    #[must_use]
+    pub fn with_expected_spec_digest(mut self, digest: impl Into<String>) -> Self {
+        self.expected_spec_digest = Some(digest.into());
+        self
     }
 }
 
@@ -724,6 +748,19 @@ impl IdentityGrantEntry {
             placement_present: spec.placement.is_some(),
         }
     }
+
+    /// What a change of an identity under `profile` that sets no field of
+    /// its spec asks of a grant: its removal, archive, unarchive or settle.
+    #[must_use]
+    pub fn for_profile(profile: impl Into<ProfileName>) -> Self {
+        Self {
+            profile: profile.into(),
+            runtime_mode_present: false,
+            backend_present: false,
+            binding_present: false,
+            placement_present: false,
+        }
+    }
 }
 
 impl IdentityGrantRequest {
@@ -736,6 +773,27 @@ impl IdentityGrantRequest {
                 .map(IdentityGrantEntry::for_spec)
                 .collect(),
         }
+    }
+
+    /// What a removal, archive, unarchive or settle of an identity whose
+    /// current profile is `profile` asks of a grant.
+    #[must_use]
+    pub fn for_identity(profile: impl Into<ProfileName>) -> Self {
+        Self {
+            entries: vec![IdentityGrantEntry::for_profile(profile)],
+        }
+    }
+
+    /// What an update of an identity whose current profile is `current` to
+    /// `spec` asks of a grant: the new spec (its profile and the privileged
+    /// fields it sets) and the current profile.
+    #[must_use]
+    pub fn for_update(current: &ProfileName, spec: &CreatedIdentitySpec) -> Self {
+        let mut entries = vec![IdentityGrantEntry::for_spec(spec)];
+        if *current != spec.profile {
+            entries.push(IdentityGrantEntry::for_profile(current.clone()));
+        }
+        Self { entries }
     }
 }
 
@@ -2297,6 +2355,20 @@ impl super::MobHandle {
         ))
     }
 
+    /// The grant of a change `requester` asked for and an approval admitted
+    /// before, rebuilt from the recorded requester identity.
+    pub async fn identity_change_grant_for(
+        &self,
+        requester: &AgentIdentity,
+        operation: &IdentityOperation,
+        request: &IdentityGrantRequest,
+    ) -> Result<IdentityChangeGrant, MobError> {
+        let _ = (requester, operation, request);
+        Err(MobError::Internal(
+            "a change's grant cannot be rebuilt from its requester identity yet".to_string(),
+        ))
+    }
+
     /// Commit a create of store-owned identities as one change: each
     /// identity's row in the identity store (revision 1, its spec, its
     /// provenance with the requester and the consent), the journal rows of
@@ -2642,6 +2714,7 @@ impl super::MobHandle {
             operation,
             requester,
             identity,
+            ..
         } = removal;
         self.change_identity_entry(
             mob_dsl::IdentityEntryChangeKind::Remove,
@@ -2675,6 +2748,7 @@ impl super::MobHandle {
             operation,
             requester,
             identity,
+            ..
         } = change;
         self.change_identity_entry(
             mob_dsl::IdentityEntryChangeKind::Archive,
@@ -2701,6 +2775,7 @@ impl super::MobHandle {
             operation,
             requester,
             identity,
+            ..
         } = change;
         self.change_identity_entry(
             mob_dsl::IdentityEntryChangeKind::Unarchive,

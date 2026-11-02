@@ -139,6 +139,16 @@ impl StoreOwnedMob {
     /// Crash the mob and resume its storage as the composition `authority`
     /// over a cold-restarted session service.
     async fn restart_as(&mut self, authority: MobCompositionAuthority) {
+        self.restart_configured(authority, |builder| builder).await;
+    }
+
+    /// [`Self::restart_as`], with the resumed mob's builder configured by
+    /// `configure` (a host registers its grant mint again).
+    async fn restart_configured(
+        &mut self,
+        authority: MobCompositionAuthority,
+        configure: impl FnOnce(MobBuilder) -> MobBuilder,
+    ) {
         let restarted = Arc::new(self.service.cold_restart_preserving_durable_state().await);
         let _ = restarted.enable_runtime_adapter();
         crash_stop_and_release_routes(self.handle.clone()).await;
@@ -146,12 +156,14 @@ impl StoreOwnedMob {
         self.handle = tokio::time::timeout(
             STEP,
             Box::pin(
-                MobBuilder::for_resume(self.storage.clone())
-                    .with_session_service(self.service.clone())
-                    .with_member_comms_identity_root(self.keys.path())
-                    .with_composition_authority(authority)
-                    .notify_orchestrator_on_resume(false)
-                    .resume(),
+                configure(
+                    MobBuilder::for_resume(self.storage.clone())
+                        .with_session_service(self.service.clone())
+                        .with_member_comms_identity_root(self.keys.path())
+                        .with_composition_authority(authority)
+                        .notify_orchestrator_on_resume(false),
+                )
+                .resume(),
             ),
         )
         .await
@@ -290,6 +302,40 @@ impl StoreOwnedMob {
                 &IdentityGrantRequest::for_specs(specs),
             )
             .await
+    }
+
+    /// Admit `requester_session`'s change `operation_id` asking `request`
+    /// of its grant.
+    async fn admit_for(
+        &self,
+        requester_session: &SessionId,
+        operation_id: &str,
+        request: &IdentityGrantRequest,
+    ) -> crate::runtime::IdentityChangeGrant {
+        self.handle
+            .admit_identity_change_grant(requester_session, &operation(operation_id), request)
+            .await
+            .unwrap_or_else(|error| panic!("the grant admits {operation_id}: {error:?}"))
+    }
+
+    /// The executor's re-admission of `requester`'s change `operation_id`
+    /// asking `request`, rebuilt from the requester identity.
+    async fn grant_for(
+        &self,
+        requester: &str,
+        operation_id: &str,
+        request: &IdentityGrantRequest,
+    ) -> Result<crate::runtime::IdentityChangeGrant, MobError> {
+        tokio::time::timeout(
+            STEP,
+            self.handle.identity_change_grant_for(
+                &id(requester),
+                &operation(operation_id),
+                request,
+            ),
+        )
+        .await
+        .expect("the re-admission answers")
     }
 
     /// An agent requester's create of `specs` as `operation_id`, under its
@@ -1387,6 +1433,634 @@ async fn a_dormant_requesters_grant_is_read_without_waking_it() {
         "the recheck woke nothing"
     );
     assert_eq!(mob.builds().await, builds, "no session was built");
+}
+
+/// A mob over a host grant mint the row revokes.
+async fn revocable_mob(label: &str) -> (StoreOwnedMob, Arc<RevocableMint>) {
+    let mint = Arc::new(RevocableMint::default());
+    let mint_for_builder: Arc<dyn MemberGrantMint> = mint.clone();
+    let mob = StoreOwnedMob::build(
+        store_owned_definition(label),
+        MobStorage::in_memory(),
+        move |builder| builder.with_member_grant_mint(mint_for_builder),
+    )
+    .await;
+    (mob, mint)
+}
+
+/// Row: the recheck of a decided change prepares its check again at the
+/// commit (the change waited for its decision): a grant the host revoked
+/// meanwhile ends the change `grant_revoked` under its permit, and nothing
+/// is written.
+///
+/// A coverage row for behaviour that stands before this change (no row
+/// drove the decided branch of the sink's check): it passes at its RED
+/// commit.
+#[tokio::test]
+async fn a_grant_revoked_while_a_decided_change_waits_ends_it_grant_revoked_under_its_permit() {
+    let (mob, mint) = revocable_mob("grant-revoked-decided").await;
+    let session = mob.spawn_requester("requester").await;
+    let child = spec("child", "worker");
+    let grant = mob
+        .admit(&session, "create-child", std::slice::from_ref(&child))
+        .await
+        .expect("the grant admits the change");
+    let now = now_ms();
+    let permit = decided_permit(&operation("create-child"), now, now + 600_000);
+    mint.revoke();
+    let journal = mob.journal().await.len();
+    assert_eq!(
+        refusal(
+            mob.create(
+                StoreOwnedMob::agent_create("create-child", grant, vec![child]),
+                IdentityChangeConsentInput::Decided(&permit),
+            )
+            .await
+        ),
+        IdentityChangeRefusal::GrantRevoked
+    );
+    assert_eq!(mob.journal().await.len(), journal);
+    assert!(mob.rows().await.is_empty());
+    assert!(!mob.is_member("child").await);
+}
+
+/// Row: a dormant requester's revoked grant ends its change
+/// `grant_revoked` without waking it: the requester stays unmaterialized,
+/// no session is built, and nothing is written.
+///
+/// A coverage row for behaviour that stands before this change (the
+/// dormant row's change commits, so it passes even with no recheck): it
+/// passes at its RED commit.
+#[tokio::test]
+async fn a_dormant_requesters_revoked_grant_ends_its_change_without_waking_it() {
+    let (mob, mint) = revocable_mob("grant-revoked-dormant").await;
+    let session = mob.spawn_requester("requester").await;
+    let child = spec("child", "worker");
+    let grant = mob
+        .admit(&session, "create-child", std::slice::from_ref(&child))
+        .await
+        .expect("the grant admits the change");
+    mob.handle
+        .release_member(&id("requester"))
+        .await
+        .expect("release the requester");
+    assert!(mob.handle.member_unmaterialized(&id("requester")));
+    mint.revoke();
+    let builds = mob.builds().await;
+    assert_eq!(
+        refusal(
+            mob.create(
+                StoreOwnedMob::agent_create("create-child", grant, vec![child]),
+                ALLOW,
+            )
+            .await
+        ),
+        IdentityChangeRefusal::GrantRevoked
+    );
+    assert!(
+        mob.handle.member_unmaterialized(&id("requester")),
+        "the recheck woke nothing"
+    );
+    assert_eq!(mob.builds().await, builds, "no session was built");
+    assert!(mob.rows().await.is_empty());
+}
+
+/// Row: a grant the host revokes before the change commits ends an update,
+/// a removal, an archive and a settle `grant_revoked`, as it ends a create,
+/// with nothing written: each row keeps its revision and its presence, and
+/// the journal is unchanged.
+///
+/// A coverage row for behaviour that stands before this change: it passes
+/// at its RED commit.
+#[tokio::test]
+async fn a_grant_revoked_before_an_update_a_removal_an_archive_or_a_settle_ends_it_grant_revoked() {
+    let (mob, mint) = revocable_mob("grant-revoked-changes").await;
+    committed(
+        mob.create(
+            host_create("create-targets", &["updated", "removed", "archived"]),
+            ALLOW,
+        )
+        .await,
+    );
+    committed(
+        mob.create(
+            prepared_create(
+                "create-pending",
+                spec("pending", "worker"),
+                IdentityPreparationMode::Required,
+            ),
+            ALLOW,
+        )
+        .await,
+    );
+    let session = mob.spawn_requester("requester").await;
+    let moved = spec("updated", "worker").with_display_name("The moved identity");
+    let worker = IdentityGrantRequest::for_identity("worker");
+    let update_grant = mob
+        .admit_for(
+            &session,
+            "update-updated",
+            &IdentityGrantRequest::for_update(&ProfileName::from("worker"), &moved),
+        )
+        .await;
+    let removal_grant = mob.admit_for(&session, "remove-removed", &worker).await;
+    let archive_grant = mob.admit_for(&session, "archive-archived", &worker).await;
+    let settle_grant = mob.admit_for(&session, "settle-pending", &worker).await;
+    mint.revoke();
+    let journal = mob.journal().await.len();
+
+    let update = crate::runtime::StoreOwnedIdentityUpdate::new(
+        operation("update-updated"),
+        IdentityChangeRequesterInput::Agent {
+            grant: update_grant,
+        },
+        moved,
+        spec_digest(&spec("updated", "worker")),
+    );
+    assert_eq!(
+        refusal(mob.handle.update_store_owned_identity(update, ALLOW).await),
+        IdentityChangeRefusal::GrantRevoked
+    );
+    let removal = crate::runtime::IdentityRemoval::new(
+        operation("remove-removed"),
+        IdentityChangeRequesterInput::Agent {
+            grant: removal_grant,
+        },
+        "removed",
+    );
+    assert_eq!(
+        refusal(mob.handle.remove_identity(removal, ALLOW).await),
+        IdentityChangeRefusal::GrantRevoked
+    );
+    let archive = crate::runtime::IdentityArchiveChange::new(
+        operation("archive-archived"),
+        IdentityChangeRequesterInput::Agent {
+            grant: archive_grant,
+        },
+        "archived",
+    );
+    assert_eq!(
+        refusal(mob.handle.archive_identity(archive, ALLOW).await),
+        IdentityChangeRefusal::GrantRevoked
+    );
+    let settle = crate::runtime::IdentityPreparationSettle::new(
+        operation("settle-pending"),
+        IdentityChangeRequesterInput::Agent {
+            grant: settle_grant,
+        },
+        "pending",
+    );
+    assert_eq!(
+        refusal(mob.handle.settle_identity_preparation(settle, ALLOW).await),
+        IdentityChangeRefusal::GrantRevoked
+    );
+
+    assert_eq!(mob.journal().await.len(), journal);
+    assert_eq!(mob.row("updated").await.revision, 1);
+    for name in ["removed", "archived"] {
+        assert_eq!(
+            mob.row(name).await.presence,
+            CreatedIdentityPresence::Present,
+            "{name}"
+        );
+        assert!(mob.seated_dormant(name), "{name}");
+    }
+    assert!(matches!(
+        mob.row("pending").await.presence,
+        CreatedIdentityPresence::PendingPreparation { .. }
+    ));
+    mob.unseated_for("pending", UnseatedEntryCause::PreparationPending)
+        .await;
+}
+
+/// Row (RED): an approved change of a requester a restart left dormant
+/// executes without waking it: the executor rebuilds the change's grant
+/// from the recorded requester identity
+/// (`MobHandle::identity_change_grant_for`), reading no session, and
+/// commits under the decision's permit. The requester stays
+/// unmaterialized, and no session is built.
+///
+/// RED on the old tree: no grant can be rebuilt from an identity (the
+/// rebuild answers an internal error).
+#[tokio::test]
+async fn an_approved_change_of_a_dormant_requester_executes_after_a_restart_without_waking_it() {
+    let mut mob = StoreOwnedMob::new("grant-after-restart").await;
+    let session = mob.spawn_requester("requester").await;
+    let child = spec("child", "worker");
+    let request = IdentityGrantRequest::for_specs(std::slice::from_ref(&child));
+    // Admitted, the change waits for its decision; the grant is
+    // process-local and goes with the restart.
+    mob.admit_for(&session, "create-child", &request).await;
+    let now = now_ms();
+    let permit = decided_permit(&operation("create-child"), now, now + 600_000);
+
+    mob.restart_as(MobCompositionAuthority::Authoritative).await;
+    assert!(
+        mob.handle.member_unmaterialized(&id("requester")),
+        "the restart left the requester dormant"
+    );
+    let builds = mob.builds().await;
+    let grant = mob
+        .grant_for("requester", "create-child", &request)
+        .await
+        .expect("the executor rebuilds the grant from the requester identity");
+    assert_eq!(grant.requester(), &id("requester"));
+    committed(
+        mob.create(
+            StoreOwnedMob::agent_create("create-child", grant, vec![child]),
+            IdentityChangeConsentInput::Decided(&permit),
+        )
+        .await,
+    );
+    assert!(mob.seated_dormant("child"));
+    assert!(
+        mob.handle.member_unmaterialized(&id("requester")),
+        "the re-admission and the commit woke nothing"
+    );
+    assert_eq!(mob.builds().await, builds, "no session was built");
+}
+
+/// Row (RED): the re-admission reads the requester identity's current
+/// grant: one its host revoked while the change waited across a restart is
+/// refused `grant_revoked`, the requester still dormant, no session built
+/// and nothing written.
+///
+/// RED on the old tree: the rebuild answers an internal error.
+#[tokio::test]
+async fn a_revoked_grant_of_a_dormant_requester_is_refused_grant_revoked_after_a_restart() {
+    let (mut mob, mint) = revocable_mob("grant-revoked-after-restart").await;
+    let session = mob.spawn_requester("requester").await;
+    let child = spec("child", "worker");
+    let request = IdentityGrantRequest::for_specs(std::slice::from_ref(&child));
+    mob.admit_for(&session, "create-child", &request).await;
+    let mint_for_resume: Arc<dyn MemberGrantMint> = mint.clone();
+    mob.restart_configured(MobCompositionAuthority::Authoritative, move |builder| {
+        builder.with_member_grant_mint(mint_for_resume)
+    })
+    .await;
+    mint.revoke();
+    let builds = mob.builds().await;
+    assert_eq!(
+        refusal(mob.grant_for("requester", "create-child", &request).await),
+        IdentityChangeRefusal::GrantRevoked
+    );
+    assert!(mob.handle.member_unmaterialized(&id("requester")));
+    assert_eq!(mob.builds().await, builds, "no session was built");
+    assert!(!mob.rows().await.contains_key(&id("child")));
+}
+
+/// Row (RED): a grant binds its operation's request: committed under the
+/// same operation id with another request digest, the change is refused
+/// `invalid_request`, and nothing is written.
+///
+/// RED on the old tree: the commit compares only the operation id, and
+/// the change commits.
+#[tokio::test]
+async fn a_grant_admitted_for_another_request_digest_is_refused_invalid_request() {
+    let mob = StoreOwnedMob::new("grant-other-digest").await;
+    let session = mob.spawn_requester("requester").await;
+    let child = spec("child", "worker");
+    let grant = mob
+        .admit(&session, "create-child", std::slice::from_ref(&child))
+        .await
+        .expect("the grant admits the change");
+    let create = StoreOwnedIdentityCreate::new(
+        IdentityOperation::new("create-child", digest("another request")),
+        IdentityChangeRequesterInput::Agent { grant },
+        vec![CreatedIdentityRequest::new(child)],
+    );
+    assert!(matches!(
+        refusal(mob.create(create, ALLOW).await),
+        IdentityChangeRefusal::InvalidRequest { .. }
+    ));
+    assert!(mob.rows().await.is_empty());
+    assert!(!mob.is_member("child").await);
+}
+
+/// Row (RED): a create commits only what its grant's admission checked: a
+/// spec of a profile the admitted request does not name is refused
+/// `invalid_request`, and nothing is written.
+///
+/// RED on the old tree: the commit checks the grant against the admitted
+/// request only, and the other profile's identity is created.
+#[tokio::test]
+async fn a_create_outside_its_admitted_request_is_refused_invalid_request() {
+    let mob = StoreOwnedMob::new("grant-create-outside").await;
+    let session = mob.spawn_requester("requester").await;
+    let admitted = spec("child", "worker");
+    let grant = mob
+        .admit(&session, "create-child", std::slice::from_ref(&admitted))
+        .await
+        .expect("the grant admits the change");
+    assert!(matches!(
+        refusal(
+            mob.create(
+                StoreOwnedMob::agent_create("create-child", grant, vec![spec("child", "lead")]),
+                ALLOW,
+            )
+            .await
+        ),
+        IdentityChangeRefusal::InvalidRequest { .. }
+    ));
+    assert!(mob.rows().await.is_empty());
+    assert!(!mob.is_member("child").await);
+}
+
+/// Row (RED): an update commits only what its grant's admission checked
+/// (the identity's current profile and its new spec): an update to a
+/// profile the admitted request does not name is refused
+/// `invalid_request`, the row at its revision and the member on its role.
+///
+/// RED on the old tree: the update commits, migrating the identity to the
+/// other profile.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_update_outside_its_admitted_request_is_refused_invalid_request() {
+    let mob = StoreOwnedMob::new("grant-update-outside").await;
+    committed(
+        mob.create(host_create("create-target", &["target"]), ALLOW)
+            .await,
+    );
+    let session = mob.spawn_requester("requester").await;
+    let admitted = spec("target", "worker").with_display_name("The renamed identity");
+    let grant = mob
+        .admit_for(
+            &session,
+            "update-target",
+            &IdentityGrantRequest::for_update(&ProfileName::from("worker"), &admitted),
+        )
+        .await;
+    let update = crate::runtime::StoreOwnedIdentityUpdate::new(
+        operation("update-target"),
+        IdentityChangeRequesterInput::Agent { grant },
+        spec("target", "lead"),
+        spec_digest(&spec("target", "worker")),
+    );
+    assert!(matches!(
+        refusal(
+            tokio::time::timeout(STEP, mob.handle.update_store_owned_identity(update, ALLOW))
+                .await
+                .expect("the update answers")
+        ),
+        IdentityChangeRefusal::InvalidRequest { .. }
+    ));
+    assert_eq!(mob.row("target").await.revision, 1);
+    assert_eq!(mob.role("target").await, Some(ProfileName::from("worker")));
+}
+
+/// Row (RED): a removal and an archive commit only against the target's
+/// current profile, as their grant's admission checked it: a grant
+/// admitted for another profile is refused `invalid_request`, with the
+/// identity's row and member untouched. An agent's removal of a
+/// roster-owned identity no member holds is refused the same way: Core
+/// holds no profile of it to check the grant against (its host's roster
+/// holds its spec). Admitted for the target's profile, the removal
+/// commits.
+///
+/// RED on the old tree: the commits check the grant against the admitted
+/// request only, and each change commits.
+#[tokio::test]
+async fn a_removal_or_archive_of_another_profile_than_admitted_is_refused_invalid_request() {
+    let mob = StoreOwnedMob::new("grant-target-profile").await;
+    committed(
+        mob.create(
+            host_create("create-targets", &["removed", "archived"]),
+            ALLOW,
+        )
+        .await,
+    );
+    tokio::time::timeout(
+        STEP,
+        mob.handle
+            .apply_declared_roster(DeclaredRoster::partial([DeclaredEntry::new(roster_spec(
+                "pending",
+            ))
+            .with_preparation(IdentityPreparationMode::Required)])),
+    )
+    .await
+    .expect("the apply answers")
+    .expect("the apply runs");
+    mob.unseated_for("pending", UnseatedEntryCause::PreparationPending)
+        .await;
+    let session = mob.spawn_requester("requester").await;
+    let lead = IdentityGrantRequest::for_identity("lead");
+    let worker = IdentityGrantRequest::for_identity("worker");
+    let agent = |grant| IdentityChangeRequesterInput::Agent { grant };
+
+    let removal = crate::runtime::IdentityRemoval::new(
+        operation("remove-removed"),
+        agent(mob.admit_for(&session, "remove-removed", &lead).await),
+        "removed",
+    );
+    assert!(matches!(
+        refusal(mob.handle.remove_identity(removal, ALLOW).await),
+        IdentityChangeRefusal::InvalidRequest { .. }
+    ));
+    let archive = crate::runtime::IdentityArchiveChange::new(
+        operation("archive-archived"),
+        agent(mob.admit_for(&session, "archive-archived", &lead).await),
+        "archived",
+    );
+    assert!(matches!(
+        refusal(mob.handle.archive_identity(archive, ALLOW).await),
+        IdentityChangeRefusal::InvalidRequest { .. }
+    ));
+    for name in ["removed", "archived"] {
+        assert_eq!(
+            mob.row(name).await.presence,
+            CreatedIdentityPresence::Present,
+            "{name}"
+        );
+        assert!(mob.seated_dormant(name), "{name}");
+    }
+    let pending = crate::runtime::IdentityRemoval::new(
+        operation("remove-pending"),
+        agent(mob.admit_for(&session, "remove-pending", &worker).await),
+        "pending",
+    );
+    assert!(matches!(
+        refusal(mob.handle.remove_identity(pending, ALLOW).await),
+        IdentityChangeRefusal::InvalidRequest { .. }
+    ));
+    mob.unseated_for("pending", UnseatedEntryCause::PreparationPending)
+        .await;
+    assert!(!mob.rows().await.contains_key(&id("pending")));
+
+    let removal = crate::runtime::IdentityRemoval::new(
+        operation("remove-removed-again"),
+        agent(
+            mob.admit_for(&session, "remove-removed-again", &worker)
+                .await,
+        ),
+        "removed",
+    );
+    committed(
+        tokio::time::timeout(STEP, mob.handle.remove_identity(removal, ALLOW))
+            .await
+            .expect("the removal answers"),
+    );
+    mob.removed("removed").await;
+}
+
+/// Row (RED): a removal, an archive and an unarchive decided against a
+/// spec the identity no longer holds are refused `stale_spec` with the
+/// row's current digest and revision, and nothing is written; decided
+/// against the current spec, they commit.
+///
+/// RED on the old tree: the changes carry no expected spec, and the stale
+/// removal commits.
+#[tokio::test]
+async fn a_removal_archive_or_unarchive_decided_against_a_stale_spec_is_refused_with_the_current_one()
+ {
+    let mob = StoreOwnedMob::new("entry-change-stale").await;
+    committed(
+        mob.create(
+            host_create("create-targets", &["removed", "archived"]),
+            ALLOW,
+        )
+        .await,
+    );
+    let moved = |name: &str| spec(name, "worker").with_display_name(format!("The moved {name}"));
+    for name in ["removed", "archived"] {
+        mob.update(
+            &format!("update-{name}"),
+            moved(name),
+            &spec_digest(&spec(name, "worker")),
+        )
+        .await
+        .expect("the update commits");
+    }
+    let stale = |name: &str| spec_digest(&spec(name, "worker"));
+    let stale_spec = |name: &str| IdentityChangeRefusal::StaleSpec {
+        identity: id(name),
+        current_digest: spec_digest(&moved(name)),
+        current_revision: Some(2),
+    };
+    let host = || IdentityChangeRequesterInput::host("console");
+
+    let removal =
+        crate::runtime::IdentityRemoval::new(operation("remove-removed"), host(), "removed")
+            .with_expected_spec_digest(stale("removed"));
+    assert_eq!(
+        refusal(mob.handle.remove_identity(removal, ALLOW).await),
+        stale_spec("removed")
+    );
+    let archive = crate::runtime::IdentityArchiveChange::new(
+        operation("archive-archived"),
+        host(),
+        "archived",
+    )
+    .with_expected_spec_digest(stale("archived"));
+    assert_eq!(
+        refusal(mob.handle.archive_identity(archive, ALLOW).await),
+        stale_spec("archived")
+    );
+    for name in ["removed", "archived"] {
+        assert_eq!(
+            mob.row(name).await.presence,
+            CreatedIdentityPresence::Present,
+            "{name}"
+        );
+        assert!(mob.seated_dormant(name), "{name}");
+    }
+
+    let archive = crate::runtime::IdentityArchiveChange::new(
+        operation("archive-archived-current"),
+        host(),
+        "archived",
+    )
+    .with_expected_spec_digest(spec_digest(&moved("archived")));
+    committed(
+        tokio::time::timeout(STEP, mob.handle.archive_identity(archive, ALLOW))
+            .await
+            .expect("the archive answers"),
+    );
+    let unarchive = crate::runtime::IdentityArchiveChange::new(
+        operation("unarchive-archived"),
+        host(),
+        "archived",
+    )
+    .with_expected_spec_digest(stale("archived"));
+    assert_eq!(
+        refusal(mob.handle.unarchive_identity(unarchive, ALLOW).await),
+        stale_spec("archived")
+    );
+    assert!(matches!(
+        mob.row("archived").await.presence,
+        CreatedIdentityPresence::Archived { .. }
+    ));
+    let removal = crate::runtime::IdentityRemoval::new(
+        operation("remove-removed-current"),
+        host(),
+        "removed",
+    )
+    .with_expected_spec_digest(spec_digest(&moved("removed")));
+    committed(
+        tokio::time::timeout(STEP, mob.handle.remove_identity(removal, ALLOW))
+            .await
+            .expect("the removal answers"),
+    );
+}
+
+/// Row (RED): an expected spec digest names a store-owned identity's row:
+/// a roster-owned identity's removal naming one is refused
+/// `invalid_request` (its host's roster checks its spec), its member kept
+/// and no tombstone written.
+///
+/// RED on the old tree: the removal carries no expected spec, and it
+/// commits.
+#[tokio::test]
+async fn a_roster_owned_removal_naming_a_spec_digest_is_refused_invalid_request() {
+    let mob = StoreOwnedMob::new("roster-removal-digest").await;
+    mob.declare(&["listed"]).await;
+    let removal = crate::runtime::IdentityRemoval::new(
+        operation("remove-listed"),
+        IdentityChangeRequesterInput::host("console"),
+        "listed",
+    )
+    .with_expected_spec_digest(digest("a roster spec"));
+    assert!(matches!(
+        refusal(mob.handle.remove_identity(removal, ALLOW).await),
+        IdentityChangeRefusal::InvalidRequest { .. }
+    ));
+    assert!(mob.is_member("listed").await);
+    assert!(
+        !mob.rows().await.contains_key(&id("listed")),
+        "no tombstone was written"
+    );
+}
+
+/// Row (RED): the receipt read needs the List scope, as the record reads
+/// do: on the agent lane it is refused `ScopeDenied`, and the receipt (its
+/// requester, its consent) is not read; the host reads it.
+///
+/// RED on the old tree: the read checks no scope and answers the receipt.
+#[tokio::test]
+async fn the_operation_read_is_refused_without_the_list_scope() {
+    let mob = StoreOwnedMob::new("operation-read-scope").await;
+    committed(
+        mob.create(host_create("create-alpha", &["alpha"]), ALLOW)
+            .await,
+    );
+    let denied = mob
+        .handle
+        .clone()
+        .with_command_authority(crate::control_policy::CommandAuthority::agent_lane())
+        .identity_operation("create-alpha")
+        .await;
+    assert!(
+        matches!(
+            &denied,
+            Err(MobError::ScopeDenied(denial)) if denial.required == crate::ControlScope::List
+        ),
+        "{denied:?}"
+    );
+    assert!(
+        mob.handle
+            .identity_operation("create-alpha")
+            .await
+            .expect("the host reads the receipt")
+            .is_some()
+    );
 }
 
 // ---------------------------------------------------------------------------

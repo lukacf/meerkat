@@ -1169,6 +1169,31 @@ else
   done
 fi
 
+# The created identity runner's runs reach the shards by the --part lists
+# the lane names, under one "running bounded" line per shard, so a run
+# dropped from every list would leave the lines above unchanged: by the
+# runner's own per-run lines, the shards together must run each run the
+# runner checks whole (no --part) exactly once.
+created_identity_runs() {
+  grep -E '^created identity audit [a-z]+ run: [0-9]+ distinct states' \
+    | sed -E 's/^created identity audit ([a-z]+) run: .*/\1/' | sort
+}
+created_whole_rc=0
+created_whole_out="$(PATH="$tlc_env_tmp:$PATH" \
+  TLC_JAVA_OPTIONS_CAPTURE="$capture" \
+  TLC_JDK_JAVA_OPTIONS_CAPTURE="$jdk_capture" \
+  TLC_WORKERS=1 bash specs/machines/mob_machine/created_identity_audit.sh 2>&1)" || created_whole_rc=$?
+created_whole_runs="$(printf '%s\n' "$created_whole_out" | created_identity_runs || true)"
+created_shard_runs="$(for shard in $audit_shards; do created_identity_runs < "$shard_outputs/$shard" || true; done | sort)"
+if [ "$created_whole_rc" = 0 ] && [ -n "$created_whole_runs" ] \
+  && [ -z "$(printf '%s\n' "$created_shard_runs" | uniq -d)" ] \
+  && [ "$created_shard_runs" = "$created_whole_runs" ]; then
+  ok "TLC lane parts: the audit shards run each run of the created identity runner exactly once"
+else
+  bad "TLC lane parts drop or repeat a created identity run (whole runner rc=$created_whole_rc; its runs:$(printf ' %s' $created_whole_runs); the shards':$(printf ' %s' $created_shard_runs))"
+  [ "$created_whole_rc" = 0 ] || show_tail created-identity-whole "$created_whole_out"
+fi
+
 # The member residency runner counts an arm printed with TLC's location
 # suffix (the fake above prints one so; the lane parts run it), and still
 # refuses a covered arm that is absent from the coverage block: a copy of the

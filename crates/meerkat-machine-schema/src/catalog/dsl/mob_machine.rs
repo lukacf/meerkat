@@ -9924,6 +9924,15 @@ macro_rules! mob_catalog_machine_dsl {
             // tombstoned yet; a member is never seated under a removed entry's
             // name (tombstone_is_never_an_entry).
             guard "name_not_tombstoned" { self.identity_entry_tombstones.contains(agent_identity) == false }
+            // Nor is an entry archived yet: a member is never seated under an
+            // archived entry. The store holds an archive's row beside its
+            // member's roster row while the archive's retirement runs; the
+            // scan after this replay marks the entry archiving again, and the
+            // retirement finishes. A replay after the scan recorded the entry
+            // archived is refused, and the entry stays archived.
+            guard "entry_not_archived" {
+                self.identity_entry_unseated.get_cloned(agent_identity) != Some(UnseatedEntryCause::Archived)
+            }
             guard "runtime_not_recovered" { self.live_runtime_ids.contains(agent_runtime_id) == false }
             // Replay sees only the events after the last reset, so an
             // identity's first recovered generation can continue its
@@ -10102,6 +10111,15 @@ macro_rules! mob_catalog_machine_dsl {
             // tombstoned yet; a member is never seated under a removed entry's
             // name (tombstone_is_never_an_entry).
             guard "name_not_tombstoned" { self.identity_entry_tombstones.contains(agent_identity) == false }
+            // Nor is an entry archived yet: a member is never seated under an
+            // archived entry. The store holds an archive's row beside its
+            // member's roster row while the archive's retirement runs; the
+            // scan after this replay marks the entry archiving again, and the
+            // retirement finishes. A replay after the scan recorded the entry
+            // archived is refused, and the entry stays archived.
+            guard "entry_not_archived" {
+                self.identity_entry_unseated.get_cloned(agent_identity) != Some(UnseatedEntryCause::Archived)
+            }
             guard "runtime_not_recovered" { self.live_runtime_ids.contains(agent_runtime_id) == false }
             // Replay sees only the events after the last reset, so an
             // identity's first recovered generation can continue its

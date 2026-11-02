@@ -281,7 +281,12 @@ unreadable row, or one the replay
 contradicts (a tombstone of the name, or a spawn ladder open for it,
 included), reserves the name
 (`identity_entry_unreadable`). No arm records an entry for a tombstoned
-name, and no replay seats a member under one. The replay
+name, and no replay seats a member under one, or under an archived entry.
+The store holds an archive's row beside its member's roster row while the
+archive's retirement runs: the replay, which comes first, seats that member
+and the scan then marks the archive in flight; a replay that came after the
+scan recorded the entry archived is refused, so MobMachine does not depend
+on that order. The replay
 reserves the name of a member row whose origin token this build does not
 know the same way. A removed entry's name is never an entry or a member
 again; an unreadable name keeps what the replay recorded for it (a

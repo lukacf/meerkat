@@ -609,6 +609,16 @@ keeps names but shows `<redacted>` for values:
 anything you serialize still contain the values. Rust hosts can reuse
 `meerkat_core::redact::REDACTED` and `RedactedUrl` for their own types.
 
+Since 0.9.9 the header values a dynamic authorizer supplies are marked
+sensitive on every OpenAI Responses, Chat Completions and Anthropic Messages
+request (a value that is not a valid header value fails the request as an
+authentication failure before it is sent), and those clients pass what they
+read from a response (rejection bodies, stream errors, unparsable data lines,
+logged provider error fields) through `HttpAuthorizer::redact_response_diagnostic`
+before it reaches a caller or a log. The GitHub Copilot authorizer redacts
+the last four bearers its account signed with; other authorizers change
+nothing unless they implement it.
+
 ## Common questions
 
 - Why is every prompt refused after `rkat realm govern`? `govern` issues no

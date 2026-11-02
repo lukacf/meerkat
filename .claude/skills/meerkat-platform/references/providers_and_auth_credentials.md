@@ -272,7 +272,14 @@ the token store. It sets `[realm.global] default_binding` if none is set.
   stored under `global:account:github_copilot` with the login as its account
   id. The token is the Copilot API bearer, identity and API host come from
   GitHub's `copilot_internal/user`, a classic `ghp_` token is refused, and a
-  token GitHub refuses moves the account to `reauth_required`. The routes hold
+  token GitHub refuses moves the account to `reauth_required`; a refusal of an
+  earlier token that a newer one already replaced fails only its own request
+  (`stale_credential`) and leaves the newer token valid. A command source
+  with `refresh_interval_ms` reports that lifetime as the token's expiry, so a
+  session built within it reuses the token without running the command again.
+  A token a provider, proxy or gateway echoes back is redacted from errors and
+  logs (the last four bearers the account signed with), and the route's
+  `Authorization` value is marked sensitive. The routes hold
   one method at a time: each login refuses routes set up for the other. A
   Rust host checks a token without storing it with
   `meerkat_copilot::verify_operator_token`, which answers its

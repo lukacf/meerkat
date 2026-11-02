@@ -419,6 +419,9 @@ compiles, but the default disables what they carry:
 - a `WorkGraphStore` that serves pages: `list_public_events` and
   `latest_event_seq`, as the built-in stores do. The default
   `list_public_events` pages through `list_events`.
+- an `HttpAuthorizer` wrapper: `redact_response_diagnostic`. Its default
+  changes nothing, so a credential a provider echoes back reaches the errors
+  and logs of the requests signed through the wrapper.
 
 ### Declared identity entries
 

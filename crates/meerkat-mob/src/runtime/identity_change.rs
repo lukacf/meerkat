@@ -435,7 +435,8 @@ impl IdentityNameHolder {
 
 /// Why an identity change was refused. Nothing of a refused change is
 /// written. Each refusal has a stable kind token ([`Self::kind`]), and only
-/// [`Self::ChangesHeld`] is retryable unchanged ([`Self::is_retryable`]).
+/// [`Self::ChangesHeld`] and [`Self::HostPreparationPending`] are retryable
+/// unchanged ([`Self::is_retryable`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum IdentityChangeRefusal {
@@ -526,6 +527,13 @@ pub enum IdentityChangeRefusal {
         identity: AgentIdentity,
         reason: String,
     },
+    /// The identity awaits its host's preparation: it is not archived until
+    /// the preparation is settled, or the identity removed. `attempt` names
+    /// its held or activating construction, if one is open. Retryable.
+    HostPreparationPending {
+        identity: AgentIdentity,
+        attempt: Option<u64>,
+    },
 }
 
 impl IdentityChangeRefusal {
@@ -561,14 +569,19 @@ impl IdentityChangeRefusal {
             Self::ConstructionRequired { .. } => "construction_required",
             Self::ActivationPending { .. } => "activation_pending",
             Self::ConstructionRefused { .. } => "construction_refused",
+            Self::HostPreparationPending { .. } => "host_preparation_pending",
         }
     }
 
-    /// Whether the same request may commit later unchanged: only a changes
-    /// hold ends by itself.
+    /// Whether the same request may commit later unchanged: a changes hold
+    /// ends by itself, and an identity's pending preparation ends with its
+    /// settle.
     #[must_use]
     pub fn is_retryable(&self) -> bool {
-        matches!(self, Self::ChangesHeld)
+        matches!(
+            self,
+            Self::ChangesHeld | Self::HostPreparationPending { .. }
+        )
     }
 }
 
@@ -668,6 +681,13 @@ impl std::fmt::Display for IdentityChangeRefusal {
                 formatter,
                 "the construction of '{identity}' was refused: {reason}"
             ),
+            Self::HostPreparationPending { identity, attempt } => match attempt {
+                Some(attempt) => write!(
+                    formatter,
+                    "'{identity}' awaits its host's preparation (attempt {attempt} is open)"
+                ),
+                None => write!(formatter, "'{identity}' awaits its host's preparation"),
+            },
         }
     }
 }
@@ -813,6 +833,67 @@ pub trait MemberGrantMint: Send + Sync {
 /// The error of a refused identity change.
 pub(super) fn refused(refusal: IdentityChangeRefusal) -> MobError {
     MobError::IdentityChangeRefused { refusal }
+}
+
+/// Test seam: holds of a mob's next change step of one kind (`unlist` or
+/// `update`), each consumed once, so a row can act between the handle's
+/// preparation of the step and the step itself.
+#[cfg(test)]
+static CHANGE_STEP_HOLDS_FOR_TEST: std::sync::Mutex<Vec<ArmedChangeStepHold>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// One armed hold: the mob, the step, and the hold's two ends.
+#[cfg(test)]
+type ArmedChangeStepHold = (
+    MobId,
+    &'static str,
+    oneshot::Sender<()>,
+    oneshot::Receiver<()>,
+);
+
+/// A held change step: `entered` fires once the step reaches its hold;
+/// sending on `release` (or dropping it) lets the step go on.
+#[cfg(test)]
+pub(in crate::runtime) struct ChangeStepHold {
+    pub(in crate::runtime) entered: oneshot::Receiver<()>,
+    pub(in crate::runtime) release: oneshot::Sender<()>,
+}
+
+/// Hold `mob_id`'s next `step` (`unlist` or `update`), consumed once.
+#[cfg(test)]
+pub(in crate::runtime) fn hold_next_change_step_for_test(
+    mob_id: &MobId,
+    step: &'static str,
+) -> ChangeStepHold {
+    let (entered_tx, entered_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
+    CHANGE_STEP_HOLDS_FOR_TEST
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .push((mob_id.clone(), step, entered_tx, release_rx));
+    ChangeStepHold {
+        entered: entered_rx,
+        release: release_tx,
+    }
+}
+
+/// Pass `mob_id`'s hold of `step`, if one is armed: announce the step and
+/// wait for its release.
+#[cfg(test)]
+pub(super) async fn pass_change_step_hold_for_test(mob_id: &MobId, step: &'static str) {
+    let hold = {
+        let mut holds = CHANGE_STEP_HOLDS_FOR_TEST
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        holds
+            .iter()
+            .position(|(armed, armed_step, ..)| armed == mob_id && *armed_step == step)
+            .map(|index| holds.remove(index))
+    };
+    if let Some((_, _, entered, release)) = hold {
+        let _ = entered.send(());
+        let _ = release.await;
+    }
 }
 
 /// The current time in UNIX milliseconds (`time_compat`: the browser's
@@ -2933,6 +3014,8 @@ impl super::MobHandle {
                 expected_spec_digest,
             },
         };
+        #[cfg(test)]
+        pass_change_step_hold_for_test(self.mob_id(), "update").await;
         let (mut outcome, answer) = self
             .run_declared_apply(super::DeclaredRoster::partial(entries), Some(change))
             .await?;

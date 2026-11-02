@@ -849,6 +849,8 @@ impl super::MobHandle {
         // apply records a Declared entry.
         let mut listed =
             super::identity_entry::declared_entries(&self.machine_state_watch_rx.borrow());
+        #[cfg(test)]
+        super::identity_change::pass_change_step_hold_for_test(self.mob_id(), "unlist").await;
         let mut outcome = DeclaredRosterOutcome::default();
         let result = if listed.remove(identity) {
             self.seal_declared_roster(listed, &mut outcome).await

@@ -10577,6 +10577,96 @@ mod tests {
         assert!(authority.state().runtime_retire_archive_only.is_empty());
     }
 
+    /// The mob's destroy ends a removal's or an archive's mark with the
+    /// entry: a destroy admitted after the change marked the seated
+    /// store-owned entry, before its own retirement ran, archives the member
+    /// and leaves no mark on an identity with no entry and no member.
+    #[test]
+    fn the_destroy_ends_a_removal_or_archive_mark_with_the_entry() {
+        for kind in [
+            IdentityEntryChangeKind::Remove,
+            IdentityEntryChangeKind::Archive,
+        ] {
+            let (mut authority, member) = dormant_member_authority("destroy-marked");
+            recover_created(
+                &mut authority,
+                &member.identity,
+                RecoveredPresence::Present,
+                None,
+            );
+            let change = match kind {
+                IdentityEntryChangeKind::Remove => MobMachineInput::RemoveIdentityEntry {
+                    agent_identity: member.identity.clone(),
+                },
+                _ => MobMachineInput::ArchiveIdentityEntry {
+                    agent_identity: member.identity.clone(),
+                },
+            };
+            let marked = MobMachineMutator::apply(&mut authority, change)
+                .unwrap_or_else(|error| panic!("{kind:?}: the change answers: {error}"));
+            assert!(
+                marked.effects().iter().any(|effect| matches!(
+                    effect,
+                    MobMachineEffect::IdentityEntryChangeResolved {
+                        verdict: IdentityEntryChangeVerdict::Retiring
+                            | IdentityEntryChangeVerdict::Archiving,
+                        ..
+                    }
+                )),
+                "{kind:?}: the change marks the seated entry"
+            );
+            begin_completion_lifecycle_quiesce(
+                &mut authority,
+                PlacedCompletionLifecycleIntentKind::Destroy,
+            );
+            authority
+                .apply_signal(MobMachineSignal::AdmitDestroyCleanup)
+                .expect("the mob admits its destroy");
+            authority
+                .apply_signal(MobMachineSignal::AdmitDestroyMemberRetire {
+                    mob_id: MobId::from("archive-only-mob"),
+                    agent_identity: member.identity.clone(),
+                    agent_runtime_id: member.runtime_id.clone(),
+                    fence_token: member.fence_token,
+                    generation: Generation(0),
+                    session_id: Some(member.session_id.clone()),
+                })
+                .unwrap_or_else(|error| {
+                    panic!("{kind:?}: the destroy admits the marked member: {error}")
+                });
+            close_ingress_detach(&mut authority, &member);
+            authority
+                .apply_signal(MobMachineSignal::ObserveDestroyMemberRetirementArchived {
+                    agent_identity: member.identity.clone(),
+                    agent_runtime_id: member.runtime_id.clone(),
+                    fence_token: member.fence_token,
+                    generation: Generation(0),
+                    session_id: Some(member.session_id.clone()),
+                    disposal: MemberSessionDisposal::Archived,
+                })
+                .unwrap_or_else(|error| {
+                    panic!("{kind:?}: the destroy archives the marked member: {error}")
+                });
+            let state = authority.state();
+            assert!(
+                !state.identity_to_runtime.contains_key(&member.identity),
+                "{kind:?}"
+            );
+            assert!(
+                !state.identity_entry_origins.contains_key(&member.identity),
+                "{kind:?}: the destroy ends the entry"
+            );
+            assert!(
+                !state.identity_entry_removing.contains(&member.identity),
+                "{kind:?}: no removal mark outlives its entry"
+            );
+            assert!(
+                !state.identity_entry_archiving.contains(&member.identity),
+                "{kind:?}: no archive mark outlives its entry"
+            );
+        }
+    }
+
     /// No retiring member is woken after a restart, so a replayed
     /// retirement start is archive-only and its re-drive routes nothing.
     #[test]

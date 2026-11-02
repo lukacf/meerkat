@@ -2078,6 +2078,128 @@ async fn a_one_entry_unlist_and_relist_keep_a_roster_owned_identitys_session() {
     ));
 }
 
+/// Wait, within one step, until `name` is no member of `mob`.
+async fn left(mob: &StoreOwnedMob, name: &str) {
+    let deadline = tokio::time::Instant::now() + STEP;
+    while mob.is_member(name).await {
+        assert!(tokio::time::Instant::now() < deadline, "{name} never left");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// Row (RED): the one-entry unlist reads and changes no other entry: an
+/// entry the legacy adoption records while the unlist waits for its step
+/// stays listed, its member seated, and the unlist answers only its own
+/// identity.
+///
+/// RED on the old tree: the unlist seals a roster built from the entries
+/// published before its step, which omits the adopted one, so the seal
+/// unlists it too and retires its member.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_entry_adopted_while_an_unlist_waits_is_not_unlisted() {
+    let mob = StoreOwnedMob::new("unlist-concurrent").await;
+    mob.declare(&["listed"]).await;
+    let mut legacy = SpawnMemberSpec::new("worker", id("legacy"));
+    legacy.labels = Some(BTreeMap::from([(
+        crate::runtime::identity_entry::LEGACY_IDENTITY_LABEL.to_string(),
+        "legacy".to_string(),
+    )]));
+    mob.handle
+        .spawn_spec(legacy)
+        .await
+        .expect("a legacy member");
+
+    let hold =
+        super::super::identity_change::hold_next_change_step_for_test(&mob.mob_id(), "unlist");
+    let handle = mob.handle.clone();
+    let unlist = tokio::spawn(async move { handle.unlist_declared_identity(&id("listed")).await });
+    tokio::time::timeout(STEP, hold.entered)
+        .await
+        .expect("the unlist reaches its step")
+        .expect("the hold is armed");
+    assert_eq!(
+        mob.handle
+            .adopt_legacy_identity_entry(&id("legacy"))
+            .await
+            .expect("the adoption answers"),
+        crate::runtime::LegacyIdentityEntryAdoption::Adopted
+    );
+    let _ = hold.release.send(());
+    let unlisted = tokio::time::timeout(STEP, unlist)
+        .await
+        .expect("the unlist answers")
+        .expect("the unlist task completes")
+        .expect("the unlist runs");
+    assert!(
+        unlisted.unlisted.contains_key(&id("listed")),
+        "{unlisted:?}"
+    );
+    assert!(
+        !unlisted.unlisted.contains_key(&id("legacy")),
+        "the adopted entry is not unlisted: {unlisted:?}"
+    );
+    left(&mob, "listed").await;
+    assert!(
+        mob.is_member("legacy").await,
+        "the adopted entry's member stays"
+    );
+    assert!(
+        matches!(
+            mob.read("legacy"),
+            IdentityEntryRead::Entry(view)
+                if view.origin == IdentityEntryOrigin::Declared
+                    && matches!(view.standing, EntryStanding::Seated(_))
+        ),
+        "{:?}",
+        mob.read("legacy")
+    );
+}
+
+/// Row (RED): an unlisted roster-owned identity's archived session record
+/// holds its name: a store-owned create of the name is refused
+/// `name_taken {by: identity}` and writes nothing, and listing the identity
+/// again seats it on its own session.
+///
+/// RED on the old tree: the create takes the name and lets the record go.
+#[tokio::test]
+async fn a_create_of_an_unlisted_roster_identitys_name_is_refused_name_taken() {
+    let mob = StoreOwnedMob::new("unlisted-name").await;
+    mob.declare(&["listed"]).await;
+    let session = mob.session("listed").await;
+    tokio::time::timeout(STEP, mob.handle.unlist_declared_identity(&id("listed")))
+        .await
+        .expect("the unlist answers")
+        .expect("the unlist runs");
+    left(&mob, "listed").await;
+    assert_eq!(
+        refusal(
+            mob.create(host_create("create-listed", &["listed"]), ALLOW)
+                .await
+        ),
+        IdentityChangeRefusal::NameTaken {
+            identity: id("listed"),
+            by: IdentityNameHolder::Identity,
+        }
+    );
+    assert!(mob.rows().await.is_empty(), "nothing is written");
+    assert_eq!(
+        mob.handle
+            .identity_operation("create-listed")
+            .await
+            .expect("read the receipt"),
+        None
+    );
+    let relisted = mob.declare(&["listed"]).await;
+    assert!(
+        matches!(
+            relisted.entries.get(&id("listed")),
+            Some(crate::runtime::DeclaredEntryOutcome::Seated { session_id, .. })
+                if *session_id == session
+        ),
+        "the re-list restores the identity on its own session: {relisted:?}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // R2.16: a roster listing of a store-owned name
 // ---------------------------------------------------------------------------
@@ -2544,6 +2666,76 @@ async fn a_retried_update_that_committed_replays_its_outcome() {
         "{retried:?}"
     );
     assert_eq!(mob.row("again").await.revision, 2);
+}
+
+/// Row (RED): a store-owned update decided while its identity is archived,
+/// whose identity is unarchived before the update's step, reaches the
+/// seated member: MobMachine routes the update from the step's own state,
+/// so the member moves to the new profile on its own session and the row
+/// lets the migration go.
+///
+/// RED on the old tree: the update read the archived row before its step and
+/// changed the row only, leaving the seated member under its old profile.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_update_racing_an_unarchive_reaches_the_seated_member() {
+    let mob = StoreOwnedMob::new("update-unarchive-race").await;
+    let before = spec("mover", "worker");
+    committed(
+        mob.create(host_create("create-mover", &["mover"]), ALLOW)
+            .await,
+    );
+    committed(mob.archive("archive-mover", "mover").await);
+    mob.unseated_for("mover", UnseatedEntryCause::Archived)
+        .await;
+    let mut after = before.clone();
+    after.profile = ProfileName::from("lead");
+
+    let hold =
+        super::super::identity_change::hold_next_change_step_for_test(&mob.mob_id(), "update");
+    let handle = mob.handle.clone();
+    let expected = spec_digest(&before);
+    let changed = after.clone();
+    let update = tokio::spawn(async move {
+        handle
+            .update_store_owned_identity(
+                crate::runtime::StoreOwnedIdentityUpdate::new(
+                    operation("update-mover"),
+                    IdentityChangeRequesterInput::host("console"),
+                    changed,
+                    &expected,
+                ),
+                ALLOW,
+            )
+            .await
+    });
+    tokio::time::timeout(STEP, hold.entered)
+        .await
+        .expect("the update reaches its step")
+        .expect("the hold is armed");
+    committed(mob.unarchive("unarchive-mover", "mover").await);
+    assert!(
+        mob.is_member("mover").await,
+        "the unarchive seats the identity"
+    );
+    let session = mob.session("mover").await;
+    let _ = hold.release.send(());
+    let updated = tokio::time::timeout(STEP, update)
+        .await
+        .expect("the update answers")
+        .expect("the update task completes")
+        .expect("the update commits");
+    assert!(
+        matches!(
+            updated.applied,
+            Some(crate::runtime::DeclaredEntryOutcome::RoleMigrated { .. })
+        ),
+        "{updated:?}"
+    );
+    assert_eq!(mob.role("mover").await, Some(ProfileName::from("lead")));
+    assert_eq!(mob.session("mover").await, session, "the same session");
+    let row = mob.row("mover").await;
+    assert_eq!(row.spec, Some(after));
+    assert_eq!(row.pending_role_migration, None);
 }
 
 // ---------------------------------------------------------------------------
@@ -3460,6 +3652,165 @@ async fn a_removal_during_a_held_construction_aborts_it_and_tombstones() {
         settle(&mob.handle, "settle-built", "built", Some(held.attempt())).await,
         Err(MobError::IdentityChangeRefused { .. })
     ));
+}
+
+/// A host surface's archive of `name` as `operation_id` through `handle`.
+async fn archive_through(
+    handle: &MobHandle,
+    operation_id: &str,
+    name: &str,
+) -> Result<IdentityChangeOutcome, MobError> {
+    tokio::time::timeout(
+        STEP,
+        handle.archive_identity(
+            crate::runtime::IdentityArchiveChange::new(
+                operation(operation_id),
+                IdentityChangeRequesterInput::host("console"),
+                name,
+            ),
+            ALLOW,
+        ),
+    )
+    .await
+    .expect("the archive answers")
+}
+
+/// `name`'s row's presence, read through `handle`.
+async fn row_presence(handle: &MobHandle, name: &str) -> CreatedIdentityPresence {
+    match handle
+        .identity_record(&id(name))
+        .await
+        .expect("the record read answers")
+    {
+        Some(CreatedIdentityObservation::Created(row)) => row.presence,
+        other => panic!("{name} has no readable row: {other:?}"),
+    }
+}
+
+/// Assert `refused` is the archive's refusal of `name`, awaiting its host's
+/// preparation with `attempt` open, retryable.
+fn assert_preparation_pending(refused: &IdentityChangeRefusal, name: &str, attempt: Option<u64>) {
+    assert_eq!(
+        refused,
+        &IdentityChangeRefusal::HostPreparationPending {
+            identity: id(name),
+            attempt,
+        }
+    );
+    assert_eq!(refused.kind(), "host_preparation_pending");
+    assert!(refused.is_retryable(), "{name}: the refusal is retryable");
+}
+
+/// Row (RED): an archive of an identity awaiting its host's preparation is
+/// refused `host_preparation_pending`, retryable and naming its open
+/// attempt, so the preparation is never dropped: its row still awaits the
+/// preparation (and records the attempt), the identity stays pending, and no
+/// receipt is written. Once the preparation is settled, the archive under
+/// the same operation commits. Two legs: a `required` preparation with no
+/// attempt, and a `constructed` one whose construction is held.
+///
+/// RED on the old tree: the `required` identity's archive commits and drops
+/// its preparation (its unarchive would seat it without one), and the held
+/// construction's answers a generic pending lifecycle operation.
+#[tokio::test]
+async fn archiving_an_identity_awaiting_its_preparation_is_refused_naming_it() {
+    // The `required` leg.
+    let mob = StoreOwnedMob::new("archive-pending").await;
+    committed(
+        mob.create(
+            prepared_create(
+                "create-pending",
+                spec("pending", "worker"),
+                IdentityPreparationMode::Required,
+            ),
+            ALLOW,
+        )
+        .await,
+    );
+    let refused = refusal(mob.archive("archive-pending", "pending").await);
+    assert_preparation_pending(&refused, "pending", None);
+    assert!(
+        matches!(
+            mob.row("pending").await.presence,
+            CreatedIdentityPresence::PendingPreparation {
+                constructed: false,
+                ..
+            }
+        ),
+        "the row still awaits the preparation"
+    );
+    assert_eq!(
+        mob.standing("pending"),
+        Some(EntryStanding::Unseated(
+            UnseatedEntryCause::PreparationPending
+        ))
+    );
+    assert_eq!(
+        mob.handle
+            .identity_operation("archive-pending")
+            .await
+            .expect("read the receipt"),
+        None,
+        "a refused archive writes no receipt"
+    );
+    settle(&mob.handle, "settle-pending", "pending", None)
+        .await
+        .expect("the settle commits");
+    assert!(mob.seated_dormant("pending"));
+    committed(mob.archive("archive-pending", "pending").await);
+    mob.unseated_for("pending", UnseatedEntryCause::Archived)
+        .await;
+
+    // The `constructed` leg, its construction held.
+    let mob = HeldMob::new("archive-constructed").await;
+    mob.create_constructed("built").await;
+    let held = mob
+        .construct("construct-built", "built")
+        .await
+        .expect("the construction is held");
+    let refused = refusal(archive_through(&mob.handle, "archive-built", "built").await);
+    assert_preparation_pending(&refused, "built", Some(held.attempt()));
+    assert!(
+        matches!(
+            row_presence(&mob.handle, "built").await,
+            CreatedIdentityPresence::PendingPreparation {
+                attempt,
+                constructed: true,
+            } if attempt == held.attempt()
+        ),
+        "the row still records the held attempt"
+    );
+    assert_eq!(
+        mob.standing("built"),
+        Some(EntryStanding::Unseated(
+            UnseatedEntryCause::PreparationPending
+        ))
+    );
+    assert_eq!(
+        mob.handle
+            .identity_operation("archive-built")
+            .await
+            .expect("read the receipt"),
+        None,
+        "a refused archive writes no receipt"
+    );
+    settle(&mob.handle, "settle-built", "built", Some(held.attempt()))
+        .await
+        .expect("the settle activates the held construction");
+    assert!(matches!(
+        mob.standing("built"),
+        Some(EntryStanding::Seated(_))
+    ));
+    committed(archive_through(&mob.handle, "archive-built", "built").await);
+    let deadline = tokio::time::Instant::now() + STEP;
+    while mob.standing("built") != Some(EntryStanding::Unseated(UnseatedEntryCause::Archived)) {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "built never read archived: {:?}",
+            mob.standing("built")
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 }
 
 /// Row (RED): an activation accepted before the attempt's deadline publishes

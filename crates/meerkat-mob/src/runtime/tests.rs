@@ -101469,8 +101469,7 @@ async fn a_placed_peer_drops_a_migrated_members_old_endpoint_after_the_member_tr
     // runs during the row, so it reads what the wake's own repair left.
     let controlling =
         placement_support::create_controlling_mob_with_builder("placed-history", |builder| {
-            builder
-                .with_member_wake_retry_backoff(Duration::from_secs(600), Duration::from_secs(600))
+            builder.with_member_wake_retry_backoff(Duration::from_mins(10), Duration::from_mins(10))
         })
         .await;
     let report = controlling.bind_scripted(&host).await;

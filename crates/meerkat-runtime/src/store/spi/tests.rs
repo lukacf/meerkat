@@ -1313,7 +1313,7 @@ async fn a_dispatch_waits_no_longer_than_its_bound() {
     {
         let mut faults = host.faults.lock().unwrap();
         faults.renew_hang = 1;
-        faults.list_delay = Some(Duration::from_secs(60));
+        faults.list_delay = Some(Duration::from_mins(1));
     }
     tokio::time::sleep(Duration::from_millis(2100)).await;
     assert!(
@@ -1328,7 +1328,7 @@ async fn a_dispatch_waits_no_longer_than_its_bound() {
         waited >= Duration::from_secs(13) && waited < Duration::from_millis(13_100),
         "the dispatch waited its bound: {waited:?}"
     );
-    tokio::time::sleep(Duration::from_secs(60)).await;
+    tokio::time::sleep(Duration::from_mins(1)).await;
     assert!(
         realm.lease_is_live(),
         "the re-acquire resumed the writer once its listing answered"
@@ -1374,7 +1374,7 @@ async fn a_dispatch_waits_out_a_reacquire_whose_two_acquires_are_slow() {
     );
     assert!(realm.fence() > first, "under the takeover's token");
     assert!(
-        waited >= Duration::from_millis(11_000) && waited < realm.dispatch_wait_bound(),
+        waited >= Duration::from_secs(11) && waited < realm.dispatch_wait_bound(),
         "the dispatch waited out both acquires and the listing: {waited:?}"
     );
     assert!(realm.realm_poisoned().is_none());

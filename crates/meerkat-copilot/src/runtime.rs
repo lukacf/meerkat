@@ -4854,7 +4854,7 @@ mod tests {
             "Retry-After: 0 cannot switch the backoff off"
         );
         assert_eq!(
-            exchange_retry_at(now, Some(StdDuration::from_secs(60)), expires_at),
+            exchange_retry_at(now, Some(StdDuration::from_mins(1)), expires_at),
             now + Duration::seconds(60)
         );
         assert_eq!(

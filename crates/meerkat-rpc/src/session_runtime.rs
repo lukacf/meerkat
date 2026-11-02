@@ -28691,7 +28691,7 @@ mod tests {
         let observed = process.block_on(async {
             let (event_tx, _event_rx) = mpsc::channel(100);
             let turn = tokio::time::timeout(
-                Duration::from_secs(60),
+                Duration::from_mins(1),
                 runtime.start_turn_via_runtime(
                     &session_id,
                     OVERRIDE_PROMPT.into(),
@@ -28782,7 +28782,7 @@ mod tests {
         let process = process_runtime_outliving_the_host();
         let observed = process.block_on(async {
             let accepted = tokio::time::timeout(
-                Duration::from_secs(60),
+                Duration::from_mins(1),
                 runtime.accept_external_event_via_runtime(
                     &session_id,
                     "host.runtime.stopped".to_string(),
@@ -28951,7 +28951,7 @@ mod tests {
         let (refusals, observed) = process.block_on(async {
             let (first_event_tx, _first_event_rx) = mpsc::channel(100);
             let first = tokio::time::timeout(
-                Duration::from_secs(60),
+                Duration::from_mins(1),
                 runtime.start_turn_via_runtime(
                     &session_id,
                     FIRST.into(),
@@ -28972,7 +28972,7 @@ mod tests {
                 .is_some();
             let (second_event_tx, _second_event_rx) = mpsc::channel(100);
             let second = tokio::time::timeout(
-                Duration::from_secs(60),
+                Duration::from_mins(1),
                 runtime.start_turn_via_runtime(
                     &session_id,
                     SECOND.into(),
@@ -28987,7 +28987,7 @@ mod tests {
             .await
             .expect("the second turn is answered within its bound");
             let event = tokio::time::timeout(
-                Duration::from_secs(60),
+                Duration::from_mins(1),
                 runtime.accept_external_event_via_runtime(
                     &session_id,
                     "host.runtime.stopped".to_string(),

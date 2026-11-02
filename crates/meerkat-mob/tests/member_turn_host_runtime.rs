@@ -34,7 +34,7 @@ use meerkat_mob::{
 };
 
 /// Bound for one step of a scenario; it only turns a hang into a failure.
-const STEP: Duration = Duration::from_secs(60);
+const STEP: Duration = Duration::from_mins(1);
 /// The host tool the scripted model calls once.
 const PROBE_TOOL: &str = "host_probe";
 /// The name of the host runtime's threads in these tests.
@@ -57,7 +57,7 @@ const STACK_CHILD_TEST: &str = "member_tool_stack_probe_child";
 /// waits on it. The member's turn, and its tool, run on the workers.
 const STACK_CHILD_DRIVER_STACK_BYTES: usize = 8 * 1024 * 1024;
 /// How long the parent waits for the child test process before killing it.
-const STACK_CHILD_DEADLINE: Duration = Duration::from_secs(300);
+const STACK_CHILD_DEADLINE: Duration = Duration::from_mins(5);
 
 /// First request calls [`PROBE_TOOL`]; the request carrying its result ends
 /// the turn.

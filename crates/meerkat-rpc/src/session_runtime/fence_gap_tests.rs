@@ -25,7 +25,7 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 /// Bound on one step of the row: it only turns a hang into a failure.
-const STEP: Duration = Duration::from_secs(60);
+const STEP: Duration = Duration::from_mins(1);
 /// The model id the row's session runs.
 const MODEL: &str = "claude-sonnet-4-5";
 /// How long every acquire fails from the stop on: longer than the agent's

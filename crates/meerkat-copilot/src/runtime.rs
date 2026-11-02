@@ -1606,6 +1606,12 @@ impl CopilotAuthorizer {
                 model_discovery_due: false,
             });
         }
+        tracing::warn!(
+            credential_identity = %self.binding.credential_identity(),
+            error = %unavailable.message,
+            retryable = %unavailable.retryable,
+            "Copilot token exchange failed transiently and no valid token is left; the turn fails with the retryable error and is retried"
+        );
         cached.exchange_unavailable = Some(unavailable);
         Err(error)
     }

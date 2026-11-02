@@ -5119,26 +5119,82 @@ source = { kind = "external_resolver", handle = "team-copilot-token" }
         assert_eq!(target.auth_profile.source, copilot_account_source());
     }
 
-    /// The zero-config routes are the lowering of a default Copilot account:
-    /// the one owner of the routes' shape builds both, so they cannot drift.
+    /// The zero-config routes are the lowering of a default Copilot account,
+    /// pinned by value: the three token routes on the `global`
+    /// `github_copilot` account, reading `COPILOT_GITHUB_TOKEN`, then
+    /// `GH_TOKEN`, then `GITHUB_TOKEN`, with no backend options, no default
+    /// model, no default marker and no default binding. A section over the
+    /// same source lowers into the same set.
     #[test]
     fn zero_config_copilot_routes_are_the_default_account_lowering() {
+        let source = CredentialSourceSpec::Env {
+            env: "COPILOT_GITHUB_TOKEN".to_string(),
+            fallback: vec!["GH_TOKEN".to_string(), "GITHUB_TOKEN".to_string()],
+        };
+        let account = CredentialAccountId::parse("github_copilot").unwrap();
+        let mut expected = RealmConnectionSet {
+            realm_id: RealmId::global(),
+            backends: BTreeMap::new(),
+            auth_profiles: BTreeMap::new(),
+            bindings: BTreeMap::new(),
+            default_binding: None,
+        };
+        for (id, provider) in [
+            ("copilot_openai", Provider::OpenAI),
+            ("copilot_anthropic", Provider::Anthropic),
+            ("copilot_gemini", Provider::Gemini),
+        ] {
+            expected.backends.insert(
+                id.to_string(),
+                BackendProfile {
+                    id: id.to_string(),
+                    provider,
+                    backend_kind: "copilot".to_string(),
+                    base_url: None,
+                    options: serde_json::Value::Null,
+                    server: None,
+                },
+            );
+            expected.auth_profiles.insert(
+                id.to_string(),
+                AuthProfile {
+                    id: id.to_string(),
+                    provider,
+                    auth_method: "github_copilot_token".to_string(),
+                    source: source.clone(),
+                    constraints: AuthConstraints::default(),
+                    metadata_defaults: AuthMetadataDefaults::default(),
+                },
+            );
+            expected.bindings.insert(
+                id.to_string(),
+                ProviderBinding {
+                    id: id.to_string(),
+                    backend_profile: id.to_string(),
+                    auth_profile: id.to_string(),
+                    credential_account: Some(account.clone()),
+                    default_model: None,
+                    policy: BindingPolicy::default(),
+                    provider_default: false,
+                },
+            );
+        }
+
         let zero_config = RealmConnectionSet::copilot_token_default(
             &Config::default(),
             &RealmId::global(),
             "copilot_openai",
         )
         .expect("the zero-config routes");
+        assert_eq!(zero_config, expected, "the zero-config routes, by value");
         let section = RealmConfigSection {
-            copilot: Some(CopilotAccountConfig::new(CredentialSourceSpec::Env {
-                env: "COPILOT_GITHUB_TOKEN".to_string(),
-                fallback: vec!["GH_TOKEN".to_string(), "GITHUB_TOKEN".to_string()],
-            })),
+            copilot: Some(CopilotAccountConfig::new(source)),
             ..Default::default()
         };
         assert_eq!(
             RealmConnectionSet::from_config("global", &section),
-            Ok(zero_config)
+            Ok(expected),
+            "a section over the same source lowers into the same set"
         );
     }
 

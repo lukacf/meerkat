@@ -4990,6 +4990,69 @@ mod tests {
         }
     }
 
+    /// Every Authorization value the canary authorizer signs with carries
+    /// this canary.
+    const AUTHORIZATION_CANARY: &str = "c4n4ryProviderBearer";
+
+    /// Signs every request with `Authorization: Bearer <canary>`, as a
+    /// dynamic authorizer (a GitHub Copilot operator token, a cloud bearer)
+    /// does.
+    struct CanaryBearerAuthorizer;
+
+    #[async_trait::async_trait]
+    impl meerkat_core::HttpAuthorizer for CanaryBearerAuthorizer {
+        async fn authorize(
+            &self,
+            request: &mut meerkat_core::HttpAuthorizationRequest<'_>,
+        ) -> Result<(), meerkat_core::AuthError> {
+            request.headers.push((
+                "Authorization".to_string(),
+                format!("Bearer {AUTHORIZATION_CANARY}"),
+            ));
+            Ok(())
+        }
+
+        fn label(&self) -> &'static str {
+            "canary-bearer-test"
+        }
+    }
+
+    /// The Authorization value an authorizer supplies is marked sensitive on
+    /// the request the Responses client builds, so the request's `Debug`
+    /// (and HTTP/2 header compression) never keeps the credential.
+    #[tokio::test]
+    async fn authorizer_authorization_header_is_sensitive() {
+        let client =
+            OpenAiClient::new_with_base_url("unused".to_string(), "http://127.0.0.1:9".to_string())
+                .with_authorizer(Arc::new(CanaryBearerAuthorizer));
+        let endpoint = client.responses_endpoint();
+        let (builder, _) = client
+            .apply_request_headers_with_receipt(
+                reqwest::Client::new().post(&endpoint),
+                &endpoint,
+                &[],
+            )
+            .await
+            .expect("the authorizer signs the request");
+        let request = builder.build().expect("the request builds");
+        let authorization = request
+            .headers()
+            .get(reqwest::header::AUTHORIZATION)
+            .expect("an Authorization header");
+        assert_eq!(
+            authorization.to_str().ok(),
+            Some(format!("Bearer {AUTHORIZATION_CANARY}").as_str())
+        );
+        assert!(
+            authorization.is_sensitive(),
+            "the authorizer's Authorization value must be marked sensitive"
+        );
+        assert!(
+            !format!("{request:?}").contains(AUTHORIZATION_CANARY),
+            "{request:?}"
+        );
+    }
+
     /// Serves each element of `chunks` as a separate paced HTTP body chunk so
     /// tests can pin per-chunk wire behavior (lifecycle-only chunks etc.).
     async fn paced_responses_sse(State(chunks): State<Vec<String>>) -> impl IntoResponse {

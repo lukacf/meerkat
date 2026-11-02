@@ -2160,6 +2160,76 @@ mod tests {
         server.abort();
     }
 
+    /// Every Authorization value the canary authorizer signs with carries
+    /// this canary.
+    const AUTHORIZATION_CANARY: &str = "c4n4ryProviderBearer";
+
+    /// Signs every request with `Authorization: Bearer <canary>`, as a
+    /// dynamic authorizer (a GitHub Copilot operator token, a cloud bearer)
+    /// does.
+    struct CanaryBearerAuthorizer;
+
+    #[async_trait::async_trait]
+    impl HttpAuthorizer for CanaryBearerAuthorizer {
+        async fn authorize(
+            &self,
+            request: &mut HttpAuthorizationRequest<'_>,
+        ) -> Result<(), meerkat_core::AuthError> {
+            request.headers.push((
+                "Authorization".to_string(),
+                format!("Bearer {AUTHORIZATION_CANARY}"),
+            ));
+            Ok(())
+        }
+
+        fn label(&self) -> &'static str {
+            "canary-bearer-test"
+        }
+    }
+
+    /// The Authorization value an authorizer supplies is marked sensitive on
+    /// the request the Chat Completions client builds, so the request's
+    /// `Debug` (and HTTP/2 header compression) never keeps the credential.
+    #[tokio::test]
+    async fn authorizer_authorization_header_is_sensitive() {
+        let client = OpenAiCompatibleClient::new_with_options(
+            OpenAiCompatibleMode::ChatCompletions,
+            "remote-model".to_string(),
+            "http://127.0.0.1:9".to_string(),
+            None,
+            options(true, true, true, true),
+        )
+        .with_authorizer(Arc::new(CanaryBearerAuthorizer));
+        let url = client.chat_completions_endpoint();
+        let (builder, _) = client
+            .apply_dynamic_auth_with_receipt(
+                reqwest::Client::new().post(&url),
+                "POST",
+                &url,
+                "application/json",
+                meerkat_core::HttpAuthorizationContent::default(),
+            )
+            .await
+            .expect("the authorizer signs the request");
+        let request = builder.build().expect("the request builds");
+        let authorization = request
+            .headers()
+            .get(reqwest::header::AUTHORIZATION)
+            .expect("an Authorization header");
+        assert_eq!(
+            authorization.to_str().ok(),
+            Some(format!("Bearer {AUTHORIZATION_CANARY}").as_str())
+        );
+        assert!(
+            authorization.is_sensitive(),
+            "the authorizer's Authorization value must be marked sensitive"
+        );
+        assert!(
+            !format!("{request:?}").contains(AUTHORIZATION_CANARY),
+            "{request:?}"
+        );
+    }
+
     /// What the raw stub does after the scripted head bytes are on the wire.
     #[derive(Debug, Clone, Copy)]
     enum RawStubTail {

@@ -5223,6 +5223,68 @@ mod tests {
         server.abort();
     }
 
+    /// Every Authorization value the canary authorizer signs with carries
+    /// this canary.
+    const AUTHORIZATION_CANARY: &str = "c4n4ryProviderBearer";
+
+    /// Signs every request with `Authorization: Bearer <canary>`, as a
+    /// dynamic authorizer (a GitHub Copilot operator token, a cloud bearer)
+    /// does.
+    struct CanaryBearerAuthorizer;
+
+    #[async_trait::async_trait]
+    impl meerkat_core::HttpAuthorizer for CanaryBearerAuthorizer {
+        async fn authorize(
+            &self,
+            request: &mut meerkat_core::HttpAuthorizationRequest<'_>,
+        ) -> Result<(), meerkat_core::AuthError> {
+            request.headers.push((
+                "Authorization".to_string(),
+                format!("Bearer {AUTHORIZATION_CANARY}"),
+            ));
+            Ok(())
+        }
+
+        fn label(&self) -> &'static str {
+            "canary-bearer-test"
+        }
+    }
+
+    /// The Authorization value an authorizer supplies is marked sensitive on
+    /// the request the Messages client builds, so the request's `Debug` (and
+    /// HTTP/2 header compression) never keeps the credential.
+    #[tokio::test]
+    async fn authorizer_authorization_header_is_sensitive() {
+        let client = AnthropicClient::builder(String::new())
+            .base_url("http://127.0.0.1:9".to_string())
+            .authorizer(Arc::new(CanaryBearerAuthorizer))
+            .build()
+            .expect("client");
+        let url = client.messages_endpoint();
+        let mut betas = Vec::new();
+        let (builder, _) = client
+            .apply_authorization(reqwest::Client::new().post(&url), &url, false, &mut betas)
+            .await
+            .expect("the authorizer signs the request");
+        let request = builder.build().expect("the request builds");
+        let authorization = request
+            .headers()
+            .get(reqwest::header::AUTHORIZATION)
+            .expect("an Authorization header");
+        assert_eq!(
+            authorization.to_str().ok(),
+            Some(format!("Bearer {AUTHORIZATION_CANARY}").as_str())
+        );
+        assert!(
+            authorization.is_sensitive(),
+            "the authorizer's Authorization value must be marked sensitive"
+        );
+        assert!(
+            !format!("{request:?}").contains(AUTHORIZATION_CANARY),
+            "{request:?}"
+        );
+    }
+
     /// A base URL whose HTTP client could not be built fails each unchecked
     /// request (one without an authorization check, as this test sends) with
     /// that error. The client built for the previous base URL is never used

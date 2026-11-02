@@ -102,8 +102,14 @@
 //! ([`kept_head`]), since Core may carry out the earlier rotation's started
 //! retirement for the later call without journaling a new start; the step
 //! still reads its own reach from the head it read itself. A head that does
-//! not read refuses the step before Core is asked. The projection reads
-//! a rotation's record by the same fact ([`step_reached`]): the record
+//! not read refuses the step before Core is asked. A reset or a delete reads
+//! Core's binding of the identity again right after that head, and is
+//! refused, retryable, with nothing recorded, when the incarnation changed
+//! since the verb first read it (another lifecycle operation of the member
+//! ended in between): the incarnation its record names is the one Core held
+//! at its head. The seat step reads its head before the binding. The
+//! projection reads a rotation's record by the same fact ([`step_reached`]):
+//! the record
 //! answers a retirement of its incarnation, or the fresh life's seat after
 //! it, only when Core journaled that fact after the rotation's head and up
 //! to that retirement or seat. Another operation's end of the incarnation (a

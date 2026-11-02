@@ -14661,6 +14661,12 @@ impl IdentityRuntime {
     /// effects, run by the lifecycle projection once Core journaled it) is
     /// recorded before Core is asked too, with the incarnation as the
     /// retirement hook reads it and the build the customizer is told of.
+    /// `last` is Core's binding of the identity as the verb read it, before
+    /// the build: Core's binding is read again once the head of Core's
+    /// journal is read, and one whose generation or liveness changed in
+    /// between (another lifecycle operation of the member ended) refuses the
+    /// step, retryable (`IdentityWakeRetryable`), with nothing recorded and
+    /// nothing asked of Core.
     async fn start_fresh_life_locked(
         &self,
         identity: &AgentIdentity,
@@ -14717,6 +14723,32 @@ impl IdentityRuntime {
         // the fact the rotation journals first, past it, says the rotation
         // reached Core. A head that does not read refuses the step here.
         let asked_after = self.lifecycle_journal_head(identity).await?;
+        // Core's binding of the identity, read again after the head. The
+        // verb read `last` before its build (a delete before its
+        // distillation too), and a step of the member that ended since (a
+        // host's own rotation, retirement or fresh life) lies at or before
+        // the head, where the record keyed by `last` could never claim what
+        // Core then rotates for the verb. Such a change refuses the step,
+        // retryable, with nothing recorded and nothing asked of Core; asked
+        // again, the verb reads the binding Core holds now.
+        let current = self.core_last_binding(identity).await?;
+        let moved = match (last.as_ref(), current.as_ref()) {
+            (Some(read), Some(now)) => {
+                read.generation() != now.generation() || read.is_live() != now.is_live()
+            }
+            (read, now) => read.is_some() != now.is_some(),
+        };
+        if moved {
+            return Err(IdentityRuntimeError::IdentityWakeRetryable {
+                identity: identity.clone(),
+                session_id: None,
+                detail: format!(
+                    "the {operation} was not started, and nothing was retired: Core's binding of \
+                     the identity changed while the {operation} prepared, as another lifecycle \
+                     operation of its member ended; ask again"
+                ),
+            });
+        }
         let first = lifecycle_projection::StepFirstFact::of(last.as_ref());
         // The live incarnation the rotation retires, as the verb read it, or
         // the incarnation Core had already retired that the rotation's fresh

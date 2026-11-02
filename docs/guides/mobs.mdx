@@ -704,7 +704,26 @@ refuses it, and the other members resume. A destination the hook
 selected that the runtime did not install is
 `MobError::MemberDestinationNotInstalled` instead (the runtime's verdict, not
 a refusal): the member keeps its registration, and the repair must select
-again with an advanced `context_generation`.
+again with an advanced `context_generation`. Since 0.9.9 the hooks are called
+as tasks on the host's runtime, where the member's turns run, and a call that
+ends without an answer is not recorded as the host's refusal.
+
+Since 0.9.9 every member build a mob runtime performs (a fresh spawn, a
+restore or a wake) carries that runtime's incarnation witness in
+`SessionBuildOptions::mob_incarnation` (`AgentBuildConfig::mob_incarnation`),
+so a host's member build hook mints the member's mob operator scope for the
+mob as it runs, also for a member restored at boot before the host holds the
+mob's handle. The witness is never persisted, and a placed member built on a
+host that does not run its mob carries none. The mob runtime also receives the
+live mob operator authority of every member session it builds locally:
+`MobHandle::member_spawn_profile_scope_contains(origin_session, profile)` and
+`MobHandle::member_manage_scope_contains(origin_session)` read whether that
+session's own authority holds spawn-profile scope for the profile, and manage
+scope, in the mob as it runs (the facts the spawn tools pass to the mob
+machine's spawn admission). Each reads only that session's authority and
+finds none for a session the runtime did not build or whose build bound none.
+A hook that edits a member build's external tools wraps them: tools it
+replaces outright leave the session with no recorded authority.
 
 ## Identity And Respawn
 

@@ -2264,14 +2264,20 @@ async fn the_operation_read_is_refused_without_the_list_scope() {
 /// The shipped items that may read an identity entry's origin, by file:
 /// the custody guards (the recovery source, the writers, the name guards
 /// and the reservations) and the reads that show it. Each item is named by
-/// the start of its signature, and only its body may read the origin. A
-/// file with no shipped read has no entry: a whole-file entry would
-/// authorize in advance exactly the branch on custody this guard forbids.
+/// the start of its signature, and only its body may read the origin; a
+/// method by its impl block's header and its signature, joined by ` > `,
+/// so a new method of the impl (an `is_created()`) is not authorized in
+/// advance. A file with no shipped read has no entry: a whole-file entry
+/// would authorize in advance exactly the branch on custody this guard
+/// forbids.
 const ORIGIN_READERS: &[(&str, &[&str], &str)] = &[
     (
         "runtime/identity_entry.rs",
         &[
-            "impl IdentityEntryOrigin {",
+            "impl IdentityEntryOrigin { > pub(crate) fn from_machine(",
+            "impl IdentityEntryOrigin { > pub(crate) fn to_machine(",
+            "impl IdentityEntryOrigin { > pub(crate) fn as_stored(",
+            "impl IdentityEntryOrigin { > pub(crate) fn from_stored(",
             "pub(crate) fn identity_census(",
         ],
         "the origin's machine conversions and journal token, and the census, which shows it",
@@ -2326,13 +2332,28 @@ const ORIGIN_GUARD_INVARIANTS: &[&str] = &[
     "entry_ending_marks_are_seated_and_disjoint",
 ];
 
+/// The body of an origin reader in `code`: the item `signature` names, or,
+/// for `impl header > method signature`, that method inside the impl block.
+fn origin_reader_body(code: &str, item: &str) -> Option<std::ops::Range<usize>> {
+    use super::fail_stop_cause::{brace_group_end, function_body};
+    let Some((scope, method)) = item.split_once(" > ") else {
+        return function_body(code, item);
+    };
+    let block = function_body(code, scope)?;
+    let start = block.start + code[block.clone()].find(method)?;
+    let open = start + code[start..block.end].find('{')?;
+    Some(open..brace_group_end(code, open))
+}
+
 /// The byte offsets of every read of an origin value in `code`: a path to
 /// `IdentityEntryOrigin::Created` or `::Declared`; `Self::Created` or
 /// `Self::Declared` in the type's own impl blocks; a `use` that renames the
 /// type or imports its variants (`as`, braces or a glob), which would hide
-/// every later read from the name; and a comparison of a stored token
-/// (`as_stored()` on a line that compares or matches: the token's type is
-/// not visible to the scan, so any such comparison counts).
+/// every later read from the name; and a stored token compared or matched
+/// (`as_stored()` in an expression, between the statement or block
+/// boundaries around it, that compares, matches or is a `match` scrutinee,
+/// split across lines or not: the token's type is not visible to the scan,
+/// so any such use counts).
 fn origin_value_reads(code: &str) -> Vec<usize> {
     use super::fail_stop_cause::{brace_group_end, whole_identifier};
     const NAME: &str = "IdentityEntryOrigin";
@@ -2383,10 +2404,21 @@ fn origin_value_reads(code: &str) -> Vec<usize> {
         }
     }
     for (at, _) in code.match_indices(".as_stored()") {
-        let line_start = code[..at].rfind('\n').map_or(0, |index| index + 1);
-        let line_end = code[at..].find('\n').map_or(code.len(), |index| at + index);
-        let line = &code[line_start..line_end];
-        if line.contains("==") || line.contains("!=") || line.contains("matches!") {
+        let start = code[..at]
+            .rfind([';', '{', '}'])
+            .map_or(0, |index| index + 1);
+        let end = code[at..]
+            .find([';', '{', '}'])
+            .map_or(code.len(), |index| at + index);
+        let expression = &code[start..end];
+        let scrutinee = expression
+            .match_indices("match")
+            .any(|(offset, _)| whole_identifier(expression, offset, "match"));
+        if expression.contains("==")
+            || expression.contains("!=")
+            || expression.contains("matches!")
+            || scrutinee
+        {
             reads.push(at);
         }
     }
@@ -2403,16 +2435,16 @@ fn origin_value_reads(code: &str) -> Vec<usize> {
 /// custody guards and the reads that show it. Custody decides the recovery
 /// source, the writer, the name guards and the reservations, nothing else.
 ///
-/// Hardened: readers are listed per item, not per file; the files
-/// with no shipped read (the journal codec, the store-owned writer and the
-/// machine's own module) have no entry; renamed, brace and glob imports,
-/// `Self::` variants and stored-token comparisons count as reads; and a DSL
-/// read counts for an item only when it lies inside that item's braces.
+/// Hardened: readers are listed per item, not per file, and the origin's
+/// impl per method; the files with no shipped read (the journal codec, the
+/// store-owned writer and the machine's own module) have no entry; renamed,
+/// brace and glob imports, `Self::` variants and stored tokens compared or
+/// matched (on one line or across lines) count as reads; and a DSL read
+/// counts for an item only when it lies inside that item's braces.
+/// `the_origin_scan_sees_each_read_form` pins each form.
 #[test]
 fn identity_entry_origin_is_read_only_by_the_custody_guards() {
-    use super::fail_stop_cause::{
-        brace_group_end, function_body, line_of, shipped_code, shipped_sources,
-    };
+    use super::fail_stop_cause::{line_of, shipped_code, shipped_sources};
     let mut strays = Vec::new();
     for (path, code) in shipped_sources() {
         let reads = origin_value_reads(&code);
@@ -2424,7 +2456,7 @@ fn identity_entry_origin_is_read_only_by_the_custody_guards() {
             .filter(|(reader, ..)| *reader == path)
             .flat_map(|(_, items, _)| items.iter())
             .map(|item| {
-                function_body(&code, item)
+                origin_reader_body(&code, item)
                     .unwrap_or_else(|| panic!("{path}: the origin reader `{item}` is gone"))
             })
             .collect();
@@ -2443,37 +2475,136 @@ fn identity_entry_origin_is_read_only_by_the_custody_guards() {
     .join("../meerkat-machine-schema/src/catalog/dsl/mob_machine.rs");
     let dsl = shipped_code(&std::fs::read_to_string(&dsl_path).expect("read the DSL"));
     for at in origin_value_reads(&dsl) {
-        let before = &dsl[..at];
-        let item = ["transition ", "invariant ", "helper "]
-            .iter()
-            .filter_map(|keyword| before.rfind(keyword).map(|start| (start, *keyword)))
-            .max_by_key(|(start, _)| *start);
-        let allowed = item.is_some_and(|(start, keyword)| {
-            // The read lies inside the item's own braces, not after them.
-            let inside = dsl[start..]
-                .find('{')
-                .map(|offset| start + offset)
-                .is_some_and(|open| open < at && at < brace_group_end(&dsl, open));
-            let name = dsl[start + keyword.len()..]
-                .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
-                .next()
-                .unwrap_or_default();
-            inside
-                && match keyword {
-                    "transition " => ORIGIN_GUARD_TRANSITIONS
-                        .iter()
-                        .any(|prefix| name.starts_with(prefix)),
-                    "invariant " => ORIGIN_GUARD_INVARIANTS.contains(&name),
-                    _ => false,
-                }
-        });
-        if !allowed {
+        if !dsl_origin_read_allowed(&dsl, at) {
             strays.push(format!("mob_machine DSL:{}", line_of(&dsl, at)));
         }
     }
     assert!(
         strays.is_empty(),
         "an identity's origin is read outside the custody guards: {strays:?}"
+    );
+}
+
+/// Whether the origin read at `at` in the DSL lies inside the braces of a
+/// custody guard: a transition of [`ORIGIN_GUARD_TRANSITIONS`] or an
+/// invariant of [`ORIGIN_GUARD_INVARIANTS`], never after the item's closing
+/// brace and never in a helper.
+fn dsl_origin_read_allowed(dsl: &str, at: usize) -> bool {
+    use super::fail_stop_cause::brace_group_end;
+    let before = &dsl[..at];
+    let item = ["transition ", "invariant ", "helper "]
+        .iter()
+        .filter_map(|keyword| before.rfind(keyword).map(|start| (start, *keyword)))
+        .max_by_key(|(start, _)| *start);
+    item.is_some_and(|(start, keyword)| {
+        // The read lies inside the item's own braces, not after them.
+        let inside = dsl[start..]
+            .find('{')
+            .map(|offset| start + offset)
+            .is_some_and(|open| open < at && at < brace_group_end(dsl, open));
+        let name = dsl[start + keyword.len()..]
+            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .next()
+            .unwrap_or_default();
+        inside
+            && match keyword {
+                "transition " => ORIGIN_GUARD_TRANSITIONS
+                    .iter()
+                    .any(|prefix| name.starts_with(prefix)),
+                "invariant " => ORIGIN_GUARD_INVARIANTS.contains(&name),
+                _ => false,
+            }
+    })
+}
+
+/// Row (the origin guard's own self-test): the scan finds each form of an
+/// origin read, on exactly its line, and nothing else; a reader's body is
+/// its listed method's, not its impl block's; and a DSL read is allowed
+/// only inside a custody guard's braces. A scan branch that broke would
+/// otherwise let the guard pass silently.
+#[test]
+fn the_origin_scan_sees_each_read_form() {
+    use super::fail_stop_cause::{line_of, shipped_code};
+    let code = shipped_code(
+        "use crate::runtime::IdentityEntryOrigin;\n\
+         use crate::runtime::IdentityEntryOrigin as Origin;\n\
+         use crate::runtime::IdentityEntryOrigin::{Created};\n\
+         use crate::runtime::IdentityEntryOrigin::*;\n\
+         fn custody(origin: IdentityEntryOrigin) -> bool {\n\
+             let token = origin.as_stored();\n\
+             let created = origin == IdentityEntryOrigin::Created;\n\
+             if origin.as_stored() == \"created\" {}\n\
+             if origin.as_stored()\n\
+                 != \"declared\"\n\
+             {}\n\
+             match origin.as_stored() {\n\
+                 _ => {}\n\
+             }\n\
+             matches!(token, \"created\") && created\n\
+         }\n\
+         impl IdentityEntryOrigin {\n\
+             fn listed(self) -> bool {\n\
+                 self == Self::Declared\n\
+             }\n\
+             fn is_created(self) -> bool {\n\
+                 matches!(self, Self::Created)\n\
+             }\n\
+         }\n",
+    );
+    let lines = |reads: Vec<usize>| -> Vec<usize> {
+        reads.into_iter().map(|at| line_of(&code, at)).collect()
+    };
+    assert_eq!(
+        lines(origin_value_reads(&code)),
+        [2, 3, 4, 7, 8, 9, 12, 19, 22],
+        "the renamed, brace and glob imports, a variant's path, a stored token \
+         compared on one line, across lines and as a match scrutinee, and the \
+         impl's Self:: variants; not the plain import, the parameter, the \
+         token's binding or a match on a binding"
+    );
+
+    // A method listed by its impl is the reader: the impl's other methods
+    // are not.
+    let listed = origin_reader_body(&code, "impl IdentityEntryOrigin { > fn listed(")
+        .expect("the listed method is found inside its impl");
+    let reads_in = |body: &std::ops::Range<usize>| -> Vec<usize> {
+        lines(
+            origin_value_reads(&code)
+                .into_iter()
+                .filter(|at| body.contains(at))
+                .collect(),
+        )
+    };
+    assert_eq!(reads_in(&listed), [19]);
+    assert!(
+        origin_reader_body(&code, "impl IdentityEntryOrigin { > fn unlisted(").is_none(),
+        "a method the impl does not hold is no reader"
+    );
+
+    let dsl = shipped_code(
+        "transition DeclareIdentityEntryKept {\n\
+             guard { origin == Some(IdentityEntryOrigin::Declared) }\n\
+         }\n\
+         origin = IdentityEntryOrigin::Created;\n\
+         transition StopRunning {\n\
+             guard { origin == Some(IdentityEntryOrigin::Created) }\n\
+         }\n\
+         invariant archived_entry_is_store_owned {\n\
+             origin == Some(IdentityEntryOrigin::Created)\n\
+         }\n\
+         helper custody() -> bool {\n\
+             origin == Some(IdentityEntryOrigin::Declared)\n\
+         }\n",
+    );
+    let verdicts: Vec<(usize, bool)> = origin_value_reads(&dsl)
+        .into_iter()
+        .map(|at| (line_of(&dsl, at), dsl_origin_read_allowed(&dsl, at)))
+        .collect();
+    assert_eq!(
+        verdicts,
+        [(2, true), (4, false), (6, false), (9, true), (12, false)],
+        "a custody guard's read is allowed; one after its closing brace, in \
+         another transition or in a helper is not"
     );
 }
 
@@ -6022,8 +6153,9 @@ async fn rb_cl2_4b_apply_now_writes_the_rows_labels_into_the_seat_row() {
     assert_eq!(seats_stale(&mob).await, 0, "no seat is stale");
 }
 
-/// Row: a respawn that names no labels keeps the member's own: Apply now
-/// is the respawn with the row's labels, never a default.
+/// Row: a respawn that names no labels keeps the member's own, even after
+/// an update moved its row's labels: Apply now is the respawn with the
+/// row's labels, never a default, so the seat stays stale.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_respawn_without_labels_keeps_the_members_labels() {
     let mob = StoreOwnedMob::new("respawn-keeps-labels").await;
@@ -6032,6 +6164,20 @@ async fn a_respawn_without_labels_keeps_the_members_labels() {
             .await,
     );
     let seated_with = mob.spawn_row("desk").await.labels;
+    let moved = BTreeMap::from([("team".to_string(), "beta".to_string())]);
+    assert_ne!(moved, seated_with, "the update moves the labels");
+    mob.update(
+        "relabel-desk",
+        spec("desk", "worker").with_labels(moved),
+        &spec_digest(&spec("desk", "worker")),
+    )
+    .await
+    .expect("the update commits");
+    assert_eq!(
+        seats_stale(&mob).await,
+        1,
+        "the label change left the seat stale"
+    );
     tokio::time::timeout(
         STEP,
         mob.handle
@@ -6040,7 +6186,12 @@ async fn a_respawn_without_labels_keeps_the_members_labels() {
     .await
     .expect("the respawn answers")
     .expect("the respawn commits");
-    assert_eq!(mob.spawn_row("desk").await.labels, seated_with);
+    assert_eq!(
+        mob.spawn_row("desk").await.labels,
+        seated_with,
+        "the respawn keeps the member's labels, not the row's"
+    );
+    assert_eq!(seats_stale(&mob).await, 1, "the seat stays stale");
 }
 
 /// Row (RED): a store-owned update that restamps its member (another

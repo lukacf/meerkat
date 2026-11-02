@@ -236,6 +236,13 @@ pub mod machine_schema_exports {
                 crate::machines::forked_participant_lifecycle::ForkedParticipantLifecycleMachineState::schema(),
             )
     }
+
+    pub fn mob_store_restore_lifecycle_schema() -> meerkat_machine_schema::MachineSchema {
+        meerkat_machine_schema::catalog::dsl::mob_store_restore_lifecycle_schema_metadata()
+            .attach_to(
+                crate::machines::mob_store_restore_lifecycle::MobStoreRestoreLifecycleMachineState::schema(),
+            )
+    }
 }
 
 #[doc(hidden)]

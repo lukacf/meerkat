@@ -41,6 +41,7 @@ pub mod grant_authority;
 pub mod meerkat_machine;
 pub mod mob_host_binding_authority;
 pub mod mob_machine;
+pub mod mob_store_restore_lifecycle;
 pub mod occurrence_lifecycle;
 pub mod runtime_delivery;
 pub mod schedule_lifecycle;
@@ -182,6 +183,9 @@ pub const DETACHED_JOB_PRODUCTION_RUST_MODULE: &str = "machines::detached_job";
 pub const FORKED_PARTICIPANT_LIFECYCLE_PRODUCTION_RUST_CRATE: &str = "meerkat-mob";
 pub const FORKED_PARTICIPANT_LIFECYCLE_PRODUCTION_RUST_MODULE: &str =
     "machines::forked_participant_lifecycle";
+pub const MOB_STORE_RESTORE_LIFECYCLE_PRODUCTION_RUST_CRATE: &str = "meerkat-mob";
+pub const MOB_STORE_RESTORE_LIFECYCLE_PRODUCTION_RUST_MODULE: &str =
+    "machines::mob_store_restore_lifecycle";
 pub const TEMPORARY_COUNCIL_LIFECYCLE_PRODUCTION_RUST_CRATE: &str = "meerkat-mob";
 pub const TEMPORARY_COUNCIL_LIFECYCLE_PRODUCTION_RUST_MODULE: &str =
     "machines::temporary_council_lifecycle";
@@ -5505,6 +5509,49 @@ pub fn forked_participant_lifecycle_schema_metadata() -> MachineSchemaMetadata {
 pub fn dsl_temporary_council_lifecycle_machine() -> MachineSchema {
     temporary_council_lifecycle_schema_metadata()
         .attach_to(temporary_council_lifecycle::TemporaryCouncilLifecycleMachineState::schema())
+}
+
+pub fn dsl_mob_store_restore_lifecycle_machine() -> MachineSchema {
+    mob_store_restore_lifecycle_schema_metadata()
+        .attach_to(mob_store_restore_lifecycle::MobStoreRestoreLifecycleMachineState::schema())
+}
+
+pub fn dsl_mob_store_restore_lifecycle_machine_production_schema() -> MachineSchema {
+    with_production_rust_binding(
+        dsl_mob_store_restore_lifecycle_machine(),
+        MOB_STORE_RESTORE_LIFECYCLE_PRODUCTION_RUST_CRATE,
+        MOB_STORE_RESTORE_LIFECYCLE_PRODUCTION_RUST_MODULE,
+    )
+}
+
+/// Named-type bindings for the quarantined mob store record machine.
+pub fn mob_store_restore_lifecycle_schema_metadata() -> MachineSchemaMetadata {
+    machine_schema_metadata(
+        vec![
+            NamedTypeBinding::string_enum(
+                "MobStoreRestoreLifecyclePhase",
+                &["Unclassified", "Quarantined", "Retrying", "Released"],
+            ),
+            NamedTypeBinding::string_enum(
+                "MobQuarantineClass",
+                &["StoreUnavailable", "StoreUnreadable", "ResumeRefused"],
+            ),
+            NamedTypeBinding::string_enum(
+                "MobStoreRestoreOutcome",
+                &["Managed", "Held", "Settled", "Failed"],
+            ),
+            NamedTypeBinding::string_enum(
+                "MobStoreRestoreRefusal",
+                &[
+                    "RetryInFlight",
+                    "NotQuarantined",
+                    "AlreadyClassified",
+                    "NotRetrying",
+                ],
+            ),
+        ],
+        vec![],
+    )
 }
 
 pub fn dsl_temporary_council_lifecycle_machine_production_schema() -> MachineSchema {

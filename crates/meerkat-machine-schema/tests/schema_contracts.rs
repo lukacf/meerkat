@@ -108,6 +108,12 @@ fn canonical_machine_registry_contains_kernel_and_perimeter_entries() {
             // the deadline, and use admission. Record-scoped and clock-free,
             // so the store persists one machine state per grant.
             "ToolGrantLifecycleMachine",
+            // Mob store restore owns ONE quarantined persisted mob store:
+            // its class, the single re-attempt in flight, and whether a
+            // re-attempt released the store. Record-scoped and volatile: the
+            // mob-set state holds one machine state per quarantined store in
+            // memory, and every restore pass derives them again.
+            "MobStoreRestoreLifecycleMachine",
         ]
     );
 

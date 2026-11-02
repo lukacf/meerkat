@@ -1564,6 +1564,68 @@ fn the_requester_selector_reads_kind_surface_identity_profile_and_labels() {
 }
 
 #[test]
+fn a_requester_selector_that_can_select_nobody_is_refused() {
+    // A surface is the host's, and an identity, a profile or labels an
+    // agent's; a human has none of them. A selector that names a member its
+    // kind lacks, or names both a surface and an agent's member, selects
+    // nobody: a configuration error, refused malformed at the selector,
+    // never a silent no-op.
+    let refused = [
+        (
+            json!({"kind": "agent", "surface": "console"}),
+            "kind agent has no surface",
+        ),
+        (
+            json!({"kind": "human", "surface": "console"}),
+            "kind human has no surface",
+        ),
+        (
+            json!({"kind": "host", "profile": ["lead"]}),
+            "kind host has no profile",
+        ),
+        (
+            json!({"kind": "host", "labels": {"desk": "ops"}}),
+            "kind host has no labels",
+        ),
+        (
+            json!({"kind": "human", "identity": ["lead-1"]}),
+            "kind human has no identity",
+        ),
+        (
+            json!({"surface": "console", "labels": {"desk": "ops"}}),
+            "surface selects the host and labels an agent",
+        ),
+    ];
+    for (selector, detail) in refused {
+        let mut value = policy_json();
+        value["approval"]["rules"][0]["requester"] = selector;
+        let refusal = refusal_of(&value);
+        assert_eq!(refusal.path, "approval.rules[0].requester", "{refusal}");
+        let PolicyRefusalKind::Malformed { detail: shown } = &refusal.kind else {
+            panic!("{refusal}");
+        };
+        assert!(shown.contains(detail), "{refusal}");
+        assert!(
+            shown.ends_with("the rule would match no requester"),
+            "{refusal}"
+        );
+    }
+    // A selector may name every member its kind has.
+    let accepted = [
+        json!({"kind": "host", "surface": "console"}),
+        json!({"kind": "agent", "identity": ["lead-1"], "profile": ["lead"], "labels": {"desk": "ops"}}),
+        json!({"surface": "gateway"}),
+        json!({"profile": ["analyst"], "labels": {"desk": "ops"}}),
+        json!({"kind": "human"}),
+    ];
+    for selector in accepted {
+        let mut value = policy_json();
+        value["approval"]["rules"][0]["requester"] = selector;
+        assert!(IdentityCreationPolicy::parse(&value).is_ok(), "{value}");
+    }
+}
+
+#[test]
 fn tied_decisions_with_different_approvers_are_refused_before_anything_is_held() {
     // Two rules give equally strict decisions to different approvers. A
     // request under both has no one approver who may decide all of it, so it

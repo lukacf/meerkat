@@ -172,6 +172,11 @@ pub enum UnseatedEntryCause {
     /// until its host settles the preparation, and no seat takes its name
     /// meanwhile.
     PreparationPending,
+    /// An archived store-owned identity
+    /// ([`super::MobHandle::archive_identity`]): it has no member until its
+    /// unarchive, which seats it again on its archived session, and keeps
+    /// its name and its record.
+    Archived,
 }
 
 impl UnseatedEntryCause {
@@ -229,6 +234,13 @@ pub enum MemberRetirementCause {
     /// The declared apply's seal unlisted the member's identity entry: the
     /// end of the retirement ends the entry.
     Unlisted,
+    /// The identity was removed ([`super::MobHandle::remove_identity`]):
+    /// the end of the retirement ends the entry and tombstones its name.
+    Removed,
+    /// The store-owned identity was archived
+    /// ([`super::MobHandle::archive_identity`]): the end of the retirement
+    /// leaves the entry unseated, archived, on its archived session.
+    Archived,
 }
 
 impl MemberRetirementCause {
@@ -236,6 +248,8 @@ impl MemberRetirementCause {
     pub(crate) fn as_stored(self) -> &'static str {
         match self {
             Self::Unlisted => "unlisted",
+            Self::Removed => "removed",
+            Self::Archived => "archived",
         }
     }
 
@@ -246,6 +260,8 @@ impl MemberRetirementCause {
     pub(crate) fn from_stored(token: &str) -> Option<Self> {
         match token {
             "unlisted" => Some(Self::Unlisted),
+            "removed" => Some(Self::Removed),
+            "archived" => Some(Self::Archived),
             _ => None,
         }
     }
@@ -414,6 +430,8 @@ pub struct UnseatedEntryCounts {
     /// Created entries awaiting their host's preparation
     /// ([`UnseatedEntryCause::PreparationPending`]).
     pub preparation_pending: usize,
+    /// Archived store-owned identities ([`UnseatedEntryCause::Archived`]).
+    pub archived: usize,
 }
 
 /// The counts of [`super::MobHandle::identity_census`].
@@ -1050,6 +1068,9 @@ pub(crate) fn identity_census(
             }
             EntryStanding::Unseated(UnseatedEntryCause::PreparationPending) => {
                 census.unseated_by_cause.preparation_pending += 1;
+            }
+            EntryStanding::Unseated(UnseatedEntryCause::Archived) => {
+                census.unseated_by_cause.archived += 1;
             }
         }
         if view.broken.is_some() {

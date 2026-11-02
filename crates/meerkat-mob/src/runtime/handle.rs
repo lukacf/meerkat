@@ -2898,7 +2898,7 @@ fn spawn_many_failure_observation(error: &MobError) -> mob_dsl::MobSpawnManyFail
         }
         // An identity change is not a spawn; its typed refusal is the same
         // family as the machine refusing the requested transition.
-        MobError::IdentityChangeRefused { .. } => {
+        MobError::IdentityChangeRefused { .. } | MobError::IdentityArchived { .. } => {
             mob_dsl::MobSpawnManyFailureObservationKind::InvalidTransition
         }
         MobError::NotExternallyAddressable(_) => {

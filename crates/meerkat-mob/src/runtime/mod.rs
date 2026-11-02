@@ -216,8 +216,9 @@ pub use boot_plan::{
 };
 mod declared_apply;
 pub use declared_apply::{
-    DECLARED_APPLY_CHUNK, DeclaredEntry, DeclaredEntryOutcome, DeclaredEntryRefusal,
-    DeclaredRoster, DeclaredRosterOutcome, FirstBootRequest, UnlistedEntryOutcome,
+    DECLARED_APPLY_CHUNK, DeclaredEntry, DeclaredEntryNote, DeclaredEntryOutcome,
+    DeclaredEntryRefusal, DeclaredRoster, DeclaredRosterOutcome, FirstBootRequest,
+    UnlistedEntryOutcome,
 };
 mod dormant_seat;
 pub use dormant_seat::DormantSeatOutcome;
@@ -247,10 +248,10 @@ mod handle;
 mod held_spawn;
 mod identity_change;
 pub use identity_change::{
-    CreatedIdentityRequest, IdentityChangeConsentInput, IdentityChangeGrant, IdentityChangeOutcome,
-    IdentityChangeRefusal, IdentityChangeRequesterInput, IdentityGrantEntry, IdentityGrantRequest,
-    IdentityNameHolder, IdentityOperation, MemberGrantMint, MemberGrantMintRequest,
-    StoreOwnedIdentityCreate,
+    CreatedIdentityRequest, IdentityArchiveChange, IdentityChangeConsentInput, IdentityChangeGrant,
+    IdentityChangeOutcome, IdentityChangeRefusal, IdentityChangeRequesterInput, IdentityGrantEntry,
+    IdentityGrantRequest, IdentityNameHolder, IdentityOperation, IdentityRemoval, MemberGrantMint,
+    MemberGrantMintRequest, StoreOwnedIdentityCreate,
 };
 mod identity_entry;
 mod identity_incarnation_custody;

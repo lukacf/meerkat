@@ -222,6 +222,62 @@ impl StoreOwnedIdentityCreate {
     }
 }
 
+/// A removal of one identity, of either custody, as one change: its
+/// member's retirement ends the entry and tombstones the name, or, for an
+/// identity no member holds, the tombstone is written at once. The name is
+/// never an identity or a member again.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct IdentityRemoval {
+    pub operation: IdentityOperation,
+    pub requester: IdentityChangeRequesterInput,
+    pub identity: AgentIdentity,
+}
+
+impl IdentityRemoval {
+    #[must_use]
+    pub fn new(
+        operation: IdentityOperation,
+        requester: IdentityChangeRequesterInput,
+        identity: impl Into<AgentIdentity>,
+    ) -> Self {
+        Self {
+            operation,
+            requester,
+            identity: identity.into(),
+        }
+    }
+}
+
+/// An archive, or an unarchive, of one store-owned identity, as one change.
+/// An archived identity has no member and keeps its name, its record and its
+/// session; its unarchive seats it again on that session. A roster-owned
+/// identity's archive is its host's: a one-entry unlist of its roster
+/// ([`super::MobHandle::unlist_declared_identity`]), and its unarchive a
+/// re-list.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct IdentityArchiveChange {
+    pub operation: IdentityOperation,
+    pub requester: IdentityChangeRequesterInput,
+    pub identity: AgentIdentity,
+}
+
+impl IdentityArchiveChange {
+    #[must_use]
+    pub fn new(
+        operation: IdentityOperation,
+        requester: IdentityChangeRequesterInput,
+        identity: impl Into<AgentIdentity>,
+    ) -> Self {
+        Self {
+            operation,
+            requester,
+            identity: identity.into(),
+        }
+    }
+}
+
 /// What a committed change answers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -318,6 +374,14 @@ pub enum IdentityChangeRefusal {
     ImportRefused,
     /// The change asks for something this build does not support yet.
     Unsupported { feature: String },
+    /// No identity of this mob holds the name: a worker member, or nothing.
+    IdentityUnknown { identity: AgentIdentity },
+    /// The identity is not archived: there is nothing to unarchive.
+    NotArchived { identity: AgentIdentity },
+    /// The change is its owner's to write, and this writer is not its owner:
+    /// a roster-owned identity's archive is its host's one-entry unlist
+    /// (`owner` is `roster`).
+    OwnerReadOnly { owner: &'static str },
 }
 
 impl IdentityChangeRefusal {
@@ -341,6 +405,9 @@ impl IdentityChangeRefusal {
             Self::DecisionClosed { .. } => "decision_closed",
             Self::ImportRefused => "import_refused",
             Self::Unsupported { .. } => "unsupported",
+            Self::IdentityUnknown { .. } => "identity_unknown",
+            Self::NotArchived { .. } => "not_archived",
+            Self::OwnerReadOnly { .. } => "owner_read_only",
         }
     }
 
@@ -397,6 +464,14 @@ impl std::fmt::Display for IdentityChangeRefusal {
                 formatter.write_str("imported consent comes only with a host operator's import")
             }
             Self::Unsupported { feature } => write!(formatter, "unsupported: {feature}"),
+            Self::IdentityUnknown { identity } => {
+                write!(formatter, "no identity of the mob is named '{identity}'")
+            }
+            Self::NotArchived { identity } => write!(formatter, "'{identity}' is not archived"),
+            Self::OwnerReadOnly { owner } => write!(
+                formatter,
+                "the identity's owner ({owner}) writes this change, not the identity store"
+            ),
         }
     }
 }
@@ -1681,4 +1756,67 @@ pub(super) fn create_rows_and_receipt(
     .and_then(|receipt| receipt.with_attribution(commit.requester.clone(), commit.consent.clone()))
     .map_err(invalid)?;
     Ok((rows, receipt))
+}
+
+impl super::MobHandle {
+    /// Remove one identity, of either custody, as one change. A seated
+    /// identity's member retires, its retirement's start row recording the
+    /// cause `removed`: the identity reads retiring until the retirement's
+    /// end, which ends the entry and tombstones its name. An identity no
+    /// member holds (owed its seat, archived, awaiting its preparation or its
+    /// creation) is tombstoned at once. The store-owned row (presence
+    /// `removed`, with the removal's record) and the receipt are written in
+    /// one store transaction before anything retires; a roster-owned
+    /// identity's tombstone is the store's first row of its name. The name is
+    /// never an identity or a member again: a create, a declaration, a spawn
+    /// and an adoption of it are refused. Meanwhile the declared apply defers
+    /// the identity, and afterwards refuses its name.
+    ///
+    /// Refused typed, with nothing written: no identity of this mob holds the
+    /// name ([`IdentityChangeRefusal::IdentityUnknown`]), and every refusal of
+    /// [`Self::create_store_owned_identities`] that applies to a change.
+    pub async fn remove_identity(
+        &self,
+        removal: IdentityRemoval,
+        consent: IdentityChangeConsentInput<'_>,
+    ) -> Result<IdentityChangeOutcome, MobError> {
+        let _ = (removal, consent);
+        Err(MobError::Internal(
+            "identity removals are not built yet".to_string(),
+        ))
+    }
+
+    /// Archive one store-owned identity as one change: its member retires
+    /// with the cause `archived`, and its entry stays, unseated, archived,
+    /// with the session its member was bound to recorded; its row records
+    /// presence `archived` and its name stays reserved. Deliveries to it are
+    /// refused ([`MobError::IdentityArchived`]) until its unarchive; updates
+    /// of it are allowed. A roster-owned identity's archive is refused
+    /// [`IdentityChangeRefusal::OwnerReadOnly`]: its host unlists it.
+    pub async fn archive_identity(
+        &self,
+        change: IdentityArchiveChange,
+        consent: IdentityChangeConsentInput<'_>,
+    ) -> Result<IdentityChangeOutcome, MobError> {
+        let _ = (change, consent);
+        Err(MobError::Internal(
+            "identity archives are not built yet".to_string(),
+        ))
+    }
+
+    /// Unarchive one archived store-owned identity as one change: it is
+    /// seated Dormant again on its archived session, its history kept, or on
+    /// a fresh session with the notice when that session is gone from the
+    /// store. Refused [`IdentityChangeRefusal::NotArchived`] for an identity
+    /// that is not archived.
+    pub async fn unarchive_identity(
+        &self,
+        change: IdentityArchiveChange,
+        consent: IdentityChangeConsentInput<'_>,
+    ) -> Result<IdentityChangeOutcome, MobError> {
+        let _ = (change, consent);
+        Err(MobError::Internal(
+            "identity archives are not built yet".to_string(),
+        ))
+    }
 }

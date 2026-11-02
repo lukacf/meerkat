@@ -1445,3 +1445,87 @@ async fn roll_forward_reprojects_on_the_same_session_fixture() {
 async fn a_retire_stale_reconcile_archives_and_roll_forward_reseats_on_the_same_session_fixture() {
     write_created_owner_fixture("created-owner-retire-stale", FixturePeer::Absent).await;
 }
+
+/// Row (RED): unarchiving a store-owned identity seats it Dormant again on
+/// its archived session, its history kept: its first wake revives that
+/// session. Over the persistent session service, where an archived session
+/// stays durable.
+///
+/// RED on the old tree: no archive exists (the archive answers an internal
+/// error).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn unarchiving_seats_it_dormant_on_its_archived_session_with_its_history() {
+    use crate::runtime::{
+        CreatedIdentityRequest, IdentityArchiveChange, IdentityChangeConsentInput,
+        IdentityChangeOutcome, IdentityChangeRequesterInput, IdentityOperation,
+        StoreOwnedIdentityCreate,
+    };
+    let operation = |name: &str| {
+        IdentityOperation::new(
+            name,
+            meerkat_core::approval::decision::Sha256Digest::of(name.as_bytes()).as_str(),
+        )
+    };
+    let allow = IdentityChangeConsentInput::Policy(crate::identity::IdentityPolicyOutcome::Allow);
+    let host = || IdentityChangeRequesterInput::host("console");
+    let mob = CreatedMob::persistent("unarchive-history").await;
+    let created = mob
+        .handle
+        .create_store_owned_identities(
+            StoreOwnedIdentityCreate::new(
+                operation("create-keeper"),
+                host(),
+                vec![CreatedIdentityRequest::new(
+                    crate::identity::CreatedIdentitySpec::new("keeper", "worker"),
+                )],
+            ),
+            allow,
+        )
+        .await;
+    assert!(
+        matches!(created, Ok(IdentityChangeOutcome::Committed { .. })),
+        "{created:?}"
+    );
+    tokio::time::timeout(STEP, mob.handle.ensure_member_live(&id("keeper")))
+        .await
+        .expect("the wake answers")
+        .expect("the wake builds the identity's session");
+    let session = mob.session("keeper").await.expect("the keeper's session");
+    let archived = mob
+        .handle
+        .archive_identity(
+            IdentityArchiveChange::new(operation("archive-keeper"), host(), "keeper"),
+            allow,
+        )
+        .await;
+    assert!(
+        matches!(archived, Ok(IdentityChangeOutcome::Committed { .. })),
+        "{archived:?}"
+    );
+    mob.left("keeper").await;
+    assert_eq!(
+        mob.standing("keeper"),
+        Some(EntryStanding::Unseated(UnseatedEntryCause::Archived))
+    );
+    let restored = mob
+        .handle
+        .unarchive_identity(
+            IdentityArchiveChange::new(operation("unarchive-keeper"), host(), "keeper"),
+            allow,
+        )
+        .await;
+    assert!(
+        matches!(restored, Ok(IdentityChangeOutcome::Committed { .. })),
+        "{restored:?}"
+    );
+    assert_eq!(
+        seated_session(mob.standing("keeper")),
+        Some(session.clone())
+    );
+    assert!(mob.handle.member_unmaterialized(&id("keeper")));
+    tokio::time::timeout(STEP, mob.handle.ensure_member_live(&id("keeper")))
+        .await
+        .expect("the wake answers")
+        .expect("the wake revives the archived session");
+    assert_eq!(mob.session("keeper").await, Some(session));
+}

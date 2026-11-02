@@ -357,14 +357,15 @@ pub use runtime::{
 };
 pub use runtime::{CloseIfIdleOutcome, MobAdmissionCloseReason, MobBusy};
 pub use runtime::{
-    CreatedIdentityRequest, IdentityChangeConsentInput, IdentityChangeGrant, IdentityChangeOutcome,
-    IdentityChangeRefusal, IdentityChangeRequesterInput, IdentityGrantEntry, IdentityGrantRequest,
-    IdentityNameHolder, IdentityOperation, MemberGrantMint, MemberGrantMintRequest,
-    StoreOwnedIdentityCreate,
+    CreatedIdentityRequest, IdentityArchiveChange, IdentityChangeConsentInput, IdentityChangeGrant,
+    IdentityChangeOutcome, IdentityChangeRefusal, IdentityChangeRequesterInput, IdentityGrantEntry,
+    IdentityGrantRequest, IdentityNameHolder, IdentityOperation, IdentityRemoval, MemberGrantMint,
+    MemberGrantMintRequest, StoreOwnedIdentityCreate,
 };
 pub use runtime::{
-    DECLARED_APPLY_CHUNK, DeclaredEntry, DeclaredEntryOutcome, DeclaredEntryRefusal,
-    DeclaredRoster, DeclaredRosterOutcome, FirstBootRequest, UnlistedEntryOutcome,
+    DECLARED_APPLY_CHUNK, DeclaredEntry, DeclaredEntryNote, DeclaredEntryOutcome,
+    DeclaredEntryRefusal, DeclaredRoster, DeclaredRosterOutcome, FirstBootRequest,
+    UnlistedEntryOutcome,
 };
 #[cfg(feature = "openai-live")]
 pub use runtime::{

@@ -304,9 +304,24 @@ pub enum DeclaredEntryOutcome {
     Deferred { reason: MobError },
     /// Refused, typed: nothing of it was written.
     Refused { refusal: DeclaredEntryRefusal },
+    /// Left as it is, for a typed note: a quiet steady state, not a refusal,
+    /// that no apply retries and that retires nothing.
+    Noted { note: DeclaredEntryNote },
     /// Realizing the identity's verdict failed, typed: an apply runs it
     /// again only once the cause is fixed.
     Failed { error: MobError },
+}
+
+/// Why the declared apply left a listed identity as it is
+/// ([`DeclaredEntryOutcome::Noted`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum DeclaredEntryNote {
+    /// The identity is store-owned (its record is its row in the identity
+    /// store, for example after its adoption): the roster's listing of it
+    /// changes nothing, and a roster that keeps listing it (a rollback to a
+    /// roster generation from before the adoption included) retires nothing.
+    OwnedByStore,
 }
 
 /// What the seal did with one Declared entry the complete roster does not
@@ -700,6 +715,25 @@ impl super::MobHandle {
         let outcome = self.apply_open_declared_roster(roster).await;
         lease.close().await;
         outcome
+    }
+
+    /// Unlist one roster-owned identity, as a complete roster that lists
+    /// every other Declared entry would: its member retires (the journal
+    /// records the cause [`super::MemberRetirementCause::Unlisted`]) and the
+    /// end of the retirement ends the entry, or an entry no member holds ends
+    /// at once. No tombstone is written: its archived session record outlives
+    /// the entry, so listing it again ([`Self::apply_declared_roster`] with a
+    /// partial roster) seats it on its own session. This is a roster-owned
+    /// identity's archive, and its re-list the unarchive. An identity that is
+    /// no Declared entry is left as it is, and the outcome names nothing.
+    pub async fn unlist_declared_identity(
+        &self,
+        identity: &AgentIdentity,
+    ) -> Result<DeclaredRosterOutcome, MobError> {
+        let _ = identity;
+        Err(MobError::Internal(
+            "the one-entry unlist is not built yet".to_string(),
+        ))
     }
 
     /// The body of [`Self::apply_declared_roster`], under its open fact.

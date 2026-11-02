@@ -1585,3 +1585,538 @@ fn the_recheck_runs_through_the_prepared_check_at_the_final_sink() {
         "a grant read outside the admission and the prepared check's owner: {strays:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// R2.6: removal of either custody
+// ---------------------------------------------------------------------------
+
+/// A roster-owned spec of `name` on the worker profile, as a host declares
+/// it.
+fn roster_spec(name: &str) -> SpawnMemberSpec {
+    SpawnMemberSpec::host_root("worker", id(name))
+}
+
+/// A unique identity name for a row that holds a retirement stage: the
+/// stage holds are keyed by name across the test process.
+fn unique(name: &str) -> String {
+    format!("{name}-{}", uuid::Uuid::new_v4().simple())
+}
+
+impl StoreOwnedMob {
+    /// Apply a partial roster declaring `names`; the pass itself succeeds.
+    async fn declare(&self, names: &[&str]) -> crate::runtime::DeclaredRosterOutcome {
+        tokio::time::timeout(
+            STEP,
+            self.handle.apply_declared_roster(DeclaredRoster::partial(
+                names
+                    .iter()
+                    .map(|name| DeclaredEntry::new(roster_spec(name))),
+            )),
+        )
+        .await
+        .expect("the apply answers")
+        .expect("the apply runs")
+    }
+
+    /// A host surface's removal of `name` as `operation_id`.
+    async fn remove(
+        &self,
+        operation_id: &str,
+        name: &str,
+    ) -> Result<IdentityChangeOutcome, MobError> {
+        tokio::time::timeout(
+            STEP,
+            self.handle.remove_identity(
+                crate::runtime::IdentityRemoval::new(
+                    operation(operation_id),
+                    IdentityChangeRequesterInput::host("console"),
+                    name,
+                ),
+                ALLOW,
+            ),
+        )
+        .await
+        .expect("the removal answers")
+    }
+
+    /// A host surface's archive of `name` as `operation_id`.
+    async fn archive(
+        &self,
+        operation_id: &str,
+        name: &str,
+    ) -> Result<IdentityChangeOutcome, MobError> {
+        tokio::time::timeout(
+            STEP,
+            self.handle.archive_identity(
+                crate::runtime::IdentityArchiveChange::new(
+                    operation(operation_id),
+                    IdentityChangeRequesterInput::host("console"),
+                    name,
+                ),
+                ALLOW,
+            ),
+        )
+        .await
+        .expect("the archive answers")
+    }
+
+    /// A host surface's unarchive of `name` as `operation_id`.
+    async fn unarchive(
+        &self,
+        operation_id: &str,
+        name: &str,
+    ) -> Result<IdentityChangeOutcome, MobError> {
+        tokio::time::timeout(
+            STEP,
+            self.handle.unarchive_identity(
+                crate::runtime::IdentityArchiveChange::new(
+                    operation(operation_id),
+                    IdentityChangeRequesterInput::host("console"),
+                    name,
+                ),
+                ALLOW,
+            ),
+        )
+        .await
+        .expect("the unarchive answers")
+    }
+
+    /// Wait, within one step, until `name` reads removed.
+    async fn removed(&self, name: &str) {
+        let deadline = tokio::time::Instant::now() + STEP;
+        while !matches!(self.read(name), IdentityEntryRead::Removed) {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "{name} never read removed: {:?}",
+                self.read(name)
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    /// `name`'s standing, when it is an entry.
+    fn standing(&self, name: &str) -> Option<EntryStanding> {
+        match self.read(name) {
+            IdentityEntryRead::Entry(view) => Some(view.standing),
+            _ => None,
+        }
+    }
+
+    /// Wait, within one step, until `name` stands unseated for `cause`.
+    async fn unseated_for(&self, name: &str, cause: UnseatedEntryCause) {
+        let deadline = tokio::time::Instant::now() + STEP;
+        while self.standing(name) != Some(EntryStanding::Unseated(cause)) {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "{name} never stood unseated for {cause:?}: {:?}",
+                self.read(name)
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    /// `name`'s readable store-owned row.
+    async fn row(&self, name: &str) -> crate::identity::CreatedIdentityRecord {
+        match self.rows().await.remove(&id(name)) {
+            Some(CreatedIdentityObservation::Created(row)) => row,
+            other => panic!("{name} has no readable row: {other:?}"),
+        }
+    }
+}
+
+/// Row (RED): removing a roster-owned identity retires its member and
+/// tombstones its name: the store's first row of the name is its tombstone
+/// (presence removed, the removal's record), and the roster's listing of it
+/// is refused afterwards.
+///
+/// RED on the old tree: no removal exists.
+#[tokio::test]
+async fn removing_a_roster_owned_identity_tombstones_its_name() {
+    let mob = StoreOwnedMob::new("remove-roster-owned").await;
+    mob.declare(&["alpha"]).await;
+    assert!(mob.is_member("alpha").await);
+    let receipt = committed(mob.remove("remove-alpha", "alpha").await);
+    assert_eq!(receipt.change, IdentityChangeKind::Remove);
+    assert_eq!(
+        receipt.identities[0].outcome,
+        IdentityChangeEntryOutcome::Retiring
+    );
+    mob.removed("alpha").await;
+    assert!(!mob.is_member("alpha").await);
+    let row = mob.row("alpha").await;
+    assert_eq!(row.presence, CreatedIdentityPresence::Removed);
+    assert_eq!(row.spec, None);
+    assert_eq!(
+        row.provenance.entered,
+        crate::identity::IdentityEntered::RosterRemoval
+    );
+    assert_eq!(
+        row.removal
+            .as_ref()
+            .map(|removal| removal.operation_id.as_str()),
+        Some("remove-alpha")
+    );
+    let relisted = mob.declare(&["alpha"]).await;
+    assert!(matches!(
+        relisted.entries.get(&id("alpha")),
+        Some(crate::runtime::DeclaredEntryOutcome::Refused {
+            refusal: crate::runtime::DeclaredEntryRefusal::NameTombstoned
+        })
+    ));
+}
+
+/// Row: a seated identity's removal reads retiring until its member's
+/// retirement ends, then removed; its retirement's start row records the
+/// cause `removed`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_removal_reads_retiring_until_the_terminal_then_removed() {
+    let mob = StoreOwnedMob::new("remove-retiring").await;
+    let name = unique("removed");
+    committed(
+        mob.create(host_create("create-held", &[&name]), ALLOW)
+            .await,
+    );
+    mob.handle
+        .ensure_member_live(&id(&name))
+        .await
+        .expect("wake the identity");
+    let hold = super::actor::retirement_stage_hold::install(&id(&name), "retire-runtime-quiesce");
+    let removal = {
+        let handle = mob.handle.clone();
+        let name = name.clone();
+        tokio::spawn(async move {
+            handle
+                .remove_identity(
+                    crate::runtime::IdentityRemoval::new(
+                        operation("remove-held"),
+                        IdentityChangeRequesterInput::host("console"),
+                        name,
+                    ),
+                    ALLOW,
+                )
+                .await
+        })
+    };
+    tokio::time::timeout(STEP, hold.entered())
+        .await
+        .expect("the retirement reaches its held stage");
+    assert!(
+        matches!(mob.standing(&name), Some(EntryStanding::Retiring(_))),
+        "{:?}",
+        mob.read(&name)
+    );
+    hold.release();
+    committed(removal.await.expect("the removal task"));
+    mob.removed(&name).await;
+    let started = mob
+        .journal()
+        .await
+        .into_iter()
+        .find_map(|event| match event.kind {
+            MobEventKind::MemberRetirementStarted {
+                agent_identity,
+                cause,
+                ..
+            } if agent_identity == id(&name) => Some(cause),
+            _ => None,
+        })
+        .expect("the retirement's start row");
+    assert_eq!(
+        started,
+        Some(crate::runtime::MemberRetirementCause::Removed)
+    );
+}
+
+/// Row: a removal whose member's retirement a crash interrupted finishes
+/// after the restart: the name reads removed, and no member holds it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_crash_during_a_removal_finishes_it_after_restart() {
+    let mut mob = StoreOwnedMob::new("remove-crash").await;
+    let name = unique("crashed");
+    committed(
+        mob.create(host_create("create-crashed", &[&name]), ALLOW)
+            .await,
+    );
+    mob.handle
+        .ensure_member_live(&id(&name))
+        .await
+        .expect("wake the identity");
+    let hold = super::actor::retirement_stage_hold::install(&id(&name), "retire-runtime-quiesce");
+    let removal = {
+        let handle = mob.handle.clone();
+        let name = name.clone();
+        tokio::spawn(async move {
+            handle
+                .remove_identity(
+                    crate::runtime::IdentityRemoval::new(
+                        operation("remove-crashed"),
+                        IdentityChangeRequesterInput::host("console"),
+                        name,
+                    ),
+                    ALLOW,
+                )
+                .await
+        })
+    };
+    tokio::time::timeout(STEP, hold.entered())
+        .await
+        .expect("the retirement reaches its held stage");
+    mob.restart_as(MobCompositionAuthority::Authoritative).await;
+    hold.release();
+    removal.abort();
+    mob.removed(&name).await;
+    assert!(!mob.is_member(&name).await);
+    assert_eq!(
+        mob.row(&name).await.presence,
+        CreatedIdentityPresence::Removed
+    );
+}
+
+/// Row: a removed name is refused by everything that would take it again:
+/// a create (`name_taken` by a removed identity), a declaration
+/// (`NameTombstoned`), a spawn and a legacy adoption.
+#[tokio::test]
+async fn a_tombstoned_name_is_refused_by_create_declare_spawn_and_adopt() {
+    let mob = StoreOwnedMob::new("remove-reserved").await;
+    committed(
+        mob.create(host_create("create-gone", &["gone"]), ALLOW)
+            .await,
+    );
+    committed(mob.remove("remove-gone", "gone").await);
+    mob.removed("gone").await;
+    assert_eq!(
+        refusal(
+            mob.create(host_create("create-again", &["gone"]), ALLOW)
+                .await
+        ),
+        IdentityChangeRefusal::NameTaken {
+            identity: id("gone"),
+            by: IdentityNameHolder::Removed
+        }
+    );
+    let declared = mob.declare(&["gone"]).await;
+    assert!(matches!(
+        declared.entries.get(&id("gone")),
+        Some(crate::runtime::DeclaredEntryOutcome::Refused {
+            refusal: crate::runtime::DeclaredEntryRefusal::NameTombstoned
+        })
+    ));
+    assert!(matches!(
+        mob.handle
+            .spawn_spec(SpawnMemberSpec::new("worker", id("gone")))
+            .await,
+        Err(MobError::IdentityMember { .. })
+    ));
+    assert!(!matches!(
+        mob.handle.adopt_legacy_identity_entry(&id("gone")).await,
+        Ok(crate::runtime::LegacyIdentityEntryAdoption::Adopted)
+    ));
+    assert!(!mob.is_member("gone").await);
+}
+
+/// Row: an unlisting is not a removal: a complete roster that leaves an
+/// identity out retires its member and ends its entry, with no tombstone,
+/// and listing it again seats it.
+#[tokio::test]
+async fn an_unlisting_is_not_a_removal_and_writes_no_tombstone() {
+    let mob = StoreOwnedMob::new("unlist-not-removal").await;
+    mob.declare(&["kept", "left"]).await;
+    tokio::time::timeout(
+        STEP,
+        mob.handle
+            .apply_declared_roster(DeclaredRoster::complete([DeclaredEntry::new(roster_spec(
+                "kept",
+            ))])),
+    )
+    .await
+    .expect("the apply answers")
+    .expect("the apply runs");
+    let deadline = tokio::time::Instant::now() + STEP;
+    while mob.is_member("left").await {
+        assert!(tokio::time::Instant::now() < deadline, "left never left");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(mob.rows().await.is_empty(), "no tombstone was written");
+    assert!(!matches!(mob.read("left"), IdentityEntryRead::Removed));
+    let relisted = mob.declare(&["left"]).await;
+    assert!(matches!(
+        relisted.entries.get(&id("left")),
+        Some(crate::runtime::DeclaredEntryOutcome::Seated { .. })
+    ));
+}
+
+// ---------------------------------------------------------------------------
+// R2.15: archive and unarchive
+// ---------------------------------------------------------------------------
+
+/// Row (RED): archiving a store-owned identity retires its member and keeps
+/// its entry (unseated, archived), its name and its record (presence
+/// archived); a create of its name is still refused.
+///
+/// RED on the old tree: no archive exists.
+#[tokio::test]
+async fn archiving_a_store_owned_identity_retires_its_member_and_keeps_its_name_and_record() {
+    let mob = StoreOwnedMob::new("archive-store-owned").await;
+    committed(
+        mob.create(host_create("create-shelf", &["shelf"]), ALLOW)
+            .await,
+    );
+    let receipt = committed(mob.archive("archive-shelf", "shelf").await);
+    assert_eq!(receipt.change, IdentityChangeKind::Archive);
+    mob.unseated_for("shelf", UnseatedEntryCause::Archived)
+        .await;
+    assert!(!mob.is_member("shelf").await);
+    assert!(matches!(
+        mob.row("shelf").await.presence,
+        CreatedIdentityPresence::Archived { .. }
+    ));
+    assert_eq!(
+        refusal(
+            mob.create(host_create("create-shelf-again", &["shelf"]), ALLOW)
+                .await
+        ),
+        IdentityChangeRefusal::NameTaken {
+            identity: id("shelf"),
+            by: IdentityNameHolder::Identity
+        }
+    );
+}
+
+/// Row (RED): a delivery to an archived identity is refused
+/// `identity_archived`, and nothing wakes.
+///
+/// RED on the old tree: no archive exists.
+#[tokio::test]
+async fn a_delivery_to_an_archived_identity_is_refused_identity_archived() {
+    let mob = StoreOwnedMob::new("archive-delivery").await;
+    committed(
+        mob.create(host_create("create-quiet", &["quiet"]), ALLOW)
+            .await,
+    );
+    committed(mob.archive("archive-quiet", "quiet").await);
+    mob.unseated_for("quiet", UnseatedEntryCause::Archived)
+        .await;
+    assert!(matches!(
+        mob.handle.ensure_member_live(&id("quiet")).await,
+        Err(MobError::IdentityArchived { member_id }) if member_id == id("quiet")
+    ));
+    assert!(!mob.is_member("quiet").await);
+}
+
+/// Row (RED): an archived identity stays archived across a restart.
+///
+/// RED on the old tree: no archive exists.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_archived_identity_stays_archived_across_restart() {
+    let mut mob = StoreOwnedMob::new("archive-restart").await;
+    committed(
+        mob.create(host_create("create-kept", &["kept"]), ALLOW)
+            .await,
+    );
+    committed(mob.archive("archive-kept", "kept").await);
+    mob.unseated_for("kept", UnseatedEntryCause::Archived).await;
+    mob.restart_as(MobCompositionAuthority::Authoritative).await;
+    assert_eq!(
+        mob.standing("kept"),
+        Some(EntryStanding::Unseated(UnseatedEntryCause::Archived))
+    );
+    assert!(!mob.is_member("kept").await);
+}
+
+/// Row: removing an archived identity tombstones it at once.
+#[tokio::test]
+async fn removing_an_archived_identity_tombstones_it() {
+    let mob = StoreOwnedMob::new("archive-remove").await;
+    committed(mob.create(host_create("create-old", &["old"]), ALLOW).await);
+    committed(mob.archive("archive-old", "old").await);
+    mob.unseated_for("old", UnseatedEntryCause::Archived).await;
+    let receipt = committed(mob.remove("remove-old", "old").await);
+    assert_eq!(
+        receipt.identities[0].outcome,
+        IdentityChangeEntryOutcome::Removed
+    );
+    assert!(matches!(mob.read("old"), IdentityEntryRead::Removed));
+    assert_eq!(
+        mob.row("old").await.presence,
+        CreatedIdentityPresence::Removed
+    );
+}
+
+/// Row (RED): a roster-owned identity's archive is a one-entry unlist, and
+/// its unarchive a re-list: it comes back on its own session.
+///
+/// RED on the old tree: no one-entry unlist exists.
+#[tokio::test]
+async fn a_one_entry_unlist_and_relist_keep_a_roster_owned_identitys_session() {
+    let mob = StoreOwnedMob::new("unlist-one").await;
+    mob.declare(&["listed", "other"]).await;
+    let session = mob.session("listed").await;
+    let unlisted = tokio::time::timeout(STEP, mob.handle.unlist_declared_identity(&id("listed")))
+        .await
+        .expect("the unlist answers")
+        .expect("the unlist runs");
+    assert!(unlisted.unlisted.contains_key(&id("listed")));
+    assert!(!unlisted.unlisted.contains_key(&id("other")));
+    let deadline = tokio::time::Instant::now() + STEP;
+    while mob.is_member("listed").await {
+        assert!(tokio::time::Instant::now() < deadline, "listed never left");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(mob.is_member("other").await, "the other entry stays");
+    assert!(mob.rows().await.is_empty(), "no tombstone");
+    let relisted = mob.declare(&["listed"]).await;
+    assert!(matches!(
+        relisted.entries.get(&id("listed")),
+        Some(crate::runtime::DeclaredEntryOutcome::Seated { session_id, .. })
+            if *session_id == session
+    ));
+}
+
+// ---------------------------------------------------------------------------
+// R2.16: a roster listing of a store-owned name
+// ---------------------------------------------------------------------------
+
+/// Row (RED): a roster that lists a store-owned identity's name gets a typed
+/// note, not a refusal, and nothing retires.
+///
+/// RED on the old tree: the apply answers `Refused { NameOwnedByCreated }`.
+#[tokio::test]
+async fn a_roster_listing_of_a_store_owned_name_is_a_typed_note() {
+    let mob = StoreOwnedMob::new("listing-note").await;
+    committed(
+        mob.create(host_create("create-owned", &["owned"]), ALLOW)
+            .await,
+    );
+    let outcome = mob.declare(&["owned"]).await;
+    assert!(
+        matches!(
+            outcome.entries.get(&id("owned")),
+            Some(crate::runtime::DeclaredEntryOutcome::Noted {
+                note: crate::runtime::DeclaredEntryNote::OwnedByStore
+            })
+        ),
+        "{outcome:?}"
+    );
+    assert!(mob.seated_dormant("owned"));
+}
+
+/// Row: a roster generation from before an identity became store-owned (one
+/// that lists it, or one that omits it) retires nothing.
+#[tokio::test]
+async fn a_pre_adopt_roster_generation_retires_nothing() {
+    let mob = StoreOwnedMob::new("pre-adopt-roster").await;
+    committed(
+        mob.create(host_create("create-owned", &["owned"]), ALLOW)
+            .await,
+    );
+    for roster in [
+        DeclaredRoster::complete([DeclaredEntry::new(roster_spec("owned"))]),
+        DeclaredRoster::complete([DeclaredEntry::new(roster_spec("listed"))]),
+    ] {
+        tokio::time::timeout(STEP, mob.handle.apply_declared_roster(roster))
+            .await
+            .expect("the apply answers")
+            .expect("the apply runs");
+        assert!(mob.seated_dormant("owned"), "{:?}", mob.read("owned"));
+    }
+}

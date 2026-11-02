@@ -15984,6 +15984,96 @@ mod tests {
         }
     }
 
+    /// No journal replay replaces an entry of another origin, whatever order
+    /// MobMachine meets the replay of a member's entry row and the scan of its
+    /// created entry row in. The boot replays first: the Declared entry
+    /// stands, and the scan's Present row contradicts it, reserving the name
+    /// as unreadable. Scanned first, the Created entry stands, and the replay
+    /// of a Declared row is refused. A replay of the entry's own origin
+    /// records it again (the control).
+    #[test]
+    fn no_replay_replaces_an_entry_of_another_origin() {
+        let mut authority = MobMachineAuthority::new();
+        let seat = |authority: &mut MobMachineAuthority, identity: &AgentIdentity| {
+            authority
+                .apply_signal(MobMachineSignal::RecoverRosterMember {
+                    agent_identity: identity.clone(),
+                    agent_runtime_id: AgentRuntimeId(format!("{}:0", identity.0)),
+                    fence_token: FenceToken(1),
+                    generation: Generation(0),
+                    profile_name: "worker".to_string(),
+                    runtime_mode: SpawnPolicyRuntimeMode::AutonomousHost,
+                    external_addressable: false,
+                })
+                .expect("the roster row replays");
+        };
+        let replay = |identity: &AgentIdentity, origin: IdentityEntryOrigin| {
+            MobMachineSignal::RecoverIdentityEntry {
+                agent_identity: identity.clone(),
+                agent_runtime_id: AgentRuntimeId(format!("{}:0", identity.0)),
+                origin,
+            }
+        };
+
+        // The boot's order: the replay, then the scan.
+        let replayed_first = AgentIdentity::from("origin-replayed-first");
+        seat(&mut authority, &replayed_first);
+        authority
+            .apply_signal(replay(&replayed_first, IdentityEntryOrigin::Declared))
+            .expect("the replay records the Declared entry");
+        recover_created(
+            &mut authority,
+            &replayed_first,
+            RecoveredPresence::Present,
+            None,
+        );
+        assert_eq!(
+            authority
+                .state()
+                .identity_entry_origins
+                .get(&replayed_first),
+            Some(&IdentityEntryOrigin::Declared),
+            "the Declared entry stands"
+        );
+        assert!(
+            authority
+                .state()
+                .identity_entry_unreadable
+                .contains(&replayed_first),
+            "the contradicting row reserves the name"
+        );
+
+        // The other order: the scan, then the replay.
+        let scanned_first = AgentIdentity::from("origin-scanned-first");
+        seat(&mut authority, &scanned_first);
+        recover_created(
+            &mut authority,
+            &scanned_first,
+            RecoveredPresence::Present,
+            None,
+        );
+        assert!(
+            authority
+                .apply_signal(replay(&scanned_first, IdentityEntryOrigin::Declared))
+                .is_err(),
+            "no replay replaces the Created entry with a Declared one"
+        );
+        assert_eq!(
+            authority.state().identity_entry_origins.get(&scanned_first),
+            Some(&IdentityEntryOrigin::Created),
+            "the Created entry stands"
+        );
+
+        // The control: a replay of the entry's own origin records it again.
+        authority
+            .apply_signal(replay(&scanned_first, IdentityEntryOrigin::Created))
+            .expect("a replay of the entry's own origin is recorded");
+        assert_eq!(
+            authority.state().identity_entry_origins.get(&scanned_first),
+            Some(&IdentityEntryOrigin::Created)
+        );
+    }
+
     /// A created entry row of a name a spawn ladder acts for is answered
     /// unreadable: it ends neither the entry nor the ladder's custody, so no
     /// custody outlives the entry it was opened for

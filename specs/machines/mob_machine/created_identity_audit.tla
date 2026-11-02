@@ -22,10 +22,10 @@
 \* vacuously.
 \* This module keeps the generated model unchanged, extends
 \* identity_entry_apply_audit for its constants and arm families, and
-\* checks twelve runs over fixed domains: the four of the recovery part
-\* below, and the eight of the changes part (0.9.9: commit, update,
-\* removal, archive, preparation, placement, unlist and recovered), which
-\* its own section describes.
+\* checks fourteen runs over fixed domains: the four of the recovery part
+\* below, and the ten of the changes part (0.9.9: admit, commit, update,
+\* removal, archive, preparation, prepverdicts, placement, unlist and
+\* recovered), which its own section describes.
 \* The recovery part:
 \*
 \*   scan (ScanSpec): member 1 recovered and bound (a seated local member),
@@ -526,14 +526,14 @@ AuditWitnessScanContradictedPlaced ==
 NotAuditWitnessScanContradictedPlaced == [][~AuditWitnessScanContradictedPlaced]_vars
 
 (***************************************************************************)
-(* The changes part (0.9.9): a change's admission and a store-owned       *)
-(* entry's record (commit), a store-owned update beside a roster's change *)
+(* The changes part (0.9.9): a change's admission (admit), a store-owned   *)
+(* entry's record (commit), a store-owned update beside a roster's change  *)
 (* of the same spec (update), the removal of either custody (removal), the *)
 (* archive and unarchive (archive), the host's preparation and its held    *)
-(* constructions (preparation), the placed and peer-only spawns of a       *)
-(* store-owned identity (placement), the one-entry unlist of a roster-     *)
-(* owned identity (unlist) and the replay of a removal or an archive in    *)
-(* flight carried to its terminal (recovered).                             *)
+(* constructions (preparation) and their verdicts (prepverdicts), the      *)
+(* placed and peer-only spawns of a store-owned identity (placement), the  *)
+(* one-entry unlist of a roster-owned identity (unlist) and the replay of  *)
+(* a removal or an archive in flight carried to its terminal (recovered).  *)
 (***************************************************************************)
 
 Receipts == {"Absent", "Same", "Other"}
@@ -761,6 +761,16 @@ CRetireAt(inc) ==
     \/ RetireRunningReleasingArchiveOnly(AuditMob, inc[1], Id2, inc[3], Some(Sess3), Some(Sess3))
     \/ RetireRunningPreservingBindingArchiveOnly(AuditMob, inc[1], Id2, inc[3], None, Some(Sess3))
 CArchiveAt(inc) == ObserveMemberRetirementArchivedLive(Id2, inc[1], inc[2], inc[3], Some(Sess3), AuditDisposal, FALSE)
+\* Member 2's retirement by its archive only (the archive run retires it for
+\* nothing else). Named wrappers of one arm each: TLC's coverage names an
+\* action whose body is a conjunction after its operator, and the runner's
+\* closed alias table counts each wrapper's coverage for the arm it wraps.
+ArchiveRetireReleasing(inc) ==
+    /\ Id2 \in identity_entry_archiving
+    /\ RetireRunningReleasingArchiveOnly(AuditMob, inc[1], Id2, inc[3], Some(Sess3), Some(Sess3))
+ArchiveRetirePreserving(inc) ==
+    /\ Id2 \in identity_entry_archiving
+    /\ RetireRunningPreservingBindingArchiveOnly(AuditMob, inc[1], Id2, inc[3], None, Some(Sess3))
 \* Member 1's membership commit of its first incarnation (the apply run's
 \* AFirst, its ladder AOpen holding entry custody).
 ACommit ==
@@ -774,11 +784,13 @@ AArchiveStopped == ObserveMemberRetirementArchivedLiveStopped(Id1, Rid1, 1, 0, S
 (***************************************************************************)
 
 \* Member 1 recovered and bound as a worker (no entry row), member 2's name
-\* reserved by its row or not; the admission of every change, the record of
-\* either name from every request's facts, the host's changes hold, and
-\* member 2's ladder under created custody, its dormant seat (an entry owed
-\* its seat) or its membership commit (one held for its creation, which the
-\* held protocol publishes), in a running and a stopped mob.
+\* reserved by its row or not; the record of either name from every
+\* request's facts, the host's changes hold, and member 2's ladder under
+\* created custody, its dormant seat (an entry owed its seat) or its
+\* membership commit (one held for its creation, which the held protocol
+\* publishes), in a running and a stopped mob. A change's admission is the
+\* admit run's: a pure verdict, which changes nothing, so it adds no state
+\* here, only 288 self-loops per state.
 CommitNext ==
     \/ C1Recover
     \/ C1Bind
@@ -786,7 +798,6 @@ CommitNext ==
     \/ ASeed
     \/ CStop
     \/ HoldArm
-    \/ AdmitAny
     \/ \E id \in CreatedIds, f \in Facts : RecordArm(id, f)
     \/ CRAuthorize(Id2)
     \/ COpenAt(<<Rid2, 2, 0>>, FALSE, TRUE)
@@ -796,6 +807,17 @@ CommitNext ==
     \/ SealBootMaterializationPlan
 
 CommitSpec == Init /\ [][CommitNext]_vars
+
+\* The admit run: the admission of every change from every fact, over the
+\* only state it reads (the build seed's composition authority, the host's
+\* changes hold, a running and a stopped mob). It changes nothing.
+AdmitNext ==
+    \/ ASeed
+    \/ HoldArm
+    \/ CStop
+    \/ AdmitAny
+
+AdmitSpec == Init /\ [][AdmitNext]_vars
 
 AuditAdmitExactlyOne ==
     phase \in {"Running", "Stopped"} =>
@@ -807,13 +829,15 @@ AuditRecordExactlyOne ==
         \A id \in CreatedIds, f \in Facts :
             Cardinality({i \in 1..8 : RecordVerdicts(id, f)[i]}) = 1
 
-\* A new store-owned entry takes only a free name: no entry, no member, no
-\* spawn under way, no reservation, and no unlisted roster-owned identity's
-\* archived session record.
+\* A new store-owned entry takes only a free name: no entry of either
+\* custody, no member, no spawn under way, no reservation, and no unlisted
+\* roster-owned identity's archived session record. Keyed on the record's
+\* own step, so a record that replaces an entry is checked too.
 AuditRecordTakesFreeNames ==
-    [][\A id \in CreatedIds :
-         (Origin(id) = None /\ OriginNext(id) = Some("Created"))
-           => (/\ ~Reserved(id)
+    [][\A id \in CreatedIds, f \in Facts :
+         RecordCreatedIdentityEntryRecorded(id, f[1], f[2], f[3])
+           => (/\ Origin(id) = None
+               /\ ~Reserved(id)
                /\ ~Seated(id)
                /\ id \notin DOMAIN spawn_exec_phase
                /\ id \notin DOMAIN identity_entry_archived_sessions)
@@ -1070,7 +1094,8 @@ ArchiveNext ==
          \/ COpenAt(inc, FALSE, TRUE)
          \/ CSeatAt(inc, inc[3] = 1)
          \/ CCommitAt(inc)
-         \/ (Id2 \in identity_entry_archiving /\ CRetireAt(inc))
+         \/ ArchiveRetireReleasing(inc)
+         \/ ArchiveRetirePreserving(inc)
          \/ CArchiveAt(inc)
     \/ CRAbort(Id2)
     \/ DeclareCustodyArm(Id2, ApplyShape, TRUE, FALSE)
@@ -1088,15 +1113,32 @@ AuditArchiveExactlyOne ==
 
 \* An archived identity keeps its name and its entry until its unarchive or
 \* its removal: nothing else unseats its cause, and no member is seated
-\* under it.
+\* under it. A step leaves it archived under its origin, owes it its seat
+\* again on its record (its unarchive's change), or ends its entry with its
+\* name tombstoned (its removal's). No disjunct names an arm: an arm's
+\* action holds for any step with its successor, so it would pass another
+\* input's step that changed as it does. Which input took the step is the
+\* input's own property's to pin (AuditStoreUpdateKeepsStanding for the
+\* update).
 AuditArchivedNeverSeated ==
     [][\A id \in CreatedIds : Unseated(id) = Some("Archived") => ~(id \in DOMAIN identity_to_runtime')]_vars
 AuditArchivedKeepsItsName ==
     [][\A id \in CreatedIds :
          Unseated(id) = Some("Archived")
-           => (\/ UnarchiveIdentityEntryRestored(id)
-               \/ RemoveIdentityEntryRemoved(id)
-               \/ (UnseatedNext(id) = Some("Archived") /\ OriginNext(id) = Origin(id)))
+           => \/ UnseatedNext(id) = Some("Archived") /\ OriginNext(id) = Origin(id)
+              \/ /\ UnseatedNext(id) = Some("SeatOwed")
+                 /\ OriginNext(id) = Origin(id)
+                 /\ RecordNext(id) = Record(id)
+              \/ /\ OriginNext(id) = None
+                 /\ id \in identity_entry_tombstones'
+      ]_vars
+\* A store-owned update of an identity archived or awaiting its host's
+\* preparation changes its row only (RecordOnly), or is refused: its entry
+\* keeps its cause and its origin.
+AuditStoreUpdateKeepsStanding ==
+    [][(Unseated(Id2) \in {Some("Archived"), Some("PreparationPending")}
+          /\ DeclareCustodyArm(Id2, ApplyShape, TRUE, FALSE))
+         => (UnseatedNext(Id2) = Unseated(Id2) /\ OriginNext(Id2) = Origin(Id2))
       ]_vars
 \* An identity awaiting its host's preparation is never archived: its
 \* preparation is settled first, or the identity removed.
@@ -1211,15 +1253,23 @@ Activating(id) == IF id \in DOMAIN identity_entry_constructions_activating THEN 
 \* and the end of their held constructions with every fact, each one's
 \* spawn ladder under its custody (member 1's first incarnation, member
 \* 2's first), its dormant seat and its membership commit, its archive, its
-\* removal, and member 2's update; under the build seed's composition
-\* authority, in a running and a stopped mob.
+\* removal, and member 2's update; in an authoritative composition (the
+\* initial one: no step here needs a candidate one, whose refusals the
+\* verdict run answers, and seeding one would double every state), in a
+\* running and a stopped mob.
 PrepNext ==
-    \/ ASeed
     \/ \E pr \in BOOLEAN : DeclareCustodyArm(Id1, ApplyShape, FALSE, pr)
     \/ RecordAs(Id2, "PreparationPending")
-    \/ \E id \in CreatedIds, a \in Attempts, k \in BOOLEAN : BeginArm(id, a, k)
-    \/ \E id \in CreatedIds, a \in SettleAttempts, k \in BOOLEAN, b \in BOOLEAN, m \in BOOLEAN : SettleArm(id, a, k, b, m)
-    \/ \E id \in CreatedIds, a \in Attempts, e \in EndKinds : EndArm(id, a, e)
+    \* The attempts' arms that change state, from every fact. Their refusals
+    \* change nothing (each is a self-loop here): the verdict run fires them
+    \* and checks that exactly one arm answers each.
+    \/ \E id \in CreatedIds, a \in Attempts, k \in BOOLEAN : BeginPreparationConstructionHeld(id, a, k)
+    \/ \E id \in CreatedIds, a \in SettleAttempts, k \in BOOLEAN, b \in BOOLEAN, m \in BOOLEAN :
+         \/ SettleHostPreparationSeat(id, a, k, b, m)
+         \/ SettleHostPreparationActivationAccepted(id, a, k, b, m)
+    \/ \E id \in CreatedIds, a \in Attempts, e \in EndKinds :
+         \/ EndPreparationConstructionEndedRunning(id, a, e)
+         \/ EndPreparationConstructionEndedStopped(id, a, e)
     \/ AAuthorize
     \/ AOpen(AFirst)
     \/ ASeat(AFirst)
@@ -1236,6 +1286,22 @@ PrepNext ==
 
 PrepSpec == Init /\ [][PrepNext]_vars
 
+\* The verdict run of the preparation: every arm of an attempt's start,
+\* settle and end, from every fact, over the facts their verdicts read (each
+\* identity's preparation, its held and its activating attempt, the build
+\* seed's composition authority, a running and a stopped mob), with the
+\* preparation run's declarations and records and no ladder.
+PrepVerdictsNext ==
+    \/ ASeed
+    \/ \E pr \in BOOLEAN : DeclareCustodyArm(Id1, ApplyShape, FALSE, pr)
+    \/ RecordAs(Id2, "PreparationPending")
+    \/ \E id \in CreatedIds, a \in Attempts, k \in BOOLEAN : BeginArm(id, a, k)
+    \/ \E id \in CreatedIds, a \in SettleAttempts, k \in BOOLEAN, b \in BOOLEAN, m \in BOOLEAN : SettleArm(id, a, k, b, m)
+    \/ \E id \in CreatedIds, a \in Attempts, e \in EndKinds : EndArm(id, a, e)
+    \/ CStop
+
+PrepVerdictsSpec == Init /\ [][PrepVerdictsNext]_vars
+
 AuditPrepExactlyOne ==
     phase \in {"Running", "Stopped"} =>
         \A id \in CreatedIds :
@@ -1244,6 +1310,13 @@ AuditPrepExactlyOne ==
                  Cardinality({i \in 1..11 : SettleVerdicts(id, a, k, b, m)[i]}) = 1
             /\ \A a \in Attempts, e \in EndKinds : Cardinality({i \in 1..6 : EndVerdicts(id, a, e)[i]}) = 1
             /\ Cardinality({i \in 1..11 : ArchiveVerdicts(id)[i]}) = 1
+
+\* Exactly one arm answers every archive in the preparation run's states,
+\* whose attempts open ladders and seat members (the verdict run has
+\* neither): the archive's verdict reads both.
+AuditPrepArchiveExactlyOne ==
+    phase \in {"Running", "Stopped"} =>
+        \A id \in CreatedIds : Cardinality({i \in 1..11 : ArchiveVerdicts(id)[i]}) = 1
 
 \* An attempt is open only for an entry awaiting its preparation (the
 \* recovery, which the run does not drive, runs before any attempt opens).
@@ -1490,19 +1563,33 @@ NotAuditWitnessUnlistLeavesCreated == [][~AuditWitnessUnlistLeavesCreated]_vars
 (* The recovered run.                                                      *)
 (***************************************************************************)
 
-\* Member 1 recovered and bound (a seated local member, Dormant); the scan of
-\* its store-owned row Present, then of a removal's or an archive's row,
-\* before the boot plan's seal; then the retirement the recovered mark owes,
-\* to its terminal, in a running and a stopped mob.
+\* The shell retires the member a recovered mark owes once the start sealed
+\* its boot plan, so no row is scanned after the retirement: member 1's
+\* first incarnation (AFirst), by named wrappers of one arm each, which the
+\* runner's alias table counts for the arm they wrap.
+RecoveredRetireReleasing ==
+    /\ boot_plan_sealed = TRUE
+    /\ RetireRunningReleasingArchiveOnly(AuditMob, Rid1, Id1, 0, Some(Sess1), Some(Sess1))
+RecoveredRetirePreserving ==
+    /\ boot_plan_sealed = TRUE
+    /\ RetireRunningPreservingBindingArchiveOnly(AuditMob, Rid1, Id1, 0, None, Some(Sess1))
+
+\* Member 1 recovered and bound (a seated local member, Dormant) with its
+\* peer endpoint, which the seal requires of a member it does not wake; the
+\* scan of its store-owned row Present, then of a removal's or an archive's
+\* row, before the boot plan's seal, in either order with the journal
+\* replay (the shell replays first; MobMachine refuses a replay that would
+\* seat a member under an archived entry); then the retirement the
+\* recovered mark owes, to its terminal, in a running and a stopped mob.
 RecoveredNext ==
     \/ C1Recover
     \/ C1Bind
+    \/ WEndpoint
     \/ \E presence \in {"Present", "Tombstone", "Archived"} : RecoverArm(Id1, presence, None)
     \/ SealBootMaterializationPlan
     \/ CStop
-    \* The shell retires the member a recovered mark owes once the start
-    \* sealed its boot plan, so no row is scanned after the retirement.
-    \/ boot_plan_sealed = TRUE /\ ARetire(AFirst)
+    \/ RecoveredRetireReleasing
+    \/ RecoveredRetirePreserving
     \/ AArchive(AFirst)
     \/ AArchiveStopped
 

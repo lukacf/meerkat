@@ -376,7 +376,7 @@ is open (`construction_is_held_or_activating`).
 
 The ci profile has no identities, so the hand-written audit
 `specs/machines/mob_machine/created_identity_audit.sh` drives the created
-entries' arms in twelve runs, in two parts. Its recovery part has four:
+entries' arms in fourteen runs, in two parts. Its recovery part has four:
 
 - The scan run scans a row of every presence, with and without a revival
   record, in Running and Stopped, until the boot plan's seal. The rows are
@@ -395,14 +395,19 @@ entries' arms in twelve runs, in two parts. Its recovery part has four:
   never touches a `Created` entry.
 - The placed run scans the row of a member seated on a member host.
 
-Its changes part (0.9.9) has eight:
+Its changes part (0.9.9) has ten:
 
-- The commit run drives every change's admission and the record of a name
-  from every request's facts, the changes hold and a seat or membership
-  commit under created custody: exactly one arm answers each, a new entry
-  takes only a free name, its cause follows the declared apply's precedence
-  over its facts, and an entry held for its creation is never seated
-  Dormant.
+- The admit run drives every change's admission from every fact, over the
+  only facts it reads (the composition authority, the changes hold, a
+  running and a stopped mob): exactly one arm answers each. The admission
+  changes nothing, so no other run fires it.
+- The commit run drives the record of a name from every request's facts,
+  the changes hold and a seat or membership commit under created custody:
+  exactly one arm answers each record, a new entry takes only a free name
+  (no entry of either custody, member, ladder, reservation or archived
+  session record holds it), its cause follows the declared apply's
+  precedence over its facts, and an entry held for its creation is never
+  seated Dormant.
 - The update run declares the same change of a roster-owned and a
   store-owned identity, owed their seats or seated under the same spec:
   exactly one arm answers each, and both answer the same verdict for the
@@ -414,24 +419,29 @@ Its changes part (0.9.9) has eight:
 - The archive run archives a seated store-owned identity through its
   retirement and unarchives it onto its archived session: an archived
   identity keeps its name and is never seated, an identity awaiting its
-  preparation is never archived, and a roster-owned identity's archive is
-  refused.
+  preparation is never archived, the update of either changes its row only
+  (`RecordOnly`), and a roster-owned identity's archive is refused.
 - The preparation run drives the start, settle and end of held
   constructions of either custody with their ladders (the construction's
   own ladder opening after its activation was accepted included), seats,
-  membership commits, archives and removals: an entry awaiting its
-  preparation is seated only by its accepted activation, no end of an
-  accepted activation but its failed publication is enabled, and a
-  `constructed` preparation is never settled without an attempt.
+  membership commits, archives and removals, firing the attempts' arms
+  that change state: an entry awaiting its preparation is seated only by
+  its accepted activation, no end of an accepted activation but its failed
+  publication is enabled, a `constructed` preparation is never settled
+  without an attempt, and its update changes its row only.
+- The prepverdicts run drives every arm of an attempt's start, settle and
+  end from every fact, over the facts their verdicts read: exactly one arm
+  answers each.
 - The placement run seats a store-owned identity hosted on its first use by
   a placed or peer-only spawn holding its created custody.
 - The unlist run unlists a roster-owned identity through its retirement
   beside a store-owned one: exactly one arm answers each unlist, which
-  decides on its identity alone, and the unlisted identity's archived
-  session record holds its name.
+  decides on its identity alone, and no record takes the name of an entry
+  or of the unlisted identity's archived session record.
 - The recovered run replays a seated store-owned identity's removal or
-  archive row and carries the recovered mark's retirement to its terminal,
-  running or stopped.
+  archive row, scanned before or after the journal replay, and carries the
+  recovered mark's retirement to its terminal, running or stopped: no
+  replay seats a member under an archived entry.
 
 The audit seeds defects of the invariants above, the action properties and
 the guards a reachable state needs, and refuses each with the violation it

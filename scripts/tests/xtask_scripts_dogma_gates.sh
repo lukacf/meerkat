@@ -427,14 +427,17 @@ trap 'rm -rf "$tlc_env_tmp"' EXIT
 # witnesses violated, and with --mutants each seeded defect's target
 # invariant violated.
 # created_identity_audit.sh (mob_machine) requires a final distinct-state
-# count for each of its twelve runs (at or above the floor of each measured
-# one), a coverage block in which each covered action of every run
-# generated a state, its seventy step witnesses violated, and with
-# --mutants each seeded defect's generated invariant, audit invariant,
-# totality invariant or action property violated and its
-# created_custody_local_kept, recovered_removal_unmarked and
-# accepted_ladder_refused mutants' runs to end without an error (the success
-# line below).
+# count for each of its fourteen runs (at or above the floor of each
+# measured one), a coverage block in which each covered action of every run
+# generated a state (an arm a run fires only through a named wrapper read
+# under the wrapper's name, by the runner's closed alias table: the
+# wrappers print so below, and a check further down drops the scan run's
+# and the archive run's in turn), its seventy
+# step witnesses violated, and with --mutants each seeded defect's generated
+# invariant, audit invariant, totality invariant or action property
+# violated and its created_custody_local_kept, recovered_removal_unmarked
+# and accepted_ladder_refused mutants' runs to end without an error (the
+# success line below).
 # activation_body_retirement_audit.sh (session_document) requires its three
 # witnesses violated, and with --mutants each seeded defect's target
 # invariant violated.
@@ -1048,6 +1051,10 @@ printf '%s\n' \
   'echo "Error: Invariant construction_is_held_or_activating is violated."' \
   'echo "Error: Invariant entry_ending_marks_are_seated_and_disjoint is violated."' \
   'echo "Error: Invariant archived_entry_is_store_owned is violated."' \
+  'echo "Error: Action property AuditStoreUpdateKeepsStanding is violated."' \
+  'echo "<C1Declared line 1, col 1 to line 1, col 2 of module created_identity_audit>: 1:1"' \
+  'echo "<ArchiveRetireReleasing line 1, col 1 to line 1, col 2 of module created_identity_audit>: 1:1"' \
+  'echo "<RecoveredRetireReleasing line 1, col 1 to line 1, col 2 of module created_identity_audit>: 1:1"' \
   'for action in SetOperatorInstructionNewRunning SetOperatorInstructionAdvanceRunning SetOperatorInstructionDuplicateRunning SetOperatorInstructionStaleRunning SetOperatorInstructionConflictRunning RevokeOperatorInstructionUnknownSlotRunning RevokeOperatorInstructionStaleRunning RevokeOperatorInstructionDuplicateRunning RevokeOperatorInstructionConflictRunning RevokeOperatorInstructionAdvanceRunning PrepareMemberInstructionDeliveryNotOwedRunning PrepareMemberInstructionDeliveryDeliverRunning PrepareMemberInstructionDeliveryUnbornRunning PrepareMemberInstructionDeliveryUnboundRunning RecordMemberInstructionTargetNotOwedRunning RecordMemberInstructionTargetStaleSessionRunning RecordMemberInstructionTargetSupersededRunning RecordMemberInstructionTargetCurrentRunning RecordMemberInstructionTargetUnmintedRunning RefuseMemberInstructionTargetNotOwedRunning RefuseMemberInstructionTargetStaleSessionRunning RefuseMemberInstructionTargetSupersededRunning RefuseMemberInstructionTargetBlockedRunning PrepareMemberInstructionDeliveryRetiringRunning RetireRunningReleasingArchiveOnly ResolveMemberInstructionReleaseAuthorizedRunning ResolveMemberInstructionReleaseNotNeededRunning; do echo "<$action line 1, col 1 to line 1, col 2 of module model>: 1:1"; done' \
   'echo "Error: Action property NotAuditWitnessProfileWriteOwesOne is violated."' \
   'echo "Error: Action property NotAuditWitnessRetargetOwesLeaver is violated."' \
@@ -1183,6 +1190,42 @@ else
   show_tail residency-absent "$absent_out"
 fi
 rm -rf "$absent_tlc_tmp"
+
+# The created identity runner reads an arm a run fires only through a named
+# wrapper under the wrapper's name, by its closed alias table (TLC names an
+# action whose body is a conjunction after its operator), never by a
+# location: a copy of the fake without the wrapper's line must fail that
+# run on exactly that arm and wrapper, though the fake still prints the
+# arm's own line.
+alias_tlc_tmp="$(mktemp -d)"
+alias_failures=""
+for alias_case in "scan:C1Declared:RecoverIdentityEntrySeatedRunning" \
+  "archive:ArchiveRetireReleasing:RetireRunningReleasingArchiveOnly"; do
+  alias_run="${alias_case%%:*}"
+  alias_wrapper="${alias_case#*:}"
+  alias_wrapper="${alias_wrapper%%:*}"
+  alias_arm="${alias_case##*:}"
+  grep -vF "<${alias_wrapper} line 1, col 1 to line 1, col 2 of module created_identity_audit>" \
+    "$tlc_env_tmp/tlc" > "$alias_tlc_tmp/tlc"
+  chmod +x "$alias_tlc_tmp/tlc"
+  alias_rc=0
+  alias_out="$(PATH="$alias_tlc_tmp:$PATH" \
+    TLC_JAVA_OPTIONS_CAPTURE="$alias_tlc_tmp/capture" \
+    TLC_JDK_JAVA_OPTIONS_CAPTURE="$alias_tlc_tmp/capture-jdk" \
+    TLC_WORKERS=1 bash specs/machines/mob_machine/created_identity_audit.sh --part "$alias_run" 2>&1)" || alias_rc=$?
+  if [ "$alias_rc" = 0 ] \
+    || ! printf '%s\n' "$alias_out" \
+      | grep -Fq "${alias_run} run: ${alias_arm} never fired (coverage of ${alias_wrapper}: 'absent')"; then
+    alias_failures+=" ${alias_run}"
+    show_tail "created-identity-alias-${alias_run}" "$alias_out"
+  fi
+done
+if [ -z "$alias_failures" ]; then
+  ok "created identity audit reads a wrapped arm under its wrapper's name and refuses it when the wrapper's line is absent"
+else
+  bad "created identity audit accepted a coverage block without a wrapper its alias table names (runs:${alias_failures})"
+fi
+rm -rf "$alias_tlc_tmp"
 
 # tlc_run_cap.sh: the per-run watchdog must never outlive a run that ended
 # first, or hold a caller's `$(...)` capture open. A sleep orphaned between

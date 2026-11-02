@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # TLC audit of MobMachine created identity entries.
 #
-# usage: created_identity_audit.sh [--mutants] [--part recovery|changes|<run>]
+# usage: created_identity_audit.sh [--mutants]
+#                                  [--part recovery|changes|<run>[,<run>...]]
 #                                  [extra tlc args...]
 #
 # Derives each run's TLC config from the generated ci.cfg next to this script
@@ -9,10 +10,10 @@
 # identity_entry_audit.sh does for the declared apply, with the VIEW of
 # member_residency_audit that leaves out the two counters no guard reads
 # (model_step_count and topology_epoch); the runner first checks that the
-# model reads neither anywhere else. It checks twelve runs of
+# model reads neither anywhere else. It checks fourteen runs of
 # created_identity_audit.tla, each over its whole space with TLC coverage, in
-# two parts (every part by default; --part <run> checks one run). Its
-# recovery part (--part recovery):
+# two parts (every part by default; --part <run>,<run>... checks those runs,
+# as a CI shard does). Its recovery part (--part recovery):
 #
 # - scan: member 1 recovered and bound, its Declared entry row replayed or
 #   not, member 2 with no member, and the boot scan of a row of either with
@@ -45,16 +46,21 @@
 #
 # Its changes part (--part changes, 0.9.9):
 #
-# - commit: a worker member, a name reserved by its row or not, the
-#   admission of every change and the record of either name from every
-#   request's facts, the host's changes hold, and a ladder under created
-#   custody, its dormant seat or its membership commit, in a running and a
-#   stopped mob: exactly one arm answers every admission and every record
-#   (AuditAdmitExactlyOne, AuditRecordExactlyOne), a new store-owned entry
-#   takes only a free name (AuditRecordTakesFreeNames), its cause follows
-#   the declared apply's precedence over its facts
-#   (AuditRecordCauseFollowsFacts), and an entry held for its creation is
-#   never seated Dormant (AuditHeldNeverSeatedDormant).
+# - admit: the admission of every change from every fact, over the only
+#   state it reads (the build seed's composition authority, the host's
+#   changes hold, a running and a stopped mob): exactly one arm answers
+#   every admission (AuditAdmitExactlyOne). The admission changes nothing,
+#   so the commit run leaves it out: there it added no state and 288
+#   self-loops to every state.
+# - commit: a worker member, a name reserved by its row or not, the record
+#   of either name from every request's facts, the host's changes hold, and
+#   a ladder under created custody, its dormant seat or its membership
+#   commit, in a running and a stopped mob: exactly one arm answers every
+#   record (AuditRecordExactlyOne), a new store-owned entry takes only a
+#   free name (AuditRecordTakesFreeNames), its cause follows the declared
+#   apply's precedence over its facts (AuditRecordCauseFollowsFacts), and an
+#   entry held for its creation is never seated Dormant
+#   (AuditHeldNeverSeatedDormant).
 # - update: a roster-owned and a store-owned identity owed their seats and
 #   seated under the same profile and runtime mode, and their declarations
 #   of the same change, the store-owned one's by its update: exactly one arm
@@ -76,23 +82,33 @@
 #   refused: exactly one arm answers every archive, unarchive and update
 #   (AuditArchiveExactlyOne), no member is seated under an archived
 #   identity (AuditArchivedNeverSeated), it keeps its name until its
-#   unarchive or removal (AuditArchivedKeepsItsName), and an identity
-#   awaiting its preparation is never archived (AuditPendingNeverArchived).
+#   unarchive or removal (AuditArchivedKeepsItsName), an identity awaiting
+#   its preparation is never archived (AuditPendingNeverArchived), and the
+#   update of an archived or pending identity changes its row only
+#   (AuditStoreUpdateKeepsStanding).
 # - preparation: a roster-owned identity whose rule requires its
 #   preparation and a store-owned one pending it, the start, settle and end
 #   of their held constructions with every fact, their ladders (each
 #   construction's own ladder opening after its activation was accepted, as
 #   the shell opens it at the publication), seats, membership commits,
-#   archives and removals, and the store-owned one's
-#   update: exactly one arm answers each (AuditPrepExactlyOne), an attempt
-#   is open only for an entry awaiting its preparation
-#   (AuditConstructionAwaitsPreparation), while an activation is accepted no
-#   end of its attempt but its failed publication is enabled
-#   (AuditAcceptedActivationIsFinal), such an entry is seated only by its
-#   accepted activation's membership commit
-#   (AuditPendingSeatedOnlyByItsActivation), and a `constructed`
-#   preparation is never settled without an attempt
-#   (AuditConstructedNeverSettledWithoutAttempt).
+#   archives and removals, and the store-owned one's update, firing the
+#   attempts' arms that change state (their refusals are the verdict run's),
+#   in the initial authoritative composition: an attempt is open only for an
+#   entry awaiting its preparation (AuditConstructionAwaitsPreparation),
+#   while an activation is accepted no end of its attempt but its failed
+#   publication is enabled (AuditAcceptedActivationIsFinal), such an entry
+#   is seated only by its accepted activation's membership commit
+#   (AuditPendingSeatedOnlyByItsActivation), a `constructed` preparation is
+#   never settled without an attempt
+#   (AuditConstructedNeverSettledWithoutAttempt), the update of a pending
+#   identity changes its row only (AuditStoreUpdateKeepsStanding), and
+#   exactly one arm answers every archive, ladders and seats included
+#   (AuditPrepArchiveExactlyOne).
+# - prepverdicts: every arm of an attempt's start, settle and end, from
+#   every fact, over the facts their verdicts read (each identity's
+#   preparation, its held and its activating attempt, the build seed's
+#   composition authority, a running and a stopped mob) and no ladder:
+#   exactly one arm answers each (AuditPrepExactlyOne).
 # - placement: a store-owned identity hosted on its first use (placed, or
 #   externally bound) or owed its seat, its placed and peer-only spawns
 #   holding its created custody (the placed and peer-only witnesses): the
@@ -102,16 +118,18 @@
 #   unlisted and retired to its terminal, a store-owned identity, and the
 #   record of the unlisted identity's name: exactly one arm answers every
 #   unlist (AuditUnlistExactlyOne), an unlist changes no other identity and
-#   never a Created entry (AuditUnlistDecidesItsIdentityAlone), and the
-#   unlisted identity's archived session record holds its name
-#   (AuditRecordTakesFreeNames).
-# - recovered: a seated store-owned identity whose Present row is followed
-#   by a removal's or an archive's row, and the retirement the recovered
-#   mark owes, once the boot plan is sealed, to its terminal, running or
-#   stopped: exactly one arm answers
-#   every row (AuditRecoverExactlyOne), the removal's end tombstones the
-#   name (AuditRemovalTombstones), and the archived identity keeps it
-#   (AuditArchivedKeepsItsName, AuditArchivedNeverSeated).
+#   never a Created entry (AuditUnlistDecidesItsIdentityAlone), and a
+#   record takes no name an entry or the unlisted identity's archived
+#   session record holds (AuditRecordTakesFreeNames).
+# - recovered: a store-owned identity replayed seated (recovered, bound and
+#   its peer endpoint recorded), its Present row followed by a removal's or
+#   an archive's row, the rows scanned before or after the replay, and the
+#   retirement the recovered mark owes, once the boot plan is sealed, to
+#   its terminal, running or stopped: exactly one arm answers every row
+#   (AuditRecoverExactlyOne), the removal's end tombstones the name
+#   (AuditRemovalTombstones), and the archived identity keeps it: no replay
+#   or seat puts a member under it (AuditArchivedNeverSeated,
+#   AuditArchivedKeepsItsName).
 #
 # Every run checks every generated invariant (the created entries' among
 # them: tombstone_is_never_an_entry, entry_custodies_are_disjoint,
@@ -121,9 +139,11 @@
 # archived), in its witness and mutant runs too.
 #
 # Each run must finish without an error, reach at least its floor of distinct
-# states and fire every action of its covered list (TLC coverage): an arm
-# that answers exactly the states its guard names (a refusal of a reserved
-# name, say) has the coverage check as its witness. The runner also requires
+# states and fire every action of its covered list (TLC coverage; an arm a
+# run fires only through a named wrapper is read under the wrapper's name,
+# by the closed table covered_aliases): an arm that answers exactly the
+# states its guard names (a refusal of a reserved name, say) has the
+# coverage check as its witness. The runner also requires
 # every witness reached (a step goal's negation violated), and --mutants
 # seeds the defects listed at its end, each of which TLC must refuse with
 # the named violation: defects of the created entries' invariants and
@@ -155,22 +175,27 @@ done
 part_of() {
   case "$1" in
     scan|reseat|names|placed) echo recovery ;;
-    commit|update|removal|archive|preparation|placement|unlist|recovered) echo changes ;;
+    admit|commit|update|removal|archive|preparation|prepverdicts|placement|unlist|recovered) echo changes ;;
     *) return 1 ;;
   esac
 }
+# A part is all, recovery, changes, or a comma-separated list of runs (a CI
+# shard names the runs it checks).
 case "${run_part}" in
   all|recovery|changes) ;;
   *)
-    if ! part_of "${run_part}" > /dev/null; then
-      echo "error: unknown part '${run_part}' (recovery, changes or a run)" >&2
-      exit 2
-    fi
+    IFS=, read -r -a listed_runs <<< "${run_part}"
+    for listed_run in "${listed_runs[@]}"; do
+      if ! part_of "${listed_run}" > /dev/null; then
+        echo "error: unknown part '${listed_run}' (recovery, changes or runs)" >&2
+        exit 2
+      fi
+    done
     ;;
 esac
 # usage: in_part <run>: whether the selected part checks <run>.
 in_part() {
-  [[ "${run_part}" == "all" || "${run_part}" == "$1" || "${run_part}" == "$(part_of "$1")" ]]
+  [[ "${run_part}" == "all" || "${run_part}" == "$(part_of "$1")" || ",${run_part}," == *",$1,"* ]]
 }
 # Each run's distinct-state floor is 90% of the whole space its first green
 # run found, so a guard that silently disables arms fails the lane.
@@ -182,17 +207,22 @@ placed_states=150
 # floors are `unmeasured`, which checks no floor and prints the run's
 # distinct-state count; each is set to that whole space from the batch's
 # first green run, before its merge.
+admit_states=unmeasured
 commit_states=unmeasured
 update_states=unmeasured
 removal_states=unmeasured
 archive_states=unmeasured
 preparation_states=unmeasured
+prepverdicts_states=unmeasured
 placement_states=unmeasured
 unlist_states=unmeasured
 recovered_states=unmeasured
 
 # Every arm each run must fire. TLC names an arm after the generated
-# operator, since every audit wrapper here is a plain application.
+# operator where it is applied plainly (an audit wrapper that only applies
+# it, or a disjunct); one a run fires only through a named wrapper whose
+# conjunct restricts it is read under the wrapper's name (covered_aliases
+# below).
 scan_covered_actions=(
   RecoverRosterMemberRunning
   RecoverMemberSessionBindingFreshRunning
@@ -304,11 +334,7 @@ placed_covered_actions=(
   RecoverCreatedIdentityEntryUnreadableRunning
 )
 
-commit_covered_actions=(
-  RecoverRosterMemberRunning
-  RecoverMemberSessionBindingFreshRunning
-  RecoverCreatedIdentityEntryTombstoneRunning
-  RecoverCreatedIdentityEntryUnreadableRunning
+admit_covered_actions=(
   SeedMemberResidencyRunning
   BeginPlacedCompletionLifecycleQuiesceFreshStop
   StopRunning
@@ -326,6 +352,19 @@ commit_covered_actions=(
   AdmitIdentityChangeGrantRevoked
   AdmitIdentityChangeStaleSpec
   AdmitIdentityChangeMobNotRunningStopped
+)
+
+commit_covered_actions=(
+  RecoverRosterMemberRunning
+  RecoverMemberSessionBindingFreshRunning
+  RecoverCreatedIdentityEntryTombstoneRunning
+  RecoverCreatedIdentityEntryUnreadableRunning
+  SeedMemberResidencyRunning
+  BeginPlacedCompletionLifecycleQuiesceFreshStop
+  StopRunning
+  ResumeStopped
+  SetIdentityChangesHeldRunning
+  SetIdentityChangesHeldStopped
   RecordCreatedIdentityEntryRecorded
   RecordCreatedIdentityEntryNameHeldByIdentity
   RecordCreatedIdentityEntryNameHeldByWorker
@@ -433,10 +472,34 @@ archive_covered_actions=(
 )
 
 preparation_covered_actions=(
-  SeedMemberResidencyRunning
   DeclareIdentityEntryPreparationPending
   DeclareIdentityEntrySeatOwed
   DeclareIdentityEntryLifecycleInFlight
+  RecordCreatedIdentityEntryRecorded
+  BeginPreparationConstructionHeld
+  SettleHostPreparationSeat
+  SettleHostPreparationActivationAccepted
+  EndPreparationConstructionEndedRunning
+  EndPreparationConstructionEndedStopped
+  AuthorizeSpawnProfileRunning
+  BeginSpawnExecFresh
+  CommitDormantSeatRunning
+  CommitSpawnMembershipFresh
+  AbortSpawnExecActiveRunning
+  RemoveIdentityEntryRemoved
+  RemoveIdentityEntryInFlight
+  ArchiveIdentityEntryPreparationPending
+  ArchiveIdentityEntryOwnedByRoster
+  DeclareIdentityEntryRecordOnly
+  BeginPlacedCompletionLifecycleQuiesceFreshStop
+  StopRunning
+  ResumeStopped
+)
+
+prepverdicts_covered_actions=(
+  SeedMemberResidencyRunning
+  DeclareIdentityEntryPreparationPending
+  DeclareIdentityEntrySeatOwed
   RecordCreatedIdentityEntryRecorded
   BeginPreparationConstructionHeld
   BeginPreparationConstructionNotPending
@@ -461,16 +524,6 @@ preparation_covered_actions=(
   EndPreparationConstructionNotOpenStopped
   EndPreparationConstructionActivationPendingRunning
   EndPreparationConstructionActivationPendingStopped
-  AuthorizeSpawnProfileRunning
-  BeginSpawnExecFresh
-  CommitDormantSeatRunning
-  CommitSpawnMembershipFresh
-  AbortSpawnExecActiveRunning
-  RemoveIdentityEntryRemoved
-  RemoveIdentityEntryInFlight
-  ArchiveIdentityEntryPreparationPending
-  ArchiveIdentityEntryOwnedByRoster
-  DeclareIdentityEntryRecordOnly
   BeginPlacedCompletionLifecycleQuiesceFreshStop
   StopRunning
   ResumeStopped
@@ -517,6 +570,7 @@ unlist_covered_actions=(
 recovered_covered_actions=(
   RecoverRosterMemberRunning
   RecoverMemberSessionBindingFreshRunning
+  RecoverMemberPeerEndpointFreshRunning
   RecoverCreatedIdentityEntrySeatedRunning
   RecoverCreatedIdentityEntryRemovingRunning
   RecoverCreatedIdentityEntryArchivingRunning
@@ -525,6 +579,19 @@ recovered_covered_actions=(
   RetireRunningReleasingArchiveOnly
   ObserveMemberRetirementArchivedLive
   ObserveMemberRetirementArchivedLiveStopped
+)
+
+# A covered arm a run fires only through a named wrapper whose conjunct
+# restricts its exploration: TLC's coverage names such an action after the
+# wrapper (an action whose body is a conjunction is named after its
+# operator), so in that run the arm's coverage is read under the wrapper's
+# name. A closed table of <run>:<wrapper>:<arm>; never a match on a
+# coverage line's location.
+covered_aliases=(
+  "scan:C1Declared:RecoverIdentityEntrySeatedRunning"
+  "names:C1Declared:RecoverIdentityEntrySeatedRunning"
+  "archive:ArchiveRetireReleasing:RetireRunningReleasingArchiveOnly"
+  "recovered:RecoveredRetireReleasing:RetireRunningReleasingArchiveOnly"
 )
 
 spec_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -591,7 +658,10 @@ step_index="${view_positions% *}"
 epoch_index="${view_positions#* }"
 
 # usage: write_cfg <run> <file> <extra invariant lines> <extra property lines>
-#                  [without-totality]
+#                  [without-totality|without-totality-or-properties]
+# without-totality leaves out the run's ENABLED totality invariants;
+# without-totality-or-properties its action properties too (its safety
+# invariants and the generated ones stay).
 write_cfg() {
   local run="$1" cfg="$2" invariants="$3" properties="$4" totality="${5:-}"
   local spec run_properties run_invariants run_safety="" section_end
@@ -634,6 +704,12 @@ write_cfg() {
       run_invariants="
   AuditRecoverExactlyOne"
       ;;
+    admit)
+      spec="AdmitSpec"
+      run_properties=""
+      run_invariants="
+  AuditAdmitExactlyOne"
+      ;;
     commit)
       spec="CommitSpec"
       run_properties="
@@ -641,7 +717,6 @@ write_cfg() {
   AuditRecordCauseFollowsFacts
   AuditHeldNeverSeatedDormant"
       run_invariants="
-  AuditAdmitExactlyOne
   AuditRecordExactlyOne"
       ;;
     update)
@@ -669,7 +744,8 @@ write_cfg() {
       run_properties="
   AuditArchivedNeverSeated
   AuditArchivedKeepsItsName
-  AuditPendingNeverArchived"
+  AuditPendingNeverArchived
+  AuditStoreUpdateKeepsStanding"
       run_invariants="
   AuditArchiveExactlyOne"
       ;;
@@ -678,7 +754,17 @@ write_cfg() {
       run_properties="
   AuditPendingSeatedOnlyByItsActivation
   AuditConstructedNeverSettledWithoutAttempt
-  AuditPendingNeverArchived"
+  AuditPendingNeverArchived
+  AuditStoreUpdateKeepsStanding"
+      run_invariants="
+  AuditPrepArchiveExactlyOne"
+      run_safety="
+  AuditConstructionAwaitsPreparation
+  AuditAcceptedActivationIsFinal"
+      ;;
+    prepverdicts)
+      spec="PrepVerdictsSpec"
+      run_properties=""
       run_invariants="
   AuditPrepExactlyOne"
       run_safety="
@@ -716,6 +802,7 @@ write_cfg() {
   case "${totality}" in
     "") ;;
     without-totality) run_invariants="" ;;
+    without-totality-or-properties) run_invariants="" run_properties="" ;;
     *)
       echo "error: unknown write_cfg mode '${totality}'" >&2
       exit 1
@@ -829,22 +916,33 @@ check_space() {
   local coverage="${work_dir}/${run}-coverage.txt"
   awk '/^The coverage statistics at / { block = ""; next } { block = block $0 "\n" } END { printf "%s", block }' \
     "${log}" > "${coverage}"
-  local action generated
+  local action generated named alias
   for action in "$@"; do
-    generated="$(awk -v head="<${action} line " '
+    named="${action}"
+    for alias in "${covered_aliases[@]}"; do
+      if [[ "${alias%%:*}" == "${run}" && "${alias##*:}" == "${action}" ]]; then
+        named="${alias#*:}"
+        named="${named%%:*}"
+      fi
+    done
+    generated="$(awk -v head="<${named} line " '
       index($0, head) == 1 && $0 ~ / of module (model|created_identity_audit|identity_entry_apply_audit|member_residency_audit)( \([0-9]+ [0-9]+ [0-9]+ [0-9]+\))?>: [0-9]+:[0-9]+$/ {
         split($NF, counts, ":"); total += counts[2]; found = 1
       }
       END { if (found) print total }' "${coverage}")"
     if [[ -z "${generated}" || "${generated}" == "0" ]]; then
-      echo "error: created identity audit ${run} run: ${action} never fired (coverage '${generated:-absent}')" >&2
+      echo "error: created identity audit ${run} run: ${action} never fired (coverage of ${named}: '${generated:-absent}')" >&2
       exit 1
     fi
-    echo "covered ${action}: ${generated} successor states"
+    if [[ "${named}" == "${action}" ]]; then
+      echo "covered ${action}: ${generated} successor states"
+    else
+      echo "covered ${action} through ${named}: ${generated} successor states"
+    fi
   done
 }
 
-for run in scan reseat names placed commit update removal archive preparation placement unlist recovered; do
+for run in scan reseat names placed admit commit update removal archive preparation prepverdicts placement unlist recovered; do
   if in_part "${run}"; then
     floor_var="${run}_states"
     arms_var="${run}_covered_actions[@]"
@@ -854,9 +952,10 @@ done
 
 # Each witness is <run>:<kind>:<name>: a state goal's negation joins the
 # invariants, a step goal's negation ([][~step]_vars) joins the properties.
-# A witness run leaves out its run's ENABLED totality invariants: it explores
-# a part of the run's space, whose whole-space run checks them in every
-# state.
+# A witness run leaves out its run's ENABLED totality invariants and its
+# action properties: it explores a part of the run's space, whose
+# whole-space run checks them in every state and step (they cost most of a
+# witness run's time, and only end it early).
 for witness in \
   "scan:Action property:ScanSeated" "scan:Action property:ScanRetired" \
   "scan:Action property:ScanPending" "scan:Action property:ScanTombstone" \
@@ -869,7 +968,7 @@ for witness in \
   "names:Action property:ProbeOtherOrigin" \
   "placed:Action property:ScanContradictedPlaced" \
   "commit:Action property:CommitRecordedPending" "commit:Action property:CommitRecordedHosted" \
-  "commit:Action property:CommitRecordedHeld" "commit:Action property:CommitStaleSpec" \
+  "commit:Action property:CommitRecordedHeld" "admit:Action property:CommitStaleSpec" \
   "commit:Action property:CommitHeldRefused" "commit:Action property:CommitWorkerRefused" \
   "commit:Action property:CommitCreatedSeat" "commit:Action property:CommitHeldCreated" \
   "update:Action property:UpdateMigrates" "update:Action property:UpdateRestamps" \
@@ -886,7 +985,7 @@ for witness in \
   "preparation:Action property:PrepRosterPending" "preparation:Action property:PrepRosterSettledByDeclaration" \
   "preparation:Action property:PrepStoreSettleSeats" "preparation:Action property:PrepAccepted" \
   "preparation:Action property:PrepPublished" "preparation:Action property:PrepRosterPublished" \
-  "preparation:Action property:PrepAbortRefusedWhileActivating" "preparation:Action property:PrepExpired" \
+  "prepverdicts:Action property:PrepAbortRefusedWhileActivating" "preparation:Action property:PrepExpired" \
   "preparation:Action property:PrepRemovalEndsHeld" "preparation:Action property:PrepRemovalWaits" \
   "preparation:Action property:PrepArchiveRefusedWhileHeld" "preparation:Action property:PrepUpdateRecordOnly" \
   "preparation:Action property:PrepLadderOpensAfterAcceptance" \
@@ -906,10 +1005,10 @@ for witness in \
   cfg="${work_dir}/witness-${name}.cfg"
   if [[ "${kind}" == "Invariant" ]]; then
     write_cfg "${run}" "${cfg}" "
-  NotAuditWitness${name}" "" without-totality
+  NotAuditWitness${name}" "" without-totality-or-properties
   else
     write_cfg "${run}" "${cfg}" "" "
-  NotAuditWitness${name}" without-totality
+  NotAuditWitness${name}" without-totality-or-properties
   fi
   status=0
   run_tlc "witness-${name}" "${cfg}" ${tlc_args[@]+"${tlc_args[@]}"} || status=$?
@@ -1004,9 +1103,11 @@ PY
   # edit on stdin, run after the shared helpers, that rewrites model.tla in
   # place and must find each anchor it names. A mutant runs without its
   # run's ENABLED totality invariants unless it expects one of them (they
-  # cost most of a deep run's time); a mutant that expects a generated
+  # cost most of a deep run's time), and without its action properties
+  # unless it expects one of them; a mutant that expects a generated
   # invariant or an action property then meets it even where the totality
-  # would refuse an earlier state first (a second arm answering a row).
+  # would refuse an earlier state first (a second arm answering a row), and
+  # one that expects an invariant where another step's property would.
   mutate() {
     local run="$1" name="$2" violation="$3"
     if ! in_part "${run}"; then
@@ -1014,8 +1115,10 @@ PY
       return 0
     fi
     local totality=""
-    if [[ "${violation}" != *ExactlyOne* ]]; then
+    if [[ "${violation}" == "Action property "* ]]; then
       totality=without-totality
+    elif [[ "${violation}" != *ExactlyOne* ]]; then
+      totality=without-totality-or-properties
     fi
     local dir="${work_dir}/mutant-${name}"
     mkdir -p "${dir}"
@@ -1036,7 +1139,8 @@ PY
 
   # usage: mutate_unreached <run> <name> <witness>; reads a python edit on
   # stdin as mutate does. The mutant is refused when the witness's goal is
-  # no longer reachable: the witness run ends without an error.
+  # no longer reachable: the witness run, as the witness runs it, ends
+  # without an error.
   mutate_unreached() {
     local run="$1" name="$2" witness="$3"
     if ! in_part "${run}"; then
@@ -1049,7 +1153,7 @@ PY
     { printf '%s\n' "${mutant_prelude}"; cat; } | MODEL="${dir}/model.tla" python3 -
     local cfg="${work_dir}/mutant-${name}.cfg"
     write_cfg "${run}" "${cfg}" "" "
-  NotAuditWitness${witness}" without-totality
+  NotAuditWitness${witness}" without-totality-or-properties
     local status=0
     (cd "${dir}" && run_tlc "mutant-${name}" "${cfg}" ${tlc_args[@]+"${tlc_args[@]}"}) || status=$?
     local log="${work_dir}/mutant-${name}.log"
@@ -1283,7 +1387,7 @@ PY
 
   # Two arms answer an admission: the stale refusal answers every change
   # (its verdict guard dropped).
-  mutate commit admit_two_answers "Invariant AuditAdmitExactlyOne" <<'PY'
+  mutate admit admit_two_answers "Invariant AuditAdmitExactlyOne" <<'PY'
 drop_guard("AdmitIdentityChangeStaleSpec", '"StaleSpec")')
 PY
 
@@ -1396,6 +1500,15 @@ PY
 drop_guard("ArchiveIdentityEntryNameUnreadable", '"NameUnreadable")')
 PY
 
+  # A store-owned update of an identity awaiting its host's preparation, or
+  # archived, is declared as any other (the declared apply's verdict takes
+  # no RecordOnly branch): it is owed its seat, its standing dropped. Its
+  # step has the unarchive's successor, so only the update's own property
+  # refuses it.
+  mutate archive update_skips_record_only "Action property AuditStoreUpdateKeepsStanding" <<'PY'
+replace_text('(IF (record_only = TRUE) THEN "RecordOnly" ELSE ', '(IF FALSE THEN "RecordOnly" ELSE ')
+PY
+
   # The dormant seat seats an entry awaiting its host's preparation (its
   # unseated_entry_owed_its_seat guard dropped): its shortest path seats the
   # entry with its held attempt still recorded.
@@ -1434,7 +1547,7 @@ PY
 
   # Two arms answer a settle: the mismatch refusal answers every settle (its
   # verdict guard dropped).
-  mutate preparation prep_two_answers "Invariant AuditPrepExactlyOne" <<'PY'
+  mutate prepverdicts prep_two_answers "Invariant AuditPrepExactlyOne" <<'PY'
 drop_guard("SettleHostPreparationMismatch", '"Mismatch")')
 PY
 
@@ -1480,12 +1593,27 @@ PY
 drop_guard("UnlistIdentityEntryNonAuthoritative", '"NonAuthoritative")')
 PY
 
+  # A record takes the name of a roster-owned identity's entry (the entry
+  # half of the held_by_identity argument of its verdict read as FALSE):
+  # member 1's unseated Declared entry becomes a Created one.
+  mutate unlist record_takes_a_declared_entrys_name "Action property AuditRecordTakesFreeNames" <<'PY'
+replace_in_arm("RecordCreatedIdentityEntryRecorded", "((agent_identity \\in DOMAIN identity_entry_origins) = TRUE)", "FALSE")
+PY
+
   # A ladder takes an entry awaiting its preparation only while its attempt
   # is held, as before the fix: the construction's own spawn, which opens
   # its ladder at its publication, after the settle accepted its
   # activation, is refused, and its publication fails.
   mutate_unreached preparation accepted_ladder_refused PrepLadderOpensAfterAcceptance <<'PY'
 replace_in_arm("BeginSpawnExecFresh", '(IF ((agent_identity \\in DOMAIN identity_entry_constructions_held) = TRUE) THEN TRUE ELSE ((agent_identity \\in DOMAIN identity_entry_constructions_activating) = TRUE))', '((agent_identity \\in DOMAIN identity_entry_constructions_held) = TRUE)', 2)
+PY
+
+  # The journal replay recovers a member under an archived entry (the
+  # roster replay's entry_not_archived guard dropped): the scan of an
+  # archive's row before the replay leaves the entry archived, and the
+  # replay then seats its member.
+  mutate recovered replay_seats_an_archived_entry "Action property AuditArchivedNeverSeated" <<'PY'
+drop_guard("RecoverRosterMemberRunning", '# Some("Archived"))')
 PY
 
   # The replay of a removal's row marks no removal, in a running or a

@@ -118,6 +118,16 @@ message at that turn boundary. System messages are repeatable and may appear
 anywhere in the transcript; an append never replaces row zero or rewrites an
 earlier message.
 
+A resume that names an explicit system prompt appends it as such a row too,
+except, since 0.9.9, when the prompt is exactly the newest System row the
+model reads as a prompt (one without an append identity, an instruction
+activation or an operator-instruction entry, that is not a superseded prompt
+version): then it appends nothing, where earlier releases appended another
+identical row. A different prompt, and an earlier prompt sent again after a
+change, still append; a bare resume appends nothing; and
+`StartTurnRequest.system_prompt` keeps its per-turn append. A host that
+materializes a resumed session itself asks `Session::newest_prompt_row_is`.
+
 Keyed system-prompt updates instead append rows carrying
 `SystemPromptVersionIdentity`: a `SystemPromptKey` and `SystemPromptVersion`.
 The active model view selects the latest version per key; unkeyed rows are

@@ -117,6 +117,14 @@ its open run until its next open.
   example its MCP servers connecting, for at most each server's connect
   timeout. A tool that is still missing then answers its call with an error
   result the model sees.
+- **A per-turn model selection carries over.** A run whose input carried a
+  per-turn LLM selection (a model, provider, self-hosted server, provider
+  params or auth binding) resumes under the LLM identity that selection saved
+  with the session before the run's first round; a mob member's field that
+  its profile lists in `resume_overrides` takes the profile's value, as on any
+  member resume. Through 0.9.8 a mob member's or an RPC session's resumed run
+  applied the selection again, which its committed boundary refused, and its
+  input never completed.
 
 ### Inputs And Ordering
 

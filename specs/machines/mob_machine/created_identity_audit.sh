@@ -207,25 +207,23 @@ in_part() {
   [[ "${run_part}" == "all" || "${run_part}" == "$(part_of "$1")" || ",${run_part}," == *",$1,"* ]]
 }
 # Each run's distinct-state floor is 90% of the whole space its first green
-# run found, so a guard that silently disables arms fails the lane.
-scan_states=1512
-reseat_states=3245
-names_states=1560
-placed_states=150
-# The changes part's runs (0.9.9) have not had a first green run yet: their
-# floors are `unmeasured`, which checks no floor and prints the run's
-# distinct-state count; each is set to that whole space from the batch's
-# first green run, before its merge.
-admit_states=unmeasured
-commit_states=unmeasured
-update_states=unmeasured
-removal_states=unmeasured
-archive_states=unmeasured
-preparation_states=unmeasured
-prepverdicts_states=unmeasured
-placement_states=unmeasured
-unlist_states=unmeasured
-recovered_states=unmeasured
+# run found, so a guard that silently disables arms fails the lane. A new
+# run's floor may be `unmeasured` until then, which checks no floor and
+# prints the run's distinct-state count.
+scan_states=3264
+reseat_states=6597
+names_states=2880
+placed_states=198
+admit_states=12
+commit_states=7680
+update_states=70
+removal_states=38976
+archive_states=2016
+preparation_states=2790
+prepverdicts_states=294
+placement_states=105
+unlist_states=336
+recovered_states=180
 
 # Every arm each run must fire. TLC names an arm after the generated
 # operator where it is applied plainly (an audit wrapper that only applies

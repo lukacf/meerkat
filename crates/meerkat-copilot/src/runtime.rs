@@ -145,13 +145,15 @@ impl From<ProviderAuthError> for CopilotTokenExchangeError {
 }
 
 impl CopilotTokenExchangeError {
-    /// A non-2xx answer that asks for no account action. HTTP 429, a 403 (a
-    /// GitHub API rate limit) and a 5xx may pass; any other status will not.
+    /// A non-2xx answer that asks for no account action. HTTP 408, 429, a
+    /// 403 (a GitHub API rate limit) and a 5xx may pass; any other status
+    /// will not.
     fn from_status(status: u16, retry_after: Option<StdDuration>, message: String) -> Self {
         let retryable = match status {
             403 | 429 => meerkat_llm_core::LlmError::RateLimited {
                 retry_after_ms: retry_after.map(|delay| delay.as_millis() as u64),
             },
+            408 => exchange_timeout(),
             500..=599 => meerkat_llm_core::LlmError::ServerError {
                 status,
                 message: message.clone(),
@@ -170,12 +172,11 @@ impl CopilotTokenExchangeError {
     /// client will not.
     fn from_transport(error: &CopilotHttpTransportError) -> Self {
         let message = format!("Copilot token exchange failed: {error}");
-        let timeout = || meerkat_llm_core::LlmError::NetworkTimeout {
-            duration_ms: COPILOT_HTTP_TIMEOUT.as_millis() as u64,
-        };
         let retryable = match error {
-            CopilotHttpTransportError::Timeout => timeout(),
-            CopilotHttpTransportError::Request(request) if request.is_timeout() => timeout(),
+            CopilotHttpTransportError::Timeout => exchange_timeout(),
+            CopilotHttpTransportError::Request(request) if request.is_timeout() => {
+                exchange_timeout()
+            }
             CopilotHttpTransportError::Request(request) if request.is_connect() => {
                 meerkat_llm_core::LlmError::ConnectionReset
             }
@@ -200,9 +201,17 @@ impl CopilotTokenExchangeError {
     }
 }
 
+/// The class of a token exchange that timed out: on its request bound, or
+/// with HTTP 408 from the endpoint.
+fn exchange_timeout() -> meerkat_llm_core::LlmError {
+    meerkat_llm_core::LlmError::NetworkTimeout {
+        duration_ms: COPILOT_HTTP_TIMEOUT.as_millis() as u64,
+    }
+}
+
 /// A token exchange that may succeed on a later attempt: a network failure
-/// or timeout, HTTP 429, a 5xx, or a 403 that asks for no account action (a
-/// GitHub API rate limit).
+/// or timeout, HTTP 408 or 429, a 5xx, or a 403 that asks for no account
+/// action (a GitHub API rate limit).
 #[derive(Debug, Clone)]
 struct CopilotExchangeUnavailable {
     /// The failure as the exchange reported it.

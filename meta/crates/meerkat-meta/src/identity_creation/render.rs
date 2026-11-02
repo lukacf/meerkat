@@ -14,8 +14,9 @@
 //! - **Deterministic.** The same request and the same host consequence lines
 //!   give the same bytes. The rendering holds no time of its own; a time is
 //!   rendered only when the request carries one.
-//! - **Never cut.** A text past its limit is refused at normalization
-//!   (`text_too_large`), and a rendering past 256 KiB is refused here.
+//! - **Never cut.** A request body past its limit is refused at
+//!   normalization (`text_too_large`), and a rendering past 256 KiB is
+//!   refused here.
 //!
 //! # Layout
 //!
@@ -30,15 +31,22 @@
 //!
 //! The blocks come in this order: the header (the action, the requester,
 //! the proposer and the source evidence, then the action's own fields);
-//! the structural fields of each identity (template, binding, profile,
-//! model, tools, peers, authority fields, descriptive labels); the
+//! the structural fields of each identity (profile, addressability, runtime
+//! mode, backend, runtime binding, placement, peers, labels); the
 //! consequences the policy states; the host's consequence lines, in their
-//! own block; then the free text of each identity, quoted line by line.
+//! own block; then the free text of each identity (display name, additional
+//! instructions, initial message, context), quoted line by line. A keyword
+//! of the declared spec renders as a word whose parts a hyphen joins
+//! (`internal-only`, `turn-driven`), since an underscore is markup.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU32;
 
-use serde_json::Value;
+use meerkat_core::ContentInput;
+use meerkat_mob::{MobBackendKind, MobRuntimeMode};
+use serde::Serialize;
+
+use crate::identity_first::{AgentAddressability, DisplayName, DurableAgentSpec};
 
 use super::config::ChangeClass;
 use super::consequences::{ConsequenceHook, ConsequenceLine};
@@ -46,7 +54,7 @@ use super::digest::{Sha256Digest, canonical_json_pretty};
 use super::escape::{escaped_line, quoted};
 use super::parts::{CanonicalPart, canonical_parts};
 use super::presentation::{CardError, StructuredCard};
-use super::refusal::{IdentityRefusal, IdentityRefusalKind};
+use super::refusal::{IdentityRefusal, IdentityRefusalKind, RequestProblem};
 use super::request::{
     Consequence, ConsequenceEffect, CreatedSpec, EdgeBasis, IdentityRequest, RequestAction,
     Requester, UpdatedSpec,
@@ -87,33 +95,37 @@ pub mod labels {
     pub const IDENTITIES: &str = "Identities";
     /// The identity an update or a remove names.
     pub const IDENTITY: &str = "Identity";
-    /// The revision an update or a remove expects.
-    pub const EXPECTED_REVISION: &str = "Expected revision";
-    /// The template.
-    pub const TEMPLATE: &str = "Template";
-    /// The template binding's digest.
-    pub const TEMPLATE_BINDING: &str = "Template binding";
-    /// An update's new binding digest, or `none`.
-    pub const TEMPLATE_REBIND: &str = "Template rebind";
+    /// The digest of the spec an update or a remove was asked of.
+    pub const EXPECTED_SPEC_DIGEST: &str = "Expected spec digest";
     /// An update's change classes.
     pub const CHANGES: &str = "Changes";
     /// The heading of an update's structural fields.
     pub const UPDATE_OF: &str = "Update of";
-    /// The bound profile.
+    /// The profile; for an update, the profile it migrates from, `to`, and
+    /// the profile it migrates to.
     pub const PROFILE: &str = "Profile";
-    /// The model.
-    pub const MODEL: &str = "Model";
-    /// The sealed tools.
-    pub const TOOLS: &str = "Tools";
+    /// Whether the identity accepts sends: `addressable` or
+    /// `internal-only`.
+    pub const ADDRESSABILITY: &str = "Addressability";
+    /// The runtime mode: `autonomous-host` or `turn-driven`.
+    pub const RUNTIME_MODE: &str = "Runtime mode";
+    /// The backend: `session` or `external`.
+    pub const BACKEND: &str = "Backend";
+    /// The runtime binding, as canonical pretty JSON.
+    pub const BINDING: &str = "Binding";
+    /// The exact host placement.
+    pub const PLACEMENT: &str = "Placement";
     /// The peers, each with its edge's basis.
     pub const PEERS: &str = "Peers";
     /// Peers an update adds.
     pub const PEERS_ADDED: &str = "Peers added";
     /// Peers an update removes.
     pub const PEERS_REMOVED: &str = "Peers removed";
-    /// Authority fields.
+    /// A created identity's labels, its authority fields among them.
+    pub const LABELS: &str = "Labels";
+    /// An update's authority fields.
     pub const AUTHORITY_FIELDS: &str = "Authority fields";
-    /// Descriptive labels.
+    /// An update's labels that are no authority field.
     pub const DESCRIPTIVE_LABELS: &str = "Descriptive labels";
     /// The consequences the policy states.
     pub const CONSEQUENCES: &str = "Consequences";
@@ -125,14 +137,16 @@ pub mod labels {
     pub const TEXT_OF_IDENTITY: &str = "Text of identity";
     /// The display name.
     pub const DISPLAY_NAME: &str = "Display name";
-    /// The purpose.
-    pub const PURPOSE: &str = "Purpose";
-    /// The creator's instructions.
-    pub const INSTRUCTIONS: &str = "Instructions";
-    /// The kickoff message.
-    pub const KICKOFF: &str = "Kickoff";
-    /// The supplied context, as canonical pretty JSON.
-    pub const SUPPLIED_CONTEXT: &str = "Supplied context";
+    /// How many additional instructions there are.
+    pub const ADDITIONAL_INSTRUCTIONS: &str = "Additional instructions";
+    /// One additional instruction, before its ordinal.
+    pub const ADDITIONAL_INSTRUCTION: &str = "Additional instruction";
+    /// An initial message of text.
+    pub const INITIAL_MESSAGE: &str = "Initial message";
+    /// An initial message of content blocks, as canonical pretty JSON.
+    pub const INITIAL_MESSAGE_BLOCKS: &str = "Initial message blocks";
+    /// The context, as canonical pretty JSON.
+    pub const CONTEXT: &str = "Context";
     /// The word of an absent value.
     pub const NONE: &str = "none";
     /// The word of an update field that does not change.
@@ -229,6 +243,19 @@ impl Text {
             None => self.field(label, absent),
         }
     }
+
+    /// Additional instructions: their count, then each as text under its
+    /// ordinal.
+    fn instructions(&mut self, instructions: &[String]) {
+        let count = instructions.len();
+        self.field(labels::ADDITIONAL_INSTRUCTIONS, &count.to_string());
+        for (position, instruction) in instructions.iter().enumerate() {
+            self.text(
+                &ordinal_label(labels::ADDITIONAL_INSTRUCTION, position + 1, count),
+                instruction,
+            );
+        }
+    }
 }
 
 /// Render `request` with the host's consequence lines from `hook` (none
@@ -270,14 +297,14 @@ pub fn render_v1(
         RequestAction::Create { identities } => {
             text.field(labels::IDENTITIES, &identities.len().to_string());
             let count = identities.len();
-            for (position, (identity, spec)) in identities.iter().enumerate() {
+            for (position, created) in identities.iter().enumerate() {
                 text.block();
-                created_fields(&mut text, position + 1, count, identity, spec);
+                created_fields(&mut text, position + 1, count, created)?;
             }
             consequence_blocks(&mut text, &request.consequences, &host_lines);
-            for (position, (identity, spec)) in identities.iter().enumerate() {
+            for (position, created) in identities.iter().enumerate() {
                 text.block();
-                created_text(&mut text, position + 1, count, identity, spec);
+                created_text(&mut text, position + 1, count, &created.spec)?;
             }
         }
         RequestAction::Update(update) => {
@@ -290,10 +317,10 @@ pub fn render_v1(
         }
         RequestAction::Remove {
             identity,
-            expected_revision,
+            expected_spec_digest,
         } => {
             text.field(labels::IDENTITY, &quoted(identity));
-            text.field(labels::EXPECTED_REVISION, &expected_revision.to_string());
+            text.field(labels::EXPECTED_SPEC_DIGEST, expected_spec_digest.as_str());
             consequence_blocks(&mut text, &request.consequences, &host_lines);
         }
     }
@@ -372,78 +399,143 @@ fn peer_items(peers: &BTreeMap<String, EdgeBasis>) -> Vec<String> {
 }
 
 fn basis_value(basis: &EdgeBasis) -> String {
-    match basis {
-        EdgeBasis::Creator => "creator".to_owned(),
-        EdgeBasis::CreatorPeer => "creator-peer".to_owned(),
-        EdgeBasis::SameBatch => "same-batch".to_owned(),
-        EdgeBasis::Rule { id } => format!("rule {}", quoted(id)),
-    }
+    let EdgeBasis::Rule { id } = basis;
+    format!("rule {}", quoted(id))
 }
 
 fn ordinal_label(prefix: &str, position: usize, count: usize) -> String {
     format!("{prefix} {position} of {count}")
 }
 
+fn addressability_word(addressability: &AgentAddressability) -> &'static str {
+    match addressability {
+        AgentAddressability::Addressable => "addressable",
+        AgentAddressability::InternalOnly => "internal-only",
+    }
+}
+
+fn runtime_mode_word(mode: &MobRuntimeMode) -> &'static str {
+    match mode {
+        MobRuntimeMode::AutonomousHost => "autonomous-host",
+        MobRuntimeMode::TurnDriven => "turn-driven",
+    }
+}
+
+fn backend_word(backend: &MobBackendKind) -> &'static str {
+    match backend {
+        MobBackendKind::Session => "session",
+        MobBackendKind::External => "external",
+    }
+}
+
+/// `value` as canonical pretty JSON text, for a structured value the
+/// rendering shows whole.
+fn json_text<T: Serialize>(value: &T) -> Result<String, IdentityRefusal> {
+    serde_json::to_value(value)
+        .map(|value| canonical_json_pretty(&value))
+        .map_err(|_| {
+            IdentityRefusal::new(IdentityRefusalKind::InvalidRequest {
+                problem: RequestProblem::Malformed,
+            })
+        })
+}
+
 fn created_fields(
     text: &mut Text,
     position: usize,
     count: usize,
-    identity: &str,
-    spec: &CreatedSpec,
-) {
+    created: &CreatedSpec,
+) -> Result<(), IdentityRefusal> {
+    let DurableAgentSpec {
+        identity,
+        profile,
+        addressability,
+        display_name: _,
+        labels: spec_labels,
+        context: _,
+        additional_instructions: _,
+        initial_message: _,
+        runtime_mode_override,
+        backend,
+        binding,
+        placement,
+    } = &created.spec;
     text.field(
         &ordinal_label(labels::IDENTITY, position, count),
-        &quoted(identity),
+        &quoted(identity.as_str()),
     );
-    text.field(labels::TEMPLATE, &quoted(&spec.template));
-    text.field(labels::TEMPLATE_BINDING, spec.binding_digest.as_str());
-    text.field(labels::PROFILE, &quoted(&spec.profile));
-    text.field(labels::MODEL, &quoted(&spec.model));
-    text.list(labels::TOOLS, &quoted_set(&spec.tools));
-    text.list(labels::PEERS, &peer_items(&spec.peers));
-    text.list(
-        labels::AUTHORITY_FIELDS,
-        &label_items(&spec.authority_fields),
+    text.field(labels::PROFILE, &quoted(profile.as_str()));
+    text.field(labels::ADDRESSABILITY, addressability_word(addressability));
+    text.field(
+        labels::RUNTIME_MODE,
+        runtime_mode_override
+            .as_ref()
+            .map_or(labels::NONE, runtime_mode_word),
     );
-    text.list(
-        labels::DESCRIPTIVE_LABELS,
-        &label_items(&spec.descriptive_labels),
+    text.field(
+        labels::BACKEND,
+        backend.as_ref().map_or(labels::NONE, backend_word),
     );
+    let binding = binding.as_ref().map(json_text).transpose()?;
+    text.optional_text(labels::BINDING, binding.as_deref(), labels::NONE);
+    text.field(
+        labels::PLACEMENT,
+        &placement
+            .as_ref()
+            .map_or_else(|| labels::NONE.to_owned(), |host| quoted(&host.0)),
+    );
+    text.list(labels::PEERS, &peer_items(&created.peers));
+    text.list(labels::LABELS, &label_items(spec_labels));
+    Ok(())
 }
 
 fn created_text(
     text: &mut Text,
     position: usize,
     count: usize,
-    identity: &str,
-    spec: &CreatedSpec,
-) {
+    spec: &DurableAgentSpec,
+) -> Result<(), IdentityRefusal> {
+    let DurableAgentSpec {
+        identity,
+        profile: _,
+        addressability: _,
+        display_name,
+        labels: _,
+        context,
+        additional_instructions,
+        initial_message,
+        runtime_mode_override: _,
+        backend: _,
+        binding: _,
+        placement: _,
+    } = spec;
     text.field(
         &ordinal_label(labels::TEXT_OF_IDENTITY, position, count),
-        &quoted(identity),
+        &quoted(identity.as_str()),
     );
-    text.text(labels::DISPLAY_NAME, &spec.display_name);
-    text.text(labels::PURPOSE, &spec.purpose);
-    text.text(labels::INSTRUCTIONS, &spec.instructions);
-    text.optional_text(labels::KICKOFF, spec.kickoff.as_deref(), labels::NONE);
-    let context = spec.supplied_context.as_ref().map(context_text);
-    text.optional_text(labels::SUPPLIED_CONTEXT, context.as_deref(), labels::NONE);
+    text.optional_text(
+        labels::DISPLAY_NAME,
+        display_name.as_ref().map(DisplayName::as_str),
+        labels::NONE,
+    );
+    text.instructions(additional_instructions);
+    match initial_message {
+        None => text.field(labels::INITIAL_MESSAGE, labels::NONE),
+        Some(ContentInput::Text(message)) => text.text(labels::INITIAL_MESSAGE, message),
+        Some(blocks @ ContentInput::Blocks(_)) => {
+            text.text(labels::INITIAL_MESSAGE_BLOCKS, &json_text(blocks)?);
+        }
+    }
+    let context = context.as_ref().map(canonical_json_pretty);
+    text.optional_text(labels::CONTEXT, context.as_deref(), labels::NONE);
+    Ok(())
 }
 
 fn update_header(text: &mut Text, update: &UpdatedSpec) {
     text.field(labels::IDENTITY, &quoted(&update.identity));
     text.field(
-        labels::EXPECTED_REVISION,
-        &update.expected_revision.to_string(),
-    );
-    text.field(labels::TEMPLATE, &quoted(&update.template));
-    text.field(labels::TEMPLATE_BINDING, update.binding_digest.as_str());
-    text.field(
-        labels::TEMPLATE_REBIND,
-        update
-            .rebind
-            .as_ref()
-            .map_or(labels::NONE, Sha256Digest::as_str),
+        labels::EXPECTED_SPEC_DIGEST,
+        update.expected_spec_digest.as_str(),
     );
     let changes: Vec<&str> = update
         .change_classes()
@@ -459,56 +551,83 @@ fn update_header(text: &mut Text, update: &UpdatedSpec) {
 }
 
 fn update_fields(text: &mut Text, update: &UpdatedSpec) {
-    text.field(labels::UPDATE_OF, &quoted(&update.identity));
-    match &update.tools {
-        Some(tools) => text.list(labels::TOOLS, &quoted_set(tools)),
-        None => text.field(labels::TOOLS, labels::UNCHANGED),
+    let UpdatedSpec {
+        identity,
+        expected_spec_digest: _,
+        profile,
+        addressability,
+        runtime_mode_override,
+        display_name: _,
+        additional_instructions: _,
+        context: _,
+        descriptive_labels,
+        authority_fields,
+        peers_add,
+        peers_remove,
+    } = update;
+    text.field(labels::UPDATE_OF, &quoted(identity));
+    match profile {
+        Some(change) => text.field(
+            labels::PROFILE,
+            &format!(
+                "{} to {}",
+                quoted(change.from.as_str()),
+                quoted(change.to.as_str())
+            ),
+        ),
+        None => text.field(labels::PROFILE, labels::UNCHANGED),
     }
-    text.list(labels::PEERS_ADDED, &peer_items(&update.peers_add));
-    text.list(labels::PEERS_REMOVED, &quoted_set(&update.peers_remove));
-    match &update.authority_fields {
+    text.field(
+        labels::ADDRESSABILITY,
+        addressability
+            .as_ref()
+            .map_or(labels::UNCHANGED, addressability_word),
+    );
+    text.field(
+        labels::RUNTIME_MODE,
+        runtime_mode_override
+            .as_ref()
+            .map_or(labels::UNCHANGED, runtime_mode_word),
+    );
+    text.list(labels::PEERS_ADDED, &peer_items(peers_add));
+    text.list(labels::PEERS_REMOVED, &quoted_set(peers_remove));
+    match authority_fields {
         Some(fields) => text.list(labels::AUTHORITY_FIELDS, &label_items(fields)),
         None => text.field(labels::AUTHORITY_FIELDS, labels::UNCHANGED),
     }
-    match &update.descriptive_labels {
+    match descriptive_labels {
         Some(descriptive) => text.list(labels::DESCRIPTIVE_LABELS, &label_items(descriptive)),
         None => text.field(labels::DESCRIPTIVE_LABELS, labels::UNCHANGED),
     }
 }
 
 fn update_text(text: &mut Text, update: &UpdatedSpec) {
-    text.field(labels::TEXT_OF, &quoted(&update.identity));
+    let UpdatedSpec {
+        identity,
+        expected_spec_digest: _,
+        profile: _,
+        addressability: _,
+        runtime_mode_override: _,
+        display_name,
+        additional_instructions,
+        context,
+        descriptive_labels: _,
+        authority_fields: _,
+        peers_add: _,
+        peers_remove: _,
+    } = update;
+    text.field(labels::TEXT_OF, &quoted(identity));
     text.optional_text(
         labels::DISPLAY_NAME,
-        update.display_name.as_deref(),
+        display_name.as_ref().map(DisplayName::as_str),
         labels::UNCHANGED,
     );
-    text.optional_text(
-        labels::PURPOSE,
-        update.purpose.as_deref(),
-        labels::UNCHANGED,
-    );
-    text.optional_text(
-        labels::INSTRUCTIONS,
-        update.instructions.as_deref(),
-        labels::UNCHANGED,
-    );
-    let context = update.supplied_context.as_ref().map(context_text);
-    text.optional_text(
-        labels::SUPPLIED_CONTEXT,
-        context.as_deref(),
-        labels::UNCHANGED,
-    );
-}
-
-fn context_text(context: &BTreeMap<String, Value>) -> String {
-    let value = Value::Object(
-        context
-            .iter()
-            .map(|(key, item)| (key.clone(), item.clone()))
-            .collect(),
-    );
-    canonical_json_pretty(&value)
+    match additional_instructions {
+        Some(instructions) => text.instructions(instructions),
+        None => text.field(labels::ADDITIONAL_INSTRUCTIONS, labels::UNCHANGED),
+    }
+    let context = context.as_ref().map(canonical_json_pretty);
+    text.optional_text(labels::CONTEXT, context.as_deref(), labels::UNCHANGED);
 }
 
 fn consequence_blocks(
@@ -527,14 +646,6 @@ fn consequence_blocks(
 fn consequence_item(consequence: &Consequence) -> String {
     let identity = quoted(&consequence.identity);
     match &consequence.effect {
-        ConsequenceEffect::ToolOutsideTemplate { tool } => format!(
-            "{identity} tool {} is outside the template ceiling",
-            quoted(tool)
-        ),
-        ConsequenceEffect::ToolNotHeldByCreator { tool } => format!(
-            "{identity} tool {} is not held by the creator",
-            quoted(tool)
-        ),
         ConsequenceEffect::PeerNeedsApproval { peer, rule, reason } => {
             let rule = rule.as_deref().map_or_else(
                 || "the default rule".to_owned(),
@@ -554,10 +665,6 @@ fn consequence_item(consequence: &Consequence) -> String {
             "{identity} authority field {} = {} becomes authority",
             quoted(key),
             quoted(value)
-        ),
-        ConsequenceEffect::AnyProfile { profile } => format!(
-            "{identity} profile {} is chosen from every mob profile",
-            quoted(profile)
         ),
     }
 }

@@ -4835,10 +4835,17 @@ mod tests {
                 transport: Arc<dyn CopilotHttpTransport>,
                 clock: &TestClock,
             ) -> Self {
-                let account = Self::new(transport, clock).await;
+                Self::new(transport, clock).await.admitting()
+            }
+
+            /// The same account (runtime, sign-in and binding), resolving with
+            /// an environment that admits pending account limits.
+            fn admitting(&self) -> Self {
                 Self {
-                    env: account.env.admitting_pending_account_limits(),
-                    ..account
+                    runtime: Arc::clone(&self.runtime),
+                    binding: self.binding.clone(),
+                    env: self.env.clone().admitting_pending_account_limits(),
+                    auth_lease: self.auth_lease.clone(),
                 }
             }
 
@@ -5695,6 +5702,58 @@ mod tests {
             assert!(events.is_empty(), "{events:?}");
             assert_eq!(restored.bearers(), ["Bearer derived-two"]);
             assert_eq!(transport.request_count(), 6);
+        }
+
+        #[tokio::test]
+        async fn a_shared_failed_exchange_admits_only_the_build_that_admits_pending_limits() {
+            let clock = TestClock::new();
+            let transport = Arc::new(HeldTransport {
+                inner: ScriptedTransport::new([json_response(
+                    503,
+                    serde_json::json!({"message": "unavailable"}),
+                )]),
+                // The strict build's token exchange.
+                hold_at: 0,
+                calls: AtomicU64::new(0),
+                held: tokio::sync::Notify::new(),
+                release: tokio::sync::Notify::new(),
+            });
+            let strict = RouteAccount::new(transport.clone(), &clock).await;
+            let admitting = strict.admitting();
+
+            let admitted_build = async {
+                transport.held.notified().await;
+                // The strict build's exchange is in flight: this build waits
+                // for it and receives its verdict.
+                let mut build = std::pin::pin!(admitting.try_session([]));
+                assert!(futures::poll!(build.as_mut()).is_pending());
+                transport.release.notify_one();
+                build.await
+            };
+            let (strict_build, admitted_build) =
+                tokio::join!(strict.try_session([]), admitted_build);
+
+            let Err(error) = strict_build else {
+                panic!("a build that does not admit pending limits must fail during the outage");
+            };
+            assert!(
+                matches!(
+                    &error,
+                    ProviderAuthError::SourceResolutionFailed(message)
+                        if message.contains("returned 503")
+                ),
+                "{error:?}"
+            );
+            assert!(
+                admitted_build.is_ok(),
+                "a build that admits pending limits builds on the same verdict: {:?}",
+                admitted_build.as_ref().err()
+            );
+            assert_eq!(
+                transport.inner.request_count(),
+                1,
+                "both builds share one exchange"
+            );
         }
     }
 }

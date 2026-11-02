@@ -15190,9 +15190,9 @@ impl MobHandle {
     /// mode, and other per-spawn options are applied only when a new member
     /// is created.
     ///
-    /// A reserved name (a removed created identity's, or one whose created
-    /// identity this build cannot read) is never spawned: an ensure of one
-    /// that holds no member is refused [`MobError::IdentityMember`], as
+    /// A reserved name (a removed identity's, or one this build cannot
+    /// read) is never spawned: an ensure of one that holds no member is
+    /// refused [`MobError::IdentityMember`], as
     /// [`spawn_spec`](Self::spawn_spec) refuses it, before anything is
     /// recorded or created.
     pub async fn ensure_member(

@@ -30932,11 +30932,10 @@ impl MobActor {
                         return ActorLoopControl::SkipBoundary;
                     }
                     // MobMachine refuses a worker ensure of a reserved name (a
-                    // removed created entry's, or one whose entry this build
-                    // cannot read: `name_not_reserved` on
-                    // EnsureMemberRunningMissing). The refusal is the name's
-                    // admission answer, typed in this same step, as a spawn of
-                    // the name is answered.
+                    // removed identity's, or one this build cannot read:
+                    // `name_not_reserved` on EnsureMemberRunningMissing). The
+                    // refusal is the name's admission answer, typed in this
+                    // same step, as a spawn of the name is answered.
                     let ensured = match &*input {
                         mob_dsl::MobMachineInput::EnsureMember { agent_identity } => {
                             Some(AgentIdentity::from(agent_identity.0.as_str()))

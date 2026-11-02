@@ -277,7 +277,7 @@ async def test_the_candidate_build_host_never_owns_the_set_up_installation(set_u
 def reloaded(f, monkeypatch):
     """A new Forge process over the same storage, with no retained owners."""
     store = GuideStore(f.store.root)
-    guide = GuideService(store, architect=None)
+    guide = GuideService(store, architect=SimpleNamespace())
     implementation = ImplementationService(f.implementation.root.parent, guide)
     service = DeploymentService(f.service.root.parent, guide, implementation)
     owner = LocalApplicationRegistry(guide_store=store, implementation=implementation,

@@ -1,3 +1,4 @@
+import { RequiredServiceChecks } from "./required-service-checks.jsx";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { captureGuideSelection, guideSelectionAvailable, guideSelectionEvents } from "./guide-selection.mjs";
 import { ConversationTranscript } from "../../packages/console-components/src/conversation/conversation-transcript";
@@ -299,10 +300,12 @@ export function ImplementationPanel({ state, plan, designBusy, pendingManual, Ic
   const packageActionClass = !statusUnconfirmed && canDownload && receipt.source_verified === true && acceptance?.passed === true
     ? "setup-action" : "setup-action primary";
   const decisionBlocked = (state.readiness?.decision_blockers?.length || 0) > 0;
+  const serviceHold = state.service_preparation;
+  const serviceUnavailable = serviceHold?.status === "unavailable";
   const packageReason = packagePreparationReason(state, plan);
   const retainedContinuation = !statusUnconfirmed && retainsCandidateFramework(receipt, state);
   const candidateRefreshBlocked = retainedContinuation && !candidateRuntimeRefreshReady(receipt, state);
-  const canBuild = (!packageReason || retainedContinuation) && !statusUnconfirmed && !decisionBlocked && checker?.status === 'ready' && !!(state.proposal || state.blueprint) && !designBusy && !pendingManual && !submitting && !running;
+  const canBuild = (!packageReason || retainedContinuation) && !serviceHold && !statusUnconfirmed && !decisionBlocked && checker?.status === 'ready' && !!(state.proposal || state.blueprint) && !designBusy && !pendingManual && !submitting && !running;
   const needsFeedback = current && receipt?.status === "completed" && acceptance?.passed;
   const canRefreshFramework = current && ["completed", "failed", "interrupted"].includes(receipt?.status) &&
     typeof receipt?.build_id === "string" && !!receipt.build_id && receipt.worker_stop_confirmed === true &&
@@ -484,7 +487,10 @@ export function ImplementationPanel({ state, plan, designBusy, pendingManual, Ic
     </div>
     <h2>{overview.title || `Bring ${plan.project.name} to life`}</h2>
     <p role={overview.attention ? "status" : undefined}>{!statusUnconfirmed && packageReason && !running && !retainedContinuation ? "Your design can be accepted and refined while package preparation is pending." : overview.message}</p>
-    <p className="implementation-next">{!statusUnconfirmed && packageReason && !running && !retainedContinuation ? "Review the limitation with your guide before starting a new build." : overview.next}</p>
+    <p className="implementation-next">{serviceHold && !running ? (serviceUnavailable
+      ? "This host cannot set up or verify the required services yet. Your plan remains saved."
+      : "Review the required service information below before building.")
+      : !statusUnconfirmed && packageReason && !running && !retainedContinuation ? "Review the limitation with your guide before starting a new build." : overview.next}</p>
     {packageReason && <div className="implementation-warning" role="status">
       <strong>New package preparation is pending</strong><p>{packageReason}</p>
       {retainedContinuation && <p>You can continue this saved application. Rebuilding it with the current runtime still needs support for this design.</p>}
@@ -541,6 +547,11 @@ export function ImplementationPanel({ state, plan, designBusy, pendingManual, Ic
     {(designBusy || pendingManual) && !running && <p className="implementation-detail">{pendingManual
       ? "Send your manual changes back to the guide before building."
       : "The guide is revising your proposal. Building will be available when this revision is saved."}</p>}
+    {serviceHold && !running && <div className="implementation-warning" role="status">
+      <strong>{serviceUnavailable ? "Service setup is unavailable on this host" : "Required services need verification"}</strong>
+      <p>{serviceHold.detail}</p>
+      <RequiredServiceChecks operations={serviceHold.required_operations || []} />
+    </div>}
     {decisionBlocked && !running && <p className="implementation-detail" role="status">Answer the guide's open setup decisions before building. Proposed defaults and remaining implementation work can be built once those decisions are clear.</p>}
     {canDownload && <p className="implementation-detail">The package passed the checks below. Installation, credentials, and any remaining integrations still need to be verified in your deployment.</p>}
     {receipt?.status === "completed" && current && !running && !canDownload && <p className="implementation-detail">This build does not have a current verified package yet. Continue implementation to resolve its checks before downloading.</p>}

@@ -147,17 +147,18 @@ test("held configured work explains blocked startup and rechecks until the exist
     held = false;
     await click("Check saved settings");
     assert.equal(document.querySelector(".setup-provider").dataset.providerStep, "start");
-    assert.equal(document.querySelector("h2").textContent, "Start your setup guide");
+    assert.equal(document.querySelector("h2").textContent, "Your model is configured");
     assert.equal(document.querySelector(".setup-provider-work") === null, true);
     assert.equal(button("Start guide").disabled, false);
-    assert.equal(outsideClosedDetails(button("Start guide")), true);
+    assert.equal(outsideClosedDetails(button("Start guide")), false);
     assert.equal(document.querySelector('input[type="password"]').disabled, false);
     retainedIdea(document);
     assert.equal(closes(), 0);
     assert.equal(calls.length, 5);
     assert.ok(calls.every(call => call.method === "GET"));
-    assert.equal(document.querySelector(".setup-provider-return") === null, true,
-      "Clearing a hold is not evidence that the guide started or provider access works.");
+    assert.ok(button("Continue").classList.contains("setup-provider-primary"));
+    assert.match(document.querySelector(".setup-provider-access-note").textContent,
+      /first message will start the guide/, "Continue does not claim the guide already started.");
   });
 });
 
@@ -193,7 +194,7 @@ test("a confirmed ready guide with held work keeps the existing unsent-draft ret
   } }, async ({ document, calls, runtimes, button, click, closes }) => {
     assert.equal(document.querySelector(".setup-provider").dataset.providerStep, "ready");
     assert.equal(document.querySelector("h2").textContent, "Ready for your first message");
-    const action = button("Back to my draft");
+    const action = button("Continue");
     assert.equal(action.disabled, false);
     assert.equal(outsideClosedDetails(action), true);
     assert.match(document.querySelector(".setup-provider-return p").textContent,
@@ -204,7 +205,7 @@ test("a confirmed ready guide with held work keeps the existing unsent-draft ret
     retainedIdea(document);
     await click("Save locally");
     await click("Stop setup team");
-    await click("Back to my draft");
+    await click("Continue");
     assert.equal(closes(), 1, "Returning uses only the original close callback.");
     assert.deepEqual(calls.map(call => [call.method, call.url]), [["GET", "/api/provider-settings"]],
       "The ready return does not change credentials, start or stop the runtime, check it again, or send the draft.");

@@ -18,6 +18,15 @@ function ownedRemoteInstallation(receipt, guide) {
     receipt.remote_admission_requested === true || remoteInstallAdmitted(receipt));
 }
 
+/** Presentation only. An unavailable read never establishes an installation. */
+export function setupInstallationRelevant(guide, { build, deployment, remoteDeployment } = {}, flags = {}) {
+  if (flags.installationAttention === true) return true;
+  if (deployment?.guide_id === guide?.id && typeof deployment?.deployment_id === 'string' && deployment.deployment_id ||
+      ownedRemoteInstallation(remoteDeployment, guide)) return true;
+  return buildObservationKnown(flags) && flags.buildAdmissionPending !== true &&
+    (deploymentCanPrepare(build, guide) || flags.agentTeamAvailable !== false && nativeTeamCanInstall(guide));
+}
+
 /** Remote status directs the user to its existing controls, never to an inferred browser URL. */
 function remoteInstallationProgress(receipt, guide, flags) {
   const owned = ownedRemoteInstallation(receipt, guide);
@@ -204,10 +213,15 @@ export function setupProgress(guide, { build, trial, deployment, remoteDeploymen
     actions: [...progress.actions.filter(item => item.target !== 'trial'), followAction],
   });
   const localInstallation = deployment?.guide_id === guide.id && typeof deployment.deployment_id === 'string' && !!deployment.deployment_id;
-  const remoteProgress = ownedRemoteInstallation(remoteDeployment, guide) || !localInstallation
+  const installationRelevant = setupInstallationRelevant(guide, { build, deployment, remoteDeployment }, flags);
+  if (flags.installationAttention === true && !localInstallation && !ownedRemoteInstallation(remoteDeployment, guide))
+    return withActiveTrial(withCleanup({ title: 'Review your saved installation operation',
+      detail: 'An installation operation or its acknowledgement still needs attention. Open its saved controls to check the original request.',
+      actions: [action('deployment', 'Review saved operation')], attention: true }));
+  const remoteProgress = ownedRemoteInstallation(remoteDeployment, guide) || !localInstallation && installationRelevant
     ? remoteInstallationProgress(remoteDeployment, guide, flags) : null;
   if (remoteProgress) return withActiveTrial(withCleanup(remoteProgress));
-  if (!deploymentObservationKnown(flags)) {
+  if (installationRelevant && !deploymentObservationKnown(flags)) {
     const installationStatus = { title: flags.deploymentObservation === 'loading'
       ? 'Checking your installation status' : 'Installation status is unavailable',
       detail: flags.deploymentObservation === 'loading'
@@ -300,7 +314,7 @@ export function setupProgress(guide, { build, trial, deployment, remoteDeploymen
       detail: packageReason, actions: [], attention: true };
     if (setupNeedsApplicationBuild(guide, build, flags)) return { title: 'Your application needs to be built',
       detail: 'Your current plan includes application work that the agent team package does not implement. Open the builder to create and check the application from this proposal.',
-      actions: [action('build', 'Build application')] };
+      actions: [action('build', guide.service_preparation ? 'Review build status' : 'Build application')] };
     // A Forge that offers no agent team package leads to the builder instead.
     if (agentTeamAvailable && nativeTeamCanInstall(guide)) return { title: 'Your agent team is ready to install',
       detail: 'Check the selected destination, then set up private credentials and start the Console, agents and tools. No custom application build is needed.',

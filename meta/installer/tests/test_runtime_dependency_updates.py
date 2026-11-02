@@ -54,8 +54,8 @@ def test_current_compiler_dependency_transition_keeps_exact_agent_authority(monk
     transition = updates.runtime_dependency_transition(previous, candidate, {})
     assert transition is not None
     assert transition["from_version"] == "0.8.42" and transition["to_version"] == generator.MOBKIT_VERSION
-    assert transition["version"] == (1 if generator.MOBKIT_VERSION == "0.8.46" else 4)
-    assert len(transition["protected_paths"]) == (26 if generator.MOBKIT_VERSION == "0.8.46" else 75)
+    assert transition["version"] == (1 if generator.MOBKIT_VERSION == "0.8.46" else 6)
+    assert len(transition["protected_paths"]) == (26 if generator.MOBKIT_VERSION == "0.8.46" else 76)
     assert transition["core_version"] == "0.8.51" and transition["definition_unchanged"] is True
     assert transition["recovery"] == "forward-only-after-runtime-admission"
     assert previous["config/mob.toml"] == candidate["config/mob.toml"]

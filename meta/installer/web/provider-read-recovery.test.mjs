@@ -189,7 +189,7 @@ test("a stalled initial provider-settings body exposes deliberate retry and reta
     await settle();
     assert.equal(document.querySelector(".setup-provider").dataset.providerStep, "ready", "Late original settings cannot replace the checked owner");
     assert.equal(closes(), 0);
-    await click("Back to my draft");
+    await click("Continue");
     assert.equal(closes(), 1);
     assert.ok(calls.every(call => call.method === "GET"));
   }, { ready: true });
@@ -364,7 +364,7 @@ test("pending start recovery checks fresh settings and status without replacing 
     assert.equal(document.querySelector(".setup-provider-idea p").textContent, idea);
     assert.equal(calls.filter(call => call.method !== "GET").length, 1);
     assert.equal(closes(), 0, "Readback does not navigate or submit the idea");
-    await click("Back to my draft");
+    await click("Continue");
     assert.equal(closes(), 1);
     assert.equal(calls.filter(call => call.method !== "GET").length, 1);
   });
@@ -529,7 +529,7 @@ for (const held of ["headers", "successful body", "refused body"]) {
       assert.equal(calls.length, reads, "A late save response cannot schedule another status read");
       assert.doesNotMatch(document.body.textContent, /Saving was not confirmed|synthetic-unsent-provider-key|synthetic-replacement-key-not-sent/);
       assert.equal(calls.filter(call => call.method !== "GET").length, 1);
-      await click("Back to my draft");
+      await click("Continue");
       assert.equal(closes(), 1);
       assert.equal(document.querySelector(".setup-provider-idea p").textContent, idea);
       assert.equal(calls.filter(call => call.method !== "GET").length, 1, "Continuing does not save again or submit the idea");

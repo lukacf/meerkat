@@ -95,11 +95,20 @@ def load_module(name):
 
 
 def bootstrap_code():
-    path = source_root() / "launchkit/templates/deploy-gcp.sh"
-    marker = 'REMOTE_INSTALL="$(python3 - "$INSTANCE" "$DEPLOYMENT_ID" "$CONFIGURATION" <<\'PY\'\n'
-    text = path.read_text().split(marker, 1)[1].split("\nPY\n", 1)[0]
-    tree = ast.parse(text, filename=str(path))
-    assignments = [node for node in tree.body if isinstance(node, ast.Assign)
+    path = source_root() / "launchkit/templates_v2/remote_operations.py"
+    tree = ast.parse(path.read_text(), filename=str(path))
+    functions = [node for node in tree.body if isinstance(node, ast.FunctionDef)
+        and node.name == "remote_install_command"]
+    if functions:
+        assert len(functions) == 1
+        body = functions[0].body
+    else:
+        # Retained predecessor trees still keep the receiver in the shell template.
+        path = source_root() / "launchkit/templates/deploy-gcp.sh"
+        marker = 'REMOTE_INSTALL="$(python3 - "$INSTANCE" "$DEPLOYMENT_ID" "$CONFIGURATION" <<\'PY\'\n'
+        text = path.read_text().split(marker, 1)[1].split("\nPY\n", 1)[0]
+        body = ast.parse(text, filename=str(path)).body
+    assignments = [node for node in body if isinstance(node, ast.Assign)
         and any(isinstance(target, ast.Name) and target.id == "code" for target in node.targets)]
     assert len(assignments) == 1
     return ast.literal_eval(assignments[0].value), str(path) + ":remote-bootstrap"

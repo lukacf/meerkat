@@ -334,3 +334,16 @@ test('selected model host exposes its configured model without a key field or cr
       assert.ok(calls.every(c=>c.method==='GET'));
     });
 });
+
+test('an active guide shows its current provider and model with lifecycle controls behind Advanced', async () => {
+  await mount(call => call.url === '/api/provider-settings'
+    ? { ...saved(), effective_model: 'fixture-current-model', runtime_active: true } : { status: 'ready', available: true },
+    async ({ document, calls }) => {
+      assert.match(document.querySelector('.setup-provider-configured').textContent, /OpenAI.*fixture-current-model/);
+      assert.ok([...document.querySelectorAll('button')].some(node => node.textContent === 'Return to conversation'));
+      const stop = [...document.querySelectorAll('button')].find(node => node.textContent === 'Stop setup team');
+      assert.equal(stop.closest('details').open, false);
+      assert.match(stop.closest('details').querySelector('summary').textContent, /Advanced guide controls/);
+      assert.ok(calls.every(call => call.method === 'GET'));
+    });
+});

@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from copy import deepcopy
 from datetime import datetime, timezone
 import fcntl
@@ -24,7 +24,9 @@ from .architect import ArchitectUnavailable
 from .projects import DraftConflict, fingerprint
 from .templates.storage_setup import write_private
 from .owned_worker import spawn_owned_worker, stop_owned_worker
+from .protected_worker import is_protected_worker, selected_worker
 from .deployment_deadlines import WORKER_STOP_TIMEOUT, PROCESS_FORCE_REAP_TIMEOUT
+from .service_requirements import required_service_operations
 
 ACCEPTANCE_POLICY_VERSION = 1
 IMPLEMENTATION_SECONDS = 2400
@@ -184,10 +186,12 @@ identity stages. Selection changes require a cold host restart via the ordinary
 installation owner; reconcile_agents does not rebind existing agents. Retained
 Python callback scopes alone do not establish native access, and other native
 overlays remain independent. After native startup, inspect
-context.runtime.mob_handle().identity_resolved_tools(identity), or its
-identity_resolved_tools_detail(identity) method. Require that actual catalog and
-denied old-name calls on continuing seed/dynamic sessions before claiming
-installed isolation. Frozen host packages
+context.runtime.mob_handle().identity_resolved_tools_detail(identity) and read
+its tools_source where the selected SDK reports one: a member that is not built
+yet can answer no_build_recorded with an empty tools list, which is no catalog.
+Warm or wake that member first (identity_warm where the selected SDK offers it).
+Require that actual catalog and denied old-name calls on continuing seed/dynamic
+sessions before claiming installed isolation. Frozen host packages
 need an explicit framework refresh/rebuild; never patch protected host source.
 Check each supported operation's model-facing arguments against its published
 schema and handler, including omitted, null and empty values. Reads must remain
@@ -294,11 +298,32 @@ before native startup; cold native registration may call lookup before start().
 retain must atomically compare that exact nonvoided admitting row and commit the
 complete bounded set (at most 32 unique refs) before returning None. Exact replay
 may succeed; changed refs, class, identity, admission or a successor row must fail.
-lookup returns that exact committed value for an admitting or listed row. Missing,
-unreadable, voided, retired or mismatched rows must raise, never return implicit [].
+For ordinary operator-self bindings, lookup returns that exact committed value
+for an admitting or listed row. Missing, unreadable, voided, retired or mismatched
+rows must raise, never return implicit []. The observed-requirement cleanup-only
+lookup exception is described below.
 An explicitly committed empty bindings list means no MCP. Neither hook publishes
 the identity or grants access. Connect owns approval, mandate and current binding
 resolution; the normal native admission/finalizer owns publication readiness.
+With the selected remote observed-requirement SDK, the optional
+observe_member_mcp_requirement(selection, source) hook reads that SAME actual row
+and returns None when it is missing or voided, or the native JSON
+{contract:"observed_requirement", selection, source, services}.
+source={resource_id, revision, sha256} is the full accepted source; services is the
+exact ordered native service intent list, including operations and lifetimes.
+Never reconstruct this from roster labels or report synchronous currentness.
+Connect observes before and after issue and still requires protected approval.
+For this contract retain_member_mcp receives accepted_requirement in addition to
+selection and bindings. In the existing row transaction, compare the complete
+nonvoided requirement/source/ordered services and atomically retain that full
+association with the pending locators before returning. Preserve the exact retained
+value after void/retirement for cleanup-only lookup; it cannot authorize listing.
+Publication must still compare the actual nonvoided row and accepted requirement
+inside the existing held-Add finalizer transaction. Native startup retries owed
+grant cleanup. Neither Forge nor the application fabricates a native grant/result.
+Without the observation hook, existing operator-self callbacks and SDK behavior
+are unchanged. The ordinary context.begin_member_class_add mapper still accepts
+no MCP intent; explicit accepted-requirement Add uses the selected native SDK.
 The host joins entered retention callbacks before stop() closes the store, including
 failed startup and cancellation. Do not swallow a failed write or claim rollback
 from loss of its acknowledgement. Verify restart reads and void/successor races
@@ -309,10 +334,121 @@ lifecycle. Construction and offline trials have runtime=None; native reconcile
 and dynamic native callback availability remain explicitly unavailable until a
 trusted trial host implements them. Do not replace missing lifecycle support with
 raw ensure_member, edited protected config, reused seed context or fake success.
-The seeded host keeps native agent memory enabled and Recorder tools bound to the
-actual owning identity, while distiller and steward are disabled and operator_scope
-is off. This preserves useful own-identity memory without implicit promotion into
-shared knowledge. Publish approved shared information through the application's
+The current host always exposes context.prepare_original_native_operations.
+It refuses until a selected Fresh or Restore owner binds a supported private SDK;
+method presence alone does not establish availability. A trusted application can
+then prepare one new authenticated original for Connect's finite native operations.
+First retain its actual event through runtime.host_control.retain_authenticated_event;
+preserve the exact original ref, text and transport evidence in PrivateOriginalSubmit.
+Then await context.prepare_original_native_operations(submission, request,
+retain_request=save_exact_request, timeout=60.0) before the first
+runtime.host_control.submit_authenticated_original call. save_exact_request must
+be an async callable. The selected SDK validates the request before retention;
+SDKs without the public validation entrypoint refuse before saving it. The callback
+receives immutable JSON {submission,request}; durably compare and save those exact
+bytes in the SAME private application event row before returning. Restore that request for
+an exact retry; never select new issuance IDs, target routes or lifetimes after a
+timeout or attach new selections to an admitted original. Native owns replay and
+currentness. A retained request and its issuance IDs belong to this original
+only; never reuse them as a template for another original. The host joins entered
+callbacks/calls before stop closes the store. This host serializes retained requests
+with sorted JSON keys. Earlier hosts saved unsorted bytes, so an existing row may
+refuse an exact-byte retry after adoption. Preserve that row and its original;
+do not rewrite it or mint new issuance IDs to bypass the mismatch.
+
+The request is {not_before_ms,expires_at_ms,targets:[{issuance_id,target}]} with
+1-32 finite targets. Select actual installed routes, including completed Active
+Adds; do not derive them from a desired edge, class name or seed identity. Targets
+are {kind:"peer",route,actions:["message","request"]}, {kind:"peer_directory"},
+or {kind:"recorder_identity",actions:["read","write","delete"]}. Choose only the
+required actions in the displayed order, with distinct retained issuance IDs and
+finite ordered times. Connect derives and revalidates the actual member, session,
+controller, peer key, audience and own-identity scope. The same method works after
+Fresh or Restore once the app has reconstructed its real participants and native
+ownership. It has no seed-only lookup and creates no missing member or admission.
+
+Preparation is not input admission, tool availability or delivery. The selected
+class/profile and consequence policy must independently expose the operation;
+this adapter does not remove the current compiler's peer/Recorder guards. A host
+must adopt a coherent supported profile and native tuple separately. Incoming peer
+turns, send_response/reply_to_peer, mob-scope Propose, other identities/scopes and
+session memory_search remain unsupported by this finite selection API. Do not
+replace them with application callback tools or report sender permission as a
+completed receiver turn. Existing setup-result continuation is a separate path.
+
+Incoming sources use Meta's native announcement declarations. When the selected
+host includes announcement_options in app.py, the host preparation owner can
+adopt optional application/announcement-declarations.json through the existing
+protected application-input route, containing the native object
+{revision, sources, subscriptions}. The host captures that file once and passes
+it unchanged as inline runtime_options.mob_announcements.declarations with
+enabled=true. No file means announcements remain at the existing default. Native
+owns schema validation, monotonic revision/digest checks and managed-record
+reconciliation. Declaration changes are native configuration changes, outside a
+source-only repair of a retained framework. Implementation tools cannot add or
+edit this protected file. The following contract describes host-adopted declarations,
+not files for the implementation agent to author. Record requested changes as unmet
+intent for the host preparation owner to adopt at a new explicit revision. Never
+reset revisions to bypass a refusal, mirror a cursor, or replay subscriptions
+from application code. The host checks sources.v1 and the applied native revision
+before starting application adapters, waiting at most 30 seconds for startup
+reconciliation and asking native to verify the same revision and exact content.
+A pending native record remains pending. Restoring an earlier application across
+a declarations change is unavailable in the pinned Meta runtime; retain native
+state and use forward recovery with the current accepted application.
+
+The pinned Meta runtime's announcement sources do not yet deliver on governed Connect-hosted
+gateways. Source capability and an applied declaration revision can coexist with
+a governed-runtime refusal. Inspect native governed-admission and local-delivery
+status before presenting incoming work as available; keep a required recipient
+turn unmet until the selected runtime supports it. Preserve the native refusal
+and pending records. Do not switch to plain submit, a second gateway or an
+application callback to bypass missing governed admission. A future runtime must
+demonstrate support through its native contract and actual handling evidence.
+
+A subscription is {subscription_id, member:{mob_id,identity}, topics, start:{kind:"now"}}
+or uses members:{mob_id,role} instead of member. Native role means the actual
+profile, not the Blueprint class ID or a display label. Host-adopted coverage of a
+whole class uses its fixed identities from deployment.json.agents with member
+subscriptions and its future members with a role template using
+deployment.json.applicationProfiles[class_id]. If applicationProfiles is absent,
+only fixed identities can be declared; that accepted deployment has no reusable
+class profiles to template. Never guess a profile.
+The role template also covers zero-start classes without placeholder members and avoids
+guessing a setup helper's native profile projection. Host-adopted records have
+distinct stable IDs. Native expands role templates at capture; do not enumerate
+the live roster or create per-member subscriptions on each restart. An explicit
+identity route needs only that member. Preserve triage and conversation exclusions,
+source-owned audience checks, and the user's bounded-history requirement.
+
+Source rows must come from the actual selected native connection/collector
+binding and its supported observation, topics, audience, routes, history and
+runner. A guide description is not such a binding. Give organization documents
+intact to Connect's agent; do not parse a tool catalog or fabricate principals,
+provider scope, account evidence, host-runnable names or provider cursors. If the
+collector binding is unavailable, keep the incoming requirement unmet and retain
+the proposed intent. Do not emit a fake source or silently use new-only collection
+for requested history. Query context.runtime.mob_handle().announcement_declarations_get()
+and the native source/member methods for current status; configuration and
+capability support do not establish collection, delivery or useful handling.
+
+The current Gmail INBOX observation adapter supports new changes from its initial
+checkpoint, without historical replay. Keep requested bounded history unmet until
+the selected collector supports it. A zero-item page marked complete does not
+prove a requested backfill: require the collector's supported history contract and
+coverage evidence before treating that requirement as satisfied.
+
+Read the frozen config/mob.toml and selected native host before relying on memory.
+A requested Blueprint memory grant or enabled host storage does not establish
+an available Recorder tool. Some selected Connect routes disable it because the
+installed native policy does not yet admit its operations. Keep required native
+memory as an unmet outcome with its exact native dependency; conversation history
+or an application database is not a substitute. Do not edit protected profiles or
+add replacement memory callbacks to conceal the gap.
+Where native Recorder is supported and granted, it binds to the actual owning
+identity. The ordinary generated host disables distiller/steward and operator_scope,
+preserving useful own-identity memory without implicit promotion into shared
+knowledge. Publish approved shared information through the application's
 explicit library and access policy; do not share another identity's private context.
 These defaults do not erase preexisting or explicitly shared Mob/Realm data.
 Trusted host inspection, memory and Console APIs are not automatic agent tool
@@ -987,7 +1123,13 @@ def _package_archive(files):
 class ImplementationService:
     """Background build admission, snapshots, native timelines and checked packages."""
 
-    def __init__(self, root, guide, operations=None):
+    def __init__(self, root, guide, operations=None, *, require_service_checks=False,
+                 worker_preparer=None):
+        if type(require_service_checks) is not bool:
+            raise TypeError("Select required service checks through the trusted host policy.")
+        if worker_preparer is not None and not callable(worker_preparer):
+            raise TypeError("The trusted host must supply its worker preparer.")
+        self._worker_preparer = worker_preparer
         self.root = Path(root) / "implementations"
         self.guide = guide
         self.operations = operations
@@ -995,6 +1137,31 @@ class ImplementationService:
         self.tasks = {}
         self.processes = {}
         self.checker_setup = None
+        # Trusted host policy only. The native preparation adapter is not yet
+        # available, so unresolved required service operations cannot be admitted.
+        # Never consume a model/browser "ready" assertion to clear this hold.
+        self._require_service_checks = require_service_checks
+
+    def service_preparation(self, state):
+        if not self._require_service_checks:
+            return None
+        required = required_service_operations(state)
+        if (state.get("brief") or {}).get("service_requirements") is None:
+            return {"status": "needs_inventory", "guide_id": state["id"], "guide_version": state["version"],
+                "reason_code": "service_inventory_missing",
+                "detail": "The saved plan does not have a recorded service inventory. Ask your guide to refresh the required service operations, including an explicit empty inventory if none are needed, before Build or Resume. Your saved source and results remain available.",
+                "required_operations": required}
+        if not required:
+            return None
+        return {"status": "unavailable", "guide_id": state["id"], "guide_version": state["version"],
+            "reason_code": "native_service_checks_unavailable",
+            "detail": "The required operations below have not been verified. Protected connection setup and operation checks are not available on this host yet. Build and Resume are blocked for this application; your saved source and results remain available.",
+            "required_operations": required}
+
+    def _require_prebuild_service_checks(self, state):
+        observation = self.service_preparation(state)
+        if observation is not None:
+            raise ImplementationPrerequisiteNotAdmitted(observation["detail"])
 
     async def _guide(self, identity):
         if self.operations is not None:
@@ -1038,6 +1205,16 @@ class ImplementationService:
                 raise BuildSelectionUnavailable("Saved build selection is invalid. Recover its state before starting another build.") from None
             return self._directory(guide_id, build_id)
         return parent / build_id
+
+    def _reserve_directory(self, guide_id, build_id):
+        directory = self._directory(guide_id, build_id)
+        # Recursive mkdir applies mode only to the final component. Recovery
+        # also checks the guide parent, so create each owned level privately.
+        # Existing directories retain their modes and recovery refusal checks.
+        self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        directory.parent.mkdir(exist_ok=True, mode=0o700)
+        directory.mkdir(mode=0o700)
+        return directory
 
     def selected_build_id(self, guide_id):
         """Read the current selection for a synchronous admission fence."""
@@ -1366,15 +1543,19 @@ class ImplementationService:
             if not proposal:
                 raise ValueError("Describe a concrete job and get a proposed system before building.")
             proposal = Blueprint.model_validate(proposal).model_dump(mode="json")
+            runtime_artifacts = None
+            if runtime_target is not None:
+                from .runtime_selection import selected_runtime_artifacts
+                runtime_artifacts = await asyncio.to_thread(selected_runtime_artifacts, runtime_target)
             from .compiler import package_availability
             availability = await asyncio.to_thread(package_availability, proposal,
-                **({"runtime_target": runtime_target}
+                **({"runtime_target": runtime_target, "verified_artifacts": runtime_artifacts}
                    if initial_product or preserve_design and runtime_target is not None else {}))
             runtime_candidate = None
             if runtime_target is not None:
                 from .runtime_selection import implementation_candidate_selection
                 runtime_candidate = await asyncio.to_thread(implementation_candidate_selection, runtime_target,
-                    deployment_target=proposal["target"])
+                    deployment_target=proposal["target"], verified_artifacts=runtime_artifacts)
             request = request.strip()
             if receipt and (receipt.get("stop_requested") and receipt["status"] in {"queued", "running", "checking"}
                     or receipt.get("cleanup_in_progress")
@@ -1513,6 +1694,7 @@ class ImplementationService:
                     receipt["build_id"], prior_status["source_digest"], state, proposal)
             # Existing-build dedup above remains usable. Refuse a new package
             # before checker admission, history reservation or worker publication.
+            self._require_prebuild_service_checks(state)
             if not availability["available"] and not retained_candidate:
                 raise ValueError(availability["reason"])
             decisions = implementation_decision_blockers(state)
@@ -1524,8 +1706,7 @@ class ImplementationService:
                     raise ImplementationPrerequisiteNotAdmitted('Prepare application checks in the wizard before starting a new build. No builder was started.')
             identity = str(uuid.uuid4())
             preparation_started = time.monotonic_ns()
-            directory = self._directory(guide_id, identity)
-            directory.mkdir(parents=True, mode=0o700)
+            directory = self._reserve_directory(guide_id, identity)
             with self._unpublished_preparation(directory):
                 from .implementation_workspace import ImplementationWorkspace
                 workspace = ImplementationWorkspace(directory / "workspace", proposal)
@@ -1738,10 +1919,13 @@ class ImplementationService:
 
                 def publish_admission():
                     # No awaits separate the final fences from worker publication.
+                    self._require_prebuild_service_checks(latest_state)
                     workspace.require_preparation_current()
                     if runtime_target is not None:
                         from .runtime_selection import implementation_candidate_selection
-                        if fingerprint(implementation_candidate_selection(runtime_target, deployment_target=proposal["target"])) != fingerprint(runtime_candidate):
+                        if fingerprint(implementation_candidate_selection(runtime_target,
+                                deployment_target=proposal["target"],
+                                verified_artifacts=runtime_artifacts)) != fingerprint(runtime_candidate):
                             raise DraftConflict("The selected candidate changed before builder admission.")
                     self._fence_selected(guide_id, expected_selected_build_id,
                         _preparing_build_id=identity if previous is None else None)
@@ -1835,7 +2019,10 @@ class ImplementationService:
             self.tasks.pop(directory.name, None)
 
     async def _stop_process(self, process):
-        await stop_owned_worker(process)
+        if is_protected_worker(process):
+            await process.stop()
+        else:
+            await stop_owned_worker(process)
 
     async def _confirm_stop(self, directory, process):
         update_receipt(directory, cleanup_pending=True, cleanup_in_progress=True,
@@ -1920,20 +2107,27 @@ class ImplementationService:
         try:
             # A separate process gives this native tool registry and gateway their
             # own lifetime. Generated tests receive a different, scrubbed environment.
-            environment = dict(os.environ)
-            source_root = str(Path(__file__).resolve().parents[1])
-            environment["PYTHONPATH"] = source_root
-            from .guide_runtime import capture_worker_runtime
-            runtime_control_sha256 = capture_worker_runtime(directory)
-            with (directory / "worker.log").open("w") as log:
-                os.chmod(directory / "worker.log", 0o600)
-                process, cancelled = await spawn_owned_worker(sys.executable, "-m",
-                    "launchkit.implementation_worker", str(directory), "--owned-stdin",
-                    "--agent-runtime-sha256", runtime_control_sha256, cwd=source_root,
-                    env=environment, stdin=asyncio.subprocess.PIPE, stdout=log, stderr=log)
-                self.processes[identity] = process
-                if cancelled:
-                    raise asyncio.CancelledError
+            with ExitStack() as resources:
+                if self._worker_preparer is not None:
+                    preparation = self._worker_preparer(kind="implementation", directory=directory)
+                    process = selected_worker(preparation, "implementation", directory)
+                    self.processes[identity] = process  # Retain before any spawn await.
+                    await process.start()
+                else:
+                    environment = dict(os.environ)
+                    source_root = str(Path(__file__).resolve().parents[1])
+                    environment["PYTHONPATH"] = source_root
+                    from .guide_runtime import capture_worker_runtime
+                    runtime_control_sha256 = capture_worker_runtime(directory)
+                    log = resources.enter_context((directory / "worker.log").open("w"))
+                    os.chmod(directory / "worker.log", 0o600)
+                    process, cancelled = await spawn_owned_worker(sys.executable, "-m",
+                        "launchkit.implementation_worker", str(directory), "--owned-stdin",
+                        "--agent-runtime-sha256", runtime_control_sha256, cwd=source_root,
+                        env=environment, stdin=asyncio.subprocess.PIPE, stdout=log, stderr=log)
+                    self.processes[identity] = process
+                    if cancelled:
+                        raise asyncio.CancelledError
                 code = await asyncio.wait_for(process.wait(),
                     IMPLEMENTATION_SECONDS + WORKER_STOP_TIMEOUT + PROCESS_FORCE_REAP_TIMEOUT)
                 if await confirm_stop():

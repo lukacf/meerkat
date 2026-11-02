@@ -269,10 +269,20 @@ class BuildTools:
         def load_reference(selected):
             reference_metadata = {}
             if selected == "application":
-                source = APPLICATION_CONTRACT
+                # Older inputs omitted this snapshot. Label their compatibility
+                # reference as current rather than claiming it was frozen.
+                frozen = "application_contract" in self.input
+                source = self.input["application_contract"] if frozen else APPLICATION_CONTRACT
+                if not isinstance(source, str) or not source.strip():
+                    raise ValueError("The saved Build application contract is unavailable.")
                 digest = hashlib.sha256(source.encode("utf-8")).hexdigest()
-                origins = [("launchkit/implementation.py#APPLICATION_CONTRACT", i + 1, digest)
-                           for i in range(len(source.splitlines()))]
+                path = ("input.json#application_contract" if frozen
+                    else "launchkit/implementation.py#APPLICATION_CONTRACT")
+                origins = [(path, i + 1, digest) for i in range(len(source.splitlines()))]
+                reference_metadata = {"reference_kind": (
+                    "frozen_application_contract" if frozen else "current_application_contract"),
+                    "source_files": [{"path": path, "sha256": digest}],
+                    "observed_destination": False}
                 return source, origins, reference_metadata
             if selection_error is not None:
                 return "", [], {"ok": False, "error": selection_error, "observed_destination": False}
@@ -433,7 +443,7 @@ class BuildTools:
             try:
                 source, _, reference_metadata = load_reference(name)
             except (OSError, ValueError, KeyError, TypeError, SyntaxError) as error:
-                return {"name": name, "ok": False, "error": "The selected SDK source page is unavailable: " + str(error)}
+                return {"name": name, "ok": False, "error": "The selected reference page is unavailable: " + str(error)}
             if reference_metadata.get("ok") is False:
                 return {"name": name, **reference_metadata}
             lines = source.splitlines()
@@ -995,7 +1005,7 @@ async def execute(directory, stop, *, timing=None):
     import httpx
     from meerkat_meta import Meta
     from meerkat_meta.identity_first_models import DurableAgentSpec
-    from .guide_runtime import selected_runtime, configure_builder, build_with_cleanup
+    from .guide_runtime import selected_runtime, configure_builder, build_with_cleanup, worker_persistent_state
     tools = BuildTools(directory)
     preserve_design = runtime_refresh_source(tools) is not None
     acceptance = SemanticAcceptance(directory / "acceptance", tools.workspace, tools.input)
@@ -1011,6 +1021,7 @@ async def execute(directory, stop, *, timing=None):
     from .schema import check_model_provider
     check_model_provider(provider, model)
     runtime_root = directory / "native"
+    state_path = worker_persistent_state(selected, runtime_root / ".mobkit/state")
     runtime_root.mkdir(mode=0o700, exist_ok=True)
     mob_definition = implementation_mob_toml(provider, model,
         model_configuration=model_configuration, guide_runtime=selected)
@@ -1034,7 +1045,7 @@ async def execute(directory, stop, *, timing=None):
     owned_runtimes = []
     async def build():
         builder = (Meta.builder().mob_inline(mob_definition)
-                   .persistent_state(str(runtime_root / ".mobkit/state")).roster(Roster())
+                   .persistent_state(state_path).roster(Roster())
                    .session_service(SessionBuilder()).http_listen("127.0.0.1:0").console_auth_required(False))
         built = await build_with_cleanup(configure_builder(builder, selected), owned_runtimes)
         owned_runtimes.append(built)

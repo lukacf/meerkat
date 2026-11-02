@@ -8,6 +8,7 @@
 # application_startup) is listed first; that test fails when one is missing
 # or a listed file no longer matches. The extras after them are startup
 # owners the pattern does not match, each with its reason.
+test_announcement_configuration.py
 test_application_context_parents.py
 test_application_controller_binding.py
 test_application_extension.py
@@ -18,6 +19,7 @@ test_application_startup.py
 test_application_tool_policy_host.py
 test_application_update_startup.py
 test_candidate_deployment_updates.py
+test_connect_native_operations.py
 test_console_binding.py
 test_default_native_console_login.py
 test_deployment_application_bootstrap.py

@@ -1,12 +1,12 @@
 {
   "format": "forge-public-meta-model-catalog-v1",
-  "version": "0.9.4",
+  "version": "0.9.6",
   "source": {
-    "release": "https://github.com/lukacf/meerkat-meta/releases/download/v0.9.4",
-    "archive": "meta-rpc-gateway-0.9.4-x86_64-unknown-linux-gnu.tar.gz",
-    "archive_sha256": "2713c2fceddba62d22f81dbb0e0ee6ef82b716cd0ad15de8c1acf4b5ec455f39",
-    "sdk": "meerkat-meta==0.9.4",
-    "sdk_wheel_sha256": "46cc44eb3e05a4bd9fb2ec630c06f2e3c62548184b7f6c81101f042d8e11a659",
+    "release": "https://github.com/lukacf/meerkat-meta/releases/download/v0.9.6",
+    "archive": "meta-rpc-gateway-0.9.6-x86_64-unknown-linux-gnu.tar.gz",
+    "archive_sha256": "aa7c30fa60b6ea530ff986ed560a8bce3bcdf65d6dd7432ebb521da9e8884f6a",
+    "sdk": "meerkat-meta==0.9.6",
+    "sdk_wheel_sha256": "40e2f2a48fa8dc656953d8a6e11fe66b5cc059df66b0162c14678d89c86349dc",
     "method": "runtime.mob_handle().models_catalog()"
   },
   "models": [

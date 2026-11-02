@@ -2,6 +2,7 @@
   "mode": "dry_run",
   "state_dir": "{state_dir}",
   "fenced_databases": [
+    "{state_dir}/agent-memory/default.sqlite3",
     "{state_dir}/continuity.sqlite3",
     "{state_dir}/council.sqlite3",
     "{state_dir}/event_log.sqlite3",
@@ -53,6 +54,12 @@
     {
       "database": "{state_dir}/meta_console.sqlite3",
       "domain": "meta-console",
+      "before": 3,
+      "action": "recorded"
+    },
+    {
+      "database": "{state_dir}/agent-memory/default.sqlite3",
+      "domain": "meta-memory",
       "before": 3,
       "action": "recorded"
     },
@@ -135,6 +142,12 @@
       "code": "maintenance-fence-lock",
       "message": "maintenance-fence lock file (created by normal per-operation guards; held exclusively only during offline maintenance)",
       "path": "{state_dir}/workgraph.sqlite3.mfence"
+    },
+    {
+      "severity": "info",
+      "code": "maintenance-fence-lock",
+      "message": "maintenance-fence lock file (created by normal per-operation guards; held exclusively only during offline maintenance)",
+      "path": "{state_dir}/agent-memory/default.sqlite3.mfence"
     },
     {
       "severity": "info",

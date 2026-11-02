@@ -110,7 +110,7 @@ async def restarted_installation(registry, monkeypatch, request, tmp_path):
     # All active owner instances are new. The original process's maps and
     # source/preparation objects are unavailable to these real consumers.
     store = GuideStore(f.store.root)
-    guide = GuideService(store, architect=None)
+    guide = GuideService(store, architect=SimpleNamespace())
     implementation = ImplementationService(f.implementation.root.parent, guide)
     service = DeploymentService(f.service.root.parent, guide, implementation)
     owner = LocalApplicationRegistry(guide_store=store, implementation=implementation,

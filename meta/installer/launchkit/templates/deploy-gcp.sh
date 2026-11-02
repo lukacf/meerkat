@@ -140,39 +140,7 @@ for attempt in 1 2 3 4 5 6; do
   sleep 10
 done
 gcloud compute scp "$PACKAGE_ARCHIVE" "$INSTANCE:mobkit-package.tar.gz" --project "$PROJECT" --zone "$ZONE" --tunnel-through-iap
-REMOTE_INSTALL="$(python3 - "$INSTANCE" "$DEPLOYMENT_ID" "$CONFIGURATION" <<'PY'
-import hashlib, pathlib, shlex, sys
-# Execute only the exact transferred host helper, then let it verify the full
-# archive and destination ownership before writing any ordinary source file.
-code = '''import gzip, hashlib, io, pathlib, sys, tarfile, zlib
-root = pathlib.Path.home() / 'src' / sys.argv[1]
-archive = pathlib.Path.home() / 'mobkit-package.tar.gz'
-MAX_SOURCE = 64 * 1024 * 1024
-MAX_ARCHIVE_BYTES = MAX_SOURCE + 1024 * 1024
-MAX_TAR_BYTES = MAX_SOURCE + 16 * 1024 * 1024
-with archive.open('rb') as stream:
-    data = stream.read(MAX_ARCHIVE_BYTES + 1)
-if len(data) > MAX_ARCHIVE_BYTES:
-    raise SystemExit('Uploaded installation archive exceeded its compressed size bound.')
-try:
-    with gzip.GzipFile(fileobj=io.BytesIO(data)) as compressed:
-        tar_bytes = compressed.read(MAX_TAR_BYTES + 1)
-except (EOFError, OSError, zlib.error):
-    raise SystemExit('Uploaded installation archive could not be decompressed.') from None
-if len(tar_bytes) > MAX_TAR_BYTES:
-    raise SystemExit('Uploaded installation archive exceeded its decompressed size bound.')
-with tarfile.open(fileobj=io.BytesIO(tar_bytes), mode='r:') as stream:
-    helper = stream.extractfile('remote_operations.py').read(16 * 1024 * 1024 + 1)
-if hashlib.sha256(helper).hexdigest() != sys.argv[4]:
-    raise SystemExit('Uploaded installation helper differs from accepted source.')
-namespace = {'__name__': 'mobkit_source_receiver', '__file__': str(root / 'remote_operations.py')}
-exec(compile(helper, 'accepted remote_operations.py', 'exec'), namespace)
-namespace['receive_archive'](archive, root, sys.argv[2], sys.argv[3])
-'''
-arguments = ['python3', '-I', '-c', code, *sys.argv[1:4], hashlib.sha256(pathlib.Path('remote_operations.py').read_bytes()).hexdigest()]
-print(' '.join(shlex.quote(value) for value in arguments))
-PY
-)"
+REMOTE_INSTALL="$(python3 remote_operations.py install-command "$INSTANCE" "$DEPLOYMENT_ID" "$CONFIGURATION")"
 gcloud compute ssh "$INSTANCE" --project "$PROJECT" --zone "$ZONE" --tunnel-through-iap \
   --command "sudo apt-get update && sudo apt-get install -y python3-venv ca-certificates dbus-user-session && $REMOTE_INSTALL && rm mobkit-package.tar.gz && cd \"\$HOME/src/$INSTANCE\" && bash install.sh --non-interactive"
 printf '\nVM installed. Configure credentials on the VM:\n'

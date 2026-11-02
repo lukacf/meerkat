@@ -74,7 +74,7 @@ async def registry(tmp_path, product, monkeypatch):
     monkeypatch.setattr("launchkit.planner.planner_capability", lambda: {"available": True})
     monkeypatch.setattr("launchkit.guide.planner_capability", lambda: {"available": True})
     monkeypatch.setattr("launchkit.implementation_workspace._sandbox_executable", lambda: "/inert/sandbox")
-    guide = GuideService(store, architect=None)
+    guide = GuideService(store, architect=SimpleNamespace())
     implementation = ImplementationService(tmp_path / "original-forge-owner", guide)
     service = AdmissionOnly(tmp_path / "original-forge-owner", guide, implementation)
     service.launched = []

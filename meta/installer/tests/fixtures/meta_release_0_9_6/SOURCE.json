@@ -2,32 +2,32 @@
   "assets": {
     "checksums-trailing.sha256": {
       "bytes": 678,
-      "sha256": "a82889481a4fdd1b127a747dc60006249851f50d6b9c0fae7be26a5e0d314dcd"
+      "sha256": "163ba699bf976210d1289dba6c67ecccf1a1a977f9c11789a4210dc11c7b8c2f"
     },
     "checksums.sha256": {
       "bytes": 1053,
-      "sha256": "4b071ba2d154ac395e4833df75e5c040e237bda93cc7735b3c1ab3f6faf940f6"
+      "sha256": "4220a48f21684e88952d9ce37678bd6fb18ce0db4c423190299a8f074db63988"
     },
     "index-trailing.json": {
       "bytes": 455,
-      "sha256": "df6c35b1690dca25230c7c1eea2caa81bfd5d9cdf1ce17b4b32e49ac33aa40f5"
+      "sha256": "1320c3fcf1a4c29493e66ce0ff08b75141a77487aa0571b3b0ee083c5fcb2088"
     },
     "index.json": {
       "bytes": 640,
-      "sha256": "65b17730b9eec364641789eb499538dbea471546d26599563026a442e6511111"
+      "sha256": "3a48338215e97f0a1e6080bbb88ef87635fb1f599494340a878d22e21855ed8a"
     }
   },
   "binaries": {
     "x86_64-unknown-linux-gnu": {
-      "meta_gateway": 482301648,
-      "rpc_gateway": 494330944
+      "meta_gateway": 532566584,
+      "rpc_gateway": 545707016
     }
   },
-  "release": "https://github.com/lukacf/meerkat-meta/releases/tag/v0.9.4",
+  "release": "https://github.com/lukacf/meerkat-meta/releases/tag/v0.9.6",
   "storage_reports": {
     "cases": {
       "boot-apply": "the same directory, --apply",
-      "boot-dry": "after one first boot of the 0.9.4 runtime (rpc_gateway, meerkat-meta 0.9.4), dry run",
+      "boot-dry": "after the first boot of the starter agent team package on the 0.9.6 runtime (rpc_gateway, meerkat-meta 0.9.6), before its --apply, dry run",
       "boot-dry2": "the same directory after --apply, dry run",
       "empty-dry": "a new empty state directory, dry run",
       "predecessor-dry": "a directory holding an empty mobkit_metadata.sqlite3, dry run"
@@ -37,15 +37,15 @@
     "recorded": {
       "boot-apply": {
         "exit_code": 0,
-        "sha256": "d4a7fbdd7956d6c70eef87353c189dfafc225882ee20a0a5f19717da2408056e"
+        "sha256": "fe083467af614035e83102f2aa08cbe6460a03b115403f245e1179fa87ff2bdb"
       },
       "boot-dry": {
         "exit_code": 0,
-        "sha256": "97fbb33d428771b32f8a9683509f2a6330185f527ed4383187fdeb833e2b976d"
+        "sha256": "be0b9550a0fbf404a3c3b7bdceaeed97d4ca21e75604b31366c4eb5b50efaa89"
       },
       "boot-dry2": {
         "exit_code": 0,
-        "sha256": "dc0dc71857b660ef403a611d80a580eab998289803d028be1917a2bb1f23044b"
+        "sha256": "b693217da51d5076145dfd8cc233a14e6ff839110321db15a683c7944241d2b7"
       },
       "empty-dry": {
         "exit_code": 0,
@@ -56,6 +56,6 @@
         "sha256": "c25adad12f29803f4c954f5bcc90843fc01d3d31f108be58b2b59834cb367264"
       }
     },
-    "tool": "meta_gateway 0.9.4 x86_64-unknown-linux-gnu from meta-gateway-0.9.4-x86_64-unknown-linux-gnu.tar.gz"
+    "tool": "meta_gateway 0.9.6 x86_64-unknown-linux-gnu from meta-gateway-0.9.6-x86_64-unknown-linux-gnu.tar.gz"
   }
 }

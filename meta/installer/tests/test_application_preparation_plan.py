@@ -102,6 +102,16 @@ class Fixture:
         return json.loads(application_preparation_plan(self.pin_value, require_current=self.current))
 
 
+def select_console_domains(native):
+    native["ingress_domain"] = {"authority": {"opaque_native_principal": "selected-ingress"},
+        "namespace": "ingress"}
+    for name, namespace in (("authentication_domain", "selected-auth"), ("event_domain", "selected-events")):
+        native[name] = {"authority": deepcopy(native["ingress_domain"]["authority"]), "namespace": namespace}
+        for row in native["routes"]:
+            if row["origin"]["kind"] == "local_console":
+                row[name] = deepcopy(native[name])
+
+
 def pairs(plan):
     return [(row["action"], row["resource"]) for row in plan["acquisition"]["proposal_ceiling"]["actions"]]
 
@@ -267,6 +277,8 @@ def test_provider_event_uses_exact_unique_compiled_channel_binding(tmp_path):
         "member": deepcopy(f.caller["member"]), "realm": "mob:fixture-app", "required_surfaces": []}
     other_channel = {**deepcopy(channel), "sender_id": "different-sender", "member": deepcopy(f.other["member"])}
     f.plan["owner"]["channels"] = [other_channel, channel]
+    # Provider domains remain independent; only LocalConsole copies use the pair.
+    select_console_domains(f.plan["owner"]["native_host"])
     result = f.assemble()
     assert pairs(result)[-2:] == [("find_and_install", "native-caller-9"), ("delegate", "native-caller-9")]
     assert result["owner"] == f.plan["owner"]
@@ -475,3 +487,26 @@ def test_bounded_input_and_expanded_output_are_rejected_without_writes(tmp_path)
     with pytest.raises(CustodyError, match="assembled preparation plan exceeds"):
         f.assemble()
     assert not (tmp_path / "fresh-output").exists()
+
+
+@pytest.mark.parametrize("empty", [False, True])
+def test_installed_console_domains_survive_plan_assembly_with_or_without_seed_routes(tmp_path, empty):
+    f = helperless_fixture(tmp_path, empty=empty)
+    select_console_domains(f.plan["owner"]["native_host"])
+    original = deepcopy(f.plan)
+    assert f.assemble() == original
+
+
+@pytest.mark.parametrize("change", ["one-domain", "null", "empty-namespace", "extra-field", "foreign-authority", "route-copy"])
+def test_plan_refuses_inconsistent_console_domain_selection(tmp_path, change):
+    f = helperless_fixture(tmp_path)
+    native = f.plan["owner"]["native_host"]
+    select_console_domains(native)
+    if change == "one-domain": del native["event_domain"]
+    elif change == "null": native["event_domain"] = native["authentication_domain"] = None
+    elif change == "empty-namespace": native["event_domain"]["namespace"] = ""
+    elif change == "extra-field": native["event_domain"]["extra"] = True
+    elif change == "foreign-authority": native["event_domain"]["authority"] = {"opaque_native_principal": "foreign"}
+    else: native["routes"][0]["event_domain"]["namespace"] = "route-selected"
+    with pytest.raises(CustodyError, match="[Dd]omains"):
+        f.assemble()

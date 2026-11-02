@@ -26,7 +26,7 @@ SERVICE_PROMPT_KINDS = {"provider_target", "provider_action", "provider_api_key"
 PROVIDER_ACTIONS = {"use", "enter_key", "sign_in", "back"}
 COMPLETIONS = {"completed", "completed_without_result", "callback_pending",
                "callback_batch_pending", "cancelled", "abandoned", "abandoned_with_error",
-               "completed_with_finalization_failure", "runtime_terminated"}
+               "completed_with_finalization_failure", "runtime_terminated", "outcome_unknown"}
 REFUSALS = {"unavailable", "busy", "invalid_message", "history_unavailable", "turn_uncertain",
             "stop_unavailable", "stop_uncertain", "invalid_binding", "binding_retired",
             "stale_prompt", "invalid_answer", "native_auth_required", "unsupported_presenter",

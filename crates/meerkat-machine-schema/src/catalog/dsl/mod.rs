@@ -5207,6 +5207,12 @@ runtime_internal_inputs!(
         RemoveIdentityEntry,
         ArchiveIdentityEntry,
         UnarchiveIdentityEntry,
+        // Host preparation: a held construction's start, a settle and an
+        // attempt's end, decided in the handle's and the actor's steps. None
+        // is a surface command.
+        BeginPreparationConstruction,
+        SettleHostPreparation,
+        EndPreparationConstruction,
     ]
 );
 

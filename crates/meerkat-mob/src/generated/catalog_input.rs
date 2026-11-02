@@ -240,6 +240,15 @@ pub enum MobMachineCatalogInput {
     OpenDeclaredApply,
     CloseDeclaredApply,
     AdmitReset,
+    AdmitIdentityChange,
+    RecordCreatedIdentityEntry,
+    SetIdentityChangesHeld,
+    RemoveIdentityEntry,
+    ArchiveIdentityEntry,
+    UnarchiveIdentityEntry,
+    BeginPreparationConstruction,
+    SettleHostPreparation,
+    EndPreparationConstruction,
 }
 
 impl MobMachineCatalogInput {
@@ -480,6 +489,15 @@ impl MobMachineCatalogInput {
         Self::OpenDeclaredApply,
         Self::CloseDeclaredApply,
         Self::AdmitReset,
+        Self::AdmitIdentityChange,
+        Self::RecordCreatedIdentityEntry,
+        Self::SetIdentityChangesHeld,
+        Self::RemoveIdentityEntry,
+        Self::ArchiveIdentityEntry,
+        Self::UnarchiveIdentityEntry,
+        Self::BeginPreparationConstruction,
+        Self::SettleHostPreparation,
+        Self::EndPreparationConstruction,
     ];
 
     #[must_use]
@@ -723,6 +741,15 @@ impl MobMachineCatalogInput {
             Self::OpenDeclaredApply => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::OpenDeclaredApply,
             Self::CloseDeclaredApply => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::CloseDeclaredApply,
             Self::AdmitReset => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::AdmitReset,
+            Self::AdmitIdentityChange => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::AdmitIdentityChange,
+            Self::RecordCreatedIdentityEntry => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::RecordCreatedIdentityEntry,
+            Self::SetIdentityChangesHeld => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::SetIdentityChangesHeld,
+            Self::RemoveIdentityEntry => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::RemoveIdentityEntry,
+            Self::ArchiveIdentityEntry => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::ArchiveIdentityEntry,
+            Self::UnarchiveIdentityEntry => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::UnarchiveIdentityEntry,
+            Self::BeginPreparationConstruction => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::BeginPreparationConstruction,
+            Self::SettleHostPreparation => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::SettleHostPreparation,
+            Self::EndPreparationConstruction => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::EndPreparationConstruction,
         }
     }
 
@@ -991,6 +1018,15 @@ impl MobMachineCatalogInput {
             Self::OpenDeclaredApply => "OpenDeclaredApply",
             Self::CloseDeclaredApply => "CloseDeclaredApply",
             Self::AdmitReset => "AdmitReset",
+            Self::AdmitIdentityChange => "AdmitIdentityChange",
+            Self::RecordCreatedIdentityEntry => "RecordCreatedIdentityEntry",
+            Self::SetIdentityChangesHeld => "SetIdentityChangesHeld",
+            Self::RemoveIdentityEntry => "RemoveIdentityEntry",
+            Self::ArchiveIdentityEntry => "ArchiveIdentityEntry",
+            Self::UnarchiveIdentityEntry => "UnarchiveIdentityEntry",
+            Self::BeginPreparationConstruction => "BeginPreparationConstruction",
+            Self::SettleHostPreparation => "SettleHostPreparation",
+            Self::EndPreparationConstruction => "EndPreparationConstruction",
         }
     }
 }

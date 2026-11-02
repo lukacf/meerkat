@@ -1,22 +1,22 @@
 {
   "class": "ok",
   "exit_code": 0,
-  "finished_at": "2026-10-31T22:57:03.963750Z",
+  "finished_at": "2026-11-01T12:02:07.325901Z",
   "input": {
-    "path": "/mnt/connect-release/a1/parent/20261031T215548Z/binary/toolkit_gateway",
-    "sha256": "938c232480c0b1f3dbd13f07ccf511dd0b339f15193927e275ae2a222cb9cb8a",
+    "path": "/mnt/connect-release/a1/parent/20261101T113908Z/binary/toolkit_gateway",
+    "sha256": "102598814924ba043ade5d772e6dc44b684c54cd2bd7707a74ca4f553ed645c8",
     "size": 2544390736
   },
   "kind": "meerkat_connect_strip_debug_result",
   "output": {
     "path": "/mnt/connect-release/a1/out/derived-gateway/toolkit_gateway",
-    "sha256": "b9b2205afb95c1c9aebb20e2bdf0ccd8040de1f54b737f3acfa13cf8f574d13b",
+    "sha256": "1bf67a1966621cad906a899793179b3e0f9c2d894574a1ae8860b34540af7453",
     "size": 898696272
   },
   "output_mode": "0o555",
   "schema_version": 1,
-  "seconds": 4.17,
-  "start_sha256": "d7c2449ea4abe3d13ba2ed450a99ffd685a773690b269625c0a89c26a989a4ec",
+  "seconds": 3.969,
+  "start_sha256": "88a4e37570af5576f6a1222327206cdfc00b312332bb56f6694d6661d1df28d7",
   "stderr": {
     "bytes": 0,
     "path": "/mnt/connect-release/a1/out/derived-gateway/stderr",

@@ -1,6 +1,7 @@
 """Actual provider projection functions with isolated, inert service owners."""
 import ast
 import asyncio
+import hashlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -9,6 +10,8 @@ import pytest
 from fastapi import HTTPException
 
 from test_meta_guide_runtime import selected
+from launchkit import bootstrap, guide_sdk
+from launchkit.connect_installer_caller import ExactFile
 from launchkit.provider_settings import ProviderSettings, ProviderSettingsUnavailable
 
 
@@ -64,8 +67,27 @@ def test_saved_provider_conflict_is_exposed_without_rebinding_native_history(sel
     assert not environment and not settings.root.exists()
 
 
-def test_previous_setup_generation_lends_settings_without_binding_the_fresh_one(selected, tmp_path, monkeypatch):
-    from launchkit import guide_sdk
+@pytest.fixture
+def selected_meta_094(tmp_path, monkeypatch):
+    """The launcher's original selection of Meta 0.9.4, whose setup team
+    starts generation v2. The release is pinned before the selection is built,
+    the same way test_meta_guide_runtime.selected builds it."""
+    monkeypatch.setattr(guide_sdk, "SELECTED_VERSION", "0.9.4")
+    monkeypatch.setattr(guide_sdk, "CORE_REQUIREMENT", "=0.9.4")
+    tmp_path.chmod(0o700)
+    gateway = tmp_path / "inert-rpc-gateway"
+    gateway.write_bytes(b"inert test fixture, never execute\n")
+    gateway.chmod(0o700)
+    selection = bootstrap.SelectedGuideRuntime(
+        ExactFile(gateway, hashlib.sha256(gateway.read_bytes()).hexdigest()),
+        guide_sdk.SELECTED_VERSION, guide_sdk.SELECTED_VERSION, "a" * 40, "b" * 40,
+        {"provider": "openai", "model": "gpt-6.1-sol"},
+    )
+    monkeypatch.setattr(bootstrap, "_selected_guide_runtime", selection)
+    return selection
+
+
+def test_previous_setup_generation_lends_settings_without_binding_the_fresh_one(selected_meta_094, tmp_path):
     scope, settings, environment = provider_functions(tmp_path)
     reads = []
     def unreadable(root):
@@ -73,7 +95,6 @@ def test_previous_setup_generation_lends_settings_without_binding_the_fresh_one(
         raise ProviderSettingsUnavailable("fictional unreadable saved definition")
     scope["canonical_setup_provider"] = unreadable
     (settings.root / "architect-runtime-meta-v1").mkdir(parents=True)
-    monkeypatch.setattr(guide_sdk, "SELECTED_VERSION", "0.9.4")
     public = scope["provider_public_status"]()
     assert reads == ["architect-runtime-meta-v1"]
     assert public["locked_provider"] == "openai" and public["provider_binding_error"] is None
@@ -86,11 +107,9 @@ def test_previous_setup_generation_lends_settings_without_binding_the_fresh_one(
     assert not environment
 
 
-def test_lent_provider_never_conflicts_with_the_selected_model_host(selected, tmp_path, monkeypatch):
-    from launchkit import guide_sdk
+def test_lent_provider_never_conflicts_with_the_selected_model_host(selected_meta_094, tmp_path):
     scope, settings, environment = provider_functions(tmp_path, locked="anthropic")
     (settings.root / "architect-runtime-meta-v1").mkdir(parents=True)
-    monkeypatch.setattr(guide_sdk, "SELECTED_VERSION", "0.9.4")
     public = scope["provider_public_status"]()
     assert public["provider_binding_error"] is None
     assert public["locked_provider"] == public["effective_provider"] == "openai"

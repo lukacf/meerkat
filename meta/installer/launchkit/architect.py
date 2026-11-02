@@ -290,7 +290,7 @@ def _startup_diagnostic(error: BaseException, phase: StartupPhase | None) -> tup
 
 
 def setup_runtime_directory(version: str | None = None) -> str:
-    """Name the native generation for the selected Guide release.
+    """Name the native generation for the launcher's selected runtime.
 
     Meta 0.9.4 refuses native state that an earlier release wrote until its
     one-time, offline storage migration has converted it. A setup team on that
@@ -298,7 +298,12 @@ def setup_runtime_directory(version: str | None = None) -> str:
     """
     from .deployment_updates import NATIVE_STORAGE_META_VERSION, meta_release
     if version is None:
-        from .guide_sdk import SELECTED_VERSION as version
+        from .bootstrap import selected_guide_runtime
+        selected = selected_guide_runtime()
+        if selected is not None:
+            version = selected.version
+        else:
+            from .guide_sdk import SELECTED_VERSION as version
     selected = meta_release(version)
     if selected is None:
         raise ValueError("The setup team needs its exact selected Meta release.")

@@ -9280,6 +9280,10 @@ impl MobBuilder {
         let supervisor_startup_guard =
             SupervisorBridgeStartupGuard::new(Arc::clone(&supervisor_bridge));
         let post_bridge_epoch_start = epoch_start;
+        // Every handle of this resume, the preview its pre-activation hook
+        // gets included, shares these observations with the actor.
+        let lifecycle_observations = Arc::new(super::MemberLifecycleObservations::default());
+        let resume_lifecycle_observations = Arc::clone(&lifecycle_observations);
         // Keep every fallible post-registration recovery step inside one
         // awaited result. Native startup then synchronously settles the
         // guard before returning an error; `Drop` remains only the
@@ -9459,7 +9463,6 @@ impl MobBuilder {
                 Arc::new(super::handle::ResumeOperationRegistry::default());
             let member_admission_backlog =
                 Arc::new(super::handle::MemberAdmissionBacklogGauge::default());
-            let lifecycle_observations = Arc::new(super::MemberLifecycleObservations::default());
             let mut wiring = RuntimeWiring {
                 roster: roster_state.clone(),
                 dsl_authority: initial_dsl_authority,
@@ -9854,6 +9857,15 @@ impl MobBuilder {
             .await
         }
         .await;
+        if start_result.is_err() {
+            // The resume failed before its actor ran (the actor is spawned
+            // last, and nothing after it fails), so no actor will ever
+            // record how it ended. The preview handle a pre-activation hook
+            // kept reads as a mob that stopped, never as a live one: a host
+            // binding that refuses to replace a live mob's binding admits a
+            // later resume of the same store.
+            resume_lifecycle_observations.record_actor_task_end(super::ActorTaskEnd::Lost);
+        }
         #[cfg(not(target_arch = "wasm32"))]
         let handle = supervisor_startup_guard.settle(start_result).await?;
         #[cfg(target_arch = "wasm32")]

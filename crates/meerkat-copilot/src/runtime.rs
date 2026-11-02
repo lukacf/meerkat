@@ -369,15 +369,19 @@ impl CopilotRuntime {
             env: env.clone(),
             transport: Arc::clone(&self.transport),
         });
-        // A token exchange that is temporarily unavailable does not fail the
-        // resolution: the account's routes resolve (without a model list when
-        // no token was minted yet) and the first request tries the exchange
-        // again, failing with a retryable error while the outage lasts. Every
-        // other failure, an account action included, fails it as before.
-        if let Err(error) = authorizer.prime().await
-            && !authorizer.is_recorded_exchange_outage(&error)
-        {
-            return Err(error);
+        // A token exchange that is temporarily unavailable does not fail a
+        // resolution that admits pending account limits (a build whose output
+        // budget is fixed before resolution): the account's routes resolve on
+        // its last known model list, or without one when no token was minted
+        // yet, and the first request tries the exchange again, failing with a
+        // retryable error while the outage lasts. Any other resolution fails
+        // during the outage, and every other failure, an account action
+        // included, fails it as before.
+        match authorizer.ensure_token().await {
+            Ok(_) => {}
+            Err(CopilotTokenError::ExchangeUnavailable(_))
+                if env.admits_pending_account_limits() => {}
+            Err(error) => return Err(error.into_provider()),
         }
         let metadata =
             meerkat_auth_core::resolver::finalize_auth_metadata(binding, AuthMetadata::default())?;
@@ -1340,7 +1344,32 @@ struct CopilotAccountState {
 struct CopilotRefreshOutcome {
     flight_id: u64,
     source_generation: u64,
-    error: Option<ProviderAuthError>,
+    error: Option<CopilotTokenError>,
+}
+
+/// Why the account has no token to serve. Callers that shared a refresh
+/// flight receive its leader's verdict.
+#[derive(Clone)]
+enum CopilotTokenError {
+    /// The token exchange failed transiently and no valid token is left. The
+    /// account recorded the outage; the next use tries the exchange again.
+    ExchangeUnavailable(ProviderAuthError),
+    /// Every other failure, an account action included.
+    Failed(ProviderAuthError),
+}
+
+impl From<ProviderAuthError> for CopilotTokenError {
+    fn from(error: ProviderAuthError) -> Self {
+        Self::Failed(error)
+    }
+}
+
+impl CopilotTokenError {
+    fn into_provider(self) -> ProviderAuthError {
+        match self {
+            Self::ExchangeUnavailable(error) | Self::Failed(error) => error,
+        }
+    }
 }
 
 struct CopilotRefreshFlight<'a>(&'a CopilotAccountState);
@@ -1436,7 +1465,10 @@ pub struct CopilotAuthorizer {
 
 impl CopilotAuthorizer {
     pub async fn prime(&self) -> Result<(), ProviderAuthError> {
-        self.ensure_token().await.map(|_| ())
+        self.ensure_token()
+            .await
+            .map(|_| ())
+            .map_err(CopilotTokenError::into_provider)
     }
 
     pub fn credential_identity(&self) -> &AuthCredentialIdentity {
@@ -1459,20 +1491,6 @@ impl CopilotAuthorizer {
             .map(|cached| cached.api_base.clone())
     }
 
-    /// Whether `error` is the transient token exchange failure the account
-    /// recorded because it left no token to serve.
-    fn is_recorded_exchange_outage(&self, error: &ProviderAuthError) -> bool {
-        let ProviderAuthError::SourceResolutionFailed(message) = error else {
-            return false;
-        };
-        self.state
-            .cache
-            .read()
-            .as_ref()
-            .and_then(|cached| cached.exchange_unavailable.as_ref())
-            .is_some_and(|unavailable| &unavailable.message == message)
-    }
-
     /// Copilot refused the token of `generation` (a 401 on a request it
     /// signed). A late refusal of an older generation leaves a newer token
     /// alone.
@@ -1485,7 +1503,7 @@ impl CopilotAuthorizer {
         }
     }
 
-    async fn ensure_token(&self) -> Result<CachedTokenView, ProviderAuthError> {
+    async fn ensure_token(&self) -> Result<CachedTokenView, CopilotTokenError> {
         let entry_flight_id = self
             .state
             .last_refresh_outcome
@@ -1555,7 +1573,7 @@ impl CopilotAuthorizer {
         &self,
         source: &PersistedTokens,
         source_generation: u64,
-    ) -> Result<CachedTokenView, ProviderAuthError> {
+    ) -> Result<CachedTokenView, CopilotTokenError> {
         let now = (self.env.now)();
         if let Some(cached) = self.fresh_cached(source_generation, now) {
             if cached.model_discovery_due {
@@ -1601,7 +1619,7 @@ impl CopilotAuthorizer {
                 }
                 if reauth {
                     self.mark_account_reauth_required()?;
-                    return Err(ProviderAuthError::Auth(AuthError::UserReauthRequired));
+                    return Err(ProviderAuthError::Auth(AuthError::UserReauthRequired).into());
                 }
                 if remint {
                     return self.remint(source, source_generation).await;
@@ -1617,19 +1635,20 @@ impl CopilotAuthorizer {
     /// it is valid and was minted from this source credential, and the
     /// exchange is tried again after its `Retry-After` (or shortly). Once no
     /// such token is left, the failure is recorded on the account, so a turn
-    /// fails with its retryable class.
+    /// fails with its retryable class, and the caller receives
+    /// [`CopilotTokenError::ExchangeUnavailable`].
     async fn remint(
         &self,
         source: &PersistedTokens,
         source_generation: u64,
-    ) -> Result<CachedTokenView, ProviderAuthError> {
+    ) -> Result<CachedTokenView, CopilotTokenError> {
         let unavailable = match self.mint_and_cache_token(source, source_generation).await {
             Ok(view) => return Ok(view),
             Err(CopilotTokenExchangeError::Failed(error)) => {
                 if let Some(cached) = self.state.cache.write().as_mut() {
                     cached.exchange_unavailable = None;
                 }
-                return Err(error);
+                return Err(CopilotTokenError::Failed(error));
             }
             Err(CopilotTokenExchangeError::Unavailable(unavailable)) => unavailable,
         };
@@ -1653,7 +1672,7 @@ impl CopilotAuthorizer {
                 source.expires_at,
                 unavailable,
             ));
-            return Err(error);
+            return Err(CopilotTokenError::ExchangeUnavailable(error));
         };
         if cached.source_generation == source_generation && now < cached.expires_at {
             cached.refresh_at = exchange_retry_at(now, unavailable.retry_after, cached.expires_at);
@@ -1676,7 +1695,7 @@ impl CopilotAuthorizer {
             "Copilot token exchange failed transiently and no valid token is left; the turn fails with the retryable error and is retried"
         );
         cached.exchange_unavailable = Some(unavailable);
-        Err(error)
+        Err(CopilotTokenError::ExchangeUnavailable(error))
     }
 
     async fn mint_and_cache_token(
@@ -1991,7 +2010,7 @@ impl HttpAuthorizer for CopilotAuthorizer {
         self.ensure_token()
             .await
             .map(|_| ())
-            .map_err(auth_error_from_provider)
+            .map_err(|error| auth_error_from_provider(error.into_provider()))
     }
 
     async fn authorize(&self, request: &mut HttpAuthorizationRequest<'_>) -> Result<(), AuthError> {
@@ -2076,7 +2095,7 @@ impl CopilotAuthorizer {
         let token = self
             .ensure_token()
             .await
-            .map_err(auth_error_from_provider)?;
+            .map_err(|error| auth_error_from_provider(error.into_provider()))?;
         if !url_is_within_api_base(request.url, &token.api_base) {
             return Err(AuthError::Other(format!(
                 "Copilot authorizer refused URL outside resolved API base: {}",

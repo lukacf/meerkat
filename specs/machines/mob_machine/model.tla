@@ -5282,6 +5282,7 @@ EnsureMemberRunningMissing(agent_identity) ==
     /\ (coordinator_bound = TRUE)
     /\ ((agent_identity \in DOMAIN identity_to_runtime) = FALSE)
     /\ ((agent_identity \in DOMAIN identity_entry_origins) = FALSE)
+    /\ (((agent_identity \in identity_entry_tombstones) = FALSE) /\ ((agent_identity \in identity_entry_unreadable) = FALSE))
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ desired_members' = (desired_members \cup {agent_identity})

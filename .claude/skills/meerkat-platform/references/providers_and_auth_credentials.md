@@ -280,8 +280,14 @@ the token store. It sets `[realm.global] default_binding` if none is set.
   the newer token valid. When the lookup answers a token 403 or 404 (it may
   not answer a fine-grained token), the route uses it unnamed (no login or
   plan) on `https://api.githubcopilot.com` once the account's model list
-  loads there; a failed listing fails the request (`refresh_failed`), and a
-  401 from that listing refuses the token. Token routes send
+  loads there; a failed listing fails the request (`refresh_failed`). For a
+  user token, a 401 or 403 from the model listing is Copilot refusing the
+  token (`refresh_failed`, the lease untouched; after an unanswered lookup
+  the same token is asked about again after a minute); only the identity
+  lookup's own 401 marks a token revoked, and a later listing's 401 runs the
+  lookup again. A GitHub App installation token's listing 401 refuses it.
+  The routes of one account read the token from one credential source: a
+  route over another source is refused. Token routes send
   `Copilot-Integration-Id: copilot-developer-cli` (the device sign-in's
   routes `vscode-chat`, which Copilot refuses for a personal access token)
   unless the backend options set `integration_id`; the lookup sends none. A

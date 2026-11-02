@@ -88,8 +88,9 @@
 #   refused: exactly one arm answers every archive, unarchive and update
 #   (AuditArchiveExactlyOne), no member is seated under an archived
 #   identity (AuditArchivedNeverSeated), it keeps its name until its
-#   unarchive or removal (AuditArchivedKeepsItsName), an identity awaiting
-#   its preparation is never archived (AuditPendingNeverArchived), and the
+#   unarchive (in a running, authoritative mob with no changes hold) or its
+#   removal (AuditArchivedKeepsItsName), an identity awaiting its
+#   preparation is never archived (AuditPendingNeverArchived), and the
 #   update of an archived or pending identity changes its row only
 #   (AuditStoreUpdateKeepsStanding).
 # - preparation: a roster-owned identity whose rule requires its
@@ -130,12 +131,12 @@
 # - recovered: a store-owned identity replayed seated (recovered, bound and
 #   its peer endpoint recorded), its Present row followed by a removal's or
 #   an archive's row, the rows scanned before or after the replay, and the
-#   retirement the recovered mark owes, once the boot plan is sealed, to
-#   its terminal, running or stopped: exactly one arm answers every row
-#   (AuditRecoverExactlyOne), the removal's end tombstones the name
-#   (AuditRemovalTombstones), and the archived identity keeps it: no replay
-#   or seat puts a member under it (AuditArchivedNeverSeated,
-#   AuditArchivedKeepsItsName).
+#   retirement the recovered mark owes to its terminal, running or stopped,
+#   once the boot plan is sealed (a scope restriction: the order the shell
+#   keeps): exactly one arm answers every row (AuditRecoverExactlyOne), the
+#   removal's end tombstones the name (AuditRemovalTombstones), and no
+#   replay or seat puts a member under the archived identity
+#   (AuditArchivedNeverSeated).
 #
 # Every run checks every generated invariant (the created entries' among
 # them: tombstone_is_never_an_entry, entry_custodies_are_disjoint,
@@ -748,12 +749,15 @@ write_cfg() {
       spec="ArchiveSpec"
       # TLC reports the first property a step breaks in this order: a step
       # that seats an archived identity breaks both archive properties, and
-      # is reported as the seat.
+      # is reported as the seat; an update that changes an archived
+      # identity's standing in a held mob (the run declares without the
+      # change's admission, which refuses a held change) breaks the name
+      # property's restore branch too, and is reported as the update.
       run_properties="
   AuditArchivedNeverSeated
+  AuditStoreUpdateKeepsStanding
   AuditArchivedKeepsItsName
-  AuditPendingNeverArchived
-  AuditStoreUpdateKeepsStanding"
+  AuditPendingNeverArchived"
       run_invariants="
   AuditArchiveExactlyOne"
       ;;
@@ -795,10 +799,15 @@ write_cfg() {
       ;;
     recovered)
       spec="RecoveredSpec"
+      # Not AuditArchivedKeepsItsName, the archive run's: this run scans a
+      # Present row before a removal's or an archive's row of the same
+      # identity (for the Created entry a boot's journal replay records),
+      # where a boot's scan sends one row per identity, and a Present row
+      # scanned after an archived one owes the archived identity its seat
+      # again (the scan's Retired arm), in a stopped mob too: no unarchive.
       run_properties="
   AuditRemovalTombstones
-  AuditArchivedNeverSeated
-  AuditArchivedKeepsItsName"
+  AuditArchivedNeverSeated"
       run_invariants="
   AuditRecoverExactlyOne"
       ;;
@@ -1109,10 +1118,11 @@ PY
 
   # usage: mutate <run> <name> <expected violation regex>; reads a python
   # edit on stdin, run after the shared helpers, that rewrites model.tla in
-  # place and must find each anchor it names. A mutant runs without its
-  # run's ENABLED totality invariants unless it expects one of them (they
-  # cost most of a deep run's time), and without its action properties
-  # unless it expects one of them; a mutant that expects a generated
+  # place and must find each anchor it names. A mutant that expects a
+  # totality invariant (an ExactlyOne) runs with everything its run checks.
+  # Any other runs without its run's ENABLED totality invariants (they cost
+  # most of a deep run's time), and, unless it expects an action property,
+  # without its action properties too: a mutant that expects a generated
   # invariant or an action property then meets it even where the totality
   # would refuse an earlier state first (a second arm answering a row), and
   # one that expects an invariant where another step's property would.

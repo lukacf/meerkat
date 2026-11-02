@@ -1144,12 +1144,13 @@ AuditArchiveExactlyOne ==
 \* An archived identity keeps its name and its entry until its unarchive or
 \* its removal: nothing else unseats its cause, and no member is seated
 \* under it. A step leaves it archived under its origin, owes it its seat
-\* again on its record (its unarchive's change), or ends its entry with its
-\* name tombstoned (its removal's). No disjunct names an arm: an arm's
-\* action holds for any step with its successor, so it would pass another
-\* input's step that changed as it does. Which input took the step is the
-\* input's own property's to pin (AuditStoreUpdateKeepsStanding for the
-\* update).
+\* again on its record in a running, authoritative mob with no changes hold
+\* (its unarchive's change, under its unarchive's facts), or ends its entry
+\* with its name tombstoned (its removal's). No disjunct names an arm: an
+\* arm's action holds for any step with its successor, so it would pass
+\* another input's step that changed as it does. Which input took the step
+\* is the input's own property's to pin (AuditStoreUpdateKeepsStanding for
+\* the update).
 AuditArchivedNeverSeated ==
     [][\A id \in CreatedIds : Unseated(id) = Some("Archived") => ~(id \in DOMAIN identity_to_runtime')]_vars
 AuditArchivedKeepsItsName ==
@@ -1159,6 +1160,9 @@ AuditArchivedKeepsItsName ==
               \/ /\ UnseatedNext(id) = Some("SeatOwed")
                  /\ OriginNext(id) = Origin(id)
                  /\ RecordNext(id) = Record(id)
+                 /\ phase = "Running"
+                 /\ composition_authority = "Authoritative"
+                 /\ identity_changes_held = FALSE
               \/ /\ OriginNext(id) = None
                  /\ id \in identity_entry_tombstones'
       ]_vars
@@ -1593,10 +1597,12 @@ NotAuditWitnessUnlistLeavesCreated == [][~AuditWitnessUnlistLeavesCreated]_vars
 (* The recovered run.                                                      *)
 (***************************************************************************)
 
-\* The shell retires the member a recovered mark owes once the start sealed
-\* its boot plan, so no row is scanned after the retirement: member 1's
-\* first incarnation (AFirst), by named wrappers of one arm each, which the
-\* runner's alias table counts for the arm they wrap.
+\* The retirement a recovered mark owes, of member 1's first incarnation
+\* (AFirst), by named wrappers of one arm each, which the runner's alias
+\* table counts for the arm they wrap. Their seal conjunct is a scope
+\* restriction of the run, not a guard of MobMachine: the shell retires the
+\* member once the start sealed its boot plan (an order the shell keeps),
+\* so the run scans no row after the retirement.
 RecoveredRetireReleasing ==
     /\ boot_plan_sealed = TRUE
     /\ RetireRunningReleasingArchiveOnly(AuditMob, Rid1, Id1, 0, Some(Sess1), Some(Sess1))

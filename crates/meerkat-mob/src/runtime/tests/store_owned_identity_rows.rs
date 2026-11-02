@@ -3830,7 +3830,11 @@ impl HeldMob {
     }
 
     async fn new(label: &str) -> Self {
-        let storage = MobStorage::in_memory();
+        Self::with_storage(label, MobStorage::in_memory()).await
+    }
+
+    /// [`Self::new`] over `storage`.
+    async fn with_storage(label: &str, storage: MobStorage) -> Self {
         let service = Arc::new(MockSessionService::new());
         Self::compose(&service);
         let handle = MobBuilder::new(store_owned_definition(label), storage.clone())
@@ -4347,6 +4351,254 @@ async fn the_settle_activates_exactly_the_held_attempt_and_a_stale_attempt_is_re
         IdentityChangeRefusal::PreparationNotPending {
             identity: id("built")
         }
+    );
+}
+
+/// The built-in identity store of a row's storage, whose change commit
+/// fails once, writing nothing, for a settle's receipt that accepts an
+/// activation (its entry `Activating`), as a store write that fails after
+/// the activation was sent.
+struct FailingActivationCommit {
+    inner: Arc<dyn crate::store::MobIdentityMemberStore>,
+    armed: AtomicBool,
+}
+
+impl FailingActivationCommit {
+    /// `storage` with its identity store wrapped, the failure armed.
+    fn wrap(storage: &mut MobStorage) -> Arc<Self> {
+        let failing = Arc::new(Self {
+            inner: storage
+                .identity_member
+                .clone()
+                .expect("the in-memory storage has the identity member store"),
+            armed: AtomicBool::new(true),
+        });
+        storage.identity_member =
+            Some(Arc::clone(&failing) as Arc<dyn crate::store::MobIdentityMemberStore>);
+        failing
+    }
+
+    fn accepts_an_activation(write: &crate::store::IdentityChangeWrite) -> bool {
+        write.receipt.change == IdentityChangeKind::SettlePreparation
+            && write
+                .receipt
+                .identities
+                .iter()
+                .any(|entry| entry.outcome == IdentityChangeEntryOutcome::Activating)
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::store::MobIdentityMemberStore for FailingActivationCommit {
+    async fn observe_identity_member_target(
+        &self,
+        mob_id: &MobId,
+        identity: &AgentIdentity,
+    ) -> Result<crate::store::IdentityMemberTargetObservation, MobStoreError> {
+        self.inner
+            .observe_identity_member_target(mob_id, identity)
+            .await
+    }
+
+    async fn commit_identity_member_spawned(
+        &self,
+        permit: &crate::identity::IdentityActuationPermit,
+        event: &crate::event::NewMobEvent,
+    ) -> Result<crate::store::IdentityMemberEventCommitOutcome, MobStoreError> {
+        self.inner
+            .commit_identity_member_spawned(permit, event)
+            .await
+    }
+
+    async fn observe_identity_wiring_target(
+        &self,
+        mob_id: &MobId,
+        identity: &AgentIdentity,
+    ) -> Result<crate::store::IdentityWiringTargetObservation, MobStoreError> {
+        self.inner
+            .observe_identity_wiring_target(mob_id, identity)
+            .await
+    }
+
+    async fn commit_identity_wiring_event(
+        &self,
+        permit: &crate::identity::IdentityActuationPermit,
+        event: &crate::event::NewMobEvent,
+    ) -> Result<crate::store::IdentityWiringEventCommitOutcome, MobStoreError> {
+        self.inner.commit_identity_wiring_event(permit, event).await
+    }
+
+    async fn read_member_binding_journal(
+        &self,
+        mob_id: &MobId,
+    ) -> Result<crate::store::MemberBindingJournalRead, MobStoreError> {
+        self.inner.read_member_binding_journal(mob_id).await
+    }
+
+    async fn read_member_binding_journal_from(
+        &self,
+        mob_id: &MobId,
+        from_cursor: u64,
+    ) -> Result<crate::store::MemberBindingJournalRead, MobStoreError> {
+        self.inner
+            .read_member_binding_journal_from(mob_id, from_cursor)
+            .await
+    }
+
+    async fn commit_identity_change(
+        &self,
+        write: &crate::store::IdentityChangeWrite,
+    ) -> Result<crate::store::IdentityChangeCommit, MobStoreError> {
+        if Self::accepts_an_activation(write) && self.armed.swap(false, Ordering::SeqCst) {
+            return Err(MobStoreError::WriteFailed(
+                "the row's store refused the settle's write".to_string(),
+            ));
+        }
+        self.inner.commit_identity_change(write).await
+    }
+
+    async fn settle_created_identity_row(
+        &self,
+        row: &crate::store::CreatedIdentityRowWrite,
+    ) -> Result<bool, MobStoreError> {
+        self.inner.settle_created_identity_row(row).await
+    }
+
+    async fn observe_identity_change_receipt(
+        &self,
+        mob_id: &MobId,
+        operation_id: &str,
+    ) -> Result<Option<crate::IdentityChangeReceipt>, MobStoreError> {
+        self.inner
+            .observe_identity_change_receipt(mob_id, operation_id)
+            .await
+    }
+
+    async fn scan_created_identity_rows(
+        &self,
+        mob_id: &MobId,
+        after: Option<&crate::store::IdentityIntentScanCursor>,
+        limit: usize,
+    ) -> Result<crate::store::CreatedIdentityScanPage, MobStoreError> {
+        self.inner
+            .scan_created_identity_rows(mob_id, after, limit)
+            .await
+    }
+
+    async fn observe_created_identity(
+        &self,
+        mob_id: &MobId,
+        identity: &AgentIdentity,
+    ) -> Result<Option<CreatedIdentityObservation>, MobStoreError> {
+        self.inner.observe_created_identity(mob_id, identity).await
+    }
+}
+
+/// Row (ruling 44): a store write that fails after the activation was sent
+/// ends the attempt as a failed publication and commits nothing. The settle
+/// answers the failure; MobMachine still holds the attempt unaccepted, so
+/// the publication's membership commit is refused, and the hold's end (a
+/// failed publication) ends the attempt. No member row is journaled, the
+/// identity is still pending, no receipt is stored, and the row keeps
+/// attempt 1. A retry naming attempt 1 is refused `stale_attempt` with no
+/// current attempt, and a new construction holds attempt 2 and activates.
+///
+/// A row for the confirmed path (no RED leg: it pins behaviour the commits
+/// before it built).
+#[tokio::test]
+async fn a_store_write_failing_after_the_activation_send_ends_a_failed_publication_and_commits_nothing()
+ {
+    let mut storage = MobStorage::in_memory();
+    let failing = FailingActivationCommit::wrap(&mut storage);
+    let mob = HeldMob::with_storage("activation-write-fails", storage).await;
+    mob.create_constructed("built").await;
+    let held = mob
+        .construct("construct-built", "built")
+        .await
+        .expect("the construction is held");
+    assert_eq!(held.attempt(), 1);
+    let settled = settle(&mob.handle, "settle-built", "built", Some(1)).await;
+    assert!(settled.is_err(), "{settled:?}");
+    assert!(
+        !failing.armed.load(Ordering::SeqCst),
+        "the store refused the settle's write"
+    );
+
+    // The hold's end: the publication fails, and the attempt ends.
+    let dsl_identity = crate::machines::mob_machine::AgentIdentity::from_domain(&id("built"));
+    let deadline = tokio::time::Instant::now() + STEP;
+    loop {
+        let open = {
+            let state = mob.handle.machine_state_watch_rx.borrow();
+            state
+                .identity_entry_constructions_held
+                .contains_key(&dsl_identity)
+                || state
+                    .identity_entry_constructions_activating
+                    .contains_key(&dsl_identity)
+        };
+        if !open {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the attempt never ended"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let journal = mob
+        .storage
+        .events
+        .replay_all()
+        .await
+        .expect("read the journal");
+    assert!(
+        !journals_a_member(&journal, "built"),
+        "no member was published"
+    );
+    assert_eq!(
+        mob.standing("built"),
+        Some(EntryStanding::Unseated(
+            UnseatedEntryCause::PreparationPending
+        ))
+    );
+    assert_eq!(
+        mob.handle
+            .identity_operation("settle-built")
+            .await
+            .expect("the receipt read answers"),
+        None
+    );
+    assert_eq!(
+        row_presence(&mob.handle, "built").await,
+        CreatedIdentityPresence::PendingPreparation {
+            attempt: 1,
+            constructed: true,
+        }
+    );
+    assert_eq!(
+        refusal(settle(&mob.handle, "settle-built-retry", "built", Some(1)).await),
+        IdentityChangeRefusal::StaleAttempt {
+            identity: id("built"),
+            current: None,
+        }
+    );
+
+    let again = mob
+        .construct("construct-built-again", "built")
+        .await
+        .expect("a new construction is held");
+    assert_eq!(again.attempt(), 2);
+    let settled = settle(&mob.handle, "settle-built-again", "built", Some(2))
+        .await
+        .expect("the settle activates the new attempt");
+    assert!(
+        matches!(
+            settled.settlement,
+            Some(crate::runtime::PreparationSettlement::Activated { attempt: 2 })
+        ),
+        "{:?}",
+        settled.settlement
     );
 }
 

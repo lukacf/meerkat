@@ -430,7 +430,8 @@ and the account's lifecycle (`absent` before a process first uses a token from
 the environment, then `valid`, `reauth_required` or `released`).
 `rkat auth test copilot_openai` resolves the route and prints `account:` and
 `plan:`; for a GitHub App installation token, or a token GitHub's identity
-lookup does not answer, it prints that GitHub named no account, and no plan.
+lookup does not answer, it prints `account: not named by GitHub (...)` and no
+`plan:`.
 `rkat auth login copilot --non-interactive` names such an account
 `an unnamed GitHub account` (an installation token
 `github.com installation (server-to-server)`). A Rust host checks a token

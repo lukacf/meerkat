@@ -269,10 +269,12 @@ the token store. It sets `[realm.global] default_binding` if none is set.
   `COPILOT_GITHUB_TOKEN`). `--from-env` writes the three routes reading
   `COPILOT_GITHUB_TOKEN`, then `GH_TOKEN`, then `GITHUB_TOKEN` and stores
   nothing; without it the token from `--secret` or stdin is checked, then
-  stored under `global:account:github_copilot` with the login as its account
-  id. The token is the Copilot API bearer, identity and API host come from
-  GitHub's `copilot_internal/user`, a classic `ghp_` token is refused, and a
-  token GitHub refuses moves the account to `reauth_required`; a refusal of an
+  stored under `global:account:github_copilot` with the login, when GitHub
+  names one, as its account id. The token is the Copilot API bearer; the
+  login, plan and API host come from GitHub's `copilot_internal/user` when
+  that lookup answers the token (for a 403 or 404 see below). A classic
+  `ghp_` token is refused, and a token GitHub refuses moves the account to
+  `reauth_required`; a refusal of an
   earlier token that a newer one already replaced fails only that request
   (and requests waiting on the same lookup) as `stale_credential` and leaves
   the newer token valid. When the lookup answers a token 403 or 404 (it may

@@ -1399,6 +1399,89 @@ impl AnthropicClient {
             .is_some_and(|authorizer| authorizer.label() == CLAUDE_AI_OAUTH_AUTHORIZER_LABEL)
     }
 
+    /// Remove from `diagnostic`, text a response carried, any credential the
+    /// authorizer signed the request with: a provider, proxy or gateway can
+    /// echo the request's headers in an error.
+    fn redact_diagnostic(&self, diagnostic: &mut String) {
+        if let Some(authorizer) = &self.authorizer {
+            authorizer.redact_response_diagnostic(diagnostic);
+        }
+    }
+
+    /// `diagnostic` redacted as [`Self::redact_diagnostic`] does, for a log
+    /// field.
+    fn redacted(&self, diagnostic: &str) -> String {
+        let mut diagnostic = diagnostic.to_owned();
+        self.redact_diagnostic(&mut diagnostic);
+        diagnostic
+    }
+
+    /// `error` with every field that can carry provider text redacted as
+    /// [`Self::redact_diagnostic`] does; its class is kept.
+    fn redacted_error(&self, mut error: LlmError) -> LlmError {
+        error.redact_diagnostics(|message| self.redact_diagnostic(message));
+        error
+    }
+
+    /// Sign a Messages request: with an authorizer, the headers it adds for
+    /// this request (its `anthropic-beta` values merged into
+    /// `request_betas`, never sent twice); without one, the `x-api-key`
+    /// header. Returns the request and the authorization's receipt.
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn apply_authorization(
+        &self,
+        mut request: reqwest::RequestBuilder,
+        url: &str,
+        has_images: bool,
+        request_betas: &mut Vec<String>,
+    ) -> Result<
+        (
+            reqwest::RequestBuilder,
+            meerkat_core::HttpAuthorizationReceipt,
+        ),
+        LlmError,
+    > {
+        let Some(authorizer) = &self.authorizer else {
+            return Ok((
+                request.header("x-api-key", http::sensitive_header_value(&self.api_key)?),
+                meerkat_core::HttpAuthorizationReceipt::untracked(),
+            ));
+        };
+        let mut extra = Vec::new();
+        authorizer
+            .append_content_headers(
+                meerkat_core::HttpAuthorizationContent { has_images },
+                &mut extra,
+            )
+            .map_err(|error| LlmError::AuthenticationFailed {
+                message: error.to_string(),
+            })?;
+        let receipt = authorizer
+            .authorize_with_receipt(&mut meerkat_core::HttpAuthorizationRequest {
+                method: "POST",
+                url,
+                headers: &mut extra,
+            })
+            .await
+            .map_err(LlmError::from_authorizer)?;
+        for (name, value) in extra {
+            if name.eq_ignore_ascii_case("anthropic-beta") {
+                for beta in value
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|beta| !beta.is_empty())
+                {
+                    if !request_betas.iter().any(|existing| existing == beta) {
+                        request_betas.push(beta.to_string());
+                    }
+                }
+            } else {
+                request = request.header(name, http::sensitive_header_value(&value)?);
+            }
+        }
+        Ok((request, receipt))
+    }
+
     async fn send_messages_request(
         &self,
         url: &str,
@@ -1477,55 +1560,18 @@ impl AnthropicClient {
         let mut request_betas = betas.to_vec();
         #[cfg(target_arch = "wasm32")]
         let request_betas = betas.to_vec();
-        let mut request = http
+        let request = http
             .post(url)
             .header("anthropic-version", "2023-06-01")
             .header("Content-Type", "application/json");
         #[cfg(not(target_arch = "wasm32"))]
-        let receipt = if let Some(authorizer) = &self.authorizer {
-            let mut extra = Vec::new();
-            authorizer
-                .append_content_headers(
-                    meerkat_core::HttpAuthorizationContent { has_images },
-                    &mut extra,
-                )
-                .map_err(|error| LlmError::AuthenticationFailed {
-                    message: error.to_string(),
-                })?;
-            let receipt = authorizer
-                .authorize_with_receipt(&mut meerkat_core::HttpAuthorizationRequest {
-                    method: "POST",
-                    url,
-                    headers: &mut extra,
-                })
-                .await
-                .map_err(LlmError::from_authorizer)?;
-            for (name, value) in extra {
-                if name.eq_ignore_ascii_case("anthropic-beta") {
-                    for beta in value
-                        .split(',')
-                        .map(str::trim)
-                        .filter(|beta| !beta.is_empty())
-                    {
-                        if !request_betas.iter().any(|existing| existing == beta) {
-                            request_betas.push(beta.to_string());
-                        }
-                    }
-                } else {
-                    request = request.header(name, value);
-                }
-            }
-            receipt
-        } else {
-            request = request.header("x-api-key", &self.api_key);
-            meerkat_core::HttpAuthorizationReceipt::untracked()
-        };
+        let (mut request, receipt) = self
+            .apply_authorization(request, url, has_images, &mut request_betas)
+            .await?;
         #[cfg(target_arch = "wasm32")]
-        {
-            request = request
-                .header("x-api-key", &self.api_key)
-                .header("anthropic-dangerous-direct-browser-access", "true");
-        }
+        let mut request = request
+            .header("x-api-key", http::sensitive_header_value(&self.api_key)?)
+            .header("anthropic-dangerous-direct-browser-access", "true");
         #[cfg(target_arch = "wasm32")]
         let receipt = meerkat_core::HttpAuthorizationReceipt::untracked();
         if !request_betas.is_empty() {
@@ -1825,15 +1871,16 @@ impl AnthropicClient {
                 Ok(response.bytes_stream())
             } else {
                 let headers = response.headers().clone();
-                let text = response.text().await.unwrap_or_default();
-                Err(
+                let mut text = response.text().await.unwrap_or_default();
+                self.redact_diagnostic(&mut text);
+                Err(self.redacted_error(
                     crate::request_support::provider_forced_tool_choice_rejection(
                         request,
                         status_code,
                         &text,
                     )
                     .unwrap_or_else(|| LlmError::from_http_response(status_code, text, &headers)),
-                )
+                ))
             };
             let mut stream = stream_result?;
             let mut lines = meerkat_llm_core::streaming::Utf8LineBuffer::with_capacity(SSE_BUFFER_CAPACITY);
@@ -2189,9 +2236,11 @@ impl AnthropicClient {
                                 .and_then(|t| t.as_str())
                                 .unwrap_or("unknown");
 
+                            let logged_type = self.redacted(error_type);
+                            let logged_message = self.redacted(error_msg);
                             tracing::error!(
-                                error_type,
-                                error_msg,
+                                error_type = logged_type.as_str(),
+                                error_msg = logged_message.as_str(),
                                 "Anthropic streaming error"
                             );
 
@@ -2336,7 +2385,12 @@ impl AnthropicClient {
 
         });
 
-        streaming::ensure_terminal_done(inner)
+        // Every error the stream ends with is redacted here, whichever path
+        // built it (a rejection body, an error event, a parse failure).
+        streaming::redact_stream_diagnostics(
+            streaming::ensure_terminal_done(inner),
+            self.authorizer.as_deref(),
+        )
     }
 }
 
@@ -5199,6 +5253,319 @@ mod tests {
             2
         );
         server.abort();
+    }
+
+    /// Every Authorization value the canary authorizer signs with carries
+    /// this canary.
+    const AUTHORIZATION_CANARY: &str = "c4n4ryProviderBearer";
+
+    /// Signs every request with `Authorization: Bearer <canary>`, as a
+    /// dynamic authorizer (a GitHub Copilot operator token, a cloud bearer)
+    /// does.
+    struct CanaryBearerAuthorizer;
+
+    #[async_trait::async_trait]
+    impl meerkat_core::HttpAuthorizer for CanaryBearerAuthorizer {
+        async fn authorize(
+            &self,
+            request: &mut meerkat_core::HttpAuthorizationRequest<'_>,
+        ) -> Result<(), meerkat_core::AuthError> {
+            request.headers.push((
+                "Authorization".to_string(),
+                format!("Bearer {AUTHORIZATION_CANARY}"),
+            ));
+            Ok(())
+        }
+
+        fn redact_response_diagnostic(&self, diagnostic: &mut String) {
+            *diagnostic = diagnostic.replace(AUTHORIZATION_CANARY, "<redacted>");
+        }
+
+        fn label(&self) -> &'static str {
+            "canary-bearer-test"
+        }
+    }
+
+    /// The Authorization value an authorizer supplies is marked sensitive on
+    /// the request the Messages client builds, so the request's `Debug` (and
+    /// HTTP/2 header compression) never keeps the credential.
+    #[tokio::test]
+    async fn authorizer_authorization_header_is_sensitive() {
+        let client = AnthropicClient::builder(String::new())
+            .base_url("http://127.0.0.1:9".to_string())
+            .authorizer(Arc::new(CanaryBearerAuthorizer))
+            .build()
+            .expect("client");
+        let url = client.messages_endpoint();
+        let mut betas = Vec::new();
+        let (builder, _) = client
+            .apply_authorization(reqwest::Client::new().post(&url), &url, false, &mut betas)
+            .await
+            .expect("the authorizer signs the request");
+        let request = builder.build().expect("the request builds");
+        let authorization = request
+            .headers()
+            .get(reqwest::header::AUTHORIZATION)
+            .expect("an Authorization header");
+        assert_eq!(
+            authorization.to_str().ok(),
+            Some(format!("Bearer {AUTHORIZATION_CANARY}").as_str())
+        );
+        assert!(
+            authorization.is_sensitive(),
+            "the authorizer's Authorization value must be marked sensitive"
+        );
+        assert!(
+            !format!("{request:?}").contains(AUTHORIZATION_CANARY),
+            "{request:?}"
+        );
+    }
+
+    /// A static API key travels in an `x-api-key` value marked sensitive, as
+    /// an authorizer's credential does.
+    #[tokio::test]
+    async fn static_api_key_header_is_sensitive() {
+        const KEY_CANARY: &str = "c4n4ryStaticXApiKey";
+        let client = AnthropicClient::builder(KEY_CANARY.to_string())
+            .base_url("http://127.0.0.1:9".to_string())
+            .build()
+            .expect("client");
+        let url = client.messages_endpoint();
+        let mut betas = Vec::new();
+        let (builder, _) = client
+            .apply_authorization(reqwest::Client::new().post(&url), &url, false, &mut betas)
+            .await
+            .expect("the key signs the request");
+        let request = builder.build().expect("the request builds");
+        let key = request
+            .headers()
+            .get("x-api-key")
+            .expect("an x-api-key header");
+        assert_eq!(key.to_str().ok(), Some(KEY_CANARY));
+        assert!(
+            key.is_sensitive(),
+            "the static key's x-api-key value must be marked sensitive"
+        );
+        assert!(!format!("{request:?}").contains(KEY_CANARY), "{request:?}");
+    }
+
+    /// Records the fields of every Meerkat event and span as text.
+    #[derive(Clone, Default)]
+    struct LogCapture(Arc<Mutex<String>>);
+
+    impl LogCapture {
+        fn text(&self) -> String {
+            self.0.lock().unwrap().clone()
+        }
+    }
+
+    struct CaptureVisitor<'a>(&'a mut String);
+
+    impl tracing::field::Visit for CaptureVisitor<'_> {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            use std::fmt::Write as _;
+            let _ = write!(self.0, " {}={value:?}", field.name());
+        }
+    }
+
+    struct CaptureSubscriber {
+        log: LogCapture,
+        next_span: std::sync::atomic::AtomicU64,
+    }
+
+    impl CaptureSubscriber {
+        fn dispatch(log: LogCapture) -> tracing::Dispatch {
+            tracing::Dispatch::new(Self {
+                log,
+                next_span: std::sync::atomic::AtomicU64::new(1),
+            })
+        }
+    }
+
+    impl tracing::Subscriber for CaptureSubscriber {
+        fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+            metadata.target().starts_with("meerkat")
+        }
+
+        fn new_span(&self, span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            span.record(&mut CaptureVisitor(&mut self.log.0.lock().unwrap()));
+            tracing::span::Id::from_u64(
+                self.next_span
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            )
+        }
+
+        fn record(&self, _span: &tracing::span::Id, values: &tracing::span::Record<'_>) {
+            values.record(&mut CaptureVisitor(&mut self.log.0.lock().unwrap()));
+        }
+
+        fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
+
+        fn event(&self, event: &tracing::Event<'_>) {
+            let mut log = self.log.0.lock().unwrap();
+            event.record(&mut CaptureVisitor(&mut log));
+            log.push('\n');
+        }
+
+        fn enter(&self, _span: &tracing::span::Id) {}
+
+        fn exit(&self, _span: &tracing::span::Id) {}
+    }
+
+    /// How the echoing upstream answers. Every answer carries the request's
+    /// Authorization value, as a proxy or gateway that echoes the request's
+    /// headers in an error does.
+    #[derive(Debug, Clone, Copy)]
+    enum Echo {
+        /// HTTP 500 whose error message carries the value.
+        RejectionBody,
+        /// HTTP 400 policy stop whose message carries the value with its
+        /// first character JSON-escaped: only the decoded message holds it.
+        EscapedPolicyStop,
+        /// HTTP 200 stream whose `error` event carries the value.
+        StreamErrorEvent,
+    }
+
+    async fn spawn_echoing_messages_server(echo: Echo) -> (String, tokio::task::JoinHandle<()>) {
+        let app = Router::new().route(
+            "/v1/messages",
+            post(move |headers: axum::http::HeaderMap| async move {
+                let authorization = headers
+                    .get("authorization")
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or_default()
+                    .to_string();
+                let message = format!("upstream echo: {authorization}");
+                match echo {
+                    Echo::RejectionBody => (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(serde_json::json!({
+                            "type": "error",
+                            "error": {"type": "api_error", "message": message},
+                        })),
+                    )
+                        .into_response(),
+                    Echo::EscapedPolicyStop => {
+                        let escaped = message.replacen(
+                            AUTHORIZATION_CANARY,
+                            &format!(
+                                "\\u{:04x}{}",
+                                AUTHORIZATION_CANARY.as_bytes()[0],
+                                &AUTHORIZATION_CANARY[1..]
+                            ),
+                            1,
+                        );
+                        (
+                            StatusCode::BAD_REQUEST,
+                            [("content-type", "application/json")],
+                            format!(
+                                r#"{{"error":{{"code":"misalignment_policy_violation","message":"{escaped}"}}}}"#
+                            ),
+                        )
+                            .into_response()
+                    }
+                    Echo::StreamErrorEvent => {
+                        let event = serde_json::json!({
+                            "type": "error",
+                            "error": {"type": "api_error", "message": message},
+                        });
+                        (
+                            [("content-type", "text/event-stream")],
+                            format!("data: {event}\n\n"),
+                        )
+                            .into_response()
+                    }
+                }
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind echoing server");
+        let addr = listener.local_addr().expect("local addr");
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve echoing server");
+        });
+        (format!("http://{addr}"), handle)
+    }
+
+    /// A provider that echoes the request's Authorization value in a
+    /// rejection body, a policy stop or a stream `error` event never puts the
+    /// authorizer's credential in the error the Messages client returns (its
+    /// `Display`, `Debug` or wire JSON) or in a field it logs. The echo
+    /// itself still reaches the error, and each error keeps its class.
+    #[tokio::test]
+    async fn echoed_authorization_stays_out_of_messages_errors_and_logs() {
+        let log = LogCapture::default();
+        let capture = CaptureSubscriber::dispatch(log.clone());
+        // A second registered dispatcher makes callsite interest come from
+        // every dispatcher, so a callsite first reached under no subscriber
+        // still reaches this one.
+        let _anchor = CaptureSubscriber::dispatch(LogCapture::default());
+        let _guard = tracing::dispatcher::set_default(&capture);
+
+        for echo in [
+            Echo::RejectionBody,
+            Echo::EscapedPolicyStop,
+            Echo::StreamErrorEvent,
+        ] {
+            let (base_url, server) = spawn_echoing_messages_server(echo).await;
+            let client = AnthropicClient::builder(String::new())
+                .base_url(base_url)
+                .authorizer(Arc::new(CanaryBearerAuthorizer))
+                .build()
+                .expect("client");
+            let request = LlmRequest::new(
+                "claude-sonnet-4-5",
+                vec![Message::User(UserMessage::text("hello"))],
+            );
+            let events = client.stream(&request).collect::<Vec<_>>().await;
+            server.abort();
+            let error = events
+                .into_iter()
+                .find_map(|event| match event {
+                    Err(error)
+                    | Ok(LlmEvent::Done {
+                        outcome: LlmDoneOutcome::Error { error },
+                    }) => Some(error),
+                    Ok(_) => None,
+                })
+                .unwrap_or_else(|| panic!("{echo:?}: the stream ends in an error"));
+            let rendered = format!(
+                "{error} {error:?} {}",
+                serde_json::to_string(&error).expect("error JSON")
+            );
+            assert!(
+                !rendered.contains(AUTHORIZATION_CANARY),
+                "{echo:?} leaked the credential: {rendered}"
+            );
+            assert!(
+                rendered.contains("upstream echo"),
+                "{echo:?}: the provider's message reached the error: {rendered}"
+            );
+            match echo {
+                Echo::EscapedPolicyStop => assert!(
+                    matches!(&error, LlmError::PolicyStop { code, .. }
+                        if code == "misalignment_policy_violation"),
+                    "{echo:?}: {error:?}"
+                ),
+                Echo::RejectionBody | Echo::StreamErrorEvent => assert!(
+                    matches!(error, LlmError::ServerError { status: 500, .. }),
+                    "{echo:?}: {error:?}"
+                ),
+            }
+        }
+
+        let logged = log.text();
+        assert!(
+            logged.contains("upstream echo"),
+            "the capture saw the client's error log fields: {logged}"
+        );
+        assert!(
+            !logged.contains(AUTHORIZATION_CANARY),
+            "a log field leaked the credential: {logged}"
+        );
     }
 
     /// A base URL whose HTTP client could not be built fails each unchecked

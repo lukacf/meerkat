@@ -8,7 +8,7 @@ use chrono::{DateTime, Duration, Utc};
 use futures::StreamExt;
 use meerkat_auth_core::auth_oauth::{exchange_refresh_token, oauth_refresh_error};
 use meerkat_auth_core::resolver::{
-    LockedManagedStoreOAuthRefresh, ManagedStoreOAuthRefreshPreparationSlot,
+    LockedManagedStoreOAuthRefresh, ManagedStoreLifecycle, ManagedStoreOAuthRefreshPreparationSlot,
     OAuthLoginCredentialAdmission, load_managed_store_tokens_with_lifecycle,
     prepare_managed_store_oauth_refresh_under_lock, resolve_oauth_login_credential_disposition,
     resolve_simple_secret, simple_secret_source_publishes_lifecycle,
@@ -65,6 +65,10 @@ const WITHDRAWN_TOKEN_SOURCE_REREAD_SECONDS: u64 = 60;
 /// GitHub's error `message` is quoted in errors with control characters
 /// removed and at most this many characters.
 const GITHUB_ERROR_MESSAGE_MAX_CHARS: usize = 200;
+/// How many of the bearer values an account state signed requests with it
+/// keeps to redact from response diagnostics: the current one and those that
+/// replaced each other before it, whose requests can still be answered.
+const REDACTED_BEARER_HISTORY: usize = 4;
 /// The operator token goes to no Copilot API host outside this domain.
 const COPILOT_API_DOMAIN: &str = "githubcopilot.com";
 const COPILOT_API_HOST_SUFFIX: &str = ".githubcopilot.com";
@@ -316,7 +320,7 @@ impl CopilotHttpTransport for ReqwestCopilotHttpTransport {
                 .map(StdDuration::from_secs);
             let rate_limit_reset = header_text(response.headers(), "x-ratelimit-reset")
                 .and_then(|value| value.parse::<u64>().ok());
-            let rate_limited = github_rate_limited(
+            let header_rate_limited = github_rate_limited(
                 status,
                 header_text(response.headers(), "x-ratelimit-remaining"),
                 retry_after.is_some(),
@@ -330,6 +334,10 @@ impl CopilotHttpTransport for ReqwestCopilotHttpTransport {
                 }
                 body.extend_from_slice(&chunk);
             }
+            // A secondary rate limit can show only in its message, so the
+            // answer is classified once the body is read.
+            let rate_limited =
+                header_rate_limited || (status == 403 && github_secondary_rate_limit(&body));
             Ok(CopilotHttpResponse {
                 status,
                 body,
@@ -350,11 +358,36 @@ fn header_text<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
         .map(str::trim)
 }
 
-/// GitHub's REST rate-limit rule: a 429, or a 403 whose primary limit is
-/// exhausted (`x-ratelimit-remaining: 0`) or that carries `Retry-After` (a
-/// secondary limit).
+/// GitHub's REST rate-limit rule by headers: a 429, or a 403 whose primary
+/// limit is exhausted (`x-ratelimit-remaining: 0`) or that carries
+/// `Retry-After` (a secondary limit). A secondary limit can also come without
+/// any of these headers ([`github_secondary_rate_limit`]).
 fn github_rate_limited(status: u16, remaining: Option<&str>, has_retry_after: bool) -> bool {
     status == 429 || (status == 403 && (remaining == Some("0") || has_retry_after))
+}
+
+/// Whether GitHub's answer says it exceeded a secondary rate limit: its
+/// `message` (or, for a body that is not GitHub's JSON, the body's text)
+/// names one as GitHub's own client recognises it (octokit's throttling
+/// rule, `\bsecondary rate\b` case-insensitively, so "secondary rate limit"
+/// and "secondary rate-limit" alike), since GitHub can send it as a 403
+/// with no `Retry-After` and no rate-limit header. With no stated time the
+/// wait is the minute GitHub asks for at least ([`rate_limit_until`]).
+fn github_secondary_rate_limit(body: &[u8]) -> bool {
+    const PHRASE: &str = "secondary rate";
+    let message = serde_json::from_slice::<GitHubErrorEnvelope>(body)
+        .ok()
+        .and_then(|envelope| envelope.message)
+        .unwrap_or_else(|| String::from_utf8_lossy(body).into_owned())
+        .to_ascii_lowercase();
+    let word = |character: char| character.is_ascii_alphanumeric() || character == '_';
+    message.match_indices(PHRASE).any(|(start, _)| {
+        !message[..start].chars().next_back().is_some_and(word)
+            && !message[start + PHRASE.len()..]
+                .chars()
+                .next()
+                .is_some_and(word)
+    })
 }
 
 pub struct CopilotRuntime {
@@ -455,13 +488,26 @@ impl CopilotRuntime {
             ));
         }
 
-        let config = CopilotBackendConfig::from_options(&binding.backend_profile().options)
-            .map_err(|error| ProviderAuthError::SourceResolutionFailed(error.to_string()))?;
+        // A token route sends the integration id the Copilot API accepts for
+        // a GitHub token unless its options name one; the device sign-in
+        // keeps its own default.
+        let options = &binding.backend_profile().options;
+        let config = match mode {
+            CopilotCredentialMode::OperatorToken => {
+                CopilotBackendConfig::from_token_options(options)
+            }
+            CopilotCredentialMode::DeviceSignIn => CopilotBackendConfig::from_options(options),
+        }
+        .map_err(|error| ProviderAuthError::SourceResolutionFailed(error.to_string()))?;
         let state = self.account_state(
             persistence.authority_id(),
             binding.credential_identity(),
             config,
             mode,
+        )?;
+        state.claim_source(
+            &binding.auth_profile().source,
+            binding.credential_identity(),
         )?;
         let authorizer = Arc::new(CopilotAuthorizer {
             state,
@@ -940,6 +986,10 @@ impl HttpAuthorizer for CopilotRouteBoundAuthorizer {
         self.inner
             .observe_response_with_receipt(receipt, response)
             .await
+    }
+
+    fn redact_response_diagnostic(&self, diagnostic: &mut String) {
+        self.inner.redact_response_diagnostic(diagnostic);
     }
 
     fn label(&self) -> &str {
@@ -1458,6 +1508,17 @@ struct CopilotAccountState {
     /// Operator-token mode: the account's pacing (rate limits and withdrawn
     /// re-reads), shared with every later account state of the same account.
     pacing: Arc<CopilotAccountPacing>,
+    /// The bearer values this account state's authorizers signed requests
+    /// with, oldest first, at most [`REDACTED_BEARER_HISTORY`]: in token mode
+    /// the operator's GitHub token, otherwise the derived Copilot token. A
+    /// provider, proxy or gateway can echo a request's headers in an error,
+    /// so each is redacted from what a provider client reads from a response
+    /// ([`HttpAuthorizer::redact_response_diagnostic`]), a value a rotation
+    /// replaced included.
+    signed_bearers: Mutex<std::collections::VecDeque<String>>,
+    /// The credential source the account's routes read the token from: the
+    /// first route's, which every later route of the account must name too.
+    source: Mutex<Option<CredentialSourceSpec>>,
 }
 
 /// Pacing of an operator-token account: GitHub's rate limits on its identity
@@ -1480,6 +1541,20 @@ struct CopilotAccountPacing {
     /// published again; there is at most one per registry, and production
     /// registries live for the process.
     withdrawn_source_rereads: Mutex<BTreeMap<usize, WithdrawnSourceReread>>,
+    /// The Copilot API's refusal of a token GitHub's identity lookup did not
+    /// answer: that token is not asked about again before the pause ends,
+    /// and a request in between fails with the same refusal. Another token
+    /// value is asked about at once.
+    refused_token: Mutex<Option<RefusedTokenPause>>,
+}
+
+/// A paused Copilot refusal of one token value.
+#[derive(Clone)]
+struct RefusedTokenPause {
+    token: CredentialFingerprint,
+    until: DateTime<Utc>,
+    /// The refusal a request inside the pause fails with.
+    detail: String,
 }
 
 /// When the source of a token the lease withdrew (GitHub refused it, or a
@@ -1495,6 +1570,30 @@ struct WithdrawnSourceReread {
 }
 
 impl CopilotAccountState {
+    /// The routes of one account read its token from one source, as they
+    /// share one auth method and one configuration: the first route's
+    /// source is the account's, and a route over another one is refused.
+    /// A token is then never labelled against another source's
+    /// publications (for a stored token, the record's marker generation).
+    fn claim_source(
+        &self,
+        source: &CredentialSourceSpec,
+        identity: &AuthCredentialIdentity,
+    ) -> Result<(), ProviderAuthError> {
+        let mut claimed = self.source.lock();
+        match claimed.as_ref() {
+            None => {
+                *claimed = Some(source.clone());
+                Ok(())
+            }
+            Some(account_source) if account_source == source => Ok(()),
+            Some(_) => Err(ProviderAuthError::SourceResolutionFailed(format!(
+                "Copilot routes sharing credential identity '{identity}' disagree on the \
+                 credential source; one credential account reads its token from one source"
+            ))),
+        }
+    }
+
     /// An account state with pacing of its own (tests; the runtime shares
     /// its per-account pacing through `with_pacing`).
     #[cfg(test)]
@@ -1517,6 +1616,33 @@ impl CopilotAccountState {
             last_refresh_outcome: Mutex::new(None),
             next_generation: AtomicU64::new(1),
             pacing,
+            signed_bearers: Mutex::new(std::collections::VecDeque::new()),
+            source: Mutex::new(None),
+        }
+    }
+
+    /// Keep `bearer`, the value a request was just signed with, for
+    /// [`Self::redact_signed_bearers`].
+    fn record_signed_bearer(&self, bearer: &str) {
+        if bearer.is_empty() {
+            return;
+        }
+        let mut signed = self.signed_bearers.lock();
+        if signed.back().is_some_and(|last| last == bearer) {
+            return;
+        }
+        signed.retain(|known| known != bearer);
+        signed.push_back(bearer.to_string());
+        while signed.len() > REDACTED_BEARER_HISTORY {
+            signed.pop_front();
+        }
+    }
+
+    /// Remove from `diagnostic` every bearer value this account state signed
+    /// requests with.
+    fn redact_signed_bearers(&self, diagnostic: &mut String) {
+        for bearer in self.signed_bearers.lock().iter() {
+            redact_secret(diagnostic, bearer);
         }
     }
 }
@@ -1565,6 +1691,13 @@ struct CachedCopilotToken {
     generation: u64,
     token: String,
     source_generation: u64,
+    /// The expiry of the source credential's publication this entry serves,
+    /// which the authorizer reports (`HttpAuthorizer::expires_at`): the
+    /// device sign-in's GitHub token expiry, or in token mode the expiry
+    /// the account lease's publication declares (a command source's
+    /// `refresh_interval_ms`; none otherwise). An agent build compares it
+    /// with the lease before it publishes the lease again, so it must be the
+    /// lease's own.
     source_expires_at: Option<DateTime<Utc>>,
     /// When the next token exchange is due. Never later than `expires_at`.
     refresh_at: DateTime<Utc>,
@@ -2145,7 +2278,7 @@ impl CopilotAuthorizer {
             // proxy or gateway page can echo the request's headers, the
             // GitHub token included.
             let status = response.status;
-            let message = github_error_message(&response.body);
+            let message = github_error_message(&response.body, github_token);
             return Err(CopilotTokenExchangeError::from_status(
                 status,
                 response.retry_after,
@@ -2209,7 +2342,7 @@ async fn fetch_copilot_models(
     if !(200..=299).contains(&response.status) {
         return Err(CopilotModelDiscoveryError::Http {
             status: response.status,
-            message: github_error_message(&response.body),
+            message: github_error_message(&response.body, token),
             retry_after: response.retry_after,
             rate_limited: response.rate_limited,
             rate_limit_reset: response.rate_limit_reset,
@@ -2378,7 +2511,31 @@ impl CopilotAuthorizer {
         {
             return Err(OperatorRefusal::RateLimited { until }.into_provider_error());
         }
-        let resolved = resolve_simple_secret(source, &self.env, &self.binding).await?;
+        let (resolved, stored_generation) = match source {
+            // A stored token names the publication it was stored under: its
+            // record's durable marker. A store write publishes before it
+            // saves, so a lease snapshot read after the value can already
+            // carry a newer token's publication.
+            CredentialSourceSpec::ManagedStore => {
+                let managed =
+                    load_managed_store_tokens_with_lifecycle(&self.env, &self.binding).await?;
+                if managed.lifecycle == ManagedStoreLifecycle::RefreshRequired {
+                    return Err(ProviderAuthError::Auth(AuthError::RefreshRequired));
+                }
+                let generation =
+                    meerkat_core::tokens_lifecycle_published_generation(&managed.tokens);
+                let secret = managed.tokens.primary_secret.ok_or_else(|| {
+                    ProviderAuthError::SourceResolutionFailed(
+                        "managed_store credential has no primary_secret".to_string(),
+                    )
+                })?;
+                (secret, generation)
+            }
+            _ => (
+                resolve_simple_secret(source, &self.env, &self.binding).await?,
+                None,
+            ),
+        };
         let token = resolved.trim_matches(|character: char| character.is_ascii_whitespace());
         if token.is_empty() {
             return Err(ProviderAuthError::Auth(AuthError::MissingSecret));
@@ -2417,10 +2574,16 @@ impl CopilotAuthorizer {
                 return Err(ProviderAuthError::Auth(AuthError::LeaseAbsent));
             }
         }
+        // A refusal of the token names this generation: the stored record's
+        // publication for a managed store, else the publication the lease
+        // carries now (a source this route reads publishes the value it read
+        // above, and the refusal also names the value's fingerprint).
+        let publication = auth_lease.snapshot(&lease_key);
         Ok(OperatorTokenMaterial {
             token: token.to_string(),
             kind,
-            generation: auth_lease.snapshot(&lease_key).generation,
+            generation: stored_generation.unwrap_or(publication.generation),
+            expires_at: publication.expires_at,
         })
     }
 
@@ -2484,6 +2647,18 @@ impl CopilotAuthorizer {
                 return Err(OperatorRefusal::RateLimited { until }.into_provider_error());
             }
         }
+        // Copilot refused this very token a moment ago, after GitHub's
+        // identity lookup did not answer it: the refusal stands until the
+        // pause ends, with no request.
+        let token = CredentialFingerprint::of_secret(&material.token);
+        if let Some(paused) = self.state.pacing.refused_token.lock().as_ref()
+            && paused.token == token
+            && now < paused.until
+        {
+            return Err(ProviderAuthError::Auth(AuthError::RefreshFailed(
+                paused.detail.clone(),
+            )));
+        }
         let identity = match lookup_operator_identity(
             self.transport.as_ref(),
             &self.state.config,
@@ -2494,16 +2669,56 @@ impl CopilotAuthorizer {
         .await
         {
             Ok(identity) => identity,
-            Err(refusal) => return Err(self.operator_refusal(refusal)),
+            Err(refusal) => {
+                return Err(self.operator_refusal(refusal, &material.token, material.generation));
+            }
         };
         *self.state.pacing.identity_retry_at.lock() = None;
         let models_result = self.fetch_models(&identity.api_base, &material.token).await;
+        let discovery_now = (self.env.now)();
         if let Err(error) = &models_result
             && let Some(refusal) = models_refusal(error, identity.installation)
         {
-            return Err(self.operator_refusal(refusal));
+            // A 401 or 403 from the Copilot API is Copilot refusing a user
+            // token (no Copilot Requests permission, no seat, a policy, an
+            // integration not allowed), also after a lookup that did not
+            // answer it: that lookup authenticated the token, and only the
+            // lookup's own 401 says it is revoked. Such a token is not asked
+            // about again for a minute, so a refused account costs one
+            // lookup and one listing a minute, not two requests per request.
+            if !identity.looked_up && !identity.installation {
+                *self.state.pacing.refused_token.lock() = Some(RefusedTokenPause {
+                    token,
+                    until: rate_limit_until(None, None, discovery_now),
+                    detail: refusal.detail(),
+                });
+            }
+            return Err(self.operator_refusal(refusal, &material.token, material.generation));
         }
-        let discovery_now = (self.env.now)();
+        *self.state.pacing.refused_token.lock() = None;
+        // A token GitHub's identity lookup did not answer is vouched for by
+        // its model list alone, so it is used only once that list loads: a
+        // listing that fails fails this request, and a rate limit pauses the
+        // lookup until GitHub's stated time. An installation token keeps
+        // serving without a list, as before.
+        if !identity.looked_up
+            && !identity.installation
+            && let Err(error) = &models_result
+        {
+            if matches!(
+                error,
+                CopilotModelDiscoveryError::Http {
+                    rate_limited: true,
+                    ..
+                }
+            ) {
+                *self.state.pacing.identity_retry_at.lock() =
+                    Some(operator_models_retry_at(error, discovery_now));
+            }
+            return Err(ProviderAuthError::Auth(AuthError::RefreshFailed(format!(
+                "GitHub Copilot model listing failed: {error}"
+            ))));
+        }
         let (models, model_discovery_refresh_at) = match models_result {
             Ok(snapshot) => (
                 Some(Arc::new(snapshot)),
@@ -2538,11 +2753,19 @@ impl CopilotAuthorizer {
             model_discovery_due: false,
             identity: Some(Arc::clone(&identity)),
         };
+        // The account serves the lease publication the token was admitted
+        // under, so it reports that publication's expiry: an agent build
+        // that finds it equal to the lease's publishes nothing again, and a
+        // command source runs at the interval it declares.
+        let source_expires_at = material
+            .expires_at
+            .and_then(|expires_at| i64::try_from(expires_at).ok())
+            .and_then(|expires_at| DateTime::<Utc>::from_timestamp(expires_at, 0));
         *self.state.cache.write() = Some(CachedCopilotToken {
             generation,
             token: material.token,
             source_generation: material.generation,
-            source_expires_at: None,
+            source_expires_at,
             refresh_at: DateTime::<Utc>::MAX_UTC,
             expires_at: DateTime::<Utc>::MAX_UTC,
             api_base: identity.api_base.clone(),
@@ -2556,8 +2779,9 @@ impl CopilotAuthorizer {
 
     /// Refresh the cached account's model list. A 401 or 403 drops the cache:
     /// for an installation token a 401 is GitHub refusing the token itself;
-    /// for a user token the account is rebuilt through the identity lookup,
-    /// which tells a revoked token from a Copilot refusal.
+    /// for a user token, a token the identity lookup did not answer
+    /// included, the account is rebuilt through the identity lookup, which
+    /// tells a revoked token from a Copilot refusal.
     async fn rediscover_operator_models(
         &self,
         cached: CachedTokenView,
@@ -2613,37 +2837,51 @@ impl CopilotAuthorizer {
             let material = self.load_operator_token().await?;
             return self.discover_operator_account(material).await;
         }
-        Err(self.operator_refusal(refusal))
+        Err(self.operator_refusal(refusal, &cached.token, generation))
     }
 
-    /// Publish GitHub's refusal of the operator token to the account lease,
-    /// and return the lease generation the refusal applies to.
-    /// The mark has nothing to do when the lease already left `valid`
-    /// another way while the request was in flight: another account state
-    /// published the same refusal (`reauth_required`), or a logout released
-    /// the lease. The AuthMachine's credential-use verdict says which, and
-    /// the refusal then surfaces as `user_reauth_required` all the same.
-    fn mark_operator_token_refused(&self) -> Result<u64, ProviderAuthError> {
+    /// Publish GitHub's refusal of `token`, admitted at lease `generation`,
+    /// to the account lease (`MarkPublicationRefused`), and return the lease
+    /// generation the lease withdraws, or `None` when it carries a newer
+    /// publication. The refusal names the publication the token was
+    /// admitted under: that generation and, for a source this route
+    /// publishes itself, the token's fingerprint (a managed store publishes
+    /// without naming a value). The AuthMachine withdraws the lease only
+    /// while it carries that publication, so a refusal that arrives after
+    /// another account state published a newer token leaves the newer one
+    /// valid. Its credential-use verdict after the refusal says which it
+    /// was: `reauth_required` or `lease_absent` (this refusal, another
+    /// account state's refusal of the same publication, or a logout)
+    /// withdraws the token; any other verdict is a newer publication.
+    fn mark_operator_token_refused(
+        &self,
+        token: &str,
+        generation: u64,
+    ) -> Result<Option<u64>, ProviderAuthError> {
         let auth_lease = self.auth_lease()?;
         let lease_key = self.lease_key();
-        if let Err(error) = auth_lease.mark_reauth_required(&lease_key) {
-            match auth_lease
-                .resolve_credential_use_admission(&lease_key, CredentialUseIntent::UseCredential)
-                .map_err(credential_use_admission_error)?
-            {
-                CredentialUseDisposition::ReauthRequired
-                | CredentialUseDisposition::LeaseAbsent => {}
-                CredentialUseDisposition::Authorized
-                | CredentialUseDisposition::RefreshRequired
-                | CredentialUseDisposition::RefreshDisallowed
-                | CredentialUseDisposition::AlreadyRefreshing => {
-                    return Err(ProviderAuthError::SourceResolutionFailed(format!(
-                        "Copilot token refusal could not be published to AuthMachine: {error}"
-                    )));
-                }
+        let fingerprint =
+            (!simple_secret_source_publishes_lifecycle(&self.binding.auth_profile().source))
+                .then(|| CredentialFingerprint::of_secret(token));
+        auth_lease
+            .mark_publication_refused(&lease_key, generation, fingerprint.as_ref())
+            .map_err(|error| {
+                ProviderAuthError::SourceResolutionFailed(format!(
+                    "Copilot token refusal could not be published to AuthMachine: {error}"
+                ))
+            })?;
+        match auth_lease
+            .resolve_credential_use_admission(&lease_key, CredentialUseIntent::UseCredential)
+            .map_err(credential_use_admission_error)?
+        {
+            CredentialUseDisposition::ReauthRequired | CredentialUseDisposition::LeaseAbsent => {
+                Ok(Some(auth_lease.snapshot(&lease_key).generation))
             }
+            CredentialUseDisposition::Authorized
+            | CredentialUseDisposition::RefreshRequired
+            | CredentialUseDisposition::RefreshDisallowed
+            | CredentialUseDisposition::AlreadyRefreshing => Ok(None),
         }
-        Ok(auth_lease.snapshot(&lease_key).generation)
     }
 
     /// Pace the next read of the source of a token the lease withdrew at
@@ -2725,12 +2963,21 @@ impl CopilotAuthorizer {
         Ok(None)
     }
 
-    /// Apply a refusal: a token GitHub refused is published to the account
-    /// lease (`MarkReauthRequired`), the account state built for an earlier
-    /// token is dropped and a source that runs something is paced, and a
-    /// rate limit pauses the identity lookup until GitHub's stated time.
+    /// Apply a refusal of `token`, admitted at lease `generation`: a token
+    /// GitHub refused is published to the account lease as the refusal of
+    /// that publication (`MarkPublicationRefused`), the account state built
+    /// for an earlier token is dropped and, when the lease withdraws the
+    /// token, a source that runs something is paced; a refusal of a token
+    /// the lease no longer carries (a newer one was published since) fails
+    /// this request as `stale_credential` and leaves the newer token valid.
+    /// A rate limit pauses the identity lookup until GitHub's stated time.
     /// Logged without the token.
-    fn operator_refusal(&self, refusal: OperatorRefusal) -> ProviderAuthError {
+    fn operator_refusal(
+        &self,
+        refusal: OperatorRefusal,
+        token: &str,
+        generation: u64,
+    ) -> ProviderAuthError {
         tracing::warn!(
             credential_identity = %self.binding.credential_identity(),
             refusal = %refusal.detail(),
@@ -2745,8 +2992,12 @@ impl CopilotAuthorizer {
                 // and a new value, such as the next token a command mints, is
                 // published and heals the account.
                 *self.state.cache.write() = None;
-                match self.mark_operator_token_refused() {
-                    Ok(generation) => self.pace_withdrawn_source(generation),
+                match self.mark_operator_token_refused(token, generation) {
+                    Ok(Some(withdrawn)) => self.pace_withdrawn_source(withdrawn),
+                    // The lease carries a newer publication, which the
+                    // refusal leaves valid: only this request's token is
+                    // stale, and the next request reads the source again.
+                    Ok(None) => return ProviderAuthError::Auth(AuthError::StaleCredential),
                     Err(error) => return error,
                 }
             }
@@ -2811,6 +3062,12 @@ impl HttpAuthorizer for CopilotAuthorizer {
         Ok(HttpAuthorizationResponseAction::Propagate)
     }
 
+    /// Every bearer this account state signed requests with (the operator's
+    /// GitHub token in token mode, a rotated-out one included) is redacted.
+    fn redact_response_diagnostic(&self, diagnostic: &mut String) {
+        self.state.redact_signed_bearers(diagnostic);
+    }
+
     #[allow(clippy::unnecessary_literal_bound)]
     fn label(&self) -> &str {
         crate::GITHUB_COPILOT_AUTHORIZER_LABEL
@@ -2857,6 +3114,7 @@ impl CopilotAuthorizer {
                 request.url
             )));
         }
+        self.state.record_signed_bearer(&token.token);
         for (name, value) in self
             .inference_headers(&token.token, CopilotRequestIntent::ConversationPanel)
             .map_err(|error| AuthError::Other(error.to_string()))?
@@ -2945,6 +3203,9 @@ struct OperatorTokenMaterial {
     kind: GitHubTokenKind,
     /// The account lease generation the token was admitted under.
     generation: u64,
+    /// The expiry that publication declares (epoch seconds), read with its
+    /// generation.
+    expires_at: Option<u64>,
 }
 
 /// Why GitHub or Copilot did not accept an operator token.
@@ -2987,7 +3248,9 @@ impl OperatorRefusal {
 
 /// Look up the Copilot identity of an operator token: `GET
 /// copilot_internal/user` with the token as the bearer. An installation token
-/// has no user, so it skips the lookup and uses the default Copilot API host.
+/// has no user, so it skips the lookup and uses the default Copilot API host,
+/// as does a token the lookup does not answer (403 or 404): the caller then
+/// requires the account's model list there before it uses the token.
 async fn lookup_operator_identity(
     transport: &dyn CopilotHttpTransport,
     config: &CopilotBackendConfig,
@@ -3001,6 +3264,7 @@ async fn lookup_operator_identity(
             plan: None,
             api_base: operator_api_base(None)?,
             installation: true,
+            looked_up: false,
         });
     }
     let url = copilot_user_url().map_err(|error| OperatorRefusal::Refused(error.to_string()))?;
@@ -3022,19 +3286,42 @@ async fn lookup_operator_identity(
         401 => {
             return Err(OperatorRefusal::TokenRejected {
                 status: 401,
-                message: github_error_message(&response.body),
+                message: github_error_message(&response.body, token),
+            });
+        }
+        // The lookup is an internal GitHub endpoint, and it may not answer a
+        // token the Copilot API accepts: a fine-grained personal access
+        // token can get a 403 or a 404 from it. The token is then tried on
+        // the default Copilot API host, unnamed, and used only once the
+        // account's model list loads there; a 401 or 403 from that listing
+        // is Copilot refusing the token, as for a looked-up token, and only
+        // this lookup's own 401 says that the token is revoked. A rate limit
+        // was answered above.
+        status @ (403 | 404) => {
+            tracing::warn!(
+                status,
+                github_message = %github_error_message(&response.body, token),
+                "GitHub's Copilot identity lookup did not answer the operator token; \
+                 trying the default Copilot API host"
+            );
+            return Ok(CopilotAccountIdentity {
+                login: None,
+                plan: None,
+                api_base: operator_api_base(None)?,
+                installation: false,
+                looked_up: false,
             });
         }
         status @ 400..=499 => {
             return Err(OperatorRefusal::Refused(format!(
                 "GitHub Copilot refused this token ({status}): {}",
-                github_error_message(&response.body)
+                github_error_message(&response.body, token)
             )));
         }
         status => {
             return Err(OperatorRefusal::Refused(format!(
                 "GitHub Copilot identity lookup failed ({status}): {}",
-                github_error_message(&response.body)
+                github_error_message(&response.body, token)
             )));
         }
     }
@@ -3057,11 +3344,14 @@ async fn lookup_operator_identity(
         plan: user.copilot_plan,
         api_base,
         installation: false,
+        looked_up: true,
     })
 }
 
 /// Headers of the identity lookup: the GitHub token as the bearer, GitHub's
-/// API version and the configured User-Agent.
+/// API version and the configured User-Agent. No `Copilot-Integration-Id`:
+/// nothing establishes that `api.github.com` reads one, so the lookup sends
+/// none, as before.
 fn copilot_user_headers(
     config: &CopilotBackendConfig,
     token: &str,
@@ -3080,9 +3370,11 @@ fn copilot_user_headers(
 
 /// The refusal a model listing answer is for an operator token: a 401 or 403
 /// is Copilot refusing the token, and for an installation token, which has no
-/// identity lookup, a 401 is GitHub refusing the token itself. A rate limit
-/// (a 403 with `Retry-After` or an exhausted primary limit) is no refusal:
-/// the listing waits for GitHub's stated time
+/// identity lookup, a 401 is GitHub refusing the token itself. A user token
+/// the lookup did not answer is a user token: the Copilot API also answers
+/// 401 for a valid token it does not serve. A rate limit (a 403 with
+/// `Retry-After`, an exhausted primary limit or a secondary limit) is no
+/// refusal: the listing waits for GitHub's stated time
 /// ([`operator_models_retry_at`]). Any other failure is transient and the
 /// listing is retried later.
 fn models_refusal(
@@ -3132,15 +3424,21 @@ fn operator_api_base(endpoint: Option<&str>) -> Result<String, OperatorRefusal> 
 }
 
 /// GitHub's error `message` from a response body, with control characters
-/// removed and at most [`GITHUB_ERROR_MESSAGE_MAX_CHARS`] characters. Never
-/// the raw body.
-fn github_error_message(body: &[u8]) -> String {
-    let message: String = serde_json::from_slice::<GitHubErrorEnvelope>(body)
+/// removed, `secret` (the credential the request carried, which a proxy or
+/// gateway can echo) redacted, and at most [`GITHUB_ERROR_MESSAGE_MAX_CHARS`]
+/// characters. Never the raw body. The secret is redacted before the cut, so
+/// no prefix of it survives.
+fn github_error_message(body: &[u8], secret: &str) -> String {
+    let mut message: String = serde_json::from_slice::<GitHubErrorEnvelope>(body)
         .ok()
         .and_then(|envelope| envelope.message)
         .unwrap_or_default()
         .chars()
         .filter(|character| !character.is_control())
+        .collect();
+    redact_secret(&mut message, secret);
+    let message: String = message
+        .chars()
         .take(GITHUB_ERROR_MESSAGE_MAX_CHARS)
         .collect();
     let message = message.trim();
@@ -3148,6 +3446,13 @@ fn github_error_message(body: &[u8]) -> String {
         "no message".to_string()
     } else {
         message.to_string()
+    }
+}
+
+/// Replace every occurrence of `secret` in `text` with the redaction marker.
+fn redact_secret(text: &mut String, secret: &str) {
+    if !secret.is_empty() && text.contains(secret) {
+        *text = text.replace(secret, meerkat_core::redact::REDACTED);
     }
 }
 
@@ -3329,11 +3634,14 @@ fn credential_source_kind(source: &CredentialSourceSpec) -> &'static str {
 /// Check a GitHub token the way a `github_copilot_token` route uses it,
 /// without AuthMachine, token-store or cache effects: refuse a classic
 /// personal access token, look up the Copilot identity (an installation token
-/// has none and uses the default API host), and list the account's models
-/// with the token as the Copilot API bearer. A host calls it before it stores
+/// has none and uses the default API host, as does a token the lookup does
+/// not answer), and list the account's models with the token as the Copilot
+/// API bearer, which must succeed. A host calls it before it stores
 /// a token, so a token GitHub or Copilot refuses is never stored. The token
 /// goes only to `api.github.com` and a `githubcopilot.com` API host, and no
-/// error carries it.
+/// error carries it. `config` is the token routes' configuration,
+/// [`CopilotBackendConfig::from_token_options`] of their backend options, so
+/// the check sends the integration id the routes send.
 pub async fn verify_operator_token(
     token: &str,
     config: &CopilotBackendConfig,
@@ -3782,6 +4090,185 @@ mod tests {
         assert!(!rendered.contains(LOCATION_CANARY) && !rendered.contains(BODY_CANARY));
         assert_eq!(target_hits.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
+    /// GitHub's answer to a request over its secondary rate limit, as GitHub
+    /// documents and clients observe it: a 403 whose message says so, which
+    /// may carry no `Retry-After` and no rate-limit header.
+    const SECONDARY_RATE_LIMIT_BODY: &str = r#"{"documentation_url":"https://docs.github.com/rest/using-the-rest-api/rate-limits-for-the-rest-api#about-secondary-rate-limits","message":"You have exceeded a secondary rate limit. Please wait a few minutes before you try again."}"#;
+
+    /// A raw HTTP/1.1 answer with `status`, the extra header lines `headers`
+    /// (each ending in CRLF) and the JSON `body`.
+    fn github_answer(status: u16, headers: &str, body: &str) -> String {
+        let reason = match status {
+            200 => "OK",
+            403 => "Forbidden",
+            429 => "Too Many Requests",
+            _ => "Answer",
+        };
+        format!(
+            "HTTP/1.1 {status} {reason}\r\ncontent-type: application/json; charset=utf-8\r\n{headers}content-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        )
+    }
+
+    /// A local server that answers its `n`th request with `answers[n]` and
+    /// counts the requests it reads.
+    async fn spawn_github_answers(
+        answers: Vec<String>,
+    ) -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind a local GitHub");
+        let address = listener.local_addr().expect("local GitHub address");
+        let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = Arc::clone(&hits);
+        tokio::spawn(async move {
+            let mut answers = VecDeque::from(answers);
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let mut head = Vec::new();
+                let mut chunk = [0_u8; 1024];
+                while !head.windows(4).any(|window| window == b"\r\n\r\n") {
+                    match stream.read(&mut chunk).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(read) => head.extend_from_slice(&chunk[..read]),
+                    }
+                }
+                counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let answer = answers
+                    .pop_front()
+                    .unwrap_or_else(|| github_answer(500, "", r#"{"message":"no answer left"}"#));
+                let _ = stream.write_all(answer.as_bytes()).await;
+            }
+        });
+        (format!("http://{address}"), hits)
+    }
+
+    /// The production transport, aimed at a local server that answers as
+    /// GitHub and the Copilot API do: every request keeps its path and
+    /// headers, so real status lines, headers and bodies go through the
+    /// production parse.
+    #[cfg(unix)]
+    struct LocalGitHub {
+        inner: ReqwestCopilotHttpTransport,
+        base: String,
+    }
+
+    #[cfg(unix)]
+    #[async_trait]
+    impl CopilotHttpTransport for LocalGitHub {
+        async fn get(
+            &self,
+            url: &str,
+            headers: HeaderMap,
+        ) -> Result<CopilotHttpResponse, CopilotHttpTransportError> {
+            let path = url::Url::parse(url)
+                .map(|url| url.path().to_string())
+                .unwrap_or_default();
+            self.inner
+                .get(&format!("{}{path}", self.base), headers)
+                .await
+        }
+    }
+
+    /// GitHub's rate limits as the production transport reads them from real
+    /// answers: a 403 with `Retry-After`, a 403 whose primary limit is spent
+    /// (`x-ratelimit-remaining: 0` with `x-ratelimit-reset`), a 429 with no
+    /// header, and the secondary rate limit, a 403 whose message says so
+    /// with no header at all or a blank `Retry-After` (octokit's rule: GitHub
+    /// may send it without `Retry-After`), spelt "rate limit" or
+    /// "rate-limit" (octokit matches `\bsecondary rate\b`). A 403 that names
+    /// no limit is no rate limit.
+    #[tokio::test]
+    async fn github_rate_limits_are_read_from_real_answers() {
+        let reset = Utc::now().timestamp() + 300;
+        let cases: Vec<(&str, String, bool)> = vec![
+            (
+                "403 with Retry-After",
+                github_answer(
+                    403,
+                    "retry-after: 30\r\n",
+                    r#"{"message":"API rate limit exceeded for user ID 1."}"#,
+                ),
+                true,
+            ),
+            (
+                "403 with a spent primary limit",
+                github_answer(
+                    403,
+                    &format!("x-ratelimit-remaining: 0\r\nx-ratelimit-reset: {reset}\r\n"),
+                    r#"{"message":"API rate limit exceeded for user ID 1."}"#,
+                ),
+                true,
+            ),
+            (
+                "429 with no header",
+                github_answer(429, "", r#"{"message":"Too many requests"}"#),
+                true,
+            ),
+            (
+                "403 secondary limit with no header",
+                github_answer(403, "", SECONDARY_RATE_LIMIT_BODY),
+                true,
+            ),
+            (
+                "403 secondary limit with a blank Retry-After",
+                github_answer(403, "retry-after: \r\n", SECONDARY_RATE_LIMIT_BODY),
+                true,
+            ),
+            (
+                "403 that names no limit",
+                github_answer(
+                    403,
+                    "x-ratelimit-remaining: 4999\r\n",
+                    r#"{"message":"Resource not accessible by personal access token"}"#,
+                ),
+                false,
+            ),
+            (
+                "403 secondary rate-limit with no header",
+                github_answer(
+                    403,
+                    "",
+                    r#"{"message":"You have exceeded a secondary rate-limit. Please wait a few minutes before you try again."}"#,
+                ),
+                true,
+            ),
+        ];
+        let (base, hits) =
+            spawn_github_answers(cases.iter().map(|(_, answer, _)| answer.clone()).collect()).await;
+        let transport = ReqwestCopilotHttpTransport::new();
+
+        let mut read = Vec::new();
+        for (label, _, _) in &cases {
+            let response = transport
+                .get(&format!("{base}/copilot_internal/user"), HeaderMap::new())
+                .await
+                .unwrap_or_else(|error| panic!("{label}: {error}"));
+            read.push((
+                *label,
+                response.rate_limited,
+                response.retry_after,
+                response.rate_limit_reset,
+            ));
+        }
+
+        let reset = u64::try_from(reset).expect("a positive reset");
+        assert_eq!(
+            read,
+            vec![
+                (cases[0].0, true, Some(StdDuration::from_secs(30)), None),
+                (cases[1].0, true, None, Some(reset)),
+                (cases[2].0, true, None, None),
+                (cases[3].0, true, None, None),
+                (cases[4].0, true, None, None),
+                (cases[5].0, false, None, None),
+                (cases[6].0, true, None, None),
+            ]
+        );
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), cases.len());
+    }
+
     use meerkat_core::auth::TokenStore;
     use meerkat_core::provider_matrix::openai::{OpenAiAuthMethod, OpenAiBackendKind};
     use meerkat_core::{
@@ -4959,6 +5446,57 @@ mod tests {
         }
     }
 
+    /// The device sign-in keeps `Copilot-Integration-Id: vscode-chat` on its
+    /// token exchange, its model listing and inference: only a token route
+    /// defaults to `copilot-developer-cli`.
+    #[tokio::test]
+    async fn device_sign_in_keeps_the_vscode_chat_integration_id() {
+        let (auth_binding, binding) = validated_binding();
+        let (env, _auth_lease) = resolver_environment(&auth_binding).await;
+        let transport = Arc::new(ScriptedTransport::new([
+            token_response("derived-integration"),
+            models_response(),
+        ]));
+        let runtime = CopilotRuntime::with_transport(transport.clone());
+        let resolved = runtime
+            .resolve(&binding, &env)
+            .await
+            .expect("the device route resolves");
+        let mut signed = Vec::new();
+        resolved
+            .concrete_authorizer()
+            .authorize_with_receipt(&mut HttpAuthorizationRequest {
+                method: "POST",
+                url: "https://copilot.example.test/responses",
+                headers: &mut signed,
+            })
+            .await
+            .expect("authorize a Copilot request");
+
+        let mut integration_ids = transport
+            .requests
+            .lock()
+            .iter()
+            .map(|(_, headers)| {
+                headers
+                    .get("copilot-integration-id")
+                    .and_then(|value| value.to_str().ok())
+                    .map(str::to_string)
+            })
+            .collect::<Vec<_>>();
+        integration_ids.push(
+            signed
+                .into_iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case("copilot-integration-id"))
+                .map(|(_, value)| value),
+        );
+        assert_eq!(
+            integration_ids,
+            vec![Some("vscode-chat".to_string()); 3],
+            "token exchange, model listing, inference"
+        );
+    }
+
     #[tokio::test]
     async fn concurrent_authorization_uses_one_derived_token_flight() {
         let (auth_binding, binding) = validated_binding();
@@ -5628,6 +6166,15 @@ mod tests {
             route: CopilotProviderRoute,
             source: CredentialSourceSpec,
         ) -> ValidatedBinding {
+            token_binding_with_options(route, source, serde_json::Value::Null)
+        }
+
+        /// A token route whose backend sets `options`.
+        fn token_binding_with_options(
+            route: CopilotProviderRoute,
+            source: CredentialSourceSpec,
+            options: serde_json::Value,
+        ) -> ValidatedBinding {
             let auth_binding = AuthBindingRef {
                 realm: RealmId::global(),
                 binding: BindingId::parse(route.binding_id()).expect("valid binding"),
@@ -5639,7 +6186,7 @@ mod tests {
                 provider: route.provider(),
                 backend_kind: "copilot".to_string(),
                 base_url: None,
-                options: serde_json::Value::Null,
+                options,
                 server: None,
             };
             let auth = AuthProfile {
@@ -5690,10 +6237,15 @@ mod tests {
             }
 
             fn bearer(&self, index: usize) -> Option<String> {
+                self.header(index, "authorization")
+            }
+
+            /// The value of header `name` on the `index`th request.
+            fn header(&self, index: usize, name: &str) -> Option<String> {
                 self.requests
                     .lock()
                     .get(index)
-                    .and_then(|(_, headers)| headers.get("authorization"))
+                    .and_then(|(_, headers)| headers.get(name))
                     .and_then(|value| value.to_str().ok())
                     .map(str::to_string)
             }
@@ -5968,6 +6520,113 @@ mod tests {
                     "{url}"
                 );
             }
+        }
+
+        /// Sign one Copilot request; return the value of its header `name`.
+        async fn signed_header(
+            authorizer: &CopilotAuthorizer,
+            url: &str,
+            name: &str,
+        ) -> Option<String> {
+            let mut headers = Vec::new();
+            authorizer
+                .authorize_with_receipt(&mut HttpAuthorizationRequest {
+                    method: "POST",
+                    url,
+                    headers: &mut headers,
+                })
+                .await
+                .expect("authorize a Copilot request");
+            headers
+                .into_iter()
+                .find(|(header, _)| header.eq_ignore_ascii_case(name))
+                .map(|(_, value)| value)
+        }
+
+        /// The `Copilot-Integration-Id` of a resolved token route's identity
+        /// lookup, its model listing and one request it signs, in that order.
+        async fn token_route_integration_ids(
+            harness: &Harness,
+            resolved: &CopilotResolvedAuth,
+        ) -> Vec<Option<String>> {
+            let signed = signed_header(
+                &resolved.concrete_authorizer(),
+                &format!("{BUSINESS_API}/responses"),
+                "copilot-integration-id",
+            )
+            .await;
+            assert_eq!(
+                harness.transport.urls(),
+                [
+                    GITHUB_COPILOT_USER_URL.to_string(),
+                    format!("{BUSINESS_API}/models")
+                ]
+            );
+            vec![
+                harness.transport.header(0, "copilot-integration-id"),
+                harness.transport.header(1, "copilot-integration-id"),
+                signed,
+            ]
+        }
+
+        /// A token route whose backend options set no `integration_id` sends
+        /// `Copilot-Integration-Id: copilot-developer-cli` on every Copilot
+        /// API request that carries the operator token: the model listing and
+        /// inference. That is the integration id the Copilot API accepts for a
+        /// GitHub token sent as its bearer, a personal access token included;
+        /// it refuses `vscode-chat`, the device sign-in's default, for one.
+        /// GitHub's identity lookup gets no integration id.
+        #[tokio::test]
+        async fn token_routes_send_the_cli_integration_id_by_default() {
+            let harness = Harness::new([Ok(svc_bot()), Ok(models_response())]);
+            harness
+                .operator
+                .set("COPILOT_GITHUB_TOKEN", &user_token("integration"));
+            let resolved = harness
+                .resolve(CopilotProviderRoute::OpenAi)
+                .await
+                .expect("the operator token resolves");
+
+            assert_eq!(
+                token_route_integration_ids(&harness, &resolved).await,
+                vec![
+                    None,
+                    Some("copilot-developer-cli".to_string()),
+                    Some("copilot-developer-cli".to_string())
+                ],
+                "identity lookup, model listing, inference"
+            );
+        }
+
+        /// An `integration_id` the token route's backend options set is kept on
+        /// every Copilot API request that carries the operator token; GitHub's
+        /// identity lookup still gets none.
+        #[tokio::test]
+        async fn token_routes_keep_an_explicit_integration_id() {
+            let harness = Harness::new([Ok(svc_bot()), Ok(models_response())]);
+            harness
+                .operator
+                .set("COPILOT_GITHUB_TOKEN", &user_token("explicit"));
+            let binding = token_binding_with_options(
+                CopilotProviderRoute::OpenAi,
+                env_source(),
+                serde_json::json!({"integration_id": "enterprise-approved"}),
+            );
+            let resolved = harness
+                .runtime
+                .resolve(&binding, &harness.operator.env)
+                .await
+                .expect("the operator token resolves");
+
+            assert_eq!(
+                token_route_integration_ids(&harness, &resolved).await,
+                vec![
+                    None,
+                    Some("enterprise-approved".to_string()),
+                    Some("enterprise-approved".to_string())
+                ],
+                "identity lookup, model listing, inference"
+            );
         }
 
         /// T2: the documented route reads `COPILOT_GITHUB_TOKEN`, then
@@ -6329,6 +6988,106 @@ mod tests {
             );
             assert_eq!(harness.operator.lease().phase, Some(AuthLeasePhase::Valid));
             assert_eq!(harness.transport.request_count(), 5);
+        }
+
+        /// The lease publication an agent build makes once it resolved a
+        /// route, as the facade's `AgentFactory::publish_auth_lease` does:
+        /// none while the lease carries a credential, is valid or expiring and
+        /// has the expiry the connection's lease reports; otherwise a
+        /// publication with that expiry, naming no value.
+        #[cfg(unix)]
+        fn publish_as_an_agent_build(
+            auth_lease: &meerkat_core::handles::GeneratedAuthLeaseHandle,
+            connection_lease: &dyn meerkat_core::AuthLease,
+        ) {
+            let expires_at = connection_lease
+                .expires_at()
+                .map_or(u64::MAX, |at| at.timestamp().max(0) as u64);
+            let snapshot = auth_lease.snapshot(&lease_key());
+            if snapshot.credential_present
+                && snapshot.expires_at.unwrap_or(u64::MAX) == expires_at
+                && matches!(
+                    snapshot.phase,
+                    Some(AuthLeasePhase::Valid | AuthLeasePhase::Expiring)
+                )
+            {
+                return;
+            }
+            auth_lease
+                .acquire_lease(&lease_key(), expires_at)
+                .expect("the build publishes the lease");
+        }
+
+        /// One agent build's auth step on `harness`: resolve the route over
+        /// `source`, then the build's lease publication over the
+        /// connection's lease, as a provider runtime builds it.
+        #[cfg(unix)]
+        async fn build_session(
+            harness: &Harness,
+            source: CredentialSourceSpec,
+        ) -> CopilotResolvedAuth {
+            let resolved = harness
+                .resolve_from(CopilotProviderRoute::OpenAi, source)
+                .await
+                .expect("the route resolves");
+            let connection_lease =
+                meerkat_llm_core::provider_runtime::DynamicLease::from_authorizer(
+                    resolved.authorizer(),
+                    resolved.metadata().clone(),
+                    crate::GITHUB_COPILOT_AUTHORIZER_LABEL,
+                );
+            publish_as_an_agent_build(&harness.operator.auth_lease, &connection_lease);
+            resolved
+        }
+
+        /// Within a command source's `refresh_interval_ms`, a second session
+        /// build reuses the account's lease: the route reports the expiry of
+        /// the publication it serves, so the build's own lease publication
+        /// publishes nothing, and the second build neither runs the command
+        /// nor looks the account up again.
+        #[cfg(unix)]
+        #[tokio::test]
+        async fn session_builds_within_the_refresh_interval_reuse_the_lease() {
+            let directory = tempfile::tempdir().expect("command directory");
+            let harness = Harness::new([
+                Ok(svc_bot()),
+                Ok(models_response()),
+                Ok(svc_bot()),
+                Ok(models_response()),
+            ]);
+            let source = counter_command(directory.path(), Some(600_000));
+
+            let first = build_session(&harness, source.clone()).await;
+            harness.operator.advance(60);
+            let second = build_session(&harness, source).await;
+
+            assert_eq!(
+                command_runs(directory.path()),
+                1,
+                "one command run for both builds"
+            );
+            assert_eq!(
+                harness.transport.request_count(),
+                2,
+                "one identity lookup and one model listing for both builds"
+            );
+            let lease = harness.operator.lease();
+            assert_eq!(lease.generation, 1, "no build publishes the lease again");
+            assert_eq!(
+                first
+                    .authorizer()
+                    .expires_at()
+                    .map(|at| at.timestamp().max(0) as u64),
+                lease.expires_at,
+                "the route reports the expiry of the publication it serves"
+            );
+            let (_, bearer) = authorize_once(
+                &second.concrete_authorizer(),
+                &format!("{BUSINESS_API}/responses"),
+            )
+            .await;
+            assert_eq!(bearer, format!("Bearer github_pat_{CANARY}_command_1"));
+            assert_eq!(command_runs(directory.path()), 1);
         }
 
         /// A command source that counts its runs in `directory` and prints
@@ -6697,6 +7456,80 @@ mod tests {
             assert_eq!(harness.transport.request_count(), 3);
         }
 
+        /// GitHub's secondary rate limit, a 403 whose message says so and that
+        /// may carry no `Retry-After` and no rate-limit header, pauses the
+        /// account's identity lookup like any rate limit, read through the
+        /// production transport: requests fail as `refresh_failed` without
+        /// asking GitHub again or running the token's command, for the minute
+        /// GitHub asks for at least, and the lookup runs again after it. It
+        /// is no refusal of the token.
+        #[cfg(unix)]
+        #[tokio::test]
+        async fn a_secondary_rate_limit_pauses_the_identity_lookup() {
+            let directory = tempfile::tempdir().expect("command directory");
+            std::fs::write(
+                directory.path().join("token"),
+                user_token("secondary-limit"),
+            )
+            .expect("write the token");
+            let user = String::from_utf8(svc_bot().body).expect("a JSON identity");
+            let models = String::from_utf8(models_response().body).expect("a JSON model list");
+            let (base, hits) = spawn_github_answers(vec![
+                github_answer(403, "", SECONDARY_RATE_LIMIT_BODY),
+                github_answer(200, "", &user),
+                github_answer(200, "", &models),
+            ])
+            .await;
+            let runtime = CopilotRuntime::with_transport(Arc::new(LocalGitHub {
+                inner: ReqwestCopilotHttpTransport::new(),
+                base,
+            }));
+            let operator = OperatorEnv::new();
+            let binding = token_binding(
+                CopilotProviderRoute::OpenAi,
+                token_file_command(directory.path()),
+            );
+            let resolve = || runtime.resolve(&binding, &operator.env);
+
+            let detail = refresh_failure(
+                resolve()
+                    .await
+                    .err()
+                    .expect("GitHub's secondary rate limit"),
+            );
+            assert!(detail.contains("rate limited"), "{detail}");
+            assert_eq!(command_runs(directory.path()), 1);
+            assert_eq!(operator.lease().phase, Some(AuthLeasePhase::Valid));
+
+            operator.advance(59);
+            for _ in 0..3 {
+                let detail = refresh_failure(
+                    resolve()
+                        .await
+                        .err()
+                        .expect("the account still waits for GitHub's minute"),
+                );
+                assert!(detail.contains("rate limited"), "{detail}");
+            }
+            assert_eq!(
+                hits.load(std::sync::atomic::Ordering::SeqCst),
+                1,
+                "no request inside GitHub's minute"
+            );
+            assert_eq!(
+                command_runs(directory.path()),
+                1,
+                "no command run inside GitHub's minute"
+            );
+
+            operator.advance(2);
+            resolve()
+                .await
+                .expect("the lookup runs again after the wait");
+            assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 3);
+            assert_eq!(command_runs(directory.path()), 2);
+        }
+
         /// A logout during GitHub's rate-limit window keeps its own error:
         /// the read the pause lets through is refused for the rate limit
         /// without running the command, and the requests inside the pause
@@ -6901,6 +7734,217 @@ mod tests {
             assert_eq!(harness.operator.lease().phase, Some(AuthLeasePhase::Valid));
             assert_eq!(harness.transport.request_count(), 4);
             assert_eq!(other_transport.request_count(), 1);
+        }
+
+        /// Holds the first request until the row releases it, after telling
+        /// the row it arrived; answers every request with the next scripted
+        /// outcome.
+        struct HeldFirstRequest {
+            inner: Arc<OutcomeTransport>,
+            arrived: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+            release: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+        }
+
+        #[async_trait]
+        impl CopilotHttpTransport for HeldFirstRequest {
+            async fn get(
+                &self,
+                url: &str,
+                headers: HeaderMap,
+            ) -> Result<CopilotHttpResponse, CopilotHttpTransportError> {
+                let arrived = self.arrived.lock().take();
+                if let Some(arrived) = arrived {
+                    let _ = arrived.send(());
+                    let release = self.release.lock().take();
+                    if let Some(release) = release {
+                        let _ = release.await;
+                    }
+                }
+                self.inner.get(url, headers).await
+            }
+        }
+
+        /// GitHub's refusal of a token applies only to the publication it was
+        /// made for. Two account states share the account's lease (two
+        /// provider registries): the first one's identity lookup for the
+        /// earlier token is in flight when the second one publishes a newer
+        /// token, and GitHub refuses the earlier token only after that. The
+        /// newer publication stays valid and the second account state keeps
+        /// serving it with no further request; the first one's request fails
+        /// as `stale_credential`, and its next request reads its source again
+        /// and heals on the newer token.
+        #[tokio::test]
+        async fn a_late_refusal_of_an_earlier_token_leaves_the_newer_one_valid() {
+            let earlier = user_token("earlier");
+            let newer = user_token("newer");
+            let (arrived, lookup_in_flight) = tokio::sync::oneshot::channel();
+            let (release_lookup, release) = tokio::sync::oneshot::channel();
+            let first_transport = Arc::new(HeldFirstRequest {
+                inner: OutcomeTransport::new([
+                    Ok(json_response(
+                        401,
+                        serde_json::json!({"message": "Bad credentials"}),
+                    )),
+                    Ok(svc_bot()),
+                    Ok(models_response()),
+                ]),
+                arrived: Mutex::new(Some(arrived)),
+                release: Mutex::new(Some(release)),
+            });
+            let first = CopilotRuntime::with_transport(first_transport.clone());
+            let second_transport = OutcomeTransport::new([Ok(svc_bot()), Ok(models_response())]);
+            let second = CopilotRuntime::with_transport(second_transport.clone());
+            let operator = OperatorEnv::new();
+            operator.set("COPILOT_GITHUB_TOKEN", &earlier);
+            let first_binding = token_binding(CopilotProviderRoute::OpenAi, env_source());
+            let second_binding = token_binding(CopilotProviderRoute::Anthropic, env_source());
+
+            let first_resolution = first.resolve(&first_binding, &operator.env);
+            let newer_publication = async {
+                lookup_in_flight
+                    .await
+                    .expect("the earlier token's lookup is in flight");
+                // The source now gives the newer token, and the second account
+                // state publishes it.
+                operator.set("COPILOT_GITHUB_TOKEN", &newer);
+                let resolved = second
+                    .resolve(&second_binding, &operator.env)
+                    .await
+                    .expect("the newer token resolves");
+                release_lookup
+                    .send(())
+                    .expect("GitHub answers the earlier token's lookup");
+                resolved
+            };
+            let (first_result, second_resolved) = tokio::join!(first_resolution, newer_publication);
+
+            let lease = operator.lease();
+            assert_eq!(
+                lease.phase,
+                Some(AuthLeasePhase::Valid),
+                "a refusal of the earlier token must not withdraw the newer one"
+            );
+            assert_eq!(lease.generation, 2, "the newer token's publication");
+            let url = format!("{BUSINESS_API}/responses");
+            let (_, bearer) = authorize_once(&second_resolved.concrete_authorizer(), &url).await;
+            assert_eq!(bearer, format!("Bearer {newer}"));
+            assert_eq!(
+                second_transport.request_count(),
+                2,
+                "the second account state keeps serving the newer token"
+            );
+            assert_eq!(
+                first_result.err(),
+                Some(ProviderAuthError::Auth(AuthError::StaleCredential)),
+                "the earlier token's request fails as stale"
+            );
+
+            // The first account state's next request reads its source again.
+            let healed = first
+                .resolve(&first_binding, &operator.env)
+                .await
+                .expect("the first account state heals on the newer token");
+            let (_, bearer) = authorize_once(&healed.concrete_authorizer(), &url).await;
+            assert_eq!(bearer, format!("Bearer {newer}"));
+            assert_eq!(first_transport.inner.request_count(), 3);
+            assert_eq!(operator.lease().phase, Some(AuthLeasePhase::Valid));
+            assert_eq!(operator.lease().generation, 2);
+        }
+
+        /// A refusal of a stored token names the publication the token was
+        /// stored under (its record's durable marker), not a lease snapshot
+        /// read after the value. A newer token being stored meanwhile (its
+        /// publication made, its record not yet saved when this request read
+        /// the store) stays valid: this request fails as `stale_credential`,
+        /// and once the newer record is saved it serves.
+        #[tokio::test]
+        async fn a_refusal_of_a_stored_token_names_its_stored_publication() {
+            let harness = Harness::new([
+                Ok(json_response(
+                    401,
+                    serde_json::json!({"message": "Bad credentials"}),
+                )),
+                Ok(svc_bot()),
+                Ok(models_response()),
+            ]);
+            let store = harness
+                .operator
+                .env
+                .provider_auth_persistence()
+                .expect("provider-auth persistence")
+                .token_store();
+            let identity = account_identity();
+            let key = meerkat_core::auth::TokenKey::from_credential_identity(&identity);
+            let stored = |token: String| PersistedTokens {
+                auth_mode: PersistedAuthMode::StaticBearer,
+                primary_secret: Some(token),
+                refresh_token: None,
+                id_token: None,
+                expires_at: None,
+                last_refresh: Some(Utc::now()),
+                scopes: Vec::new(),
+                account_id: None,
+                metadata: serde_json::Value::Null,
+            };
+            // As a store write does: publish the token's lifecycle, then mark
+            // the record with that publication.
+            let publish = |tokens: PersistedTokens| {
+                let transition = meerkat_core::publish_token_lifecycle_acquired_for_identity(
+                    &harness.operator.auth_lease,
+                    &identity,
+                    &tokens,
+                )
+                .expect("publish the stored token");
+                meerkat_core::mark_tokens_lifecycle_published_for_transition(
+                    &key,
+                    &tokens,
+                    &transition,
+                )
+                .expect("mark the stored token")
+            };
+            let earlier = publish(stored(user_token("stored-earlier")));
+            store
+                .save(&key, &earlier)
+                .await
+                .expect("store the earlier token");
+            let newer = publish(stored(user_token("stored-newer")));
+            let newer_generation = harness.operator.lease().generation;
+
+            let refused = harness
+                .resolve_from(
+                    CopilotProviderRoute::OpenAi,
+                    CredentialSourceSpec::ManagedStore,
+                )
+                .await
+                .err();
+            assert_eq!(
+                harness.operator.lease().phase,
+                Some(AuthLeasePhase::Valid),
+                "a refusal of the earlier stored token must not withdraw the newer one"
+            );
+            assert_eq!(harness.operator.lease().generation, newer_generation);
+            assert_eq!(
+                refused,
+                Some(ProviderAuthError::Auth(AuthError::StaleCredential))
+            );
+
+            store
+                .save(&key, &newer)
+                .await
+                .expect("the newer token's record is saved");
+            let resolved = harness
+                .resolve_from(
+                    CopilotProviderRoute::OpenAi,
+                    CredentialSourceSpec::ManagedStore,
+                )
+                .await
+                .expect("the newer stored token serves");
+            let (_, bearer) = authorize_once(
+                &resolved.concrete_authorizer(),
+                &format!("{BUSINESS_API}/responses"),
+            )
+            .await;
+            assert_eq!(bearer, format!("Bearer {}", user_token("stored-newer")));
         }
 
         /// A command source's `refresh_interval_ms` at or below the
@@ -7305,17 +8349,20 @@ mod tests {
             }
         }
 
-        /// T5: Copilot refusing this identity (403 or 404, chat disabled) is
-        /// a typed `refresh_failed` that does not touch the lease, and the
-        /// same token works once that is fixed. A rate limit pauses the
-        /// identity lookup until GitHub's stated time.
+        /// T5: Copilot refusing this identity (a 403 from the model list, here
+        /// after an identity lookup that did not answer the token, which
+        /// pauses that token for a minute; chat disabled) is a typed
+        /// `refresh_failed` that does not touch the lease, and the same token
+        /// works once that is fixed. A rate limit pauses the identity lookup
+        /// until GitHub's stated time.
         #[tokio::test]
         async fn copilot_refusal_is_typed_and_not_sticky() {
             let harness = Harness::new([
+                Ok(unanswered_lookup(403)),
                 Ok(json_response(
                     403,
                     serde_json::json!({
-                        "message": "Resource not accessible by personal access token"
+                        "message": "The Copilot Requests permission is required"
                     }),
                 )),
                 Ok(svc_bot()),
@@ -7333,15 +8380,16 @@ mod tests {
             );
             assert!(detail.contains("403"), "{detail}");
             assert!(
-                detail.contains("Resource not accessible by personal access token"),
+                detail.contains("The Copilot Requests permission is required"),
                 "{detail}"
             );
             assert_eq!(harness.operator.lease().phase, Some(AuthLeasePhase::Valid));
+            harness.operator.advance(61);
             harness
                 .resolve(CopilotProviderRoute::OpenAi)
                 .await
                 .expect("the same token works once Copilot accepts it");
-            assert_eq!(harness.transport.request_count(), 3);
+            assert_eq!(harness.transport.request_count(), 4);
 
             let chat_disabled = Harness::new([Ok(json_response(
                 200,
@@ -7698,6 +8746,309 @@ mod tests {
             );
         }
 
+        /// GitHub's answer when its identity lookup does not answer a token:
+        /// what a fine-grained personal access token can get from
+        /// `copilot_internal/user`.
+        fn unanswered_lookup(status: u16) -> CopilotHttpResponse {
+            json_response(
+                status,
+                serde_json::json!({
+                    "message": "Resource not accessible by personal access token"
+                }),
+            )
+        }
+
+        /// GitHub's identity lookup may not answer a token the Copilot API
+        /// accepts: a fine-grained personal access token can get a 403 or a
+        /// 404 from it. Such an answer, when it is no rate limit, has the
+        /// route try the default Copilot API host with no login or plan, and
+        /// use the token once the account's model list loads there. The
+        /// lookup's message, which can echo the request's token, reaches no
+        /// log line.
+        #[tokio::test]
+        async fn an_unanswered_identity_lookup_uses_the_default_host_once_models_load() {
+            let log = LogCapture::default();
+            let capture = CaptureSubscriber::dispatch(log.clone());
+            // A second registered dispatcher makes callsite interest come from
+            // every dispatcher, so a callsite first reached under no
+            // subscriber still reaches this one.
+            let _anchor = CaptureSubscriber::dispatch(LogCapture::default());
+            let _guard = tracing::dispatcher::set_default(&capture);
+
+            for status in [403, 404] {
+                let token = user_token(&format!("unanswered-{status}"));
+                let bearer = format!("Bearer {token}");
+                let harness =
+                    Harness::new([Ok(message_echo(status, &bearer)), Ok(models_response())]);
+                harness.operator.set("COPILOT_GITHUB_TOKEN", &token);
+
+                let resolved = harness
+                    .resolve(CopilotProviderRoute::OpenAi)
+                    .await
+                    .unwrap_or_else(|error| {
+                        panic!("lookup {status}: the token is used on the default host: {error:?}")
+                    });
+
+                assert_eq!(
+                    harness.transport.urls(),
+                    [
+                        GITHUB_COPILOT_USER_URL.to_string(),
+                        format!("{DEFAULT_COPILOT_API_BASE}/models")
+                    ],
+                    "lookup {status}"
+                );
+                assert_eq!(harness.transport.bearer(1), Some(bearer.clone()));
+                assert_eq!(resolved.metadata().account_id, None, "lookup {status}");
+                assert_eq!(resolved.metadata().plan, None, "lookup {status}");
+                let authorizer = resolved.concrete_authorizer();
+                let identity = authorizer.account_identity().expect("account identity");
+                assert_eq!(identity.api_base, DEFAULT_COPILOT_API_BASE);
+                assert_eq!(identity.login, None);
+                assert!(!identity.installation);
+                let (_, signed) = authorize_once(
+                    &authorizer,
+                    &format!("{DEFAULT_COPILOT_API_BASE}/responses"),
+                )
+                .await;
+                assert_eq!(signed, bearer);
+                assert_eq!(
+                    harness.transport.request_count(),
+                    2,
+                    "lookup {status}: requests reuse the account state"
+                );
+                assert_eq!(harness.operator.lease().phase, Some(AuthLeasePhase::Valid));
+            }
+
+            let logged = log.0.lock().clone();
+            assert!(
+                logged.contains("trying the default Copilot API host"),
+                "the capture saw the lookup's answer: {logged}"
+            );
+            assert!(!logged.contains(CANARY), "{logged}");
+        }
+
+        /// The CLI's check accepts such a token the same way: unnamed, on the
+        /// default host, once its model list loads there.
+        #[tokio::test]
+        async fn the_check_accepts_a_token_the_identity_lookup_does_not_answer() {
+            let transport =
+                OutcomeTransport::new([Ok(unanswered_lookup(403)), Ok(models_response())]);
+            let identity = verify_operator_token_with(
+                transport.as_ref(),
+                &user_token("check-unanswered"),
+                &CopilotBackendConfig::from_token_options(&serde_json::Value::Null)
+                    .expect("default token route options"),
+                Utc::now(),
+            )
+            .await
+            .expect("the check accepts the token");
+
+            assert_eq!(identity.login, None);
+            assert_eq!(identity.plan, None);
+            assert!(!identity.installation);
+            assert_eq!(identity.api_base, DEFAULT_COPILOT_API_BASE);
+            assert_eq!(
+                transport.urls(),
+                [
+                    GITHUB_COPILOT_USER_URL.to_string(),
+                    format!("{DEFAULT_COPILOT_API_BASE}/models")
+                ]
+            );
+        }
+
+        /// A Copilot API 401 does not mean the token is revoked: Copilot
+        /// answers 401 for a valid token without the Copilot Requests
+        /// permission, without a seat, or with its integration not allowed,
+        /// and an identity lookup that answered 403 or 404 had already
+        /// authenticated the token. So a 401 from the model list of a token
+        /// the lookup did not answer is Copilot refusing it (`refresh_failed`
+        /// with Copilot's message, the lease untouched), and the same token is
+        /// not asked about again for a minute; after it, the same token works
+        /// once Copilot accepts it. A 401 from a later listing runs the
+        /// identity lookup again, whose own 401 decides that the token is
+        /// revoked. The CLI's check reports the same Copilot refusal.
+        #[tokio::test]
+        async fn an_unanswered_lookup_then_a_rejected_model_list_refuses_the_token() {
+            let permission = || -> Outcome {
+                Ok(json_response(
+                    401,
+                    serde_json::json!({
+                        "message": "unauthorized: Personal Access Token does not have Copilot Requests permission"
+                    }),
+                ))
+            };
+            let copilot_refusal = |refused: &Option<ProviderAuthError>| {
+                matches!(
+                    refused,
+                    Some(ProviderAuthError::Auth(AuthError::RefreshFailed(detail)))
+                        if detail.contains("401")
+                            && detail.contains("does not have Copilot Requests permission")
+                )
+            };
+
+            let harness = Harness::new([
+                Ok(unanswered_lookup(403)),
+                permission(),
+                Ok(unanswered_lookup(403)),
+                Ok(models_response()),
+            ]);
+            harness
+                .operator
+                .set("COPILOT_GITHUB_TOKEN", &user_token("refused-at-first"));
+            let refused = harness.resolve(CopilotProviderRoute::OpenAi).await.err();
+            assert!(
+                copilot_refusal(&refused),
+                "a 401 from the first model listing is a Copilot refusal, not a revocation: {refused:?}"
+            );
+            assert_eq!(harness.operator.lease().phase, Some(AuthLeasePhase::Valid));
+            assert_eq!(harness.transport.request_count(), 2);
+
+            harness.operator.advance(59);
+            let paused = harness.resolve(CopilotProviderRoute::OpenAi).await.err();
+            assert!(
+                copilot_refusal(&paused),
+                "the same refusal within the minute: {paused:?}"
+            );
+            assert_eq!(
+                harness.transport.request_count(),
+                2,
+                "no request for the same token within the minute"
+            );
+            harness.operator.advance(2);
+            harness
+                .resolve(CopilotProviderRoute::OpenAi)
+                .await
+                .expect("the same token works once Copilot accepts it");
+            assert_eq!(harness.transport.request_count(), 4);
+            assert_eq!(harness.operator.lease().phase, Some(AuthLeasePhase::Valid));
+
+            let later = Harness::new([
+                Ok(unanswered_lookup(404)),
+                Ok(models_response()),
+                permission(),
+                Ok(json_response(
+                    401,
+                    serde_json::json!({"message": "Bad credentials"}),
+                )),
+            ]);
+            later
+                .operator
+                .set("COPILOT_GITHUB_TOKEN", &user_token("revoked-later"));
+            let resolved = later
+                .resolve(CopilotProviderRoute::OpenAi)
+                .await
+                .expect("the token is used on the default host");
+            // The model list is due again after five minutes.
+            later.operator.advance(301);
+            let refused = resolved
+                .concrete_authorizer()
+                .prepare_request()
+                .await
+                .expect_err("GitHub's identity lookup refused the token");
+            assert_eq!(refused, AuthError::UserReauthRequired);
+            assert_eq!(
+                later.operator.lease().phase,
+                Some(AuthLeasePhase::ReauthRequired)
+            );
+            assert_eq!(
+                later.transport.request_count(),
+                4,
+                "the later listing's 401 runs the identity lookup again, and its 401 decides"
+            );
+
+            let check = OutcomeTransport::new([Ok(unanswered_lookup(403)), permission()]);
+            let checked = verify_operator_token_with(
+                check.as_ref(),
+                &user_token("check-refused"),
+                &CopilotBackendConfig::from_token_options(&serde_json::Value::Null)
+                    .expect("default token route options"),
+                Utc::now(),
+            )
+            .await
+            .err();
+            assert!(
+                copilot_refusal(&checked),
+                "the CLI's check reports Copilot's refusal: {checked:?}"
+            );
+        }
+
+        /// A token the identity lookup does not answer never serves without
+        /// its model list: a listing that fails (a server error, a timeout, a
+        /// rate limit) fails the request as `refresh_failed` and leaves the
+        /// lease valid, and a rate limit pauses the lookup until GitHub's
+        /// stated time.
+        #[tokio::test]
+        async fn an_unanswered_lookup_never_serves_without_a_model_list() {
+            let listings: Vec<(&str, Outcome)> = vec![
+                (
+                    "server error",
+                    Ok(json_response(
+                        502,
+                        serde_json::json!({"message": "Bad gateway"}),
+                    )),
+                ),
+                ("timeout", Err(CopilotHttpTransportError::Timeout)),
+                ("rate limit", Ok(rate_limited(429, 120))),
+            ];
+            for (label, listing) in listings {
+                let harness = Harness::new([Ok(unanswered_lookup(404)), listing]);
+                harness
+                    .operator
+                    .set("COPILOT_GITHUB_TOKEN", &user_token("unanswered-down"));
+                let failed = harness.resolve(CopilotProviderRoute::OpenAi).await.err();
+                assert_eq!(
+                    harness.transport.request_count(),
+                    2,
+                    "{label}: the model list was asked"
+                );
+                let detail = refresh_failure(
+                    failed.unwrap_or_else(|| panic!("{label}: no route without the model list")),
+                );
+                assert!(detail.contains("model listing failed"), "{label}: {detail}");
+                assert_eq!(
+                    harness.operator.lease().phase,
+                    Some(AuthLeasePhase::Valid),
+                    "{label}"
+                );
+            }
+
+            let harness = Harness::new([
+                Ok(unanswered_lookup(403)),
+                Ok(rate_limited(429, 120)),
+                Ok(unanswered_lookup(403)),
+                Ok(models_response()),
+            ]);
+            harness
+                .operator
+                .set("COPILOT_GITHUB_TOKEN", &user_token("unanswered-paced"));
+            refresh_failure(
+                harness
+                    .resolve(CopilotProviderRoute::OpenAi)
+                    .await
+                    .err()
+                    .expect("the model listing is rate limited"),
+            );
+            harness.operator.advance(119);
+            refresh_failure(
+                harness
+                    .resolve(CopilotProviderRoute::OpenAi)
+                    .await
+                    .err()
+                    .expect("still inside GitHub's stated wait"),
+            );
+            assert_eq!(
+                harness.transport.request_count(),
+                2,
+                "no request before GitHub's stated time"
+            );
+            harness.operator.advance(2);
+            harness
+                .resolve(CopilotProviderRoute::OpenAi)
+                .await
+                .expect("the lookup and the listing run again after the wait");
+            assert_eq!(harness.transport.request_count(), 4);
+        }
+
         /// T9: the token never goes to an API host outside
         /// `githubcopilot.com`, even when GitHub's identity answer names one.
         #[tokio::test]
@@ -7811,10 +9162,16 @@ mod tests {
                 ),
                 (
                     "identity 403",
-                    vec![Ok(json_response(
-                        403,
-                        serde_json::json!({"message": "Forbidden"}),
-                    ))],
+                    vec![
+                        Ok(json_response(
+                            403,
+                            serde_json::json!({"message": "Forbidden"}),
+                        )),
+                        Ok(json_response(
+                            403,
+                            serde_json::json!({"message": "Forbidden"}),
+                        )),
+                    ],
                     token.clone(),
                 ),
                 (
@@ -7965,6 +9322,158 @@ mod tests {
             }
         }
 
+        /// A GitHub answer whose JSON `message` quotes the request's
+        /// Authorization value, as a proxy or gateway that echoes the request's
+        /// headers can produce.
+        fn message_echo(status: u16, authorization: &str) -> CopilotHttpResponse {
+            json_response(
+                status,
+                serde_json::json!({"message": format!("echoed by GitHub: {authorization}")}),
+            )
+        }
+
+        /// The operator token never reaches an error, its `Display` or
+        /// `Debug`, or a log line through GitHub's quoted `message`: an
+        /// identity lookup that does not answer (403, logged before the model
+        /// list refuses), rejected (401) or failing (500), a model listing
+        /// failing (500) or refused (403), the CLI's check, and the device
+        /// sign-in's token exchange, each answering with a `message` that
+        /// echoes the request's Authorization value. The message itself is
+        /// still quoted.
+        #[tokio::test]
+        async fn githubs_quoted_message_never_carries_the_token() {
+            let log = LogCapture::default();
+            let capture = CaptureSubscriber::dispatch(log.clone());
+            // A second registered dispatcher makes callsite interest come from
+            // every dispatcher, so a callsite first reached under no
+            // subscriber still reaches this one.
+            let _anchor = CaptureSubscriber::dispatch(LogCapture::default());
+            let _guard = tracing::dispatcher::set_default(&capture);
+
+            let token = user_token("quoted");
+            let bearer = format!("Bearer {token}");
+            let paths: Vec<(&str, Vec<Outcome>)> = vec![
+                (
+                    "identity 403",
+                    vec![
+                        Ok(message_echo(403, &bearer)),
+                        Ok(message_echo(403, &bearer)),
+                    ],
+                ),
+                ("identity 401", vec![Ok(message_echo(401, &bearer))]),
+                ("identity 500", vec![Ok(message_echo(500, &bearer))]),
+                (
+                    "models 500",
+                    vec![Ok(svc_bot()), Ok(message_echo(500, &bearer))],
+                ),
+                (
+                    "models 403",
+                    vec![Ok(svc_bot()), Ok(message_echo(403, &bearer))],
+                ),
+            ];
+            let mut rendered = String::new();
+            for (path, outcomes) in paths {
+                let harness = Harness::new(outcomes);
+                harness.operator.set("COPILOT_GITHUB_TOKEN", &token);
+                match harness.resolve(CopilotProviderRoute::OpenAi).await {
+                    Ok(resolved) => {
+                        let authorizer = resolved.concrete_authorizer();
+                        rendered.push_str(&format!(
+                            "{path}: {:?}",
+                            authorizer.state.cache.read().as_ref()
+                        ));
+                    }
+                    Err(error) => {
+                        rendered.push_str(&format!("{path}: {error} {error:?}\n"));
+                    }
+                }
+            }
+            let checked = verify_operator_token_with(
+                &*OutcomeTransport::new([Ok(svc_bot()), Ok(message_echo(500, &bearer))]),
+                &token,
+                &CopilotBackendConfig::default(),
+                Utc::now(),
+            )
+            .await
+            .expect_err("the model listing failed");
+            rendered.push_str(&format!("check: {checked} {checked:?}\n"));
+            let (auth_binding, device_binding) = validated_binding();
+            let (device_env, _device_lease) =
+                resolver_environment_with_token(&auth_binding, &token).await;
+            let device = CopilotAuthorizer {
+                state: Arc::new(CopilotAccountState::new(
+                    CopilotBackendConfig::default(),
+                    CopilotCredentialMode::DeviceSignIn,
+                )),
+                binding: device_binding,
+                env: device_env,
+                transport: Arc::new(ScriptedTransport::new([message_echo(
+                    500,
+                    &format!("token {token}"),
+                )])),
+            };
+            let exchanged = device.prime().await.expect_err("the token exchange failed");
+            rendered.push_str(&format!("device: {exchanged} {exchanged:?}\n"));
+            rendered.push_str(&log.0.lock());
+
+            assert!(
+                rendered.contains("GitHub Copilot refused this token (403): echoed by GitHub"),
+                "GitHub's message is still quoted: {rendered}"
+            );
+            assert!(
+                rendered.contains("model discovery returned HTTP 500: echoed by GitHub"),
+                "the capture saw the model listing failure: {rendered}"
+            );
+            assert!(
+                rendered.contains("token exchange returned 500: echoed by GitHub"),
+                "the capture saw the token exchange failure: {rendered}"
+            );
+            assert!(!rendered.contains(CANARY), "{rendered}");
+        }
+
+        /// The route's authorizer, which provider clients ask to redact what
+        /// they read from a response, removes every operator token the
+        /// account signed requests with: the current one, and the one a
+        /// rotation replaced, whose request can still be answered. The rest
+        /// of the diagnostic is kept.
+        #[tokio::test]
+        async fn signed_operator_tokens_are_redacted_from_response_diagnostics() {
+            let earlier = user_token("earlier");
+            let current = user_token("current");
+            let harness = Harness::new([
+                Ok(svc_bot()),
+                Ok(models_response()),
+                Ok(svc_bot()),
+                Ok(models_response()),
+            ]);
+            harness.operator.set("COPILOT_GITHUB_TOKEN", &earlier);
+            let resolved = harness
+                .resolve(CopilotProviderRoute::OpenAi)
+                .await
+                .expect("the earlier token resolves");
+            let concrete = resolved.concrete_authorizer();
+            let route = resolve_route_for_state(&concrete.state, Provider::OpenAI, "gpt-test")
+                .expect("the account's route");
+            let authorizer = route.bind_authorizer(resolved.authorizer());
+            let url = format!("{BUSINESS_API}/responses");
+
+            let (receipt, bearer) = authorize_once(&concrete, &url).await;
+            assert_eq!(bearer, format!("Bearer {earlier}"));
+            // The operator rotates the token, and Copilot refuses the earlier
+            // one: the next request signs with the current one.
+            harness.operator.set("COPILOT_GITHUB_TOKEN", &current);
+            refuse_with_401(&concrete, &url, receipt).await;
+            let (_, bearer) = authorize_once(&concrete, &url).await;
+            assert_eq!(bearer, format!("Bearer {current}"));
+
+            let mut diagnostic = format!("upstream echo: Bearer {earlier}, then Bearer {current}");
+            authorizer.redact_response_diagnostic(&mut diagnostic);
+            assert_eq!(
+                diagnostic,
+                "upstream echo: Bearer <redacted>, then Bearer <redacted>"
+            );
+        }
+
         /// T11: no token in any variable, or only whitespace, is
         /// `missing_secret` with no request and no lease.
         #[tokio::test]
@@ -8020,6 +9529,56 @@ mod tests {
                     && message.contains("github_copilot_token"),
                 "{message}"
             );
+        }
+
+        /// The routes of one credential account read its token from one
+        /// source, as they share one auth method and one configuration: a
+        /// route over a second source is refused before it makes a request,
+        /// so no token is labelled against another source's publications (a
+        /// stored token's refusal would otherwise read as superseded on every
+        /// request). Routes over the same source still share the account.
+        #[tokio::test]
+        async fn routes_of_one_account_refuse_a_second_credential_source() {
+            let harness = Harness::new([Ok(svc_bot()), Ok(models_response())]);
+            harness
+                .operator
+                .set("COPILOT_GITHUB_TOKEN", &user_token("first-source"));
+            harness
+                .operator
+                .set("SECOND_COPILOT_TOKEN", &user_token("second-source"));
+            let _first = harness
+                .resolve(CopilotProviderRoute::OpenAi)
+                .await
+                .expect("the first route resolves");
+
+            let refused = harness
+                .resolve_from(
+                    CopilotProviderRoute::Anthropic,
+                    CredentialSourceSpec::Env {
+                        env: "SECOND_COPILOT_TOKEN".to_string(),
+                        fallback: Vec::new(),
+                    },
+                )
+                .await
+                .err();
+            assert!(
+                matches!(
+                    &refused,
+                    Some(ProviderAuthError::SourceResolutionFailed(message))
+                        if message.contains("disagree on the credential source")
+                ),
+                "a second credential source on one account is refused: {refused:?}"
+            );
+            assert_eq!(
+                harness.transport.request_count(),
+                2,
+                "the refused route makes no request"
+            );
+            harness
+                .resolve(CopilotProviderRoute::Gemini)
+                .await
+                .expect("a route over the same source still shares the account");
+            assert_eq!(harness.transport.request_count(), 2);
         }
 
         /// The device sign-in still requires its stored token, and names the
@@ -8111,11 +9670,29 @@ mod tests {
                 "message": format!("line\u{0007}one\n{long}")
             }))
             .expect("body");
-            let message = github_error_message(&body);
+            let message = github_error_message(&body, "unquoted-secret");
             assert!(message.starts_with("lineone"), "{message}");
             assert_eq!(message.chars().count(), GITHUB_ERROR_MESSAGE_MAX_CHARS);
             assert!(!message.chars().any(char::is_control));
-            assert_eq!(github_error_message(b"<html>"), "no message");
+            assert_eq!(
+                github_error_message(b"<html>", "unquoted-secret"),
+                "no message"
+            );
+
+            // The secret is redacted before the cut, so no prefix of it
+            // survives the cut, and a control character inside it does not
+            // hide it.
+            let secret = user_token("quoted");
+            let body = serde_json::to_vec(&serde_json::json!({
+                "message": format!("{} {}\u{0007}{}", "y".repeat(189), &secret[..8], &secret[8..])
+            }))
+            .expect("body");
+            let message = github_error_message(&body, &secret);
+            assert!(!message.contains(&secret[..8]), "{message}");
+            assert!(
+                message.ends_with(meerkat_core::redact::REDACTED),
+                "{message}"
+            );
         }
 
         /// The CLI's check: no lease, no store and no cache effects; the same
@@ -8228,6 +9805,14 @@ mod tests {
                 .unwrap_or_else(|| panic!("{name} is required for this live probe"))
         }
 
+        /// The configuration the token routes use with no backend options,
+        /// which the live checks send, as `rkat auth login copilot
+        /// --non-interactive` does.
+        fn live_token_config() -> CopilotBackendConfig {
+            CopilotBackendConfig::from_token_options(&serde_json::Value::Null)
+                .expect("default token route options")
+        }
+
         /// Resolve the OpenAI route of a live token over real HTTP.
         async fn resolve_live(
             operator: &OperatorEnv,
@@ -8252,7 +9837,7 @@ mod tests {
         #[ignore = "live probe: needs COPILOT_LIVE_USER_TOKEN, a GitHub user token with Copilot access"]
         async fn live_operator_user_token_resolves_identity_and_models() {
             let token = live_token("COPILOT_LIVE_USER_TOKEN");
-            let identity = verify_operator_token(&token, &CopilotBackendConfig::default())
+            let identity = verify_operator_token(&token, &live_token_config())
                 .await
                 .expect("GitHub and Copilot accept the token");
             eprintln!(
@@ -8296,7 +9881,7 @@ mod tests {
         #[ignore = "live probe: needs COPILOT_LIVE_INSTALLATION_TOKEN, a GitHub App installation token"]
         async fn live_operator_installation_token_lists_models() {
             let token = live_token("COPILOT_LIVE_INSTALLATION_TOKEN");
-            let identity = verify_operator_token(&token, &CopilotBackendConfig::default())
+            let identity = verify_operator_token(&token, &live_token_config())
                 .await
                 .expect("Copilot accepts the installation token");
             assert!(
@@ -8326,7 +9911,7 @@ mod tests {
         #[ignore = "live probe: needs COPILOT_LIVE_REVOKED_TOKEN, a revoked GitHub user token"]
         async fn live_operator_revoked_token_requires_reauth() {
             let token = live_token("COPILOT_LIVE_REVOKED_TOKEN");
-            let checked = verify_operator_token(&token, &CopilotBackendConfig::default()).await;
+            let checked = verify_operator_token(&token, &live_token_config()).await;
             assert!(
                 matches!(
                     checked,
@@ -8355,7 +9940,7 @@ mod tests {
         #[ignore = "live probe: needs COPILOT_LIVE_NO_ACCESS_TOKEN, a GitHub token without Copilot access"]
         async fn live_operator_token_without_copilot_access_is_refused() {
             let token = live_token("COPILOT_LIVE_NO_ACCESS_TOKEN");
-            let refused = verify_operator_token(&token, &CopilotBackendConfig::default())
+            let refused = verify_operator_token(&token, &live_token_config())
                 .await
                 .expect_err("Copilot refuses the token");
             eprintln!("copilot-live-token refusal: {refused}");

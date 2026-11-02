@@ -1255,6 +1255,7 @@ impl RuntimeAuthLeaseHandle {
             auth_dsl::AuthMachineInput::ResolveSourceCredentialPublication { .. } => {
                 "resolve_source_credential_publication"
             }
+            auth_dsl::AuthMachineInput::MarkPublicationRefused { .. } => "mark_publication_refused",
         }
     }
 }
@@ -1914,6 +1915,25 @@ impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
         }
     }
 
+    fn mark_publication_refused(
+        &self,
+        lease_key: &LeaseKey,
+        credential_generation: u64,
+        material: Option<&CredentialFingerprint>,
+    ) -> Result<(), DslTransitionError> {
+        self.apply(
+            lease_key,
+            auth_dsl::AuthMachineInput::MarkPublicationRefused {
+                refused_credential_generation: credential_generation,
+                refused_credential_material_fingerprint: material
+                    .map(CredentialFingerprint::machine_material),
+            },
+            "AuthLeaseHandle::mark_publication_refused",
+            false,
+        )
+        .map(|_| ())
+    }
+
     fn snapshot(&self, lease_key: &LeaseKey) -> AuthLeaseSnapshot {
         let guard = self
             .machines
@@ -2370,6 +2390,205 @@ mod tests {
                     expected == Publish,
                     "{label}/{material}: Acquire naming the value"
                 );
+            }
+        }
+    }
+
+    /// A consumer's refusal withdraws only the publication it names. A
+    /// refusal of an earlier publication (a newer value was published since)
+    /// or of another value at the same generation leaves the lease valid;
+    /// the refusal of the current one withdraws it, and refusing again
+    /// changes nothing. A publication that names no value is refused by its
+    /// generation alone, and a released lease is left released.
+    #[test]
+    fn publication_refusal_withdraws_only_the_publication_it_names() {
+        let h = RuntimeAuthLeaseHandle::new();
+        let k = lease("dev", "publication_refusal");
+        let earlier = CredentialFingerprint::of_secret("earlier-source-token");
+        let newer = CredentialFingerprint::of_secret("newer-source-token");
+        h.publish_source_credential(&k, &earlier, u64::MAX)
+            .expect("the earlier value publishes");
+        h.publish_source_credential(&k, &newer, u64::MAX)
+            .expect("the newer value publishes");
+        assert_eq!(h.snapshot(&k).generation, 2);
+        let refuse = |generation: u64, material: Option<&CredentialFingerprint>| {
+            h.mark_publication_refused(&k, generation, material)
+                .expect("every refusal is accepted");
+        };
+
+        refuse(1, Some(&earlier));
+        assert_eq!(
+            h.snapshot(&k).phase,
+            Some(AuthLeasePhase::Valid),
+            "a late refusal of the earlier publication"
+        );
+        refuse(2, Some(&earlier));
+        assert_eq!(
+            h.snapshot(&k).phase,
+            Some(AuthLeasePhase::Valid),
+            "a refusal of another value at the current generation"
+        );
+        refuse(2, None);
+        assert_eq!(
+            h.snapshot(&k).phase,
+            Some(AuthLeasePhase::Valid),
+            "a refusal that names no value, of a publication that names one"
+        );
+        assert_eq!(
+            h.resolve_credential_use_admission(
+                &k,
+                meerkat_core::handles::CredentialUseIntent::UseCredential
+            )
+            .unwrap(),
+            meerkat_core::handles::CredentialUseDisposition::Authorized
+        );
+
+        refuse(2, Some(&newer));
+        let refused = h.snapshot(&k);
+        assert_eq!(refused.phase, Some(AuthLeasePhase::ReauthRequired));
+        assert_eq!(refused.generation, 2, "a refusal publishes nothing");
+        refuse(2, Some(&newer));
+        assert_eq!(h.snapshot(&k), refused, "refusing again changes nothing");
+        assert_eq!(
+            h.publish_source_credential(&k, &newer, u64::MAX).unwrap(),
+            meerkat_core::handles::SourceCredentialPublication::AlreadyPublished,
+            "the refused value is not published again"
+        );
+
+        // A login names no value: its publication is refused by generation.
+        h.acquire_lease(&k, u64::MAX).unwrap();
+        assert_eq!(h.snapshot(&k).generation, 3);
+        refuse(2, Some(&newer));
+        assert_eq!(h.snapshot(&k).phase, Some(AuthLeasePhase::Valid));
+        refuse(3, None);
+        assert_eq!(h.snapshot(&k).phase, Some(AuthLeasePhase::ReauthRequired));
+
+        // A released lease stays released.
+        h.release_lease(&k).unwrap();
+        refuse(3, None);
+        assert_eq!(h.snapshot(&k).phase, None);
+    }
+
+    /// `MarkPublicationRefused` is total and partitions every phase: in a
+    /// live phase (Valid, Expiring, Expired, Refreshing) the refusal of the
+    /// publication the lease carries withdraws it to ReauthRequired and
+    /// keeps its generation, fingerprint and expiry; a refusal of an
+    /// earlier generation or of another value, and any refusal of a lease
+    /// already refused or released, changes no state.
+    #[test]
+    fn publication_refusal_arms_partition_every_phase() {
+        fn apply(
+            authority: &mut auth_dsl::AuthMachineAuthority,
+            input: auth_dsl::AuthMachineInput,
+        ) {
+            auth_dsl::AuthMachineMutator::apply(authority, input).expect("scenario input applies");
+        }
+        fn copy(authority: &auth_dsl::AuthMachineAuthority) -> auth_dsl::AuthMachineAuthority {
+            auth_dsl::AuthMachineAuthority::recover_from_state(authority.state().clone())
+                .expect("a reachable state recovers")
+        }
+        fn acquire(material: &str) -> auth_dsl::AuthMachineInput {
+            auth_dsl::AuthMachineInput::Acquire {
+                expires_at_ts: Some(100),
+                credential_published_at_millis: 1,
+                credential_material_fingerprint: Some(material.to_string()),
+            }
+        }
+        fn refusal(generation: u64, material: Option<&str>) -> auth_dsl::AuthMachineInput {
+            auth_dsl::AuthMachineInput::MarkPublicationRefused {
+                refused_credential_generation: generation,
+                refused_credential_material_fingerprint: material.map(str::to_string),
+            }
+        }
+        fn observe(now_ts: u64) -> auth_dsl::AuthMachineInput {
+            auth_dsl::AuthMachineInput::ObserveCredentialFreshness {
+                now_ts,
+                refresh_window_secs: 60,
+            }
+        }
+
+        // Two publications: the lease carries generation 2, value "current".
+        let mut valid = auth_dsl::AuthMachineAuthority::new();
+        apply(&mut valid, acquire("earlier"));
+        apply(&mut valid, acquire("current"));
+        let mut expiring = copy(&valid);
+        apply(&mut expiring, observe(50));
+        let mut expired = copy(&valid);
+        apply(&mut expired, observe(100));
+        let mut refreshing = copy(&valid);
+        apply(&mut refreshing, auth_dsl::AuthMachineInput::BeginRefresh);
+        let mut refused = copy(&valid);
+        apply(&mut refused, auth_dsl::AuthMachineInput::MarkReauthRequired);
+        let mut released = copy(&valid);
+        apply(&mut released, auth_dsl::AuthMachineInput::BeginRelease);
+        apply(&mut released, auth_dsl::AuthMachineInput::Release);
+
+        // (state, phase, whether the current publication's refusal withdraws it)
+        let cases = [
+            ("valid", &valid, auth_dsl::AuthLifecyclePhase::Valid, true),
+            (
+                "expiring",
+                &expiring,
+                auth_dsl::AuthLifecyclePhase::Expiring,
+                true,
+            ),
+            (
+                "expired",
+                &expired,
+                auth_dsl::AuthLifecyclePhase::Expired,
+                true,
+            ),
+            (
+                "refreshing",
+                &refreshing,
+                auth_dsl::AuthLifecyclePhase::Refreshing,
+                true,
+            ),
+            (
+                "refused",
+                &refused,
+                auth_dsl::AuthLifecyclePhase::ReauthRequired,
+                false,
+            ),
+            (
+                "released",
+                &released,
+                auth_dsl::AuthLifecyclePhase::Released,
+                false,
+            ),
+        ];
+        for (label, authority, phase, live) in cases {
+            assert_eq!(authority.state().lifecycle_phase, phase, "{label}");
+            assert_eq!(authority.state().credential_generation, 2, "{label}");
+            for (name, input, withdraws) in [
+                ("current", refusal(2, Some("current")), live),
+                ("earlier generation", refusal(1, Some("earlier")), false),
+                ("earlier value", refusal(2, Some("earlier")), false),
+                ("no value", refusal(2, None), false),
+                ("next generation", refusal(3, Some("current")), false),
+            ] {
+                let mut refuser = copy(authority);
+                let before = refuser.state().clone();
+                let applied = auth_dsl::AuthMachineMutator::apply(&mut refuser, input)
+                    .map(|_| ())
+                    .map_err(|error| error.to_string());
+                assert_eq!(applied, Ok(()), "{label}/{name}: every refusal is accepted");
+                let after = refuser.state();
+                if withdraws {
+                    assert_eq!(
+                        after.lifecycle_phase,
+                        auth_dsl::AuthLifecyclePhase::ReauthRequired,
+                        "{label}/{name}"
+                    );
+                    assert_eq!(after.credential_generation, before.credential_generation);
+                    assert_eq!(
+                        after.credential_material_fingerprint,
+                        before.credential_material_fingerprint
+                    );
+                    assert_eq!(after.expires_at, before.expires_at);
+                } else {
+                    assert_eq!(after, &before, "{label}/{name}: no state changes");
+                }
             }
         }
     }

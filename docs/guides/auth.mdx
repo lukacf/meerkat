@@ -257,6 +257,24 @@ jobs, servers and service accounts. The token itself is the Copilot API
 credential; the first time a route uses it, Meerkat looks up the GitHub login,
 the Copilot plan and the plan's API host, and nothing is exchanged.
 
+Token routes identify themselves to the Copilot API with
+`Copilot-Integration-Id: copilot-developer-cli`, GitHub Copilot CLI's
+integration id, which the Copilot API accepts for personal access tokens and
+OAuth tokens alike; it refuses `vscode-chat`, the device sign-in's default, for
+a personal access token. An `integration_id` in the backend `options` replaces
+it on every request of that route (GitHub's identity lookup sends none).
+
+GitHub's identity lookup may not answer a fine-grained personal access token
+that the Copilot API accepts (it can answer 403 or 404). The route then uses
+the default Copilot API host, `https://api.githubcopilot.com`, with no login
+or plan, and only once the account's model list loads there: a token that
+cannot list the models is never used. A 401 or 403 from that list is Copilot
+refusing the token (a missing Copilot Requests permission or seat, a policy),
+not a revoked token: the request fails as `refresh_failed`, the same token is
+asked about again after a minute, and it works once that is fixed. Only the
+identity lookup's own 401 marks a token revoked. Once such a route serves,
+`rkat auth test` reports that GitHub named no account.
+
 Write the three routes once, then provide the token in the environment:
 
 ```bash
@@ -370,11 +388,15 @@ Token kinds (read from the documented prefix only):
 
 | Token | Prefix | Notes |
 |---|---|---|
-| Fine-grained personal access token | `github_pat_` | Owned by a user account, such as a dedicated machine user, with the **Copilot Requests** account permission |
+| Fine-grained personal access token | `github_pat_` | Resource owner: the user's own personal account, not an organization (for example a dedicated machine user), with the **Copilot Requests** account permission |
 | OAuth app token | `gho_` | For example the token of a GitHub CLI login (`gh auth token`) |
 | GitHub App user token | `ghu_` | Expires after 8 hours when the App expires user tokens; renew it with a `command` or `external_resolver` source |
 | GitHub App installation token (preview) | `ghs_` | Server-to-server: an App with the **Copilot Requests** organization permission, installed on the organization that pays; no Copilot seat and no user lookup; expires after 1 hour |
 | Classic personal access token | `ghp_` | Refused before any request |
+
+These follow GitHub's requirements for GitHub Copilot CLI's personal access
+tokens: a fine-grained token owned by your personal account with the Copilot
+Requests permission works, and a classic token is not supported.
 
 Choosing a token: for automation that belongs to an organization, prefer a
 GitHub App installation token. Its usage is billed to the organization and

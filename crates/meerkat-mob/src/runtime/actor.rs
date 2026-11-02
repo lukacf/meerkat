@@ -9090,6 +9090,29 @@ impl CleanupDeliveryRestoreFailure {
     }
 }
 
+/// Where a failed load of a member's session that settles its durable tail
+/// first stopped (`MobActor::load_member_session_settling_durable_tail_staged`).
+#[cfg(feature = "runtime-adapter")]
+enum SettledSessionLoadFailure {
+    /// Nothing was written: a read of the member's session failed, or the
+    /// settle was refused before it applied anything (a hosting refusal: the
+    /// claim was not taken), or the recovery withholds the tail and keeps it
+    /// as it is (the unprovable tail).
+    BeforeEffect(MobError),
+    /// The settle of the durable tail failed, or the read after a settle that
+    /// ran: the settle is a write, so it may have left an effect behind.
+    AfterSettle(MobError),
+}
+
+#[cfg(feature = "runtime-adapter")]
+impl SettledSessionLoadFailure {
+    fn into_error(self) -> MobError {
+        match self {
+            Self::BeforeEffect(error) | Self::AfterSettle(error) => error,
+        }
+    }
+}
+
 /// Why a Running mob's startup restore left a member to be recovered right
 /// after the start instead of restoring its binding.
 #[cfg_attr(not(feature = "runtime-adapter"), allow(dead_code))]
@@ -34880,8 +34903,10 @@ impl MobActor {
     /// [`Self::restore_member_local_cleanup_delivery`], with whether a
     /// failure came before the restore had any effect: the reads of the
     /// member's session state (its session, and its runtime residue, whose
-    /// store failure stays typed), and a typed hosting refusal of its
-    /// registration, which takes nothing.
+    /// store failure stays typed), a typed hosting refusal of its
+    /// registration or of its durable tail's settle, which takes nothing,
+    /// and a tail the recovery withholds as it is. A failed settle of the
+    /// durable tail is a failed write: it comes after an effect.
     #[cfg(feature = "runtime-adapter")]
     async fn restore_member_local_cleanup_delivery_staged(
         &self,
@@ -34895,10 +34920,20 @@ impl MobActor {
             .has_live_session(session)
             .await
             .map_err(|error| before_effect(error.into()))?
-            && Self::load_member_session_settling_durable_tail(io, &entry.agent_identity, session)
-                .await
-                .map_err(before_effect)?
-                .is_none()
+            && Self::load_member_session_settling_durable_tail_staged(
+                io,
+                &entry.agent_identity,
+                session,
+            )
+            .await
+            .map_err(|failure| match failure {
+                SettledSessionLoadFailure::BeforeEffect(error) => before_effect(error),
+                // A failed settle is a failed write: the start stops on it.
+                SettledSessionLoadFailure::AfterSettle(error) => {
+                    CleanupDeliveryRestoreFailure::AfterEffect(error)
+                }
+            })?
+            .is_none()
             && !io
                 .adapter
                 .archive_runtime_residue_present(session)
@@ -35329,6 +35364,23 @@ impl MobActor {
         member: &AgentIdentity,
         session: &SessionId,
     ) -> Result<Option<meerkat_core::Session>, MobError> {
+        Self::load_member_session_settling_durable_tail_staged(io, member, session)
+            .await
+            .map_err(SettledSessionLoadFailure::into_error)
+    }
+
+    /// [`Self::load_member_session_settling_durable_tail`], with where a
+    /// failure stopped: before anything was written (a read of the session,
+    /// a hosting refusal of the settle, a tail the recovery withholds), or at
+    /// or after the settle, which is a write.
+    #[cfg(feature = "runtime-adapter")]
+    async fn load_member_session_settling_durable_tail_staged(
+        io: &ResumeOperationBindingIo,
+        member: &AgentIdentity,
+        session: &SessionId,
+    ) -> Result<Option<meerkat_core::Session>, SettledSessionLoadFailure> {
+        let before_effect = SettledSessionLoadFailure::BeforeEffect;
+        let after_settle = SettledSessionLoadFailure::AfterSettle;
         match io.session_service.load_persisted_session(session).await {
             Err(error) if is_transcript_revision_conflict(&error) => {
                 tracing::info!(
@@ -35366,10 +35418,10 @@ impl MobActor {
                             "a member's durable tail is withheld from resume; the mob start \
                              refuses the member and keeps its tail for reconciliation"
                         );
-                        return Err(MobError::MemberDurableTailUnprovable {
+                        return Err(before_effect(MobError::MemberDurableTailUnprovable {
                             member_id: member.clone(),
                             session_id: session.clone(),
-                        });
+                        }));
                     }
                     Err(error) => {
                         if matches!(
@@ -35386,8 +35438,11 @@ impl MobActor {
                                  owner's tail. Stop the runtime owner that hosts the session, or \
                                  wait until it releases it, then start the mob again"
                             );
+                            // The settle's claim was not taken: nothing was
+                            // settled.
+                            return Err(before_effect(error.into()));
                         }
-                        return Err(error.into());
+                        return Err(after_settle(error.into()));
                     }
                 };
                 // The recovery continues the member's open run: its tail
@@ -35411,15 +35466,15 @@ impl MobActor {
                 // any other read keeps its own error.
                 match io.session_service.load_persisted_session(session).await {
                     Err(error) if is_transcript_revision_conflict(&error) => {
-                        Err(MobError::MemberDurableTailUnprovable {
+                        Err(before_effect(MobError::MemberDurableTailUnprovable {
                             member_id: member.clone(),
                             session_id: session.clone(),
-                        })
+                        }))
                     }
-                    loaded => Ok(loaded?),
+                    loaded => loaded.map_err(|error| after_settle(error.into())),
                 }
             }
-            loaded => Ok(loaded?),
+            loaded => loaded.map_err(|error| before_effect(error.into())),
         }
     }
 

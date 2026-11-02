@@ -6647,6 +6647,66 @@ async fn a_mob_start_defers_a_retiring_members_unprovable_durable_tail() {
     let _ = handle.shutdown().await;
 }
 
+/// A retiring member whose durable tail the start cannot settle because the
+/// session store fails still stops the start. The settle is a write: only a
+/// read of the member's state, a hosting refusal or an unprovable tail fails
+/// the cleanup restore before it had any effect, and only those defer the
+/// member. The tail stays as the crash left it.
+#[cfg(feature = "test-support")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_mob_start_still_stops_when_a_retiring_members_tail_settle_fails_in_the_store() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let paths = Paths::new(temp.path());
+    let power_store = Arc::new(PowerCutRuntimeStore::new(&paths.realm_db_path));
+    let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> = power_store.clone();
+    let w1_sid =
+        retiring_member_after_a_crash(&paths, &power_store, true, "retiring-settle-fails").await;
+
+    let (service_2, store_2) = persistent_head_canonical_service(&paths, runtime_store.clone());
+    let head_before = store_2
+        .load_head(&w1_sid)
+        .await
+        .expect("load the physical head")
+        .expect("the physical head exists");
+    let persistent_owner: Arc<dyn MobSessionService> = service_2.clone();
+    let failing_settles = FailingOnceSessionService::new(persistent_owner, None, None, 0, false);
+    failing_settles.fail_durable_tail_settles_in_the_store();
+    let started = MobBuilder::for_resume(
+        MobStorage::persistent(&paths.mob_db_path).expect("reopen mob storage"),
+    )
+    .with_session_service(failing_settles.clone())
+    .with_default_llm_client(openai_test_client())
+    .notify_orchestrator_on_resume(false)
+    .resume()
+    .await;
+    let status = match &started {
+        Ok(handle) => Some(handle.status().await),
+        Err(_) => None,
+    };
+    assert!(
+        failing_settles.durable_tail_settle_failed(),
+        "the start reached the retiring member's tail settle"
+    );
+    assert!(
+        !matches!(status, Some(Ok(meerkat_mob::MobState::Running))),
+        "a store failure while settling a retiring member's tail must still stop the start: \
+         {status:?}"
+    );
+    let head_after = store_2
+        .load_head(&w1_sid)
+        .await
+        .expect("load the physical head after the stopped start")
+        .expect("the physical head still exists");
+    assert_eq!(
+        meerkat_core::session_store::session_head_cas_token(&head_after).unwrap(),
+        meerkat_core::session_store::session_head_cas_token(&head_before).unwrap(),
+        "the stopped start leaves the tail as the crash left it"
+    );
+    if let Ok(handle) = started {
+        let _ = handle.shutdown().await;
+    }
+}
+
 /// A mob restarted over [`retiring_member_after_a_crash`] (no durable tail)
 /// whose session service answers every persisted read of the retiring
 /// member's session with `fault`.

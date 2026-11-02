@@ -10410,8 +10410,12 @@ impl MobHandle {
         identity: &AgentIdentity,
     ) -> Result<Option<crate::identity::CreatedIdentityObservation>, MobError> {
         self.read_published_machine_state(crate::ControlScope::List, |_| ())?;
-        let _ = identity;
-        Ok(None)
+        let Some(store) = self.identity_member.as_ref() else {
+            return Ok(None);
+        };
+        Ok(store
+            .observe_created_identity(self.mob_id(), identity)
+            .await?)
     }
 
     /// The counts of the mob's records in its identity store and of what a
@@ -10421,8 +10425,96 @@ impl MobHandle {
     /// store-owned identity. Under the [`crate::ControlScope::List`] scope;
     /// it never wakes a member.
     pub async fn identity_record_census(&self) -> Result<super::IdentityRecordCensus, MobError> {
-        self.read_published_machine_state(crate::ControlScope::List, |_| ())?;
-        Ok(super::IdentityRecordCensus::default())
+        let (mut census, seated) =
+            self.read_published_machine_state(crate::ControlScope::List, |state| {
+                let census = super::IdentityRecordCensus {
+                    preparations_open: state
+                        .identity_entry_unseated
+                        .values()
+                        .filter(|cause| **cause == mob_dsl::UnseatedEntryCause::PreparationPending)
+                        .count(),
+                    constructions_held: state.identity_entry_constructions_held.len()
+                        + state.identity_entry_constructions_activating.len(),
+                    ..super::IdentityRecordCensus::default()
+                };
+                let seated: std::collections::BTreeSet<AgentIdentity> = state
+                    .identity_to_runtime
+                    .keys()
+                    .map(|identity| AgentIdentity::from(identity.0.as_str()))
+                    .collect();
+                (census, seated)
+            })?;
+        let Some(store) = self.identity_member.as_ref() else {
+            return Ok(census);
+        };
+        // The present seated identities' labels and profile, against their
+        // member's last seat row below.
+        let mut seats = Vec::new();
+        let mut after = None;
+        loop {
+            let page = store
+                .scan_created_identity_rows(
+                    self.mob_id(),
+                    after.as_ref(),
+                    crate::store::IDENTITY_INTENT_SCAN_PAGE_MAX,
+                )
+                .await?;
+            for (identity, observation) in &page.observations {
+                census.created_rows += 1;
+                match observation {
+                    crate::identity::CreatedIdentityObservation::Created(record) => {
+                        match &record.presence {
+                            crate::identity::CreatedIdentityPresence::Present => {
+                                if seated.contains(identity)
+                                    && let Some(spec) = &record.spec
+                                {
+                                    seats.push((
+                                        identity.clone(),
+                                        spec.labels.clone(),
+                                        spec.profile.clone(),
+                                    ));
+                                }
+                            }
+                            crate::identity::CreatedIdentityPresence::PendingPreparation {
+                                ..
+                            } => {}
+                            crate::identity::CreatedIdentityPresence::Removed => {
+                                census.tombstones += 1;
+                            }
+                            crate::identity::CreatedIdentityPresence::Archived { .. } => {
+                                census.archived += 1;
+                            }
+                        }
+                    }
+                    crate::identity::CreatedIdentityObservation::Unreadable { .. } => {
+                        census.unreadable += 1;
+                    }
+                }
+            }
+            match page.next {
+                None => break,
+                Some(next) if after.as_ref().is_none_or(|current| &next > current) => {
+                    after = Some(next);
+                }
+                Some(_) => {
+                    return Err(MobError::Internal(format!(
+                        "the created identity scan of mob '{}' returned a non-advancing cursor",
+                        self.mob_id()
+                    )));
+                }
+            }
+        }
+        if !seats.is_empty() {
+            let rows = self.last_spawn_rows().await?;
+            census.seats_stale = seats
+                .iter()
+                .filter(|(identity, labels, profile)| {
+                    rows.get(identity)
+                        .is_some_and(|row| row.labels != *labels || row.role != *profile)
+                })
+                .count();
+        }
+        Ok(census)
     }
 
     /// The members whose run starts this mob's host holds for `reason`, in

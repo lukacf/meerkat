@@ -489,7 +489,7 @@ impl super::MobHandle {
     }
 
     /// Every identity's last spawn row in this mob's current epoch.
-    async fn last_spawn_rows(
+    pub(super) async fn last_spawn_rows(
         &self,
     ) -> Result<BTreeMap<AgentIdentity, MemberSpawnedEvent>, MobError> {
         let events = self.events.replay_all().await.map_err(MobError::from)?;

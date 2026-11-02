@@ -26,9 +26,11 @@
 //! retirement the declared apply did not start: it stays unseated
 //! ([`EntryStanding::Unseated`]), and the next apply seats it again on its own
 //! archived session. Only the end of an unlisted retirement (the declared
-//! apply's seal), the mob's destroy and the mob's reset end an entry. An
-//! unseated entry is not journaled: after a restart, the next apply declares
-//! it again.
+//! apply's seal), the identity's removal
+//! ([`super::MobHandle::remove_identity`], which tombstones its name), the
+//! mob's destroy and the mob's reset end an entry. An unseated roster-owned
+//! entry is not journaled: after a restart, the next apply declares it
+//! again.
 //!
 //! A created entry ([`IdentityEntryOrigin::Created`]) has its desired record
 //! in the mob's identity store: its created entry row. Every start recovers
@@ -62,12 +64,17 @@
 //!
 //! The reads ([`super::MobHandle::identity_entry`],
 //! [`super::MobHandle::identity_entries`], [`super::MobHandle::identity_census`],
+//! [`super::MobHandle::identity_tombstones`],
 //! [`super::MobHandle::member_lifecycle_events`],
-//! [`super::MobHandle::members_holding_run_starts`]) need no actor command and
-//! never wake a member. The first three read the machine state the actor last
+//! [`super::MobHandle::members_holding_run_starts`],
+//! [`super::MobHandle::identity_record`],
+//! [`super::MobHandle::identity_record_census`]) need no actor command and
+//! never wake a member. The first four read the machine state the actor last
 //! published, as [`super::MobHandle::member_unmaterialized`] does; the answer
 //! can be stale by the time the caller acts on it, and it never says whether a
-//! member is materialized.
+//! member is materialized. The record reads read the identity store: a
+//! store-owned identity's revision, spec, presence and provenance, and a
+//! removed name's tombstone with its removal's record.
 
 use std::collections::BTreeSet;
 use std::ops::Bound;
@@ -170,9 +177,11 @@ pub enum UnseatedEntryCause {
     /// ([`super::MobHandle::spawn_held_until`] with entry custody), never a
     /// dormant seat.
     HeldCreation,
-    /// A created entry whose host preparation is pending: it has no member
-    /// until its host settles the preparation, and no seat takes its name
-    /// meanwhile.
+    /// An entry of either custody, never seated, awaiting its host's
+    /// preparation before its first seat: it has no member until its host
+    /// settles the preparation (a store-owned identity's settle, a
+    /// roster-owned one's next declaration, or the activation of its held
+    /// construction), and no other seat takes its name meanwhile.
     PreparationPending,
     /// An archived store-owned identity
     /// ([`super::MobHandle::archive_identity`]): it has no member until its
@@ -404,8 +413,8 @@ pub enum IdentityEntryRead {
     /// declaration, worker reconcile, adoption or agent-lane command acts).
     /// `member` is where the member that holds the name stands, if one does.
     Unreadable { member: Option<EntryStanding> },
-    /// The identity was a created entry and was removed: its name is never
-    /// an entry or a member again.
+    /// The identity was removed, whatever its custody: its name is never an
+    /// entry or a member again.
     Removed,
 }
 
@@ -994,7 +1003,17 @@ fn entry_view(
             .get(identity)
             .copied()
             .map(super::RotationTarget::from_machine),
-        archived_session: None,
+        archived_session: state
+            .identity_entry_archived_sessions
+            .get(identity)
+            .map(|session| SessionId::parse(&session.0))
+            .transpose()
+            .map_err(|error| {
+                MobError::Internal(format!(
+                    "identity entry '{}' holds an invalid archived session record: {error}",
+                    identity.0
+                ))
+            })?,
     })
 }
 
@@ -1101,11 +1120,25 @@ pub(crate) fn identity_tombstone_page(
     after: Option<&AgentIdentity>,
     limit: usize,
 ) -> IdentityTombstonePage {
-    let _ = (state, after, limit);
-    IdentityTombstonePage {
-        removed: Vec::new(),
-        next: None,
-    }
+    let limit = limit.clamp(1, IDENTITY_ENTRY_PAGE_MAX);
+    let start = match after {
+        Some(after) => Bound::Excluded(mob_dsl::AgentIdentity::from_domain(after)),
+        None => Bound::Unbounded,
+    };
+    let mut names = state
+        .identity_entry_tombstones
+        .range((start, Bound::Unbounded));
+    let removed: Vec<AgentIdentity> = names
+        .by_ref()
+        .take(limit)
+        .map(|name| AgentIdentity::from(name.0.as_str()))
+        .collect();
+    let next = if names.next().is_some() {
+        removed.last().cloned()
+    } else {
+        None
+    };
+    IdentityTombstonePage { removed, next }
 }
 
 /// [`super::MobHandle::identity_census`] over one published machine state.

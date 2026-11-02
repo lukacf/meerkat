@@ -2067,6 +2067,15 @@ impl MobIdentityMemberStore for InMemoryMobIdentityStore {
             .cloned())
     }
 
+    async fn scan_created_identity_rows(
+        &self,
+        mob_id: &MobId,
+        after: Option<&super::IdentityIntentScanCursor>,
+        limit: usize,
+    ) -> Result<super::CreatedIdentityScanPage, MobStoreError> {
+        MobIdentityStore::scan_created_identities_page(self, mob_id, after, limit).await
+    }
+
     async fn observe_created_identity(
         &self,
         mob_id: &MobId,

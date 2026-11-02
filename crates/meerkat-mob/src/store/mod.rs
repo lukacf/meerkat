@@ -5919,6 +5919,21 @@ pub(crate) trait MobIdentityMemberStore: Send + Sync {
         Err(MobStoreError::IdentityMemberAtomicPersistenceUnavailable)
     }
 
+    /// One page of `mob_id`'s created identity rows, as the identity store's
+    /// created identity scan reads them
+    /// ([`MobIdentityStore::scan_created_identities_page`]). Never writes.
+    ///
+    /// The default, a storage that never holds a created entry, reads none.
+    async fn scan_created_identity_rows(
+        &self,
+        mob_id: &MobId,
+        after: Option<&IdentityIntentScanCursor>,
+        limit: usize,
+    ) -> Result<CreatedIdentityScanPage, MobStoreError> {
+        let _ = (mob_id, after, limit);
+        Ok(CreatedIdentityScanPage::default())
+    }
+
     /// `identity`'s row of `mob_id`'s intents table as the created identity
     /// scan reads it: `None` when the identity has no row of schema version 2
     /// or later (no row, or a host-adopted intent's). Never writes.

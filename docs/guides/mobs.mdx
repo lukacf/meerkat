@@ -120,7 +120,12 @@ part of a mob definition:
   of a member with activated host instructions is refused before anything is
   committed, with the typed `fork_instruction_refused` error.
 - `reactivate_inherited`: the fork appends the child's own activation of every
-  key that was effective in the source, and the child runs at once.
+  key that was effective in the source, and the child runs at once. A fork
+  (durable, or `fork_helper` below) whose carried head of a key is a row whose
+  body a compaction of the source retired (a later row of that key, past the
+  fork point, superseded it) is refused with the typed cause
+  `head_body_retired` before anything is committed; a fork at a later boundary
+  carries the superseding row with its body.
 - `refuse`: every fork whose child would inherit an activation is refused.
 
 A durable fork child's model never reads the body of an activation it
@@ -653,6 +658,19 @@ same rule: its member host reports whether the adopted session's first turn
 started. A member host of 0.9.4 or earlier reports nothing, and a resume there
 still runs the first turn.
 
+`mob/ensure_member` (Rust `MobHandle::ensure_member`) is the idempotent spawn:
+it spawns the member only when its identity holds none and otherwise answers
+the existing member, and `mob/ingress_interaction` ensures its ingress member
+the same way before it delivers. When a spawn of the same member is still in
+flight, the call waits for that spawn to seat the member and answers with it,
+within a 60 second ready-wait budget, after which it answers
+`ReadyWaitTimedOut`; if that spawn fails before its member is committed, the
+waiting call spawns the member itself. A second spawn of a member whose first
+spawn has not settled yet is refused `MemberAlreadyExists`.
+An ensure of a reserved name (a removed identity's, or a name this build
+cannot read) is refused `IdentityMember`, as a spawn of that name is, before
+anything is recorded or created.
+
 ### Trusted Rust member build overrides
 
 An in-process Rust host can attach a per-member
@@ -689,7 +707,26 @@ refuses it, and the other members resume. A destination the hook
 selected that the runtime did not install is
 `MobError::MemberDestinationNotInstalled` instead (the runtime's verdict, not
 a refusal): the member keeps its registration, and the repair must select
-again with an advanced `context_generation`.
+again with an advanced `context_generation`. Since 0.9.9 the hooks are called
+as tasks on the host's runtime, where the member's turns run, and a call that
+ends without an answer is not recorded as the host's refusal.
+
+Since 0.9.9 every member build a mob runtime performs (a fresh spawn, a
+restore or a wake) carries that runtime's incarnation witness in
+`SessionBuildOptions::mob_incarnation` (`AgentBuildConfig::mob_incarnation`),
+so a host's member build hook mints the member's mob operator scope for the
+mob as it runs, also for a member restored at boot before the host holds the
+mob's handle. The witness is never persisted, and a placed member built on a
+host that does not run its mob carries none. The mob runtime also receives the
+live mob operator authority of every member session it builds locally:
+`MobHandle::member_spawn_profile_scope_contains(origin_session, profile)` and
+`MobHandle::member_manage_scope_contains(origin_session)` read whether that
+session's own authority holds spawn-profile scope for the profile, and manage
+scope, in the mob as it runs (the facts the spawn tools pass to the mob
+machine's spawn admission). Each reads only that session's authority and
+finds none for a session the runtime did not build or whose build bound none.
+A hook that edits a member build's external tools wraps them: tools it
+replaces outright leave the session with no recorded authority.
 
 ## Identity And Respawn
 
@@ -713,6 +750,26 @@ re-spawned a member under a pre-reset identity resumes after a restart (0.9.3
 and earlier failed that resume with an internal error). A store written
 before 0.9.4 whose last epoch already reused a generation still resumes, and
 that identity's next spawn goes above the recovered high-water.
+
+### Dormant seats and comms keys (Rust hosts)
+
+A dormant seat (`MobHandle::seat_dormant_members`, a `rotate_member` that
+seats, an identity entry's seat) records a member's comms endpoint before the
+member's first build, so it reads or mints the member's key pair where that
+build will load it. On in-process comms, when the host declares no root, the
+seat takes the root the mob's session service reports
+(`session_comms_identity_root`: where its agent factory keeps each session's
+key pair, under the factory's `user_config_root`), so a host that composes
+its own session service needs no
+`MobBuilder::with_member_comms_identity_root`. A declared root, and
+`MobBuilder::with_network_member_comms`, win over the report. A service that
+reports `NotKept`, or a root it cannot resolve, has every seat refused typed
+(`MobError::WiringError`, naming the report) unless the host declares a root:
+no other root stands in for the one its builds use. The report covers
+in-process keys only. A host whose members run on TCP or UDS declares
+`MobBuilder::with_network_member_comms`; without it the seat records an
+in-process endpoint, the member's first wake refuses it as an endpoint
+mismatch, and the member needs a rotation (`MobHandle::rotate_member`).
 
 ### Durable role migration
 

@@ -621,7 +621,11 @@ a coherent WAL read. Reports per-root realm inventory,
 manifest state, schema-ledger versions per database, dual-root split-brain
 twins, persisted-session structural decode failures, transcript-history
 footprint, dangling session→blob references, and orphaned
-lock/lease/backup artifacts.
+lock/lease/backup artifacts. Since 0.9.9 it also lists, as informational
+findings, the sessions written at session envelope 5
+(`operator-instruction-envelope`) and the mob databases that hold
+operator-instruction events (`operator-instruction-mob-events`), which a
+release before 0.9.9 refuses.
 Exit 0 = no error-severity findings; exit 1 = errors found.
 
 `storage migrate` is the offline migration framework, dry-run by default;
@@ -703,7 +707,10 @@ stdin is checked and stored under the `github_copilot` account. A refused
 token is never stored; classic `ghp_` tokens are refused; `--backend` and
 `--method` are refused. The routes hold one method at a time, so each login
 refuses routes configured for the other. `rkat auth test copilot_openai`
-prints the `account:` and `plan:` the token resolves to.
+prints the `account:` and `plan:` the token resolves to; for a GitHub App
+installation token, or a token GitHub's identity lookup does not answer (the
+route then uses the default Copilot API host), it prints
+`account: not named by GitHub (...)` and no `plan:`.
 Non-interactive api-key login (`--non-interactive` requires the provider and
 reads the secret from stdin when `--secret` is omitted) only stores the token
 under `global:default_<provider>`; it writes no backend/auth/binding config, so

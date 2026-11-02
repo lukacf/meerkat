@@ -371,6 +371,23 @@ route. A `person_authenticated` rule therefore refuses that operator.
    when the run closes it is parked or withdrawn, and a restored row is
    history only.
 
+Since 0.9.9 a pending or approved consent is kept across unrelated
+authorization changes and past its decision's own validity window. It is
+withdrawn as `context_changed` when its binding, review tier or presented
+material changes, as `authority_changed` when its owners refuse the operation
+or its approver was revoked or forbidden by policy since deciding, and
+otherwise only when it expires, when its run closes with no resumed run to
+take it, or when the notice input that carries it into a resumed run ends. An
+owner change still in progress, or an owner that cannot say now, decides
+nothing: reads return the consent unchanged, a decision is refused retryable
+with nothing recorded, and an attempt keeps the consent. A consent notice
+waits in the queue lane for the session's next turn, so a graceful requeue
+stop no longer ends it. Rust hosts: approval reads and decisions call the
+host's authorization `prepare` and `review_operation_context` (and the
+route's eligibility) on the caller's thread, outside the approval owner's
+locks, so never hold a lock your owners take while reading or deciding
+approvals.
+
 The pipe's authority ends at EOF. SDKs receive notices with Python
 `on_consent_notice` (`parse_consent_notice`) and TypeScript `onConsentNotice`
 (`parseConsentNotice`); they have no consent-decision wrapper, so send
@@ -591,6 +608,21 @@ keeps names but shows `<redacted>` for values:
 `Serialize` and equality are unchanged, so config files, wire payloads and
 anything you serialize still contain the values. Rust hosts can reuse
 `meerkat_core::redact::REDACTED` and `RedactedUrl` for their own types.
+
+Since 0.9.9 credential header values are marked sensitive on every OpenAI
+Responses, Chat Completions and Anthropic Messages request: the values a
+dynamic authorizer supplies and a static API key's (`Authorization`,
+`api-key`, `x-api-key`; the Gemini client's are not marked). A value that is
+not a valid header value fails the request as an authentication failure
+before it is sent. Those clients pass what they read from a text generation
+response (rejection bodies, stream errors, unparsable data lines, logged
+provider error fields) through `HttpAuthorizer::redact_response_diagnostic`
+before it reaches a caller or a log. The GitHub Copilot authorizer redacts
+the last four bearers its account signed with (shown as `<redacted>`); other
+authorizers change nothing unless they implement it, and nothing redacts a
+static API key a gateway echoes back. Only a verbatim echo is caught: an
+echo a provider or gateway truncated, re-encoded or otherwise transformed
+can keep part of a credential.
 
 ## Common questions
 

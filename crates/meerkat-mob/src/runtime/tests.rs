@@ -94293,6 +94293,7 @@ fn mob_modeled_probe_arguments(
             }
         }
         MobRuntimeParityProbeInput::Respawn => {
+            pinned.insert("agent_identity", mob_modeled_identity(MOB_PARITY_WORKER)?);
             if let Some(member) = mob_modeled_live_member(before, MOB_PARITY_WORKER) {
                 pinned.insert(
                     "agent_runtime_id",
@@ -95102,17 +95103,21 @@ const MOB_PARITY_RETIRE_GAP: &str = "projection gap: every arm needs identity_to
      and the probe's releasing and session_id, which keep their typed defaults with mob_id: with \
      identity and generations projected alone, the kernel would take the no-binding arm where the \
      runtime takes a binding arm";
-const MOB_PARITY_RETIRE_LIVENESS_GAP: &str = "Running and Stopped: every arm needs \
-     identity_to_runtime and identity_runtime_generations, then the binding arms need \
-     member_session_bindings and the defaulted releasing and session_id (see the Retire accepted \
-     differences). Completed: the target is absent, so the row asks RetireAbsent, which has no \
-     Completed arm until the pending MobMachine fix";
-const MOB_PARITY_RETIRE_ABSENT_DEFECT: &str = "defect, machine fix pending: the handle answers the \
-     retire of an absent member outside the machine (handle.rs, `Retirement is idempotent`), and \
-     RetireAbsent, the input the actor submits for an absent member, has no Completed arm. The \
-     fix, a machine-owned RetireAbsent arm from Completed with the handle's absent case routed \
-     through it, is pending in a MobMachine slice; once it lands this row fires that arm and the \
-     entry turns stale";
+const MOB_PARITY_RESPAWN_GAP: &str = "projection gap: RespawnRunning's identity_matches guard \
+     needs identity_to_runtime, which the snapshot does not project; its other guards pass on the \
+     projected pre-state (not_an_identity_entry reads identity_entry_origins, which keeps its \
+     typed default, no entry). The RespawnIdentityEntryRefused twin is blocked on the same \
+     identity_matches and, behind it, on an_identity_entry, which the probed worker, not an \
+     identity entry, fails";
+const MOB_PARITY_RESPAWN_REFUSED_GAP: &str = "refusal on blocked arms: outside Running the only \
+     arm is the RespawnIdentityEntryRefused twin, blocked on identity_matches (identity_to_runtime \
+     is not projected) and, behind it, on an_identity_entry, which the probed worker, not an \
+     identity entry, fails. The runtime refuses the respawn; arms the kernel finds blocked never \
+     count as agreement with a refusal";
+const MOB_PARITY_RESPAWN_LIVENESS_GAP: &str = "Running: RespawnRunning's identity_matches guard \
+     needs identity_to_runtime, which the snapshot does not project (see the Respawn accepted \
+     differences). Stopped and Completed: the only arm is the identity-entry refusal twin, which a \
+     worker's respawn never fires";
 const MOB_PARITY_ADAPTIVE_ONLY_GAP: &str = "kernel gap: every arm's adaptive_lifecycle_drained \
      guard calls mob_machine_adaptive_lifecycle_drained, which the test oracle does not implement \
      (KERNEL_UNIMPLEMENTED_NATIVE_HELPERS); no other guard blocks the projected pre-state";
@@ -95256,24 +95261,25 @@ const ACCEPTED_MOB_PARITY_DIFFERENCES: &[AcceptedMobParityDifference] = &[
         reason: MOB_PARITY_RETIRE_GAP,
     },
     AcceptedMobParityDifference {
-        phase: MobRuntimeParityPhase::Completed,
-        input: SchemaMobMachineInputVariant::Retire,
-        runtime: MobRuntimeParityOutcomeKind::Ok,
-        kernel: AcceptedMobKernelOutcome::NoArm(SchemaMobMachineInputVariant::RetireAbsent),
-        reason: MOB_PARITY_RETIRE_ABSENT_DEFECT,
-    },
-    AcceptedMobParityDifference {
         phase: MobRuntimeParityPhase::Running,
         input: SchemaMobMachineInputVariant::Respawn,
         runtime: MobRuntimeParityOutcomeKind::Ok,
-        kernel: AcceptedMobKernelOutcome::Transition {
-            transition: "RespawnRunning",
-            differing_keys: MOB_PARITY_SPAWN_LADDER_KEYS,
-        },
-        reason: "single-input row: RespawnRunning only exposes the pending spawn; the runtime then \
-                 retires the member and spawns its next generation through inputs the row does not \
-                 replay. To confirm at validation: the differing keys, read from the 2026-10-30 \
-                 reports",
+        kernel: AcceptedMobKernelOutcome::ArmsBlocked,
+        reason: MOB_PARITY_RESPAWN_GAP,
+    },
+    AcceptedMobParityDifference {
+        phase: MobRuntimeParityPhase::Stopped,
+        input: SchemaMobMachineInputVariant::Respawn,
+        runtime: MobRuntimeParityOutcomeKind::Err,
+        kernel: AcceptedMobKernelOutcome::ArmsBlocked,
+        reason: MOB_PARITY_RESPAWN_REFUSED_GAP,
+    },
+    AcceptedMobParityDifference {
+        phase: MobRuntimeParityPhase::Completed,
+        input: SchemaMobMachineInputVariant::Respawn,
+        runtime: MobRuntimeParityOutcomeKind::Err,
+        kernel: AcceptedMobKernelOutcome::ArmsBlocked,
+        reason: MOB_PARITY_RESPAWN_REFUSED_GAP,
     },
     AcceptedMobParityDifference {
         phase: MobRuntimeParityPhase::Running,
@@ -95582,8 +95588,8 @@ const MOB_PARITY_KERNEL_LIVENESS_GAPS: &[(SchemaMobMachineInputVariant, &str)] =
         MOB_PARITY_CANCEL_FLOW_GAP,
     ),
     (
-        SchemaMobMachineInputVariant::Retire,
-        MOB_PARITY_RETIRE_LIVENESS_GAP,
+        SchemaMobMachineInputVariant::Respawn,
+        MOB_PARITY_RESPAWN_LIVENESS_GAP,
     ),
     (
         SchemaMobMachineInputVariant::RetireAll,

@@ -41,10 +41,15 @@ pub const KERNEL_NATIVE_HELPERS: &[(&str, usize)] = &[
     ("mob_machine_next_minted_generation", 3),
     ("mob_machine_u64_is_exact_successor", 2),
     ("mob_machine_optional_u64_is_exact_successor", 2),
-    ("mob_machine_members_to_spawn", 2),
-    ("mob_machine_members_to_retire", 3),
+    ("mob_machine_members_to_spawn", 5),
+    ("mob_machine_members_to_retire", 5),
+    ("mob_machine_fresh_rotation_sessions", 2),
     ("mob_machine_placed_cleanup_absent_for_identity", 2),
     ("mob_machine_placed_cleanup_obligation", 7),
+    ("session_document_instruction_slot_after_set", 3),
+    ("session_document_instruction_active_bytes", 2),
+    ("session_document_instruction_active_slots", 2),
+    ("session_document_activation_retired_after", 2),
 ];
 
 const PLACED_CUSTODY_GAP: &str = "placed-member custody predicate on runtime-internal inputs and \

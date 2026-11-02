@@ -707,7 +707,10 @@ stdin is checked and stored under the `github_copilot` account. A refused
 token is never stored; classic `ghp_` tokens are refused; `--backend` and
 `--method` are refused. The routes hold one method at a time, so each login
 refuses routes configured for the other. `rkat auth test copilot_openai`
-prints the `account:` and `plan:` the token resolves to.
+prints the `account:` and `plan:` the token resolves to; for a GitHub App
+installation token, or a token GitHub's identity lookup does not answer (the
+route then uses the default Copilot API host), it prints that GitHub named
+no account, and no plan.
 Non-interactive api-key login (`--non-interactive` requires the provider and
 reads the secret from stdin when `--secret` is omitted) only stores the token
 under `global:default_<provider>`; it writes no backend/auth/binding config, so

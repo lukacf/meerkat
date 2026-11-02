@@ -425,6 +425,10 @@ compiles, but the default disables what they carry:
 - an `HttpAuthorizer` wrapper: `redact_response_diagnostic`. Its default
   changes nothing, so a credential a provider echoes back reaches the errors
   and logs of the requests signed through the wrapper.
+- an `AuthLeaseHandle` wrapper: `mark_publication_refused` too. Its default
+  fails closed, so GitHub's refusal of a `github_copilot_token` route's token
+  fails to be recorded over the wrapper, and the request fails without
+  withdrawing the token.
 
 ### Declared identity entries
 

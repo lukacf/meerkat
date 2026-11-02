@@ -273,17 +273,34 @@ the token store. It sets `[realm.global] default_binding` if none is set.
   id. The token is the Copilot API bearer, identity and API host come from
   GitHub's `copilot_internal/user`, a classic `ghp_` token is refused, and a
   token GitHub refuses moves the account to `reauth_required`; a refusal of an
-  earlier token that a newer one already replaced fails only its own request
-  (`stale_credential`) and leaves the newer token valid. A command source
-  with `refresh_interval_ms` reports that lifetime as the token's expiry, so a
-  session built within it reuses the token without running the command again.
-  A token a provider, proxy or gateway echoes back is redacted from errors and
-  logs (the last four bearers the account signed with), and the route's
-  `Authorization` value is marked sensitive. The routes hold
-  one method at a time: each login refuses routes set up for the other. A
-  Rust host checks a token without storing it with
-  `meerkat_copilot::verify_operator_token`, which answers its
-  `CopilotAccountIdentity` (`login`, `plan`, `api_base`, `installation`).
+  earlier token that a newer one already replaced fails only that request
+  (and requests waiting on the same lookup) as `stale_credential` and leaves
+  the newer token valid. When the lookup answers a token 403 or 404 (it may
+  not answer a fine-grained token), the route uses it unnamed (no login or
+  plan) on `https://api.githubcopilot.com` once the account's model list
+  loads there; a failed listing fails the request (`refresh_failed`), and a
+  401 from that listing refuses the token. Token routes send
+  `Copilot-Integration-Id: copilot-developer-cli` (the device sign-in's
+  routes `vscode-chat`, which Copilot refuses for a personal access token)
+  unless the backend options set `integration_id`; the lookup sends none. A
+  GitHub rate limit (a 429, or a 403 with `Retry-After`, a spent primary
+  limit or a message naming the secondary rate limit) pauses the account's
+  lookup for GitHub's stated time, at least a minute; a 5xx or network
+  failure pauses nothing. A command source with `refresh_interval_ms`
+  reports that lifetime as the token's expiry, so a session built within it
+  reuses the token without running the command again. A token a provider,
+  proxy or gateway echoes back verbatim is redacted from errors and logs (the
+  last four bearers the account signed with; a truncated or re-encoded echo
+  is not caught), and the header values the route signs requests with are
+  marked sensitive. The routes hold one method at a time: each login refuses
+  routes set up for the other. A Rust host checks a token without storing it
+  with `meerkat_copilot::verify_operator_token(token, &config)`, `config`
+  being `CopilotBackendConfig::from_token_options` of the routes' options,
+  which answers its `CopilotAccountIdentity` (`login`, `plan`, `api_base`,
+  `installation`, `looked_up`). The route is tested only against local
+  stand-ins for GitHub and the Copilot API; its live check with a
+  fine-grained token has not run yet (the auth guide lists what is not yet
+  observed live).
 - Zero-config: while `[realm.global]` configures no Copilot route, a request
   that names `global:copilot_openai`, `global:copilot_anthropic` or
   `global:copilot_gemini` resolves it in token mode from the same variables

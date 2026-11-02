@@ -23,7 +23,7 @@ class ReleaseVersionScriptsTests(unittest.TestCase):
         (self.root / "crates/meerkat-meta").mkdir(parents=True)
         (self.root / "crates/meta-store-conformance").mkdir(parents=True)
         (self.root / "docs/sdks").mkdir(parents=True)
-        (self.root / "src").mkdir()
+        (self.root / "crates/meerkat-meta/src").mkdir()
 
         for name in (
             "bump-sdk-versions.sh",
@@ -38,10 +38,13 @@ class ReleaseVersionScriptsTests(unittest.TestCase):
         repo_cargo.write_text('#!/usr/bin/env bash\nexec cargo "$@"\n')
         repo_cargo.chmod(0o755)
 
-        (self.root / "Cargo.toml").write_text(
+        # The crate manifest sits where the scripts read Meta's version from:
+        # crates/meerkat-meta/Cargo.toml below Meta's root (meta/ in the
+        # monorepo), as in the real tree.
+        (self.root / "crates/meerkat-meta/Cargo.toml").write_text(
             '[package]\nname = "meerkat-meta"\nversion = "0.8.1"\nedition = "2024"\n'
         )
-        (self.root / "src/lib.rs").write_text("")
+        (self.root / "crates/meerkat-meta/src/lib.rs").write_text("")
         (self.root / "sdk/python/pyproject.toml").write_text(
             '[project]\nname = "meerkat-meta"\nversion = "0.8.0"\n'
         )

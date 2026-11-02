@@ -4398,6 +4398,7 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
                     "SeatOwed",
                     "HostedOnFirstUse",
                     "AwaitHeldCreation",
+                    "PreparationPending",
                     "RuntimeModeRestamp",
                     "RoleMigrate",
                     "RoleRotate",
@@ -4432,6 +4433,7 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
                 &[
                     "Present",
                     "PresentUnseated",
+                    "PendingConstruction",
                     "Tombstone",
                     "Unreadable",
                     "Archived",
@@ -4461,6 +4463,7 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
                     "ImportedNotHostOperator",
                     "GrantRevoked",
                     "MobNotRunning",
+                    "StaleSpec",
                 ],
             ),
             NamedTypeBinding::string_enum(
@@ -4501,6 +4504,44 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
                     "ChangesHeld",
                     "MobNotRunning",
                 ],
+            ),
+            // Held constructions (0.9.9): the verdicts of a construction's
+            // start, of a settle and of an attempt's end, and how an attempt
+            // ended.
+            NamedTypeBinding::string_enum(
+                "PreparationConstructionVerdict",
+                &[
+                    "Held",
+                    "NotPending",
+                    "NotConstructed",
+                    "ConstructionOpen",
+                    "NonAuthoritative",
+                    "MobNotRunning",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "PreparationSettleVerdict",
+                &[
+                    "Seat",
+                    "ActivationAccepted",
+                    "NotPending",
+                    "ConstructionRequired",
+                    "ConstructionOpen",
+                    "StaleAttempt",
+                    "Expired",
+                    "Mismatch",
+                    "ActivationPending",
+                    "NonAuthoritative",
+                    "MobNotRunning",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "ConstructionEndKind",
+                &["Aborted", "Expired", "Refused", "PublicationFailed"],
+            ),
+            NamedTypeBinding::string_enum(
+                "ConstructionEndVerdict",
+                &["Ended", "NotOpen", "ActivationPending"],
             ),
             NamedTypeBinding::string("RuntimeEpochId"),
             NamedTypeBinding::string("ResumeAttemptId"),

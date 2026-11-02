@@ -50,6 +50,13 @@ pub use meerkat_machine_schema::catalog::dsl::mob_machine::{
     CreatedIdentityRecordVerdict, IdentityChangeAdmissionKind, IdentityChangeConsentKind,
     IdentityChangeReceiptKind, IdentityEntryChangeKind, IdentityEntryChangeVerdict,
 };
+// Host preparation (0.9.9): the verdicts of a held construction's start, of
+// a settle and of an attempt's end, and how an attempt ended. The schema's
+// own types, one definition for both instantiations of the machine.
+pub use meerkat_machine_schema::catalog::dsl::mob_machine::{
+    ConstructionEndKind, ConstructionEndVerdict, PreparationConstructionVerdict,
+    PreparationSettleVerdict,
+};
 // Rotation targets and the refusal reason of a fresh-life respawn: the
 // schema's own types, one definition for both instantiations of the machine.
 pub use meerkat_machine_schema::catalog::dsl::mob_machine::{RespawnRefusalReason, RotationTarget};
@@ -14151,6 +14158,9 @@ mod tests {
         /// Whether a store-owned identity's update declares it (created
         /// custody), not a host's roster.
         created_custody: bool,
+        /// Whether the host's rule requires the identity's preparation
+        /// before its first seat.
+        preparation_required: bool,
     }
 
     impl Default for Declaration<'_> {
@@ -14166,6 +14176,7 @@ mod tests {
                 resume_role: None,
                 first_boot: FirstBootRequestKind::None,
                 created_custody: false,
+                preparation_required: false,
             }
         }
     }
@@ -14183,6 +14194,7 @@ mod tests {
             resume_session_role: declaration.resume_role.map(str::to_string),
             first_boot: declaration.first_boot,
             created_custody: declaration.created_custody,
+            preparation_required: declaration.preparation_required,
         }
     }
 
@@ -16500,5 +16512,392 @@ mod tests {
                 ..
             }
         )));
+    }
+
+    // ---------------------------------------------------------------------
+    // Host preparation and held constructions (0.9.9)
+    // ---------------------------------------------------------------------
+
+    /// A held construction's start (`BeginPreparationConstruction`).
+    fn begin_construction(
+        authority: &mut MobMachineAuthority,
+        identity: &AgentIdentity,
+        attempt: u64,
+        constructed: bool,
+    ) -> PreparationConstructionVerdict {
+        let transition = MobMachineMutator::apply(
+            authority,
+            MobMachineInput::BeginPreparationConstruction {
+                agent_identity: identity.clone(),
+                attempt,
+                constructed,
+            },
+        )
+        .expect("a construction's start answers");
+        transition
+            .effects()
+            .iter()
+            .find_map(|effect| match effect {
+                MobMachineEffect::PreparationConstructionResolved { verdict, .. } => Some(*verdict),
+                _ => None,
+            })
+            .expect("a construction's start emits its verdict")
+    }
+
+    /// A settle of an identity's preparation (`SettleHostPreparation`).
+    fn settle_preparation(
+        authority: &mut MobMachineAuthority,
+        identity: &AgentIdentity,
+        attempt: Option<u64>,
+        before_deadline: bool,
+        binding_matches: bool,
+    ) -> PreparationSettleVerdict {
+        let transition = MobMachineMutator::apply(
+            authority,
+            MobMachineInput::SettleHostPreparation {
+                agent_identity: identity.clone(),
+                attempt,
+                constructed: true,
+                before_deadline,
+                binding_matches,
+            },
+        )
+        .expect("a settle answers");
+        transition
+            .effects()
+            .iter()
+            .find_map(|effect| match effect {
+                MobMachineEffect::PreparationSettleResolved { verdict, .. } => Some(*verdict),
+                _ => None,
+            })
+            .expect("a settle emits its verdict")
+    }
+
+    /// An attempt's end (`EndPreparationConstruction`).
+    fn end_construction(
+        authority: &mut MobMachineAuthority,
+        identity: &AgentIdentity,
+        attempt: u64,
+        end: ConstructionEndKind,
+    ) -> ConstructionEndVerdict {
+        let transition = MobMachineMutator::apply(
+            authority,
+            MobMachineInput::EndPreparationConstruction {
+                agent_identity: identity.clone(),
+                attempt,
+                end,
+            },
+        )
+        .expect("an attempt's end answers");
+        transition
+            .effects()
+            .iter()
+            .find_map(|effect| match effect {
+                MobMachineEffect::PreparationConstructionEnded { verdict, .. } => Some(*verdict),
+                _ => None,
+            })
+            .expect("an attempt's end emits its verdict")
+    }
+
+    /// The membership commit of a held construction's ladder, as the
+    /// publication of its activation commits it.
+    fn publish_construction(member: &SeatedMember, generation: Generation) -> MobMachineInput {
+        MobMachineInput::CommitSpawnMembership {
+            agent_identity: member.identity.clone(),
+            agent_runtime_id: member.runtime_id.clone(),
+            fence_token: member.fence_token,
+            generation,
+            profile_material_digest: "declared-seat-profile-digest".to_string(),
+            external_addressable: false,
+            runtime_mode: SpawnPolicyRuntimeMode::AutonomousHost,
+            bridge_session_id: Some(member.session_id.clone()),
+            replacing: None,
+            member_peer_endpoint: None,
+            spec_digest_echo: None,
+            ack_engine_version: None,
+            placed_spawn_id: None,
+            provision_operation_id: None,
+            definition_wiring_exempt: false,
+        }
+    }
+
+    /// Row: a roster's declaration of an identity never created whose host's
+    /// rule requires its preparation leaves it unseated, PreparationPending,
+    /// derived again at each apply; a declaration that no longer requires
+    /// it owes its seat. A store-owned identity's update requires none.
+    #[test]
+    fn a_declared_identity_awaits_its_preparation_until_its_rule_requires_none() {
+        let mut authority = MobMachineAuthority::new();
+        let identity = AgentIdentity::from("prepared");
+        let required = || Declaration {
+            preparation_required: true,
+            ..Declaration::default()
+        };
+        for _ in 0..2 {
+            assert_eq!(
+                declare(&mut authority, &identity, required()),
+                IdentityEntryVerdict::PreparationPending
+            );
+            assert_eq!(
+                authority.state().identity_entry_unseated.get(&identity),
+                Some(&UnseatedEntryCause::PreparationPending)
+            );
+            assert_eq!(
+                authority.state().identity_entry_origins.get(&identity),
+                Some(&IdentityEntryOrigin::Declared)
+            );
+        }
+        assert_eq!(
+            declare(&mut authority, &identity, Declaration::default()),
+            IdentityEntryVerdict::SeatOwed
+        );
+        assert_eq!(
+            authority.state().identity_entry_unseated.get(&identity),
+            Some(&UnseatedEntryCause::SeatOwed)
+        );
+        // A seated identity's rule asks nothing of it.
+        let seated = seat_live_entry_member(&mut authority, "seated-prepared", 73);
+        assert_eq!(
+            declare(&mut authority, &seated.identity, required()),
+            IdentityEntryVerdict::Kept
+        );
+    }
+
+    /// Row: a held construction's attempt is accepted once and nothing
+    /// replaces it. MobMachine holds one attempt of an entry awaiting its
+    /// preparation, and only its ladder opens for the entry; a settle that
+    /// names another attempt, is decided at the deadline, or does not bind
+    /// the construction is refused, and one without an attempt is refused
+    /// for a `constructed` preparation; the settle naming the held attempt
+    /// accepts its activation, and from then on no abort, expiry, newer
+    /// attempt or declaration replaces it, and no membership commit but its
+    /// publication's seats the entry, which ends the attempt.
+    #[test]
+    fn a_held_construction_is_accepted_once_and_nothing_replaces_it() {
+        let mut authority = MobMachineAuthority::new();
+        let identity = AgentIdentity::from("constructed");
+        assert_eq!(
+            declare(
+                &mut authority,
+                &identity,
+                Declaration {
+                    preparation_required: true,
+                    ..Declaration::default()
+                }
+            ),
+            IdentityEntryVerdict::PreparationPending
+        );
+        let member = SeatedMember {
+            identity: identity.clone(),
+            runtime_id: AgentRuntimeId("constructed:0".to_string()),
+            session_id: SessionId::from("session-constructed".to_string()),
+            fence_token: FenceToken(7),
+        };
+        assert_eq!(
+            begin_construction(&mut authority, &identity, 1, false),
+            PreparationConstructionVerdict::NotConstructed
+        );
+        assert_eq!(
+            begin_construction(&mut authority, &identity, 1, true),
+            PreparationConstructionVerdict::Held
+        );
+        assert_eq!(
+            begin_construction(&mut authority, &identity, 2, true),
+            PreparationConstructionVerdict::ConstructionOpen
+        );
+        // Only the held attempt's ladder opens for the entry.
+        open_custody_seat_ladder(&mut authority, &member, Generation(0));
+        assert!(
+            MobMachineMutator::apply(&mut authority, publish_construction(&member, Generation(0)))
+                .is_err(),
+            "no membership commit publishes an attempt whose activation was not accepted"
+        );
+        assert_eq!(
+            settle_preparation(&mut authority, &identity, Some(2), true, true),
+            PreparationSettleVerdict::StaleAttempt
+        );
+        assert_eq!(
+            settle_preparation(&mut authority, &identity, Some(1), false, true),
+            PreparationSettleVerdict::Expired
+        );
+        assert_eq!(
+            settle_preparation(&mut authority, &identity, Some(1), true, false),
+            PreparationSettleVerdict::Mismatch
+        );
+        assert_eq!(
+            settle_preparation(&mut authority, &identity, None, true, true),
+            PreparationSettleVerdict::ConstructionRequired
+        );
+        assert_eq!(
+            settle_preparation(&mut authority, &identity, Some(1), true, true),
+            PreparationSettleVerdict::ActivationAccepted
+        );
+        assert!(
+            authority
+                .state()
+                .identity_entry_constructions_held
+                .is_empty()
+        );
+        assert_eq!(
+            authority
+                .state()
+                .identity_entry_constructions_activating
+                .get(&identity),
+            Some(&1)
+        );
+        for end in [ConstructionEndKind::Aborted, ConstructionEndKind::Expired] {
+            assert_eq!(
+                end_construction(&mut authority, &identity, 1, end),
+                ConstructionEndVerdict::ActivationPending
+            );
+        }
+        assert_eq!(
+            begin_construction(&mut authority, &identity, 2, true),
+            PreparationConstructionVerdict::ConstructionOpen
+        );
+        assert_eq!(
+            settle_preparation(&mut authority, &identity, Some(1), true, true),
+            PreparationSettleVerdict::ActivationPending
+        );
+        assert_eq!(
+            declare(
+                &mut authority,
+                &identity,
+                Declaration {
+                    preparation_required: true,
+                    ..Declaration::default()
+                }
+            ),
+            IdentityEntryVerdict::LifecycleInFlight,
+            "an apply leaves an entry with an open attempt to the attempt's end"
+        );
+        MobMachineMutator::apply(&mut authority, publish_construction(&member, Generation(0)))
+            .expect("the accepted activation's publication commits its membership");
+        let state = authority.state();
+        assert!(state.identity_to_runtime.contains_key(&identity));
+        assert!(!state.identity_entry_unseated.contains_key(&identity));
+        assert!(
+            state.identity_entry_constructions_activating.is_empty(),
+            "the publication ends the attempt"
+        );
+        assert_eq!(
+            state.identity_entry_origins.get(&identity),
+            Some(&IdentityEntryOrigin::Declared)
+        );
+    }
+
+    /// Row: an attempt ended before its activation leaves the entry pending,
+    /// and a new attempt may follow; a failed publication ends an accepted
+    /// one the same way; an entry awaiting no preparation takes no
+    /// construction, and a store-owned entry's settle without a
+    /// construction owes its seat.
+    #[test]
+    fn an_ended_attempt_leaves_the_entry_pending_and_a_settle_without_one_owes_its_seat() {
+        let mut authority = MobMachineAuthority::new();
+        let identity = AgentIdentity::from("pending");
+        assert_eq!(
+            begin_construction(&mut authority, &identity, 1, true),
+            PreparationConstructionVerdict::NotPending
+        );
+        assert_eq!(
+            declare(
+                &mut authority,
+                &identity,
+                Declaration {
+                    preparation_required: true,
+                    ..Declaration::default()
+                }
+            ),
+            IdentityEntryVerdict::PreparationPending
+        );
+        for (attempt, end) in [
+            (1, ConstructionEndKind::Aborted),
+            (2, ConstructionEndKind::Expired),
+            (3, ConstructionEndKind::Refused),
+        ] {
+            assert_eq!(
+                begin_construction(&mut authority, &identity, attempt, true),
+                PreparationConstructionVerdict::Held
+            );
+            assert_eq!(
+                end_construction(&mut authority, &identity, attempt, end),
+                ConstructionEndVerdict::Ended
+            );
+            assert_eq!(
+                end_construction(&mut authority, &identity, attempt, end),
+                ConstructionEndVerdict::NotOpen,
+                "an ended attempt ends once"
+            );
+            assert_eq!(
+                authority.state().identity_entry_unseated.get(&identity),
+                Some(&UnseatedEntryCause::PreparationPending)
+            );
+        }
+        assert_eq!(
+            begin_construction(&mut authority, &identity, 4, true),
+            PreparationConstructionVerdict::Held
+        );
+        assert_eq!(
+            settle_preparation(&mut authority, &identity, Some(4), true, true),
+            PreparationSettleVerdict::ActivationAccepted
+        );
+        assert_eq!(
+            end_construction(
+                &mut authority,
+                &identity,
+                4,
+                ConstructionEndKind::PublicationFailed
+            ),
+            ConstructionEndVerdict::Ended
+        );
+        assert_eq!(
+            authority.state().identity_entry_unseated.get(&identity),
+            Some(&UnseatedEntryCause::PreparationPending),
+            "a failed publication leaves the entry pending"
+        );
+        assert_eq!(
+            settle_preparation(&mut authority, &identity, Some(4), true, true),
+            PreparationSettleVerdict::StaleAttempt
+        );
+
+        let created = AgentIdentity::from("required");
+        let recorded = MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::RecordCreatedIdentityEntry {
+                agent_identity: created.clone(),
+                cause: UnseatedEntryCause::PreparationPending,
+            },
+        )
+        .expect("the record answers");
+        assert!(recorded.effects().iter().any(|effect| matches!(
+            effect,
+            MobMachineEffect::CreatedIdentityEntryRecorded {
+                verdict: CreatedIdentityRecordVerdict::Recorded,
+                ..
+            }
+        )));
+        let transition = MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::SettleHostPreparation {
+                agent_identity: created.clone(),
+                attempt: None,
+                constructed: false,
+                before_deadline: false,
+                binding_matches: false,
+            },
+        )
+        .expect("the settle answers");
+        assert!(transition.effects().iter().any(|effect| matches!(
+            effect,
+            MobMachineEffect::PreparationSettleResolved {
+                verdict: PreparationSettleVerdict::Seat,
+                ..
+            }
+        )));
+        assert_eq!(
+            authority.state().identity_entry_unseated.get(&created),
+            Some(&UnseatedEntryCause::SeatOwed),
+            "the settled entry is owed its seat"
+        );
     }
 }

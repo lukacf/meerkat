@@ -70,6 +70,42 @@ impl MobActor {
                 }
                 let _ = reply_tx.send(result);
             }
+            IdentityChangeCommand::Settle { commit, reply_tx } => {
+                let result = Box::pin(self.settle_identity_preparation_step(*commit)).await;
+                let _ = reply_tx.send(result);
+            }
+            #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+            IdentityChangeCommand::BeginConstruction { request, reply_tx } => {
+                let result = Box::pin(self.begin_identity_construction(*request)).await;
+                let _ = reply_tx.send(result);
+            }
+            #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+            IdentityChangeCommand::AdoptConstruction {
+                identity,
+                construction,
+                reply_tx,
+            } => {
+                let _ = reply_tx.send(self.adopt_identity_construction(identity, *construction));
+            }
+            #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+            IdentityChangeCommand::EndConstruction {
+                identity,
+                attempt,
+                completion,
+                reply_tx,
+            } => {
+                let result =
+                    Box::pin(self.end_identity_construction(identity, attempt, completion)).await;
+                let _ = reply_tx.send(result);
+            }
+            #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+            IdentityChangeCommand::AbortConstruction {
+                identity,
+                attempt,
+                reply_tx,
+            } => {
+                let _ = reply_tx.send(self.abort_identity_construction_step(identity, attempt));
+            }
         }
     }
 

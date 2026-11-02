@@ -295,8 +295,22 @@ pub struct HeldSpawn {
     controller_route: ControllerRouteObservation,
     decision_tx: Option<oneshot::Sender<HeldSpawnDecision>>,
     completion_rx: Option<oneshot::Receiver<Result<MemberSpawnReceipt, MobError>>>,
-    /// The caller's presence, carried over from the start call.
-    _caller: HeldSetupCaller,
+    /// The caller's presence, carried over from the start call, until a
+    /// retained owner takes it ([`Self::into_parts`]).
+    caller: Option<HeldSetupCaller>,
+}
+
+/// The parts of a held spawn a retained owner keeps
+/// ([`HeldSpawn::into_parts`]): the witnesses its hold offered, the decision
+/// channel it activates or aborts the hold through, the spawn's completion,
+/// and the caller presence that keeps the hold while the owner holds it.
+#[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+pub(crate) struct HeldSpawnParts {
+    pub(crate) finished_surface: ToolSurfaceSelection,
+    pub(crate) controller_route: ControllerRouteObservation,
+    pub(crate) decision_tx: oneshot::Sender<HeldSpawnDecision>,
+    pub(crate) completion_rx: oneshot::Receiver<Result<MemberSpawnReceipt, MobError>>,
+    pub(crate) caller: HeldSetupCaller,
 }
 
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
@@ -324,8 +338,25 @@ impl HeldSpawn {
             controller_route: ready.controller_route,
             decision_tx: Some(ready.decision_tx),
             completion_rx: Some(completion_rx),
-            _caller: caller,
+            caller: Some(caller),
         }
+    }
+
+    /// Hand the hold to a retained owner: its witnesses, its decision
+    /// channel, its completion and the caller presence. From here dropping
+    /// the parts' decision channel or presence ends the hold, as dropping
+    /// this handle does. `None` once the hold was already decided.
+    pub(crate) fn into_parts(mut self) -> Option<HeldSpawnParts> {
+        let decision_tx = self.decision_tx.take()?;
+        let completion_rx = self.completion_rx.take()?;
+        let caller = self.caller.take()?;
+        Some(HeldSpawnParts {
+            finished_surface: self.finished_surface.clone(),
+            controller_route: self.controller_route.clone(),
+            decision_tx,
+            completion_rx,
+            caller,
+        })
     }
 
     /// The held member's identity.

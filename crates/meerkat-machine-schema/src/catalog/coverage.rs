@@ -870,6 +870,7 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                             "DeclareIdentityEntrySeatOwed",
                             "DeclareIdentityEntryHostedOnFirstUse",
                             "DeclareIdentityEntryAwaitHeldCreation",
+                            "DeclareIdentityEntryPreparationPending",
                             "DeclareIdentityEntryRuntimeModeRestamp",
                             "DeclareIdentityEntryRoleMigrate",
                             "DeclareIdentityEntryRoleRotate",
@@ -910,7 +911,7 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                     "mob_created_identity_entry_authority",
                     "MobMachine",
                     "crates/meerkat-mob/src/runtime/created_identity.rs",
-                    "MobMachine created identity entries realized by the shell at a start: recover each created entry row of the identity store from its presence and the replayed journal after the replay and before the boot plan (a present row of a seated local member records it a Created entry, a present row whose member the journal shows retired records the entry owed its seat with its member's last session as its revival record, a row pending its host's preparation records it unseated for that preparation, a removed row reserves the name as a tombstone, and an unreadable row, a row the replay contradicts or a member row whose origin token this build does not know reserves the name as unreadable), then seat a created entry owed its seat again, Dormant, on its archived session under created custody; no spawn takes a reserved name or the entry of another origin, a tombstoned name is never an entry or a member, an unseated created entry awaits its preparation or is owed its seat, and created custody belongs to an open local ladder of a Created entry, never beside entry custody",
+                    "MobMachine created identity entries realized by the shell at a start: recover each created entry row of the identity store from its presence and the replayed journal after the replay and before the boot plan (a present row of a seated local member records it a Created entry, a present row whose member the journal shows retired records the entry owed its seat with its member's last session as its revival record, a row pending its host's preparation records it unseated for that preparation unless the replay seats the published construction of a `constructed` one, a removed row reserves the name as a tombstone, and an unreadable row, a row the replay contradicts or a member row whose origin token this build does not know reserves the name as unreadable), then seat a created entry owed its seat again, Dormant, on its archived session under created custody, and settle the row of a published construction; no spawn takes a reserved name or the entry of another origin, a tombstoned name is never an entry or a member, and created custody belongs to an open ladder of a Created entry, never beside entry custody",
                     CoverageClaims::none()
                         .transitions(&[
                             "RecoverCreatedIdentityEntrySeatedRunning",
@@ -971,6 +972,37 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                             "archived_entry_is_store_owned",
                             "entry_ending_marks_are_seated_and_disjoint",
                         ]),
+                ),
+                machine_anchor(
+                    "mob_identity_preparation_authority",
+                    "MobMachine",
+                    "crates/meerkat-mob/src/runtime/identity_preparation.rs",
+                    "MobMachine host preparation realized by the shell: an identity never seated whose host's rule requires its preparation is unseated for it (a roster-owned one by the declared apply, derived again at each apply, a store-owned one by its create, from its row at a start), and a delivery to it is refused retryable; a settle without a construction commits its receipt and its row and leaves the entry owed its seat, which the shell seats Dormant from its spec or embodies for an owed kickoff, and a `constructed` preparation refuses that settle; a host asks for a held construction of the identity, an attempt the mob owns whose spawn ladder alone may open for the entry, and a settle naming that attempt, decided before its deadline and binding the identity's spec, accepts its activation, journaled by the settle's receipt; from then on no abort, expiry or newer attempt replaces it, and only the membership commit that publishes the construction or its failed publication ends it; an abort, the deadline or a refused construction ends a held attempt with the entry still pending, and an identity holds at most one attempt, emitting the construction resolved, settle resolved and construction ended effects",
+                    CoverageClaims::none()
+                        .transitions(&[
+                            "BeginPreparationConstructionHeld",
+                            "BeginPreparationConstructionNotPending",
+                            "BeginPreparationConstructionNotConstructed",
+                            "BeginPreparationConstructionConstructionOpen",
+                            "SettleHostPreparationSeat",
+                            "SettleHostPreparationActivationAccepted",
+                            "SettleHostPreparationNotPending",
+                            "SettleHostPreparationConstructionRequired",
+                            "SettleHostPreparationConstructionOpen",
+                            "SettleHostPreparationStaleAttempt",
+                            "SettleHostPreparationExpired",
+                            "SettleHostPreparationMismatch",
+                            "SettleHostPreparationActivationPending",
+                            "EndPreparationConstructionEndedRunning",
+                            "EndPreparationConstructionNotOpenRunning",
+                            "EndPreparationConstructionActivationPendingRunning",
+                        ])
+                        .effects(&[
+                            "PreparationConstructionResolved",
+                            "PreparationSettleResolved",
+                            "PreparationConstructionEnded",
+                        ])
+                        .invariants(&["construction_is_held_or_activating"]),
                 ),
                 machine_anchor(
                     "mob_identity_entry_respawn_authority",

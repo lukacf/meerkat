@@ -21,6 +21,7 @@ pub(super) mod explicit_resume;
 mod host_preparation_hold;
 mod identity_change;
 mod identity_entry_admission;
+mod identity_preparation;
 #[cfg(feature = "openai-live")]
 pub(super) mod live_durable_source_loads;
 pub(super) mod member_effect_lane;
@@ -9706,6 +9707,11 @@ pub(super) struct MobActor {
     /// of publishing an undialable process-local endpoint.
     #[cfg(not(target_arch = "wasm32"))]
     pub(super) controlling_acceptor: Option<ControllingAcceptorState>,
+    /// The held constructions this mob owns (0.9.9): MobMachine's
+    /// held-construction record decides each attempt, and the registry keeps
+    /// what carrying out its decisions needs (see
+    /// [`super::identity_preparation`]).
+    pub(super) held_constructions: super::identity_preparation::HeldConstructions,
 }
 
 struct AuthorizedPeerOnlyBind {

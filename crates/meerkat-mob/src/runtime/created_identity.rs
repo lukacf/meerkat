@@ -48,6 +48,9 @@ fn recovered_presence(observation: &CreatedIdentityObservation) -> mob_dsl::Reco
     match observation {
         CreatedIdentityObservation::Created(record) => match record.presence {
             CreatedIdentityPresence::Present => mob_dsl::RecoveredPresence::Present,
+            CreatedIdentityPresence::PendingPreparation {
+                constructed: true, ..
+            } => mob_dsl::RecoveredPresence::PendingConstruction,
             CreatedIdentityPresence::PendingPreparation { .. } => {
                 mob_dsl::RecoveredPresence::PresentUnseated
             }
@@ -94,12 +97,15 @@ fn last_bound_sessions(mob_id: &MobId, events: &[MobEvent]) -> BTreeMap<AgentIde
 
 /// What a start carries out from the store-owned rows it recovered: each
 /// present identity's spec (a seat whose session no build created takes its
-/// descriptive inputs from it), and the identities whose row keeps a role
-/// migration its restamp has not committed.
+/// descriptive inputs from it), the identities whose row keeps a role
+/// migration its restamp has not committed, and the identities whose row
+/// is pending a `constructed` preparation (one whose construction a crash
+/// published before its row was settled is seated: its row is settled).
 #[derive(Debug, Default)]
 pub(super) struct RecoveredCreatedRows {
     pub(super) specs: BTreeMap<AgentIdentity, crate::identity::CreatedIdentitySpec>,
     pub(super) role_migrations_owed: std::collections::BTreeSet<AgentIdentity>,
+    pub(super) pending_constructions: std::collections::BTreeSet<AgentIdentity>,
 }
 
 /// Recover `mob_id`'s created entry rows into MobMachine, one
@@ -135,6 +141,17 @@ pub(super) async fn recover_created_identity_entries(
                 if record.pending_role_migration.is_some() {
                     recovered.role_migrations_owed.insert(identity.clone());
                 }
+            }
+            if let CreatedIdentityObservation::Created(record) = observation
+                && matches!(
+                    record.presence,
+                    CreatedIdentityPresence::PendingPreparation {
+                        constructed: true,
+                        ..
+                    }
+                )
+            {
+                recovered.pending_constructions.insert(identity.clone());
             }
             // An archived row names its archived session itself; any other
             // row's revival record is its member's last bound session.
@@ -260,7 +277,8 @@ fn owed_created_seats(state: &mob_dsl::MobMachineState) -> Vec<(AgentIdentity, O
 
 impl super::MobHandle {
     /// Carry out at a start what the store-owned rows keep owed (see the
-    /// module docs): the entries owed their seat
+    /// module docs): the row of each published construction a crash kept
+    /// pending, the entries owed their seat
     /// ([`Self::reseat_owed_created_entries`]), then, off the caller's path,
     /// each role migration whose restamp a crash prevented, in its own
     /// declared apply. Never fails its caller: what it cannot carry out
@@ -268,7 +286,10 @@ impl super::MobHandle {
     pub(super) async fn carry_out_store_owned_rows_at_start(
         &self,
         role_migrations_owed: std::collections::BTreeSet<AgentIdentity>,
+        pending_constructions: std::collections::BTreeSet<AgentIdentity>,
     ) {
+        self.settle_published_construction_rows(pending_constructions)
+            .await;
         self.reseat_owed_created_entries().await;
         if role_migrations_owed.is_empty() {
             return;
@@ -401,6 +422,44 @@ impl super::MobHandle {
         }
     }
 
+    /// Settle the row of each identity in `pending` whose construction the
+    /// recovery found published (MobMachine seats it): the row is present
+    /// again. A row that cannot be settled is logged; the next start
+    /// settles it.
+    async fn settle_published_construction_rows(
+        &self,
+        pending: std::collections::BTreeSet<AgentIdentity>,
+    ) {
+        let Some(store) = self.identity_member.as_ref() else {
+            return;
+        };
+        for identity in pending {
+            let seated = {
+                let state = self.machine_state_watch_rx.borrow();
+                let dsl_identity = mob_dsl::AgentIdentity::from_domain(&identity);
+                state.identity_to_runtime.contains_key(&dsl_identity)
+                    && !state.identity_entry_unseated.contains_key(&dsl_identity)
+            };
+            if !seated {
+                continue;
+            }
+            if let Err(error) = super::identity_preparation::settle_published_construction_row(
+                store.as_ref(),
+                self.mob_id(),
+                &identity,
+            )
+            .await
+            {
+                tracing::warn!(
+                    mob_id = %self.mob_id(),
+                    agent_identity = %identity,
+                    error = %error,
+                    "a published construction's row was not settled"
+                );
+            }
+        }
+    }
+
     /// Finish the removals and archives MobMachine holds owed (recovered at
     /// a start from the identities' rows, or left by a removal whose
     /// retirement did not run): retire the member of each, with the mark's
@@ -484,6 +543,13 @@ mod tests {
                     constructed: false,
                 }),
                 mob_dsl::RecoveredPresence::PresentUnseated,
+            ),
+            (
+                record(CreatedIdentityPresence::PendingPreparation {
+                    attempt: 2,
+                    constructed: true,
+                }),
+                mob_dsl::RecoveredPresence::PendingConstruction,
             ),
             (
                 record(CreatedIdentityPresence::Removed),

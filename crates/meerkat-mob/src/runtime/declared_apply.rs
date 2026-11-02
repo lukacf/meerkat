@@ -430,6 +430,10 @@ pub(in crate::runtime) struct IdentityDeclaration {
     /// Whose declaration it is: a store-owned identity's update (its
     /// Created entry), or a host's roster (a Declared entry or a free name).
     pub(in crate::runtime) created_custody: bool,
+    /// Whether the host's rule requires the identity's preparation before
+    /// its first seat ([`DeclaredEntry::preparation`]): a roster's
+    /// declaration only, never a store-owned identity's.
+    pub(in crate::runtime) preparation_required: bool,
 }
 
 impl IdentityDeclaration {
@@ -456,6 +460,7 @@ impl IdentityDeclaration {
                 .map(|profile| profile.as_str().to_string()),
             first_boot: self.first_boot,
             created_custody: self.created_custody,
+            preparation_required: self.preparation_required,
         }
     }
 }
@@ -1009,6 +1014,8 @@ impl super::MobHandle {
                 Some(FirstBootRequest::Fresh) => mob_dsl::FirstBootRequestKind::Fresh,
             },
             created_custody: entry.spec.created_custody,
+            preparation_required: !entry.spec.created_custody
+                && super::identity_preparation::preparation_required(entry.preparation),
         };
         let declarations: Vec<IdentityDeclaration> = declared.values().map(declare).collect();
         let (verdicts, change) = self.declare_identity_entries(declarations, change).await?;
@@ -1579,6 +1586,9 @@ impl super::MobHandle {
             }
             mob_dsl::IdentityEntryVerdict::AwaitHeldCreation => {
                 DeclaredEntryOutcome::AwaitingHeldCreation
+            }
+            mob_dsl::IdentityEntryVerdict::PreparationPending => {
+                DeclaredEntryOutcome::PreparationPending
             }
             mob_dsl::IdentityEntryVerdict::RuntimeModeRestamp
             | mob_dsl::IdentityEntryVerdict::RoleMigrate => {

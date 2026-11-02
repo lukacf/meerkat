@@ -394,10 +394,12 @@ impl MobActor {
         }
         let state = self.dsl_authority.state();
         let seated_now = state.identity_to_runtime.contains_key(&dsl_identity);
-        // A dormant seat never takes an identity entry its host creates: one
-        // hosted on its first use (placed or externally bound) or one
-        // awaiting its held creation (MobMachine's dormant seat refuses both
-        // too, unseated_entry_owed_its_seat).
+        // A dormant seat never takes an identity entry its host creates or
+        // prepares: one hosted on its first use (placed or externally
+        // bound), one awaiting its held creation, or one awaiting its host's
+        // preparation, which its settle seats or its held construction's
+        // activation publishes (MobMachine's dormant seat refuses them too,
+        // unseated_entry_owed_its_seat).
         if mode == SeatPlanMode::Seat
             && let Some(cause) = state.identity_entry_unseated.get(&dsl_identity)
         {
@@ -416,8 +418,8 @@ impl MobActor {
                 }
                 mob_dsl::UnseatedEntryCause::PreparationPending => {
                     return Err(MobError::WiringError(format!(
-                        "'{agent_identity}' cannot be seated dormant: the created identity entry \
-                         awaits its host's preparation"
+                        "'{agent_identity}' cannot be seated dormant: the identity entry awaits \
+                         its host's preparation"
                     )));
                 }
                 mob_dsl::UnseatedEntryCause::Archived => {

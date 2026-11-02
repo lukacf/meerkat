@@ -430,8 +430,11 @@ pub struct UnseatedEntryCounts {
     /// Entries awaiting their held creation
     /// ([`UnseatedEntryCause::HeldCreation`]).
     pub held_creation: usize,
-    /// Created entries awaiting their host's preparation
-    /// ([`UnseatedEntryCause::PreparationPending`]).
+    /// Entries of either custody awaiting their host's preparation before
+    /// their first seat ([`UnseatedEntryCause::PreparationPending`]). Their
+    /// deliveries are refused `host_preparation_pending`, as those of an
+    /// entry whose host preparation is owed
+    /// ([`IdentityCensus::host_preparations_owed`]): the two are disjoint.
     pub preparation_pending: usize,
     /// Archived store-owned identities ([`UnseatedEntryCause::Archived`]).
     pub archived: usize,
@@ -454,8 +457,12 @@ pub struct IdentityCensus {
     pub unseated_by_cause: UnseatedEntryCounts,
     /// Entries whose member is Broken.
     pub broken: usize,
-    /// Entries whose host preparation is owed, whatever its cause.
-    pub host_preparation_pending: usize,
+    /// Entries whose member's host preparation is owed, whatever its cause
+    /// ([`IdentityEntryView::host_preparation`]: a first-boot request, an
+    /// undeclared role move, a build preparation to retry). Disjoint from
+    /// the entries awaiting their host's preparation before their first
+    /// seat ([`UnseatedEntryCounts::preparation_pending`]).
+    pub host_preparations_owed: usize,
     /// Entries with a rotation in flight.
     pub rotation_in_flight: usize,
     /// Names of removed created entries ([`IdentityEntryRead::Removed`]).
@@ -1080,7 +1087,7 @@ pub(crate) fn identity_census(
             census.broken += 1;
         }
         if view.host_preparation.is_some() {
-            census.host_preparation_pending += 1;
+            census.host_preparations_owed += 1;
         }
         if view.rotation_in_flight.is_some() {
             census.rotation_in_flight += 1;
@@ -1752,9 +1759,10 @@ mod tests {
                 hosted_on_first_use: 1,
                 held_creation: 1,
                 preparation_pending: 1,
+                archived: 0,
             }
         );
-        assert_eq!(census.host_preparation_pending, 1);
+        assert_eq!(census.host_preparations_owed, 1);
         assert!(census.is_complete());
     }
 

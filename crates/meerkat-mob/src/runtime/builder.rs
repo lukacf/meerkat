@@ -9908,7 +9908,10 @@ impl MobBuilder {
         // a store-owned update's role migration a crash left owed is carried
         // out.
         handle
-            .carry_out_store_owned_rows_at_start(recovered_created_rows.role_migrations_owed)
+            .carry_out_store_owned_rows_at_start(
+                recovered_created_rows.role_migrations_owed,
+                recovered_created_rows.pending_constructions,
+            )
             .await;
         Ok(handle)
     }
@@ -11622,6 +11625,7 @@ impl MobBuilder {
                 #[cfg(not(target_arch = "wasm32"))]
                 controlling_acceptor: controlling_acceptor
                     .map(super::actor::ControllingAcceptorState::new),
+                held_constructions: Default::default(),
             };
             #[cfg(target_arch = "wasm32")]
             let _ = controlling_acceptor;

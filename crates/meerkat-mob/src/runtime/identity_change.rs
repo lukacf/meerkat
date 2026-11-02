@@ -1318,6 +1318,50 @@ pub(super) enum IdentityChangeCommand {
         commit: Box<EntryChangeCommit>,
         reply_tx: oneshot::Sender<Result<EntryChangeCommitted, MobError>>,
     },
+    /// Commit a settle of one identity's preparation.
+    Settle {
+        commit: Box<super::identity_preparation::PreparationSettleCommit>,
+        reply_tx: oneshot::Sender<
+            Result<super::identity_preparation::PreparationSettleCommitted, MobError>,
+        >,
+    },
+    /// Begin a held construction of one identity: MobMachine holds a new
+    /// attempt (a store-owned identity's row records it).
+    #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+    BeginConstruction {
+        request: Box<super::identity_preparation::IdentityConstructionRequest>,
+        reply_tx: oneshot::Sender<Result<super::identity_preparation::ConstructionBegun, MobError>>,
+    },
+    /// Keep the hold of a held construction in the mob's registry.
+    #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+    AdoptConstruction {
+        identity: AgentIdentity,
+        construction: Box<super::identity_preparation::HeldConstruction>,
+        reply_tx: oneshot::Sender<Result<(), MobError>>,
+    },
+    /// A held construction's spawn completed: published (`Ok`), or ended
+    /// with its error.
+    #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+    EndConstruction {
+        identity: AgentIdentity,
+        attempt: u64,
+        completion: Result<(), MobError>,
+        reply_tx: oneshot::Sender<Result<(), MobError>>,
+    },
+    /// Abort a held construction attempt before its activation.
+    #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+    AbortConstruction {
+        identity: AgentIdentity,
+        attempt: u64,
+        reply_tx: oneshot::Sender<
+            Result<
+                crate::tokio::sync::watch::Receiver<
+                    Option<super::identity_preparation::ConstructionOutcome>,
+                >,
+                MobError,
+            >,
+        >,
+    },
 }
 
 /// What one identity's removal, archive or unarchive commit step takes.
@@ -1440,6 +1484,7 @@ pub(super) fn declared_entry_receipt_outcome(
         | Verdict::RoleMigrationHeld => Some(IdentityChangeEntryOutcome::Committed),
         Verdict::HostedOnFirstUse => Some(IdentityChangeEntryOutcome::HostedOnFirstUse),
         Verdict::AwaitHeldCreation => Some(IdentityChangeEntryOutcome::AwaitingHeldCreation),
+        Verdict::PreparationPending => Some(IdentityChangeEntryOutcome::PendingPreparation),
         Verdict::LifecycleInFlight
         | Verdict::RefusedNameHeldByWorker
         | Verdict::RefusedHostAdopted
@@ -1688,6 +1733,27 @@ impl IdentityChangeCommand {
                 let _ = reply_tx.send(Err(error));
             }
             Self::CommitEntryChange { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(error));
+            }
+            Self::Settle { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(error));
+            }
+            #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+            Self::BeginConstruction { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(error));
+            }
+            // The refused hold's decision channel goes with the command: the
+            // hold aborts, and its completion ends the attempt.
+            #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+            Self::AdoptConstruction { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(error));
+            }
+            #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+            Self::EndConstruction { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(error));
+            }
+            #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+            Self::AbortConstruction { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(error));
             }
         }
@@ -2549,26 +2615,52 @@ impl super::MobHandle {
             decided,
             consent,
         } = ChangeAttribution::of(requester, consent, &operation)?;
+        let commit = || EntryChangeCommit {
+            kind,
+            identity: identity.clone(),
+            operation: operation.clone(),
+            facts: consent_facts.at(now_ms()),
+            grant: grant.clone(),
+            decided,
+            requester: requester.clone(),
+            consent: consent.clone(),
+        };
         let committed = self
             .send_actor_command(|reply_tx| {
                 super::MobCommand::IdentityChange(Box::new(
                     IdentityChangeCommand::CommitEntryChange {
-                        commit: Box::new(EntryChangeCommit {
-                            kind,
-                            identity: identity.clone(),
-                            operation,
-                            facts: consent_facts.at(now_ms()),
-                            grant,
-                            decided,
-                            requester,
-                            consent,
-                        }),
+                        commit: Box::new(commit()),
                         reply_tx,
                     },
                 ))
             })
-            .await??;
-        let (receipt, verdict, replayed) = match committed {
+            .await?;
+        // A removal of an identity whose construction is held aborts the
+        // construction first, its member never published, and is decided
+        // again: the removal tombstones the identity at once.
+        #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+        let committed = if kind == mob_dsl::IdentityEntryChangeKind::Remove
+            && matches!(committed, Err(MobError::LifecycleOperationPending { .. }))
+            && self
+                .machine_state_watch_rx
+                .borrow()
+                .identity_entry_constructions_held
+                .contains_key(&mob_dsl::AgentIdentity::from_domain(&identity))
+        {
+            self.abort_held_construction_of(&identity).await?;
+            self.send_actor_command(|reply_tx| {
+                super::MobCommand::IdentityChange(Box::new(
+                    IdentityChangeCommand::CommitEntryChange {
+                        commit: Box::new(commit()),
+                        reply_tx,
+                    },
+                ))
+            })
+            .await?
+        } else {
+            committed
+        };
+        let (receipt, verdict, replayed) = match committed? {
             EntryChangeCommitted::Committed { receipt, verdict } => (receipt, Some(verdict), false),
             EntryChangeCommitted::Replayed(receipt) => (receipt, None, true),
         };
@@ -2669,6 +2761,30 @@ impl super::MobHandle {
         spec: &CreatedIdentitySpec,
         held_creation: bool,
     ) -> Result<(), MobError> {
+        match Box::pin(self.seat_store_owned_outcome(identity, spec, held_creation)).await? {
+            super::DeclaredEntryOutcome::Seated { .. }
+            | super::DeclaredEntryOutcome::Embodied { .. }
+            | super::DeclaredEntryOutcome::Kept
+            | super::DeclaredEntryOutcome::HostedOnFirstUse
+            | super::DeclaredEntryOutcome::AwaitingHeldCreation => Ok(()),
+            super::DeclaredEntryOutcome::Failed { error }
+            | super::DeclaredEntryOutcome::Deferred { reason: error } => Err(error),
+            other => Err(MobError::Internal(format!(
+                "the seat of store-owned '{identity}' answered {other:?}"
+            ))),
+        }
+    }
+
+    /// [`Self::seat_store_owned_from_spec`], answering the seat as the
+    /// declared apply answers it, a failed or deferred seat included; an
+    /// error only when the apply itself could not run. The row lets its
+    /// role migration go once the member holds the spec's profile.
+    pub(super) async fn seat_store_owned_outcome(
+        &self,
+        identity: &AgentIdentity,
+        spec: &CreatedIdentitySpec,
+        held_creation: bool,
+    ) -> Result<super::DeclaredEntryOutcome, MobError> {
         let archived = self
             .machine_state_watch_rx
             .borrow()
@@ -2692,30 +2808,13 @@ impl super::MobHandle {
             roster = roster.with_role_migration(identity.clone(), role);
         }
         let (mut outcome, _) = self.run_declared_apply(roster, None).await?;
-        match outcome.entries.remove(identity) {
-            Some(
-                super::DeclaredEntryOutcome::Seated { .. }
-                | super::DeclaredEntryOutcome::Embodied { .. }
-                | super::DeclaredEntryOutcome::Kept
-                | super::DeclaredEntryOutcome::HostedOnFirstUse
-                | super::DeclaredEntryOutcome::AwaitingHeldCreation,
-            ) => {}
-            Some(
-                super::DeclaredEntryOutcome::Failed { error }
-                | super::DeclaredEntryOutcome::Deferred { reason: error },
-            ) => return Err(error),
-            Some(other) => {
-                return Err(MobError::Internal(format!(
-                    "the seat of store-owned '{identity}' answered {other:?}"
-                )));
-            }
-            None => {
-                return Err(MobError::Internal(format!(
-                    "the seat of store-owned '{identity}' was not answered"
-                )));
-            }
-        }
-        self.settle_store_owned_role_migration(identity).await
+        let seat = outcome.entries.remove(identity).ok_or_else(|| {
+            MobError::Internal(format!(
+                "the seat of store-owned '{identity}' was not answered"
+            ))
+        })?;
+        self.settle_store_owned_role_migration(identity).await?;
+        Ok(seat)
     }
 }
 

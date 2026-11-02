@@ -691,6 +691,9 @@ macro_rules! non_flow_reducer_authority_mob_machine_inputs {
             | mob_dsl::MobMachineInput::RemoveIdentityEntry { .. }
             | mob_dsl::MobMachineInput::ArchiveIdentityEntry { .. }
             | mob_dsl::MobMachineInput::UnarchiveIdentityEntry { .. }
+            | mob_dsl::MobMachineInput::BeginPreparationConstruction { .. }
+            | mob_dsl::MobMachineInput::SettleHostPreparation { .. }
+            | mob_dsl::MobMachineInput::EndPreparationConstruction { .. }
             | mob_dsl::MobMachineInput::OpenDeclaredApply
             | mob_dsl::MobMachineInput::CloseDeclaredApply
             | mob_dsl::MobMachineInput::FinishExplicitResume { .. }
@@ -1993,6 +1996,9 @@ impl FlowAuthorityInputRecord {
             | mob_dsl::MobMachineInput::RemoveIdentityEntry { .. }
             | mob_dsl::MobMachineInput::ArchiveIdentityEntry { .. }
             | mob_dsl::MobMachineInput::UnarchiveIdentityEntry { .. }
+            | mob_dsl::MobMachineInput::BeginPreparationConstruction { .. }
+            | mob_dsl::MobMachineInput::SettleHostPreparation { .. }
+            | mob_dsl::MobMachineInput::EndPreparationConstruction { .. }
             | mob_dsl::MobMachineInput::OpenDeclaredApply
             | mob_dsl::MobMachineInput::CloseDeclaredApply
             | mob_dsl::MobMachineInput::FinishExplicitResume { .. }

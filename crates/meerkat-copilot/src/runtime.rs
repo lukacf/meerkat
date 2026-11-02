@@ -8204,6 +8204,270 @@ mod tests {
             );
         }
 
+        /// GitHub's answer when its identity lookup does not answer a token:
+        /// what a fine-grained personal access token can get from
+        /// `copilot_internal/user`.
+        fn unanswered_lookup(status: u16) -> CopilotHttpResponse {
+            json_response(
+                status,
+                serde_json::json!({
+                    "message": "Resource not accessible by personal access token"
+                }),
+            )
+        }
+
+        /// GitHub's identity lookup may not answer a token the Copilot API
+        /// accepts: a fine-grained personal access token can get a 403 or a
+        /// 404 from it. Such an answer, when it is no rate limit, has the
+        /// route try the default Copilot API host with no login or plan, and
+        /// use the token once the account's model list loads there. The
+        /// lookup's message, which can echo the request's token, reaches no
+        /// log line.
+        #[tokio::test]
+        async fn an_unanswered_identity_lookup_uses_the_default_host_once_models_load() {
+            let log = LogCapture::default();
+            let capture = CaptureSubscriber::dispatch(log.clone());
+            // A second registered dispatcher makes callsite interest come from
+            // every dispatcher, so a callsite first reached under no
+            // subscriber still reaches this one.
+            let _anchor = CaptureSubscriber::dispatch(LogCapture::default());
+            let _guard = tracing::dispatcher::set_default(&capture);
+
+            for status in [403, 404] {
+                let token = user_token(&format!("unanswered-{status}"));
+                let bearer = format!("Bearer {token}");
+                let harness =
+                    Harness::new([Ok(message_echo(status, &bearer)), Ok(models_response())]);
+                harness.operator.set("COPILOT_GITHUB_TOKEN", &token);
+
+                let resolved = harness
+                    .resolve(CopilotProviderRoute::OpenAi)
+                    .await
+                    .unwrap_or_else(|error| {
+                        panic!("lookup {status}: the token is used on the default host: {error:?}")
+                    });
+
+                assert_eq!(
+                    harness.transport.urls(),
+                    [
+                        GITHUB_COPILOT_USER_URL.to_string(),
+                        format!("{DEFAULT_COPILOT_API_BASE}/models")
+                    ],
+                    "lookup {status}"
+                );
+                assert_eq!(harness.transport.bearer(1), Some(bearer.clone()));
+                assert_eq!(resolved.metadata().account_id, None, "lookup {status}");
+                assert_eq!(resolved.metadata().plan, None, "lookup {status}");
+                let authorizer = resolved.concrete_authorizer();
+                let identity = authorizer.account_identity().expect("account identity");
+                assert_eq!(identity.api_base, DEFAULT_COPILOT_API_BASE);
+                assert_eq!(identity.login, None);
+                assert!(!identity.installation);
+                let (_, signed) = authorize_once(
+                    &authorizer,
+                    &format!("{DEFAULT_COPILOT_API_BASE}/responses"),
+                )
+                .await;
+                assert_eq!(signed, bearer);
+                assert_eq!(
+                    harness.transport.request_count(),
+                    2,
+                    "lookup {status}: requests reuse the account state"
+                );
+                assert_eq!(harness.operator.lease().phase, Some(AuthLeasePhase::Valid));
+            }
+
+            let logged = log.0.lock().clone();
+            assert!(
+                logged.contains("trying the default Copilot API host"),
+                "the capture saw the lookup's answer: {logged}"
+            );
+            assert!(!logged.contains(CANARY), "{logged}");
+        }
+
+        /// The CLI's check accepts such a token the same way: unnamed, on the
+        /// default host, once its model list loads there.
+        #[tokio::test]
+        async fn the_check_accepts_a_token_the_identity_lookup_does_not_answer() {
+            let transport =
+                OutcomeTransport::new([Ok(unanswered_lookup(403)), Ok(models_response())]);
+            let identity = verify_operator_token_with(
+                transport.as_ref(),
+                &user_token("check-unanswered"),
+                &CopilotBackendConfig::from_token_options(&serde_json::Value::Null)
+                    .expect("default token route options"),
+                Utc::now(),
+            )
+            .await
+            .expect("the check accepts the token");
+
+            assert_eq!(identity.login, None);
+            assert_eq!(identity.plan, None);
+            assert!(!identity.installation);
+            assert_eq!(identity.api_base, DEFAULT_COPILOT_API_BASE);
+            assert_eq!(
+                transport.urls(),
+                [
+                    GITHUB_COPILOT_USER_URL.to_string(),
+                    format!("{DEFAULT_COPILOT_API_BASE}/models")
+                ]
+            );
+        }
+
+        /// A token the identity lookup does not answer has only the Copilot
+        /// API to vouch for it, as an installation token has: a 401 from its
+        /// model list is GitHub refusing the token itself
+        /// (`user_reauth_required`, and the lease withdraws it), at the first
+        /// listing and at a later one, which looks the account up no second
+        /// time. The CLI's check refuses it the same way. A 401 from the
+        /// lookup itself still refuses the token
+        /// (`revoked_token_marks_reauth_and_fails_fast`).
+        #[tokio::test]
+        async fn an_unanswered_lookup_then_a_rejected_model_list_refuses_the_token() {
+            let rejected = || -> Outcome {
+                Ok(json_response(
+                    401,
+                    serde_json::json!({"message": "Bad credentials"}),
+                ))
+            };
+
+            let harness = Harness::new([Ok(unanswered_lookup(403)), rejected()]);
+            harness
+                .operator
+                .set("COPILOT_GITHUB_TOKEN", &user_token("rejected-at-first"));
+            assert_eq!(
+                harness.resolve(CopilotProviderRoute::OpenAi).await.err(),
+                Some(ProviderAuthError::Auth(AuthError::UserReauthRequired)),
+                "a 401 from the first model listing"
+            );
+            assert_eq!(
+                harness.operator.lease().phase,
+                Some(AuthLeasePhase::ReauthRequired)
+            );
+            assert_eq!(harness.transport.request_count(), 2);
+
+            let later = Harness::new([
+                Ok(unanswered_lookup(404)),
+                Ok(models_response()),
+                rejected(),
+            ]);
+            later
+                .operator
+                .set("COPILOT_GITHUB_TOKEN", &user_token("rejected-later"));
+            let resolved = later
+                .resolve(CopilotProviderRoute::OpenAi)
+                .await
+                .expect("the token is used on the default host");
+            // The model list is due again after five minutes.
+            later.operator.advance(301);
+            let refused = resolved
+                .concrete_authorizer()
+                .prepare_request()
+                .await
+                .expect_err("GitHub refused the token");
+            assert_eq!(refused, AuthError::UserReauthRequired);
+            assert_eq!(
+                later.operator.lease().phase,
+                Some(AuthLeasePhase::ReauthRequired)
+            );
+            assert_eq!(
+                later.transport.request_count(),
+                3,
+                "the later listing looks the account up no second time"
+            );
+
+            let check = OutcomeTransport::new([Ok(unanswered_lookup(403)), rejected()]);
+            assert_eq!(
+                verify_operator_token_with(
+                    check.as_ref(),
+                    &user_token("check-rejected"),
+                    &CopilotBackendConfig::from_token_options(&serde_json::Value::Null)
+                        .expect("default token route options"),
+                    Utc::now(),
+                )
+                .await
+                .err(),
+                Some(ProviderAuthError::Auth(AuthError::UserReauthRequired))
+            );
+        }
+
+        /// A token the identity lookup does not answer never serves without
+        /// its model list: a listing that fails (a server error, a timeout, a
+        /// rate limit) fails the request as `refresh_failed` and leaves the
+        /// lease valid, and a rate limit pauses the lookup until GitHub's
+        /// stated time.
+        #[tokio::test]
+        async fn an_unanswered_lookup_never_serves_without_a_model_list() {
+            let listings: Vec<(&str, Outcome)> = vec![
+                (
+                    "server error",
+                    Ok(json_response(
+                        502,
+                        serde_json::json!({"message": "Bad gateway"}),
+                    )),
+                ),
+                ("timeout", Err(CopilotHttpTransportError::Timeout)),
+                ("rate limit", Ok(rate_limited(429, 120))),
+            ];
+            for (label, listing) in listings {
+                let harness = Harness::new([Ok(unanswered_lookup(404)), listing]);
+                harness
+                    .operator
+                    .set("COPILOT_GITHUB_TOKEN", &user_token("unanswered-down"));
+                let failed = harness.resolve(CopilotProviderRoute::OpenAi).await.err();
+                assert_eq!(
+                    harness.transport.request_count(),
+                    2,
+                    "{label}: the model list was asked"
+                );
+                let detail = refresh_failure(
+                    failed.unwrap_or_else(|| panic!("{label}: no route without the model list")),
+                );
+                assert!(detail.contains("model listing failed"), "{label}: {detail}");
+                assert_eq!(
+                    harness.operator.lease().phase,
+                    Some(AuthLeasePhase::Valid),
+                    "{label}"
+                );
+            }
+
+            let harness = Harness::new([
+                Ok(unanswered_lookup(403)),
+                Ok(rate_limited(429, 120)),
+                Ok(unanswered_lookup(403)),
+                Ok(models_response()),
+            ]);
+            harness
+                .operator
+                .set("COPILOT_GITHUB_TOKEN", &user_token("unanswered-paced"));
+            refresh_failure(
+                harness
+                    .resolve(CopilotProviderRoute::OpenAi)
+                    .await
+                    .err()
+                    .expect("the model listing is rate limited"),
+            );
+            harness.operator.advance(119);
+            refresh_failure(
+                harness
+                    .resolve(CopilotProviderRoute::OpenAi)
+                    .await
+                    .err()
+                    .expect("still inside GitHub's stated wait"),
+            );
+            assert_eq!(
+                harness.transport.request_count(),
+                2,
+                "no request before GitHub's stated time"
+            );
+            harness.operator.advance(2);
+            harness
+                .resolve(CopilotProviderRoute::OpenAi)
+                .await
+                .expect("the lookup and the listing run again after the wait");
+            assert_eq!(harness.transport.request_count(), 4);
+        }
+
         /// T9: the token never goes to an API host outside
         /// `githubcopilot.com`, even when GitHub's identity answer names one.
         #[tokio::test]

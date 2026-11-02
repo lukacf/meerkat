@@ -1328,6 +1328,16 @@ impl AgentBuildConfig {
         self.initial_tool_filter = Some(filter);
     }
 
+    /// Whether this build's output budget is fixed before provider
+    /// resolution under the effective `config`: an explicit budget (the
+    /// build's own, or the one a restored session persisted) or a configured
+    /// one. Such a build reads none of the account's stated limits, so its
+    /// resolution may admit an account whose limits are pending; a budget
+    /// taken from the account's limit needs them.
+    pub(crate) fn output_budget_known(&self, config: &Config) -> bool {
+        self.max_tokens.is_some() || config.configured_max_tokens().is_some()
+    }
+
     /// Build config from a service `CreateSessionRequest` + event channel.
     pub fn from_create_session_request(
         req: &CreateSessionRequest,
@@ -10514,6 +10524,20 @@ impl AgentFactory {
                         for (handle, resolver) in &self.external_auth_resolvers {
                             env = env.with_external_resolver(handle.clone(), resolver.clone());
                         }
+                        // A build whose output budget is fixed before
+                        // resolution (an explicit or configured budget, or
+                        // the one a restored session persisted) reads none of
+                        // the account's stated limits, so its resolution may
+                        // admit an account whose limits are pending, such as
+                        // one whose credential exchange is temporarily
+                        // unavailable; the first request completes it. A
+                        // budget taken from the account's limit needs those
+                        // limits, so that build still fails until they are
+                        // known. A prepared controller pins the same fact in
+                        // its inputs, so the build that consumes it agrees.
+                        if build_config.output_budget_known(config) {
+                            env = env.admitting_pending_account_limits();
+                        }
                         let explicit_auth_binding = build_config.auth_binding.is_some();
                         let provider_registry = Arc::clone(&self.provider_registry);
                         let mut first_resolution_error: Option<
@@ -17958,6 +17982,342 @@ mod tests {
         assert!(
             selection.uses_synthetic_env_default_credential(),
             "governed custody must recognize the factory's env-default route"
+        );
+    }
+
+    /// Stands in for a provider runtime whose accounts state their limits
+    /// only once a credential exchange answers: while `outage` is set, a
+    /// resolution that does not admit pending account limits fails, as one
+    /// on a GitHub Copilot route does during a token exchange outage. Records
+    /// whether each resolution admitted them.
+    #[cfg(not(target_arch = "wasm32"))]
+    struct PendingLimitsProviderRuntime {
+        outage: Arc<std::sync::atomic::AtomicBool>,
+        admissions: Arc<std::sync::Mutex<Vec<bool>>>,
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[async_trait]
+    impl meerkat_llm_core::provider_runtime::ProviderRuntime for PendingLimitsProviderRuntime {
+        fn provider_id(&self) -> Provider {
+            Provider::OpenAI
+        }
+
+        async fn resolve_binding(
+            &self,
+            binding: &meerkat_llm_core::provider_runtime::ValidatedBinding,
+            env: &meerkat_llm_core::provider_runtime::ResolverEnvironment,
+        ) -> Result<
+            meerkat_llm_core::provider_runtime::ResolvedConnection,
+            meerkat_llm_core::provider_runtime::ProviderAuthError,
+        > {
+            let admitted = env.admits_pending_account_limits();
+            self.admissions.lock().unwrap().push(admitted);
+            if self.outage.load(std::sync::atomic::Ordering::SeqCst) && !admitted {
+                return Err(
+                    meerkat_llm_core::provider_runtime::ProviderAuthError::SourceResolutionFailed(
+                        "credential exchange returned 503".to_string(),
+                    ),
+                );
+            }
+            Ok(meerkat_llm_core::provider_runtime::ResolvedConnection {
+                provider: Provider::OpenAI,
+                backend: binding.backend(),
+                backend_profile: Arc::clone(binding.backend_profile()),
+                credential_identity: binding.credential_identity().clone(),
+                auth_lease: Arc::new(
+                    meerkat_llm_core::provider_runtime::StaticLease::inline_secret(
+                        "test-openai-key".to_string(),
+                        meerkat_core::AuthMetadata::default(),
+                        None,
+                        "test",
+                    ),
+                ),
+            })
+        }
+
+        fn build_client(
+            &self,
+            _connection: meerkat_llm_core::provider_runtime::ResolvedConnection,
+        ) -> Result<Arc<dyn LlmClient>, meerkat_llm_core::provider_runtime::ProviderClientError>
+        {
+            Ok(Arc::new(meerkat_client::TestClient::default()))
+        }
+    }
+
+    /// A factory whose only provider runtime is a
+    /// [`PendingLimitsProviderRuntime`], with the outage switch and the
+    /// admission record that runtime shares.
+    #[cfg(not(target_arch = "wasm32"))]
+    struct PendingLimitsFactory {
+        factory: AgentFactory,
+        outage: Arc<std::sync::atomic::AtomicBool>,
+        admissions: Arc<std::sync::Mutex<Vec<bool>>>,
+        _sessions: tempfile::TempDir,
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    impl PendingLimitsFactory {
+        fn new() -> Self {
+            let sessions = tempfile::tempdir().unwrap();
+            let outage = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let admissions = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let mut factory = AgentFactory::new(sessions.path().join("sessions"))
+                .without_provider_auth_persistence()
+                .builtins(false);
+            factory.provider_registry = Arc::new(
+                meerkat_llm_core::provider_runtime::ProviderRuntimeRegistry::empty().with_runtime(
+                    Arc::new(PendingLimitsProviderRuntime {
+                        outage: Arc::clone(&outage),
+                        admissions: Arc::clone(&admissions),
+                    }),
+                ),
+            );
+            Self {
+                factory,
+                outage,
+                admissions,
+                _sessions: sessions,
+            }
+        }
+
+        fn begin_outage(&self) {
+            self.outage.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+
+        fn admissions(&self) -> Vec<bool> {
+            self.admissions.lock().unwrap().clone()
+        }
+
+        /// A build of the stand-in's model as a request makes it, without an
+        /// output budget. Image generation is off: its executors resolve
+        /// image bindings of their own (strictly, through the stand-in too),
+        /// so the admissions recorded are the session's own resolution's.
+        fn request() -> AgentBuildConfig {
+            let mut build = AgentBuildConfig::new("gpt-5.4");
+            build.provider = Some(Provider::OpenAI);
+            build.override_builtins = ToolCategoryOverride::Disable;
+            build.override_image_generation = ToolCategoryOverride::Disable;
+            build
+        }
+
+        /// A build of `session` (a new one, or one to restore) on its own
+        /// runtime bindings from `runtime`.
+        async fn build_config(
+            runtime: &meerkat_runtime::MeerkatMachine,
+            session: Session,
+        ) -> AgentBuildConfig {
+            let bindings = runtime
+                .prepare_bindings(session.id().clone())
+                .await
+                .expect("session runtime bindings");
+            let mut build = Self::request();
+            build.resume_session = Some(session);
+            build.runtime_build_mode = RuntimeBuildMode::SessionOwned(bindings);
+            build
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn a_new_session_whose_budget_comes_from_the_account_fails_to_build_during_an_outage() {
+        let stand_in = PendingLimitsFactory::new();
+        stand_in.begin_outage();
+        let runtime = meerkat_runtime::MeerkatMachine::ephemeral();
+        let build = PendingLimitsFactory::build_config(&runtime, Session::new()).await;
+
+        let error = stand_in
+            .factory
+            .build_agent(build, &Config::default())
+            .await
+            .err()
+            .expect("a build whose output budget comes from the account's limit must fail while that limit is pending");
+        assert!(
+            matches!(
+                &error,
+                BuildAgentError::LlmClient(FactoryError::ProviderAuth(
+                    meerkat_llm_core::provider_runtime::ProviderAuthError::SourceResolutionFailed(
+                        message
+                    )
+                )) if message.contains("returned 503")
+            ),
+            "{error}"
+        );
+        assert_eq!(stand_in.admissions(), [false]);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn a_session_with_an_explicit_budget_builds_during_an_outage() {
+        let stand_in = PendingLimitsFactory::new();
+        stand_in.begin_outage();
+        let runtime = meerkat_runtime::MeerkatMachine::ephemeral();
+        let mut build = PendingLimitsFactory::build_config(&runtime, Session::new()).await;
+        build.max_tokens = Some(1024);
+
+        let agent = stand_in
+            .factory
+            .build_agent(build, &Config::default())
+            .await
+            .expect("a build whose output budget is explicit reads none of the account's limits");
+        assert_eq!(stand_in.admissions(), [true]);
+        assert_eq!(
+            agent
+                .session()
+                .session_metadata()
+                .expect("metadata written")
+                .max_tokens,
+            1024
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn a_session_with_a_configured_budget_builds_during_an_outage() {
+        let stand_in = PendingLimitsFactory::new();
+        stand_in.begin_outage();
+        let runtime = meerkat_runtime::MeerkatMachine::ephemeral();
+        let build = PendingLimitsFactory::build_config(&runtime, Session::new()).await;
+        let config = Config {
+            max_tokens: Some(2048),
+            ..Default::default()
+        };
+
+        let agent =
+            stand_in.factory.build_agent(build, &config).await.expect(
+                "a build whose output budget is configured reads none of the account's limits",
+            );
+        assert_eq!(stand_in.admissions(), [true]);
+        assert_eq!(
+            agent
+                .session()
+                .session_metadata()
+                .expect("metadata written")
+                .max_tokens,
+            2048
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn a_restored_session_builds_during_an_outage() {
+        let stand_in = PendingLimitsFactory::new();
+        let runtime = meerkat_runtime::MeerkatMachine::ephemeral();
+        let build = PendingLimitsFactory::build_config(&runtime, Session::new()).await;
+        let agent = stand_in
+            .factory
+            .build_agent(build, &Config::default())
+            .await
+            .expect("a new session builds while the exchange answers");
+        let session = agent.session().clone();
+        let budget = session
+            .session_metadata()
+            .expect("metadata written")
+            .max_tokens;
+
+        // The session is restored (a wake, or a surface rebuilding it) while
+        // the exchange is down.
+        stand_in.begin_outage();
+        let restored_runtime = meerkat_runtime::MeerkatMachine::ephemeral();
+        let build = PendingLimitsFactory::build_config(&restored_runtime, session).await;
+        let restored = stand_in
+            .factory
+            .build_agent(build, &Config::default())
+            .await
+            .expect("a restored session keeps its persisted budget and reads none of the account's limits");
+        assert_eq!(stand_in.admissions(), [false, true]);
+        assert_eq!(
+            restored
+                .session()
+                .session_metadata()
+                .expect("metadata kept")
+                .max_tokens,
+            budget,
+            "the restored session keeps the budget it persisted"
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn a_controller_prepared_under_a_known_budget_refuses_a_build_without_one() {
+        use crate::prepared_controller::{
+            PreparedControllerCell, PreparedControllerRefusal, PreparedControllerTicket,
+            encode_prepared_controller_for_service,
+        };
+        let stand_in = PendingLimitsFactory::new();
+        stand_in.begin_outage();
+        let runtime = meerkat_runtime::MeerkatMachine::ephemeral();
+        let session_id = meerkat_core::SessionId::new();
+
+        // Prepared during the outage under an explicit budget: its resolution
+        // admitted the account's pending limits.
+        let mut request = PendingLimitsFactory::request();
+        request.max_tokens = Some(1024);
+        let graph = stand_in
+            .factory
+            .prepare_controller_graph(
+                request,
+                &Config::default(),
+                runtime.generated_auth_lease_handle(),
+                &session_id,
+            )
+            .await
+            .expect("a controller whose budget is known is prepared during the outage");
+        let ticket =
+            PreparedControllerTicket::new(PreparedControllerCell::new(session_id.clone(), graph));
+        assert_eq!(stand_in.admissions(), [true]);
+
+        let bindings = runtime
+            .prepare_bindings(session_id.clone())
+            .await
+            .expect("session runtime bindings");
+        let consuming_build = |max_tokens: Option<u32>| {
+            let mut build = PendingLimitsFactory::request();
+            build.max_tokens = max_tokens;
+            build.resume_session = Some(Session::with_id(session_id.clone()));
+            build.resume_session_intent = meerkat_core::SessionBuildIntent::Mint;
+            build.runtime_build_mode = RuntimeBuildMode::SessionOwned(bindings.clone());
+            build.prepared_controller =
+                Some(encode_prepared_controller_for_service(ticket.clone()));
+            build
+        };
+
+        // The session's build names no budget: its budget would come from the
+        // account's limit, which the admitted resolution never read.
+        let error = stand_in
+            .factory
+            .build_agent(consuming_build(None), &Config::default())
+            .await
+            .err()
+            .expect("a build whose budget comes from the account's limit must not consume a controller admitted under a known budget");
+        assert!(
+            matches!(
+                error,
+                BuildAgentError::PreparedController(PreparedControllerRefusal::InputsChanged(
+                    "output budget"
+                ))
+            ),
+            "{error}"
+        );
+
+        // The refusal leaves the controller to a build whose budget is known.
+        let agent = stand_in
+            .factory
+            .build_agent(consuming_build(Some(1024)), &Config::default())
+            .await
+            .expect("a build with the prepared budget consumes the controller");
+        assert_eq!(
+            agent
+                .session()
+                .session_metadata()
+                .expect("metadata written")
+                .max_tokens,
+            1024
+        );
+        assert_eq!(
+            stand_in.admissions(),
+            [true],
+            "consumption resolves nothing"
         );
     }
 

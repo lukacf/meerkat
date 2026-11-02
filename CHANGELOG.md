@@ -524,6 +524,14 @@ them.
   exclusion, which a step refused to rebuild waits for; the waiting helper
   admission reads it for entered fences.
 
+- `meerkat-llm-core`: `ResolverEnvironment::admitting_pending_account_limits`
+  lets a resolution succeed while a temporary outage keeps a provider from
+  obtaining an account's stated limits (its model list and output limits),
+  for a build that reads none of them, such as one whose output budget is
+  set before resolution; the first request then obtains them.
+  `ResolverEnvironment::admits_pending_account_limits` reads it. Off by
+  default; it has no effect on wasm32.
+
 ### Fixed
 
 - `meerkat-openai`: on the GitHub Copilot Responses route, a response with
@@ -575,6 +583,28 @@ them.
   is now replaced on its next use while the account's route stays
   resolvable, and after a discovery 403 the next turn reports that the
   account needs a new login.
+
+- `meerkat-copilot`, `meerkat`: restoring a session on a GitHub Copilot
+  route (the wake of a dormant session or mob member, or a surface
+  rebuilding it), or building one whose output budget is set explicitly
+  or in the configuration, no longer fails during a temporary token
+  exchange outage when the account has no valid token. The build minted a
+  token first, so it failed, and a woken mob member was left broken and
+  its waking message refused. The build now succeeds on the account's
+  last known model list, or without one when no token was minted yet; the
+  first request performs the exchange and fails with a retryable error
+  while the outage lasts, and once the exchange answers the session
+  continues on the account's route (moving to it, with one retry, when the
+  build had no model list). A new session whose output budget comes
+  from the account's model limit still fails to build until the exchange
+  answers, so no session is created with a budget the account refuses.
+  For the same reason, a controller prepared ahead of its session under a
+  known output budget is now refused with
+  `PreparedControllerRefusal::InputsChanged("output budget")` when the
+  build that consumes it takes its budget from the account's limit; builds
+  that prepare and consume a controller with the same request are
+  unaffected. An exchange 401, or a 403 that asks for an account action,
+  still fails the build and asks for a new login.
 
 - `meerkat-session`: a turn in flight when an embedding host's runtime stops
   is now treated as ended with that runtime. The check a runtime loop uses

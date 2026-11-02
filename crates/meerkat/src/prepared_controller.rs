@@ -83,9 +83,11 @@ pub enum PreparedControllerRefusal {
 
 /// The configuration and selection facts a controller graph is prepared
 /// from, captured before provider resolution: the request's own controller
-/// facts and every configuration section that selects, defines, authorizes
-/// or shapes a request of one of its routes. Pure configuration: capturing
-/// and comparing them resolves no credential and sends no request.
+/// facts, every configuration section that selects, defines, authorizes
+/// or shapes a request of one of its routes, and whether the output budget
+/// is known before resolution (which decides whether that resolution may
+/// admit an account whose stated limits are pending). Pure configuration:
+/// capturing and comparing them resolves no credential and sends no request.
 ///
 /// A realm's connector OAuth clients are left out: they serve MCP connectors,
 /// never a model route.
@@ -106,6 +108,10 @@ pub(crate) struct PreparedControllerInputs {
     model_fallback: ModelFallbackConfig,
     provider_tools: ProviderToolsConfig,
     realm_connections: BTreeMap<String, RealmConfigSection>,
+    /// An explicit or configured output budget (not its value): a graph
+    /// resolved while the account's limits were pending serves only a build
+    /// whose budget does not come from those limits.
+    output_budget_known: bool,
 }
 
 impl PreparedControllerInputs {
@@ -141,6 +147,7 @@ impl PreparedControllerInputs {
                     (realm.clone(), section)
                 })
                 .collect(),
+            output_budget_known: build.output_budget_known(config),
         }
     }
 
@@ -162,6 +169,7 @@ impl PreparedControllerInputs {
             model_fallback,
             provider_tools,
             realm_connections,
+            output_budget_known,
         } = self;
         [
             (*model != current.model, "model"),
@@ -205,6 +213,10 @@ impl PreparedControllerInputs {
             (
                 *realm_connections != current.realm_connections,
                 "realm connections",
+            ),
+            (
+                *output_budget_known != current.output_budget_known,
+                "output budget",
             ),
         ]
         .into_iter()

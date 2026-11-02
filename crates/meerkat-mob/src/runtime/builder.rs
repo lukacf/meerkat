@@ -17448,6 +17448,82 @@ mod tests {
         );
     }
 
+    /// The resume replays a later incarnation's Created row over a stale
+    /// Declared origin: a roster-owned identity's member retired with no
+    /// archived session and its entry ended unseated, which the journal does
+    /// not record, and a store-owned identity of the same name was created
+    /// and seated after. The replay admits the Created row and the resume
+    /// goes on.
+    #[test]
+    fn a_created_row_replays_over_a_stale_declared_origin_on_resume() {
+        let definition = MobDefinition::explicit("stale-declared-origin");
+        let identity = AgentIdentity::from("desk");
+        let first = Generation::INITIAL;
+        let second = Generation::new(1);
+        let event = |cursor, kind| MobEvent {
+            cursor,
+            timestamp: Utc::now(),
+            mob_id: definition.id.clone(),
+            kind,
+        };
+        let spawned = |generation: Generation, fence: u64, origin| {
+            MobEventKind::MemberSpawned(
+                MemberSpawnedEvent::new(
+                    identity.clone(),
+                    generation,
+                    FenceToken::new(fence),
+                    AgentRuntimeId::new(identity.clone(), generation),
+                    ProfileName::from("worker"),
+                )
+                .with_identity_entry(Some(origin)),
+            )
+        };
+        let events = vec![
+            event(
+                1,
+                spawned(first, 7, crate::runtime::IdentityEntryOrigin::Declared),
+            ),
+            event(
+                2,
+                MobEventKind::MemberRetired {
+                    agent_identity: identity.clone(),
+                    generation: first,
+                    role: ProfileName::from("worker"),
+                    session_archived: false,
+                    facts: crate::event::MemberRetiredFacts::default(),
+                },
+            ),
+            event(
+                3,
+                spawned(second, 8, crate::runtime::IdentityEntryOrigin::Created),
+            ),
+        ];
+        let mut authority = seed_mob_authority();
+
+        seed_mob_authority_sync_from_events(
+            &mut authority,
+            &events,
+            &definition,
+            false,
+            &BTreeSet::new(),
+        )
+        .expect("the resume replays the later incarnation's Created row");
+
+        let dsl_identity = mob_dsl::AgentIdentity::from_domain(&identity);
+        assert_eq!(
+            authority.state().identity_entry_origins.get(&dsl_identity),
+            Some(&mob_dsl::IdentityEntryOrigin::Created)
+        );
+        assert_eq!(
+            authority.state().identity_to_runtime.get(&dsl_identity),
+            Some(&mob_dsl::AgentRuntimeId::from_domain(&AgentRuntimeId::new(
+                identity.clone(),
+                second
+            ))),
+            "the later incarnation is seated"
+        );
+    }
+
     #[test]
     fn committed_later_placed_spawn_defers_only_current_incarnation() {
         let definition = MobDefinition::explicit("placed-later-generation");

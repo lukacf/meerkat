@@ -16074,6 +16074,85 @@ mod tests {
         );
     }
 
+    /// A later incarnation's Created row replays over a stale Declared
+    /// origin. The journal records no end of an entry that ends unseated (the
+    /// seal's or a one-entry unlist's end of an entry no member holds), so a
+    /// roster-owned identity whose member retired with no archived session,
+    /// and whose entry the seal then ended, replays as its Declared row left
+    /// it, owed its seat; a store-owned identity created under the freed name
+    /// is seated, and its Created row takes the origin over. The scan's
+    /// Present row of that incarnation then answers Seated.
+    #[test]
+    fn a_created_row_replays_over_a_stale_declared_origin() {
+        let mut authority = MobMachineAuthority::new();
+        let identity = AgentIdentity::from("origin-stale-declared");
+        let runtime =
+            |generation: u64| AgentRuntimeId(format!("origin-stale-declared:{generation}"));
+        let seat = |authority: &mut MobMachineAuthority, generation: u64| {
+            authority
+                .apply_signal(MobMachineSignal::RecoverRosterMember {
+                    agent_identity: identity.clone(),
+                    agent_runtime_id: runtime(generation),
+                    fence_token: FenceToken(generation + 1),
+                    generation: Generation(generation),
+                    profile_name: "worker".to_string(),
+                    runtime_mode: SpawnPolicyRuntimeMode::AutonomousHost,
+                    external_addressable: false,
+                })
+                .expect("the roster row replays");
+        };
+        let entry =
+            |generation: u64, origin: IdentityEntryOrigin| MobMachineSignal::RecoverIdentityEntry {
+                agent_identity: identity.clone(),
+                agent_runtime_id: runtime(generation),
+                origin,
+            };
+
+        // X:0, Declared, and its retirement with no archived session.
+        seat(&mut authority, 0);
+        authority
+            .apply_signal(entry(0, IdentityEntryOrigin::Declared))
+            .expect("the Declared row replays");
+        authority
+            .apply_signal(MobMachineSignal::RecoverRosterMemberRetired {
+                agent_identity: identity.clone(),
+                agent_runtime_id: runtime(0),
+                generation: Generation(0),
+                preserve_machine_topology: false,
+                preservation_started: false,
+                session_archived: false,
+                hosted_incarnation: false,
+            })
+            .expect("the retirement replays");
+        assert_eq!(
+            authority.state().identity_entry_origins.get(&identity),
+            Some(&IdentityEntryOrigin::Declared),
+            "the stale Declared origin is kept, owed its seat"
+        );
+
+        // X:1, seated, and its Created row.
+        seat(&mut authority, 1);
+        authority
+            .apply_signal(entry(1, IdentityEntryOrigin::Created))
+            .expect("the Created row takes the stale Declared origin over");
+        assert_eq!(
+            authority.state().identity_entry_origins.get(&identity),
+            Some(&IdentityEntryOrigin::Created)
+        );
+
+        // The scan's Present row of the incarnation answers Seated.
+        recover_created(&mut authority, &identity, RecoveredPresence::Present, None);
+        let state = authority.state();
+        assert_eq!(
+            state.identity_entry_origins.get(&identity),
+            Some(&IdentityEntryOrigin::Created)
+        );
+        assert!(
+            !state.identity_entry_unreadable.contains(&identity),
+            "the Present row is no contradiction"
+        );
+    }
+
     /// A created entry row of a name a spawn ladder acts for is answered
     /// unreadable: it ends neither the entry nor the ladder's custody, so no
     /// custody outlives the entry it was opened for

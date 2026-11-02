@@ -1040,6 +1040,28 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                     ]),
                 ),
                 scenario(
+                    "member-custody-degraded",
+                    "a mob start that cannot restore a seated member's custody for a cause of the member's own records the member degraded (the restore and its cause) in every live phase, a later record replaces the cause, a re-attempt that restores it resolves the record, a record for an unseated identity or in a destroyed mob changes nothing, and an ended seat or a destroy takes the record (crates/meerkat-machine-schema/tests/mob_machine_member_custody_region.rs)",
+                    CoverageClaims::none()
+                        .transitions(&[
+                            "RecordMemberCustodyUnrestoredSeatedRunning",
+                            "RecordMemberCustodyUnrestoredSeatedStopped",
+                            "RecordMemberCustodyUnrestoredSeatedCompleted",
+                            "RecordMemberCustodyUnrestoredNotSeatedRunning",
+                            "RecordMemberCustodyUnrestoredNotSeatedStopped",
+                            "RecordMemberCustodyUnrestoredNotSeatedCompleted",
+                            "RecordMemberCustodyUnrestoredDestroyed",
+                            "ResolveMemberCustodyRestoredRecordedRunning",
+                            "ResolveMemberCustodyRestoredRecordedStopped",
+                            "ResolveMemberCustodyRestoredRecordedCompleted",
+                            "ResolveMemberCustodyRestoredUnrecordedRunning",
+                            "ResolveMemberCustodyRestoredUnrecordedStopped",
+                            "ResolveMemberCustodyRestoredUnrecordedCompleted",
+                            "ResolveMemberCustodyRestoredUnrecordedDestroyed",
+                        ])
+                        .invariants(&["custody_unrestored_members_are_seated"]),
+                ),
+                scenario(
                     "wiring-and-session-binding",
                     "wire and unwire members, enforce known identity for session bindings, expose pending spawn, member session binding changed, and wiring lifecycle notices",
                     CoverageClaims::none()

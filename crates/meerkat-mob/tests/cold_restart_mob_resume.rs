@@ -6612,6 +6612,219 @@ async fn a_mob_start_defers_a_retiring_members_unprovable_durable_tail() {
     let _ = handle.shutdown().await;
 }
 
+/// A mob restarted over [`retiring_member_after_a_crash`] (no durable tail)
+/// whose session service answers every persisted read of the retiring
+/// member's session with `fault`.
+#[cfg(feature = "test-support")]
+struct RetiringMemberUnreadAtStart {
+    handle: MobHandle,
+    faulting: Arc<FailingOnceSessionService>,
+    session_id: meerkat_core::types::SessionId,
+    identity: AgentIdentity,
+}
+
+/// Start the mob while every read of its retiring member `w-1`'s session
+/// fails with `fault`. The start must run: the member's own failure defers
+/// its cleanup delivery custody instead of stopping the mob.
+#[cfg(feature = "test-support")]
+async fn start_with_a_retiring_members_session_unread(
+    temp: &Path,
+    paths: &Paths,
+    fault: support::SessionLoadFault,
+    label: &str,
+) -> RetiringMemberUnreadAtStart {
+    let _ = temp;
+    let power_store = Arc::new(PowerCutRuntimeStore::new(&paths.realm_db_path));
+    let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> = power_store.clone();
+    let session_id = retiring_member_after_a_crash(paths, &power_store, false, label).await;
+    let (service, _store) = persistent_head_canonical_service(paths, runtime_store);
+    let persistent_owner: Arc<dyn MobSessionService> = service;
+    let faulting = FailingOnceSessionService::new(persistent_owner, None, None, 0, false);
+    faulting.fail_session_loads(session_id.clone(), fault);
+    let handle = MobBuilder::for_resume(
+        MobStorage::persistent(&paths.mob_db_path).expect("reopen mob storage"),
+    )
+    .with_session_service(faulting.clone())
+    .with_default_llm_client(openai_test_client())
+    .notify_orchestrator_on_resume(false)
+    .resume()
+    .await
+    .unwrap_or_else(|error| {
+        panic!("[{label}] a retiring member whose session cannot be read does not stop the mob: {error}")
+    });
+    let status = handle.status().await;
+    assert!(
+        matches!(status, Ok(meerkat_mob::MobState::Running)),
+        "[{label}] the start runs instead of fail-stopping before admission: {status:?}"
+    );
+    RetiringMemberUnreadAtStart {
+        handle,
+        faulting,
+        session_id,
+        identity: AgentIdentity::from("w-1"),
+    }
+}
+
+#[cfg(feature = "test-support")]
+impl RetiringMemberUnreadAtStart {
+    /// The member stays rostered as Retiring next to the healthy lead, its
+    /// status shows its cleanup delivery deferred with `cause` (a wire token),
+    /// and the start read its session.
+    async fn assert_degraded(&self, cause: &str, label: &str) {
+        let members = self.handle.list_members_including_retiring().await;
+        assert!(
+            members
+                .iter()
+                .any(|entry| entry.agent_identity == self.identity
+                    && entry.status == MobMemberStatus::Retiring),
+            "[{label}] the degraded member stays Retiring: {members:?}"
+        );
+        assert!(
+            members.iter().any(|entry| entry.agent_identity == "lead-1"),
+            "[{label}] the healthy lead is still listed: {members:?}"
+        );
+        let status = self
+            .handle
+            .member_status(&self.identity)
+            .await
+            .unwrap_or_else(|error| panic!("[{label}] the degraded member's status: {error}"));
+        let deferral = status.custody_deferred.unwrap_or_else(|| {
+            panic!("[{label}] the member's status shows its deferred custody restore")
+        });
+        assert_eq!(
+            deferral.restore,
+            meerkat_mob::MemberCustodyRestore::CleanupDelivery,
+            "[{label}] the deferred restore"
+        );
+        assert_eq!(
+            deferral.cause.as_str(),
+            cause,
+            "[{label}] the deferral's cause"
+        );
+        assert!(
+            self.faulting.session_loads(&self.session_id) >= 1,
+            "[{label}] the start read the member's session"
+        );
+    }
+
+    /// A retire while the session still cannot be read refuses with the
+    /// typed deferral, whose cause is the store failure the read met.
+    async fn assert_retire_refused_typed(&self, label: &str) {
+        let error = self
+            .handle
+            .retire(self.identity.clone())
+            .await
+            .expect_err("a retire while the member's session still cannot be read refuses");
+        let deferral = match &error {
+            meerkat_mob::MobError::SharedRetirementFailure(shared) => shared.as_ref(),
+            other => other,
+        };
+        assert!(
+            matches!(
+                deferral,
+                meerkat_mob::MobError::MemberCustodyDeferred {
+                    member_id,
+                    session_id,
+                    restore: meerkat_mob::MemberCustodyRestore::CleanupDelivery,
+                    cause,
+                } if member_id == &self.identity
+                    && session_id == &self.session_id
+                    && matches!(
+                        cause.as_ref(),
+                        meerkat_mob::MobError::SessionError(
+                            meerkat_core::service::SessionError::Store(_)
+                        )
+                    )
+            ),
+            "[{label}] the retire refuses with the deferral carrying the store failure: {error:?}"
+        );
+    }
+
+    /// Once the store serves the session again, a retire restores the
+    /// member's custody and the retirement completes.
+    async fn assert_retire_completes_once_the_store_serves(&self, label: &str) {
+        self.faulting.serve_session_loads();
+        self.handle
+            .retire(self.identity.clone())
+            .await
+            .unwrap_or_else(|error| {
+                panic!("[{label}] once the store serves, the retire restores the custody and completes: {error}")
+            });
+        let members = self.handle.list_members_including_retiring().await;
+        assert!(
+            !members
+                .iter()
+                .any(|entry| entry.agent_identity == self.identity),
+            "[{label}] the member's retirement completed: {members:?}"
+        );
+    }
+}
+
+/// A retiring member whose session the start cannot read because the store
+/// could not serve now no longer stops the mob. The start defers the member's
+/// cleanup delivery custody (`store_unavailable`): the mob runs, the member
+/// stays Retiring next to the healthy lead and its status shows the deferral,
+/// and a retire while the store still cannot serve refuses with the typed
+/// deferral. Once the store serves again, the retire restores the custody and
+/// the retirement completes.
+#[cfg(feature = "test-support")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_retiring_member_whose_session_store_cannot_serve_degrades_and_recovers() {
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::WARN)
+        .with_writer(std::io::stderr)
+        .try_init();
+    let temp = tempfile::tempdir().expect("temp dir");
+    let paths = Paths::new(temp.path());
+    let label = "store-unavailable";
+    let started = start_with_a_retiring_members_session_unread(
+        temp.path(),
+        &paths,
+        support::SessionLoadFault::Unavailable,
+        label,
+    )
+    .await;
+    started.assert_degraded("store_unavailable", label).await;
+    started.assert_retire_refused_typed(label).await;
+    started
+        .assert_retire_completes_once_the_store_serves(label)
+        .await;
+    let _ = started.handle.shutdown().await;
+}
+
+/// A retiring member whose stored session does not decode stays degraded,
+/// typed and visible (`store_unreadable`): the mob runs, the deferral survives
+/// the backoff wakes that re-attempt it, and every retire refuses typed until
+/// the state is repaired; after the repair the retire completes.
+#[cfg(feature = "test-support")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_retiring_member_whose_session_does_not_decode_stays_degraded_and_visible() {
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::WARN)
+        .with_writer(std::io::stderr)
+        .try_init();
+    let temp = tempfile::tempdir().expect("temp dir");
+    let paths = Paths::new(temp.path());
+    let label = "store-unreadable";
+    let started = start_with_a_retiring_members_session_unread(
+        temp.path(),
+        &paths,
+        support::SessionLoadFault::Unreadable,
+        label,
+    )
+    .await;
+    started.assert_degraded("store_unreadable", label).await;
+    // Several backoff periods (250 ms, doubling) pass with the state still
+    // unreadable: the member stays degraded with the same cause.
+    sleep(Duration::from_millis(1_800)).await;
+    started.assert_degraded("store_unreadable", label).await;
+    started.assert_retire_refused_typed(label).await;
+    started
+        .assert_retire_completes_once_the_store_serves(label)
+        .await;
+    let _ = started.handle.shutdown().await;
+}
+
 /// A retiring member whose durable tail its recovery withholds from resume
 /// (held for recovery, or refused by recovery) meets the settle's typed
 /// refusal at start, before any read of its session. That is the member's

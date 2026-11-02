@@ -299,9 +299,10 @@ A lookup or create of its id answers `MobError::MobQuarantined` (structured
 `kind: "mob_quarantined"`, with `class`, `retryable` and the cause). An
 id-addressed verb re-attempts a `store_unavailable` store's restore once,
 one attempt at a time (a verb that meets an attempt in flight answers the
-quarantine at once); a list never does. `MobMcpState::mob_restore_retry`
-re-attempts any class after a repair, and every start classifies the stores
-again. `MobMcpState::mob_inventory` reads the managed, held and quarantined
+quarantine at once); a list never does. `mob/restore_retry`
+(`MobMcpState::mob_restore_retry`) re-attempts any class after a repair, and
+every start classifies the stores again; `mob/list` names quarantined mobs
+under `quarantined`. `MobMcpState::mob_inventory` reads the managed, held and quarantined
 mobs in one read (each id in exactly one), and `quarantined_mobs` and
 `held_child_mobs` fail rather than answer empty when the restore fails. A
 quarantined store's roster still counts for provenance, so a create by a

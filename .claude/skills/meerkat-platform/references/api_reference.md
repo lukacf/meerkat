@@ -554,7 +554,8 @@ failures return typed codes: `APPROVAL_STORE_UNAVAILABLE` (nothing committed),
 
 Lifecycle and identity:
 
-- `mob/create`, `mob/list`, `mob/status`, `mob/lifecycle`, `mob/destroy`, `mob/snapshot`
+- `mob/create`, `mob/list`, `mob/status`, `mob/lifecycle`, `mob/destroy`, `mob/snapshot`,
+  `mob/restore_retry` (`mob/list` names quarantined mobs under `quarantined`)
 - `mob/members`, `mob/list_members_matching`, `mob/member_status`
 - `mob/spawn`, `mob/spawn_many`, `mob/spawn_helper`, `mob/fork_helper`
 - `mob/ensure_member`, `mob/reconcile`

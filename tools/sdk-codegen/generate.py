@@ -105,6 +105,9 @@ MOB_RPC_CONTRACT_TYPES = [
     "MobMemberParams",
     "MobCreateParams",
     "MobCreateResult",
+    # The quarantined row, listed before the list result that carries it;
+    # its class vocabulary is an alias (MOB_RPC_CONTRACT_ALIAS_TYPES).
+    "WireQuarantinedMob",
     "MobListResult",
     "WireMobLifecycleFailure",
     "MobStatusResult",
@@ -198,6 +201,7 @@ MOB_RPC_CONTRACT_TYPES = [
     "MobDestroyResult",
     "SupervisorRotationReportWire",
     "MobRotateSupervisorResult",
+    "MobRestoreRetryResult",
     "MobClaimCallbackRouteParams",
     "MobClaimCallbackRouteResult",
     "MobSubmitWorkParams",
@@ -629,6 +633,10 @@ MOB_RPC_CONTRACT_ALIAS_TYPES = [
     "WireContinuationStatus",
     "WireMemberCustodyRestore",
     "WireMemberCustodyDeferralCause",
+    # Why a persisted mob store is quarantined (a tolerant vocabulary) and
+    # how a restore retry ended.
+    "WireMobQuarantineClass",
+    "WireMobRestoreRetryOutcome",
     "WireMobRunStatus",
     # Closed usage-attribution vocabulary on the run-result accounting block.
     # An alias, not a contract type: the object emitter would turn a
@@ -7360,8 +7368,11 @@ def generate_web_mob_types(schemas: dict, output_dir: Path) -> None:
     append_interface("WireMemberLifecycleCapabilities")
     append_interface("WireMobLifecycleFailure")
     append_interface("MobStatusResult")
+    append_alias("WireMobQuarantineClass")
+    append_interface("WireQuarantinedMob")
     lines.append("export interface MobListResult {")
     lines.append("  mobs: MobStatusResult[];")
+    lines.append("  quarantined?: WireQuarantinedMob[];")
     lines.append("}")
     lines.append("")
     emitted.add("MobListResult")

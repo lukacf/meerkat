@@ -2278,12 +2278,8 @@ pub async fn mob_status(mob_id: &str) -> Result<JsValue, JsValue> {
 #[wasm_bindgen]
 pub async fn mob_list() -> Result<JsValue, JsValue> {
     let mob_state = with_mob_state(Ok)?;
-    let mobs = mob_state.mob_list().await.map_err(err_mob)?;
-    let rows: Vec<meerkat_contracts::MobStatusResult> = mobs
-        .into_iter()
-        .map(|(id, observation)| meerkat_mob_mcp::wire_mob_status_row(&id, &observation))
-        .collect();
-    let result = meerkat_contracts::MobListResult { mobs: rows };
+    let inventory = mob_state.mob_inventory().await.map_err(err_mob)?;
+    let result = meerkat_mob_mcp::wire_mob_list_result(&inventory);
     let json = serde_json::to_string(&result).map_err(|e| err_str("serialize_error", e))?;
     Ok(JsValue::from_str(&json))
 }

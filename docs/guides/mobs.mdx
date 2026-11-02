@@ -1211,6 +1211,7 @@ command. `rkat run --export-atif` writes a trajectory for a single-session run.
 | Task | Methods |
 |------|---------|
 | List and inspect mobs | `mob/list`, `mob/status`, `mob/snapshot` |
+| Retry a quarantined mob's restore | `mob/restore_retry` (see [Quarantined mobs and degraded members](#quarantined-mobs-and-degraded-members)) |
 | Inspect roster | `mob/members`, `mob/member_status`, `mob/list_members_matching` |
 | Watch events | `mob/events`, SDK event subscriptions |
 | Manage lifecycle | `mob/lifecycle`, `mob/retire`, `mob/respawn`, `mob/destroy` |
@@ -1298,6 +1299,59 @@ Build the mob over the persistent session service to adopt its members. Its
 runtime has a store whatever the realm backend, so unlike a durable worker an
 adopted member does not need sessions that outlive the process: a mob in a
 `memory` realm can adopt its members.
+
+### Quarantined mobs and degraded members
+
+A host that restores its persisted mobs when it starts (the CLI, `rkat-rpc`,
+`rkat-rest` and `rkat-mcp`, and any Rust host of `MobMcpState` with a
+persistent root) restores each mob store on its own. Since 0.9.9 a store that
+does not restore no longer fails the restore of the others: it is
+quarantined.
+
+- **What quarantined means.** The store is kept exactly as found and no actor
+  runs for the mob. Every other mob restores and serves. `mob/list` lists the
+  mob under `quarantined`, not under `mobs` (so do the MCP `meerkat_mob_list`
+  and `mob_list` tools, and `MobMcpState::mob_inventory` in Rust), and every
+  call that addresses its id, a create of that id included, answers the
+  `mob_quarantined` refusal. Its structured data carries `kind:
+  "mob_quarantined"`, `mob_id`, `class`, `retryable`, `content_retained`,
+  `cause` (the failure the last restore attempt met) and `code`. Only a mob
+  root that cannot be created, read or listed still fails the whole restore.
+
+The class says why a mob is quarantined:
+
+| Class | Meaning | Code a lookup answers | Heals by itself |
+|-------|---------|-----------------------|-----------------|
+| `store_unavailable` | A store could not serve a read the restore needed now, for example a host store that answered unavailable. Nothing is known to be wrong with the stored data. | `SESSION_RUNTIME_UNAVAILABLE`, `retryable: true` | Yes: the next call that addresses the mob by id re-attempts its restore once, and so does the next start |
+| `store_unreadable` | The mob's store, or stored state its restore needs, cannot be opened, read or decoded. | The code of the cause | At the next start once the store is repaired, or by an explicit retry |
+| `resume_refused` | The restore refused the store for another typed reason, such as records that disagree among themselves. | The code of the cause | At the next start once the store is repaired, or by an explicit retry |
+
+- **Re-attempts.** One re-attempt of a mob's restore runs at a time: a call
+  that meets a re-attempt in flight answers the refusal at once and never
+  waits for it. A list never re-attempts, and a `store_unreadable` or
+  `resume_refused` mob is never re-attempted on its own. Every start
+  classifies every store again, so a mob of any class restores at the next
+  start once its store does.
+- **Retry after a repair.** `mob/restore_retry` (Rust
+  `MobMcpState::mob_restore_retry`, owner console only) re-attempts the
+  restore of a quarantined mob of any class and answers `restored`, `held`
+  (a child mob held until its owner resolves), `settled` (the store held no
+  mob any more, or a child was torn down with its archived owner) or
+  `not_quarantined`. A re-attempt that fails answers the `mob_quarantined`
+  refusal again, with the class it met, and the mob stays listed with its
+  `attempts` counted. An unknown id is not found.
+- **Degraded members.** A member whose restore at a mob start fails on its
+  own (see the custody deferral above) degrades that member only: the mob
+  runs, and the member shows `custody_deferred` with the cause, for example
+  `store_unavailable` or `store_unreadable`, until a re-attempt restores it.
+  A Dormant member is never read at a start, so a store fault behind it
+  degrades nothing.
+
+A quarantined store's roster still counts for member lookups: a create by a
+session that roster names is refused with `ProvenanceUnavailable`. A host
+decides what a quarantine means for its own boot; Meerkat Meta, for example,
+fails its boot when its own mob is quarantined and lists every other
+quarantined mob in its hosted set and gateway status.
 
 ### Durable workers
 
@@ -1491,20 +1545,27 @@ typed `failure` (`cause`, `message`, `code`, `structured_data`): present
 means the mob's actor has stopped; `status` is the last machine phase. Before
 0.9.5 the row read `Running`.
 
-A member the start cannot restore because another runtime owner on the realm
-hosts its session, its hosting claim cannot be taken, or its durable tail could
-not be proven does not fail the start when it is retiring, or when its restore
-already failed (it is Broken). The start defers that member's custody restore:
-the mob runs, the member stays Retiring or Broken with its session untouched,
-and `MobHandle::member_status` shows the deferral as `custody_deferred` (the
-restore and the cause its last attempt met; both vocabularies may grow, and
-the SDKs report a value they do not know as unknown instead of failing the
-read). A retire, `redrive_retirement`, respawn or destroy of the member
-re-attempts the restore first and answers `MobError::MemberCustodyDeferred`
-while it still cannot restore; an explicit resume re-attempts it once and still
-succeeds. The mob also re-attempts the restore on its own: once it succeeds, a
-retiring member's retirement completes, and a respawn rebuilds a Broken
-member. Any other restore failure still stops the start.
+A member whose cleanup delivery the start cannot restore (a retiring member,
+or any member bound to a session of a Stopped or Completed mob) does not fail
+the start when the failure is the member's own and came before the restore had
+an effect: another runtime owner on the realm hosts its session, its hosting
+claim cannot be taken, its durable tail could not be proven, or a read of its
+session state failed (`store_unavailable` when the store could not serve now,
+`store_unreadable` when the state cannot be read or decoded). The start defers
+that member's custody restore: the mob runs, the member keeps its state and its
+session untouched, and `MobHandle::member_status` shows the deferral as
+`custody_deferred` (the restore and the cause its last attempt met; both
+vocabularies may grow, and the SDKs report a value they do not know as unknown
+instead of failing the read). The member is degraded, not Broken. A retire,
+`redrive_retirement`, respawn or destroy of the member re-attempts the restore
+first and answers `MobError::MemberCustodyDeferred` while it still cannot
+restore; an explicit resume re-attempts it once and still succeeds. A restore
+that owes work (a retiring member's cleanup) is also re-attempted on its own,
+with backoff: once it succeeds, the retirement completes. A degraded member of
+a Stopped or Completed mob is re-attempted only by an operation on it, an
+explicit resume or the next start; no timer reads its state in the background.
+A divergence of the mob's own records, or a failure after the member's
+registration was prepared, still stops the start.
 
 While a Shutdown drains, a command the close refuses (spawn, respawn, work, a
 flow run, wiring, a host bind, a live commit, resume, reset or reload) fails

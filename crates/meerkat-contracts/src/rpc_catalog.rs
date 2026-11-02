@@ -804,7 +804,11 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
                 "MobCreateParams",
                 "MobCreateResult",
             ),
-            RpcMethodDescriptor::result_only("mob/list", "List active mobs", "MobListResult"),
+            RpcMethodDescriptor::result_only(
+                "mob/list",
+                "List active mobs and the quarantined persisted mobs",
+                "MobListResult",
+            ),
             RpcMethodDescriptor::typed(
                 "mob/status",
                 "Get mob lifecycle status",
@@ -1015,6 +1019,12 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
                 "Rotate the supervisor bridge for all members of a mob",
                 "MobIdParams",
                 "MobRotateSupervisorResult",
+            ),
+            RpcMethodDescriptor::typed(
+                "mob/restore_retry",
+                "Re-attempt the restore of a quarantined persisted mob, for example after a repair",
+                "MobIdParams",
+                "MobRestoreRetryResult",
             ),
             RpcMethodDescriptor::typed(
                 "mob/claim_callback_route",
@@ -1939,6 +1949,11 @@ mod tests {
                 "mob/rotate_supervisor",
                 Some("MobIdParams"),
                 Some("MobRotateSupervisorResult"),
+            ),
+            (
+                "mob/restore_retry",
+                Some("MobIdParams"),
+                Some("MobRestoreRetryResult"),
             ),
             (
                 "mob/claim_callback_route",

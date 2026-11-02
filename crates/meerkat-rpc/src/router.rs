@@ -3150,6 +3150,11 @@ impl MethodRouter {
                     .await
             }
             #[cfg(feature = "mob")]
+            "mob/restore_retry" => {
+                routed_arm(|| handlers::mob::handle_restore_retry(id, params, &self.mob_state))
+                    .await
+            }
+            #[cfg(feature = "mob")]
             "mob/claim_callback_route" => {
                 routed_arm(|| {
                     handlers::mob::handle_claim_callback_route(
@@ -17255,6 +17260,105 @@ mod tests {
             "the second call is the queued turn: {}",
             requests[1]
         );
+    }
+
+    /// `mob/list` names a persisted mob whose store did not restore under
+    /// `quarantined`, with the refusal a lookup of its id answers, and a
+    /// lookup answers that refusal. `mob/restore_retry` of a store that
+    /// still does not decode keeps it quarantined, answers the refusal and
+    /// counts the attempt; an unknown id is not found.
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn mob_list_names_a_quarantined_store_and_restore_retry_answers_its_refusal() {
+        let root = tempfile::tempdir().unwrap();
+        let root_path = root.path().to_path_buf();
+        std::fs::create_dir_all(root_path.join("mobs")).unwrap();
+        std::fs::write(
+            root_path.join("mobs").join("mob--broken.db"),
+            b"not a sqlite database",
+        )
+        .unwrap();
+        let config_store = meerkat_core::TaggedConfigStore::new(
+            Arc::new(MemoryConfigStore::new(
+                anthropic_test_config(),
+                meerkat_models::canonical(),
+            )),
+            meerkat_core::ConfigStoreMetadata {
+                realm_id: None,
+                instance_id: None,
+                backend: None,
+                resolved_paths: Some(meerkat_core::ConfigResolvedPaths {
+                    root: root_path.display().to_string(),
+                    manifest_path: root_path.join("realm.toml").display().to_string(),
+                    config_path: root_path.join("config.toml").display().to_string(),
+                    sessions_sqlite_path: None,
+                    sessions_jsonl_dir: root_path.join("sessions").display().to_string(),
+                }),
+            },
+        );
+        let (router, _notif_rx) = test_router_with_config_store(Arc::new(config_store)).await;
+
+        let listed = router
+            .dispatch(make_request("mob/list", serde_json::json!({})))
+            .await
+            .expect("mob/list answers");
+        let listed = result_value(&listed);
+        assert_eq!(listed["mobs"], serde_json::json!([]), "{listed}");
+        let quarantined = listed["quarantined"]
+            .as_array()
+            .expect("the quarantined mobs are listed");
+        assert_eq!(quarantined.len(), 1, "{listed}");
+        assert_eq!(quarantined[0]["mob_id"], "broken");
+        assert_eq!(quarantined[0]["class"], "store_unreadable");
+        assert_eq!(quarantined[0]["retryable"], false);
+        assert_eq!(quarantined[0]["attempts"], 0);
+        assert_eq!(quarantined[0]["structured_data"]["kind"], "mob_quarantined");
+
+        let status = router
+            .dispatch(make_request(
+                "mob/status",
+                serde_json::json!({"mob_id": "broken"}),
+            ))
+            .await
+            .expect("mob/status answers");
+        let data = status
+            .error
+            .expect("a quarantined mob has no status")
+            .data
+            .expect("the quarantine's structured data");
+        assert_eq!(data["kind"], "mob_quarantined");
+        assert_eq!(data["class"], "store_unreadable");
+        assert_eq!(data["mob_id"], "broken");
+
+        let retry = router
+            .dispatch(make_request(
+                "mob/restore_retry",
+                serde_json::json!({"mob_id": "broken"}),
+            ))
+            .await
+            .expect("mob/restore_retry answers");
+        let data = retry
+            .error
+            .expect("the store still does not decode")
+            .data
+            .expect("the quarantine's structured data");
+        assert_eq!(data["kind"], "mob_quarantined");
+        assert_eq!(data["class"], "store_unreadable");
+        let listed = router
+            .dispatch(make_request("mob/list", serde_json::json!({})))
+            .await
+            .expect("mob/list answers");
+        let listed = result_value(&listed);
+        assert_eq!(listed["quarantined"][0]["attempts"], 1, "{listed}");
+
+        let unknown = router
+            .dispatch(make_request(
+                "mob/restore_retry",
+                serde_json::json!({"mob_id": "never-existed"}),
+            ))
+            .await
+            .expect("mob/restore_retry answers");
+        assert!(unknown.error.is_some(), "an unknown id is not found");
     }
 
     /// A `mob/create` whose RPC handler is dropped mid-creation (a cancelled

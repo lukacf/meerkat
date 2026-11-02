@@ -389,6 +389,19 @@ pub struct QuarantinedMob {
     pub cause: Arc<MobError>,
 }
 
+impl QuarantinedMob {
+    /// The answer a lookup of the quarantined mob gets
+    /// ([`MobError::MobQuarantined`]).
+    #[must_use]
+    pub fn lookup_error(&self) -> MobError {
+        MobError::MobQuarantined {
+            mob_id: self.mob_id.clone(),
+            class: self.class,
+            cause: Arc::clone(&self.cause),
+        }
+    }
+}
+
 /// Every mob this state hosts, from one read: each mob id is in exactly one
 /// of the three sets.
 #[derive(Debug, Clone)]
@@ -9843,7 +9856,8 @@ impl MobMcpDispatcher {
             ),
             tool(
                 "mob_list",
-                &format!("List mobs or get detail for one. Omit mob_id for summary of all mobs; \
+                &format!("List mobs or get detail for one. Omit mob_id for summary of all mobs \
+                     (and, under quarantined, any persisted mob whose store did not restore); \
                      provide mob_id for detailed status of that mob. {COMMON}"),
                 json!({"type":"object","properties":{"mob_id":{"type":"string"}}}),
             ),
@@ -10427,6 +10441,71 @@ pub fn wire_mob_status_row(
     }
 }
 
+/// Why a persisted mob store is quarantined, on the wire.
+pub fn wire_mob_quarantine_class(
+    class: meerkat_mob::MobQuarantineClass,
+) -> meerkat_contracts::WireMobQuarantineClass {
+    match class {
+        meerkat_mob::MobQuarantineClass::StoreUnavailable => {
+            meerkat_contracts::WireMobQuarantineClass::StoreUnavailable
+        }
+        meerkat_mob::MobQuarantineClass::StoreUnreadable => {
+            meerkat_contracts::WireMobQuarantineClass::StoreUnreadable
+        }
+        meerkat_mob::MobQuarantineClass::ResumeRefused => {
+            meerkat_contracts::WireMobQuarantineClass::ResumeRefused
+        }
+    }
+}
+
+/// One quarantined persisted mob on the wire: its class, whether a
+/// re-attempt is in flight, and the refusal a lookup of its id answers.
+pub fn wire_quarantined_mob_row(row: &QuarantinedMob) -> meerkat_contracts::WireQuarantinedMob {
+    let lookup = row.lookup_error();
+    meerkat_contracts::WireQuarantinedMob {
+        mob_id: row.mob_id.to_string(),
+        class: wire_mob_quarantine_class(row.class),
+        retryable: row.class.is_retryable(),
+        retrying: row.retrying,
+        attempts: row.attempts,
+        message: lookup.to_string(),
+        code: lookup.wire_error_code(),
+        structured_data: lookup.structured_data(),
+    }
+}
+
+/// The `mob/list` answer from one inventory read
+/// ([`MobMcpState::mob_inventory`]): the managed mobs and the quarantined
+/// ones. Every surface that lists mobs projects through this.
+pub fn wire_mob_list_result(inventory: &MobInventory) -> meerkat_contracts::MobListResult {
+    meerkat_contracts::MobListResult {
+        mobs: inventory
+            .managed
+            .iter()
+            .map(|(mob_id, observation)| wire_mob_status_row(mob_id, observation))
+            .collect(),
+        quarantined: inventory
+            .quarantined
+            .iter()
+            .map(wire_quarantined_mob_row)
+            .collect(),
+    }
+}
+
+/// How an explicit retry of a quarantined mob's restore ended, on the wire.
+pub fn wire_mob_restore_retry_outcome(
+    outcome: MobRestoreRetryOutcome,
+) -> meerkat_contracts::WireMobRestoreRetryOutcome {
+    match outcome {
+        MobRestoreRetryOutcome::Restored => meerkat_contracts::WireMobRestoreRetryOutcome::Restored,
+        MobRestoreRetryOutcome::Held => meerkat_contracts::WireMobRestoreRetryOutcome::Held,
+        MobRestoreRetryOutcome::Settled => meerkat_contracts::WireMobRestoreRetryOutcome::Settled,
+        MobRestoreRetryOutcome::NotQuarantined => {
+            meerkat_contracts::WireMobRestoreRetryOutcome::NotQuarantined
+        }
+    }
+}
+
 impl WireActionArgs {
     fn resolve(
         self,
@@ -10572,15 +10651,14 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                         .map_err(|e| map_mob_err(call, e))?;
                     encode(call, json!({"status": wire_mob_lifecycle_status(status)}))
                 } else {
-                    let mobs = self
+                    // One inventory read: the managed mobs and, when any
+                    // store did not restore, the quarantined ones.
+                    let inventory = self
                         .state
-                        .mob_list()
+                        .mob_inventory()
                         .await
                         .map_err(|e| map_mob_err(call, e))?;
-                    encode(
-                        call,
-                        json!({"mobs": mobs.iter().map(|(id, observation)| wire_mob_status_row(id, observation)).collect::<Vec<_>>() }),
-                    )
+                    encode(call, json!(wire_mob_list_result(&inventory)))
                 }
             }
             "mob_lifecycle" => {
@@ -20223,6 +20301,45 @@ mod tests {
         let inventory = restored.mob_inventory().await.expect("the inventory reads");
         assert_one_set_per_id(&inventory);
         assert_eq!(inventory.quarantined.len(), 1, "{inventory:?}");
+    }
+
+    /// Every surface that lists mobs names a quarantined mob from the one
+    /// inventory read: the `mob_list` tool and the public
+    /// `meerkat_mob_list` tool list it under `quarantined` with its class,
+    /// and leave it out of `mobs`.
+    #[tokio::test]
+    async fn the_list_tools_name_a_quarantined_mob_beside_the_managed_ones() {
+        let svc = Arc::new(MockSessionSvc::new());
+        let root = tempfile::tempdir().expect("tempdir");
+        let mob_root = MobMcpState::persistent_mob_root(root.path());
+        tokio::fs::create_dir_all(&mob_root)
+            .await
+            .expect("create mob root");
+        tokio::fs::write(
+            mob_root.join(format!("{}broken.db", MobMcpState::MOB_STORE_FILE_PREFIX)),
+            b"not a sqlite database",
+        )
+        .await
+        .expect("write an undecodable mob store");
+        let restored = restored_state(&svc, root.path());
+
+        let d = MobMcpDispatcher::new(Arc::clone(&restored));
+        let listed = call_tool(&d, "mob_list", json!({})).await;
+        assert_eq!(listed["mobs"], json!([]), "{listed}");
+        assert_eq!(listed["quarantined"][0]["mob_id"], "broken", "{listed}");
+        assert_eq!(listed["quarantined"][0]["class"], "store_unreadable");
+        assert_eq!(listed["quarantined"][0]["retryable"], false);
+
+        let public =
+            crate::public_mcp::handle_public_tools_call(&restored, "meerkat_mob_list", &json!({}))
+                .await
+                .expect("the public list tool answers");
+        assert_eq!(public["mobs"], json!([]), "{public}");
+        assert_eq!(public["quarantined"][0]["mob_id"], "broken", "{public}");
+        assert_eq!(
+            public["quarantined"][0]["structured_data"]["kind"],
+            MOB_QUARANTINED_KIND
+        );
     }
 
     /// When the restore of the persisted mobs fails as a whole (the root

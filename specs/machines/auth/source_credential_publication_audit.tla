@@ -15,6 +15,13 @@
 \* lease, and a declared freshness window that ran out (Expiring, Expired)
 \* renews the same value.
 \*
+\* A consumer that sees a published credential refused (a provider answered
+\* that it is revoked) fires MarkPublicationRefused naming the publication:
+\* the credential generation it was admitted under and the fingerprint it
+\* recorded. The refusal withdraws the lease only while the lease carries
+\* that publication, so a refusal that arrives after another session or
+\* machine published a newer value never withdraws the newer one.
+\*
 \* This audit keeps the generated AuthMachine model unchanged and explores
 \* every generated action over two credential values ("alpha", "beta"),
 \* with OAuth flow membership left out by the state constraint (no flow
@@ -28,16 +35,26 @@
 \*     Publish exactly when an Acquire arm naming the value is enabled, so a
 \*     publisher that mirrors the verdict fires exactly the Acquire the
 \*     machine accepts.
+\*   AuditRefusalCorrelated (invariant): in every reachable state and for
+\*     every refusal (a generation in 0..2, a fingerprint or none), exactly
+\*     one kind of MarkPublicationRefused arm is enabled, and an arm that
+\*     withdraws the lease is enabled exactly when the refusal names the
+\*     publication the lease carries in a live phase (Valid, Expiring,
+\*     Expired, Refreshing).
 \*
 \* AuditWitness* operators are reachability goals the runner checks as
 \* expected violations, so the properties are not vacuous: a refused value
 \* healed by another, a logged-out value healed by another, a declared window
-\* that ran out renewing the same value, and a refused and a logged-out value
-\* whose Acquire is disabled while another value's is enabled. With
-\* --mutants the runner seeds two defects into copies of the generated model
-\* and requires TLC to refuse each: Acquire without its guard (refused by the
-\* action property), and the renewal arms AcquireFromExpiring and
-\* AcquireFromExpired disabled (refused by AuditVerdictMatchesAcquire).
+\* that ran out renewing the same value, a refused and a logged-out value
+\* whose Acquire is disabled while another value's is enabled, a newer
+\* publication that a late refusal of the earlier one leaves valid, and a
+\* refusal of the current publication that withdraws it. With --mutants the
+\* runner seeds three defects into copies of the generated model and
+\* requires TLC to refuse each: Acquire without its guard (refused by the
+\* action property), the renewal arms AcquireFromExpiring and
+\* AcquireFromExpired disabled (refused by AuditVerdictMatchesAcquire), and
+\* MarkPublicationRefusedFromValid without its correlation guard (refused by
+\* AuditRefusalCorrelated).
 \*
 \* The TLC config is DERIVED from the generated ci.cfg on every run by
 \* source_credential_publication_audit.sh. Run a deeper bound by hand with:
@@ -154,9 +171,58 @@ AuditValueBlockedIn(from) ==
 AuditWitnessRefusedValueBlocked == AuditValueBlockedIn("ReauthRequired")
 AuditWitnessLoggedOutValueBlocked == AuditValueBlockedIn("Released")
 
+\* The arms of MarkPublicationRefused (the per_phase expansion of the
+\* catalog's no-op arms included) that withdraw the lease, and those that
+\* leave it as it is.
+AuditRefusalWithdraws(g, f) ==
+    \/ ENABLED MarkPublicationRefusedFromValid(g, f)
+    \/ ENABLED MarkPublicationRefusedFromExpiring(g, f)
+    \/ ENABLED MarkPublicationRefusedFromExpired(g, f)
+    \/ ENABLED MarkPublicationRefusedFromRefreshing(g, f)
+
+AuditRefusalLeavesLease(g, f) ==
+    \/ ENABLED MarkPublicationRefusedSupersededValid(g, f)
+    \/ ENABLED MarkPublicationRefusedSupersededExpiring(g, f)
+    \/ ENABLED MarkPublicationRefusedSupersededExpired(g, f)
+    \/ ENABLED MarkPublicationRefusedSupersededRefreshing(g, f)
+    \/ ENABLED MarkPublicationRefusedWithdrawnReauthRequired(g, f)
+    \/ ENABLED MarkPublicationRefusedWithdrawnReleased(g, f)
+
+\* The refusal names the publication the lease carries.
+AuditRefusalNamesCurrent(g, f) ==
+    /\ g = credential_generation
+    /\ f = credential_material_fingerprint
+
+AuditRefusalCorrelated ==
+    \A g \in 0..2 :
+        \A f \in OptionStringValues :
+            /\ AuditRefusalWithdraws(g, f) # AuditRefusalLeavesLease(g, f)
+            /\ AuditRefusalWithdraws(g, f)
+                = (AuditRefusalNamesCurrent(g, f)
+                   /\ phase \in {"Valid", "Expiring", "Expired", "Refreshing"})
+
+\* A newer publication (generation 2) that a late refusal of the earlier
+\* one, naming another value, leaves valid.
+AuditWitnessLateRefusalLeavesNewer ==
+    /\ phase = "Valid"
+    /\ credential_generation = 2
+    /\ credential_material_fingerprint # None
+    /\ \E f \in OptionStringValues :
+        /\ f # None
+        /\ f # credential_material_fingerprint
+        /\ ENABLED MarkPublicationRefusedSupersededValid(1, f)
+
+\* A refusal of the publication the lease carries withdraws it.
+AuditWitnessCurrentRefusalWithdraws ==
+    /\ phase = "Valid"
+    /\ credential_material_fingerprint # None
+    /\ ENABLED MarkPublicationRefusedFromValid(credential_generation, credential_material_fingerprint)
+
 NotAuditWitnessRefusalHealed == ~AuditWitnessRefusalHealed
 NotAuditWitnessLogoutHealed == ~AuditWitnessLogoutHealed
 NotAuditWitnessWindowRenewed == ~AuditWitnessWindowRenewed
 NotAuditWitnessRefusedValueBlocked == ~AuditWitnessRefusedValueBlocked
 NotAuditWitnessLoggedOutValueBlocked == ~AuditWitnessLoggedOutValueBlocked
+NotAuditWitnessLateRefusalLeavesNewer == ~AuditWitnessLateRefusalLeavesNewer
+NotAuditWitnessCurrentRefusalWithdraws == ~AuditWitnessCurrentRefusalWithdraws
 ====

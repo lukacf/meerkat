@@ -367,6 +367,26 @@ them.
   window still renews the lease. Code that builds `Acquire` sets the new
   field.
 
+- `meerkat-runtime`, `meerkat-machine-schema`, `meerkat-machine-kernels`: the
+  AuthMachine withdraws a lease on a consumer's refusal only while the lease
+  carries the publication the refusal names (see Fixed). `AuthMachineInput`
+  and `AuthMachineInputVariant` gain `MarkPublicationRefused {
+  refused_credential_generation, refused_credential_material_fingerprint }`,
+  appended last, in the `auth_machine::dsl` bridge copies (meerkat-runtime)
+  and the catalog types (meerkat-machine-schema `catalog::dsl::auth_machine`).
+  The kernel's `generated::auth` `inputs::MarkPublicationRefused` is new;
+  `Input` and `InputKind` gain `MarkPublicationRefused`; and `TransitionId`
+  gains, appended last, `MarkPublicationRefusedFromValid`,
+  `MarkPublicationRefusedFromExpiring`, `MarkPublicationRefusedFromExpired`,
+  `MarkPublicationRefusedFromRefreshing`,
+  `MarkPublicationRefusedSupersededValid`,
+  `MarkPublicationRefusedSupersededExpiring`,
+  `MarkPublicationRefusedSupersededExpired`,
+  `MarkPublicationRefusedSupersededRefreshing`,
+  `MarkPublicationRefusedWithdrawnReauthRequired` and
+  `MarkPublicationRefusedWithdrawnReleased`, so no existing variant's
+  discriminant moves. Exhaustive matches must add the new variants.
+
 - `meerkat-machine-schema`, `meerkat-machine-kernels`, `meerkat-runtime`:
   `MeerkatMachineInput::SuspendRunForStop` gains `cause`, of the new enum
   `RunSuspensionCause` (`RequeueStop`, `FenceGap`), with the `meerkat_machine::dsl`

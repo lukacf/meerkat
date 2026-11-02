@@ -2703,6 +2703,39 @@ pub trait AuthLeaseHandle: Send + Sync + std::any::Any {
         ))
     }
 
+    /// Report that the credential of one publication was refused by its
+    /// consumer (a provider answered that it is revoked or invalid), naming
+    /// that publication: `credential_generation`, the
+    /// [`AuthLeaseSnapshot::generation`] the credential was admitted under,
+    /// and `material`, the fingerprint the publication recorded
+    /// ([`Self::publish_source_credential`]; `None` for a publication that
+    /// names no value, such as a login's or a store's).
+    ///
+    /// Fires the AuthMachine's `MarkPublicationRefused`, which withdraws the
+    /// lease (`ReauthRequired`) only while it still carries that publication.
+    /// A refusal that names another publication (a newer value was published
+    /// since, by another session or machine) or a lease that was already
+    /// refused or released is accepted and changes nothing, so a late refusal
+    /// never withdraws a newer credential. The caller takes
+    /// [`Self::resolve_credential_use_admission`] afterwards for the lease's
+    /// verdict.
+    ///
+    /// Production handles must implement this through generated AuthMachine
+    /// authority. The default fails closed so a handwritten handle cannot
+    /// become a refusal reducer.
+    fn mark_publication_refused(
+        &self,
+        lease_key: &LeaseKey,
+        credential_generation: u64,
+        material: Option<&CredentialFingerprint>,
+    ) -> Result<(), DslTransitionError> {
+        let _ = (lease_key, credential_generation, material);
+        Err(DslTransitionError::no_matching(
+            "AuthLeaseHandle::mark_publication_refused",
+            "refusing a credential publication requires generated AuthMachine authority",
+        ))
+    }
+
     /// Observe the current DSL-level state of a binding.
     fn snapshot(&self, lease_key: &LeaseKey) -> AuthLeaseSnapshot;
 }

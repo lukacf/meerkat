@@ -2140,6 +2140,7 @@ fn boundary_manifest() -> BoundaryDiscoveryManifest {
                     "complete_refresh",
                     "refresh_failed",
                     "mark_reauth_required",
+                    "mark_publication_refused",
                     "release_lease",
                     "snapshot",
                 ]
@@ -3999,6 +4000,19 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             &["machines"],
             "AuthMachine MarkReauthRequired transition",
             &["any known phase transitions to ReauthRequired"],
+            &["every phase write goes through AuthMachineState::transition"],
+            EntryStatus::Closed,
+        ),
+        semantic_operation_entry!(
+            "crates/meerkat-runtime/src/handles/auth_lease.rs",
+            "mark_publication_refused",
+            BoundaryKind::TraitImpl,
+            "RuntimeAuthLeaseHandle",
+            &["machines"],
+            "AuthMachine MarkPublicationRefused transitions",
+            &[
+                "a refusal withdraws the lease to ReauthRequired only while it carries the publication the refusal names (credential generation and recorded fingerprint); any other refusal changes nothing",
+            ],
             &["every phase write goes through AuthMachineState::transition"],
             EntryStatus::Closed,
         ),

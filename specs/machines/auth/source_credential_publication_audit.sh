@@ -5,15 +5,17 @@
 #
 # Derives the TLC config from the generated ci.cfg next to this script (every
 # generated constant and invariant, unchanged), then adds a second credential
-# value, the audit's action property and invariant, and its step bound, and
+# value, the audit's action property and invariants, and its step bound, and
 # checks them over the whole bounded space. It then reruns the same space
 # once per reachability witness, with that witness's negation as an extra
 # invariant, and requires TLC to report exactly that violation, so the
-# properties are not vacuous. With --mutants it then seeds two defects, each
-# into its own copy of the generated model, and requires TLC to refuse each:
-# Acquire without its guard credential_material_publishable (refused by the
-# action property), and the renewal arms AcquireFromExpiring and
-# AcquireFromExpired disabled (refused by the verdict invariant). An anchor
+# properties are not vacuous. With --mutants it then seeds three defects,
+# each into its own copy of the generated model, and requires TLC to refuse
+# each: Acquire without its guard credential_material_publishable (refused by
+# the action property), the renewal arms AcquireFromExpiring and
+# AcquireFromExpired disabled (refused by the verdict invariant), and
+# MarkPublicationRefusedFromValid without its guard
+# refused_publication_current (refused by the refusal invariant). An anchor
 # this script expects but cannot find fails the run.
 set -euo pipefail
 
@@ -93,7 +95,8 @@ run_tlc() {
 
 safety_cfg="${work_dir}/safety.cfg"
 write_cfg "${safety_cfg}" "
-  AuditVerdictMatchesAcquire"
+  AuditVerdictMatchesAcquire
+  AuditRefusalCorrelated"
 safety_status=0
 run_tlc safety "${safety_cfg}" "$@" || safety_status=$?
 cat "${work_dir}/safety.log"
@@ -104,7 +107,7 @@ if [[ "${safety_status}" != "0" ]] \
 fi
 
 for witness in RefusalHealed LogoutHealed WindowRenewed RefusedValueBlocked \
-  LoggedOutValueBlocked; do
+  LoggedOutValueBlocked LateRefusalLeavesNewer CurrentRefusalWithdraws; do
   cfg="${work_dir}/witness-${witness}.cfg"
   write_cfg "${cfg}" "
   NotAuditWitness${witness}"
@@ -186,5 +189,41 @@ PY
     exit 1
   fi
   echo "mutant no-renewal refused by AuditVerdictMatchesAcquire"
+
+  # The refusal's correlation guard dropped from the Valid arm: a refusal that
+  # names an earlier publication withdraws the newer one. The refusal
+  # invariant must refuse it.
+  dir="${work_dir}/mutant-uncorrelated-refusal"
+  mkdir -p "${dir}"
+  cp "${spec_dir}"/*.tla "${dir}/"
+  MODEL="${dir}/model.tla" python3 - <<'PY'
+import os
+import re
+path = os.environ["MODEL"]
+text = open(path).read()
+block = re.search(r"^MarkPublicationRefusedFromValid\(.*?\n\n", text, re.S | re.M)
+assert block, "MarkPublicationRefusedFromValid not found"
+lines = block.group(0).split("\n")
+kept = [
+    line
+    for line in lines
+    if not (line.startswith("    /\\ ") and "refused_credential_" in line)
+]
+assert len(kept) < len(lines), "no refused_publication_current conjunct in MarkPublicationRefusedFromValid"
+text = text[: block.start()] + "\n".join(kept) + text[block.end():]
+open(path, "w").write(text)
+PY
+  cfg="${work_dir}/mutant-uncorrelated-refusal.cfg"
+  write_cfg "${cfg}" "
+  AuditRefusalCorrelated"
+  status=0
+  (cd "${dir}" && run_tlc mutant-uncorrelated-refusal "${cfg}" "$@") || status=$?
+  log="${work_dir}/mutant-uncorrelated-refusal.log"
+  if ! grep -q "Error: Invariant AuditRefusalCorrelated is violated" "${log}"; then
+    cat "${log}"
+    echo "error: mutant uncorrelated-refusal was not refused by AuditRefusalCorrelated (tlc exit ${status})" >&2
+    exit 1
+  fi
+  echo "mutant uncorrelated-refusal refused by AuditRefusalCorrelated"
 fi
 echo "source-credential publication audit passed at model_step_count <= ${max_steps}"

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # usage: machine_verify_all_tlc_test.sh <xtask-bin> [--part <part>]
-#        machine_verify_all_tlc_test.sh --part audits-a|...|audits-o|audits-q
+#        machine_verify_all_tlc_test.sh --part audits-a|...|audits-o|audits-q|...|audits-v
 # The canonical TLC lane, split into parts so each fits a CI job limit:
 #   machine-verify  the bounded adaptive witness plus `machine-verify --all`
 #   audits-a        hand-written audit shard A
@@ -21,9 +21,14 @@ set -euo pipefail
 #   audits-n        hand-written audit shard N
 #   audits-o        hand-written audit shard O
 #   audits-q        hand-written audit shard Q
+#   audits-r        hand-written audit shard R
+#   audits-s        hand-written audit shard S
+#   audits-t        hand-written audit shard T
+#   audits-u        hand-written audit shard U
+#   audits-v        hand-written audit shard V
 #   all             every part (the default: `make machine-verify`, the
 #                   nightly bounded TLC job and the release gate)
-# Bazel runs the seventeen parts as separate targets
+# Bazel runs the twenty-two parts as separate targets
 # (machine_verify_all_tlc_test, machine_verify_audits_a_tlc_test,
 # machine_verify_audits_b_tlc_test, machine_verify_audits_c_tlc_test,
 # machine_verify_audits_d_tlc_test, machine_verify_audits_e_tlc_test,
@@ -32,13 +37,16 @@ set -euo pipefail
 # machine_verify_audits_j_tlc_test, machine_verify_audits_k_tlc_test,
 # machine_verify_audits_l_tlc_test, machine_verify_audits_m_tlc_test,
 # machine_verify_audits_n_tlc_test, machine_verify_audits_o_tlc_test,
-# machine_verify_audits_q_tlc_test) so the BuildBuddy machine-authority lane
-# runs them in parallel; together they are exactly `all`. CI's tlc-audits job
-# runs the sixteen audit shards, one job each.
+# machine_verify_audits_q_tlc_test, machine_verify_audits_r_tlc_test,
+# machine_verify_audits_s_tlc_test, machine_verify_audits_t_tlc_test,
+# machine_verify_audits_u_tlc_test, machine_verify_audits_v_tlc_test) so the
+# BuildBuddy machine-authority lane runs them in parallel; together they are
+# exactly `all`. CI's tlc-audits job runs the twenty-one audit shards, one
+# job each.
 # The audit shards never execute xtask, so they alone may omit its path.
 audit_shard() {
   case "$1" in
-    audits-a|audits-b|audits-c|audits-d|audits-e|audits-f|audits-g|audits-h|audits-i|audits-j|audits-k|audits-l|audits-m|audits-n|audits-o|audits-q) return 0 ;;
+    audits-a|audits-b|audits-c|audits-d|audits-e|audits-f|audits-g|audits-h|audits-i|audits-j|audits-k|audits-l|audits-m|audits-n|audits-o|audits-q|audits-r|audits-s|audits-t|audits-u|audits-v) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -47,13 +55,13 @@ if [[ "${1:-}" == "--part" ]] && audit_shard "${2:-}"; then
   xtask_bin=""
   lane_part="$2"
 else
-  xtask_bin="${1:?xtask binary path is required (only --part audits-a..audits-o or audits-q may omit it)}"
+  xtask_bin="${1:?xtask binary path is required (only --part audits-a..audits-o or audits-q..audits-v may omit it)}"
   if [[ "${2:-}" == "--part" ]]; then
-    lane_part="${3:?--part needs machine-verify, an audit shard (audits-a..audits-o, audits-q) or all}"
+    lane_part="${3:?--part needs machine-verify, an audit shard (audits-a..audits-o, audits-q..audits-v) or all}"
   fi
 fi
 if [[ "${lane_part}" != "machine-verify" && "${lane_part}" != "all" ]] && ! audit_shard "${lane_part}"; then
-  echo "error: unknown lane part '${lane_part}' (machine-verify, audits-a..audits-o, audits-q, all)" >&2
+  echo "error: unknown lane part '${lane_part}' (machine-verify, audits-a..audits-o, audits-q..audits-v, all)" >&2
   exit 2
 fi
 # run_part <part>: whether this invocation runs <part>.
@@ -940,14 +948,18 @@ fi
 # opposed to one the host declared) are recorded by the boot's scan of the
 # identity store's created entry rows, which the ci profile cannot reach
 # either. A hand-written audit over the same generated model
-# (created_identity_audit.tla) checks four runs over their whole reachable
-# space, its recovery part (--part recovery, shard audits-q). The scan run
-# replays a seated member with or without its Declared entry's row beside an
-# identity without a member, then scans a row of either with every presence
-# and revival record, in a running and a stopped mob, until the boot plan's
-# seal: a Present row of a seated local member records a Created entry, one
-# of an identity without a member an entry owed its seat (with its revival
-# record), a row pending its host's preparation an entry awaiting it, a
+# (created_identity_audit.tla, shards audits-q through audits-v) checks
+# fourteen runs over their whole reachable space, in two parts. Its
+# recovery part's scan run
+# replays a seated member with or without its Declared entry's row (before
+# or after the scan of its rows: no replay turns a Created entry Declared;
+# its own replay never after the scan of its pending row, the boot's order)
+# beside an identity without a member, and scans a row of either with every
+# presence and revival record, in a running and a stopped mob, until the
+# boot plan's seal: a Present row of a seated local member records a Created
+# entry, one of an identity without a member an entry owed its seat (with
+# its revival record), a row pending its host's preparation an entry
+# awaiting it, a
 # removed row the name's tombstone, and an unreadable or contradicted row (a
 # Declared entry of the name, a member where the row says none, a placed
 # member, the name's tombstone, a spawn ladder open for it) reserves the
@@ -960,29 +972,89 @@ fi
 # desired set, the legacy adoption, the agent lane and the admission probe in
 # a running and a stopped mob; the placed run scans the row of a member
 # seated on a member host, before or after its remote commit. They check
-# every generated invariant (the created entries' among them: an unseated
-# Created entry awaits its template's preparation or is owed its seat, a
-# removed entry's name is never an entry or a member again, created custody
-# belongs to an open ladder of a Created entry and never beside entry
-# custody, no worker reconcile spawns a reserved name or retires an
-# unreadable one, a destroyed mob holds no entry, custody or reserved name),
+# every generated invariant (the created entries' among them: only a
+# store-owned entry is archived, a removed entry's name is never an entry
+# or a member again, created custody belongs to an open ladder of a Created
+# entry and never beside entry custody, no worker reconcile spawns a
+# reserved name or retires an unreadable one, a destroyed mob holds no
+# entry, custody or reserved name),
 # exactly one arm answering every row, declaration, seal, adoption,
 # agent-lane admission and admission probe, and four action properties (no
 # spawn ladder opens for a reserved name, and no ladder close seats a member
 # under one; a ladder's custody matches its name's origin, and a seat under
 # created custody binds the entry's revival record; the seal never touches a
-# Created entry or an unreadable name's). They require every listed arm to
-# fire, a floor of distinct states and their eighteen witnesses reached, and
-# --mutants refuses twenty-nine seeded defects: one per created entries'
-# invariant and property and one per new guard a reachable state needs.
+# Created entry or an unreadable name's). Its changes part (0.9.9) drives a
+# change's admission (in a run of its own over the only facts it reads: it
+# changes nothing) and a store-owned entry's record (exactly one arm
+# answering each, a new entry taking only a free name, its cause the
+# declared apply's precedence over its facts, an entry held for its
+# creation never seated Dormant), a store-owned update beside a roster's
+# change of the same spec (the same verdict for the same facts, seated or
+# not), the removal of either custody (every removal's end but the
+# destroy's tombstoning its name, the destroy ending its mark), the archive
+# and unarchive (an archived identity keeping its name and never seated, an
+# identity awaiting its preparation never archived, the update of either
+# changing its row only), the host's preparation and its held
+# constructions (an entry awaiting its preparation seated only by its
+# accepted activation, an accepted activation ended only by its
+# publication, a `constructed` preparation never settled without an
+# attempt, at most one attempt held or activating, a removal ending a held
+# attempt) with their verdicts in a run of their own, the placed and
+# peer-only spawns of a store-owned identity hosted on its first use, the
+# one-entry unlist (exactly one arm answering it, deciding on its identity
+# alone, a record taking no name an entry or the unlisted identity's
+# archived session record holds) and the replay of a removal or an archive
+# in flight carried to its terminal, its one row scanned before or after
+# the journal replay (no replay seats a member under an archived entry, and
+# the boot plan's seal keeps an archived identity's standing). They
+# require every listed arm
+# to fire, a floor of distinct states (the changes part's printed until its
+# first green run sets them) and their witnesses reached, and --mutants
+# refuses the seeded defects named in the runner: the created entries'
+# invariants and properties and the new guards a reachable state needs (a
+# removal's end that leaves no tombstone or keeps its mark, a destroy that
+# keeps a mark, a removal that marks an unseated entry, a store-owned
+# update that skips its declared migration or its RecordOnly or swaps two
+# verdicts, an archive that frees its name or takes a pending entry, a
+# roster-owned identity archived, an archived entry seated or replayed, a
+# tombstoned name seated, a Declared row's replay over a Created entry, a
+# record over an entry's name, a new entry's cause out of precedence, an
+# unlist of a Created entry, a created custody kept local, which leaves the
+# placed witness unreachable).
 created_identity_audit="${workspace_root}/specs/machines/mob_machine/created_identity_audit.sh"
 if [[ ! -x "${created_identity_audit}" ]]; then
   echo "error: created identity audit runner is missing from workspace runfiles: ${created_identity_audit}" >&2
   exit 1
 fi
+# Its runs are split over six shards (sized below): the recovery part's
+# scan and placed runs in audits-q and its reseat and names runs in
+# audits-v; the changes part's admit, commit and update runs in audits-r,
+# its removal run in audits-s, its archive, unlist, placement and
+# recovered runs in audits-t, and its preparation and prepverdicts runs in
+# audits-u.
 if run_part audits-q; then
-  echo "running bounded created identity TLC audit"
-  TLC_WORKERS="${tlc_workers}" "${created_identity_audit}" --mutants --part recovery
+  echo "running bounded created identity scans TLC audit"
+  TLC_WORKERS="${tlc_workers}" "${created_identity_audit}" --mutants --part scan,placed
+fi
+if run_part audits-v; then
+  echo "running bounded created identity reseats and names TLC audit"
+  TLC_WORKERS="${tlc_workers}" "${created_identity_audit}" --mutants --part reseat,names
+fi
+if run_part audits-r; then
+  echo "running bounded created identity admissions and records TLC audit"
+  TLC_WORKERS="${tlc_workers}" "${created_identity_audit}" --mutants --part admit,commit,update
+fi
+if run_part audits-s; then
+  echo "running bounded created identity removals TLC audit"
+  TLC_WORKERS="${tlc_workers}" "${created_identity_audit}" --mutants --part removal
+fi
+if run_part audits-t; then
+  echo "running bounded created identity archives and unlists TLC audit"
+  TLC_WORKERS="${tlc_workers}" "${created_identity_audit}" --mutants --part archive,unlist,placement,recovered
+fi
+if run_part audits-u; then
+  echo "running bounded created identity preparations TLC audit"
+  TLC_WORKERS="${tlc_workers}" "${created_identity_audit}" --mutants --part preparation,prepverdicts
 fi
 
 # The SessionDocumentMachine activation-body retirement region: a hand-written
@@ -1268,24 +1340,58 @@ run_machine_verify() {
 # declared apply's runs count their fifteen declaration arms, none of these
 # runs recording a created entry or a reserved name (created_identity_audit
 # counts every arm).
-# audits-q = the created identity audit's recovery part with --mutants
-# (--part recovery), alone: its four whole-space runs, 18 witnesses and 29
-# mutants took 225 s locally with 4 TLC workers (2026-10-31), 51 TLC runs
-# whose JVM start and model parse are most of it. To keep it there its
-# reseat run spawns member 1 without custody only, gives a revival record
-# only to member 2's Present row and reconciles both members or none, its
-# names run's rows carry no revival record, and the reseat run's row
-# totality counts rows without one (no arm's guard reads it); a witness run,
-# and a mutant that expects no totality invariant, leaves out its run's
-# ENABLED totality invariants (the whole-space run checks them).
-# None of audits-g through audits-o and audits-q has been measured on a
-# hosted runner yet.
-# Each job adds about 20 s of checkout and TLC setup: 6-10 minutes a shard,
-# inside the 1080 s execution budget even on a runner 1.6x slower than the
-# faster ones here. As three shards these audits ran 13-18 minutes (audits-a),
-# 15 minutes and past the 20-minute job timeout (audits-b), and past it on
-# both runs (audits-c). A new audit joins the lightest shard, or a new shard
-# when it would take that shard past 10 minutes. Shard of the two audits the
+# The created identity audit runs in six shards, each with --mutants and
+# the runs its --part names; each TLC run's JVM start and model parse took
+# about 5 s on a 4-worker local run (2026-11-02), so a shard holds at most
+# about 40 TLC runs. Each shard is projected, not yet measured as a shard,
+# to stay within 348 s locally (800 s hosted at a 2.3x runner factor): its
+# TLC runs' start-up (the run counts below, about 5 s each) plus the
+# searches of the spaces below. A shard a measured run finds past 348 s is
+# split again:
+# audits-q = its scan and placed runs (two whole-space runs, 9 witnesses,
+# 12 mutants: 23 TLC runs) and audits-v = its reseat and names runs (two
+# runs, 9 witnesses, 19 mutants: 30 TLC runs). As one shard (--part
+# recovery) they took 225 s locally with 4 TLC workers (2026-10-31), and
+# 235 s (2026-11-02) before the scan and names runs' witnesses and mutants
+# had run: the scan, reseat and names spaces about doubled with the 0.9.9
+# rows. To keep them small the reseat run spawns member 1 without custody
+# only, gives a revival record only to member 2's Present row and
+# reconciles both members or none, its names run's rows carry no revival
+# record, and the reseat run's row totality counts rows without one (no
+# arm's guard reads it).
+# audits-r = its admit, commit and update runs (three whole-space runs, 11
+# witnesses, 7 mutants: 21 TLC runs). The commit run alone took 884 s
+# locally (2026-11-02) for 7680 distinct states and 2,337,953 generated: a
+# change's admission, a pure verdict over 288 combinations of its facts
+# that changes nothing, added 288 self-loops (2,211,840 of the generated
+# states) and 3168 ENABLED evaluations of its totality to every state. The
+# admission is the admit run's now, over the only facts it reads (tens of
+# states); the commit run keeps its 7680 states with about 1.3e5 generated.
+# audits-s = its removal run (38976 states, 41 s locally; 9 witnesses, 6
+# mutants: 16 TLC runs, its deep witnesses each exploring much of the
+# space), alone.
+# audits-t = its archive (2016 states, 11 s locally), unlist, placement and
+# recovered runs (four whole-space runs, 18 witnesses, 17 mutants: 39 TLC
+# runs, each space in the thousands of states or fewer).
+# audits-u = its preparation and prepverdicts runs (two whole-space runs, 14
+# witnesses, 8 mutants: 24 TLC runs): the preparation run fires only the
+# attempts' arms that change state, in the initial authoritative
+# composition, and the verdict run every arm over the facts the verdicts
+# read.
+# A witness run, and a mutant that expects neither a totality invariant nor
+# an action property, leaves out its run's ENABLED totality invariants and
+# its action properties (the whole-space run checks them in every state and
+# step); a mutant that expects an action property leaves out the totality
+# invariants only.
+# None of audits-g through audits-o and audits-q through audits-v has been
+# measured on a hosted runner yet.
+# Each job adds about 20 s of checkout and TLC setup: a shard within 348 s
+# locally takes at most about 14 minutes hosted (800 s of TLC at a 2.3x
+# runner factor, and its setup), inside the 1080 s execution budget. As
+# three shards these audits ran 13-18 minutes (audits-a), 15 minutes and
+# past the 20-minute job timeout (audits-b), and past it on both runs
+# (audits-c). A new audit joins the lightest shard, or a new shard when it
+# would take that shard past 348 s locally. Shard of the two audits the
 # `all` lane runs concurrently with machine-verify below:
 durable_steer_shard="audits-b"
 live_context_outbox_shard="audits-d"

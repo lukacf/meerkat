@@ -319,6 +319,11 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `identity_entry_tombstones`: `Set<AgentIdentity>`
 - `identity_entry_unreadable`: `Set<AgentIdentity>`
 - `spawn_exec_created_custody`: `Set<AgentIdentity>`
+- `identity_changes_held`: `Bool`
+- `identity_entry_removing`: `Set<AgentIdentity>`
+- `identity_entry_archiving`: `Set<AgentIdentity>`
+- `identity_entry_constructions_held`: `Map<AgentIdentity, u64>`
+- `identity_entry_constructions_activating`: `Map<AgentIdentity, u64>`
 - `operator_instruction_revision`: `Map<String, u64>`
 - `operator_instruction_effect`: `Map<String, InstructionEffect>`
 - `operator_instruction_digest`: `Map<String, String>`
@@ -409,7 +414,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ObserveMemberProgress`(agent_identity: AgentIdentity, run_open: Bool, in_flight_work: u64, progress_token: String, observed_at_ms: u64)
 - `ResolveFlowDelegationEdgeAdmission`(from_role: String, to_role: String, rule_verdict: MobFlowDelegationEdgeRuleVerdictKind, mode: MobFlowDelegationEdgeModeKind)
 - `ClassifyRemoteMemberRuntimeObservation`(observed_state: MobRemoteMemberRuntimeObservedState)
-- `ResolveSpawnMemberAdmission`(manage_scope_present: Bool, profile_scope_contains: Bool, privileged_resume_bridge_session_present: Bool, privileged_resume_session_present: Bool, privileged_backend_present: Bool, privileged_runtime_mode_present: Bool, privileged_launch_mode_present: Bool, privileged_tool_access_policy_present: Bool, privileged_tooling_present: Bool, privileged_auth_binding_present: Bool)
+- `ResolveSpawnMemberAdmission`(manage_scope_present: Bool, profile_scope_contains: Bool, privileged_resume_bridge_session_present: Bool, privileged_resume_session_present: Bool, privileged_backend_present: Bool, privileged_runtime_mode_present: Bool, privileged_launch_mode_present: Bool, privileged_tool_access_policy_present: Bool, privileged_tooling_present: Bool, privileged_auth_binding_present: Bool, privileged_binding_present: Bool, privileged_placement_present: Bool)
 - `ResolveCurrentMobAdmission`(can_manage_mob: Bool)
 - `ResolveOwnedMemberAdmission`(can_manage_mob: Bool, caller_owns_member: Bool)
 - `ResolveSpawnToolAdmission`(can_manage_mob: Bool, spawn_profile_scope_present: Bool)
@@ -576,12 +581,22 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ClassifyMemberRelease`(agent_identity: AgentIdentity, scope_agent_runtime_id: Option<AgentRuntimeId>, scope_fence_token: Option<FenceToken>, scope_session_id: Option<SessionId>)
 - `AdoptLegacyIdentityEntry`(agent_identity: AgentIdentity, generation: Generation, legacy_roster_member: Bool)
 - `ResolveAgentLaneMemberAdmission`(agent_identity: AgentIdentity)
-- `DeclareIdentityEntry`(agent_identity: AgentIdentity, profile_name: String, runtime_mode: SpawnPolicyRuntimeMode, placement: EntryPlacementKind, held_creation: Bool, declared_migration_from: Option<String>, intent_managed: Bool, session_memory_only: Bool, resume_session_role: Option<String>, first_boot: FirstBootRequestKind)
+- `DeclareIdentityEntry`(agent_identity: AgentIdentity, profile_name: String, runtime_mode: SpawnPolicyRuntimeMode, placement: EntryPlacementKind, held_creation: Bool, declared_migration_from: Option<String>, intent_managed: Bool, session_memory_only: Bool, resume_session_role: Option<String>, first_boot: FirstBootRequestKind, created_custody: Bool, preparation_required: Bool)
 - `SealDeclaredRoster`(desired: Set<AgentIdentity>)
 - `ForgetArchivedSession`(agent_identity: AgentIdentity, session_id: SessionId, reason: ArchivedSessionForgetReason)
 - `OpenDeclaredApply`
 - `CloseDeclaredApply`
 - `AdmitReset`
+- `AdmitIdentityChange`(receipt: IdentityChangeReceiptKind, consent: IdentityChangeConsentKind, permit_binds: Bool, permit_admits: Bool, host_operator: Bool, grant_current: Bool, spec_current: Bool)
+- `RecordCreatedIdentityEntry`(agent_identity: AgentIdentity, preparation_required: Bool, placement: EntryPlacementKind, held_creation: Bool)
+- `SetIdentityChangesHeld`(held: Bool)
+- `RemoveIdentityEntry`(agent_identity: AgentIdentity)
+- `ArchiveIdentityEntry`(agent_identity: AgentIdentity)
+- `UnarchiveIdentityEntry`(agent_identity: AgentIdentity)
+- `BeginPreparationConstruction`(agent_identity: AgentIdentity, attempt: u64, constructed: Bool)
+- `SettleHostPreparation`(agent_identity: AgentIdentity, attempt: Option<u64>, constructed: Bool, before_deadline: Bool, binding_matches: Bool)
+- `EndPreparationConstruction`(agent_identity: AgentIdentity, attempt: u64, end: ConstructionEndKind)
+- `UnlistIdentityEntry`(agent_identity: AgentIdentity)
 
 ## Signals
 - `ObserveRuntimeReady`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, runtime_epoch_id: Option<RuntimeEpochId>)
@@ -870,10 +885,25 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `MemberInstructionTargetBlocked`(agent_identity: AgentIdentity, generation: u64, block: MemberInstructionBlock)
 - `MemberInstructionReleaseAuthorized`(agent_identity: AgentIdentity, session_id: SessionId)
 - `MemberInstructionReleaseNotNeeded`(agent_identity: AgentIdentity)
+- `IdentityChangeAdmissionResolved`(verdict: IdentityChangeAdmissionKind)
+- `CreatedIdentityEntryRecorded`(agent_identity: AgentIdentity, verdict: CreatedIdentityRecordVerdict)
+- `IdentityEntryChangeResolved`(agent_identity: AgentIdentity, verdict: IdentityEntryChangeVerdict)
+- `PreparationConstructionResolved`(agent_identity: AgentIdentity, attempt: u64, verdict: PreparationConstructionVerdict, held_attempt: Option<u64>, activating_attempt: Option<u64>)
+- `PreparationSettleResolved`(agent_identity: AgentIdentity, verdict: PreparationSettleVerdict, held_attempt: Option<u64>, activating_attempt: Option<u64>)
+- `PreparationConstructionEnded`(agent_identity: AgentIdentity, attempt: u64, verdict: ConstructionEndVerdict)
+- `IdentityEntryUnlisted`(agent_identity: AgentIdentity, verdict: UnlistEntryVerdict)
 
 ## Helpers
 - `identity_reconcile_decision`(intent: IdentityAuthorityCondition, lease: IdentityLeaseCondition, replacement: IdentityReplacementCondition, external_binding_required: Bool, initial_delivery_required: Bool, session_creation_receipt: IdentityReceiptCondition, retirement_receipt: IdentityReceiptCondition, session: IdentitySessionCondition, runtime: IdentityResourceCondition, member: IdentityResourceCondition, external_binding_receipt: IdentityReceiptCondition, external_trust: IdentityExternalTrustCondition, external_ceremony: IdentityExternalCeremonyCondition, initial_delivery_receipt: IdentityReceiptCondition, initial_delivery: IdentityInitialDeliveryCondition, wiring: IdentityResourceCondition) -> `IdentityReconcileDecision`
-- `identity_entry_verdict`(composition_authoritative: Bool, intent_managed: Bool, worker_holds_name: Bool, lifecycle_in_flight: Bool, seated: Bool, ever_created: Bool, placement: EntryPlacementKind, held_creation: Bool, profile_matches: Bool, migration_declared_from_current: Bool, session_memory_only: Bool, mode_matches: Bool, resume_role_moved: Bool, migration_declared_from_resume_role: Bool) -> `IdentityEntryVerdict`
+- `identity_entry_verdict`(composition_authoritative: Bool, intent_managed: Bool, worker_holds_name: Bool, lifecycle_in_flight: Bool, seated: Bool, ever_created: Bool, placement: EntryPlacementKind, held_creation: Bool, profile_matches: Bool, migration_declared_from_current: Bool, session_memory_only: Bool, mode_matches: Bool, resume_role_moved: Bool, migration_declared_from_resume_role: Bool, preparation_required: Bool, record_only: Bool) -> `IdentityEntryVerdict`
+- `identity_change_admission`(composition_authoritative: Bool, receipt: IdentityChangeReceiptKind, changes_held: Bool, consent: IdentityChangeConsentKind, permit_binds: Bool, permit_admits: Bool, host_operator: Bool, grant_current: Bool, spec_current: Bool) -> `IdentityChangeAdmissionKind`
+- `created_identity_record_verdict`(composition_authoritative: Bool, changes_held: Bool, name_unreadable: Bool, name_tombstoned: Bool, held_by_identity: Bool, held_by_worker: Bool) -> `CreatedIdentityRecordVerdict`
+- `identity_entry_change_verdict`(kind: IdentityEntryChangeKind, composition_authoritative: Bool, changes_held: Bool, name_unreadable: Bool, name_tombstoned: Bool, entry_recorded: Bool, entry_store_owned: Bool, in_flight: Bool, seated: Bool, archived: Bool, preparation_pending: Bool) -> `IdentityEntryChangeVerdict`
+- `created_entry_cause`(preparation_required: Bool, placement: EntryPlacementKind, held_creation: Bool) -> `UnseatedEntryCause`
+- `unlist_entry_verdict`(composition_authoritative: Bool, declared_entry: Bool, in_flight: Bool, seated: Bool) -> `UnlistEntryVerdict`
+- `preparation_construction_verdict`(composition_authoritative: Bool, preparation_pending: Bool, constructed: Bool, construction_open: Bool) -> `PreparationConstructionVerdict`
+- `preparation_settle_verdict`(composition_authoritative: Bool, preparation_pending: Bool, constructed: Bool, attempt_named: Bool, names_held_attempt: Bool, names_activating_attempt: Bool, construction_open: Bool, before_deadline: Bool, binding_matches: Bool) -> `PreparationSettleVerdict`
+- `construction_end_verdict`(names_held_attempt: Bool, names_activating_attempt: Bool, end: ConstructionEndKind) -> `ConstructionEndVerdict`
 - `member_wake_refusal`(member_present: Bool, session_bound: Bool, placed: Bool, broken: Bool, retiring: Bool, mob_admitting: Bool, composition_authoritative: Bool, origin_open: Bool, host_pending: Bool, input_class: PeerInputClass, sender_waking: Bool, observed_missing: Bool, phase: Option<MemberMaterializationPhase>) -> `Option<MemberWakeRefusalKind>`
 - `member_boot_materialization`(policy: MemberRestorePolicyKind, composition_authoritative: Bool, host_pending: Bool, origin_open: Bool, obligation: MemberRecoveryObligationKind, kickoff_pending: Bool, network_transport: Bool, orchestrator_notified: Bool, has_durable_endpoint: Bool, host_required: Bool, session_unborn: Bool) -> `BootMaterializationKind`
 - `peer_notice_disposition`(recipient_phase: Option<MemberMaterializationPhase>, sender_phase: Option<MemberMaterializationPhase>, notice_class: PeerInputClass) -> `PeerNoticeDisposition`
@@ -1061,8 +1091,10 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `role_hold_belongs_to_an_entry`
 - `placed_entry_custody_is_hosted_on_first_use`
 - `worker_reconcile_spares_entries`
-- `unseated_created_entry_is_preparing_or_owed`
+- `archived_entry_is_store_owned`
+- `entry_ending_marks_are_seated_and_disjoint`
 - `tombstone_is_never_an_entry`
+- `construction_is_held_or_activating`
 - `entry_custodies_are_disjoint`
 - `entry_custody_ladder_is_open`
 - `owed_edge_repairs_join_seated_members`
@@ -1768,7 +1800,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveSpawnMemberAdmissionManageScopeRunning`
 - From: `Running`
-- On: `ResolveSpawnMemberAdmission`(manage_scope_present, profile_scope_contains, privileged_resume_bridge_session_present, privileged_resume_session_present, privileged_backend_present, privileged_runtime_mode_present, privileged_launch_mode_present, privileged_tool_access_policy_present, privileged_tooling_present, privileged_auth_binding_present)
+- On: `ResolveSpawnMemberAdmission`(manage_scope_present, profile_scope_contains, privileged_resume_bridge_session_present, privileged_resume_session_present, privileged_backend_present, privileged_runtime_mode_present, privileged_launch_mode_present, privileged_tool_access_policy_present, privileged_tooling_present, privileged_auth_binding_present, privileged_binding_present, privileged_placement_present)
 - Guards:
   - `manage_scope_allows`
 - Emits: `SpawnMemberAdmissionResolved`
@@ -1776,7 +1808,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveSpawnMemberAdmissionManageScopeStopped`
 - From: `Stopped`
-- On: `ResolveSpawnMemberAdmission`(manage_scope_present, profile_scope_contains, privileged_resume_bridge_session_present, privileged_resume_session_present, privileged_backend_present, privileged_runtime_mode_present, privileged_launch_mode_present, privileged_tool_access_policy_present, privileged_tooling_present, privileged_auth_binding_present)
+- On: `ResolveSpawnMemberAdmission`(manage_scope_present, profile_scope_contains, privileged_resume_bridge_session_present, privileged_resume_session_present, privileged_backend_present, privileged_runtime_mode_present, privileged_launch_mode_present, privileged_tool_access_policy_present, privileged_tooling_present, privileged_auth_binding_present, privileged_binding_present, privileged_placement_present)
 - Guards:
   - `manage_scope_allows`
 - Emits: `SpawnMemberAdmissionResolved`
@@ -1784,7 +1816,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveSpawnMemberAdmissionManageScopeCompleted`
 - From: `Completed`
-- On: `ResolveSpawnMemberAdmission`(manage_scope_present, profile_scope_contains, privileged_resume_bridge_session_present, privileged_resume_session_present, privileged_backend_present, privileged_runtime_mode_present, privileged_launch_mode_present, privileged_tool_access_policy_present, privileged_tooling_present, privileged_auth_binding_present)
+- On: `ResolveSpawnMemberAdmission`(manage_scope_present, profile_scope_contains, privileged_resume_bridge_session_present, privileged_resume_session_present, privileged_backend_present, privileged_runtime_mode_present, privileged_launch_mode_present, privileged_tool_access_policy_present, privileged_tooling_present, privileged_auth_binding_present, privileged_binding_present, privileged_placement_present)
 - Guards:
   - `manage_scope_allows`
 - Emits: `SpawnMemberAdmissionResolved`
@@ -1792,7 +1824,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveSpawnMemberAdmissionManageScopeDestroyed`
 - From: `Destroyed`
-- On: `ResolveSpawnMemberAdmission`(manage_scope_present, profile_scope_contains, privileged_resume_bridge_session_present, privileged_resume_session_present, privileged_backend_present, privileged_runtime_mode_present, privileged_launch_mode_present, privileged_tool_access_policy_present, privileged_tooling_present, privileged_auth_binding_present)
+- On: `ResolveSpawnMemberAdmission`(manage_scope_present, profile_scope_contains, privileged_resume_bridge_session_present, privileged_resume_session_present, privileged_backend_present, privileged_runtime_mode_present, privileged_launch_mode_present, privileged_tool_access_policy_present, privileged_tooling_present, privileged_auth_binding_present, privileged_binding_present, privileged_placement_present)
 - Guards:
   - `manage_scope_allows`
 - Emits: `SpawnMemberAdmissionResolved`
@@ -1800,7 +1832,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveSpawnMemberAdmissionPrivilegedArgsDeniedRunning`
 - From: `Running`
-- On: `ResolveSpawnMemberAdmission`(manage_scope_present, profile_scope_contains, privileged_resume_bridge_session_present, privileged_resume_session_present, privileged_backend_present, privileged_runtime_mode_present, privileged_launch_mode_present, privileged_tool_access_policy_present, privileged_tooling_present, privileged_auth_binding_present)
+- On: `ResolveSpawnMemberAdmission`(manage_scope_present, profile_scope_contains, privileged_resume_bridge_session_present, privileged_resume_session_present, privileged_backend_present, privileged_runtime_mode_present, privileged_launch_mode_present, privileged_tool_access_policy_present, privileged_tooling_present, privileged_auth_binding_present, privileged_binding_present, privileged_placement_present)
 - Guards:
   - `privileged_args_without_manage_scope`
 - Emits: `SpawnMemberAdmissionResolved`
@@ -1808,7 +1840,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveSpawnMemberAdmissionPrivilegedArgsDeniedStopped`
 - From: `Stopped`
-- On: `ResolveSpawnMemberAdmission`(manage_scope_present, profile_scope_contains, privileged_resume_bridge_session_present, privileged_resume_session_present, privileged_backend_present, privileged_runtime_mode_present, privileged_launch_mode_present, privileged_tool_access_policy_present, privileged_tooling_present, privileged_auth_binding_present)
+- On: `ResolveSpawnMemberAdmission`(manage_scope_present, profile_scope_contains, privileged_resume_bridge_session_present, privileged_resume_session_present, privileged_backend_present, privileged_runtime_mode_present, privileged_launch_mode_present, privileged_tool_access_policy_present, privileged_tooling_present, privileged_auth_binding_present, privileged_binding_present, privileged_placement_present)
 - Guards:
   - `privileged_args_without_manage_scope`
 - Emits: `SpawnMemberAdmissionResolved`
@@ -1816,7 +1848,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveSpawnMemberAdmissionPrivilegedArgsDeniedCompleted`
 - From: `Completed`
-- On: `ResolveSpawnMemberAdmission`(manage_scope_present, profile_scope_contains, privileged_resume_bridge_session_present, privileged_resume_session_present, privileged_backend_present, privileged_runtime_mode_present, privileged_launch_mode_present, privileged_tool_access_policy_present, privileged_tooling_present, privileged_auth_binding_present)
+- On: `ResolveSpawnMemberAdmission`(manage_scope_present, profile_scope_contains, privileged_resume_bridge_session_present, privileged_resume_session_present, privileged_backend_present, privileged_runtime_mode_present, privileged_launch_mode_present, privileged_tool_access_policy_present, privileged_tooling_present, privileged_auth_binding_present, privileged_binding_present, privileged_placement_present)
 - Guards:
   - `privileged_args_without_manage_scope`
 - Emits: `SpawnMemberAdmissionResolved`
@@ -1824,7 +1856,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveSpawnMemberAdmissionPrivilegedArgsDeniedDestroyed`
 - From: `Destroyed`
-- On: `ResolveSpawnMemberAdmission`(manage_scope_present, profile_scope_contains, privileged_resume_bridge_session_present, privileged_resume_session_present, privileged_backend_present, privileged_runtime_mode_present, privileged_launch_mode_present, privileged_tool_access_policy_present, privileged_tooling_present, privileged_auth_binding_present)
+- On: `ResolveSpawnMemberAdmission`(manage_scope_present, profile_scope_contains, privileged_resume_bridge_session_present, privileged_resume_session_present, privileged_backend_present, privileged_runtime_mode_present, privileged_launch_mode_present, privileged_tool_access_policy_present, privileged_tooling_present, privileged_auth_binding_present, privileged_binding_present, privileged_placement_present)
 - Guards:
   - `privileged_args_without_manage_scope`
 - Emits: `SpawnMemberAdmissionResolved`
@@ -1832,7 +1864,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveSpawnMemberAdmissionProfileScopeRunning`
 - From: `Running`
-- On: `ResolveSpawnMemberAdmission`(manage_scope_present, profile_scope_contains, privileged_resume_bridge_session_present, privileged_resume_session_present, privileged_backend_present, privileged_runtime_mode_present, privileged_launch_mode_present, privileged_tool_access_policy_present, privileged_tooling_present, privileged_auth_binding_present)
+- On: `ResolveSpawnMemberAdmission`(manage_scope_present, profile_scope_contains, privileged_resume_bridge_session_present, privileged_resume_session_present, privileged_backend_present, privileged_runtime_mode_present, privileged_launch_mode_present, privileged_tool_access_policy_present, privileged_tooling_present, privileged_auth_binding_present, privileged_binding_present, privileged_placement_present)
 - Guards:
   - `profile_scope_allows`
 - Emits: `SpawnMemberAdmissionResolved`
@@ -1840,7 +1872,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveSpawnMemberAdmissionProfileScopeStopped`
 - From: `Stopped`
-- On: `ResolveSpawnMemberAdmission`(manage_scope_present, profile_scope_contains, privileged_resume_bridge_session_present, privileged_resume_session_present, privileged_backend_present, privileged_runtime_mode_present, privileged_launch_mode_present, privileged_tool_access_policy_present, privileged_tooling_present, privileged_auth_binding_present)
+- On: `ResolveSpawnMemberAdmission`(manage_scope_present, profile_scope_contains, privileged_resume_bridge_session_present, privileged_resume_session_present, privileged_backend_present, privileged_runtime_mode_present, privileged_launch_mode_present, privileged_tool_access_policy_present, privileged_tooling_present, privileged_auth_binding_present, privileged_binding_present, privileged_placement_present)
 - Guards:
   - `profile_scope_allows`
 - Emits: `SpawnMemberAdmissionResolved`
@@ -1848,7 +1880,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveSpawnMemberAdmissionProfileScopeCompleted`
 - From: `Completed`
-- On: `ResolveSpawnMemberAdmission`(manage_scope_present, profile_scope_contains, privileged_resume_bridge_session_present, privileged_resume_session_present, privileged_backend_present, privileged_runtime_mode_present, privileged_launch_mode_present, privileged_tool_access_policy_present, privileged_tooling_present, privileged_auth_binding_present)
+- On: `ResolveSpawnMemberAdmission`(manage_scope_present, profile_scope_contains, privileged_resume_bridge_session_present, privileged_resume_session_present, privileged_backend_present, privileged_runtime_mode_present, privileged_launch_mode_present, privileged_tool_access_policy_present, privileged_tooling_present, privileged_auth_binding_present, privileged_binding_present, privileged_placement_present)
 - Guards:
   - `profile_scope_allows`
 - Emits: `SpawnMemberAdmissionResolved`
@@ -1856,7 +1888,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveSpawnMemberAdmissionProfileScopeDestroyed`
 - From: `Destroyed`
-- On: `ResolveSpawnMemberAdmission`(manage_scope_present, profile_scope_contains, privileged_resume_bridge_session_present, privileged_resume_session_present, privileged_backend_present, privileged_runtime_mode_present, privileged_launch_mode_present, privileged_tool_access_policy_present, privileged_tooling_present, privileged_auth_binding_present)
+- On: `ResolveSpawnMemberAdmission`(manage_scope_present, profile_scope_contains, privileged_resume_bridge_session_present, privileged_resume_session_present, privileged_backend_present, privileged_runtime_mode_present, privileged_launch_mode_present, privileged_tool_access_policy_present, privileged_tooling_present, privileged_auth_binding_present, privileged_binding_present, privileged_placement_present)
 - Guards:
   - `profile_scope_allows`
 - Emits: `SpawnMemberAdmissionResolved`
@@ -1864,7 +1896,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveSpawnMemberAdmissionDeniedRunning`
 - From: `Running`
-- On: `ResolveSpawnMemberAdmission`(manage_scope_present, profile_scope_contains, privileged_resume_bridge_session_present, privileged_resume_session_present, privileged_backend_present, privileged_runtime_mode_present, privileged_launch_mode_present, privileged_tool_access_policy_present, privileged_tooling_present, privileged_auth_binding_present)
+- On: `ResolveSpawnMemberAdmission`(manage_scope_present, profile_scope_contains, privileged_resume_bridge_session_present, privileged_resume_session_present, privileged_backend_present, privileged_runtime_mode_present, privileged_launch_mode_present, privileged_tool_access_policy_present, privileged_tooling_present, privileged_auth_binding_present, privileged_binding_present, privileged_placement_present)
 - Guards:
   - `no_scope_denies`
 - Emits: `SpawnMemberAdmissionResolved`
@@ -1872,7 +1904,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveSpawnMemberAdmissionDeniedStopped`
 - From: `Stopped`
-- On: `ResolveSpawnMemberAdmission`(manage_scope_present, profile_scope_contains, privileged_resume_bridge_session_present, privileged_resume_session_present, privileged_backend_present, privileged_runtime_mode_present, privileged_launch_mode_present, privileged_tool_access_policy_present, privileged_tooling_present, privileged_auth_binding_present)
+- On: `ResolveSpawnMemberAdmission`(manage_scope_present, profile_scope_contains, privileged_resume_bridge_session_present, privileged_resume_session_present, privileged_backend_present, privileged_runtime_mode_present, privileged_launch_mode_present, privileged_tool_access_policy_present, privileged_tooling_present, privileged_auth_binding_present, privileged_binding_present, privileged_placement_present)
 - Guards:
   - `no_scope_denies`
 - Emits: `SpawnMemberAdmissionResolved`
@@ -1880,7 +1912,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveSpawnMemberAdmissionDeniedCompleted`
 - From: `Completed`
-- On: `ResolveSpawnMemberAdmission`(manage_scope_present, profile_scope_contains, privileged_resume_bridge_session_present, privileged_resume_session_present, privileged_backend_present, privileged_runtime_mode_present, privileged_launch_mode_present, privileged_tool_access_policy_present, privileged_tooling_present, privileged_auth_binding_present)
+- On: `ResolveSpawnMemberAdmission`(manage_scope_present, profile_scope_contains, privileged_resume_bridge_session_present, privileged_resume_session_present, privileged_backend_present, privileged_runtime_mode_present, privileged_launch_mode_present, privileged_tool_access_policy_present, privileged_tooling_present, privileged_auth_binding_present, privileged_binding_present, privileged_placement_present)
 - Guards:
   - `no_scope_denies`
 - Emits: `SpawnMemberAdmissionResolved`
@@ -1888,7 +1920,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveSpawnMemberAdmissionDeniedDestroyed`
 - From: `Destroyed`
-- On: `ResolveSpawnMemberAdmission`(manage_scope_present, profile_scope_contains, privileged_resume_bridge_session_present, privileged_resume_session_present, privileged_backend_present, privileged_runtime_mode_present, privileged_launch_mode_present, privileged_tool_access_policy_present, privileged_tooling_present, privileged_auth_binding_present)
+- On: `ResolveSpawnMemberAdmission`(manage_scope_present, profile_scope_contains, privileged_resume_bridge_session_present, privileged_resume_session_present, privileged_backend_present, privileged_runtime_mode_present, privileged_launch_mode_present, privileged_tool_access_policy_present, privileged_tooling_present, privileged_auth_binding_present, privileged_binding_present, privileged_placement_present)
 - Guards:
   - `no_scope_denies`
 - Emits: `SpawnMemberAdmissionResolved`
@@ -3877,6 +3909,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `spawn_exec_opened`
   - `name_not_reserved`
+  - `pending_entry_publishes_its_accepted_activation`
   - `ack_fields_absent`
   - `no_prior_session_binding`
   - `current_binding_absent`
@@ -3892,6 +3925,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `spawn_exec_opened`
   - `name_not_reserved`
+  - `pending_entry_publishes_its_accepted_activation`
   - `ack_fields_absent`
   - `no_prior_session_binding`
   - `current_binding_absent`
@@ -3907,6 +3941,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `spawn_exec_materialize_pending`
   - `name_not_reserved`
+  - `pending_entry_publishes_its_accepted_activation`
   - `placement_present`
   - `placed_not_exempt`
   - `no_prior_session_binding`
@@ -3972,7 +4007,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `no_prior_session_binding`
   - `current_binding_absent`
   - `entry_name_free`
-  - `created_custody_local`
   - `name_not_reserved`
   - `generation_is_next`
   - `replacing_absent`
@@ -4208,7 +4242,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `lifecycle_origin_open`
   - `placement_present`
   - `entry_name_free`
-  - `created_custody_local`
   - `name_not_reserved`
   - `placed_custody_hosted_on_first_use`
   - `placed_spawn_id_present`
@@ -4501,6 +4534,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `host_binding_generation_observed`
   - `identity_not_recovered`
   - `name_not_tombstoned`
+  - `entry_not_archived`
   - `runtime_not_recovered`
   - `generation_ascends`
   - `pending_attempt_absent`
@@ -4552,6 +4586,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `identity_not_recovered`
   - `name_not_tombstoned`
+  - `entry_not_archived`
   - `runtime_not_recovered`
   - `generation_ascends`
 - To: `Running`
@@ -17513,6 +17548,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `replay_not_sealed`
   - `identity_runtime_matches`
+  - `entry_of_the_rows_origin`
 - To: `Running`
 
 ### `RecoverIdentityEntrySeatedStopped`
@@ -17521,6 +17557,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `replay_not_sealed`
   - `identity_runtime_matches`
+  - `entry_of_the_rows_origin`
 - To: `Stopped`
 
 ### `AdoptLegacyIdentityEntryAdopted`
@@ -17739,9 +17776,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `DeclareIdentityEntryKept`
 - From: `Running`
-- On: `DeclareIdentityEntry`(agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot)
+- On: `DeclareIdentityEntry`(agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody, preparation_required)
 - Guards:
-  - `declared_entry_or_no_entry`
+  - `entry_of_the_declared_custody`
   - `name_not_reserved`
   - `verdict_kept`
 - Emits: `IdentityEntryDeclared`
@@ -17749,9 +17786,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `DeclareIdentityEntrySeatOwed`
 - From: `Running`
-- On: `DeclareIdentityEntry`(agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot)
+- On: `DeclareIdentityEntry`(agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody, preparation_required)
 - Guards:
-  - `declared_entry_or_no_entry`
+  - `entry_of_the_declared_custody`
   - `name_not_reserved`
   - `verdict_seat_owed`
 - Emits: `IdentityEntryDeclared`
@@ -17759,9 +17796,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `DeclareIdentityEntryHostedOnFirstUse`
 - From: `Running`
-- On: `DeclareIdentityEntry`(agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot)
+- On: `DeclareIdentityEntry`(agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody, preparation_required)
 - Guards:
-  - `declared_entry_or_no_entry`
+  - `entry_of_the_declared_custody`
   - `name_not_reserved`
   - `verdict_hosted_on_first_use`
 - Emits: `IdentityEntryDeclared`
@@ -17769,19 +17806,39 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `DeclareIdentityEntryAwaitHeldCreation`
 - From: `Running`
-- On: `DeclareIdentityEntry`(agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot)
+- On: `DeclareIdentityEntry`(agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody, preparation_required)
 - Guards:
-  - `declared_entry_or_no_entry`
+  - `entry_of_the_declared_custody`
   - `name_not_reserved`
   - `verdict_await_held_creation`
 - Emits: `IdentityEntryDeclared`
 - To: `Running`
 
+### `DeclareIdentityEntryPreparationPending`
+- From: `Running`
+- On: `DeclareIdentityEntry`(agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody, preparation_required)
+- Guards:
+  - `entry_of_the_declared_custody`
+  - `name_not_reserved`
+  - `verdict_preparation_pending`
+- Emits: `IdentityEntryDeclared`
+- To: `Running`
+
+### `DeclareIdentityEntryRecordOnly`
+- From: `Running`
+- On: `DeclareIdentityEntry`(agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody, preparation_required)
+- Guards:
+  - `entry_of_the_declared_custody`
+  - `name_not_reserved`
+  - `verdict_record_only`
+- Emits: `IdentityEntryDeclared`
+- To: `Running`
+
 ### `DeclareIdentityEntryRuntimeModeRestamp`
 - From: `Running`
-- On: `DeclareIdentityEntry`(agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot)
+- On: `DeclareIdentityEntry`(agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody, preparation_required)
 - Guards:
-  - `declared_entry_or_no_entry`
+  - `entry_of_the_declared_custody`
   - `name_not_reserved`
   - `verdict_runtime_mode_restamp`
 - Emits: `IdentityEntryDeclared`
@@ -17789,9 +17846,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `DeclareIdentityEntryRoleMigrate`
 - From: `Running`
-- On: `DeclareIdentityEntry`(agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot)
+- On: `DeclareIdentityEntry`(agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody, preparation_required)
 - Guards:
-  - `declared_entry_or_no_entry`
+  - `entry_of_the_declared_custody`
   - `name_not_reserved`
   - `verdict_role_migrate`
 - Emits: `IdentityEntryDeclared`
@@ -17799,9 +17856,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `DeclareIdentityEntryRoleRotate`
 - From: `Running`
-- On: `DeclareIdentityEntry`(agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot)
+- On: `DeclareIdentityEntry`(agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody, preparation_required)
 - Guards:
-  - `declared_entry_or_no_entry`
+  - `entry_of_the_declared_custody`
   - `name_not_reserved`
   - `verdict_role_rotate`
 - Emits: `IdentityEntryDeclared`
@@ -17809,9 +17866,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `DeclareIdentityEntryRoleMigrationHeld`
 - From: `Running`
-- On: `DeclareIdentityEntry`(agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot)
+- On: `DeclareIdentityEntry`(agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody, preparation_required)
 - Guards:
-  - `declared_entry_or_no_entry`
+  - `entry_of_the_declared_custody`
   - `name_not_reserved`
   - `verdict_role_migration_held`
 - Emits: `IdentityEntryDeclared`
@@ -17819,9 +17876,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `DeclareIdentityEntryLifecycleInFlight`
 - From: `Running`
-- On: `DeclareIdentityEntry`(agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot)
+- On: `DeclareIdentityEntry`(agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody, preparation_required)
 - Guards:
-  - `declared_entry_or_no_entry`
+  - `entry_of_the_declared_custody`
   - `name_not_reserved`
   - `verdict_lifecycle_in_flight`
 - Emits: `IdentityEntryDeclared`
@@ -17829,9 +17886,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `DeclareIdentityEntryRefusedNameHeldByWorker`
 - From: `Running`
-- On: `DeclareIdentityEntry`(agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot)
+- On: `DeclareIdentityEntry`(agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody, preparation_required)
 - Guards:
-  - `declared_entry_or_no_entry`
+  - `entry_of_the_declared_custody`
   - `name_not_reserved`
   - `verdict_refused_name_held_by_worker`
 - Emits: `IdentityEntryDeclared`
@@ -17839,9 +17896,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `DeclareIdentityEntryRefusedHostAdopted`
 - From: `Running`
-- On: `DeclareIdentityEntry`(agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot)
+- On: `DeclareIdentityEntry`(agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody, preparation_required)
 - Guards:
-  - `declared_entry_or_no_entry`
+  - `entry_of_the_declared_custody`
   - `name_not_reserved`
   - `verdict_refused_host_adopted`
 - Emits: `IdentityEntryDeclared`
@@ -17849,9 +17906,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `DeclareIdentityEntryRefusedNonAuthoritative`
 - From: `Running`
-- On: `DeclareIdentityEntry`(agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot)
+- On: `DeclareIdentityEntry`(agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody, preparation_required)
 - Guards:
-  - `declared_entry_or_no_entry`
+  - `entry_of_the_declared_custody`
   - `name_not_reserved`
   - `verdict_refused_non_authoritative`
 - Emits: `IdentityEntryDeclared`
@@ -17859,8 +17916,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `DeclareIdentityEntryRefusedNameOwnedByCreated`
 - From: `Running`
-- On: `DeclareIdentityEntry`(agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot)
+- On: `DeclareIdentityEntry`(agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody, preparation_required)
 - Guards:
+  - `roster_custody`
   - `created_entry`
   - `name_not_reserved`
 - Emits: `IdentityEntryDeclared`
@@ -17868,7 +17926,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `DeclareIdentityEntryRefusedNameTombstoned`
 - From: `Running`
-- On: `DeclareIdentityEntry`(agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot)
+- On: `DeclareIdentityEntry`(agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody, preparation_required)
 - Guards:
   - `name_tombstoned`
   - `name_readable`
@@ -17877,7 +17935,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `DeclareIdentityEntryRefusedNameUnreadable`
 - From: `Running`
-- On: `DeclareIdentityEntry`(agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot)
+- On: `DeclareIdentityEntry`(agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody, preparation_required)
 - Guards:
   - `name_unreadable`
 - Emits: `IdentityEntryDeclared`
@@ -17885,19 +17943,19 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `DeclareIdentityEntryMobNotRunningStopped`
 - From: `Stopped`
-- On: `DeclareIdentityEntry`(agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot)
+- On: `DeclareIdentityEntry`(agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody, preparation_required)
 - Emits: `IdentityEntryDeclared`
 - To: `Stopped`
 
 ### `DeclareIdentityEntryMobNotRunningCompleted`
 - From: `Completed`
-- On: `DeclareIdentityEntry`(agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot)
+- On: `DeclareIdentityEntry`(agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody, preparation_required)
 - Emits: `IdentityEntryDeclared`
 - To: `Completed`
 
 ### `DeclareIdentityEntryMobNotRunningDestroyed`
 - From: `Destroyed`
-- On: `DeclareIdentityEntry`(agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot)
+- On: `DeclareIdentityEntry`(agent_identity, profile_name, runtime_mode, placement, held_creation, declared_migration_from, intent_managed, session_memory_only, resume_session_role, first_boot, created_custody, preparation_required)
 - Emits: `IdentityEntryDeclared`
 - To: `Destroyed`
 
@@ -17933,6 +17991,64 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Destroyed`
 - On: `SealDeclaredRoster`(desired)
 - Emits: `DeclaredRosterSealed`
+- To: `Destroyed`
+
+### `UnlistIdentityEntryRetiring`
+- From: `Running`
+- On: `UnlistIdentityEntry`(agent_identity)
+- Guards:
+  - `unlist_retiring`
+- Emits: `IdentityEntryUnlisted`
+- To: `Running`
+
+### `UnlistIdentityEntryRemoved`
+- From: `Running`
+- On: `UnlistIdentityEntry`(agent_identity)
+- Guards:
+  - `unlist_removed`
+- Emits: `IdentityEntryUnlisted`
+- To: `Running`
+
+### `UnlistIdentityEntryDeferred`
+- From: `Running`
+- On: `UnlistIdentityEntry`(agent_identity)
+- Guards:
+  - `unlist_deferred`
+- Emits: `IdentityEntryUnlisted`
+- To: `Running`
+
+### `UnlistIdentityEntryNotADeclaredEntry`
+- From: `Running`
+- On: `UnlistIdentityEntry`(agent_identity)
+- Guards:
+  - `unlist_not_a_declared_entry`
+- Emits: `IdentityEntryUnlisted`
+- To: `Running`
+
+### `UnlistIdentityEntryNonAuthoritative`
+- From: `Running`
+- On: `UnlistIdentityEntry`(agent_identity)
+- Guards:
+  - `unlist_non_authoritative`
+- Emits: `IdentityEntryUnlisted`
+- To: `Running`
+
+### `UnlistIdentityEntryMobNotRunningStopped`
+- From: `Stopped`
+- On: `UnlistIdentityEntry`(agent_identity)
+- Emits: `IdentityEntryUnlisted`
+- To: `Stopped`
+
+### `UnlistIdentityEntryMobNotRunningCompleted`
+- From: `Completed`
+- On: `UnlistIdentityEntry`(agent_identity)
+- Emits: `IdentityEntryUnlisted`
+- To: `Completed`
+
+### `UnlistIdentityEntryMobNotRunningDestroyed`
+- From: `Destroyed`
+- On: `UnlistIdentityEntry`(agent_identity)
+- Emits: `IdentityEntryUnlisted`
 - To: `Destroyed`
 
 ### `RecoverIdentityEntryRetiringMarkedRunning`
@@ -18152,7 +18268,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `replay_not_sealed`
   - `row_removed`
   - `no_member`
-  - `no_declared_entry`
   - `name_readable`
   - `name_not_tombstoned`
   - `no_spawn_ladder`
@@ -18165,7 +18280,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `replay_not_sealed`
   - `row_removed`
   - `no_member`
-  - `no_declared_entry`
   - `name_readable`
   - `name_not_tombstoned`
   - `no_spawn_ladder`
@@ -18186,6 +18300,794 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `replay_not_sealed`
   - `row_unreadable_or_contradicted`
 - To: `Stopped`
+
+### `RecoverCreatedIdentityEntryRemovingRunning`
+- From: `Running`
+- On: `RecoverCreatedIdentityEntry`(agent_identity, presence, last_session)
+- Guards:
+  - `replay_not_sealed`
+  - `row_removed`
+  - `member_seated`
+  - `entry_recorded`
+  - `name_readable`
+  - `name_not_tombstoned`
+  - `no_spawn_ladder`
+  - `no_archive_mark`
+- To: `Running`
+
+### `RecoverCreatedIdentityEntryRemovingStopped`
+- From: `Stopped`
+- On: `RecoverCreatedIdentityEntry`(agent_identity, presence, last_session)
+- Guards:
+  - `replay_not_sealed`
+  - `row_removed`
+  - `member_seated`
+  - `entry_recorded`
+  - `name_readable`
+  - `name_not_tombstoned`
+  - `no_spawn_ladder`
+  - `no_archive_mark`
+- To: `Stopped`
+
+### `RecoverCreatedIdentityEntryArchivingRunning`
+- From: `Running`
+- On: `RecoverCreatedIdentityEntry`(agent_identity, presence, last_session)
+- Guards:
+  - `replay_not_sealed`
+  - `row_archived`
+  - `member_seated`
+  - `store_owned_entry`
+  - `name_readable`
+  - `name_not_tombstoned`
+  - `no_spawn_ladder`
+  - `no_removal_mark`
+- To: `Running`
+
+### `RecoverCreatedIdentityEntryArchivingStopped`
+- From: `Stopped`
+- On: `RecoverCreatedIdentityEntry`(agent_identity, presence, last_session)
+- Guards:
+  - `replay_not_sealed`
+  - `row_archived`
+  - `member_seated`
+  - `store_owned_entry`
+  - `name_readable`
+  - `name_not_tombstoned`
+  - `no_spawn_ladder`
+  - `no_removal_mark`
+- To: `Stopped`
+
+### `RecoverCreatedIdentityEntryArchivedRunning`
+- From: `Running`
+- On: `RecoverCreatedIdentityEntry`(agent_identity, presence, last_session)
+- Guards:
+  - `replay_not_sealed`
+  - `row_archived`
+  - `no_member`
+  - `no_declared_entry`
+  - `name_readable`
+  - `name_not_tombstoned`
+  - `no_spawn_ladder`
+- To: `Running`
+
+### `RecoverCreatedIdentityEntryArchivedStopped`
+- From: `Stopped`
+- On: `RecoverCreatedIdentityEntry`(agent_identity, presence, last_session)
+- Guards:
+  - `replay_not_sealed`
+  - `row_archived`
+  - `no_member`
+  - `no_declared_entry`
+  - `name_readable`
+  - `name_not_tombstoned`
+  - `no_spawn_ladder`
+- To: `Stopped`
+
+### `AdmitIdentityChangeAdmitted`
+- From: `Running`
+- On: `AdmitIdentityChange`(receipt, consent, permit_binds, permit_admits, host_operator, grant_current, spec_current)
+- Guards:
+  - `admission_admitted`
+- Emits: `IdentityChangeAdmissionResolved`
+- To: `Running`
+
+### `AdmitIdentityChangeReplayed`
+- From: `Running`
+- On: `AdmitIdentityChange`(receipt, consent, permit_binds, permit_admits, host_operator, grant_current, spec_current)
+- Guards:
+  - `admission_replayed`
+- Emits: `IdentityChangeAdmissionResolved`
+- To: `Running`
+
+### `AdmitIdentityChangeOperationReused`
+- From: `Running`
+- On: `AdmitIdentityChange`(receipt, consent, permit_binds, permit_admits, host_operator, grant_current, spec_current)
+- Guards:
+  - `admission_operation_reused`
+- Emits: `IdentityChangeAdmissionResolved`
+- To: `Running`
+
+### `AdmitIdentityChangeNonAuthoritative`
+- From: `Running`
+- On: `AdmitIdentityChange`(receipt, consent, permit_binds, permit_admits, host_operator, grant_current, spec_current)
+- Guards:
+  - `admission_non_authoritative`
+- Emits: `IdentityChangeAdmissionResolved`
+- To: `Running`
+
+### `AdmitIdentityChangeChangesHeld`
+- From: `Running`
+- On: `AdmitIdentityChange`(receipt, consent, permit_binds, permit_admits, host_operator, grant_current, spec_current)
+- Guards:
+  - `admission_changes_held`
+- Emits: `IdentityChangeAdmissionResolved`
+- To: `Running`
+
+### `AdmitIdentityChangeDecisionUnbound`
+- From: `Running`
+- On: `AdmitIdentityChange`(receipt, consent, permit_binds, permit_admits, host_operator, grant_current, spec_current)
+- Guards:
+  - `admission_decision_unbound`
+- Emits: `IdentityChangeAdmissionResolved`
+- To: `Running`
+
+### `AdmitIdentityChangeDecisionExpired`
+- From: `Running`
+- On: `AdmitIdentityChange`(receipt, consent, permit_binds, permit_admits, host_operator, grant_current, spec_current)
+- Guards:
+  - `admission_decision_expired`
+- Emits: `IdentityChangeAdmissionResolved`
+- To: `Running`
+
+### `AdmitIdentityChangeImportedNotHostOperator`
+- From: `Running`
+- On: `AdmitIdentityChange`(receipt, consent, permit_binds, permit_admits, host_operator, grant_current, spec_current)
+- Guards:
+  - `admission_imported_not_host_operator`
+- Emits: `IdentityChangeAdmissionResolved`
+- To: `Running`
+
+### `AdmitIdentityChangeGrantRevoked`
+- From: `Running`
+- On: `AdmitIdentityChange`(receipt, consent, permit_binds, permit_admits, host_operator, grant_current, spec_current)
+- Guards:
+  - `admission_grant_revoked`
+- Emits: `IdentityChangeAdmissionResolved`
+- To: `Running`
+
+### `AdmitIdentityChangeStaleSpec`
+- From: `Running`
+- On: `AdmitIdentityChange`(receipt, consent, permit_binds, permit_admits, host_operator, grant_current, spec_current)
+- Guards:
+  - `admission_stale_spec`
+- Emits: `IdentityChangeAdmissionResolved`
+- To: `Running`
+
+### `AdmitIdentityChangeMobNotRunningStopped`
+- From: `Stopped`
+- On: `AdmitIdentityChange`(receipt, consent, permit_binds, permit_admits, host_operator, grant_current, spec_current)
+- Emits: `IdentityChangeAdmissionResolved`
+- To: `Stopped`
+
+### `AdmitIdentityChangeMobNotRunningCompleted`
+- From: `Completed`
+- On: `AdmitIdentityChange`(receipt, consent, permit_binds, permit_admits, host_operator, grant_current, spec_current)
+- Emits: `IdentityChangeAdmissionResolved`
+- To: `Completed`
+
+### `AdmitIdentityChangeMobNotRunningDestroyed`
+- From: `Destroyed`
+- On: `AdmitIdentityChange`(receipt, consent, permit_binds, permit_admits, host_operator, grant_current, spec_current)
+- Emits: `IdentityChangeAdmissionResolved`
+- To: `Destroyed`
+
+### `RecordCreatedIdentityEntryRecorded`
+- From: `Running`
+- On: `RecordCreatedIdentityEntry`(agent_identity, preparation_required, placement, held_creation)
+- Guards:
+  - `record_recorded`
+- Emits: `CreatedIdentityEntryRecorded`
+- To: `Running`
+
+### `RecordCreatedIdentityEntryNameHeldByIdentity`
+- From: `Running`
+- On: `RecordCreatedIdentityEntry`(agent_identity, preparation_required, placement, held_creation)
+- Guards:
+  - `record_name_held_by_identity`
+- Emits: `CreatedIdentityEntryRecorded`
+- To: `Running`
+
+### `RecordCreatedIdentityEntryNameHeldByWorker`
+- From: `Running`
+- On: `RecordCreatedIdentityEntry`(agent_identity, preparation_required, placement, held_creation)
+- Guards:
+  - `record_name_held_by_worker`
+- Emits: `CreatedIdentityEntryRecorded`
+- To: `Running`
+
+### `RecordCreatedIdentityEntryNameTombstoned`
+- From: `Running`
+- On: `RecordCreatedIdentityEntry`(agent_identity, preparation_required, placement, held_creation)
+- Guards:
+  - `record_name_tombstoned`
+- Emits: `CreatedIdentityEntryRecorded`
+- To: `Running`
+
+### `RecordCreatedIdentityEntryNameUnreadable`
+- From: `Running`
+- On: `RecordCreatedIdentityEntry`(agent_identity, preparation_required, placement, held_creation)
+- Guards:
+  - `record_name_unreadable`
+- Emits: `CreatedIdentityEntryRecorded`
+- To: `Running`
+
+### `RecordCreatedIdentityEntryNonAuthoritative`
+- From: `Running`
+- On: `RecordCreatedIdentityEntry`(agent_identity, preparation_required, placement, held_creation)
+- Guards:
+  - `record_non_authoritative`
+- Emits: `CreatedIdentityEntryRecorded`
+- To: `Running`
+
+### `RecordCreatedIdentityEntryChangesHeld`
+- From: `Running`
+- On: `RecordCreatedIdentityEntry`(agent_identity, preparation_required, placement, held_creation)
+- Guards:
+  - `record_changes_held`
+- Emits: `CreatedIdentityEntryRecorded`
+- To: `Running`
+
+### `RecordCreatedIdentityEntryMobNotRunningStopped`
+- From: `Stopped`
+- On: `RecordCreatedIdentityEntry`(agent_identity, preparation_required, placement, held_creation)
+- Emits: `CreatedIdentityEntryRecorded`
+- To: `Stopped`
+
+### `RecordCreatedIdentityEntryMobNotRunningCompleted`
+- From: `Completed`
+- On: `RecordCreatedIdentityEntry`(agent_identity, preparation_required, placement, held_creation)
+- Emits: `CreatedIdentityEntryRecorded`
+- To: `Completed`
+
+### `RecordCreatedIdentityEntryMobNotRunningDestroyed`
+- From: `Destroyed`
+- On: `RecordCreatedIdentityEntry`(agent_identity, preparation_required, placement, held_creation)
+- Emits: `CreatedIdentityEntryRecorded`
+- To: `Destroyed`
+
+### `SetIdentityChangesHeldRunning`
+- From: `Running`
+- On: `SetIdentityChangesHeld`(held)
+- To: `Running`
+
+### `SetIdentityChangesHeldStopped`
+- From: `Stopped`
+- On: `SetIdentityChangesHeld`(held)
+- To: `Stopped`
+
+### `SetIdentityChangesHeldCompleted`
+- From: `Completed`
+- On: `SetIdentityChangesHeld`(held)
+- To: `Completed`
+
+### `SetIdentityChangesHeldDestroyed`
+- From: `Destroyed`
+- On: `SetIdentityChangesHeld`(held)
+- To: `Destroyed`
+
+### `RemoveIdentityEntryRetiring`
+- From: `Running`
+- On: `RemoveIdentityEntry`(agent_identity)
+- Guards:
+  - `change_retiring`
+- Emits: `IdentityEntryChangeResolved`
+- To: `Running`
+
+### `RemoveIdentityEntryRemoved`
+- From: `Running`
+- On: `RemoveIdentityEntry`(agent_identity)
+- Guards:
+  - `change_removed`
+- Emits: `IdentityEntryChangeResolved`
+- To: `Running`
+
+### `RemoveIdentityEntryAlreadyRemoved`
+- From: `Running`
+- On: `RemoveIdentityEntry`(agent_identity)
+- Guards:
+  - `change_already_removed`
+- Emits: `IdentityEntryChangeResolved`
+- To: `Running`
+
+### `RemoveIdentityEntryUnknown`
+- From: `Running`
+- On: `RemoveIdentityEntry`(agent_identity)
+- Guards:
+  - `change_unknown`
+- Emits: `IdentityEntryChangeResolved`
+- To: `Running`
+
+### `RemoveIdentityEntryInFlight`
+- From: `Running`
+- On: `RemoveIdentityEntry`(agent_identity)
+- Guards:
+  - `change_in_flight`
+- Emits: `IdentityEntryChangeResolved`
+- To: `Running`
+
+### `RemoveIdentityEntryNameUnreadable`
+- From: `Running`
+- On: `RemoveIdentityEntry`(agent_identity)
+- Guards:
+  - `change_name_unreadable`
+- Emits: `IdentityEntryChangeResolved`
+- To: `Running`
+
+### `RemoveIdentityEntryNonAuthoritative`
+- From: `Running`
+- On: `RemoveIdentityEntry`(agent_identity)
+- Guards:
+  - `change_non_authoritative`
+- Emits: `IdentityEntryChangeResolved`
+- To: `Running`
+
+### `RemoveIdentityEntryChangesHeld`
+- From: `Running`
+- On: `RemoveIdentityEntry`(agent_identity)
+- Guards:
+  - `change_changes_held`
+- Emits: `IdentityEntryChangeResolved`
+- To: `Running`
+
+### `RemoveIdentityEntryMobNotRunningStopped`
+- From: `Stopped`
+- On: `RemoveIdentityEntry`(agent_identity)
+- Emits: `IdentityEntryChangeResolved`
+- To: `Stopped`
+
+### `RemoveIdentityEntryMobNotRunningCompleted`
+- From: `Completed`
+- On: `RemoveIdentityEntry`(agent_identity)
+- Emits: `IdentityEntryChangeResolved`
+- To: `Completed`
+
+### `RemoveIdentityEntryMobNotRunningDestroyed`
+- From: `Destroyed`
+- On: `RemoveIdentityEntry`(agent_identity)
+- Emits: `IdentityEntryChangeResolved`
+- To: `Destroyed`
+
+### `ArchiveIdentityEntryArchiving`
+- From: `Running`
+- On: `ArchiveIdentityEntry`(agent_identity)
+- Guards:
+  - `change_archiving`
+- Emits: `IdentityEntryChangeResolved`
+- To: `Running`
+
+### `ArchiveIdentityEntryArchived`
+- From: `Running`
+- On: `ArchiveIdentityEntry`(agent_identity)
+- Guards:
+  - `change_archived`
+- Emits: `IdentityEntryChangeResolved`
+- To: `Running`
+
+### `ArchiveIdentityEntryAlreadyArchived`
+- From: `Running`
+- On: `ArchiveIdentityEntry`(agent_identity)
+- Guards:
+  - `change_already_archived`
+- Emits: `IdentityEntryChangeResolved`
+- To: `Running`
+
+### `ArchiveIdentityEntryOwnedByRoster`
+- From: `Running`
+- On: `ArchiveIdentityEntry`(agent_identity)
+- Guards:
+  - `change_owned_by_roster`
+- Emits: `IdentityEntryChangeResolved`
+- To: `Running`
+
+### `ArchiveIdentityEntryUnknown`
+- From: `Running`
+- On: `ArchiveIdentityEntry`(agent_identity)
+- Guards:
+  - `change_unknown`
+- Emits: `IdentityEntryChangeResolved`
+- To: `Running`
+
+### `ArchiveIdentityEntryInFlight`
+- From: `Running`
+- On: `ArchiveIdentityEntry`(agent_identity)
+- Guards:
+  - `change_in_flight`
+- Emits: `IdentityEntryChangeResolved`
+- To: `Running`
+
+### `ArchiveIdentityEntryNameUnreadable`
+- From: `Running`
+- On: `ArchiveIdentityEntry`(agent_identity)
+- Guards:
+  - `change_name_unreadable`
+- Emits: `IdentityEntryChangeResolved`
+- To: `Running`
+
+### `ArchiveIdentityEntryNonAuthoritative`
+- From: `Running`
+- On: `ArchiveIdentityEntry`(agent_identity)
+- Guards:
+  - `change_non_authoritative`
+- Emits: `IdentityEntryChangeResolved`
+- To: `Running`
+
+### `ArchiveIdentityEntryChangesHeld`
+- From: `Running`
+- On: `ArchiveIdentityEntry`(agent_identity)
+- Guards:
+  - `change_changes_held`
+- Emits: `IdentityEntryChangeResolved`
+- To: `Running`
+
+### `ArchiveIdentityEntryPreparationPending`
+- From: `Running`
+- On: `ArchiveIdentityEntry`(agent_identity)
+- Guards:
+  - `change_preparation_pending`
+- Emits: `IdentityEntryChangeResolved`
+- To: `Running`
+
+### `ArchiveIdentityEntryMobNotRunningStopped`
+- From: `Stopped`
+- On: `ArchiveIdentityEntry`(agent_identity)
+- Emits: `IdentityEntryChangeResolved`
+- To: `Stopped`
+
+### `ArchiveIdentityEntryMobNotRunningCompleted`
+- From: `Completed`
+- On: `ArchiveIdentityEntry`(agent_identity)
+- Emits: `IdentityEntryChangeResolved`
+- To: `Completed`
+
+### `ArchiveIdentityEntryMobNotRunningDestroyed`
+- From: `Destroyed`
+- On: `ArchiveIdentityEntry`(agent_identity)
+- Emits: `IdentityEntryChangeResolved`
+- To: `Destroyed`
+
+### `UnarchiveIdentityEntryRestored`
+- From: `Running`
+- On: `UnarchiveIdentityEntry`(agent_identity)
+- Guards:
+  - `change_restored`
+- Emits: `IdentityEntryChangeResolved`
+- To: `Running`
+
+### `UnarchiveIdentityEntryNotArchived`
+- From: `Running`
+- On: `UnarchiveIdentityEntry`(agent_identity)
+- Guards:
+  - `change_not_archived`
+- Emits: `IdentityEntryChangeResolved`
+- To: `Running`
+
+### `UnarchiveIdentityEntryOwnedByRoster`
+- From: `Running`
+- On: `UnarchiveIdentityEntry`(agent_identity)
+- Guards:
+  - `change_owned_by_roster`
+- Emits: `IdentityEntryChangeResolved`
+- To: `Running`
+
+### `UnarchiveIdentityEntryUnknown`
+- From: `Running`
+- On: `UnarchiveIdentityEntry`(agent_identity)
+- Guards:
+  - `change_unknown`
+- Emits: `IdentityEntryChangeResolved`
+- To: `Running`
+
+### `UnarchiveIdentityEntryInFlight`
+- From: `Running`
+- On: `UnarchiveIdentityEntry`(agent_identity)
+- Guards:
+  - `change_in_flight`
+- Emits: `IdentityEntryChangeResolved`
+- To: `Running`
+
+### `UnarchiveIdentityEntryNameUnreadable`
+- From: `Running`
+- On: `UnarchiveIdentityEntry`(agent_identity)
+- Guards:
+  - `change_name_unreadable`
+- Emits: `IdentityEntryChangeResolved`
+- To: `Running`
+
+### `UnarchiveIdentityEntryNonAuthoritative`
+- From: `Running`
+- On: `UnarchiveIdentityEntry`(agent_identity)
+- Guards:
+  - `change_non_authoritative`
+- Emits: `IdentityEntryChangeResolved`
+- To: `Running`
+
+### `UnarchiveIdentityEntryChangesHeld`
+- From: `Running`
+- On: `UnarchiveIdentityEntry`(agent_identity)
+- Guards:
+  - `change_changes_held`
+- Emits: `IdentityEntryChangeResolved`
+- To: `Running`
+
+### `UnarchiveIdentityEntryMobNotRunningStopped`
+- From: `Stopped`
+- On: `UnarchiveIdentityEntry`(agent_identity)
+- Emits: `IdentityEntryChangeResolved`
+- To: `Stopped`
+
+### `UnarchiveIdentityEntryMobNotRunningCompleted`
+- From: `Completed`
+- On: `UnarchiveIdentityEntry`(agent_identity)
+- Emits: `IdentityEntryChangeResolved`
+- To: `Completed`
+
+### `UnarchiveIdentityEntryMobNotRunningDestroyed`
+- From: `Destroyed`
+- On: `UnarchiveIdentityEntry`(agent_identity)
+- Emits: `IdentityEntryChangeResolved`
+- To: `Destroyed`
+
+### `BeginPreparationConstructionHeld`
+- From: `Running`
+- On: `BeginPreparationConstruction`(agent_identity, attempt, constructed)
+- Guards:
+  - `construction_held`
+- Emits: `PreparationConstructionResolved`
+- To: `Running`
+
+### `BeginPreparationConstructionNotPending`
+- From: `Running`
+- On: `BeginPreparationConstruction`(agent_identity, attempt, constructed)
+- Guards:
+  - `construction_not_pending`
+- Emits: `PreparationConstructionResolved`
+- To: `Running`
+
+### `BeginPreparationConstructionNotConstructed`
+- From: `Running`
+- On: `BeginPreparationConstruction`(agent_identity, attempt, constructed)
+- Guards:
+  - `construction_not_constructed`
+- Emits: `PreparationConstructionResolved`
+- To: `Running`
+
+### `BeginPreparationConstructionConstructionOpen`
+- From: `Running`
+- On: `BeginPreparationConstruction`(agent_identity, attempt, constructed)
+- Guards:
+  - `construction_construction_open`
+- Emits: `PreparationConstructionResolved`
+- To: `Running`
+
+### `BeginPreparationConstructionNonAuthoritative`
+- From: `Running`
+- On: `BeginPreparationConstruction`(agent_identity, attempt, constructed)
+- Guards:
+  - `construction_non_authoritative`
+- Emits: `PreparationConstructionResolved`
+- To: `Running`
+
+### `BeginPreparationConstructionMobNotRunningStopped`
+- From: `Stopped`
+- On: `BeginPreparationConstruction`(agent_identity, attempt, constructed)
+- Emits: `PreparationConstructionResolved`
+- To: `Stopped`
+
+### `BeginPreparationConstructionMobNotRunningCompleted`
+- From: `Completed`
+- On: `BeginPreparationConstruction`(agent_identity, attempt, constructed)
+- Emits: `PreparationConstructionResolved`
+- To: `Completed`
+
+### `BeginPreparationConstructionMobNotRunningDestroyed`
+- From: `Destroyed`
+- On: `BeginPreparationConstruction`(agent_identity, attempt, constructed)
+- Emits: `PreparationConstructionResolved`
+- To: `Destroyed`
+
+### `SettleHostPreparationSeat`
+- From: `Running`
+- On: `SettleHostPreparation`(agent_identity, attempt, constructed, before_deadline, binding_matches)
+- Guards:
+  - `settle_seat`
+- Emits: `PreparationSettleResolved`
+- To: `Running`
+
+### `SettleHostPreparationActivationAccepted`
+- From: `Running`
+- On: `SettleHostPreparation`(agent_identity, attempt, constructed, before_deadline, binding_matches)
+- Guards:
+  - `settle_activation_accepted`
+- Emits: `PreparationSettleResolved`
+- To: `Running`
+
+### `SettleHostPreparationNotPending`
+- From: `Running`
+- On: `SettleHostPreparation`(agent_identity, attempt, constructed, before_deadline, binding_matches)
+- Guards:
+  - `settle_not_pending`
+- Emits: `PreparationSettleResolved`
+- To: `Running`
+
+### `SettleHostPreparationConstructionRequired`
+- From: `Running`
+- On: `SettleHostPreparation`(agent_identity, attempt, constructed, before_deadline, binding_matches)
+- Guards:
+  - `settle_construction_required`
+- Emits: `PreparationSettleResolved`
+- To: `Running`
+
+### `SettleHostPreparationConstructionOpen`
+- From: `Running`
+- On: `SettleHostPreparation`(agent_identity, attempt, constructed, before_deadline, binding_matches)
+- Guards:
+  - `settle_construction_open`
+- Emits: `PreparationSettleResolved`
+- To: `Running`
+
+### `SettleHostPreparationStaleAttempt`
+- From: `Running`
+- On: `SettleHostPreparation`(agent_identity, attempt, constructed, before_deadline, binding_matches)
+- Guards:
+  - `settle_stale_attempt`
+- Emits: `PreparationSettleResolved`
+- To: `Running`
+
+### `SettleHostPreparationExpired`
+- From: `Running`
+- On: `SettleHostPreparation`(agent_identity, attempt, constructed, before_deadline, binding_matches)
+- Guards:
+  - `settle_expired`
+- Emits: `PreparationSettleResolved`
+- To: `Running`
+
+### `SettleHostPreparationMismatch`
+- From: `Running`
+- On: `SettleHostPreparation`(agent_identity, attempt, constructed, before_deadline, binding_matches)
+- Guards:
+  - `settle_mismatch`
+- Emits: `PreparationSettleResolved`
+- To: `Running`
+
+### `SettleHostPreparationActivationPending`
+- From: `Running`
+- On: `SettleHostPreparation`(agent_identity, attempt, constructed, before_deadline, binding_matches)
+- Guards:
+  - `settle_activation_pending`
+- Emits: `PreparationSettleResolved`
+- To: `Running`
+
+### `SettleHostPreparationNonAuthoritative`
+- From: `Running`
+- On: `SettleHostPreparation`(agent_identity, attempt, constructed, before_deadline, binding_matches)
+- Guards:
+  - `settle_non_authoritative`
+- Emits: `PreparationSettleResolved`
+- To: `Running`
+
+### `SettleHostPreparationMobNotRunningStopped`
+- From: `Stopped`
+- On: `SettleHostPreparation`(agent_identity, attempt, constructed, before_deadline, binding_matches)
+- Emits: `PreparationSettleResolved`
+- To: `Stopped`
+
+### `SettleHostPreparationMobNotRunningCompleted`
+- From: `Completed`
+- On: `SettleHostPreparation`(agent_identity, attempt, constructed, before_deadline, binding_matches)
+- Emits: `PreparationSettleResolved`
+- To: `Completed`
+
+### `SettleHostPreparationMobNotRunningDestroyed`
+- From: `Destroyed`
+- On: `SettleHostPreparation`(agent_identity, attempt, constructed, before_deadline, binding_matches)
+- Emits: `PreparationSettleResolved`
+- To: `Destroyed`
+
+### `EndPreparationConstructionEndedRunning`
+- From: `Running`
+- On: `EndPreparationConstruction`(agent_identity, attempt, end)
+- Guards:
+  - `end_ended`
+- Emits: `PreparationConstructionEnded`
+- To: `Running`
+
+### `EndPreparationConstructionEndedStopped`
+- From: `Stopped`
+- On: `EndPreparationConstruction`(agent_identity, attempt, end)
+- Guards:
+  - `end_ended`
+- Emits: `PreparationConstructionEnded`
+- To: `Stopped`
+
+### `EndPreparationConstructionEndedCompleted`
+- From: `Completed`
+- On: `EndPreparationConstruction`(agent_identity, attempt, end)
+- Guards:
+  - `end_ended`
+- Emits: `PreparationConstructionEnded`
+- To: `Completed`
+
+### `EndPreparationConstructionEndedDestroyed`
+- From: `Destroyed`
+- On: `EndPreparationConstruction`(agent_identity, attempt, end)
+- Guards:
+  - `end_ended`
+- Emits: `PreparationConstructionEnded`
+- To: `Destroyed`
+
+### `EndPreparationConstructionNotOpenRunning`
+- From: `Running`
+- On: `EndPreparationConstruction`(agent_identity, attempt, end)
+- Guards:
+  - `end_not_open`
+- Emits: `PreparationConstructionEnded`
+- To: `Running`
+
+### `EndPreparationConstructionNotOpenStopped`
+- From: `Stopped`
+- On: `EndPreparationConstruction`(agent_identity, attempt, end)
+- Guards:
+  - `end_not_open`
+- Emits: `PreparationConstructionEnded`
+- To: `Stopped`
+
+### `EndPreparationConstructionNotOpenCompleted`
+- From: `Completed`
+- On: `EndPreparationConstruction`(agent_identity, attempt, end)
+- Guards:
+  - `end_not_open`
+- Emits: `PreparationConstructionEnded`
+- To: `Completed`
+
+### `EndPreparationConstructionNotOpenDestroyed`
+- From: `Destroyed`
+- On: `EndPreparationConstruction`(agent_identity, attempt, end)
+- Guards:
+  - `end_not_open`
+- Emits: `PreparationConstructionEnded`
+- To: `Destroyed`
+
+### `EndPreparationConstructionActivationPendingRunning`
+- From: `Running`
+- On: `EndPreparationConstruction`(agent_identity, attempt, end)
+- Guards:
+  - `end_activation_pending`
+- Emits: `PreparationConstructionEnded`
+- To: `Running`
+
+### `EndPreparationConstructionActivationPendingStopped`
+- From: `Stopped`
+- On: `EndPreparationConstruction`(agent_identity, attempt, end)
+- Guards:
+  - `end_activation_pending`
+- Emits: `PreparationConstructionEnded`
+- To: `Stopped`
+
+### `EndPreparationConstructionActivationPendingCompleted`
+- From: `Completed`
+- On: `EndPreparationConstruction`(agent_identity, attempt, end)
+- Guards:
+  - `end_activation_pending`
+- Emits: `PreparationConstructionEnded`
+- To: `Completed`
+
+### `EndPreparationConstructionActivationPendingDestroyed`
+- From: `Destroyed`
+- On: `EndPreparationConstruction`(agent_identity, attempt, end)
+- Guards:
+  - `end_activation_pending`
+- Emits: `PreparationConstructionEnded`
+- To: `Destroyed`
 
 ### `SetOperatorInstructionBodyTooLargeRunning`
 - From: `Running`
@@ -19134,8 +20036,10 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `mob_operator_admission_authority` (machine `MobMachine`): `crates/meerkat-mob-mcp/src/agent_tools.rs` — MobMachine operator-admission authority for the mob tool surface: resolve create mob admission from the create-mobs capability observation and resolve profile mutation admission from the mutate-profiles capability observation, emitting the create-mob and profile-mutation admission resolved verdicts the surface mirrors (denied -> access denied)
 - `mob_membership_classifier_authority` (machine `MobMachine`): `crates/meerkat-mob/src/runtime/actor.rs` — MobMachine membership and runtime-incarnation classifiers owned by the actor: probe member admission duplicate, admitted or refused as an identity entry's name without entry custody from machine-owned binding, pending-spawn and entry state; compute respawn generation successor; reconcile desired workers to spawn retain or retire against current bindings, never an identity entry, emitting member spawn required, member retain required, and member retire required; set and observe external member rebind capability available or unavailable; classify turn timeout disposition detached canceled or retryable; and seed orphan budget once at startup, emitting the member admission probed, respawn generation computed, external member rebind capability, and turn timeout disposition classified effects
 - `mob_identity_entry_authority` (machine `MobMachine`): `crates/meerkat-mob/src/runtime/actor/identity_entry_admission.rs` — MobMachine identity entries realized by the actor: refuse an agent-lane member command addressed to an identity entry from the resolved agent lane member admission, and adopt a legacy member as an identity entry from the shell's observation of its spawn row, journaling the adoption before it commits; the entry is seated or unseated with a typed cause, spared by the worker reconcile, and its custody belongs to an open spawn ladder, placed only for an entry hosted on its first use, emitting the agent lane member admission resolved and legacy identity entry adoption resolved effects
-- `mob_declared_apply_authority` (machine `MobMachine`): `crates/meerkat-mob/src/runtime/actor/declared_apply.rs` — MobMachine declared apply realized by the actor: decide one verdict per declared identity from the declaration and member facts and realize it (a Dormant seat, on the entry's archived session when it has one, a same-session restamp, a rotation, a role hold or a typed refusal), refusing every identity of a candidate composition; seal a complete declared roster, marking every unlisted Declared entry whose member is seated and removing every unseated one, leaving one whose spawn is in flight to a later seal, and retire each marked member with the cause Unlisted, whose start row records the mark for replay; let an archived session record go when the session is lost or the host asked for a fresh life; an unseated cause belongs to an entry no member holds, an unlisted mark to a seated Declared entry whose member has no spawn in flight, an archived session record to an identity no member holds, and an entry awaiting its held creation was never created, emitting the identity entry declared, declared roster sealed and archived session forgotten effects
-- `mob_created_identity_entry_authority` (machine `MobMachine`): `crates/meerkat-mob/src/runtime/created_identity.rs` — MobMachine created identity entries realized by the shell at a start: recover each created entry row of the identity store from its presence and the replayed journal after the replay and before the boot plan (a present row of a seated local member records it a Created entry, a present row whose member the journal shows retired records the entry owed its seat with its member's last session as its revival record, a row pending its host's preparation records it unseated for that preparation, a removed row reserves the name as a tombstone, and an unreadable row, a row the replay contradicts or a member row whose origin token this build does not know reserves the name as unreadable), then seat a created entry owed its seat again, Dormant, on its archived session under created custody; no spawn takes a reserved name or the entry of another origin, a tombstoned name is never an entry or a member, an unseated created entry awaits its preparation or is owed its seat, and created custody belongs to an open local ladder of a Created entry, never beside entry custody
+- `mob_declared_apply_authority` (machine `MobMachine`): `crates/meerkat-mob/src/runtime/actor/declared_apply.rs` — MobMachine declared apply realized by the actor: decide one verdict per declared identity from the declaration and member facts and realize it (a Dormant seat, on the entry's archived session when it has one, a same-session restamp, a rotation, a role hold or a typed refusal), refusing every identity of a candidate composition; seal a complete declared roster, marking every unlisted Declared entry whose member is seated and removing every unseated one, leaving one whose spawn is in flight to a later seal, and retire each marked member with the cause Unlisted, whose start row records the mark for replay; unlist one roster-owned identity alone the same way, reading and changing no other entry, and leave it to a later unlist while a spawn, retirement, removal or held construction of it is in flight; answer a store-owned update of an archived identity, or of one awaiting its host's preparation, record only; let an archived session record go when the session is lost or the host asked for a fresh life; an unseated cause belongs to an entry no member holds, an unlisted mark to a seated Declared entry whose member has no spawn in flight, an archived session record to an identity no member holds, and an entry awaiting its held creation was never created, emitting the identity entry declared, declared roster sealed, identity entry unlisted and archived session forgotten effects
+- `mob_created_identity_entry_authority` (machine `MobMachine`): `crates/meerkat-mob/src/runtime/created_identity.rs` — MobMachine created identity entries realized by the shell at a start: recover each created entry row of the identity store from its presence and the replayed journal after the replay and before the boot plan (a present row of a seated local member records it a Created entry, a present row whose member the journal shows retired records the entry owed its seat with its member's last session as its revival record, a row pending its host's preparation records it unseated for that preparation unless the replay seats the published construction of a `constructed` one, a removed row reserves the name as a tombstone, and an unreadable row, a row the replay contradicts or a member row whose origin token this build does not know reserves the name as unreadable), then seat a created entry owed its seat again, Dormant, on its archived session under created custody, and settle the row of a published construction; no spawn takes a reserved name or the entry of another origin, a tombstoned name is never an entry or a member, and created custody belongs to an open ladder of a Created entry, never beside entry custody
+- `mob_identity_change_authority` (machine `MobMachine`): `crates/meerkat-mob/src/runtime/identity_change.rs` — MobMachine identity changes realized by the store-owned writer: a change's commit step decides its admission on its prepared authority from the facts the shell observed there (the store's receipt of the operation, the consent's form, whether a decision's permit binds the change and admits a commit now, whether the requester is the host operator, whether an agent requester's grant is current through its prepared check at this final sink, and whether a store-owned update's expected spec is its identity's current one), records each new store-owned entry (origin Created, unseated with the cause MobMachine derives from the request's facts: its host preparation pending, hosted on its first use, held for its host's creation or its seat owed) or refuses its name typed (an unlisted roster-owned identity's archived session record holds it), and only then stages the seats and writes the change's one store transaction; a refusal anywhere leaves the prepared authority unapplied and writes nothing; one identity's removal ends a held construction of it in the same step, and its archive is refused while it awaits its host's preparation; and the host holds or releases the mob's changes
+- `mob_identity_preparation_authority` (machine `MobMachine`): `crates/meerkat-mob/src/runtime/identity_preparation.rs` — MobMachine host preparation realized by the shell: an identity never seated whose host's rule requires its preparation is unseated for it (a roster-owned one by the declared apply, derived again at each apply, a store-owned one by its create, from its row at a start), and a delivery to it is refused retryable; a settle without a construction commits its receipt and its row and leaves the entry owed its seat, which the shell seats Dormant from its spec or embodies for an owed kickoff, and a `constructed` preparation refuses that settle; a host asks for a held construction of the identity, an attempt the mob owns whose spawn ladder alone may open for the entry, and a settle naming that attempt, decided before its deadline and binding the identity's spec, accepts its activation, journaled by the settle's receipt; from then on no abort, expiry or newer attempt replaces it, and only the membership commit that publishes the construction or its failed publication ends it; an abort, the deadline or a refused construction ends a held attempt with the entry still pending, and an identity holds at most one attempt, emitting the construction resolved, settle resolved and construction ended effects
 - `mob_identity_entry_respawn_authority` (machine `MobMachine`): `crates/meerkat-mob/src/runtime/actor.rs` — MobMachine refuses a fresh-life respawn of an identity entry's member in every phase an entry lives in, realized by the actor: the respawn routes on that verdict, respawning an entry's member on its own session, and the retire-then-spawn admission answers the refusal typed, emitting the respawn refused effect
 - `mob_rotation_target_authority` (machine `MobMachine`): `crates/meerkat-mob/src/runtime/actor/dormant_seat.rs` — MobMachine rotation targets realized by the actor: a same-session successor starts its retirement archive-only on the member's kept binding with its rotation recorded in one step, and its terminal seats the next incarnation Dormant on the same session after the shell released the runtime and kept the session; a restart records a rotation again from its retirement's start row and re-drives it; the intent and its target are recorded together, and a same-session rotation keeps its binding
 - `mob_scoped_release_authority` (machine `MobMachine`): `crates/meerkat-mob/src/runtime/actor/member_wake.rs` — MobMachine scoped member release realized by the actor: a release scoped to a member incarnation that is not the current one on its session is classified stale and releases nothing

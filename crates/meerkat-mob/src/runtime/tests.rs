@@ -46,6 +46,8 @@ mod seat_declared_wiring;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 mod startup_binding_release;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+mod store_owned_identity_rows;
+#[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 mod unborn_seat_wake;
 use crate::definition::{
     BackendConfig, CollectionPolicy, ConditionExpr, DependencyMode, DispatchMode, FlowSpec,
@@ -91995,6 +91997,10 @@ fn summarize_mob_runtime_error(error: &MobError) -> String {
         }
         MobError::MemberAlreadyExists(_) => "meerkat_already_exists".to_string(),
         MobError::IdentityMember { .. } => "identity_member".to_string(),
+        MobError::IdentityChangeRefused { refusal } => {
+            format!("identity_change_refused:{}", refusal.kind())
+        }
+        MobError::IdentityArchived { .. } => "identity_archived".to_string(),
         MobError::SpawnCanceled { .. } => "spawn_canceled".to_string(),
         MobError::ResumeProviderParamsRequireResume { .. } => {
             "resume_provider_params_require_resume".to_string()

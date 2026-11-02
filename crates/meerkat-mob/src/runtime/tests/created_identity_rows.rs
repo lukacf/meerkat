@@ -678,14 +678,18 @@ async fn a_spawn_never_takes_a_tombstoned_or_unreadable_name() {
 }
 
 /// The declared apply never declares over a created entry, a removed one or
-/// an unreadable one: each listing is refused typed for that identity
-/// alone, and the pass goes on and seats the other identity. The created
-/// entry keeps its seat, session and generation.
+/// an unreadable one: the created entry's listing is left as it is with a
+/// typed note (CL-2: a store-owned name's listing is a quiet steady state,
+/// no longer a refusal), the removed and unreadable names' listings are
+/// refused typed for that identity alone, and the pass goes on and seats
+/// the other identity. The created entry keeps its seat, session and
+/// generation.
 ///
 /// RED: drop `DeclareIdentityEntryRefusedNameOwnedByCreated` and the
-/// declared apply's origin guard (`declared_entry_or_no_entry` on the
-/// `DeclareIdentityEntry` arms): the listing of the created entry is
-/// answered `Kept`.
+/// declared apply's custody guard (`entry_of_the_declared_custody` on the
+/// `DeclareIdentityEntry` arms, a roster's declaration acting on a Declared
+/// entry or a free name only): the listing of the created entry is answered
+/// `Kept`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_declared_listing_of_a_created_name_is_refused_for_that_identity_alone() {
     let mut mob = CreatedMob::new("created-declared-listing").await;
@@ -707,8 +711,16 @@ async fn a_declared_listing_of_a_created_name_is_refused_for_that_identity_alone
             declared("plain"),
         ]))
         .await;
+    assert!(
+        matches!(
+            outcome.entries.get(&id("owner")),
+            Some(DeclaredEntryOutcome::Noted {
+                note: crate::runtime::DeclaredEntryNote::OwnedByStore
+            })
+        ),
+        "owner: {outcome:?}"
+    );
     for (name, expected) in [
-        ("owner", DeclaredEntryRefusal::NameOwnedByCreated),
         ("removed", DeclaredEntryRefusal::NameTombstoned),
         ("unreadable", DeclaredEntryRefusal::NameUnreadable),
     ] {
@@ -981,7 +993,10 @@ async fn the_census_reports_incomplete_over_an_unreadable_created_entry() {
         .await;
     mob.put_created(
         "preparing",
-        CreatedIdentityPresence::PendingPreparation { attempt: 1 },
+        CreatedIdentityPresence::PendingPreparation {
+            attempt: 1,
+            constructed: false,
+        },
     )
     .await;
     mob.put_created("removed", CreatedIdentityPresence::Removed)
@@ -1080,7 +1095,10 @@ async fn a_sqlite_resume_recovers_every_created_row_among_host_adopted_intents()
             ("d-removed", CreatedIdentityPresence::Removed),
             (
                 "f-preparing",
-                CreatedIdentityPresence::PendingPreparation { attempt: 1 },
+                CreatedIdentityPresence::PendingPreparation {
+                    attempt: 1,
+                    constructed: false,
+                },
             ),
         ] {
             store
@@ -1380,7 +1398,7 @@ async fn write_created_owner_fixture(name: &str, peer: FixturePeer) {
         .expect("store the created row");
 }
 
-fn rollback_fixture_dir(name: &str) -> std::path::PathBuf {
+pub(super) fn rollback_fixture_dir(name: &str) -> std::path::PathBuf {
     let dir = std::path::PathBuf::from(
         std::env::var_os("MEERKAT_ROLLBACK_FIXTURE_DIR")
             .expect("MEERKAT_ROLLBACK_FIXTURE_DIR names the fixture directory"),
@@ -1438,4 +1456,140 @@ async fn roll_forward_reprojects_on_the_same_session_fixture() {
 #[ignore = "lane:rollback - writes the fixture the published pairs run"]
 async fn a_retire_stale_reconcile_archives_and_roll_forward_reseats_on_the_same_session_fixture() {
     write_created_owner_fixture("created-owner-retire-stale", FixturePeer::Absent).await;
+}
+
+/// Row (RED): unarchiving a store-owned identity seats it Dormant again on
+/// its archived session, its history kept: its first wake revives that
+/// session. Over the persistent session service, where an archived session
+/// stays durable.
+///
+/// RED on the old tree: no archive exists (the archive answers an internal
+/// error).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn unarchiving_seats_it_dormant_on_its_archived_session_with_its_history() {
+    use crate::runtime::{
+        CreatedIdentityRequest, IdentityArchiveChange, IdentityChangeConsentInput,
+        IdentityChangeOutcome, IdentityChangeRequesterInput, IdentityOperation,
+        StoreOwnedIdentityCreate,
+    };
+    let operation = |name: &str| {
+        IdentityOperation::new(
+            name,
+            meerkat_core::approval::decision::Sha256Digest::of(name.as_bytes()).as_str(),
+        )
+    };
+    let allow = IdentityChangeConsentInput::Policy(crate::identity::IdentityPolicyOutcome::Allow);
+    let host = || IdentityChangeRequesterInput::host("console");
+    let mob = CreatedMob::persistent("unarchive-history").await;
+    let created = mob
+        .handle
+        .create_store_owned_identities(
+            StoreOwnedIdentityCreate::new(
+                operation("create-keeper"),
+                host(),
+                vec![CreatedIdentityRequest::new(
+                    crate::identity::CreatedIdentitySpec::new("keeper", "worker"),
+                )],
+            ),
+            allow,
+        )
+        .await
+        .map(|created| created.change);
+    assert!(
+        matches!(created, Ok(IdentityChangeOutcome::Committed { .. })),
+        "{created:?}"
+    );
+    tokio::time::timeout(STEP, mob.handle.ensure_member_live(&id("keeper")))
+        .await
+        .expect("the wake answers")
+        .expect("the wake builds the identity's session");
+    let session = mob.session("keeper").await.expect("the keeper's session");
+    let archived = mob
+        .handle
+        .archive_identity(
+            IdentityArchiveChange::new(operation("archive-keeper"), host(), "keeper"),
+            allow,
+        )
+        .await;
+    assert!(
+        matches!(archived, Ok(IdentityChangeOutcome::Committed { .. })),
+        "{archived:?}"
+    );
+    mob.left("keeper").await;
+    assert_eq!(
+        mob.standing("keeper"),
+        Some(EntryStanding::Unseated(UnseatedEntryCause::Archived))
+    );
+    let restored = mob
+        .handle
+        .unarchive_identity(
+            IdentityArchiveChange::new(operation("unarchive-keeper"), host(), "keeper"),
+            allow,
+        )
+        .await;
+    assert!(
+        matches!(restored, Ok(IdentityChangeOutcome::Committed { .. })),
+        "{restored:?}"
+    );
+    assert_eq!(
+        seated_session(mob.standing("keeper")),
+        Some(session.clone())
+    );
+    assert!(mob.handle.member_unmaterialized(&id("keeper")));
+    tokio::time::timeout(STEP, mob.handle.ensure_member_live(&id("keeper")))
+        .await
+        .expect("the wake answers")
+        .expect("the wake revives the archived session");
+    assert_eq!(mob.session("keeper").await, Some(session));
+}
+
+/// R2.11 row: a store-owned row of this schema version that carries a field
+/// this build does not know reads unreadable, for that identity alone: its
+/// name is reserved (no spawn takes it) and nothing acts on it, while every
+/// other created row of the mob recovers as it is stored (a seated created
+/// entry stays seated).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_v2_row_with_a_field_this_build_does_not_know_reads_unreadable_for_that_identity_alone() {
+    let mut mob = CreatedMob::new("created-unknown-field").await;
+    mob.spawn_worker("owner").await;
+    mob.put_created("owner", CreatedIdentityPresence::Present)
+        .await;
+    let mut stored = serde_json::to_value(created_record(
+        &mob.mob_id(),
+        "later",
+        CreatedIdentityPresence::Present,
+    ))
+    .expect("encode the row");
+    stored
+        .as_object_mut()
+        .expect("a row object")
+        .insert("a_field_this_build_does_not_know".to_string(), true.into());
+    mob.put_raw(
+        "later",
+        serde_json::to_vec(&stored).expect("encode the row"),
+    )
+    .await;
+    mob.restart().await;
+
+    assert!(
+        matches!(
+            mob.read("later"),
+            IdentityEntryRead::Unreadable { member: None }
+        ),
+        "{:?}",
+        mob.read("later")
+    );
+    let error = mob
+        .handle
+        .spawn_spec(worker_spec("later"))
+        .await
+        .expect_err("no spawn takes the unreadable name");
+    assert!(is_identity_member(&error, "later"), "{error:?}");
+    assert_eq!(mob.origin("owner"), Some(IdentityEntryOrigin::Created));
+    assert!(
+        seated_session(mob.standing("owner")).is_some(),
+        "the other created entry is recovered seated"
+    );
+    let census = mob.handle.identity_census().expect("the census");
+    assert_eq!((census.created, census.unreadable), (1, 1));
 }

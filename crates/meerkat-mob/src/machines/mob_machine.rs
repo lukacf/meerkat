@@ -42,18 +42,33 @@ pub use meerkat_machine_schema::catalog::dsl::mob_machine::{
     AgentLaneMemberAdmissionKind, IdentityEntryOrigin, LegacyIdentityEntryAdoptionKind,
     RecoveredPresence,
 };
+// Identity changes (0.9.9): a change's receipt and consent as its commit
+// step observed them, its admission verdict, and the verdict of a new
+// store-owned entry's record. The schema's own types, one definition for
+// both instantiations of the machine.
+pub use meerkat_machine_schema::catalog::dsl::mob_machine::{
+    CreatedIdentityRecordVerdict, IdentityChangeAdmissionKind, IdentityChangeConsentKind,
+    IdentityChangeReceiptKind, IdentityEntryChangeKind, IdentityEntryChangeVerdict,
+};
+// Host preparation (0.9.9): the verdicts of a held construction's start, of
+// a settle and of an attempt's end, and how an attempt ended. The schema's
+// own types, one definition for both instantiations of the machine.
+pub use meerkat_machine_schema::catalog::dsl::mob_machine::{
+    ConstructionEndKind, ConstructionEndVerdict, PreparationConstructionVerdict,
+    PreparationSettleVerdict,
+};
 // Rotation targets and the refusal reason of a fresh-life respawn: the
 // schema's own types, one definition for both instantiations of the machine.
 pub use meerkat_machine_schema::catalog::dsl::mob_machine::{RespawnRefusalReason, RotationTarget};
 // The declared apply: unseated causes, host preparation causes, declared
 // placements, verdicts, the seal's verdict, why an archived session record
-// is let go, the kind of a host's first-boot request and the verdict of an
-// apply's opening. The schema's own types, one definition for both
-// instantiations of the machine.
+// is let go, the kind of a host's first-boot request, the verdict of an
+// apply's opening and of a one-entry unlist. The schema's own types, one
+// definition for both instantiations of the machine.
 pub use meerkat_machine_schema::catalog::dsl::mob_machine::{
     ArchivedSessionForgetReason, DeclaredApplyOpenVerdict, DeclaredRosterSealVerdict,
     EntryPlacementKind, FirstBootRequestKind, HostPreparationCause, IdentityEntryVerdict,
-    UnseatedEntryCause,
+    UnlistEntryVerdict, UnseatedEntryCause,
 };
 // Operator instructions: a record's slot effect and target kind, why a
 // member's delivery is blocked or deferred, why a write is refused, and the
@@ -3686,6 +3701,8 @@ mod tests {
                 privileged_tool_access_policy_present: false,
                 privileged_tooling_present: false,
                 privileged_auth_binding_present: false,
+                privileged_binding_present: false,
+                privileged_placement_present: false,
             };
             set_privileged(&mut input);
             input
@@ -3723,7 +3740,7 @@ mod tests {
 
         // No manage scope + ANY privileged arg present -> Denied. Exercise EACH
         // privileged field independently to prove the machine ORs the full SET.
-        let privileged_setters: [(&str, fn(&mut MobMachineInput)); 8] = [
+        let privileged_setters: [(&str, fn(&mut MobMachineInput)); 10] = [
             ("resume_bridge_session", |i| {
                 if let MobMachineInput::ResolveSpawnMemberAdmission {
                     privileged_resume_bridge_session_present,
@@ -3794,6 +3811,25 @@ mod tests {
                 } = i
                 {
                     *privileged_auth_binding_present = true;
+                }
+            }),
+            // An identity spec's runtime binding and placement (0.9.9).
+            ("binding", |i| {
+                if let MobMachineInput::ResolveSpawnMemberAdmission {
+                    privileged_binding_present,
+                    ..
+                } = i
+                {
+                    *privileged_binding_present = true;
+                }
+            }),
+            ("placement", |i| {
+                if let MobMachineInput::ResolveSpawnMemberAdmission {
+                    privileged_placement_present,
+                    ..
+                } = i
+                {
+                    *privileged_placement_present = true;
                 }
             }),
         ];
@@ -10541,6 +10577,96 @@ mod tests {
         assert!(authority.state().runtime_retire_archive_only.is_empty());
     }
 
+    /// The mob's destroy ends a removal's or an archive's mark with the
+    /// entry: a destroy admitted after the change marked the seated
+    /// store-owned entry, before its own retirement ran, archives the member
+    /// and leaves no mark on an identity with no entry and no member.
+    #[test]
+    fn the_destroy_ends_a_removal_or_archive_mark_with_the_entry() {
+        for kind in [
+            IdentityEntryChangeKind::Remove,
+            IdentityEntryChangeKind::Archive,
+        ] {
+            let (mut authority, member) = dormant_member_authority("destroy-marked");
+            recover_created(
+                &mut authority,
+                &member.identity,
+                RecoveredPresence::Present,
+                None,
+            );
+            let change = match kind {
+                IdentityEntryChangeKind::Remove => MobMachineInput::RemoveIdentityEntry {
+                    agent_identity: member.identity.clone(),
+                },
+                _ => MobMachineInput::ArchiveIdentityEntry {
+                    agent_identity: member.identity.clone(),
+                },
+            };
+            let marked = MobMachineMutator::apply(&mut authority, change)
+                .unwrap_or_else(|error| panic!("{kind:?}: the change answers: {error}"));
+            assert!(
+                marked.effects().iter().any(|effect| matches!(
+                    effect,
+                    MobMachineEffect::IdentityEntryChangeResolved {
+                        verdict: IdentityEntryChangeVerdict::Retiring
+                            | IdentityEntryChangeVerdict::Archiving,
+                        ..
+                    }
+                )),
+                "{kind:?}: the change marks the seated entry"
+            );
+            begin_completion_lifecycle_quiesce(
+                &mut authority,
+                PlacedCompletionLifecycleIntentKind::Destroy,
+            );
+            authority
+                .apply_signal(MobMachineSignal::AdmitDestroyCleanup)
+                .expect("the mob admits its destroy");
+            authority
+                .apply_signal(MobMachineSignal::AdmitDestroyMemberRetire {
+                    mob_id: MobId::from("archive-only-mob"),
+                    agent_identity: member.identity.clone(),
+                    agent_runtime_id: member.runtime_id.clone(),
+                    fence_token: member.fence_token,
+                    generation: Generation(0),
+                    session_id: Some(member.session_id.clone()),
+                })
+                .unwrap_or_else(|error| {
+                    panic!("{kind:?}: the destroy admits the marked member: {error}")
+                });
+            close_ingress_detach(&mut authority, &member);
+            authority
+                .apply_signal(MobMachineSignal::ObserveDestroyMemberRetirementArchived {
+                    agent_identity: member.identity.clone(),
+                    agent_runtime_id: member.runtime_id.clone(),
+                    fence_token: member.fence_token,
+                    generation: Generation(0),
+                    session_id: Some(member.session_id.clone()),
+                    disposal: MemberSessionDisposal::Archived,
+                })
+                .unwrap_or_else(|error| {
+                    panic!("{kind:?}: the destroy archives the marked member: {error}")
+                });
+            let state = authority.state();
+            assert!(
+                !state.identity_to_runtime.contains_key(&member.identity),
+                "{kind:?}"
+            );
+            assert!(
+                !state.identity_entry_origins.contains_key(&member.identity),
+                "{kind:?}: the destroy ends the entry"
+            );
+            assert!(
+                !state.identity_entry_removing.contains(&member.identity),
+                "{kind:?}: no removal mark outlives its entry"
+            );
+            assert!(
+                !state.identity_entry_archiving.contains(&member.identity),
+                "{kind:?}: no archive mark outlives its entry"
+            );
+        }
+    }
+
     /// No retiring member is woken after a restart, so a replayed
     /// retirement start is archive-only and its re-drive routes nothing.
     #[test]
@@ -14119,6 +14245,12 @@ mod tests {
         resume_role: Option<&'a str>,
         /// The kind of the host's first-boot request for the identity.
         first_boot: FirstBootRequestKind,
+        /// Whether a store-owned identity's update declares it (created
+        /// custody), not a host's roster.
+        created_custody: bool,
+        /// Whether the host's rule requires the identity's preparation
+        /// before its first seat.
+        preparation_required: bool,
     }
 
     impl Default for Declaration<'_> {
@@ -14133,6 +14265,8 @@ mod tests {
                 session_memory_only: false,
                 resume_role: None,
                 first_boot: FirstBootRequestKind::None,
+                created_custody: false,
+                preparation_required: false,
             }
         }
     }
@@ -14149,6 +14283,8 @@ mod tests {
             session_memory_only: declaration.session_memory_only,
             resume_session_role: declaration.resume_role.map(str::to_string),
             first_boot: declaration.first_boot,
+            created_custody: declaration.created_custody,
+            preparation_required: declaration.preparation_required,
         }
     }
 
@@ -15744,6 +15880,279 @@ mod tests {
         assert!(!authority.state().identity_to_runtime.contains_key(&removed));
     }
 
+    /// An archived entry's name takes no member from the journal replay,
+    /// whatever order MobMachine meets its facts in. The store holds an
+    /// archive's row beside its member's roster row while the archive's
+    /// retirement runs (a crash between the two leaves both); the boot
+    /// replays the roster before it scans the rows, and the scan then marks
+    /// the entry archiving again so the retirement finishes. A replay after
+    /// the scan recorded the entry archived, local or placed, is refused:
+    /// no member is seated under the archived entry, which stays archived.
+    #[test]
+    fn no_replay_seats_a_member_under_an_archived_entry() {
+        let owner_session_id = SessionId("archived-replay-owner".to_string());
+        let host_id = HostId("archived-replay-host".to_string());
+        let mut authority = MobMachineAuthority::new();
+        authority
+            .apply_signal(MobMachineSignal::RecoverOwnerBridgeSession {
+                bridge_session_id: owner_session_id.clone(),
+                destroy_on_owner_archive: false,
+                implicit_delegation_mob: false,
+            })
+            .expect("recover the placed members' owner");
+        authority
+            .apply_signal(MobMachineSignal::RecoverHostBinding {
+                host_id: host_id.clone(),
+                pubkey: PeerSigningKey([9; 32]),
+                endpoint: PeerAddress("tcp://archived-replay-host.test:4100".to_string()),
+                epoch: 1,
+                binding_generation: 1,
+                protocol_min: 4,
+                protocol_max: 4,
+                engine_version: "archived-replay-engine".to_string(),
+                durable_sessions: true,
+                autonomous_members: true,
+                hard_cancel_member: true,
+                tracked_input_cancel: true,
+                memory_store: true,
+                mcp: true,
+                resolvable_providers: std::collections::BTreeSet::from(["anthropic".to_string()]),
+                approval_forwarding: false,
+                live_endpoint: None,
+            })
+            .expect("recover the placed members' host");
+        let local = |name: &str| MobMachineSignal::RecoverRosterMember {
+            agent_identity: AgentIdentity::from(name),
+            agent_runtime_id: AgentRuntimeId(format!("{name}:0")),
+            fence_token: FenceToken(1),
+            generation: Generation(0),
+            profile_name: "worker".to_string(),
+            runtime_mode: SpawnPolicyRuntimeMode::AutonomousHost,
+            external_addressable: false,
+        };
+        let placed = |name: &str, peer: u8| MobMachineSignal::RecoverCommittedPlacedSpawn {
+            spawn_id: PlacedSpawnId(format!("{name}-spawn")),
+            agent_identity: AgentIdentity::from(name),
+            agent_runtime_id: AgentRuntimeId(format!("{name}:0")),
+            generation: Generation(0),
+            fence_token: FenceToken(1),
+            host_id: host_id.clone(),
+            host_binding_generation: 1,
+            member_session_id: SessionId(format!("{name}-session")),
+            member_peer_endpoint: MemberPeerEndpoint::new(
+                PeerName(format!("mob/worker/{name}")),
+                PeerId(format!("{name}-peer")),
+                PeerAddress(format!("tcp://{name}.test:4200")),
+                PeerSigningKey([peer; 32]),
+            ),
+            profile_name: "worker".to_string(),
+            runtime_mode: SpawnPolicyRuntimeMode::AutonomousHost,
+            external_addressable: true,
+            provision_operation_id: format!("{name}-operation"),
+            operation_owner_session_id: owner_session_id.clone(),
+        };
+        // The roster rows of names with no entry replay into seats.
+        authority
+            .apply_signal(local("archived-replay-local-kept"))
+            .expect("a local roster row replays");
+        authority
+            .apply_signal(placed("archived-replay-placed-kept", 3))
+            .expect("a placed roster row replays");
+        for (name, replay) in [
+            ("archived-replay-local", local("archived-replay-local")),
+            (
+                "archived-replay-placed",
+                placed("archived-replay-placed", 4),
+            ),
+        ] {
+            let archived = AgentIdentity::from(name);
+            recover_created(&mut authority, &archived, RecoveredPresence::Archived, None);
+            assert!(
+                authority.apply_signal(replay).is_err(),
+                "no replay seats a member under the archived entry {name}"
+            );
+            let state = authority.state();
+            assert!(
+                !state.identity_to_runtime.contains_key(&archived),
+                "{name} has no member"
+            );
+            assert_eq!(
+                state.identity_entry_unseated.get(&archived),
+                Some(&UnseatedEntryCause::Archived),
+                "{name} stays archived"
+            );
+        }
+    }
+
+    /// No journal replay turns a Created entry Declared, whatever order
+    /// MobMachine meets the replay of a member's entry row and the scan of its
+    /// created entry row in. The boot replays first: the Declared entry
+    /// stands, and the scan's Present row contradicts it, reserving the name
+    /// as unreadable. Scanned first, the Created entry stands, and the replay
+    /// of a Declared row is refused. A replay of the entry's own origin
+    /// records it again (the control).
+    #[test]
+    fn no_replay_turns_a_created_entry_declared() {
+        let mut authority = MobMachineAuthority::new();
+        let seat = |authority: &mut MobMachineAuthority, identity: &AgentIdentity| {
+            authority
+                .apply_signal(MobMachineSignal::RecoverRosterMember {
+                    agent_identity: identity.clone(),
+                    agent_runtime_id: AgentRuntimeId(format!("{}:0", identity.0)),
+                    fence_token: FenceToken(1),
+                    generation: Generation(0),
+                    profile_name: "worker".to_string(),
+                    runtime_mode: SpawnPolicyRuntimeMode::AutonomousHost,
+                    external_addressable: false,
+                })
+                .expect("the roster row replays");
+        };
+        let replay = |identity: &AgentIdentity, origin: IdentityEntryOrigin| {
+            MobMachineSignal::RecoverIdentityEntry {
+                agent_identity: identity.clone(),
+                agent_runtime_id: AgentRuntimeId(format!("{}:0", identity.0)),
+                origin,
+            }
+        };
+
+        // The boot's order: the replay, then the scan.
+        let replayed_first = AgentIdentity::from("origin-replayed-first");
+        seat(&mut authority, &replayed_first);
+        authority
+            .apply_signal(replay(&replayed_first, IdentityEntryOrigin::Declared))
+            .expect("the replay records the Declared entry");
+        recover_created(
+            &mut authority,
+            &replayed_first,
+            RecoveredPresence::Present,
+            None,
+        );
+        assert_eq!(
+            authority
+                .state()
+                .identity_entry_origins
+                .get(&replayed_first),
+            Some(&IdentityEntryOrigin::Declared),
+            "the Declared entry stands"
+        );
+        assert!(
+            authority
+                .state()
+                .identity_entry_unreadable
+                .contains(&replayed_first),
+            "the contradicting row reserves the name"
+        );
+
+        // The other order: the scan, then the replay.
+        let scanned_first = AgentIdentity::from("origin-scanned-first");
+        seat(&mut authority, &scanned_first);
+        recover_created(
+            &mut authority,
+            &scanned_first,
+            RecoveredPresence::Present,
+            None,
+        );
+        assert!(
+            authority
+                .apply_signal(replay(&scanned_first, IdentityEntryOrigin::Declared))
+                .is_err(),
+            "no replay turns the Created entry Declared"
+        );
+        assert_eq!(
+            authority.state().identity_entry_origins.get(&scanned_first),
+            Some(&IdentityEntryOrigin::Created),
+            "the Created entry stands"
+        );
+
+        // The control: a replay of the entry's own origin records it again.
+        authority
+            .apply_signal(replay(&scanned_first, IdentityEntryOrigin::Created))
+            .expect("a replay of the entry's own origin is recorded");
+        assert_eq!(
+            authority.state().identity_entry_origins.get(&scanned_first),
+            Some(&IdentityEntryOrigin::Created)
+        );
+    }
+
+    /// A later incarnation's Created row replays over a stale Declared
+    /// origin. The journal records no end of an entry that ends unseated (the
+    /// seal's or a one-entry unlist's end of an entry no member holds), so a
+    /// roster-owned identity whose member retired with no archived session,
+    /// and whose entry the seal then ended, replays as its Declared row left
+    /// it, owed its seat; a store-owned identity created under the freed name
+    /// is seated, and its Created row takes the origin over. The scan's
+    /// Present row of that incarnation then answers Seated.
+    #[test]
+    fn a_created_row_replays_over_a_stale_declared_origin() {
+        let mut authority = MobMachineAuthority::new();
+        let identity = AgentIdentity::from("origin-stale-declared");
+        let runtime =
+            |generation: u64| AgentRuntimeId(format!("origin-stale-declared:{generation}"));
+        let seat = |authority: &mut MobMachineAuthority, generation: u64| {
+            authority
+                .apply_signal(MobMachineSignal::RecoverRosterMember {
+                    agent_identity: identity.clone(),
+                    agent_runtime_id: runtime(generation),
+                    fence_token: FenceToken(generation + 1),
+                    generation: Generation(generation),
+                    profile_name: "worker".to_string(),
+                    runtime_mode: SpawnPolicyRuntimeMode::AutonomousHost,
+                    external_addressable: false,
+                })
+                .expect("the roster row replays");
+        };
+        let entry =
+            |generation: u64, origin: IdentityEntryOrigin| MobMachineSignal::RecoverIdentityEntry {
+                agent_identity: identity.clone(),
+                agent_runtime_id: runtime(generation),
+                origin,
+            };
+
+        // X:0, Declared, and its retirement with no archived session.
+        seat(&mut authority, 0);
+        authority
+            .apply_signal(entry(0, IdentityEntryOrigin::Declared))
+            .expect("the Declared row replays");
+        authority
+            .apply_signal(MobMachineSignal::RecoverRosterMemberRetired {
+                agent_identity: identity.clone(),
+                agent_runtime_id: runtime(0),
+                generation: Generation(0),
+                preserve_machine_topology: false,
+                preservation_started: false,
+                session_archived: false,
+                hosted_incarnation: false,
+            })
+            .expect("the retirement replays");
+        assert_eq!(
+            authority.state().identity_entry_origins.get(&identity),
+            Some(&IdentityEntryOrigin::Declared),
+            "the stale Declared origin is kept, owed its seat"
+        );
+
+        // X:1, seated, and its Created row.
+        seat(&mut authority, 1);
+        authority
+            .apply_signal(entry(1, IdentityEntryOrigin::Created))
+            .expect("the Created row takes the stale Declared origin over");
+        assert_eq!(
+            authority.state().identity_entry_origins.get(&identity),
+            Some(&IdentityEntryOrigin::Created)
+        );
+
+        // The scan's Present row of the incarnation answers Seated.
+        recover_created(&mut authority, &identity, RecoveredPresence::Present, None);
+        let state = authority.state();
+        assert_eq!(
+            state.identity_entry_origins.get(&identity),
+            Some(&IdentityEntryOrigin::Created)
+        );
+        assert!(
+            !state.identity_entry_unreadable.contains(&identity),
+            "the Present row is no contradiction"
+        );
+    }
+
     /// A created entry row of a name a spawn ladder acts for is answered
     /// unreadable: it ends neither the entry nor the ladder's custody, so no
     /// custody outlives the entry it was opened for
@@ -16114,6 +16523,277 @@ mod tests {
         );
     }
 
+    /// A store-owned entry hosted on its first use is created by its host's
+    /// placed spawn holding its created custody: the remote ladder opens for
+    /// it under that custody (a ladder without custody is refused its name),
+    /// and its abort drops the custody and leaves the entry hosted on its
+    /// first use.
+    #[test]
+    fn a_placed_ladder_under_created_custody_takes_a_hosted_store_owned_entry() {
+        let mut authority = MobMachineAuthority::new();
+        let identity = AgentIdentity::from("placed-created");
+        let transition = MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::RecordCreatedIdentityEntry {
+                agent_identity: identity.clone(),
+                preparation_required: false,
+                placement: EntryPlacementKind::Placed,
+                held_creation: false,
+            },
+        )
+        .expect("the record answers");
+        assert!(
+            transition.effects().iter().any(|effect| matches!(
+                effect,
+                MobMachineEffect::CreatedIdentityEntryRecorded {
+                    verdict: CreatedIdentityRecordVerdict::Recorded,
+                    ..
+                }
+            )),
+            "a new store-owned entry may be hosted on its first use"
+        );
+        let host = HostId("placed-created-host".to_string());
+        let spawn_id = PlacedSpawnId("placed-created-spawn".to_string());
+        authorize_remote_placed_spawn(&mut authority, &identity, &host, "spec-digest");
+        assert!(
+            MobMachineMutator::apply(
+                &mut authority,
+                begin_remote_placed_spawn(&identity, &host, &spawn_id),
+            )
+            .is_err(),
+            "a placed spawn without custody is refused the entry's name"
+        );
+        let begin = match begin_remote_placed_spawn(&identity, &host, &spawn_id) {
+            MobMachineInput::BeginSpawnExec {
+                agent_identity,
+                agent_runtime_id,
+                fence_token,
+                generation,
+                profile_material_digest,
+                external_addressable,
+                runtime_mode,
+                bridge_session_id,
+                replacing,
+                placement,
+                workgraph_required,
+                rust_bundles_present,
+                per_spawn_external_tools_present,
+                mob_default_external_tools_present,
+                default_llm_client_override_present,
+                host_surface_mcp_allowlist_present,
+                inherited_tool_filter_present,
+                shell_env_present,
+                mcp_stdio_env_present,
+                mcp_http_headers_present,
+                memory_required,
+                mcp_required,
+                resume_session_id,
+                placed_spawn_id,
+                placed_provision_operation_id,
+                placed_operation_owner_session_id,
+                effective_profile_override_present,
+                effective_model_override_present,
+                ..
+            } => MobMachineInput::BeginSpawnExec {
+                agent_identity,
+                agent_runtime_id,
+                fence_token,
+                generation,
+                profile_material_digest,
+                external_addressable,
+                runtime_mode,
+                bridge_session_id,
+                replacing,
+                placement,
+                workgraph_required,
+                rust_bundles_present,
+                per_spawn_external_tools_present,
+                mob_default_external_tools_present,
+                default_llm_client_override_present,
+                host_surface_mcp_allowlist_present,
+                inherited_tool_filter_present,
+                shell_env_present,
+                mcp_stdio_env_present,
+                mcp_http_headers_present,
+                memory_required,
+                mcp_required,
+                resume_session_id,
+                placed_spawn_id,
+                placed_provision_operation_id,
+                placed_operation_owner_session_id,
+                effective_profile_override_present,
+                effective_model_override_present,
+                entry_custody: false,
+                created_custody: true,
+            },
+            other => panic!("the placed spawn opens with BeginSpawnExec, got {other:?}"),
+        };
+        MobMachineMutator::apply(&mut authority, begin)
+            .expect("the placed ladder opens under created custody");
+        let state = authority.state();
+        assert_eq!(
+            state.spawn_exec_phase.get(&identity),
+            Some(&SpawnExecPhase::MaterializePending)
+        );
+        assert!(state.spawn_exec_created_custody.contains(&identity));
+        assert!(!state.spawn_exec_entry_custody.contains(&identity));
+        MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::AbortSpawnExec {
+                agent_identity: identity.clone(),
+            },
+        )
+        .expect("the ladder aborts");
+        let state = authority.state();
+        assert!(!state.spawn_exec_created_custody.contains(&identity));
+        assert_eq!(
+            state.identity_entry_unseated.get(&identity),
+            Some(&UnseatedEntryCause::HostedOnFirstUse),
+            "the entry stays hosted on its first use"
+        );
+        assert_eq!(
+            state.identity_entry_origins.get(&identity),
+            Some(&IdentityEntryOrigin::Created)
+        );
+    }
+
+    /// The admission of one identity change answers in its precedence: a
+    /// receipt of the same request replays it even when its spec is no
+    /// longer current, a changes hold refuses it first, and a store-owned
+    /// update decided against another spec than its identity's current one
+    /// is stale only once everything else admits it.
+    #[test]
+    fn an_identity_change_admission_answers_a_stale_spec_after_a_replay() {
+        let (mut authority, _) = dormant_member_authority("change-admission");
+        let admit = |authority: &mut MobMachineAuthority,
+                     receipt: IdentityChangeReceiptKind,
+                     spec_current: bool| {
+            let transition = MobMachineMutator::apply(
+                authority,
+                MobMachineInput::AdmitIdentityChange {
+                    receipt,
+                    consent: IdentityChangeConsentKind::Policy,
+                    permit_binds: false,
+                    permit_admits: false,
+                    host_operator: false,
+                    grant_current: true,
+                    spec_current,
+                },
+            )
+            .expect("the admission answers every change");
+            transition
+                .effects()
+                .iter()
+                .find_map(|effect| match effect {
+                    MobMachineEffect::IdentityChangeAdmissionResolved { verdict } => Some(*verdict),
+                    _ => None,
+                })
+                .expect("the admission's verdict")
+        };
+        assert_eq!(
+            admit(&mut authority, IdentityChangeReceiptKind::Absent, true),
+            IdentityChangeAdmissionKind::Admitted
+        );
+        assert_eq!(
+            admit(&mut authority, IdentityChangeReceiptKind::Absent, false),
+            IdentityChangeAdmissionKind::StaleSpec
+        );
+        assert_eq!(
+            admit(&mut authority, IdentityChangeReceiptKind::Same, false),
+            IdentityChangeAdmissionKind::Replayed
+        );
+        MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::SetIdentityChangesHeld { held: true },
+        )
+        .expect("the host holds the changes");
+        assert_eq!(
+            admit(&mut authority, IdentityChangeReceiptKind::Absent, false),
+            IdentityChangeAdmissionKind::ChangesHeld
+        );
+    }
+
+    /// A store-owned identity's update declares its Created entry through
+    /// the declared apply's own verdicts (created custody): the same spec
+    /// keeps it, another runtime mode restamps it, another profile with the
+    /// migration from its current role migrates it, and the entry stays
+    /// Created. A roster's declaration of the name is refused as the store's
+    /// (RefusedNameOwnedByCreated). A store-owned update's declaration of an
+    /// archived Created entry is answered record only (its row is the whole
+    /// change: MobMachine routes it from the step's own state, no longer the
+    /// shell from a row read before it), and no arm takes one of a Declared
+    /// entry.
+    #[test]
+    fn a_store_owned_update_takes_the_declared_apply_verdicts_under_created_custody() {
+        let (mut authority, member) = dormant_member_authority("created-updated");
+        recover_created(
+            &mut authority,
+            &member.identity,
+            RecoveredPresence::Present,
+            None,
+        );
+        let created = |declaration: Declaration<'static>| Declaration {
+            created_custody: true,
+            ..declaration
+        };
+        for (declaration, verdict) in [
+            (created(Declaration::default()), IdentityEntryVerdict::Kept),
+            (
+                created(Declaration {
+                    runtime_mode: SpawnPolicyRuntimeMode::TurnDriven,
+                    ..Declaration::default()
+                }),
+                IdentityEntryVerdict::RuntimeModeRestamp,
+            ),
+            (
+                created(Declaration {
+                    profile: "other",
+                    migration_from: Some("test"),
+                    ..Declaration::default()
+                }),
+                IdentityEntryVerdict::RoleMigrate,
+            ),
+            (
+                Declaration::default(),
+                IdentityEntryVerdict::RefusedNameOwnedByCreated,
+            ),
+        ] {
+            assert_eq!(
+                declare(&mut authority, &member.identity, declaration),
+                verdict
+            );
+            assert_eq!(
+                authority
+                    .state()
+                    .identity_entry_origins
+                    .get(&member.identity),
+                Some(&IdentityEntryOrigin::Created),
+                "the entry stays Created"
+            );
+        }
+
+        let declared = AgentIdentity::from("declared-updated");
+        assert_eq!(
+            declare(&mut authority, &declared, Declaration::default()),
+            IdentityEntryVerdict::SeatOwed
+        );
+        let archived = AgentIdentity::from("archived-updated");
+        recover_created(&mut authority, &archived, RecoveredPresence::Archived, None);
+        assert_eq!(
+            declare(&mut authority, &archived, created(Declaration::default())),
+            IdentityEntryVerdict::RecordOnly,
+            "an archived identity's update changes its row alone"
+        );
+        assert!(
+            MobMachineMutator::apply(
+                &mut authority,
+                declare_input(&declared, created(Declaration::default())),
+            )
+            .is_err(),
+            "no arm declares a Declared entry under created custody"
+        );
+    }
+
     /// No worker reconcile spawns a removed name or retires a member whose
     /// name is unreadable, the agent lane refuses that member as an identity
     /// member, and the legacy adoption adopts neither it nor a Created entry.
@@ -16203,5 +16883,933 @@ mod tests {
                 ..
             }
         )));
+    }
+
+    // ---------------------------------------------------------------------
+    // Host preparation and held constructions (0.9.9)
+    // ---------------------------------------------------------------------
+
+    /// A held construction's start (`BeginPreparationConstruction`).
+    fn begin_construction(
+        authority: &mut MobMachineAuthority,
+        identity: &AgentIdentity,
+        attempt: u64,
+        constructed: bool,
+    ) -> PreparationConstructionVerdict {
+        let transition = MobMachineMutator::apply(
+            authority,
+            MobMachineInput::BeginPreparationConstruction {
+                agent_identity: identity.clone(),
+                attempt,
+                constructed,
+            },
+        )
+        .expect("a construction's start answers");
+        transition
+            .effects()
+            .iter()
+            .find_map(|effect| match effect {
+                MobMachineEffect::PreparationConstructionResolved { verdict, .. } => Some(*verdict),
+                _ => None,
+            })
+            .expect("a construction's start emits its verdict")
+    }
+
+    /// A settle of an identity's preparation (`SettleHostPreparation`).
+    fn settle_preparation(
+        authority: &mut MobMachineAuthority,
+        identity: &AgentIdentity,
+        attempt: Option<u64>,
+        before_deadline: bool,
+        binding_matches: bool,
+    ) -> PreparationSettleVerdict {
+        let transition = MobMachineMutator::apply(
+            authority,
+            MobMachineInput::SettleHostPreparation {
+                agent_identity: identity.clone(),
+                attempt,
+                constructed: true,
+                before_deadline,
+                binding_matches,
+            },
+        )
+        .expect("a settle answers");
+        transition
+            .effects()
+            .iter()
+            .find_map(|effect| match effect {
+                MobMachineEffect::PreparationSettleResolved { verdict, .. } => Some(*verdict),
+                _ => None,
+            })
+            .expect("a settle emits its verdict")
+    }
+
+    /// An attempt's end (`EndPreparationConstruction`).
+    fn end_construction(
+        authority: &mut MobMachineAuthority,
+        identity: &AgentIdentity,
+        attempt: u64,
+        end: ConstructionEndKind,
+    ) -> ConstructionEndVerdict {
+        let transition = MobMachineMutator::apply(
+            authority,
+            MobMachineInput::EndPreparationConstruction {
+                agent_identity: identity.clone(),
+                attempt,
+                end,
+            },
+        )
+        .expect("an attempt's end answers");
+        transition
+            .effects()
+            .iter()
+            .find_map(|effect| match effect {
+                MobMachineEffect::PreparationConstructionEnded { verdict, .. } => Some(*verdict),
+                _ => None,
+            })
+            .expect("an attempt's end emits its verdict")
+    }
+
+    /// The membership commit of a held construction's ladder, as the
+    /// publication of its activation commits it.
+    fn publish_construction(member: &SeatedMember, generation: Generation) -> MobMachineInput {
+        MobMachineInput::CommitSpawnMembership {
+            agent_identity: member.identity.clone(),
+            agent_runtime_id: member.runtime_id.clone(),
+            fence_token: member.fence_token,
+            generation,
+            profile_material_digest: "declared-seat-profile-digest".to_string(),
+            external_addressable: false,
+            runtime_mode: SpawnPolicyRuntimeMode::AutonomousHost,
+            bridge_session_id: Some(member.session_id.clone()),
+            replacing: None,
+            member_peer_endpoint: None,
+            spec_digest_echo: None,
+            ack_engine_version: None,
+            placed_spawn_id: None,
+            provision_operation_id: None,
+            definition_wiring_exempt: false,
+        }
+    }
+
+    /// Row: a roster's declaration of an identity never created whose host's
+    /// rule requires its preparation leaves it unseated, PreparationPending,
+    /// derived again at each apply; a declaration that no longer requires
+    /// it owes its seat. A store-owned identity's update requires none.
+    #[test]
+    fn a_declared_identity_awaits_its_preparation_until_its_rule_requires_none() {
+        let mut authority = MobMachineAuthority::new();
+        let identity = AgentIdentity::from("prepared");
+        let required = || Declaration {
+            preparation_required: true,
+            ..Declaration::default()
+        };
+        for _ in 0..2 {
+            assert_eq!(
+                declare(&mut authority, &identity, required()),
+                IdentityEntryVerdict::PreparationPending
+            );
+            assert_eq!(
+                authority.state().identity_entry_unseated.get(&identity),
+                Some(&UnseatedEntryCause::PreparationPending)
+            );
+            assert_eq!(
+                authority.state().identity_entry_origins.get(&identity),
+                Some(&IdentityEntryOrigin::Declared)
+            );
+        }
+        assert_eq!(
+            declare(&mut authority, &identity, Declaration::default()),
+            IdentityEntryVerdict::SeatOwed
+        );
+        assert_eq!(
+            authority.state().identity_entry_unseated.get(&identity),
+            Some(&UnseatedEntryCause::SeatOwed)
+        );
+        // A seated identity's rule asks nothing of it.
+        let seated = seat_live_entry_member(&mut authority, "seated-prepared", 73);
+        assert_eq!(
+            declare(&mut authority, &seated.identity, required()),
+            IdentityEntryVerdict::Kept
+        );
+    }
+
+    /// Row: a held construction's attempt is accepted once and nothing
+    /// replaces it. MobMachine holds one attempt of an entry awaiting its
+    /// preparation, and only its ladder opens for the entry; a settle that
+    /// names another attempt, is decided at the deadline, or does not bind
+    /// the construction is refused, and one without an attempt is refused
+    /// for a `constructed` preparation; the settle naming the held attempt
+    /// accepts its activation, and from then on no abort, expiry, newer
+    /// attempt or declaration replaces it, and no membership commit but its
+    /// publication's seats the entry, which ends the attempt.
+    #[test]
+    fn a_held_construction_is_accepted_once_and_nothing_replaces_it() {
+        let mut authority = MobMachineAuthority::new();
+        let identity = AgentIdentity::from("constructed");
+        assert_eq!(
+            declare(
+                &mut authority,
+                &identity,
+                Declaration {
+                    preparation_required: true,
+                    ..Declaration::default()
+                }
+            ),
+            IdentityEntryVerdict::PreparationPending
+        );
+        let member = SeatedMember {
+            identity: identity.clone(),
+            runtime_id: AgentRuntimeId("constructed:0".to_string()),
+            session_id: SessionId::from("session-constructed".to_string()),
+            fence_token: FenceToken(7),
+        };
+        assert_eq!(
+            begin_construction(&mut authority, &identity, 1, false),
+            PreparationConstructionVerdict::NotConstructed
+        );
+        assert_eq!(
+            begin_construction(&mut authority, &identity, 1, true),
+            PreparationConstructionVerdict::Held
+        );
+        assert_eq!(
+            begin_construction(&mut authority, &identity, 2, true),
+            PreparationConstructionVerdict::ConstructionOpen
+        );
+        // Only the held attempt's ladder opens for the entry.
+        open_custody_seat_ladder(&mut authority, &member, Generation(0));
+        assert!(
+            MobMachineMutator::apply(&mut authority, publish_construction(&member, Generation(0)))
+                .is_err(),
+            "no membership commit publishes an attempt whose activation was not accepted"
+        );
+        assert_eq!(
+            settle_preparation(&mut authority, &identity, Some(2), true, true),
+            PreparationSettleVerdict::StaleAttempt
+        );
+        assert_eq!(
+            settle_preparation(&mut authority, &identity, Some(1), false, true),
+            PreparationSettleVerdict::Expired
+        );
+        assert_eq!(
+            settle_preparation(&mut authority, &identity, Some(1), true, false),
+            PreparationSettleVerdict::Mismatch
+        );
+        assert_eq!(
+            settle_preparation(&mut authority, &identity, None, true, true),
+            PreparationSettleVerdict::ConstructionRequired
+        );
+        assert_eq!(
+            settle_preparation(&mut authority, &identity, Some(1), true, true),
+            PreparationSettleVerdict::ActivationAccepted
+        );
+        assert!(
+            authority
+                .state()
+                .identity_entry_constructions_held
+                .is_empty()
+        );
+        assert_eq!(
+            authority
+                .state()
+                .identity_entry_constructions_activating
+                .get(&identity),
+            Some(&1)
+        );
+        for end in [ConstructionEndKind::Aborted, ConstructionEndKind::Expired] {
+            assert_eq!(
+                end_construction(&mut authority, &identity, 1, end),
+                ConstructionEndVerdict::ActivationPending
+            );
+        }
+        assert_eq!(
+            begin_construction(&mut authority, &identity, 2, true),
+            PreparationConstructionVerdict::ConstructionOpen
+        );
+        assert_eq!(
+            settle_preparation(&mut authority, &identity, Some(1), true, true),
+            PreparationSettleVerdict::ActivationPending
+        );
+        assert_eq!(
+            declare(
+                &mut authority,
+                &identity,
+                Declaration {
+                    preparation_required: true,
+                    ..Declaration::default()
+                }
+            ),
+            IdentityEntryVerdict::LifecycleInFlight,
+            "an apply leaves an entry with an open attempt to the attempt's end"
+        );
+        MobMachineMutator::apply(&mut authority, publish_construction(&member, Generation(0)))
+            .expect("the accepted activation's publication commits its membership");
+        let state = authority.state();
+        assert!(state.identity_to_runtime.contains_key(&identity));
+        assert!(!state.identity_entry_unseated.contains_key(&identity));
+        assert!(
+            state.identity_entry_constructions_activating.is_empty(),
+            "the publication ends the attempt"
+        );
+        assert_eq!(
+            state.identity_entry_origins.get(&identity),
+            Some(&IdentityEntryOrigin::Declared)
+        );
+    }
+
+    /// Whether a ladder of `member` at `generation` opens holding the given
+    /// custodies (`BeginSpawnExec`), its profile authorized first.
+    fn try_open_seat_ladder(
+        authority: &mut MobMachineAuthority,
+        member: &SeatedMember,
+        generation: Generation,
+        entry_custody: bool,
+        created_custody: bool,
+    ) -> bool {
+        let profile_material_digest = "declared-seat-profile-digest".to_string();
+        MobMachineMutator::apply(
+            authority,
+            MobMachineInput::AuthorizeSpawnProfile {
+                agent_identity: member.identity.clone(),
+                profile_name: "test".to_string(),
+                model: "test-model".to_string(),
+                profile_material_digest: profile_material_digest.clone(),
+                tool_config_digest: "test-tool-config-digest".to_string(),
+                skills_digest: "test-skills-digest".to_string(),
+                provider_params_digest: None,
+                output_schema_digest: None,
+                external_addressable: false,
+                resolved_spec_digest: None,
+            },
+        )
+        .expect("the seat's profile is authorized");
+        MobMachineMutator::apply(
+            authority,
+            MobMachineInput::BeginSpawnExec {
+                agent_identity: member.identity.clone(),
+                agent_runtime_id: member.runtime_id.clone(),
+                fence_token: member.fence_token,
+                generation,
+                profile_material_digest,
+                external_addressable: false,
+                runtime_mode: SpawnPolicyRuntimeMode::AutonomousHost,
+                bridge_session_id: Some(member.session_id.clone()),
+                replacing: None,
+                placement: None,
+                workgraph_required: false,
+                rust_bundles_present: false,
+                per_spawn_external_tools_present: false,
+                mob_default_external_tools_present: false,
+                default_llm_client_override_present: false,
+                host_surface_mcp_allowlist_present: false,
+                inherited_tool_filter_present: false,
+                shell_env_present: false,
+                mcp_stdio_env_present: false,
+                mcp_http_headers_present: false,
+                memory_required: false,
+                mcp_required: false,
+                resume_session_id: None,
+                placed_spawn_id: None,
+                placed_provision_operation_id: None,
+                placed_operation_owner_session_id: None,
+                effective_profile_override_present: false,
+                effective_model_override_present: false,
+                entry_custody,
+                created_custody,
+            },
+        )
+        .is_ok()
+    }
+
+    /// Row (RED): a construction's own spawn opens its ladder at its
+    /// publication, after the settle accepted its activation: the shell
+    /// opens a spawn's ladder once its provision returned, and a held
+    /// construction's provision returns only once its accepted activation
+    /// published the member. The ladder opens holding the entry's custody
+    /// while the attempt is activating, and its membership commit seats the
+    /// entry and ends the attempt, for either custody.
+    ///
+    /// RED on the old tree: a ladder takes an entry awaiting its preparation
+    /// only while its attempt is held, so the accepted activation's own
+    /// ladder is refused and its publication fails.
+    #[test]
+    fn an_accepted_activations_construction_opens_its_ladder_at_its_publication() {
+        let mut authority = MobMachineAuthority::new();
+        let roster = AgentIdentity::from("roster-built");
+        assert_eq!(
+            declare(
+                &mut authority,
+                &roster,
+                Declaration {
+                    preparation_required: true,
+                    ..Declaration::default()
+                }
+            ),
+            IdentityEntryVerdict::PreparationPending
+        );
+        let created = AgentIdentity::from("store-built");
+        let recorded = MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::RecordCreatedIdentityEntry {
+                agent_identity: created.clone(),
+                preparation_required: true,
+                placement: EntryPlacementKind::Local,
+                held_creation: false,
+            },
+        )
+        .expect("the record answers");
+        assert!(recorded.effects().iter().any(|effect| matches!(
+            effect,
+            MobMachineEffect::CreatedIdentityEntryRecorded {
+                verdict: CreatedIdentityRecordVerdict::Recorded,
+                ..
+            }
+        )));
+        for (
+            identity,
+            runtime_id,
+            session_id,
+            fence_token,
+            entry_custody,
+            created_custody,
+            origin,
+        ) in [
+            (
+                &roster,
+                "roster-built:0",
+                "session-roster-built",
+                11,
+                true,
+                false,
+                IdentityEntryOrigin::Declared,
+            ),
+            (
+                &created,
+                "store-built:0",
+                "session-store-built",
+                12,
+                false,
+                true,
+                IdentityEntryOrigin::Created,
+            ),
+        ] {
+            let member = SeatedMember {
+                identity: identity.clone(),
+                runtime_id: AgentRuntimeId(runtime_id.to_string()),
+                session_id: SessionId::from(session_id.to_string()),
+                fence_token: FenceToken(fence_token),
+            };
+            assert_eq!(
+                begin_construction(&mut authority, identity, 1, true),
+                PreparationConstructionVerdict::Held
+            );
+            assert_eq!(
+                settle_preparation(&mut authority, identity, Some(1), true, true),
+                PreparationSettleVerdict::ActivationAccepted
+            );
+            assert!(
+                try_open_seat_ladder(
+                    &mut authority,
+                    &member,
+                    Generation(0),
+                    entry_custody,
+                    created_custody
+                ),
+                "{identity:?}: the accepted activation's own ladder opens"
+            );
+            MobMachineMutator::apply(&mut authority, publish_construction(&member, Generation(0)))
+                .expect("the accepted activation's publication commits its membership");
+            let state = authority.state();
+            assert!(
+                state.identity_to_runtime.contains_key(identity),
+                "{identity:?}"
+            );
+            assert!(
+                !state.identity_entry_unseated.contains_key(identity),
+                "{identity:?}"
+            );
+            assert!(
+                !state
+                    .identity_entry_constructions_activating
+                    .contains_key(identity),
+                "{identity:?}: the publication ends the attempt"
+            );
+            assert_eq!(state.identity_entry_origins.get(identity), Some(&origin));
+        }
+    }
+
+    /// Row: an attempt ended before its activation leaves the entry pending,
+    /// and a new attempt may follow; a failed publication ends an accepted
+    /// one the same way; an entry awaiting no preparation takes no
+    /// construction, and a store-owned entry's settle without a
+    /// construction owes its seat.
+    #[test]
+    fn an_ended_attempt_leaves_the_entry_pending_and_a_settle_without_one_owes_its_seat() {
+        let mut authority = MobMachineAuthority::new();
+        let identity = AgentIdentity::from("pending");
+        assert_eq!(
+            begin_construction(&mut authority, &identity, 1, true),
+            PreparationConstructionVerdict::NotPending
+        );
+        assert_eq!(
+            declare(
+                &mut authority,
+                &identity,
+                Declaration {
+                    preparation_required: true,
+                    ..Declaration::default()
+                }
+            ),
+            IdentityEntryVerdict::PreparationPending
+        );
+        for (attempt, end) in [
+            (1, ConstructionEndKind::Aborted),
+            (2, ConstructionEndKind::Expired),
+            (3, ConstructionEndKind::Refused),
+        ] {
+            assert_eq!(
+                begin_construction(&mut authority, &identity, attempt, true),
+                PreparationConstructionVerdict::Held
+            );
+            assert_eq!(
+                end_construction(&mut authority, &identity, attempt, end),
+                ConstructionEndVerdict::Ended
+            );
+            assert_eq!(
+                end_construction(&mut authority, &identity, attempt, end),
+                ConstructionEndVerdict::NotOpen,
+                "an ended attempt ends once"
+            );
+            assert_eq!(
+                authority.state().identity_entry_unseated.get(&identity),
+                Some(&UnseatedEntryCause::PreparationPending)
+            );
+        }
+        assert_eq!(
+            begin_construction(&mut authority, &identity, 4, true),
+            PreparationConstructionVerdict::Held
+        );
+        assert_eq!(
+            settle_preparation(&mut authority, &identity, Some(4), true, true),
+            PreparationSettleVerdict::ActivationAccepted
+        );
+        assert_eq!(
+            end_construction(
+                &mut authority,
+                &identity,
+                4,
+                ConstructionEndKind::PublicationFailed
+            ),
+            ConstructionEndVerdict::Ended
+        );
+        assert_eq!(
+            authority.state().identity_entry_unseated.get(&identity),
+            Some(&UnseatedEntryCause::PreparationPending),
+            "a failed publication leaves the entry pending"
+        );
+        assert_eq!(
+            settle_preparation(&mut authority, &identity, Some(4), true, true),
+            PreparationSettleVerdict::StaleAttempt
+        );
+
+        let created = AgentIdentity::from("required");
+        let recorded = MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::RecordCreatedIdentityEntry {
+                agent_identity: created.clone(),
+                preparation_required: true,
+                placement: EntryPlacementKind::Local,
+                held_creation: false,
+            },
+        )
+        .expect("the record answers");
+        assert!(recorded.effects().iter().any(|effect| matches!(
+            effect,
+            MobMachineEffect::CreatedIdentityEntryRecorded {
+                verdict: CreatedIdentityRecordVerdict::Recorded,
+                ..
+            }
+        )));
+        let transition = MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::SettleHostPreparation {
+                agent_identity: created.clone(),
+                attempt: None,
+                constructed: false,
+                before_deadline: false,
+                binding_matches: false,
+            },
+        )
+        .expect("the settle answers");
+        assert!(transition.effects().iter().any(|effect| matches!(
+            effect,
+            MobMachineEffect::PreparationSettleResolved {
+                verdict: PreparationSettleVerdict::Seat,
+                ..
+            }
+        )));
+        assert_eq!(
+            authority.state().identity_entry_unseated.get(&created),
+            Some(&UnseatedEntryCause::SeatOwed),
+            "the settled entry is owed its seat"
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // Identity changes and the one-entry unlist (0.9.9)
+    // ---------------------------------------------------------------------
+
+    /// One identity's removal, archive or unarchive, and its verdict.
+    fn change_entry(
+        authority: &mut MobMachineAuthority,
+        identity: &AgentIdentity,
+        kind: IdentityEntryChangeKind,
+    ) -> IdentityEntryChangeVerdict {
+        let agent_identity = identity.clone();
+        let input = match kind {
+            IdentityEntryChangeKind::Remove => {
+                MobMachineInput::RemoveIdentityEntry { agent_identity }
+            }
+            IdentityEntryChangeKind::Archive => {
+                MobMachineInput::ArchiveIdentityEntry { agent_identity }
+            }
+            IdentityEntryChangeKind::Unarchive => {
+                MobMachineInput::UnarchiveIdentityEntry { agent_identity }
+            }
+        };
+        MobMachineMutator::apply(authority, input)
+            .expect("the change answers")
+            .effects()
+            .iter()
+            .find_map(|effect| match effect {
+                MobMachineEffect::IdentityEntryChangeResolved { verdict, .. } => Some(*verdict),
+                _ => None,
+            })
+            .expect("the change emits its verdict")
+    }
+
+    /// One roster-owned identity's unlist, and its verdict.
+    fn unlist(authority: &mut MobMachineAuthority, identity: &AgentIdentity) -> UnlistEntryVerdict {
+        MobMachineMutator::apply(
+            authority,
+            MobMachineInput::UnlistIdentityEntry {
+                agent_identity: identity.clone(),
+            },
+        )
+        .expect("the unlist answers")
+        .effects()
+        .iter()
+        .find_map(|effect| match effect {
+            MobMachineEffect::IdentityEntryUnlisted { verdict, .. } => Some(*verdict),
+            _ => None,
+        })
+        .expect("the unlist emits its verdict")
+    }
+
+    /// An identity awaiting its host's preparation is never archived: its
+    /// archive is refused PreparationPending whatever attempt is open and
+    /// changes nothing. Its removal ends a held attempt in the same step and
+    /// tombstones the name, and waits while an accepted activation's
+    /// publication is in flight.
+    #[test]
+    fn a_pending_identitys_archive_is_refused_and_its_removal_ends_a_held_attempt() {
+        let mut authority = MobMachineAuthority::new();
+        let required = AgentIdentity::from("pending-required");
+        let held = AgentIdentity::from("pending-held");
+        let activating = AgentIdentity::from("pending-activating");
+        for identity in [&required, &held, &activating] {
+            recover_created(
+                &mut authority,
+                identity,
+                RecoveredPresence::PresentUnseated,
+                None,
+            );
+        }
+        assert_eq!(
+            begin_construction(&mut authority, &held, 1, true),
+            PreparationConstructionVerdict::Held
+        );
+        assert_eq!(
+            begin_construction(&mut authority, &activating, 1, true),
+            PreparationConstructionVerdict::Held
+        );
+        assert_eq!(
+            settle_preparation(&mut authority, &activating, Some(1), true, true),
+            PreparationSettleVerdict::ActivationAccepted
+        );
+        let before = authority.state().clone();
+        for identity in [&required, &held, &activating] {
+            assert_eq!(
+                change_entry(&mut authority, identity, IdentityEntryChangeKind::Archive),
+                IdentityEntryChangeVerdict::PreparationPending,
+                "{identity:?}"
+            );
+        }
+        assert_eq!(
+            authority.state(),
+            &before,
+            "a refused archive changes nothing"
+        );
+
+        assert_eq!(
+            change_entry(&mut authority, &held, IdentityEntryChangeKind::Remove),
+            IdentityEntryChangeVerdict::Removed
+        );
+        let state = authority.state();
+        assert!(
+            !state.identity_entry_constructions_held.contains_key(&held),
+            "the removal ends the held attempt in its step"
+        );
+        assert!(state.identity_entry_tombstones.contains(&held));
+        assert!(!state.identity_entry_origins.contains_key(&held));
+        assert_eq!(
+            change_entry(&mut authority, &activating, IdentityEntryChangeKind::Remove),
+            IdentityEntryChangeVerdict::InFlight,
+            "an accepted activation's publication is in flight"
+        );
+        assert_eq!(
+            change_entry(&mut authority, &required, IdentityEntryChangeKind::Remove),
+            IdentityEntryChangeVerdict::Removed
+        );
+    }
+
+    /// A new store-owned entry's cause is MobMachine's, derived from the
+    /// request's facts with the declared apply's precedence for an identity
+    /// never created (`created_entry_cause`): its preparation first, then a
+    /// placed or externally bound spec, then its held creation, and
+    /// otherwise its seat owed.
+    #[test]
+    fn a_created_entrys_cause_is_derived_from_the_requests_facts() {
+        let mut authority = MobMachineAuthority::new();
+        for (name, preparation_required, placement, held_creation, cause) in [
+            (
+                "cause-prepared",
+                true,
+                EntryPlacementKind::Placed,
+                true,
+                UnseatedEntryCause::PreparationPending,
+            ),
+            (
+                "cause-placed",
+                false,
+                EntryPlacementKind::Placed,
+                true,
+                UnseatedEntryCause::HostedOnFirstUse,
+            ),
+            (
+                "cause-external",
+                false,
+                EntryPlacementKind::External,
+                false,
+                UnseatedEntryCause::HostedOnFirstUse,
+            ),
+            (
+                "cause-held",
+                false,
+                EntryPlacementKind::Local,
+                true,
+                UnseatedEntryCause::HeldCreation,
+            ),
+            (
+                "cause-owed",
+                false,
+                EntryPlacementKind::Local,
+                false,
+                UnseatedEntryCause::SeatOwed,
+            ),
+        ] {
+            let identity = AgentIdentity::from(name);
+            let recorded = MobMachineMutator::apply(
+                &mut authority,
+                MobMachineInput::RecordCreatedIdentityEntry {
+                    agent_identity: identity.clone(),
+                    preparation_required,
+                    placement,
+                    held_creation,
+                },
+            )
+            .expect("the record answers");
+            assert!(
+                recorded.effects().iter().any(|effect| matches!(
+                    effect,
+                    MobMachineEffect::CreatedIdentityEntryRecorded {
+                        verdict: CreatedIdentityRecordVerdict::Recorded,
+                        ..
+                    }
+                )),
+                "{name}"
+            );
+            assert_eq!(
+                authority.state().identity_entry_unseated.get(&identity),
+                Some(&cause),
+                "{name}"
+            );
+        }
+    }
+
+    /// A store-owned update of an archived identity, or of one awaiting its
+    /// host's preparation, is answered record only and changes nothing in
+    /// the machine: its row is the whole change.
+    #[test]
+    fn a_store_owned_update_of_an_archived_or_pending_identity_is_record_only() {
+        let mut authority = MobMachineAuthority::new();
+        let archived = AgentIdentity::from("update-archived");
+        let pending = AgentIdentity::from("update-pending");
+        recover_created(&mut authority, &archived, RecoveredPresence::Archived, None);
+        recover_created(
+            &mut authority,
+            &pending,
+            RecoveredPresence::PresentUnseated,
+            None,
+        );
+        let before = authority.state().clone();
+        for identity in [&archived, &pending] {
+            assert_eq!(
+                declare(
+                    &mut authority,
+                    identity,
+                    Declaration {
+                        created_custody: true,
+                        ..Declaration::default()
+                    }
+                ),
+                IdentityEntryVerdict::RecordOnly,
+                "{identity:?}"
+            );
+        }
+        assert_eq!(
+            authority.state(),
+            &before,
+            "a record-only verdict writes nothing"
+        );
+    }
+
+    /// The one-entry unlist decides on its identity alone, as the seal
+    /// decides an unlisted Declared entry: a seated entry is marked, an
+    /// unseated one ends at once, a name that is no Declared entry (a
+    /// worker's, or none) is left as it is, and no other entry is read or
+    /// changed.
+    #[test]
+    fn the_one_entry_unlist_decides_on_its_identity_alone() {
+        let mut authority = MobMachineAuthority::new();
+        let seated = seat_live_entry_member(&mut authority, "unlist-seated", 81);
+        let other = seat_live_entry_member(&mut authority, "unlist-other", 82);
+        let worker = seat_live_member_with_endpoint(&mut authority, "unlist-worker", 83);
+        let unseated = AgentIdentity::from("unlist-unseated");
+        assert_eq!(
+            declare(&mut authority, &unseated, Declaration::default()),
+            IdentityEntryVerdict::SeatOwed
+        );
+        assert_eq!(
+            unlist(&mut authority, &seated.identity),
+            UnlistEntryVerdict::Retiring
+        );
+        let state = authority.state();
+        assert!(state.identity_entry_retiring.contains(&seated.identity));
+        assert!(
+            !state.identity_entry_retiring.contains(&other.identity),
+            "no other entry is marked"
+        );
+        assert_eq!(
+            unlist(&mut authority, &unseated),
+            UnlistEntryVerdict::Removed
+        );
+        let state = authority.state();
+        assert!(!state.identity_entry_origins.contains_key(&unseated));
+        assert!(state.identity_entry_origins.contains_key(&other.identity));
+        let before = authority.state().clone();
+        for identity in [&worker.identity, &AgentIdentity::from("unlist-nobody")] {
+            assert_eq!(
+                unlist(&mut authority, identity),
+                UnlistEntryVerdict::NotADeclaredEntry,
+                "{identity:?}"
+            );
+        }
+        assert_eq!(authority.state(), &before, "nothing changes");
+    }
+
+    /// An unlisted roster-owned identity's archived session record holds its
+    /// name: the end of its unlisted retirement ends the entry and keeps the
+    /// record, and a new store-owned entry of the name is refused
+    /// NameHeldByIdentity with the record kept, so a re-list restores the
+    /// identity.
+    #[test]
+    fn an_unlisted_identitys_archived_session_record_holds_its_name() {
+        let (mut authority, member) = dormant_member_authority("unlisted-name");
+        authority
+            .apply_signal(recover_entry_signal(&member.identity, &member.runtime_id))
+            .expect("the replay records the entry");
+        assert_eq!(
+            unlist(&mut authority, &member.identity),
+            UnlistEntryVerdict::Retiring
+        );
+        retire_and_archive(&mut authority, &member);
+        let state = authority.state();
+        assert!(
+            !state.identity_entry_origins.contains_key(&member.identity),
+            "the end of the unlisted retirement ends the entry"
+        );
+        assert!(
+            state
+                .identity_entry_archived_sessions
+                .contains_key(&member.identity),
+            "the identity's archived session record outlives the entry"
+        );
+        let recorded = MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::RecordCreatedIdentityEntry {
+                agent_identity: member.identity.clone(),
+                preparation_required: false,
+                placement: EntryPlacementKind::Local,
+                held_creation: false,
+            },
+        )
+        .expect("the record answers");
+        assert!(recorded.effects().iter().any(|effect| matches!(
+            effect,
+            MobMachineEffect::CreatedIdentityEntryRecorded {
+                verdict: CreatedIdentityRecordVerdict::NameHeldByIdentity,
+                ..
+            }
+        )));
+        assert!(
+            authority
+                .state()
+                .identity_entry_archived_sessions
+                .contains_key(&member.identity),
+            "the refused record keeps the archived session record"
+        );
+    }
+
+    /// One arm answers each created row of an identity during the replay: a
+    /// removal's row after an archive's row of the same seated identity, or
+    /// the reverse, contradicts the mark the first recovered and reads the
+    /// name unreadable, so no identity carries both marks.
+    #[test]
+    fn a_second_row_contradicting_a_recovered_mark_reads_unreadable() {
+        for (first, second) in [
+            (RecoveredPresence::Archived, RecoveredPresence::Tombstone),
+            (RecoveredPresence::Tombstone, RecoveredPresence::Archived),
+        ] {
+            let (mut authority, member) = dormant_member_authority("double-mark");
+            recover_created(
+                &mut authority,
+                &member.identity,
+                RecoveredPresence::Present,
+                None,
+            );
+            recover_created(&mut authority, &member.identity, first, None);
+            recover_created(&mut authority, &member.identity, second, None);
+            let state = authority.state();
+            assert!(
+                state.identity_entry_unreadable.contains(&member.identity),
+                "{first:?} then {second:?}"
+            );
+            assert!(
+                !(state.identity_entry_removing.contains(&member.identity)
+                    && state.identity_entry_archiving.contains(&member.identity)),
+                "{first:?} then {second:?}: one mark at most"
+            );
+        }
     }
 }

@@ -153,6 +153,18 @@ impl RosterAuthority {
         self.roster.seat_build(identity)
     }
 
+    /// Set the descriptive inputs a store-owned identity's unborn seat
+    /// carries to its first build ([`Roster::set_store_owned_seat_inputs`]).
+    pub(crate) fn set_store_owned_seat_inputs(
+        &mut self,
+        identity: &AgentIdentity,
+        context: Option<serde_json::Value>,
+        instructions: Vec<String>,
+    ) {
+        self.roster
+            .set_store_owned_seat_inputs(identity, context, instructions);
+    }
+
     /// The continuity intent the current incarnation of `identity` was
     /// spawned with ([`Roster::spawn_continuity_intent`]).
     pub(crate) fn spawn_continuity_intent(

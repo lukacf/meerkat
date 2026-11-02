@@ -155,9 +155,20 @@ The declared apply (`MobHandle::apply_declared_roster`; see
 `MobMachine`'s too. `DeclareIdentityEntry` answers one verdict per declared
 identity (`IdentityEntryVerdict`), one arm per verdict, each guarded by the
 pure helper `identity_entry_verdict` over the declaration and the member's
-facts, and each guarded to act only on an identity that is no entry or a
-`Declared` one, by an explicit check: an entry of another origin is taken by
-no arm. The declaration carries the shell's raw observations: the identity
+facts, and each guarded to act only on the entries of the custody it
+declares, by an explicit check: a roster's declaration (`created_custody`
+false) on an identity that is no entry or a `Declared` one, a store-owned
+update's (`created_custody` true, since 0.9.9) on its `Created` entry,
+seated, owed its seat, hosted on its first use or awaiting its held
+creation, and, answered `RecordOnly` (its row alone changes, and its
+unarchive or settle seats the new spec), archived or awaiting its host's
+preparation; an entry of the other origin is taken by no arm. A store-owned
+update is a declaration under created custody, so both custodies answer the
+same verdict for the same facts, and MobMachine routes it from its own
+step's state. The declaration carries the shell's raw
+observations: whether the host's rule requires the identity's preparation
+before its first seat (`preparation_required`, answered `PreparationPending`
+for a roster-owned identity never seated), the identity
 store's intent rows, the session service's durability, the role the session
 an unseated identity's seat would resume was last built under
 (`resume_session_role`, so a seat under another role takes the migration
@@ -165,7 +176,8 @@ declared from that role or is held), and the kind of the host's first-boot
 request (`first_boot`), whose preparation the declaration's own step ends
 when it carries the request out. Its facts are the unseated entries with
 their typed cause (`identity_entry_unseated`: `SeatOwed`,
-`HostedOnFirstUse`, `HeldCreation`), the role hold
+`HostedOnFirstUse`, `HeldCreation`, `PreparationPending`, `Archived`), the
+role hold
 (`member_host_preparation_causes`, cause `RoleMigrationUndeclared`, which
 refuses every wake as a first-boot preparation does, holds a Live local
 member's run starts through `MeerkatMachine`'s `HostPreparation` hold reason
@@ -200,9 +212,11 @@ each marked member, its start row records the cause, and its replay passes
 every such row
 (`RecoverIdentityEntryRetiring`, which marks only the identity's seated
 Declared incarnation and takes a no-op arm for any other row). The end of an
-entry's retirement records the session it archived, and removes the entry
-only when the seal marked it; any other end keeps the entry unseated, owed
-its seat (hosted on its first use when placed or externally bound). The
+entry's retirement records the session it archived, and ends the entry
+when the seal, a one-entry unlist or a removal marked it (a removal's end
+also tombstones the name); an archive's mark leaves the entry unseated,
+`Archived`; any other end keeps the entry unseated, owed its seat (hosted
+on its first use when placed or externally bound). The
 dormant seat passes its raw observation that the session is archived and
 revivable, and its guard binds an archived session only when it is the
 entry's record; it takes a fresh session only once the record is let go
@@ -240,25 +254,56 @@ entries of the same map, recovered from the identity store at a start. The
 origin is the entry's provenance and the custody of its desired record: it
 decides the recovery, which writer persists a change of that record, the name
 guards and the reservations below, never the member's profile, labels, tools,
-grants or wiring. A created entry is still local and created at once: nothing
-places one or holds its creation yet (the `created_custody_local` guard of
-`BeginSpawnExecFreshPeerOnly` and `BeginSpawnExecRemote`, and
-`unseated_created_entry_is_preparing_or_owed`). After
+grants or wiring. Since 0.9.9 a created entry can be placed, externally
+bound, held for its host's creation or prepared by its host first, as a
+declared one can: created custody takes a `Created` entry owed its seat,
+hosted on its first use or held for its creation, and one awaiting its
+preparation only for the spawn of a construction held for it, on a local
+or a placed ladder (`placed_entry_custody_is_hosted_on_first_use` holds a
+placed ladder of either custody to an entry hosted on its first use). After
 the journal replay and before the boot plan is sealed, the shell sends one
 `RecoverCreatedIdentityEntry` per created entry row, with the row's presence
-(`RecoveredPresence`: `Present`, `PresentUnseated`, `Tombstone`,
-`Unreadable`) and the session the identity's member was last bound to in the
-replayed journal, and MobMachine decides from them and its replayed facts, in
-Running or Stopped. A present row records a seated local member a `Created`
-entry, or, when the replay left the identity without a member, records the
-entry unseated (`SeatOwed`) with that session as its revival record; a
-pending row records it unseated for its host's preparation
-(`PreparationPending`); a removed row records the name's tombstone
-(`identity_entry_tombstones`); and an unreadable row, or one the replay
+(`RecoveredPresence`: `Present`, `PresentUnseated`, `PendingConstruction`,
+`Tombstone`, `Archived`, `Unreadable`) and the session the identity's member
+was last bound to in the replayed journal, and MobMachine decides from them
+and its replayed facts, in Running or Stopped. A present row records a
+seated local member a `Created` entry, or, when the replay left the identity
+without a member, records the entry unseated (`SeatOwed`) with that session
+as its revival record; a pending row records it unseated for its host's
+preparation (`PreparationPending`), and a pending row of a held construction
+whose member the replay seats (its publication committed before a crash)
+records the member a `Created` entry; an archived row records it unseated
+(`Archived`); a removed or archived row whose member's retirement the replay
+holds in flight records the removal or the archive in flight
+(`identity_entry_removing`, `identity_entry_archiving`), one mark per entry,
+so a second row contradicting a recovered mark reserves the name as
+unreadable; a removed row
+records the name's tombstone (`identity_entry_tombstones`); and an
+unreadable row, or one the replay
 contradicts (a tombstone of the name, or a spawn ladder open for it,
 included), reserves the name
 (`identity_entry_unreadable`). No arm records an entry for a tombstoned
-name, and no replay seats a member under one. The replay
+name, and no replay seats a member under one, or under an archived entry.
+The store holds an archive's row beside its member's roster row while the
+archive's retirement runs: the replay, which comes first, seats that member
+and the scan then marks the archive in flight; a replay that came after the
+scan recorded the entry archived is refused, so MobMachine does not depend
+on that order. Nor does a Declared row's replay replace a Created entry (a
+store-owned identity never turns roster-owned): replayed first, a Declared
+entry stands and the scan's row of it reserves the name; scanned first, the
+replay of a Declared row over the Created entry is refused. A Created row
+may replay over a Declared origin: the journal records no end of an entry
+that ends unseated (the seal's or a one-entry unlist's), so a later
+store-owned incarnation's row takes over the stale origin of a roster-owned
+identity whose entry ended. MobMachine does rely on the boot's order for a
+row pending its host's preparation: the start replays the journal
+(`seed_mob_authority_sync_from_events`, then the placed carriers'
+`recover_current_committed_placed_carrier_signals`) before it scans the
+created entry rows (`recover_created_identity_entries`). Scanned first, a
+pending row would record an identity without a member awaiting its
+preparation, and a replay that seated the identity after it would drop that
+cause: the start would neither settle the row of a published construction
+nor reserve the name a member contradicts. The replay
 reserves the name of a member row whose origin token this build does not
 know the same way. A removed entry's name is never an entry or a member
 again; an unreadable name keeps what the replay recorded for it (a
@@ -275,27 +320,89 @@ Custody of one origin never takes
 an entry of the other (`IdentityMemberOfAnotherOrigin`): entry custody takes
 a `Declared` entry's name only, and created custody (`BeginSpawnExec`'s and
 `ProbeMemberAdmission`'s `created_custody`, recorded in
-`spawn_exec_created_custody`) a `Created` entry owed its seat only, never
-both; the dormant seat that closes a created ladder takes the entry's revival
-record and keeps the member a `Created` entry. The declared apply never
-declares over a `Created` entry (`RefusedNameOwnedByCreated`), and its seal
-unlists readable `Declared` entries only. A reset keeps the reserved names,
-which the identity store holds, and drops created custody; the destroy
-clears both. The invariants `unseated_created_entry_is_preparing_or_owed`,
-`tombstone_is_never_an_entry` and `entry_custodies_are_disjoint` hold these
-facts. The shell re-seats an entry owed its seat once the mob runs, as the
-handle's own command through that created custody, from its member's last
-spawn row with its roster labels, and MobMachine's guards decide each seat.
+`spawn_exec_created_custody`) a `Created` entry only, never both; the dormant
+seat that closes a created ladder takes the entry's revival record and keeps
+the member a `Created` entry, and seats only an entry owed its seat. A
+roster's declaration never declares over a `Created` entry
+(`RefusedNameOwnedByCreated`, which the shell answers as a typed note, a
+quiet steady state), and the seal unlists readable `Declared`
+entries only. A reset keeps the reserved names, which the identity store
+holds, and drops created custody; the destroy clears both. The invariants
+`tombstone_is_never_an_entry`, `entry_custodies_are_disjoint` and
+`archived_entry_is_store_owned` hold these facts (the earlier invariant
+`unseated_created_entry_is_preparing_or_owed` is retired: a store-owned
+update's declaration records a created entry hosted on its first use or
+held, and the created identity audit's scan run checks what the scan alone
+records). The shell re-seats an entry owed its seat once the mob runs, as
+the handle's own command through that created custody, from the row's spec
+(or, for a row written before rows carried their spec, from its member's last
+spawn row with its roster labels), and MobMachine's guards decide each seat.
+
+Store-owned identity changes are `MobMachine`'s too (since 0.9.9; see
+[Mob Architecture](/reference/mob-architecture#store-owned-identity-changes)).
+Each is decided in its commit step, from the shell's raw observations, before
+the shell writes the change's store transaction, and a refusal leaves the
+change's prepared authority unapplied: `AdmitIdentityChange` answers the
+change's admission (`IdentityChangeAdmissionKind`) from the store's receipt of
+the operation, the consent's form, whether a decision's permit binds the
+change and admits a commit now, whether the requester is the host operator,
+whether an agent requester's grant is current at this final sink, whether the
+spec the change was decided against is the identity's (`StaleSpec`
+otherwise) and the host's changes hold (`identity_changes_held`, set by
+`SetIdentityChangesHeld`); `RecordCreatedIdentityEntry` records a new
+store-owned entry, unseated with the cause its helper derives from the
+request's facts (whether its host's rule requires its preparation, its
+placement, a held creation) in `identity_entry_verdict`'s precedence, under
+a free name only (`CreatedIdentityRecordVerdict`; an unlisted roster-owned
+identity's archived session record holds its name); and
+`RemoveIdentityEntry`, `ArchiveIdentityEntry` and `UnarchiveIdentityEntry`
+answer one identity's removal, archive and unarchive
+(`IdentityEntryChangeVerdict`). A removal or an archive of a seated entry
+marks its ending (`identity_entry_removing`, `identity_entry_archiving`) and
+the end of its member's retirement consumes the mark, tombstoning the name
+or leaving the entry unseated, `Archived`, on its archived session; the
+destroy's retirement ends the mark with the entry. An unseated entry is
+tombstoned at once, a held construction of it ending in the same step (an
+accepted activation is in flight until its publication ends), and archived
+at once unless it awaits its host's preparation, whose archive is refused
+(`PreparationPending`, the change's typed refusal `host_preparation_pending`).
+At most one ending mark lands on an entry, only on a seated one
+(`entry_ending_marks_are_seated_and_disjoint`). `UnlistIdentityEntry`
+unlists one `Declared` entry, decided on that identity's own facts
+(`UnlistEntryVerdict`): its seated member's retirement marked as the seal
+marks one, an entry no member holds ended at once, one whose member step
+is in flight deferred, and nothing else read. Each answers one arm per
+verdict through a pure helper, with a `MobNotRunning` arm per other phase.
+
+The host's preparation before an identity's first seat is `MobMachine`'s for
+either custody. `BeginPreparationConstruction` holds an attempt of a
+`constructed` preparation (`identity_entry_constructions_held`);
+`SettleHostPreparation` settles a preparation without an attempt (the entry
+is owed its seat; a `constructed` one is refused `ConstructionRequired`) or
+accepts the activation of exactly the held attempt it names, decided before
+the attempt's deadline and binding its construction, moving it to
+`identity_entry_constructions_activating`; and `EndPreparationConstruction`
+ends an attempt by its abort, its deadline, a refused construction or a
+failed publication, an activating one only by a failed publication. A spawn
+ladder takes an entry awaiting its preparation only while a construction is
+open for it, held or activating (the construction's own spawn opens its
+ladder at its publication, after the settle accepted its activation), and
+the membership commit that publishes it requires its accepted activation and
+ends the attempt. At most one attempt of an identity
+is open (`construction_is_held_or_activating`).
 
 The ci profile has no identities, so the hand-written audit
 `specs/machines/mob_machine/created_identity_audit.sh` drives the created
-entries' arms in four runs:
+entries' arms in fourteen runs, in two parts. Its recovery part has four:
 
 - The scan run scans a row of every presence, with and without a revival
   record, in Running and Stopped, until the boot plan's seal. The rows are
-  for a replayed seated member (with or without its `Declared` entry's row)
-  and for an identity without a member. The run reaches every outcome, the
-  contradicted rows included, and exactly one arm answers every row.
+  for a replayed seated member (with or without its `Declared` entry's row,
+  replayed before or after the scan; the member's own replay never follows
+  the scan of its row pending its host's preparation, the boot's order,
+  which the names run keeps too) and for an identity without a member.
+  The run reaches every outcome, the contradicted rows included, exactly
+  one arm answers every row, and no step turns a `Created` entry `Declared`.
 - The reseat run opens, aborts and seats spawn ladders with every pair of
   custodies over the scanned rows, alongside the worker reconcile and the
   destroy. It checks that no ladder opens for a reserved name, that a
@@ -308,8 +415,63 @@ entries' arms in four runs:
   never touches a `Created` entry.
 - The placed run scans the row of a member seated on a member host.
 
-The audit seeds defects, one per invariant above, per action property and
-per guard a reachable state needs, and refuses each.
+Its changes part (0.9.9) has ten:
+
+- The admit run drives every change's admission from every fact, over the
+  only facts it reads (the composition authority, the changes hold, a
+  running and a stopped mob): exactly one arm answers each. The admission
+  changes nothing, so no other run fires it.
+- The commit run drives the record of a name from every request's facts,
+  the changes hold and a seat or membership commit under created custody:
+  exactly one arm answers each record, a new entry takes only a free name
+  (no entry of either custody, member, ladder, reservation or archived
+  session record holds it), its cause follows the declared apply's
+  precedence over its facts, and an entry held for its creation is never
+  seated Dormant.
+- The update run declares the same change of a roster-owned and a
+  store-owned identity, owed their seats or seated under the same spec:
+  exactly one arm answers each, and both answer the same verdict for the
+  same facts.
+- The removal run removes a roster-owned identity through its retirement
+  (or ends it by the destroy with its mark) and a store-owned one unseated,
+  seated through its retirement, or archived: every removal's end but the
+  destroy's tombstones its name.
+- The archive run archives a seated store-owned identity through its
+  retirement and unarchives it onto its archived session: an archived
+  identity keeps its name and is never seated, an identity awaiting its
+  preparation is never archived, the update of either changes its row only
+  (`RecordOnly`), and a roster-owned identity's archive is refused.
+- The preparation run drives the start, settle and end of held
+  constructions of either custody with their ladders (the construction's
+  own ladder opening after its activation was accepted included), seats,
+  membership commits, archives and removals, firing the attempts' arms
+  that change state: an entry awaiting its preparation is seated only by
+  its accepted activation, no end of an accepted activation but its failed
+  publication is enabled, a `constructed` preparation is never settled
+  without an attempt, and its update changes its row only.
+- The prepverdicts run drives every arm of an attempt's start, settle and
+  end from every fact, over the facts their verdicts read: exactly one arm
+  answers each.
+- The placement run seats a store-owned identity hosted on its first use by
+  a placed or peer-only spawn holding its created custody.
+- The unlist run unlists a roster-owned identity through its retirement
+  beside a store-owned one: exactly one arm answers each unlist, which
+  decides on its identity alone, and no record takes the name of an entry
+  or of the unlisted identity's archived session record.
+- The recovered run replays a seated store-owned identity, its `Created`
+  entry row included, and scans its one row, a removal's or an archive's
+  (the store keeps one row per identity), before or after the journal
+  replay. It carries the recovered mark's retirement to its terminal,
+  running or stopped: no replay seats a member under an archived entry, and
+  the boot plan's seal, a stop and a resume leave an archived identity
+  archived.
+
+The audit seeds defects of the invariants above, the action properties and
+the guards a reachable state needs, and refuses each with the violation it
+names (not every invariant has a mutant of its own); three mutants (created
+custody kept local, a recovered removal left unmarked, an accepted
+activation's own ladder refused) are refused by making a witness
+unreachable.
 
 Member rotations are `MobMachine` facts. A pending rotation records its
 identity's next session (`member_rotation_session_ids`), the endpoint it

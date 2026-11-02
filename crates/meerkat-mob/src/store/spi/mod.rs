@@ -187,6 +187,7 @@ const G_RECEIPT: &str = "rc";
 const G_MUTATION_RECEIPT: &str = "mr";
 const G_ADOPTION_RECEIPT: &str = "ar";
 const G_RESOLUTION_RECEIPT: &str = "rr";
+const G_CHANGE_RECEIPT: &str = "cx";
 
 // Entry groups of the run scope.
 const G_RUN: &str = "run";
@@ -699,6 +700,7 @@ struct Touch {
     mutation_receipt: Option<(MobId, crate::identity::MemberToolMutationId)>,
     adoption_receipt: Option<(MobId, crate::identity::IdentityAdoptionId)>,
     resolution_receipt: Option<(MobId, crate::identity::IdentityConvergenceResolutionId)>,
+    change_receipt: Option<(MobId, String)>,
     run: Option<RunId>,
     turn_intents: Option<RunId>,
     turn_receipts: Option<RunId>,
@@ -720,7 +722,8 @@ impl Touch {
                 || self.receipt.is_some()
                 || self.mutation_receipt.is_some()
                 || self.adoption_receipt.is_some()
-                || self.resolution_receipt.is_some(),
+                || self.resolution_receipt.is_some()
+                || self.change_receipt.is_some(),
             runs: self.run.is_some() || self.turn_intents.is_some() || self.turn_receipts.is_some(),
             statuses: self.statuses,
         }
@@ -854,6 +857,7 @@ impl Bundle {
                 len(identity.mutation_receipts.len()),
                 len(identity.adoption_receipts.len()),
                 len(identity.convergence_resolution_receipts.len()),
+                len(identity.change_receipts.len()),
             ]
         } else if tag == MOB_RUN_FAMILY.tag {
             vec![
@@ -1364,6 +1368,10 @@ impl Bundle {
             G_RESOLUTION_RECEIPT,
             identity.convergence_resolution_receipts.iter(),
         )?);
+        image.extend(keyed_entries(
+            G_CHANGE_RECEIPT,
+            identity.change_receipts.iter(),
+        )?);
         Ok(image)
     }
 
@@ -1424,6 +1432,16 @@ impl Bundle {
                 hashed_name(G_RESOLUTION_RECEIPT, key)?,
                 identity
                     .convergence_resolution_receipts
+                    .get(key)
+                    .map(|value| encode_keyed(key, value))
+                    .transpose()?,
+            ));
+        }
+        if let Some(key) = &touch.change_receipt {
+            changes.push((
+                hashed_name(G_CHANGE_RECEIPT, key)?,
+                identity
+                    .change_receipts
                     .get(key)
                     .map(|value| encode_keyed(key, value))
                     .transpose()?,
@@ -1732,6 +1750,14 @@ impl Bundle {
         identity.convergence_resolution_receipts = decode_group(body, G_RESOLUTION_RECEIPT)?
             .into_iter()
             .collect();
+        let change_receipts: Vec<((MobId, String), crate::identity::IdentityChangeReceipt)> =
+            decode_group(body, G_CHANGE_RECEIPT)?;
+        for ((mob_id, operation_id), receipt) in &change_receipts {
+            if receipt.mob_id != *mob_id || receipt.operation_id != *operation_id {
+                return Err(corrupt("an identity change receipt differs from its key"));
+            }
+        }
+        identity.change_receipts = change_receipts.into_iter().collect();
         Ok(())
     }
 

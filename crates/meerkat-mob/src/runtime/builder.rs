@@ -8333,6 +8333,27 @@ impl MobBuilder {
         self
     }
 
+    /// Hold the mob's identity changes from its start: every store-owned
+    /// identity change is refused, typed and retryable, until the host
+    /// releases them ([`MobHandle::set_identity_changes_held`]). Not durable:
+    /// a host that holds them passes this again at its next start.
+    pub fn with_identity_changes_held(mut self, held: bool) -> Self {
+        self.member_residency.identity_changes_held = held;
+        self
+    }
+
+    /// The host's mint of a member's mob operator grant
+    /// ([`super::MemberGrantMint`]), for the reads of an identity's current
+    /// grant that build nothing: the recheck of an agent requester's identity
+    /// change at its commit. A host whose member build hook edits the members'
+    /// grants passes the same rule here, so the recheck reads what a build
+    /// would carry; without one, an identity's grant is the authority the
+    /// runtime composes for its profile.
+    pub fn with_member_grant_mint(mut self, mint: Arc<dyn super::MemberGrantMint>) -> Self {
+        self.member_residency.member_grant_mint = Some(mint);
+        self
+    }
+
     /// Bound on one member wake: the cold restore of a dormant member through
     /// its readiness and topology. Past it MobMachine resolves the attempt
     /// retryable (the member is Dormant again and the next delivery wakes it
@@ -9283,6 +9304,8 @@ impl MobBuilder {
         let supervisor_startup_guard =
             SupervisorBridgeStartupGuard::new(Arc::clone(&supervisor_bridge));
         let post_bridge_epoch_start = epoch_start;
+        // What the start carries out from the store-owned rows it recovers.
+        let mut recovered_created_rows = super::created_identity::RecoveredCreatedRows::default();
         // Keep every fallible post-registration recovery step inside one
         // awaited result. Native startup then synchronously settles the
         // guard before returning an error; `Drop` remains only the
@@ -9398,7 +9421,7 @@ impl MobBuilder {
             if matches!(resumed_state, MobState::Running | MobState::Stopped)
                 && !destroy_storage_finalizing
             {
-                super::created_identity::recover_created_identity_entries(
+                recovered_created_rows = super::created_identity::recover_created_identity_entries(
                     initial_dsl_authority.as_mut(),
                     storage.identity.as_ref(),
                     &definition.id,
@@ -9410,6 +9433,21 @@ impl MobBuilder {
             // Roster is a projection only. Build it after the authoritative
             // carrier/event reconciliation and machine recovery have succeeded.
             let mut roster = Roster::project(&mob_events);
+            // A store-owned identity's seat whose session no build created
+            // takes its descriptive inputs from the identity's row, its
+            // record: an update after the seat applies at the first build.
+            for (identity, spec) in &recovered_created_rows.specs {
+                if super::boot_plan::domain_member_seat_session_unborn(
+                    initial_dsl_authority.state(),
+                    identity,
+                ) {
+                    roster.set_store_owned_seat_inputs(
+                        identity,
+                        spec.context.clone(),
+                        spec.additional_instructions.clone(),
+                    );
+                }
+            }
             #[cfg(not(target_arch = "wasm32"))]
             Self::normalize_sessionless_backend_runtime_modes(&mut roster);
             if resumed_state == MobState::Running
@@ -9540,6 +9578,7 @@ impl MobBuilder {
                 member_session_authorities: runtime_provisioner
                     .member_session_authorities()
                     .unwrap_or_default(),
+                member_grant_mint: wiring.member_residency.member_grant_mint.clone(),
             };
             // session_service is still live here (not consumed until start_runtime_with_components)
             if let Some(hook) = before_activation {
@@ -9865,9 +9904,15 @@ impl MobBuilder {
         #[cfg(target_arch = "wasm32")]
         let handle = start_result?;
         // A created entry owed its seat (a build that predates created
-        // entries retired its member) is seated again on its archived
-        // session, once the mob runs.
-        handle.reseat_owed_created_entries().await;
+        // entries retired its member) is seated again once the mob runs, and
+        // a store-owned update's role migration a crash left owed is carried
+        // out.
+        handle
+            .carry_out_store_owned_rows_at_start(
+                recovered_created_rows.role_migrations_owed,
+                recovered_created_rows.pending_constructions,
+            )
+            .await;
         Ok(handle)
     }
 
@@ -11224,6 +11269,7 @@ impl MobBuilder {
                 member_session_authorities: provisioner
                     .member_session_authorities()
                     .unwrap_or_default(),
+                member_grant_mint: member_residency.member_grant_mint.clone(),
             };
             if let Some(hook) = before_activation {
                 hook(handle.read_handle()).await?;
@@ -11579,6 +11625,7 @@ impl MobBuilder {
                 #[cfg(not(target_arch = "wasm32"))]
                 controlling_acceptor: controlling_acceptor
                     .map(super::actor::ControllingAcceptorState::new),
+                held_constructions: Default::default(),
             };
             #[cfg(target_arch = "wasm32")]
             let _ = controlling_acceptor;
@@ -17398,6 +17445,82 @@ mod tests {
                 .member_peer_endpoints
                 .contains_key(&mob_dsl::AgentIdentity::from_domain(&placed_identity),),
             "placed spawn endpoints must be recovered only from the exact carrier",
+        );
+    }
+
+    /// The resume replays a later incarnation's Created row over a stale
+    /// Declared origin: a roster-owned identity's member retired with no
+    /// archived session and its entry ended unseated, which the journal does
+    /// not record, and a store-owned identity of the same name was created
+    /// and seated after. The replay admits the Created row and the resume
+    /// goes on.
+    #[test]
+    fn a_created_row_replays_over_a_stale_declared_origin_on_resume() {
+        let definition = MobDefinition::explicit("stale-declared-origin");
+        let identity = AgentIdentity::from("desk");
+        let first = Generation::INITIAL;
+        let second = Generation::new(1);
+        let event = |cursor, kind| MobEvent {
+            cursor,
+            timestamp: Utc::now(),
+            mob_id: definition.id.clone(),
+            kind,
+        };
+        let spawned = |generation: Generation, fence: u64, origin| {
+            MobEventKind::MemberSpawned(
+                MemberSpawnedEvent::new(
+                    identity.clone(),
+                    generation,
+                    FenceToken::new(fence),
+                    AgentRuntimeId::new(identity.clone(), generation),
+                    ProfileName::from("worker"),
+                )
+                .with_identity_entry(Some(origin)),
+            )
+        };
+        let events = vec![
+            event(
+                1,
+                spawned(first, 7, crate::runtime::IdentityEntryOrigin::Declared),
+            ),
+            event(
+                2,
+                MobEventKind::MemberRetired {
+                    agent_identity: identity.clone(),
+                    generation: first,
+                    role: ProfileName::from("worker"),
+                    session_archived: false,
+                    facts: crate::event::MemberRetiredFacts::default(),
+                },
+            ),
+            event(
+                3,
+                spawned(second, 8, crate::runtime::IdentityEntryOrigin::Created),
+            ),
+        ];
+        let mut authority = seed_mob_authority();
+
+        seed_mob_authority_sync_from_events(
+            &mut authority,
+            &events,
+            &definition,
+            false,
+            &BTreeSet::new(),
+        )
+        .expect("the resume replays the later incarnation's Created row");
+
+        let dsl_identity = mob_dsl::AgentIdentity::from_domain(&identity);
+        assert_eq!(
+            authority.state().identity_entry_origins.get(&dsl_identity),
+            Some(&mob_dsl::IdentityEntryOrigin::Created)
+        );
+        assert_eq!(
+            authority.state().identity_to_runtime.get(&dsl_identity),
+            Some(&mob_dsl::AgentRuntimeId::from_domain(&AgentRuntimeId::new(
+                identity.clone(),
+                second
+            ))),
+            "the later incarnation is seated"
         );
     }
 

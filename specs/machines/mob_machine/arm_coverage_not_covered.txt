@@ -232,3 +232,25 @@ PrepareMemberInstructionDeliverySpawning* a member whose spawn committed its mem
 RecordMemberInstructionTarget* record feedback in a stopped, completed or destroyed mob; operator_instruction_delivery_audit drives every Running arm of the family
 RefuseMemberInstructionTarget* refusal feedback in a stopped, completed or destroyed mob; operator_instruction_delivery_audit drives every Running arm of the family
 ResolveMemberInstructionRelease* the release verdict in a stopped, completed or destroyed mob; operator_instruction_delivery_audit drives both Running arms, and the region rows pin the verdict
+# Identity changes and held constructions (0.9.9): created_identity_audit's
+# changes part drives the admission, the record, the changes hold, the
+# removal, the archive and unarchive, and a held construction's start,
+# settle and end in a running and a stopped mob; their arms in the
+# Completed and Destroyed phases answer MobNotRunning (or end an attempt the
+# destroy already cleared) and change nothing the runs check.
+AdmitIdentityChangeMobNotRunning* a change's admission in the Completed and Destroyed phases; created_identity_audit's admit run drives the Stopped arm
+RecordCreatedIdentityEntryMobNotRunning* a store-owned entry's record in the Completed and Destroyed phases; created_identity_audit's commit run drives the Stopped arm
+SetIdentityChangesHeldCompleted the changes hold in a completed mob; created_identity_audit drives its Running and Stopped arms
+SetIdentityChangesHeldDestroyed the changes hold in a destroyed mob; created_identity_audit drives its Running and Stopped arms
+RemoveIdentityEntryMobNotRunning* a removal in the Completed and Destroyed phases; created_identity_audit's removal run drives the Stopped arm
+ArchiveIdentityEntryMobNotRunning* an archive in the Completed and Destroyed phases; created_identity_audit's archive run drives the Stopped arm
+UnarchiveIdentityEntryMobNotRunning* an unarchive in the Completed and Destroyed phases; created_identity_audit's archive run drives the Stopped arm
+UnlistIdentityEntryMobNotRunning* a one-entry unlist in the Completed and Destroyed phases; created_identity_audit's unlist run drives the Stopped arm
+BeginPreparationConstructionMobNotRunning* a held construction's start in the Completed and Destroyed phases; created_identity_audit's prepverdicts run drives the Stopped arm
+SettleHostPreparationMobNotRunning* a settle in the Completed and Destroyed phases; created_identity_audit's prepverdicts run drives the Stopped arm
+EndPreparationConstructionEndedCompleted an attempt's end in a completed mob; created_identity_audit's preparation and prepverdicts runs drive its Running and Stopped arms
+EndPreparationConstructionEndedDestroyed an attempt's end in a destroyed mob (the destroy clears every attempt); created_identity_audit's preparation and prepverdicts runs drive its Running and Stopped arms
+EndPreparationConstructionNotOpenCompleted an attempt's end in a completed mob; created_identity_audit's prepverdicts run drives its Running and Stopped arms
+EndPreparationConstructionNotOpenDestroyed an attempt's end in a destroyed mob (the destroy clears every attempt); created_identity_audit's prepverdicts run drives its Running and Stopped arms
+EndPreparationConstructionActivationPendingCompleted an attempt's end in a completed mob; created_identity_audit's prepverdicts run drives its Running and Stopped arms
+EndPreparationConstructionActivationPendingDestroyed an attempt's end in a destroyed mob (the destroy clears every attempt); created_identity_audit's prepverdicts run drives its Running and Stopped arms

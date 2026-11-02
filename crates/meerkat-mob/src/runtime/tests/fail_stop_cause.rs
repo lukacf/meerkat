@@ -333,7 +333,7 @@ fn fail_stop_field_misuses(code: &str) -> Vec<String> {
 }
 
 /// The byte index just past the brace group that opens at `open`.
-fn brace_group_end(code: &str, open: usize) -> usize {
+pub(super) fn brace_group_end(code: &str, open: usize) -> usize {
     let mut depth = 0usize;
     for (offset, byte) in code.as_bytes()[open..].iter().enumerate() {
         match byte {

@@ -790,11 +790,15 @@ restores the role. A change of display name, labels, context or instructions
 alone keeps the seat. The full set of verdicts is in
 [The declared apply](/reference/mob-architecture#the-declared-apply).
 
-Retiring a declared identity that stays listed does not remove it: its
-member is retired, and the next apply seats it again on its own session. To
-remove an identity, unlist it: apply a complete roster without it, and Core
-retires its member and ends the entry. An identity unlisted and listed again
-comes back on the session it last had, with its history.
+Retiring a declared identity that stays listed does not take it out of the
+roster: its member is retired, and the next apply seats it again on its own
+session. To take an identity out of the roster (unlist it), apply a complete
+roster without it, or unlist that identity alone
+(`MobHandle::unlist_declared_identity`): Core retires its member and ends
+the entry. An identity unlisted and listed again comes back on the session it
+last had, with its history. Removing an identity
+(`MobHandle::remove_identity`) is different and permanent: it tombstones the
+name, which is never an identity or a member again.
 
 ## Wire Peers
 

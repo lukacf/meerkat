@@ -1260,6 +1260,12 @@ pub struct SpawnMemberAdmissionObservations {
     pub tooling_present: bool,
     /// Presence of an explicit `auth_binding` on the spawn request.
     pub auth_binding_present: bool,
+    /// Presence of an explicit runtime `binding` (a session, or an external
+    /// process) on the request: an identity spec's `binding`.
+    pub binding_present: bool,
+    /// Presence of an explicit `placement` on a member host on the request:
+    /// an identity spec's `placement`.
+    pub placement_present: bool,
 }
 
 /// Machine-decided per-mob operator admission verdict for current-mob-scoped
@@ -2888,6 +2894,11 @@ fn spawn_many_failure_observation(error: &MobError) -> mob_dsl::MobSpawnManyFail
         // a spawn without entry custody: the same family as the machine
         // refusing the requested transition.
         MobError::IdentityMember { .. } => {
+            mob_dsl::MobSpawnManyFailureObservationKind::InvalidTransition
+        }
+        // An identity change is not a spawn; its typed refusal is the same
+        // family as the machine refusing the requested transition.
+        MobError::IdentityChangeRefused { .. } | MobError::IdentityArchived { .. } => {
             mob_dsl::MobSpawnManyFailureObservationKind::InvalidTransition
         }
         MobError::NotExternallyAddressable(_) => {
@@ -6458,6 +6469,10 @@ pub struct MobHandle {
     /// build; see [`MobHandle::member_spawn_profile_scope_contains`].
     pub(super) member_session_authorities:
         Arc<super::member_session_authority::MemberSessionAuthorities>,
+    /// The host's mint of a member's grant, for the reads of an identity's
+    /// current grant that build nothing
+    /// ([`super::MobBuilder::with_member_grant_mint`]).
+    pub(super) member_grant_mint: Option<Arc<dyn super::MemberGrantMint>>,
 }
 
 /// Per-member retained per-spawn tool overlays (`SpawnMemberSpec::external_tools`)
@@ -7283,12 +7298,11 @@ pub struct SpawnMemberSpec {
     /// retains for the identity before the spawn's membership step. Set only
     /// by the rotation's plan; never taken from caller-supplied arguments.
     pub(crate) fresh_life: bool,
-    /// Whether the request acts for the created identity entry of its name
-    /// ([`crate::IdentityEntryOrigin::Created`]), owed its seat: the seat of
-    /// such an entry on its archived session at a start. A dormant seat with
-    /// it takes only that entry's name, never another's, and keeps its
-    /// member a created entry. Never taken from caller-supplied arguments;
-    /// a spawn ignores it.
+    /// Whether the request acts for the store-owned identity entry of its
+    /// name ([`crate::IdentityEntryOrigin::Created`]) that no member holds
+    /// ([`Self::with_created_custody`]). A spawn or a dormant seat with it
+    /// takes only that entry's name, never another's, and keeps its member a
+    /// store-owned entry. An agent-lane request never carries it.
     pub(crate) created_custody: bool,
 }
 
@@ -7469,6 +7483,21 @@ impl SpawnMemberSpec {
     #[must_use]
     pub fn with_entry_custody(mut self, entry_custody: bool) -> Self {
         self.entry_custody = entry_custody;
+        self
+    }
+
+    /// Set whether the request acts for the store-owned identity entry of
+    /// its name ([`crate::IdentityEntryOrigin::Created`]) that no member
+    /// holds: it takes only that entry's name, never another's, and keeps
+    /// its member a store-owned entry. The host's spawn that
+    /// creates a store-owned identity hosted on its first use (a placed or
+    /// externally bound one) or held for its host's held protocol
+    /// ([`MobHandle::spawn_held_until`]) holds it, as a roster-owned
+    /// identity's host spawn holds [`Self::entry_custody`]. A request may
+    /// hold one custody, never both. An agent-lane request never carries it.
+    #[must_use]
+    pub fn with_created_custody(mut self, created_custody: bool) -> Self {
+        self.created_custody = created_custody;
         self
     }
 
@@ -10264,7 +10293,7 @@ impl MobHandle {
     /// Read the machine state the actor last published under `scope`, with
     /// no actor command and without copying the state: the handle's
     /// principal must hold `scope` in that same state's grant projection.
-    fn read_published_machine_state<T>(
+    pub(super) fn read_published_machine_state<T>(
         &self,
         scope: crate::ControlScope,
         read: impl FnOnce(&mob_dsl::MobMachineState) -> T,
@@ -10353,6 +10382,141 @@ impl MobHandle {
         self.read_published_machine_state(crate::ControlScope::List, |state| {
             super::identity_entry::identity_census(state)
         })?
+    }
+
+    /// One page of the mob's removed names, of either custody, in identity
+    /// order: the names after `after` (from the first with `None`), at most
+    /// `limit` of them, clamped to 1..=[`super::IDENTITY_ENTRY_PAGE_MAX`].
+    /// Read as [`Self::identity_entry`] is: no actor command, no wake, the
+    /// [`crate::ControlScope::List`] scope.
+    pub fn identity_tombstones(
+        &self,
+        after: Option<&AgentIdentity>,
+        limit: usize,
+    ) -> Result<super::IdentityTombstonePage, MobError> {
+        self.read_published_machine_state(crate::ControlScope::List, |state| {
+            super::identity_entry::identity_tombstone_page(state, after, limit)
+        })
+    }
+
+    /// `identity`'s record in the mob's identity store, its v2 row: a
+    /// store-owned identity's revision, spec, presence (its archived
+    /// session), pending role migration and provenance, and a removed
+    /// name's tombstone with its removal's record; a row this build cannot
+    /// read answers unreadable. `None` when the store holds no row of the
+    /// name (a roster-owned identity's record is its host's roster). A store
+    /// read, under the [`crate::ControlScope::List`] scope: no actor
+    /// command, and it never wakes a member.
+    pub async fn identity_record(
+        &self,
+        identity: &AgentIdentity,
+    ) -> Result<Option<crate::identity::CreatedIdentityObservation>, MobError> {
+        self.read_published_machine_state(crate::ControlScope::List, |_| ())?;
+        let Some(store) = self.identity_member.as_ref() else {
+            return Ok(None);
+        };
+        Ok(store
+            .observe_created_identity(self.mob_id(), identity)
+            .await?)
+    }
+
+    /// The counts of the mob's records in its identity store and of what a
+    /// downgrade cycle settles first ([`super::IdentityRecordCensus`]): the
+    /// store's rows, read page by page, the published machine state, and,
+    /// for the stale seats, the journal's last seat row of each seated
+    /// store-owned identity. Under the [`crate::ControlScope::List`] scope;
+    /// it never wakes a member.
+    pub async fn identity_record_census(&self) -> Result<super::IdentityRecordCensus, MobError> {
+        let (mut census, seated) =
+            self.read_published_machine_state(crate::ControlScope::List, |state| {
+                let census = super::IdentityRecordCensus {
+                    preparations_open: state
+                        .identity_entry_unseated
+                        .values()
+                        .filter(|cause| **cause == mob_dsl::UnseatedEntryCause::PreparationPending)
+                        .count(),
+                    constructions_held: state.identity_entry_constructions_held.len()
+                        + state.identity_entry_constructions_activating.len(),
+                    ..super::IdentityRecordCensus::default()
+                };
+                let seated: std::collections::BTreeSet<AgentIdentity> = state
+                    .identity_to_runtime
+                    .keys()
+                    .map(|identity| AgentIdentity::from(identity.0.as_str()))
+                    .collect();
+                (census, seated)
+            })?;
+        let Some(store) = self.identity_member.as_ref() else {
+            return Ok(census);
+        };
+        // The present seated identities' labels and profile, against their
+        // member's last seat row below.
+        let mut seats = Vec::new();
+        let mut after = None;
+        loop {
+            let page = store
+                .scan_created_identity_rows(
+                    self.mob_id(),
+                    after.as_ref(),
+                    crate::store::IDENTITY_INTENT_SCAN_PAGE_MAX,
+                )
+                .await?;
+            for (identity, observation) in &page.observations {
+                census.created_rows += 1;
+                match observation {
+                    crate::identity::CreatedIdentityObservation::Created(record) => {
+                        match &record.presence {
+                            crate::identity::CreatedIdentityPresence::Present => {
+                                if seated.contains(identity)
+                                    && let Some(spec) = &record.spec
+                                {
+                                    seats.push((
+                                        identity.clone(),
+                                        spec.labels.clone(),
+                                        spec.profile.clone(),
+                                    ));
+                                }
+                            }
+                            crate::identity::CreatedIdentityPresence::PendingPreparation {
+                                ..
+                            } => {}
+                            crate::identity::CreatedIdentityPresence::Removed => {
+                                census.tombstones += 1;
+                            }
+                            crate::identity::CreatedIdentityPresence::Archived { .. } => {
+                                census.archived += 1;
+                            }
+                        }
+                    }
+                    crate::identity::CreatedIdentityObservation::Unreadable { .. } => {
+                        census.unreadable += 1;
+                    }
+                }
+            }
+            match page.next {
+                None => break,
+                Some(next) if after.as_ref().is_none_or(|current| &next > current) => {
+                    after = Some(next);
+                }
+                Some(_) => {
+                    return Err(MobError::Internal(format!(
+                        "the created identity scan of mob '{}' returned a non-advancing cursor",
+                        self.mob_id()
+                    )));
+                }
+            }
+        }
+        if !seats.is_empty() {
+            let rows = self.last_spawn_rows().await?;
+            census.seats_stale = seats
+                .iter()
+                .filter(|(identity, labels, profile)| {
+                    rows.get(identity)
+                        .is_some_and(|row| row.labels != *labels || row.role != *profile)
+                })
+                .count();
+        }
+        Ok(census)
     }
 
     /// The members whose run starts this mob's host holds for `reason`, in
@@ -14646,9 +14810,13 @@ impl MobHandle {
     /// host record.
     ///
     /// The next incarnation keeps the member's conversation (its session),
-    /// comms key, labels, spawner, wiring exemption and continuity, and the
-    /// profile and runtime mode the member has unless `request` names others
-    /// (a declared role migration, a runtime-mode restamp). Under the
+    /// comms key, spawner, wiring exemption and continuity, and the profile,
+    /// runtime mode and labels the member has unless `request` names others
+    /// (a declared role migration, a runtime-mode restamp, a store-owned
+    /// identity's row labels: `MemberRespawn::new().with_labels(<the row's
+    /// labels>)` is the Apply now of a seat whose row's labels moved past
+    /// it, which [`Self::identity_record_census`] counts in `seats_stale`).
+    /// Under the
     /// member's own profile it keeps the member's endpoint and wiring edges
     /// too. Under another profile it runs under that role's comms name, so
     /// it keeps neither: its endpoint is the member's key under the new name
@@ -20587,6 +20755,8 @@ impl MobHandle {
             tool_access_policy_present,
             tooling_present,
             auth_binding_present,
+            binding_present,
+            placement_present,
         } = observations;
         let effects = self
             .apply_machine_input_effects(mob_dsl::MobMachineInput::ResolveSpawnMemberAdmission {
@@ -20600,6 +20770,8 @@ impl MobHandle {
                 privileged_tool_access_policy_present: tool_access_policy_present,
                 privileged_tooling_present: tooling_present,
                 privileged_auth_binding_present: auth_binding_present,
+                privileged_binding_present: binding_present,
+                privileged_placement_present: placement_present,
             })
             .await?;
         let admission = effects
@@ -20695,10 +20867,14 @@ impl MobHandle {
         identity: &AgentIdentity,
         cause: mob_dsl::MemberWakeCause,
     ) -> Result<(), MobError> {
-        let session_id = self
-            .resolve_bridge_session_id(identity)
-            .await
-            .ok_or_else(|| MobError::MemberNotFound(identity.clone()))?;
+        // No member holds the identity: an archived identity and one
+        // awaiting its host's preparation answer typed.
+        let Some(session_id) = self.resolve_bridge_session_id(identity).await else {
+            return Err(super::identity_entry::unseated_delivery_refusal(
+                &self.machine_state_watch_rx.borrow(),
+                identity,
+            ));
+        };
         let observed_missing = match self
             .session_service
             .live_session_actor_registered(&session_id)

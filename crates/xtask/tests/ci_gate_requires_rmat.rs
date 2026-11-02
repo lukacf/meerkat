@@ -910,7 +910,7 @@ fn ci_runs_the_bounded_tlc_audits_on_machine_authority_changes() {
         [
             "audits-a", "audits-b", "audits-c", "audits-d", "audits-e", "audits-f", "audits-g",
             "audits-h", "audits-i", "audits-j", "audits-k", "audits-l", "audits-m", "audits-n",
-            "audits-o", "audits-q"
+            "audits-o", "audits-q", "audits-r", "audits-s", "audits-t", "audits-u", "audits-v"
         ],
         "every audit shard runs"
     );
@@ -918,7 +918,7 @@ fn ci_runs_the_bounded_tlc_audits_on_machine_authority_changes() {
         job.get("timeout-minutes")
             .and_then(serde_json::Value::as_u64),
         Some(20),
-        "a TLC shard times out at 20 minutes, well over its expected 6-10"
+        "a TLC shard times out at 20 minutes, over a shard's at most about 14 hosted"
     );
     let job_text = job_step_text(job);
     for required in [

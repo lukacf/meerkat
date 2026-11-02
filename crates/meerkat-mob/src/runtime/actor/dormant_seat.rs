@@ -24,7 +24,7 @@ use super::*;
 
 /// What a plan is for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SeatPlanMode {
+pub(super) enum SeatPlanMode {
     /// A dormant seat (`seat_dormant_members`).
     Seat,
     /// A rotation's next incarnation (`rotate_member`): a fresh life seated
@@ -114,6 +114,45 @@ impl MemberRotation {
     }
 }
 
+/// How a seat step answers a seat MobMachine refuses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SeatCommitScope {
+    /// Each seat is answered alone: a refused one is answered refused, and
+    /// the others commit (a dormant seat chunk).
+    EachAlone,
+    /// All or nothing: a seat answered anything but seated refuses the whole
+    /// step (a store-owned create's change).
+    AllOrNothing,
+}
+
+/// The store write that makes a staged seat step durable.
+pub(super) enum SeatCommitWrite {
+    /// The step's journal rows, appended in one batch (no write when it has
+    /// none).
+    Journal,
+    /// A store-owned identity change: the step's journal rows written with
+    /// the identities' rows and the change's receipt, in one store
+    /// transaction, also when the step seats nobody.
+    IdentityChange {
+        store: Arc<dyn crate::store::MobIdentityMemberStore>,
+        rows: Vec<crate::store::CreatedIdentityRowWrite>,
+        receipt: crate::identity::IdentityChangeReceipt,
+    },
+}
+
+/// A seat step staged on its prepared authority and not yet written: the
+/// machine's effects, the journal rows, the seated members, the answers so
+/// far, the members to verify and the declared edges.
+pub(super) struct StagedSeatCommit {
+    authority: mob_dsl::MobMachinePreparedAuthority,
+    effects: Vec<mob_dsl::MobMachineEffect>,
+    journal: Vec<NewMobEvent>,
+    seated: Vec<SeatedInChunk>,
+    outcomes: Vec<Option<DormantSeatOutcome>>,
+    verify: BTreeSet<AgentIdentity>,
+    declared_edges: super::seat_wiring::StagedDeclaredEdges,
+}
+
 /// One seated identity of a chunk, waiting for its plan and its outcome.
 struct SeatedInChunk {
     index: usize,
@@ -175,7 +214,7 @@ impl MobActor {
     /// Where this mob's seats take their members' endpoints from: the
     /// source the host declared, else the root the session service reports
     /// ([`member_seat_endpoint_source`]).
-    fn seat_endpoint_source(
+    pub(super) fn seat_endpoint_source(
         &self,
     ) -> Result<MemberSeatEndpointSource, MemberSeatEndpointsUnavailable> {
         member_seat_endpoint_source(self.member_residency.seat_endpoints.as_ref(), || {
@@ -232,7 +271,7 @@ impl MobActor {
     /// made here; the machine makes the rest at the commit. `probed` is the
     /// spec's next generation and member-admission verdict when its chunk
     /// probed them already; without them they are probed here.
-    async fn plan_dormant_seat(
+    pub(super) async fn plan_dormant_seat(
         &mut self,
         mut spec: super::super::handle::SpawnMemberSpec,
         mode: SeatPlanMode,
@@ -355,10 +394,12 @@ impl MobActor {
         }
         let state = self.dsl_authority.state();
         let seated_now = state.identity_to_runtime.contains_key(&dsl_identity);
-        // A dormant seat never takes an identity entry its host creates: one
-        // hosted on its first use (placed or externally bound) or one
-        // awaiting its held creation (MobMachine's dormant seat refuses both
-        // too, unseated_entry_owed_its_seat).
+        // A dormant seat never takes an identity entry its host creates or
+        // prepares: one hosted on its first use (placed or externally
+        // bound), one awaiting its held creation, or one awaiting its host's
+        // preparation, which its settle seats or its held construction's
+        // activation publishes (MobMachine's dormant seat refuses them too,
+        // unseated_entry_owed_its_seat).
         if mode == SeatPlanMode::Seat
             && let Some(cause) = state.identity_entry_unseated.get(&dsl_identity)
         {
@@ -377,9 +418,14 @@ impl MobActor {
                 }
                 mob_dsl::UnseatedEntryCause::PreparationPending => {
                     return Err(MobError::WiringError(format!(
-                        "'{agent_identity}' cannot be seated dormant: the created identity entry \
-                         awaits its host's preparation"
+                        "'{agent_identity}' cannot be seated dormant: the identity entry awaits \
+                         its host's preparation"
                     )));
+                }
+                mob_dsl::UnseatedEntryCause::Archived => {
+                    return Err(MobError::IdentityArchived {
+                        member_id: agent_identity,
+                    });
                 }
                 mob_dsl::UnseatedEntryCause::SeatOwed => {}
             }
@@ -637,8 +683,27 @@ impl MobActor {
         &mut self,
         entries: Vec<DormantSeatCommitEntry>,
     ) -> Result<Vec<DormantSeatOutcome>, MobError> {
+        let authority = self.dsl_authority.prepare_authority();
+        let staged = self
+            .stage_seat_commit(authority, entries, SeatCommitScope::EachAlone)
+            .await?;
+        self.finish_seat_commit(staged, SeatCommitWrite::Journal)
+            .await
+    }
+
+    /// Stage one seat chunk's step on `authority` (which may already hold a
+    /// store-owned change's admission and entry records): each entry's
+    /// inputs, its answer, the chunk's boot plans and the edges the
+    /// definition declares for the members it seats. Nothing is committed
+    /// or written. Under [`SeatCommitScope::AllOrNothing`] a seat MobMachine
+    /// refuses, or answers anything but seated, refuses the whole step.
+    pub(super) async fn stage_seat_commit(
+        &mut self,
+        mut authority: mob_dsl::MobMachinePreparedAuthority,
+        entries: Vec<DormantSeatCommitEntry>,
+        scope: SeatCommitScope,
+    ) -> Result<StagedSeatCommit, MobError> {
         let mut outcomes: Vec<Option<DormantSeatOutcome>> = Vec::with_capacity(entries.len());
-        let mut authority = self.dsl_authority.prepare_authority();
         let mut staged = Vec::with_capacity(entries.len());
         for (index, entry) in entries.into_iter().enumerate() {
             outcomes.push(None);
@@ -727,10 +792,16 @@ impl MobActor {
                 }
             }
         }
+        if scope == SeatCommitScope::AllOrNothing
+            && let Some(answered) = outcomes.iter_mut().find_map(Option::take)
+        {
+            // A store-owned change seats all of its identities or none.
+            return Err(answered.into_unseated_error());
+        }
         let SettledSeatChunk {
             mut effects,
             mut journal,
-            mut seated,
+            seated,
             plan,
         } = settled;
 
@@ -825,24 +896,75 @@ impl MobActor {
         let declared_edges = self
             .stage_seated_declared_edges(&mut authority, &seated_ends, &mut effects, &mut journal)
             .await?;
+        Ok(StagedSeatCommit {
+            authority,
+            effects,
+            journal,
+            seated,
+            outcomes,
+            verify,
+            declared_edges,
+        })
+    }
+
+    /// Write a staged seat step and commit it: the journal rows before the
+    /// machine commit (the machine never reports a member seated before its
+    /// `MemberSpawned` row is durable), then the roster, the declared
+    /// edges' live ends and the verified pass. A failed write commits
+    /// nothing.
+    pub(super) async fn finish_seat_commit(
+        &mut self,
+        staged: StagedSeatCommit,
+        write: SeatCommitWrite,
+    ) -> Result<Vec<DormantSeatOutcome>, MobError> {
+        let StagedSeatCommit {
+            authority,
+            effects,
+            journal,
+            mut seated,
+            mut outcomes,
+            verify,
+            declared_edges,
+        } = staged;
         let prepared = PreparedDslInput {
             authority,
             effects,
             phase_changed: declared_edges.phase_changed,
         };
-        // Journal before commit: the machine never reports a member seated
-        // before its MemberSpawned row is durable.
-        let stored = if journal.is_empty() {
-            self.commit_prepared_dsl_input(prepared)?;
-            Vec::new()
-        } else {
-            #[cfg(test)]
-            super::seat_wiring::record_seat_step_append_for_test(&self.definition.id, &journal);
-            let events = Arc::clone(&self.events);
-            self.commit_prepared_dsl_input_after(prepared, move || async move {
-                events.append_batch(journal).await.map_err(MobError::from)
-            })
-            .await?
+        let stored = match write {
+            SeatCommitWrite::Journal if journal.is_empty() => {
+                self.commit_prepared_dsl_input(prepared)?;
+                Vec::new()
+            }
+            SeatCommitWrite::Journal => {
+                #[cfg(test)]
+                super::seat_wiring::record_seat_step_append_for_test(&self.definition.id, &journal);
+                let events = Arc::clone(&self.events);
+                self.commit_prepared_dsl_input_after(prepared, move || async move {
+                    events.append_batch(journal).await.map_err(MobError::from)
+                })
+                .await?
+            }
+            // The change's one store transaction: its identities' rows, the
+            // step's journal rows and its receipt, all or nothing.
+            SeatCommitWrite::IdentityChange {
+                store,
+                rows,
+                receipt,
+            } => {
+                self.commit_prepared_dsl_input_after(prepared, move || async move {
+                    let commit = store
+                        .commit_identity_change(&crate::store::IdentityChangeWrite {
+                            receipt,
+                            rows,
+                            events: journal,
+                        })
+                        .await
+                        .map_err(MobError::from)?;
+                    super::super::identity_change::committed_change_events(commit)
+                })
+                .await?
+            }
         };
         {
             let mut roster = self.roster.write().await;
@@ -1449,7 +1571,14 @@ impl MobActor {
         let mut spec =
             super::super::handle::SpawnMemberSpec::new(role.clone(), agent_identity.clone());
         spec.runtime_mode = Some(request.runtime_mode.unwrap_or(entry.runtime_mode));
-        spec.labels = Some(entry.labels.clone());
+        // The request's labels (a store-owned identity's row labels), or
+        // the member's own. The rotation's record keeps them.
+        spec.labels = Some(
+            request
+                .labels
+                .clone()
+                .unwrap_or_else(|| entry.labels.clone()),
+        );
         // The member's own overrides apply to its own role; a declared role
         // migration resolves the new role from the definition.
         if role == entry.role {

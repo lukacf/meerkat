@@ -65,6 +65,10 @@ const WITHDRAWN_TOKEN_SOURCE_REREAD_SECONDS: u64 = 60;
 /// GitHub's error `message` is quoted in errors with control characters
 /// removed and at most this many characters.
 const GITHUB_ERROR_MESSAGE_MAX_CHARS: usize = 200;
+/// How many of the bearer values an account state signed requests with it
+/// keeps to redact from response diagnostics: the current one and those that
+/// replaced each other before it, whose requests can still be answered.
+const REDACTED_BEARER_HISTORY: usize = 4;
 /// The operator token goes to no Copilot API host outside this domain.
 const COPILOT_API_DOMAIN: &str = "githubcopilot.com";
 const COPILOT_API_HOST_SUFFIX: &str = ".githubcopilot.com";
@@ -942,6 +946,10 @@ impl HttpAuthorizer for CopilotRouteBoundAuthorizer {
             .await
     }
 
+    fn redact_response_diagnostic(&self, diagnostic: &mut String) {
+        self.inner.redact_response_diagnostic(diagnostic);
+    }
+
     fn label(&self) -> &str {
         self.inner.label()
     }
@@ -1458,6 +1466,14 @@ struct CopilotAccountState {
     /// Operator-token mode: the account's pacing (rate limits and withdrawn
     /// re-reads), shared with every later account state of the same account.
     pacing: Arc<CopilotAccountPacing>,
+    /// The bearer values this account state's authorizers signed requests
+    /// with, oldest first, at most [`REDACTED_BEARER_HISTORY`]: in token mode
+    /// the operator's GitHub token, otherwise the derived Copilot token. A
+    /// provider, proxy or gateway can echo a request's headers in an error,
+    /// so each is redacted from what a provider client reads from a response
+    /// ([`HttpAuthorizer::redact_response_diagnostic`]), a value a rotation
+    /// replaced included.
+    signed_bearers: Mutex<std::collections::VecDeque<String>>,
 }
 
 /// Pacing of an operator-token account: GitHub's rate limits on its identity
@@ -1517,6 +1533,32 @@ impl CopilotAccountState {
             last_refresh_outcome: Mutex::new(None),
             next_generation: AtomicU64::new(1),
             pacing,
+            signed_bearers: Mutex::new(std::collections::VecDeque::new()),
+        }
+    }
+
+    /// Keep `bearer`, the value a request was just signed with, for
+    /// [`Self::redact_signed_bearers`].
+    fn record_signed_bearer(&self, bearer: &str) {
+        if bearer.is_empty() {
+            return;
+        }
+        let mut signed = self.signed_bearers.lock();
+        if signed.back().is_some_and(|last| last == bearer) {
+            return;
+        }
+        signed.retain(|known| known != bearer);
+        signed.push_back(bearer.to_string());
+        while signed.len() > REDACTED_BEARER_HISTORY {
+            signed.pop_front();
+        }
+    }
+
+    /// Remove from `diagnostic` every bearer value this account state signed
+    /// requests with.
+    fn redact_signed_bearers(&self, diagnostic: &mut String) {
+        for bearer in self.signed_bearers.lock().iter() {
+            redact_secret(diagnostic, bearer);
         }
     }
 }
@@ -2145,7 +2187,7 @@ impl CopilotAuthorizer {
             // proxy or gateway page can echo the request's headers, the
             // GitHub token included.
             let status = response.status;
-            let message = github_error_message(&response.body);
+            let message = github_error_message(&response.body, github_token);
             return Err(CopilotTokenExchangeError::from_status(
                 status,
                 response.retry_after,
@@ -2209,7 +2251,7 @@ async fn fetch_copilot_models(
     if !(200..=299).contains(&response.status) {
         return Err(CopilotModelDiscoveryError::Http {
             status: response.status,
-            message: github_error_message(&response.body),
+            message: github_error_message(&response.body, token),
             retry_after: response.retry_after,
             rate_limited: response.rate_limited,
             rate_limit_reset: response.rate_limit_reset,
@@ -2811,6 +2853,12 @@ impl HttpAuthorizer for CopilotAuthorizer {
         Ok(HttpAuthorizationResponseAction::Propagate)
     }
 
+    /// Every bearer this account state signed requests with (the operator's
+    /// GitHub token in token mode, a rotated-out one included) is redacted.
+    fn redact_response_diagnostic(&self, diagnostic: &mut String) {
+        self.state.redact_signed_bearers(diagnostic);
+    }
+
     #[allow(clippy::unnecessary_literal_bound)]
     fn label(&self) -> &str {
         crate::GITHUB_COPILOT_AUTHORIZER_LABEL
@@ -2857,6 +2905,7 @@ impl CopilotAuthorizer {
                 request.url
             )));
         }
+        self.state.record_signed_bearer(&token.token);
         for (name, value) in self
             .inference_headers(&token.token, CopilotRequestIntent::ConversationPanel)
             .map_err(|error| AuthError::Other(error.to_string()))?
@@ -3022,19 +3071,19 @@ async fn lookup_operator_identity(
         401 => {
             return Err(OperatorRefusal::TokenRejected {
                 status: 401,
-                message: github_error_message(&response.body),
+                message: github_error_message(&response.body, token),
             });
         }
         status @ 400..=499 => {
             return Err(OperatorRefusal::Refused(format!(
                 "GitHub Copilot refused this token ({status}): {}",
-                github_error_message(&response.body)
+                github_error_message(&response.body, token)
             )));
         }
         status => {
             return Err(OperatorRefusal::Refused(format!(
                 "GitHub Copilot identity lookup failed ({status}): {}",
-                github_error_message(&response.body)
+                github_error_message(&response.body, token)
             )));
         }
     }
@@ -3132,15 +3181,21 @@ fn operator_api_base(endpoint: Option<&str>) -> Result<String, OperatorRefusal> 
 }
 
 /// GitHub's error `message` from a response body, with control characters
-/// removed and at most [`GITHUB_ERROR_MESSAGE_MAX_CHARS`] characters. Never
-/// the raw body.
-fn github_error_message(body: &[u8]) -> String {
-    let message: String = serde_json::from_slice::<GitHubErrorEnvelope>(body)
+/// removed, `secret` (the credential the request carried, which a proxy or
+/// gateway can echo) redacted, and at most [`GITHUB_ERROR_MESSAGE_MAX_CHARS`]
+/// characters. Never the raw body. The secret is redacted before the cut, so
+/// no prefix of it survives.
+fn github_error_message(body: &[u8], secret: &str) -> String {
+    let mut message: String = serde_json::from_slice::<GitHubErrorEnvelope>(body)
         .ok()
         .and_then(|envelope| envelope.message)
         .unwrap_or_default()
         .chars()
         .filter(|character| !character.is_control())
+        .collect();
+    redact_secret(&mut message, secret);
+    let message: String = message
+        .chars()
         .take(GITHUB_ERROR_MESSAGE_MAX_CHARS)
         .collect();
     let message = message.trim();
@@ -3148,6 +3203,13 @@ fn github_error_message(body: &[u8]) -> String {
         "no message".to_string()
     } else {
         message.to_string()
+    }
+}
+
+/// Replace every occurrence of `secret` in `text` with the redaction marker.
+fn redact_secret(text: &mut String, secret: &str) {
+    if !secret.is_empty() && text.contains(secret) {
+        *text = text.replace(secret, meerkat_core::redact::REDACTED);
     }
 }
 
@@ -8256,11 +8318,29 @@ mod tests {
                 "message": format!("line\u{0007}one\n{long}")
             }))
             .expect("body");
-            let message = github_error_message(&body);
+            let message = github_error_message(&body, "unquoted-secret");
             assert!(message.starts_with("lineone"), "{message}");
             assert_eq!(message.chars().count(), GITHUB_ERROR_MESSAGE_MAX_CHARS);
             assert!(!message.chars().any(char::is_control));
-            assert_eq!(github_error_message(b"<html>"), "no message");
+            assert_eq!(
+                github_error_message(b"<html>", "unquoted-secret"),
+                "no message"
+            );
+
+            // The secret is redacted before the cut, so no prefix of it
+            // survives the cut, and a control character inside it does not
+            // hide it.
+            let secret = user_token("quoted");
+            let body = serde_json::to_vec(&serde_json::json!({
+                "message": format!("{} {}\u{0007}{}", "y".repeat(189), &secret[..8], &secret[8..])
+            }))
+            .expect("body");
+            let message = github_error_message(&body, &secret);
+            assert!(!message.contains(&secret[..8]), "{message}");
+            assert!(
+                message.ends_with(meerkat_core::redact::REDACTED),
+                "{message}"
+            );
         }
 
         /// The CLI's check: no lease, no store and no cache effects; the same

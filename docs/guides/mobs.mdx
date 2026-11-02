@@ -667,6 +667,9 @@ within a 60 second ready-wait budget, after which it answers
 `ReadyWaitTimedOut`; if that spawn fails before its member is committed, the
 waiting call spawns the member itself. A second spawn of a member whose first
 spawn has not settled yet is refused `MemberAlreadyExists`.
+An ensure of a reserved name (a removed created identity's, or one whose
+created identity this build cannot read) is refused `IdentityMember`, as a
+spawn of that name is, before anything is recorded or created.
 
 ### Trusted Rust member build overrides
 

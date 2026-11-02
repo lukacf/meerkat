@@ -1136,8 +1136,8 @@ AuditArchivedKeepsItsName ==
 \* preparation changes its row only (RecordOnly), or is refused: its entry
 \* keeps its cause and its origin.
 AuditStoreUpdateKeepsStanding ==
-    [][(Unseated(Id2) \in {Some("Archived"), Some("PreparationPending")}
-          /\ DeclareCustodyArm(Id2, ApplyShape, TRUE, FALSE))
+    [][(/\ Unseated(Id2) \in {Some("Archived"), Some("PreparationPending")}
+        /\ DeclareCustodyArm(Id2, ApplyShape, TRUE, FALSE))
          => (UnseatedNext(Id2) = Unseated(Id2) /\ OriginNext(Id2) = Origin(Id2))
       ]_vars
 \* An identity awaiting its host's preparation is never archived: its

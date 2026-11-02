@@ -1901,7 +1901,7 @@ mod deferred_member_custody_tests {
             Err(store_unavailable()),
             now,
         );
-        let later = now + Duration::from_secs(3600);
+        let later = now + Duration::from_hours(1);
         assert_eq!(registry.next_wait(later), None);
         assert!(registry.due(later).is_empty());
         assert_eq!(

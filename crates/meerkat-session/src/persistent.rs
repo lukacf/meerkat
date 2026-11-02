@@ -152,6 +152,7 @@ fn whole_blob_read_error_to_session_error(
 }
 
 #[cfg(test)]
+#[allow(clippy::panic)]
 mod whole_blob_read_error_tests {
     use super::*;
 

@@ -321,8 +321,7 @@ fn every_input_in_every_phase_is_total_and_only_mutates_where_intended() {
                 let mutates = match (phase, name) {
                     (Phase::Unclassified, "Quarantine")
                     | (Phase::Quarantined, "RequestRetryExplicit")
-                    | (Phase::Retrying, "ResolveRetryFailed")
-                    | (Phase::Retrying, "ResolveRetryManaged") => true,
+                    | (Phase::Retrying, "ResolveRetryFailed" | "ResolveRetryManaged") => true,
                     // On demand, only a store that could not serve now.
                     (Phase::Quarantined, "RequestRetryOnDemand") => {
                         class == MobQuarantineClass::StoreUnavailable

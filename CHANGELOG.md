@@ -1080,8 +1080,9 @@ them.
 
 - `meerkat-mob-mcp`, `meerkat-rpc`, `meerkat-contracts`: quarantined mobs
   are visible and can be retried. `mob/list`, the MCP `meerkat_mob_list`
-  and `mob_list` tools and the browser runtime's `mob_list` read one
-  inventory and list each quarantined persisted mob under `quarantined`
+  tool, the `mob_list` tool of `MobMcpDispatcher` and the browser runtime's
+  `mob_list` read one inventory and list each quarantined persisted mob
+  under `quarantined`
   (`WireQuarantinedMob`: the id, the class in the tolerant
   `WireMobQuarantineClass` vocabulary `store_unavailable`,
   `store_unreadable` or `resume_refused`, `retryable`, `retrying`,
@@ -1105,7 +1106,8 @@ them.
   store's own integrity check), and `RuntimeStoreError::Unavailable` and
   `RuntimeStoreError::Corrupt`, so a host store read keeps unavailability
   and corruption typed. The reference host store answers a typed read fault
-  for one scope (`set_read_fault` with `HostStoreReadFault`).
+  for one scope (`set_read_fault` with `HostStoreReadFault`), or for every
+  scope of a kind (`set_kind_read_fault`).
 - `meerkat-mob`, `meerkat-contracts`: the member custody deferral causes
   `store_unavailable` and `store_unreadable` (`MemberCustodyDeferralCause`,
   `WireMemberCustodyDeferralCause`) in the tolerant advisory vocabulary of
@@ -2240,7 +2242,12 @@ them.
   next call that addresses its mob (one attempt at a time: a call that meets
   one in flight answers at once) and at the next start; one that needs a
   repair (`store_unreadable`, `resume_refused`) at the next start or by
-  `mob/restore_retry`. A list never re-attempts.
+  `mob/restore_retry`. A list never re-attempts. A re-attempt runs to its
+  end even when its caller goes away, and every lookup reads the managed,
+  held and quarantined mobs as one, so a mob a re-attempt restores is never
+  answered as not found. A create of the id of a restored child mob held
+  before activation is refused with the held answer, as a lookup of the id
+  is, before it opens that mob's store.
 - `meerkat-mob`: one member's failed cleanup restore no longer stops its
   mob. A mob start that cannot restore the cleanup delivery of a retiring
   member (or of a member bound to a session of a Stopped or Completed mob)

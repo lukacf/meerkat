@@ -1331,10 +1331,13 @@ The class says why a mob is quarantined:
 
 - **Re-attempts.** One re-attempt of a mob's restore runs at a time: a call
   that meets a re-attempt in flight answers the refusal at once and never
-  waits for it. A list never re-attempts, and a `store_unreadable` or
-  `resume_refused` mob is never re-attempted on its own. Every start
-  classifies every store again, so a mob of any class restores at the next
-  start once its store does.
+  waits for it. A re-attempt runs to its end even when the call that started
+  it goes away (a client that disconnects), and a call that meets a mob a
+  re-attempt is restoring answers the refusal or the restored mob, never
+  that the mob does not exist. A list never re-attempts, and a
+  `store_unreadable` or `resume_refused` mob is never re-attempted on its
+  own. Every start classifies every store again, so a mob of any class
+  restores at the next start once its store does.
 - **Retry after a repair.** `mob/restore_retry` (Rust
   `MobMcpState::mob_restore_retry`, owner console only) re-attempts the
   restore of a quarantined mob of any class and answers `restored`, `held`

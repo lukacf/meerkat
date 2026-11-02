@@ -87,6 +87,11 @@ Forge 0.3.0's agent teams pin the Meta 0.9.6 runtime; the 0.9.5 notes said 0.9.4
 
 ### Upgrade
 
+- A host that matches the boot error of its root mob's resume reads a store
+  fault as `MobRuntimeError::Mob(MobError::MobQuarantined { class, cause, ..
+  })`: the store error it matched before is its `cause`. A refusal that is
+  not a store fault (a definition that changed under the boot, for example)
+  keeps its own variant.
 - A host's own `MobSessionService` wrapper (around the session service it
   passes to `MobBootstrapSpec::new`) must forward the four member
   operator-instruction methods Meerkat 0.9.9 adds,
@@ -172,6 +177,13 @@ Forge 0.3.0's agent teams pin the Meta 0.9.6 runtime; the 0.9.5 notes said 0.9.4
 
 ### Added
 
+- `meta/status` lists the persisted child mobs whose stores did not restore
+  at this start under `quarantined_mobs` (each with its id, class, whether a
+  later attempt may restore it with no repair, the attempts so far and the
+  refusal a call that addresses it answers), or names the failure under
+  `quarantined_mobs_error` when the restore of the child mobs failed as a
+  whole. `UnifiedRuntime::quarantined_mobs` and
+  `MobRuntime::quarantined_mobs` read the same list.
 - The Console offers side chats. **Fork to side chat** in a conversation's
   header forks the agent's durable transcript into a new member that opens in
   a pane beside the agent (`meta/fork_member` on `/console/rpc`); the agent's
@@ -752,6 +764,22 @@ Forge 0.3.0's agent teams pin the Meta 0.9.6 runtime; the 0.9.5 notes said 0.9.4
 
 ### Fixed
 
+- One durable child mob store that does not restore no longer fails the
+  boot: Meerkat 0.9.9 keeps it quarantined (kept as found, with no actor) and
+  restores the other child mobs. The quarantined mob stays in the hosted set
+  (a mob announcement still names it as a mob hosted here, not running, never
+  as gone) and `meta/status` lists it. A quarantine of the gateway's own mob
+  still fails the boot, now with the typed reason: a root mob whose store
+  could not serve a read now, whose stored state cannot be read or decoded,
+  or whose records disagree among themselves fails with
+  `MobRuntimeError::Mob(MobError::MobQuarantined)` and its class
+  (`store_unavailable`, retryable, or `store_unreadable` and `resume_refused`,
+  which need a repair) instead of the untyped store error. On a host store
+  realm, a root mob storage the host store could not open (its scopes
+  unavailable now, or holding data that does not decode) fails the build with
+  the same typed quarantine
+  (`UnifiedRuntimeBuilderError::Bootstrap(UnifiedRuntimeBootstrapError::Mob(..))`)
+  instead of `UnifiedRuntimeBuilderError::Io` text.
 - The durable resume gate checks every WorkGraph claim a resumed worker
   holds: it pages through every open item with the WorkGraph list cursor.
   It read one page of 1,000 open items and warned that a claim past it went

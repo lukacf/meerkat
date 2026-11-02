@@ -1777,6 +1777,72 @@ async fn the_realm_runtime_store_self_fences_on_the_realm() {
 // Runtimes over the realm
 // ---------------------------------------------------------------------------
 
+/// A restart whose root mob scope the host store cannot serve fails the
+/// boot with the root mob's typed quarantine, `store_unavailable` (retryable:
+/// a later boot may pass), never with untyped text; stored data the host
+/// cannot serve as it is fails it `store_unreadable`. Once the store serves,
+/// the same realm boots.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_root_mob_scope_the_host_store_cannot_serve_fails_the_boot_quarantined() {
+    use meerkat_store_conformance::HostStoreReadFault;
+
+    let fixture = Fixture::new();
+    let mob_id = unique_mob_id("root-host-unavailable");
+    let model = Model::default();
+    let cache = tempfile::tempdir().expect("cache");
+    {
+        let provider = Arc::new(fixture.open(&fixture.process()).await.expect("open"));
+        let runtime = build(builder(&provider, cache.path(), &mob_id, &[ALICE], &model)).await;
+        stop(runtime).await;
+    }
+
+    for (fault, class) in [
+        (
+            HostStoreReadFault::Unavailable,
+            meerkat_mob::MobQuarantineClass::StoreUnavailable,
+        ),
+        (
+            HostStoreReadFault::Corrupt,
+            meerkat_mob::MobQuarantineClass::StoreUnreadable,
+        ),
+    ] {
+        let provider = reopen(&fixture).await;
+        fixture
+            .store
+            .set_kind_read_fault(ScopeKind::Mob, Some(fault));
+        match Box::pin(builder(&provider, cache.path(), &mob_id, &[ALICE], &model).build()).await {
+            Err(UnifiedRuntimeBuilderError::Bootstrap(
+                crate::unified_runtime::UnifiedRuntimeBootstrapError::Mob(MobRuntimeError::Mob(
+                    meerkat_mob::MobError::MobQuarantined {
+                        mob_id: quarantined,
+                        class: answered,
+                        ..
+                    },
+                )),
+            )) => {
+                assert_eq!(quarantined.as_str(), mob_id, "{fault:?}");
+                assert_eq!(answered, class, "{fault:?}");
+                assert_eq!(
+                    answered.is_retryable(),
+                    fault == HostStoreReadFault::Unavailable
+                );
+            }
+            Err(other) => {
+                panic!("{fault:?}: the boot fails with the typed quarantine, not: {other}")
+            }
+            Ok(runtime) => {
+                stop(runtime).await;
+                panic!("{fault:?}: a root mob whose scope cannot be read must not boot");
+            }
+        }
+        fixture.store.set_kind_read_fault(ScopeKind::Mob, None);
+    }
+
+    let provider = reopen(&fixture).await;
+    let runtime = build(builder(&provider, cache.path(), &mob_id, &[ALICE], &model)).await;
+    stop(runtime).await;
+}
+
 /// A first build over a new realm writes the realm record, creates the root
 /// mob storage in the realm with its composition record, and lists the
 /// realm, its limits and the cache in the census; the cache holds no

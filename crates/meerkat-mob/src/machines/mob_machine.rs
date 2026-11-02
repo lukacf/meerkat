@@ -35,6 +35,11 @@ pub use meerkat_machine_schema::catalog::dsl::mob_machine::{
     MemberWakeVerdictKind, PeerInputClass, PeerNoticeDisposition, PeerTransportKind,
     RuntimeEpochId,
 };
+// A seated member's unrestored custody restore and the cause it met: the
+// schema's own types, one definition for both instantiations of the machine.
+pub use meerkat_machine_schema::catalog::dsl::mob_machine::{
+    MemberCustodyCauseKind, MemberCustodyRestoreKind,
+};
 // Identity entries, and the presence of a created entry's row the boot's
 // scan recovers: the schema's own types, one definition for both
 // instantiations of the machine.

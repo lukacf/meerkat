@@ -22,8 +22,8 @@ use super::{
     dsl::{
         dsl_approval_lifecycle_machine, dsl_auth_machine, dsl_detached_job_machine,
         dsl_forked_participant_lifecycle_machine, dsl_meerkat_machine, dsl_mob_machine,
-        dsl_occurrence_lifecycle_machine, dsl_runtime_delivery_machine,
-        dsl_schedule_lifecycle_machine, dsl_session_document_machine,
+        dsl_mob_store_restore_lifecycle_machine, dsl_occurrence_lifecycle_machine,
+        dsl_runtime_delivery_machine, dsl_schedule_lifecycle_machine, dsl_session_document_machine,
         dsl_session_turn_admission_machine, dsl_temporary_council_lifecycle_machine,
         dsl_tool_grant_lifecycle_machine, dsl_work_attention_lifecycle_machine,
         dsl_work_execution_lifecycle_machine, dsl_work_item_admission_machine,
@@ -1118,6 +1118,28 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                         "RespawnIdentityEntryRefusedRunning",
                         "RespawnIdentityEntryRefusedStopped",
                     ]),
+                ),
+                scenario(
+                    "member-custody-degraded",
+                    "a mob start that cannot restore a seated member's custody for a cause of the member's own records the member degraded (the restore and its cause) in every live phase, a later record replaces the cause, a re-attempt that restores it resolves the record, a record for an unseated identity or in a destroyed mob changes nothing, and an ended seat or a destroy takes the record (crates/meerkat-machine-schema/tests/mob_machine_member_custody_region.rs)",
+                    CoverageClaims::none()
+                        .transitions(&[
+                            "RecordMemberCustodyUnrestoredSeatedRunning",
+                            "RecordMemberCustodyUnrestoredSeatedStopped",
+                            "RecordMemberCustodyUnrestoredSeatedCompleted",
+                            "RecordMemberCustodyUnrestoredNotSeatedRunning",
+                            "RecordMemberCustodyUnrestoredNotSeatedStopped",
+                            "RecordMemberCustodyUnrestoredNotSeatedCompleted",
+                            "RecordMemberCustodyUnrestoredDestroyed",
+                            "ResolveMemberCustodyRestoredRecordedRunning",
+                            "ResolveMemberCustodyRestoredRecordedStopped",
+                            "ResolveMemberCustodyRestoredRecordedCompleted",
+                            "ResolveMemberCustodyRestoredUnrecordedRunning",
+                            "ResolveMemberCustodyRestoredUnrecordedStopped",
+                            "ResolveMemberCustodyRestoredUnrecordedCompleted",
+                            "ResolveMemberCustodyRestoredUnrecordedDestroyed",
+                        ])
+                        .invariants(&["custody_unrestored_members_are_seated"]),
                 ),
                 scenario(
                     "wiring-and-session-binding",
@@ -3910,6 +3932,94 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                             "expiry_never_precedes_its_deadline",
                             "revocation_precedes_the_deadline",
                         ]),
+                ),
+            ],
+        ),
+        machine_manifest_from_schema(
+            &dsl_mob_store_restore_lifecycle_machine(),
+            &[machine_anchor(
+                "mob_store_restore_lifecycle",
+                "MobStoreRestoreLifecycleMachine",
+                "crates/meerkat-mob/src/machines/mob_store_restore_lifecycle.rs",
+                "MobStoreRestoreLifecycleMachine owns one quarantined persisted mob store: its class, the single re-attempt in flight, and whether a re-attempt released the store or left it quarantined under the class it met",
+                CoverageClaims::none()
+                    .transitions(&[
+                        "QuarantineUnclassified",
+                        "QuarantineQuarantined",
+                        "QuarantineRetrying",
+                        "QuarantineReleased",
+                        "RequestRetryUnclassified",
+                        "RequestRetryQuarantined",
+                        "RequestRetryQuarantinedNotRetryable",
+                        "RequestRetryRetrying",
+                        "RequestRetryReleased",
+                        "ResolveRetryFailed",
+                        "ResolveRetryRestored",
+                        "ResolveRetryUnclassified",
+                        "ResolveRetryQuarantined",
+                        "ResolveRetryReleased",
+                    ])
+                    .effects(&[
+                        "StoreQuarantined",
+                        "RetryAdmitted",
+                        "StoreReleased",
+                        "StoreStillQuarantined",
+                        "RequestRefused",
+                    ])
+                    .invariants(&[
+                        "unclassified_record_has_no_attempts",
+                        "released_record_was_attempted",
+                    ]),
+            )],
+            &[
+                scenario(
+                    "mob_store_quarantine_classification",
+                    "mob_store_restore_lifecycle_machine.rs::a_pass_classifies_a_store_once quarantines an unclassified store under its class and refuses a second classification in every later phase",
+                    CoverageClaims::none()
+                        .transitions(&[
+                            "QuarantineUnclassified",
+                            "QuarantineQuarantined",
+                            "QuarantineRetrying",
+                            "QuarantineReleased",
+                        ])
+                        .effects(&["StoreQuarantined", "RequestRefused"])
+                        .invariants(&["unclassified_record_has_no_attempts"]),
+                ),
+                scenario(
+                    "mob_store_single_flight_retry",
+                    "mob_store_restore_lifecycle_machine.rs::one_re_attempt_is_in_flight_at_a_time admits one re-attempt of a quarantined store, refuses a second request while it runs without waiting, and refuses a request for an unclassified or released store",
+                    CoverageClaims::none()
+                        .transitions(&[
+                            "RequestRetryUnclassified",
+                            "RequestRetryQuarantined",
+                            "RequestRetryRetrying",
+                            "RequestRetryReleased",
+                        ])
+                        .effects(&["RetryAdmitted", "RequestRefused"]),
+                ),
+                scenario(
+                    "mob_store_retry_eligibility",
+                    "mob_store_restore_lifecycle_machine.rs::an_on_demand_re_attempt_is_admitted_only_for_a_store_that_could_not_serve admits an on-demand re-attempt only for a store quarantined as store_unavailable, refuses it unchanged for store_unreadable and resume_refused, and admits an explicit re-attempt for every class",
+                    CoverageClaims::none()
+                        .transitions(&[
+                            "RequestRetryQuarantined",
+                            "RequestRetryQuarantinedNotRetryable",
+                        ])
+                        .effects(&["RetryAdmitted", "RequestRefused"]),
+                ),
+                scenario(
+                    "mob_store_retry_outcomes",
+                    "mob_store_restore_lifecycle_machine.rs::a_re_attempt_releases_the_store_or_keeps_it_quarantined releases the store on a managed, held or settled outcome, keeps it quarantined under the class a failed attempt met, counts every ended attempt, and refuses an outcome with no attempt in flight",
+                    CoverageClaims::none()
+                        .transitions(&[
+                            "ResolveRetryFailed",
+                            "ResolveRetryRestored",
+                            "ResolveRetryUnclassified",
+                            "ResolveRetryQuarantined",
+                            "ResolveRetryReleased",
+                        ])
+                        .effects(&["StoreReleased", "StoreStillQuarantined", "RequestRefused"])
+                        .invariants(&["released_record_was_attempted"]),
                 ),
             ],
         ),

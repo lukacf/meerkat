@@ -190,7 +190,9 @@ impl std::fmt::Display for PrepareError {
 /// A mob hosted here other than this gateway's own.
 enum ChildMob {
     Running(Box<meerkat_mob::MobHandle>),
-    /// Restored and held until its owner resolves: it may run again.
+    /// Hosted here but not running: restored and held until its owner
+    /// resolves, or a persisted mob whose store did not restore, kept
+    /// quarantined. It may run again.
     Held,
     /// Neither running nor held: destroyed, or never created here.
     Gone,
@@ -372,7 +374,8 @@ pub(crate) fn origin_from(records: &OriginRecords) -> Result<MobOrigin, String> 
             }
         }
         Some(ParentRecord::Held) => Err(format!(
-            "its parent {parent} is held until its owner resolves"
+            "its parent {parent} is hosted here but not running: held until its owner \
+             resolves, or quarantined"
         )),
         Some(ParentRecord::NotHosted) | None => Ok(MobOrigin::ParentNotHosted(parent)),
     }
@@ -777,9 +780,16 @@ pub(crate) trait HostedListings: Send + Sync {
         &self,
     ) -> Result<Vec<(meerkat_mob::MobId, meerkat_mob::MobState)>, meerkat_mob::MobError>;
 
-    /// The restored mobs held until their owner resolves. Empty when the
-    /// restore fails.
-    async fn held_child_mobs(&self) -> Vec<(meerkat_mob::MobId, meerkat_core::types::SessionId)>;
+    /// The restored mobs held until their owner resolves. Fails, rather
+    /// than answer empty, until the restore is done.
+    async fn held_child_mobs(
+        &self,
+    ) -> Result<Vec<(meerkat_mob::MobId, meerkat_core::types::SessionId)>, meerkat_mob::MobError>;
+
+    /// The persisted mobs whose stores did not restore, kept quarantined:
+    /// hosted here, but not running. Fails, rather than answer empty, until
+    /// the restore is done.
+    async fn quarantined_mobs(&self) -> Result<Vec<meerkat_mob::MobId>, meerkat_mob::MobError>;
 
     /// The handles of the managed mobs not destroyed. Fails until the
     /// restore is done.
@@ -805,8 +815,19 @@ impl HostedListings for meerkat_mob_mcp::MobMcpState {
             .collect())
     }
 
-    async fn held_child_mobs(&self) -> Vec<(meerkat_mob::MobId, meerkat_core::types::SessionId)> {
+    async fn held_child_mobs(
+        &self,
+    ) -> Result<Vec<(meerkat_mob::MobId, meerkat_core::types::SessionId)>, meerkat_mob::MobError>
+    {
         meerkat_mob_mcp::MobMcpState::held_child_mobs(self).await
+    }
+
+    async fn quarantined_mobs(&self) -> Result<Vec<meerkat_mob::MobId>, meerkat_mob::MobError> {
+        Ok(meerkat_mob_mcp::MobMcpState::quarantined_mobs(self)
+            .await?
+            .into_iter()
+            .map(|row| row.mob_id)
+            .collect())
     }
 
     async fn mob_handles_snapshot(
@@ -819,17 +840,18 @@ impl HostedListings for meerkat_mob_mcp::MobMcpState {
 /// Every mob hosted here, this gateway's own included: managed and not
 /// destroyed, or restored and held until its owner resolves.
 ///
-/// The managed listing is read first only to finish the restore of
-/// persisted mobs: it fails rather than answer before the restore, where
-/// the held listing answers empty. Held mobs are then read before managed
-/// ones, because activation adds a held mob to the managed ones before it
-/// drops the hold: a mob that activates between the two reads is in one of
-/// them.
+/// The managed listing is read first to finish the restore of persisted
+/// mobs: every listing fails rather than answer before the restore. The
+/// mobs that do not run (quarantined, then held) are then read before
+/// managed ones, because a move between them adds a mob to its next set
+/// before it drops it from the earlier one (a restore re-attempt adds a
+/// quarantined mob to the held or managed ones, an activation a held mob to
+/// the managed ones): a mob that moves between the reads is in one of them.
 pub(crate) async fn hosted_set<L: HostedListings>(
     listings: &L,
 ) -> Result<BTreeSet<String>, NativeUnavailable> {
     managed_listing(listings).await?;
-    let held = held_listing(listings).await;
+    let held = idle_listing(listings).await?;
     let managed = managed_listing(listings)
         .await?
         .into_iter()
@@ -838,15 +860,15 @@ pub(crate) async fn hosted_set<L: HostedListings>(
     Ok(held.into_iter().chain(managed).collect())
 }
 
-/// The held mobs and the running mobs' handles, read in the order
-/// [`hosted_set`] reads them in: the restore finished, then held, then
-/// running. A mob in neither is not one still being restored, nor one
-/// about to run.
+/// The mobs hosted here that do not run (quarantined or held) and the
+/// running mobs' handles, read in the order [`hosted_set`] reads them in:
+/// the restore finished, then quarantined, then held, then running. A mob
+/// in neither is not one still being restored, nor one about to run.
 pub(crate) async fn hosted_handles<L: HostedListings>(
     listings: &L,
 ) -> Result<(BTreeSet<String>, Vec<(meerkat_mob::MobId, L::Handle)>), NativeUnavailable> {
     managed_listing(listings).await?;
-    let held = held_listing(listings).await;
+    let held = idle_listing(listings).await?;
     let running = listings
         .mob_handles_snapshot()
         .await
@@ -892,14 +914,35 @@ async fn managed_listing<L: HostedListings>(
         .map_err(|error| NativeUnavailable(error.to_string()))
 }
 
-/// The ids of the restored mobs held until their owner resolves.
-async fn held_listing<L: HostedListings>(listings: &L) -> BTreeSet<String> {
-    listings
+/// The ids of the mobs hosted here that do not run, once the restore of
+/// persisted mobs is finished: the persisted mobs kept quarantined, read
+/// first, then the restored mobs held until their owner resolves.
+async fn idle_listing<L: HostedListings>(
+    listings: &L,
+) -> Result<BTreeSet<String>, NativeUnavailable> {
+    let mut idle: BTreeSet<String> = listings
+        .quarantined_mobs()
+        .await
+        .map_err(|error| NativeUnavailable(error.to_string()))?
+        .into_iter()
+        .map(|mob_id| mob_id.as_str().to_string())
+        .collect();
+    idle.extend(held_listing(listings).await?);
+    Ok(idle)
+}
+
+/// The ids of the restored mobs held until their owner resolves, once the
+/// restore of persisted mobs is finished.
+async fn held_listing<L: HostedListings>(
+    listings: &L,
+) -> Result<BTreeSet<String>, NativeUnavailable> {
+    Ok(listings
         .held_child_mobs()
         .await
+        .map_err(|error| NativeUnavailable(error.to_string()))?
         .into_iter()
         .map(|(mob_id, _)| mob_id.as_str().to_string())
-        .collect()
+        .collect())
 }
 
 /// The production seam over this gateway's mob runtime.
@@ -1265,7 +1308,8 @@ impl MobNativeDelivery {
         match self.child_mob(mob_id).await? {
             ChildMob::Running(handle) => Ok(Some(*handle)),
             ChildMob::Held => Err(NativeUnavailable(format!(
-                "{mob_id} is held until its owner resolves"
+                "{mob_id} is hosted here but not running: held until its owner resolves, \
+                 or quarantined"
             ))),
             ChildMob::Gone => Ok(None),
         }

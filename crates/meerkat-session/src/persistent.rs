@@ -127,7 +127,10 @@ fn activation_store_error_to_session_error(error: RuntimeStoreError) -> SessionE
 
 /// Map a committed-WholeBlob read failure to the typed session error hosts
 /// classify on: the audited-endpoint divergence means "this session needs the
-/// sanctioned repair", everything else stays an internal agent error.
+/// sanctioned repair"; a store that could not serve now and stored data that
+/// does not decode keep their typed store error (`SessionError::Store`), so a
+/// classifier tells an outage a later read may get past from state that
+/// needs a repair; everything else stays an internal agent error.
 fn whole_blob_read_error_to_session_error(
     session_id: &SessionId,
     role: &str,
@@ -139,9 +142,48 @@ fn whole_blob_read_error_to_session_error(
                 id: session_id.clone(),
             }
         }
+        error @ (RuntimeStoreError::Unavailable(_) | RuntimeStoreError::Corrupt(_)) => {
+            SessionError::Store(Box::new(error))
+        }
         other => SessionError::Agent(AgentError::InternalError(format!(
             "failed to load {role} for session {session_id}: {other}"
         ))),
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::panic)]
+mod whole_blob_read_error_tests {
+    use super::*;
+
+    /// A host store realm's committed read that could not be served now, or
+    /// that met data that does not decode, keeps its typed store error; any
+    /// other read failure stays an internal agent error.
+    #[test]
+    fn an_unavailable_or_corrupt_read_keeps_its_typed_store_error() {
+        let session_id = SessionId::new();
+        for error in [
+            RuntimeStoreError::Unavailable("host store: unavailable".to_string()),
+            RuntimeStoreError::Corrupt("host store data is invalid".to_string()),
+        ] {
+            let mapped = whole_blob_read_error_to_session_error(&session_id, "session", error);
+            let SessionError::Store(source) = &mapped else {
+                panic!("a typed store read failure stays a store error: {mapped:?}");
+            };
+            assert!(
+                source.downcast_ref::<RuntimeStoreError>().is_some(),
+                "the source keeps the runtime store error: {source:?}"
+            );
+        }
+        let mapped = whole_blob_read_error_to_session_error(
+            &session_id,
+            "session",
+            RuntimeStoreError::ReadFailed("other".to_string()),
+        );
+        assert!(
+            matches!(mapped, SessionError::Agent(AgentError::InternalError(_))),
+            "{mapped:?}"
+        );
     }
 }
 

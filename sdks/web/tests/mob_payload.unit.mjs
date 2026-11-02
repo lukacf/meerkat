@@ -1191,7 +1191,13 @@ test('memberStatus surfaces custody_deferred and omits it when unset', async () 
       },
     });
   for (const restore of ['startup_binding', 'cleanup_delivery']) {
-    for (const cause of ['served_elsewhere', 'hosting_unavailable', 'durable_tail_unprovable']) {
+    for (const cause of [
+      'served_elsewhere',
+      'hosting_unavailable',
+      'durable_tail_unprovable',
+      'store_unavailable',
+      'store_unreadable',
+    ]) {
       const snapshot = await statusMob({ custody_deferred: { restore, cause } }).memberStatus(
         'worker-1',
       );

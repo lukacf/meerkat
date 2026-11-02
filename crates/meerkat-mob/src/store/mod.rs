@@ -601,6 +601,14 @@ pub enum MobStoreError {
         mob_id: MobId,
         inconsistency: crate::error::IncarnationInconsistency,
     },
+
+    /// The store could not serve this read now (a host store that answered
+    /// unavailable): nothing is known to be wrong with the stored data, and
+    /// a later read may pass. A read that fails otherwise, stored data that
+    /// does not decode included, is [`Self::ReadFailed`] or
+    /// [`Self::Serialization`].
+    #[error("Store unavailable: {0}")]
+    Unavailable(String),
 }
 
 /// The stored form of `provenance` in a creation record.

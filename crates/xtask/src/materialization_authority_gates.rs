@@ -201,8 +201,8 @@ pub(crate) const MOB_LIVE_SESSION_OBSERVATIONS: &[SiteAllowance] = &[
     ),
     settled(
         "crates/meerkat-mob/src/runtime/actor.rs",
-        "restore_member_local_cleanup_delivery",
-        "boot cleanup-delivery restore observes live, durable and residue state of the named session",
+        "restore_member_local_cleanup_delivery_staged",
+        "boot cleanup-delivery restore observes live, durable and residue state of the named session, in its staged body; the wrapper only maps the failure",
     ),
     settled(
         "crates/meerkat-mob/src/runtime/actor.rs",

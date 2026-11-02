@@ -13,10 +13,12 @@ pub fn wire_mob_tools(
     persistent_storage_root: Option<PathBuf>,
     console_principal: meerkat_mob::MobControlPrincipal,
 ) -> Result<Arc<MobMcpState>, meerkat_runtime::RuntimeDriverError> {
-    let state = Arc::new(
+    // Shared as every host shares it: the state owns the work a caller hands
+    // off, so a dropped caller ends none of it.
+    let state =
         MobMcpState::new_with_runtime_adapter(session_service, runtime_adapter, console_principal)?
-            .with_persistent_storage_root(persistent_storage_root),
-    );
+            .with_persistent_storage_root(persistent_storage_root)
+            .into_shared();
     *builder_mob_tools_slot
         .write()
         .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::new(
@@ -61,6 +63,15 @@ mod tests {
         assert!(
             state.runtime_adapter.is_some(),
             "returned mob state should preserve the runtime adapter"
+        );
+        assert!(
+            state
+                .self_weak
+                .get()
+                .and_then(std::sync::Weak::upgrade)
+                .is_some_and(|shared| Arc::ptr_eq(&shared, &state)),
+            "the returned state is shared, so it owns the work a caller hands off \
+             (a restore re-attempt runs to its end without its caller)"
         );
     }
 

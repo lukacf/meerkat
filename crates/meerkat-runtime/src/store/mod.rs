@@ -2976,6 +2976,15 @@ pub enum RuntimeStoreError {
     /// Internal error.
     #[error("Internal error: {0}")]
     Internal(String),
+    /// The store could not serve the read now (a host store that answered
+    /// unavailable); nothing is known to be wrong with the stored state, and
+    /// a later read may pass.
+    #[error("Store unavailable: {0}")]
+    Unavailable(String),
+    /// The stored data cannot be read as it is: it does not decode, or it is
+    /// inconsistent. A re-read answers the same until it is repaired.
+    #[error("Store data is corrupt: {0}")]
+    Corrupt(String),
 }
 
 /// Classify whether `candidate` may become the durable direct-member semantic

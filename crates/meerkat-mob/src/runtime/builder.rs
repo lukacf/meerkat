@@ -7774,9 +7774,6 @@ struct RuntimeWiring {
     reachability_observations: Arc<super::handle::ReachabilityObservations>,
     restore_diagnostics:
         Arc<RwLock<HashMap<AgentIdentity, super::handle::RestoreFailureDiagnostic>>>,
-    /// The custody restores the actor defers, as member status reads see
-    /// them: shared by the handles and the actor's deferral registry.
-    custody_deferrals: super::handle::MemberCustodyDeferrals,
     runtime_metadata: Arc<dyn crate::store::MobRuntimeMetadataStore>,
     identity: Arc<dyn crate::store::MobIdentityStore>,
     identity_member: Option<Arc<dyn crate::store::MobIdentityMemberStore>>,
@@ -9306,6 +9303,10 @@ impl MobBuilder {
         let post_bridge_epoch_start = epoch_start;
         // What the start carries out from the store-owned rows it recovers.
         let mut recovered_created_rows = super::created_identity::RecoveredCreatedRows::default();
+        // Every handle of this resume, the preview its pre-activation hook
+        // gets included, shares these observations with the actor.
+        let lifecycle_observations = Arc::new(super::MemberLifecycleObservations::default());
+        let resume_lifecycle_observations = Arc::clone(&lifecycle_observations);
         // Keep every fallible post-registration recovery step inside one
         // awaited result. Native startup then synchronously settles the
         // guard before returning an error; `Drop` remains only the
@@ -9482,7 +9483,6 @@ impl MobBuilder {
             // projection below after applying any recovered binding events.
             let roster_state = Arc::new(RwLock::new(RosterAuthority::from_roster(roster.clone())));
             let restore_diagnostics = Arc::new(RwLock::new(seeded_restore_diagnostics));
-            let custody_deferrals = super::handle::MemberCustodyDeferrals::default();
             let (machine_state_watch_tx, machine_state_watch_rx) =
                 tokio::sync::watch::channel(initial_dsl_authority.state().clone());
             let reachability_observations =
@@ -9501,7 +9501,6 @@ impl MobBuilder {
                 Arc::new(super::handle::ResumeOperationRegistry::default());
             let member_admission_backlog =
                 Arc::new(super::handle::MemberAdmissionBacklogGauge::default());
-            let lifecycle_observations = Arc::new(super::MemberLifecycleObservations::default());
             let mut wiring = RuntimeWiring {
                 roster: roster_state.clone(),
                 dsl_authority: initial_dsl_authority,
@@ -9509,7 +9508,6 @@ impl MobBuilder {
                 phase_watch_tx,
                 reachability_observations: Arc::clone(&reachability_observations),
                 restore_diagnostics: restore_diagnostics.clone(),
-                custody_deferrals: custody_deferrals.clone(),
                 runtime_metadata: storage.runtime_metadata.clone(),
                 identity: storage.identity.clone(),
                 identity_member: storage.identity_member.clone(),
@@ -9545,7 +9543,6 @@ impl MobBuilder {
                 session_service: session_service.clone(),
                 runtime_adapter: runtime_adapter.clone(),
                 restore_diagnostics,
-                custody_deferrals,
                 supervisor_bridge: supervisor_bridge.clone(),
                 machine_state_watch_rx,
                 operator_instruction_delivery:
@@ -9899,6 +9896,15 @@ impl MobBuilder {
             .await
         }
         .await;
+        if start_result.is_err() {
+            // The resume failed before its actor ran (the actor is spawned
+            // last, and nothing after it fails), so no actor will ever
+            // record how it ended. The preview handle a pre-activation hook
+            // kept reads as a mob that stopped, never as a live one: a host
+            // binding that refuses to replace a live mob's binding admits a
+            // later resume of the same store.
+            resume_lifecycle_observations.record_actor_task_end(super::ActorTaskEnd::Lost);
+        }
         #[cfg(not(target_arch = "wasm32"))]
         let handle = supervisor_startup_guard.settle(start_result).await?;
         #[cfg(target_arch = "wasm32")]
@@ -11042,7 +11048,6 @@ impl MobBuilder {
                     super::handle::ReachabilityObservations::default(),
                 ),
                 restore_diagnostics,
-                custody_deferrals: super::handle::MemberCustodyDeferrals::default(),
                 runtime_metadata,
                 identity,
                 identity_member,
@@ -11191,7 +11196,6 @@ impl MobBuilder {
                 phase_watch_tx: phase_watch_tx_actor,
                 reachability_observations,
                 restore_diagnostics,
-                custody_deferrals,
                 runtime_metadata,
                 identity,
                 identity_member,
@@ -11246,7 +11250,6 @@ impl MobBuilder {
                 session_service: handle_session_service.clone(),
                 runtime_adapter: runtime_adapter.clone(),
                 restore_diagnostics: restore_diagnostics.clone(),
-                custody_deferrals: custody_deferrals.clone(),
                 supervisor_bridge: supervisor_bridge.clone(),
                 machine_state_watch_rx: machine_state_watch_tx.subscribe(),
                 operator_instruction_delivery: Arc::clone(&operator_instruction_delivery),
@@ -11578,9 +11581,7 @@ impl MobBuilder {
                 identity_reconcile_safety_cursor: None,
                 identity_reconcile_failures: Arc::new(RwLock::new(BTreeMap::new())),
                 identity_reconcile_backoff: BTreeMap::new(),
-                deferred_member_custody: super::actor::DeferredMemberCustodyRegistry::publishing(
-                    custody_deferrals,
-                ),
+                deferred_member_custody: super::actor::DeferredMemberCustodyRegistry::default(),
                 #[cfg(feature = "runtime-adapter")]
                 startup_member_recoveries: BTreeMap::new(),
                 member_wakes,

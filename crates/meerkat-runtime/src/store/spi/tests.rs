@@ -3160,3 +3160,33 @@ async fn a_failed_recovery_load_fails_the_open_and_installs_nothing() {
         );
     }
 }
+
+/// A read error keeps whether the host store could not serve now or holds
+/// data that cannot be served as it is: a reader tells an outage a later
+/// read may get past from state that needs a repair. Any other adapter
+/// failure stays a plain read failure.
+#[test]
+fn a_read_error_keeps_unavailable_and_corrupt_typed() {
+    use meerkat_core::host_store::HostStoreError;
+
+    assert!(matches!(
+        SpiError::Host(HostStoreError::Unavailable("down".to_string())).into_read(),
+        RuntimeStoreError::Unavailable(_)
+    ));
+    assert!(matches!(
+        SpiError::Host(HostStoreError::Corrupt("checksum".to_string())).into_read(),
+        RuntimeStoreError::Corrupt(_)
+    ));
+    assert!(matches!(
+        SpiError::Corrupt("does not decode".to_string()).into_read(),
+        RuntimeStoreError::Corrupt(_)
+    ));
+    assert!(matches!(
+        SpiError::LeaseLapsed("renew failed".to_string()).into_read(),
+        RuntimeStoreError::ReadFailed(_)
+    ));
+    assert!(matches!(
+        SpiError::Host(HostStoreError::Unavailable("down".to_string())).into_write(),
+        RuntimeStoreError::WriteFailed(_)
+    ));
+}

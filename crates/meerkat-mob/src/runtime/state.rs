@@ -198,6 +198,16 @@ pub(crate) struct MobDslT2Snapshot {
         std::collections::BTreeMap<crate::machines::mob_machine::AgentIdentity, String>,
     pub member_restore_failure_codes:
         std::collections::BTreeMap<crate::machines::mob_machine::AgentIdentity, String>,
+    // A seated member's unrestored custody: which restore, and the cause its
+    // last attempt met.
+    pub member_custody_unrestored: std::collections::BTreeMap<
+        crate::machines::mob_machine::AgentIdentity,
+        crate::machines::mob_machine::MemberCustodyRestoreKind,
+    >,
+    pub member_custody_unrestored_causes: std::collections::BTreeMap<
+        crate::machines::mob_machine::AgentIdentity,
+        crate::machines::mob_machine::MemberCustodyCauseKind,
+    >,
     pub runtime_retire_refusal_codes:
         std::collections::BTreeMap<crate::machines::mob_machine::AgentRuntimeId, String>,
     pub runtime_retire_refusal_reasons:

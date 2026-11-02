@@ -220,6 +220,31 @@ The constructor sets no confirmation or execution provenance. A ref without
 withdrawals keeps its wire form, so stored items, keyed-create digests and
 attention continuation keys do not change.
 
+### Quarantined mob stores
+
+A persisted mob store that does not restore no longer fails the restore of
+every mob of the realm: it is quarantined (kept exactly as found, with no
+actor), and the other mobs restore (see
+[Quarantined mobs and degraded members](/guides/mobs#quarantined-mobs-and-degraded-members)).
+A call that addresses a quarantined mob fails with the new refusal kind
+`mob_quarantined`, and `mob/list` lists the mob under `quarantined`. A mob
+start likewise no longer stops for one member whose session read fails: that
+member is degraded (`custody_deferred` with `store_unavailable` or
+`store_unreadable`). The quarantine is not durable: every start derives it
+again, and 0.9.8 reads the same stores (a store that does not restore fails
+its whole restore again).
+
+**Do:** a client that branches on mob refusal kinds handles
+`mob_quarantined` (the SDKs read it with `mob_quarantined` and
+`mobQuarantined`). A host that must still fail its boot on such a store
+reads `MobMcpState::quarantined_mobs` (or `mob/list`'s `quarantined`) after
+the restore and refuses while it is not empty. **Do (Rust):**
+`MobMcpState::unrestored_mobs` is gone (read `quarantined_mobs` or
+`mob_inventory`), `held_child_mobs` returns a `Result`, and a
+`MobListResult` literal sets `quarantined`. A host store implementation
+answers `HostStoreError::Corrupt` for stored data that does not decode or
+fails its integrity check.
+
 ### Downgrading to 0.9.8
 
 Check for mobs that used operator instructions first. A mob that recorded an

@@ -32,14 +32,14 @@ fn policy_json() -> Value {
              "outcome": "require_approval", "reason": "a core team member"}
         ], "default": "deny"},
         "approval": {"rules": [
-            {"change": ["create"], "requester": ["agent"],
+            {"change": ["create"], "requester": {"kind": "agent"},
              "outcome": {"kind": "notify", "approver": {"id": "owner"}}},
-            {"change": ["create"], "requester": ["host"], "outcome": {"kind": "allow"}},
+            {"change": ["create"], "requester": {"kind": "host"}, "outcome": {"kind": "allow"}},
             {"change": ["capability", "peers", "authority"],
              "outcome": {"kind": "require_approval", "approver": {"id": "owner"}}},
             {"change": ["descriptive", "remove"],
              "outcome": {"kind": "notify", "approver": {"id": "owner"}}},
-            {"change": ["profile"], "requester": ["host"], "outcome": {"kind": "allow"}}
+            {"change": ["profile"], "requester": {"kind": "host"}, "outcome": {"kind": "allow"}}
         ], "default": {"kind": "deny"}}
     })
 }
@@ -68,7 +68,7 @@ fn mob_profiles() -> BTreeSet<String> {
 }
 
 fn lead() -> RequesterFacts {
-    RequesterFacts::agent("lead-1", BTreeMap::new())
+    RequesterFacts::agent("lead-1", "lead", BTreeMap::new())
 }
 
 fn peers() -> BTreeMap<String, PeerFacts> {
@@ -165,9 +165,9 @@ fn peer_verdict(peer: &str) -> PeerVerdict {
     evaluate_peer(policy().peers(), peer, &peers()[peer])
 }
 
-/// An agent requester with no authority label.
+/// An agent requester of the assistant profile with no authority label.
 fn agent(identity: &str) -> RequesterFacts {
-    RequesterFacts::agent(identity, BTreeMap::new())
+    RequesterFacts::agent(identity, "assistant", BTreeMap::new())
 }
 
 /// The labels `entries`.
@@ -180,8 +180,7 @@ fn labels_of(entries: &[(&str, &str)]) -> BTreeMap<String, String> {
 
 /// An agent requester of `profile` with the authority labels `labels`.
 fn agent_of(identity: &str, profile: &str, labels: &[(&str, &str)]) -> RequesterFacts {
-    let _ = profile;
-    RequesterFacts::agent(identity, labels_of(labels))
+    RequesterFacts::agent(identity, profile, labels_of(labels))
 }
 
 fn create(
@@ -339,7 +338,7 @@ fn golden_update() -> IdentityRequest {
         source_evidence: None,
         action: RequestAction::Update(Box::new(UpdatedSpec {
             identity: "helper".to_owned(),
-            expected_revision: 3,
+            expected_spec_digest: helper_spec_digest(),
             profile: Some(ProfileChange {
                 from: ProfileName::from("assistant"),
                 to: ProfileName::from("analyst"),
@@ -377,7 +376,7 @@ fn golden_remove() -> IdentityRequest {
         )),
         action: RequestAction::Remove {
             identity: "helper".to_owned(),
-            expected_revision: 3,
+            expected_spec_digest: helper_spec_digest(),
         },
         consequences: BTreeSet::new(),
     }
@@ -422,7 +421,8 @@ fn updated_mut(request: &mut IdentityRequest) -> &mut UpdatedSpec {
 fn entry_with(profile: &str, authority: &[(&str, &str)]) -> IdentityEntryFacts {
     IdentityEntryFacts {
         identity: "helper".to_owned(),
-        revision: 3,
+        spec_digest: helper_spec_digest(),
+        revision: Some(3),
         profile: profile.to_owned(),
         authority_labels: authority
             .iter()
@@ -466,17 +466,17 @@ fn update_with(
     normalize_update(policy, &context, RequestEnvelope::default(), entry, spec)
 }
 
-/// An update of `entry` at its revision, changing `set`.
+/// An update of `entry` at its current spec, changing `set`.
 fn update_of(entry: &IdentityEntryFacts, set: Value) -> UpdateIdentitySpec {
     serde_json::from_value(json!({
         "identity": entry.identity,
-        "expected_revision": entry.revision,
+        "expected_spec_digest": entry.spec_digest,
         "set": set,
     }))
     .expect("an update request")
 }
 
-/// A removal of `entry` at its revision by `requester`, under `policy`.
+/// A removal of `entry` at its current spec by `requester`, under `policy`.
 fn remove_identity_with(
     policy: &IdentityCreationPolicy,
     requester: &RequesterFacts,
@@ -484,12 +484,12 @@ fn remove_identity_with(
 ) -> Result<NormalizedRequest, IdentityRefusal> {
     let spec = RemoveIdentitySpec {
         identity: entry.identity.clone(),
-        expected_revision: entry.revision,
+        expected_spec_digest: entry.spec_digest.clone(),
     };
     normalize_remove(policy, requester, RequestEnvelope::default(), entry, &spec)
 }
 
-/// A removal of `entry` at its revision by `requester`.
+/// A removal of `entry` at its current spec by `requester`.
 fn remove_identity(
     requester: &RequesterFacts,
     entry: &IdentityEntryFacts,
@@ -504,19 +504,17 @@ fn resolve(
     option: RuntimeOptionPolicy,
     persistent: bool,
 ) -> Result<Option<Arc<IdentityCreationPolicy>>, PolicyRefusal> {
-    resolve_launch_policy(host_policy, option, persistent)
+    resolve_launch_policy(host_policy, option, &mob_profiles(), persistent)
 }
 
 /// The preparation the policy gives a new identity of `profile`.
 fn preparation_of(policy: &IdentityCreationPolicy, profile: &str) -> PreparationMode {
-    let _ = profile;
-    policy.preparation()
+    policy.preparation(profile)
 }
 
 /// The setup deadline of a held construction of `profile`, in milliseconds.
 fn deadline_of(policy: &IdentityCreationPolicy, profile: &str) -> Option<u64> {
-    let _ = profile;
-    policy.construction_deadline_ms()
+    policy.construction_deadline_ms(profile)
 }
 
 /// The digest of the fixture identity's declared spec.
@@ -526,14 +524,13 @@ fn helper_spec_digest() -> Sha256Digest {
 
 /// The spec digest `entry` has now, as its owner reads it.
 fn spec_digest_of(entry: &IdentityEntryFacts) -> String {
-    let _ = entry;
-    helper_spec_digest().to_string()
+    entry.spec_digest.to_string()
 }
 
 /// `spec`, asked of a spec the identity no longer has.
 fn stale_update(spec: &UpdateIdentitySpec) -> UpdateIdentitySpec {
     UpdateIdentitySpec {
-        expected_revision: spec.expected_revision - 1,
+        expected_spec_digest: Sha256Digest::of(b"an older spec of helper"),
         ..spec.clone()
     }
 }
@@ -545,7 +542,7 @@ fn stale_removal(
 ) -> Result<NormalizedRequest, IdentityRefusal> {
     let spec = RemoveIdentitySpec {
         identity: entry.identity.clone(),
-        expected_revision: entry.revision - 1,
+        expected_spec_digest: Sha256Digest::of(b"an older spec of helper"),
     };
     normalize_remove(
         &policy(),
@@ -2491,7 +2488,9 @@ fn a_changed_update_or_remove_field_cannot_be_approved_by_an_old_tap() {
     }
     let updates = [
         change(|request| updated_mut(request).identity = "other".to_owned()),
-        change(|request| updated_mut(request).expected_revision = 4),
+        change(|request| {
+            updated_mut(request).expected_spec_digest = Sha256Digest::of(b"another spec");
+        }),
         change(|request| updated_mut(request).profile = None),
         change(|request| updated_mut(request).profile = migration("assistant", "lead")),
         change(|request| updated_mut(request).profile = migration("lead", "analyst")),
@@ -2531,13 +2530,13 @@ fn a_changed_update_or_remove_field_cannot_be_approved_by_an_old_tap() {
         change(|request| {
             request.action = RequestAction::Remove {
                 identity: "other".to_owned(),
-                expected_revision: 3,
+                expected_spec_digest: helper_spec_digest(),
             };
         }),
         change(|request| {
             request.action = RequestAction::Remove {
                 identity: "helper".to_owned(),
-                expected_revision: 4,
+                expected_spec_digest: Sha256Digest::of(b"another spec"),
             };
         }),
     ];
@@ -3062,6 +3061,9 @@ fn the_consequences_callback_contract_round_trips() {
 /// below stops compiling when a kind is added without a sample here.
 fn every_refusal_kind() -> Vec<IdentityRefusalKind> {
     let kinds = vec![
+        IdentityRefusalKind::ProfileUnknown {
+            profile: "p".to_owned(),
+        },
         IdentityRefusalKind::ProfileNotAllowed {
             profile: "p".to_owned(),
         },
@@ -3099,12 +3101,14 @@ fn every_refusal_kind() -> Vec<IdentityRefusalKind> {
         },
         IdentityRefusalKind::IdentityUnknown,
         IdentityRefusalKind::SelfChangeRefused,
-        IdentityRefusalKind::StaleSpec { current: 1 },
+        IdentityRefusalKind::StaleSpec {
+            current_digest: Sha256Digest::of(b"s"),
+            current_revision: Some(1),
+        },
         IdentityRefusalKind::OperationReused,
         IdentityRefusalKind::AdmissionUnsettled {
             correlation: "c".to_owned(),
         },
-        IdentityRefusalKind::NotTransferring,
         IdentityRefusalKind::PredecessorMismatch,
         IdentityRefusalKind::ImportRefused,
         IdentityRefusalKind::PreparationNotPending,
@@ -3112,9 +3116,6 @@ fn every_refusal_kind() -> Vec<IdentityRefusalKind> {
         IdentityRefusalKind::ConstructionOpen,
         IdentityRefusalKind::StaleAttempt { current: None },
         IdentityRefusalKind::NotConstructed,
-        IdentityRefusalKind::IdentityTransferring,
-        IdentityRefusalKind::TransferInFlight,
-        IdentityRefusalKind::ObservationMismatch,
         IdentityRefusalKind::ConstructionRequired,
         IdentityRefusalKind::ActivationPending { attempt: 1 },
         IdentityRefusalKind::ApprovalUnavailable,
@@ -3143,7 +3144,8 @@ fn every_refusal_kind() -> Vec<IdentityRefusalKind> {
     ];
     for kind in &kinds {
         match kind {
-            IdentityRefusalKind::ProfileNotAllowed { .. }
+            IdentityRefusalKind::ProfileUnknown { .. }
+            | IdentityRefusalKind::ProfileNotAllowed { .. }
             | IdentityRefusalKind::ReservedKey { .. }
             | IdentityRefusalKind::AuthorityFieldNeedsApproval { .. }
             | IdentityRefusalKind::AuthorityFieldInvalid { .. }
@@ -3163,7 +3165,6 @@ fn every_refusal_kind() -> Vec<IdentityRefusalKind> {
             | IdentityRefusalKind::StaleSpec { .. }
             | IdentityRefusalKind::OperationReused
             | IdentityRefusalKind::AdmissionUnsettled { .. }
-            | IdentityRefusalKind::NotTransferring
             | IdentityRefusalKind::PredecessorMismatch
             | IdentityRefusalKind::ImportRefused
             | IdentityRefusalKind::PreparationNotPending
@@ -3171,9 +3172,6 @@ fn every_refusal_kind() -> Vec<IdentityRefusalKind> {
             | IdentityRefusalKind::ConstructionOpen
             | IdentityRefusalKind::StaleAttempt { .. }
             | IdentityRefusalKind::NotConstructed
-            | IdentityRefusalKind::IdentityTransferring
-            | IdentityRefusalKind::TransferInFlight
-            | IdentityRefusalKind::ObservationMismatch
             | IdentityRefusalKind::ConstructionRequired
             | IdentityRefusalKind::ActivationPending { .. }
             | IdentityRefusalKind::ApprovalUnavailable

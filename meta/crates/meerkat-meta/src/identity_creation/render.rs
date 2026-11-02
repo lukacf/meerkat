@@ -95,8 +95,8 @@ pub mod labels {
     pub const IDENTITIES: &str = "Identities";
     /// The identity an update or a remove names.
     pub const IDENTITY: &str = "Identity";
-    /// The revision an update or a remove expects.
-    pub const EXPECTED_REVISION: &str = "Expected revision";
+    /// The digest of the spec an update or a remove was asked of.
+    pub const EXPECTED_SPEC_DIGEST: &str = "Expected spec digest";
     /// An update's change classes.
     pub const CHANGES: &str = "Changes";
     /// The heading of an update's structural fields.
@@ -317,10 +317,10 @@ pub fn render_v1(
         }
         RequestAction::Remove {
             identity,
-            expected_revision,
+            expected_spec_digest,
         } => {
             text.field(labels::IDENTITY, &quoted(identity));
-            text.field(labels::EXPECTED_REVISION, &expected_revision.to_string());
+            text.field(labels::EXPECTED_SPEC_DIGEST, expected_spec_digest.as_str());
             consequence_blocks(&mut text, &request.consequences, &host_lines);
         }
     }
@@ -534,8 +534,8 @@ fn created_text(
 fn update_header(text: &mut Text, update: &UpdatedSpec) {
     text.field(labels::IDENTITY, &quoted(&update.identity));
     text.field(
-        labels::EXPECTED_REVISION,
-        &update.expected_revision.to_string(),
+        labels::EXPECTED_SPEC_DIGEST,
+        update.expected_spec_digest.as_str(),
     );
     let changes: Vec<&str> = update
         .change_classes()
@@ -553,7 +553,7 @@ fn update_header(text: &mut Text, update: &UpdatedSpec) {
 fn update_fields(text: &mut Text, update: &UpdatedSpec) {
     let UpdatedSpec {
         identity,
-        expected_revision: _,
+        expected_spec_digest: _,
         profile,
         addressability,
         runtime_mode_override,
@@ -604,7 +604,7 @@ fn update_fields(text: &mut Text, update: &UpdatedSpec) {
 fn update_text(text: &mut Text, update: &UpdatedSpec) {
     let UpdatedSpec {
         identity,
-        expected_revision: _,
+        expected_spec_digest: _,
         profile: _,
         addressability: _,
         runtime_mode_override: _,

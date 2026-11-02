@@ -17,7 +17,8 @@
 //! - requests: normalization of a create, update or remove against the
 //!   policy, refused with the closed vocabulary (`IdentityRefusal`), and the
 //!   approval plan of the normalized request, whose rules select by the
-//!   change, the requester's kind, and the target's profile and authority
+//!   change, the requester (kind, host surface, agent identity, profile and
+//!   authority labels), and the target's identity, profile and authority
 //!   labels;
 //! - `render_v1`: the one canonical, complete plain-text rendering whose
 //!   sha256 is the decision's subject digest, with the host's consequence
@@ -47,8 +48,8 @@ pub use approval::{ApprovalPlan, PlanRequest, PlanTarget, PlannedOutcome, plan_a
 pub use config::{
     ApprovalConfig, ApprovalKind, ApprovalOutcomeConfig, ApprovalRuleConfig, ApproverConfig,
     AuthorityFieldConfig, ChangeClass, IdentityCreationConfig, MAX_DECISION_TIMEOUT_MS,
-    PeerOutcome, PeerRuleConfig, PeersConfig, PreparationMode, RequesterKind, ReservedKeysConfig,
-    SelectorConfig, TimeoutsConfig,
+    PeerOutcome, PeerRuleConfig, PeersConfig, PreparationConfig, PreparationMode, RequesterKind,
+    RequesterSelectorConfig, ReservedKeysConfig, SelectorConfig, TimeoutsConfig,
 };
 pub use consequences::{
     CONSEQUENCES_CALLBACK, ConsequenceHook, ConsequenceLine, HookRefusal,
@@ -59,7 +60,8 @@ pub use parts::{CanonicalPart, canonical_parts, part_ranges, shows_every_part};
 pub use policy::{
     ApprovalPolicy, ApprovalRule, ApproverRule, AuthorityFieldRule, CORE_BATCH_MAX,
     DEFAULT_PEER_RULE_ID, IdentityCreationPolicy, META_RESERVED_LABEL_KEYS, OutcomeRule,
-    PeerPolicy, PeerRule, RuntimeOptionPolicy, Selector, Timeouts, resolve_launch_policy,
+    PeerPolicy, PeerRule, PreparationRule, RequesterSelector, RuntimeOptionPolicy, Selector,
+    Timeouts, resolve_launch_policy,
 };
 pub use presentation::{CardBlock, CardEntry, CardError, CardValue, StructuredCard, ValueSegment};
 pub use refusal::{

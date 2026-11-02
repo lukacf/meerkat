@@ -14,6 +14,7 @@ use std::fmt;
 use serde_json::{Value, json};
 
 use super::config::ChangeClass;
+use super::digest::Sha256Digest;
 
 /// Why an identity request is refused: one kind of the closed vocabulary,
 /// with the request field it concerns.
@@ -184,9 +185,13 @@ impl RequestProblem {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum IdentityRefusalKind {
-    // Request data.
+    // Profile.
     /// The profile is not one of the mob definition's profiles.
+    ProfileUnknown { profile: String },
+    /// The requester's grant does not admit the profile, as its admission
+    /// checks it. Normalization never refuses it.
     ProfileNotAllowed { profile: String },
+    // Request data.
     /// The request names a reserved label key.
     ReservedKey { key: String },
     /// An authority field under an outcome other than a human decision.
@@ -227,16 +232,19 @@ pub enum IdentityRefusalKind {
     IdentityUnknown,
     /// An agent asked to change its own identity.
     SelfChangeRefused,
-    /// The spec revision the requester read is not the current one, which
-    /// `current` names.
-    StaleSpec { current: u64 },
+    /// The spec the requester read, named by its digest, is not the current
+    /// one: `current_digest` is, with its revision for an identity Core's
+    /// store holds.
+    StaleSpec {
+        current_digest: Sha256Digest,
+        current_revision: Option<u64>,
+    },
     /// The operation id was used with another request.
     OperationReused,
     /// A spawn or held spawn of the name is not settled.
     AdmissionUnsettled { correlation: String },
-    /// The identity is not in a custody transfer.
-    NotTransferring,
-    /// The custody transfer's predecessor does not match.
+    /// The member an adoption names is not the one the request observed:
+    /// its generation moved.
     PredecessorMismatch,
     /// The import is refused.
     ImportRefused,
@@ -257,12 +265,6 @@ pub enum IdentityRefusalKind {
     /// The attempt's activation was accepted and its publication is in
     /// flight: nothing may abort or replace it.
     ActivationPending { attempt: u64 },
-    /// The identity is in a custody transfer.
-    IdentityTransferring,
-    /// A custody transfer is in flight.
-    TransferInFlight,
-    /// The observed seat does not match.
-    ObservationMismatch,
     // Decisions.
     /// No routable decider exists; nothing was written.
     ApprovalUnavailable,
@@ -307,6 +309,7 @@ impl IdentityRefusalKind {
     /// The kind's stable token, the wire's `data.kind`.
     pub fn token(&self) -> &'static str {
         match self {
+            Self::ProfileUnknown { .. } => "profile_unknown",
             Self::ProfileNotAllowed { .. } => "profile_not_allowed",
             Self::ReservedKey { .. } => "reserved_key",
             Self::AuthorityFieldNeedsApproval { .. } => "authority_field_needs_approval",
@@ -327,7 +330,6 @@ impl IdentityRefusalKind {
             Self::StaleSpec { .. } => "stale_spec",
             Self::OperationReused => "operation_reused",
             Self::AdmissionUnsettled { .. } => "admission_unsettled",
-            Self::NotTransferring => "not_transferring",
             Self::PredecessorMismatch => "predecessor_mismatch",
             Self::ImportRefused => "import_refused",
             Self::PreparationNotPending => "preparation_not_pending",
@@ -337,9 +339,6 @@ impl IdentityRefusalKind {
             Self::NotConstructed => "not_constructed",
             Self::ConstructionRequired => "construction_required",
             Self::ActivationPending { .. } => "activation_pending",
-            Self::IdentityTransferring => "identity_transferring",
-            Self::TransferInFlight => "transfer_in_flight",
-            Self::ObservationMismatch => "observation_mismatch",
             Self::ApprovalUnavailable => "approval_unavailable",
             Self::DecisionOpen { .. } => "decision_open",
             Self::SubjectWidened => "subject_widened",
@@ -372,7 +371,9 @@ impl IdentityRefusalKind {
     /// `kind` and `field`.
     fn details(&self) -> Value {
         match self {
-            Self::ProfileNotAllowed { profile } => json!({ "profile": profile }),
+            Self::ProfileUnknown { profile } | Self::ProfileNotAllowed { profile } => {
+                json!({ "profile": profile })
+            }
             Self::ReservedKey { key }
             | Self::AuthorityFieldNeedsApproval { key }
             | Self::AuthorityFieldInvalid { key } => json!({ "key": key }),
@@ -384,7 +385,14 @@ impl IdentityRefusalKind {
             Self::ValidationRefused { reason } => json!({ "reason": reason }),
             Self::ChangeDenied { change } => json!({ "change": change.token() }),
             Self::Unsupported { feature } => json!({ "feature": feature }),
-            Self::StaleSpec { current } => json!({ "current": current }),
+            Self::StaleSpec {
+                current_digest,
+                current_revision: Some(revision),
+            } => json!({ "current_digest": current_digest.as_str(), "current_revision": revision }),
+            Self::StaleSpec {
+                current_digest,
+                current_revision: None,
+            } => json!({ "current_digest": current_digest.as_str() }),
             Self::AdmissionUnsettled { correlation } => json!({ "correlation": correlation }),
             Self::DecisionOpen { decision_id } => json!({ "decision_id": decision_id }),
             Self::DecisionClosed { state } => json!({ "state": state }),
@@ -399,7 +407,6 @@ impl IdentityRefusalKind {
             | Self::IdentityUnknown
             | Self::SelfChangeRefused
             | Self::OperationReused
-            | Self::NotTransferring
             | Self::PredecessorMismatch
             | Self::ImportRefused
             | Self::PreparationNotPending
@@ -408,9 +415,6 @@ impl IdentityRefusalKind {
             | Self::StaleAttempt { current: None }
             | Self::NotConstructed
             | Self::ConstructionRequired
-            | Self::IdentityTransferring
-            | Self::TransferInFlight
-            | Self::ObservationMismatch
             | Self::ApprovalUnavailable
             | Self::SubjectWidened
             | Self::DecisionNotFound
@@ -476,9 +480,14 @@ pub enum PolicyRefusalKind {
     Invalid { value: String },
     /// The same entry appears twice.
     Duplicate { value: String },
-    /// An authority field whose key is not a host-declared reserved label
-    /// key.
+    /// One of Meta's own label keys, which a policy neither reserves nor
+    /// declares an authority field.
+    MetaLabelKey { key: String },
+    /// An authority field whose key is not reserved: neither listed in
+    /// `reserved_keys.labels` nor read by a selector.
     AuthorityFieldNotReserved { key: String },
+    /// A profile the mob definition does not declare.
+    UnknownProfile { profile: String },
     /// A form this release does not support.
     Unsupported { feature: String },
     /// A number outside its range.
@@ -497,7 +506,7 @@ pub enum PolicyRefusalKind {
     AuthorityChangeNeedsHumanDecision,
     /// A peer rule id the policy reserves.
     ReservedRuleId { id: String },
-    /// The policy's preparation (`constructed`) holds a construction, which
+    /// A profile's preparation (`constructed`) holds a construction, which
     /// needs a native host composition, and the launch has none.
     NeedsNativeHost,
     /// The launch has no persistence (`persistent_state`), and the identity
@@ -516,10 +525,22 @@ impl fmt::Display for PolicyRefusalKind {
             Self::Empty => formatter.write_str("must not be empty"),
             Self::Invalid { value } => write!(formatter, "invalid value {value:?}"),
             Self::Duplicate { value } => write!(formatter, "duplicate {value:?}"),
+            Self::MetaLabelKey { key } => write!(
+                formatter,
+                "label key {key:?} is Meta's own: Meta sets it, and a policy neither reserves \
+                 it nor declares it an authority field"
+            ),
             Self::AuthorityFieldNotReserved { key } => write!(
                 formatter,
-                "authority field {key:?} is not a reserved label key the host declares"
+                "authority field {key:?} is not a reserved label key: list it in \
+                 reserved_keys.labels"
             ),
+            Self::UnknownProfile { profile } => {
+                write!(
+                    formatter,
+                    "profile {profile:?} is not in the mob definition"
+                )
+            }
             Self::Unsupported { feature } => write!(formatter, "{feature} is not supported"),
             Self::OutOfRange { value, min, max } => {
                 write!(formatter, "{value} is outside {min}..={max}")

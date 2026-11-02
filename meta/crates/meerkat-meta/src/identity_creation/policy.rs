@@ -13,18 +13,20 @@ use serde_json::{Value, json};
 use super::config::{
     ApprovalConfig, ApprovalKind, ApprovalOutcomeConfig, ApprovalRuleConfig, ApproverConfig,
     AuthorityFieldConfig, ChangeClass, IdentityCreationConfig, MAX_DECISION_TIMEOUT_MS,
-    PeerOutcome, PeerRuleConfig, PeersConfig, PreparationMode, RequesterKind, ReservedKeysConfig,
-    SelectorConfig, TimeoutsConfig,
+    PeerOutcome, PeerRuleConfig, PeersConfig, PreparationConfig, PreparationMode, RequesterKind,
+    RequesterSelectorConfig, ReservedKeysConfig, SelectorConfig, TimeoutsConfig,
 };
 use super::digest::{Sha256Digest, canonical_digest};
 use super::refusal::{PolicyRefusal, PolicyRefusalKind};
+use super::request::RequesterFacts;
 
 /// The most identities one create request may name: the most a Core seat
 /// step commits in one store transaction. A larger request is refused
 /// `batch_too_large`, a capacity refusal rather than a policy limit.
 pub const CORE_BATCH_MAX: u64 = 256;
 
-/// The label keys Meta itself sets on members. No request sets them.
+/// The label keys Meta itself sets on members. No request sets them, and a
+/// policy neither reserves one nor declares it an authority field.
 pub const META_RESERVED_LABEL_KEYS: [&str; 7] = [
     "agent_identity",
     "class",
@@ -34,6 +36,11 @@ pub const META_RESERVED_LABEL_KEYS: [&str; 7] = [
     "via_tool",
     "origin",
 ];
+
+/// Whether `key` is one of Meta's own label keys.
+pub(crate) fn is_meta_label(key: &str) -> bool {
+    META_RESERVED_LABEL_KEYS.contains(&key)
+}
 
 /// The rule id a peer edge records when the peer rules' default allowed it.
 pub const DEFAULT_PEER_RULE_ID: &str = "default";
@@ -50,6 +57,7 @@ const REVIEW_ROUNDS_DEFAULT: u64 = 3;
 const REVIEW_ROUNDS_MAX: u64 = 16;
 
 /// A validated selector over identities: every non-empty field must match.
+/// Every label key it reads is reserved, so it reads authority labels only.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Selector {
     identity: BTreeSet<String>,
@@ -60,7 +68,6 @@ pub struct Selector {
 impl Selector {
     /// Whether the identity `identity` (if it is one), of profile `profile`
     /// (if it has one) and with the authority labels `labels`, matches.
-    /// Selectors never read descriptive labels.
     pub fn matches(
         &self,
         identity: Option<&str>,
@@ -76,6 +83,34 @@ impl Selector {
             .iter()
             .all(|(key, value)| labels.get(key) == Some(value));
         identity_matches && profile_matches && labels_match
+    }
+}
+
+/// A validated selector over requesters: every given field must match. A
+/// surface matches only the host on that surface, and an identity, a
+/// profile or labels only an agent that has them.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RequesterSelector {
+    kind: Option<RequesterKind>,
+    surface: Option<String>,
+    agent: Selector,
+}
+
+impl RequesterSelector {
+    /// Whether `requester` matches: its kind, its host surface, and an
+    /// agent's identity, profile and authority labels.
+    pub fn matches(&self, requester: &RequesterFacts) -> bool {
+        self.kind
+            .is_none_or(|kind| kind == requester.requester.kind())
+            && self
+                .surface
+                .as_deref()
+                .is_none_or(|surface| requester.requester.surface() == Some(surface))
+            && self.agent.matches(
+                requester.requester.agent_identity(),
+                requester.profile.as_deref(),
+                &requester.authority_labels,
+            )
     }
 }
 
@@ -197,25 +232,25 @@ impl OutcomeRule {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApprovalRule {
     changes: BTreeSet<ChangeClass>,
-    requesters: BTreeSet<RequesterKind>,
+    requester: RequesterSelector,
     target: Selector,
     outcome: OutcomeRule,
 }
 
 impl ApprovalRule {
-    /// Whether the rule governs `change`, asked by a requester of kind
-    /// `requester`, of the identity `identity` of profile `profile` and with
-    /// the authority labels `labels`. Who created the identity is no input.
+    /// Whether the rule governs `change`, asked by `requester`, of the
+    /// identity `identity` of profile `profile` and with the authority labels
+    /// `labels`. Who created the identity is no input.
     pub fn governs(
         &self,
         change: ChangeClass,
-        requester: RequesterKind,
+        requester: &RequesterFacts,
         identity: &str,
         profile: &str,
         labels: &BTreeMap<String, String>,
     ) -> bool {
         self.changes.contains(&change)
-            && (self.requesters.is_empty() || self.requesters.contains(&requester))
+            && self.requester.matches(requester)
             && self.target.matches(Some(identity), Some(profile), labels)
     }
 
@@ -287,6 +322,26 @@ impl ApprovalPolicy {
     }
 }
 
+/// The validated preparation of one profile's new identities.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PreparationRule {
+    mode: PreparationMode,
+    construction_deadline_ms: Option<u64>,
+}
+
+impl PreparationRule {
+    /// The mode.
+    pub fn mode(&self) -> PreparationMode {
+        self.mode
+    }
+
+    /// For `constructed`: the setup deadline of the held construction, in
+    /// milliseconds.
+    pub fn construction_deadline_ms(&self) -> Option<u64> {
+        self.construction_deadline_ms
+    }
+}
+
 /// A validated, enabled identity policy: one change policy for every
 /// identity, whatever its origin.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -294,8 +349,7 @@ pub struct IdentityCreationPolicy {
     revision: Sha256Digest,
     reserved_labels: BTreeSet<String>,
     authority_fields: BTreeMap<String, AuthorityFieldRule>,
-    preparation: PreparationMode,
-    construction_deadline_ms: Option<u64>,
+    preparation: BTreeMap<String, PreparationRule>,
     peers: PeerPolicy,
     approval: ApprovalPolicy,
 }
@@ -317,12 +371,13 @@ impl IdentityCreationPolicy {
     /// is validated all the same.
     pub fn from_config(config: IdentityCreationConfig) -> Result<Option<Self>, PolicyRefusal> {
         let revision = policy_revision(&config)?;
-        let reserved_labels = keys(&config.reserved_keys.labels, "reserved_keys.labels")?;
-        let authority_fields = authority_fields(&config.authority_fields, &reserved_labels)?;
-        let construction_deadline_ms =
-            construction_deadline(config.preparation, config.construction_deadline_ms)?;
+        let mut reserved_labels =
+            reserved_keys(&config.reserved_keys.labels, "reserved_keys.labels")?;
         let peers = peer_policy(&config.peers)?;
         let approval = approval_policy(&config.approval)?;
+        reserved_labels.extend(selector_keys(&peers, &approval));
+        let authority_fields = authority_fields(&config.authority_fields, &reserved_labels)?;
+        let preparation = preparation(&config.preparation)?;
         if !config.enabled {
             return Ok(None);
         }
@@ -330,8 +385,7 @@ impl IdentityCreationPolicy {
             revision,
             reserved_labels,
             authority_fields,
-            preparation: config.preparation,
-            construction_deadline_ms,
+            preparation,
             peers,
             approval,
         }))
@@ -343,14 +397,12 @@ impl IdentityCreationPolicy {
         &self.revision
     }
 
-    /// The reserved label keys: the host's and Meta's own.
+    /// Whether `key` is a reserved label key: Meta's own, the host's
+    /// (`reserved_keys.labels`), or one a selector of the policy reads. A
+    /// request sets a reserved key only as an authority field, under a human
+    /// decision, and Meta's own never.
     pub fn is_reserved_label(&self, key: &str) -> bool {
-        self.reserved_labels.contains(key) || META_RESERVED_LABEL_KEYS.contains(&key)
-    }
-
-    /// Whether the host declared `key` a reserved label key.
-    pub fn is_host_reserved_label(&self, key: &str) -> bool {
-        self.reserved_labels.contains(key)
+        self.reserved_labels.contains(key) || is_meta_label(key)
     }
 
     /// The authority fields a request may set on any identity, by reserved
@@ -365,20 +417,40 @@ impl IdentityCreationPolicy {
         self.authority_fields.get(key)
     }
 
-    /// Whether the host prepares a new identity before its first use.
-    pub fn preparation(&self) -> PreparationMode {
+    /// How the host prepares a new identity of `profile` before its first
+    /// use: `none` unless the policy names the profile.
+    pub fn preparation(&self, profile: &str) -> PreparationMode {
         self.preparation
+            .get(profile)
+            .map_or(PreparationMode::None, PreparationRule::mode)
     }
 
-    /// The setup deadline of a held construction, in milliseconds.
-    pub fn construction_deadline_ms(&self) -> Option<u64> {
-        self.construction_deadline_ms
+    /// The setup deadline of a held construction of `profile`, in
+    /// milliseconds.
+    pub fn construction_deadline_ms(&self, profile: &str) -> Option<u64> {
+        self.preparation
+            .get(profile)
+            .and_then(PreparationRule::construction_deadline_ms)
     }
 
-    /// Whether the policy's preparation holds a construction, which needs a
+    /// The preparation of each profile the policy names.
+    pub fn preparations(&self) -> &BTreeMap<String, PreparationRule> {
+        &self.preparation
+    }
+
+    /// Whether a profile's preparation holds a construction, which needs a
     /// native host composition.
     pub fn needs_native_host(&self) -> bool {
-        self.preparation == PreparationMode::Constructed
+        self.constructed_profile().is_some()
+    }
+
+    /// The first profile, in byte order, whose preparation holds a
+    /// construction.
+    fn constructed_profile(&self) -> Option<&str> {
+        self.preparation
+            .iter()
+            .find(|(_, rule)| rule.mode == PreparationMode::Constructed)
+            .map(|(profile, _)| profile.as_str())
     }
 
     /// The peer rules.
@@ -389,6 +461,45 @@ impl IdentityCreationPolicy {
     /// The approval rules.
     pub fn approval(&self) -> &ApprovalPolicy {
         &self.approval
+    }
+
+    /// Check the policy against the profiles of the mob definition: every
+    /// profile a preparation or a selector names must be one of them. A
+    /// misspelled one would seat that profile's identities unprepared, or
+    /// leave a rule matching nothing.
+    pub fn check_mob_profiles(&self, profiles: &BTreeSet<String>) -> Result<(), PolicyRefusal> {
+        if let Some(profile) = self
+            .preparation
+            .keys()
+            .find(|profile| !profiles.contains(*profile))
+        {
+            return Err(refusal(
+                format!("preparation.{profile}"),
+                PolicyRefusalKind::UnknownProfile {
+                    profile: profile.clone(),
+                },
+            ));
+        }
+        for (index, rule) in self.peers.rules.iter().enumerate() {
+            known_profiles(
+                &rule.target,
+                profiles,
+                &format!("peers.rules[{index}].target"),
+            )?;
+        }
+        for (index, rule) in self.approval.rules.iter().enumerate() {
+            known_profiles(
+                &rule.requester.agent,
+                profiles,
+                &format!("approval.rules[{index}].requester"),
+            )?;
+            known_profiles(
+                &rule.target,
+                profiles,
+                &format!("approval.rules[{index}].target"),
+            )?;
+        }
+        Ok(())
     }
 }
 
@@ -415,16 +526,17 @@ impl RuntimeOptionPolicy {
 }
 
 /// The policy a launch uses: the native host's Rust form, or
-/// `runtime_options.identity_creation`, never both. `host_policy` is the
-/// host's answer, `None` when the launch has no native host composition.
-/// The identity records and decisions a policy governs are durable, so a
-/// launch without persistence (`persistent: false`) refuses a policy from
-/// either source, a disabled option included: it is never ignored. A
-/// `constructed` preparation holds a construction, which needs a native
-/// host composition.
+/// `runtime_options.identity_creation`, never both; checked against the mob
+/// definition's `profiles`. `host_policy` is the host's answer, `None` when
+/// the launch has no native host composition. The identity records and
+/// decisions a policy governs are durable, so a launch without persistence
+/// (`persistent: false`) refuses a policy from either source, a disabled
+/// option included: it is never ignored. A `constructed` preparation holds
+/// a construction, which needs a native host composition.
 pub fn resolve_launch_policy(
     host_policy: Option<Result<Option<IdentityCreationPolicy>, PolicyRefusal>>,
     option: RuntimeOptionPolicy,
+    profiles: &BTreeSet<String>,
     persistent: bool,
 ) -> Result<Option<Arc<IdentityCreationPolicy>>, PolicyRefusal> {
     let has_native_host = host_policy.is_some();
@@ -447,9 +559,10 @@ pub fn resolve_launch_policy(
         (None, RuntimeOptionPolicy::Enabled(policy)) => *policy,
         (None, RuntimeOptionPolicy::Disabled) => return Ok(None),
     };
-    if !has_native_host && policy.needs_native_host() {
+    policy.check_mob_profiles(profiles)?;
+    if !has_native_host && let Some(profile) = policy.constructed_profile() {
         return Err(PolicyRefusal::new(
-            "preparation",
+            format!("preparation.{profile}"),
             PolicyRefusalKind::NeedsNativeHost,
         ));
     }
@@ -458,16 +571,16 @@ pub fn resolve_launch_policy(
 
 /// Where in `value` the policy's shape breaks, and the parser's detail
 /// there: the policy object itself for an unknown member, else the member,
-/// the authority field, or the rule list item that does not parse.
+/// the authority field or profile preparation, or the rule list item that
+/// does not parse.
 fn locate_malformed(value: &Value) -> Option<(String, String)> {
     let object = value.as_object()?;
     for (key, member) in object {
         let found = match key.as_str() {
             "enabled" => shape_error::<bool>(member, key),
             "reserved_keys" => shape_error::<ReservedKeysConfig>(member, key),
-            "authority_fields" => authority_fields_shape_error(member),
-            "preparation" => shape_error::<PreparationMode>(member, key),
-            "construction_deadline_ms" => shape_error::<Option<u64>>(member, key),
+            "authority_fields" => map_shape_error::<AuthorityFieldConfig>(member, key),
+            "preparation" => map_shape_error::<PreparationConfig>(member, key),
             "peers" => member
                 .get("rules")
                 .and_then(|rules| list_shape_error::<PeerRuleConfig>(rules, "peers.rules"))
@@ -505,18 +618,17 @@ fn list_shape_error<T: DeserializeOwned>(value: &Value, path: &str) -> Option<(S
         .or_else(|| shape_error::<Vec<T>>(value, path))
 }
 
-/// The first authority field of `value` that does not parse, else the map.
-fn authority_fields_shape_error(value: &Value) -> Option<(String, String)> {
+/// The first entry of the map `value` that is not a `T`, at `path.<key>`,
+/// else the map.
+fn map_shape_error<T: DeserializeOwned>(value: &Value, path: &str) -> Option<(String, String)> {
     value
         .as_object()
-        .and_then(|fields| {
-            fields.iter().find_map(|(key, field)| {
-                shape_error::<AuthorityFieldConfig>(field, &format!("authority_fields.{key}"))
-            })
+        .and_then(|entries| {
+            entries
+                .iter()
+                .find_map(|(key, entry)| shape_error::<T>(entry, &format!("{path}.{key}")))
         })
-        .or_else(|| {
-            shape_error::<BTreeMap<String, AuthorityFieldConfig>>(value, "authority_fields")
-        })
+        .or_else(|| shape_error::<BTreeMap<String, T>>(value, path))
 }
 
 fn policy_revision(config: &IdentityCreationConfig) -> Result<Sha256Digest, PolicyRefusal> {
@@ -629,12 +741,50 @@ fn unique_keywords<T: Copy + Ord>(
     Ok(set)
 }
 
-fn keys(values: &[String], path: &str) -> Result<BTreeSet<String>, PolicyRefusal> {
-    unique_set(values, path, is_key)
+/// The host's reserved label keys: label keys, none of them Meta's own.
+fn reserved_keys(values: &[String], path: &str) -> Result<BTreeSet<String>, PolicyRefusal> {
+    let keys = unique_set(values, path, is_key)?;
+    if let Some((index, key)) = values
+        .iter()
+        .enumerate()
+        .find(|(_, key)| is_meta_label(key))
+    {
+        return Err(refusal(
+            format!("{path}[{index}]"),
+            PolicyRefusalKind::MetaLabelKey { key: key.clone() },
+        ));
+    }
+    Ok(keys)
 }
 
-/// The authority fields, each on a reserved label key the host declares,
-/// with a non-empty list of values.
+/// Every label key a selector of the policy reads: the peer rules' and the
+/// approval rules' targets, the requester selectors and the label
+/// approvers. Each is reserved.
+fn selector_keys(peers: &PeerPolicy, approval: &ApprovalPolicy) -> BTreeSet<String> {
+    let mut keys = BTreeSet::new();
+    for rule in &peers.rules {
+        keys.extend(rule.target.labels.keys().cloned());
+    }
+    for rule in &approval.rules {
+        keys.extend(rule.requester.agent.labels.keys().cloned());
+        keys.extend(rule.target.labels.keys().cloned());
+    }
+    let outcomes = approval
+        .rules
+        .iter()
+        .map(|rule| &rule.outcome)
+        .chain([&approval.default]);
+    for outcome in outcomes {
+        if let Some(ApproverRule::Label(key)) = &outcome.approver {
+            keys.insert(key.clone());
+        }
+    }
+    keys
+}
+
+/// The authority fields, each on a reserved label key that is not Meta's
+/// own (the host's, or one a selector reads), with a non-empty list of
+/// values.
 fn authority_fields(
     config: &BTreeMap<String, AuthorityFieldConfig>,
     reserved_labels: &BTreeSet<String>,
@@ -642,6 +792,12 @@ fn authority_fields(
     let mut fields = BTreeMap::new();
     for (key, field) in config {
         let path = format!("authority_fields.{key}");
+        if is_meta_label(key) {
+            return Err(refusal(
+                path,
+                PolicyRefusalKind::MetaLabelKey { key: key.clone() },
+            ));
+        }
         if !reserved_labels.contains(key) {
             return Err(refusal(
                 path,
@@ -670,13 +826,38 @@ fn authority_fields(
     Ok(fields)
 }
 
+/// The preparation of each profile the policy names, by a profile name.
+fn preparation(
+    config: &BTreeMap<String, PreparationConfig>,
+) -> Result<BTreeMap<String, PreparationRule>, PolicyRefusal> {
+    let mut rules = BTreeMap::new();
+    for (profile, rule) in config {
+        if !is_plain_name(profile, NAME_MAX_BYTES) {
+            return Err(invalid("preparation", profile));
+        }
+        let construction_deadline_ms = construction_deadline(
+            rule.mode,
+            rule.construction_deadline_ms,
+            &format!("preparation.{profile}.construction_deadline_ms"),
+        )?;
+        rules.insert(
+            profile.clone(),
+            PreparationRule {
+                mode: rule.mode,
+                construction_deadline_ms,
+            },
+        );
+    }
+    Ok(rules)
+}
+
 /// The setup deadline of a held construction: given, and in range, exactly
 /// when the preparation is `constructed`.
 fn construction_deadline(
     preparation: PreparationMode,
     deadline: Option<u64>,
+    path: &str,
 ) -> Result<Option<u64>, PolicyRefusal> {
-    const PATH: &str = "construction_deadline_ms";
     match (preparation, deadline) {
         (PreparationMode::Constructed, Some(deadline))
             if (CONSTRUCTION_DEADLINE_MIN_MS..=CONSTRUCTION_DEADLINE_MAX_MS)
@@ -685,29 +866,39 @@ fn construction_deadline(
             Ok(Some(deadline))
         }
         (PreparationMode::Constructed, Some(deadline)) => Err(refusal(
-            PATH,
+            path,
             PolicyRefusalKind::OutOfRange {
                 value: deadline,
                 min: CONSTRUCTION_DEADLINE_MIN_MS,
                 max: CONSTRUCTION_DEADLINE_MAX_MS,
             },
         )),
-        (PreparationMode::Constructed, None) => Err(refusal(PATH, PolicyRefusalKind::Empty)),
+        (PreparationMode::Constructed, None) => Err(refusal(path, PolicyRefusalKind::Empty)),
         (PreparationMode::None | PreparationMode::Required, Some(deadline)) => {
-            Err(invalid(PATH, &deadline.to_string()))
+            Err(invalid(path, &deadline.to_string()))
         }
         (PreparationMode::None | PreparationMode::Required, None) => Ok(None),
     }
 }
 
 fn selector(config: &SelectorConfig, path: &str) -> Result<Selector, PolicyRefusal> {
-    let identity = unique_set(&config.identity, &format!("{path}.identity"), |name| {
+    selector_of(&config.identity, &config.profile, &config.labels, path)
+}
+
+/// A selector of these identities, profiles and labels, at `path`.
+fn selector_of(
+    identity: &[String],
+    profile: &[String],
+    labels: &BTreeMap<String, String>,
+    path: &str,
+) -> Result<Selector, PolicyRefusal> {
+    let identity = unique_set(identity, &format!("{path}.identity"), |name| {
         is_plain_name(name, NAME_MAX_BYTES)
     })?;
-    let profile = unique_set(&config.profile, &format!("{path}.profile"), |name| {
+    let profile = unique_set(profile, &format!("{path}.profile"), |name| {
         is_plain_name(name, NAME_MAX_BYTES)
     })?;
-    for (key, value) in &config.labels {
+    for (key, value) in labels {
         if !is_key(key) {
             return Err(invalid(format!("{path}.labels"), key));
         }
@@ -718,8 +909,45 @@ fn selector(config: &SelectorConfig, path: &str) -> Result<Selector, PolicyRefus
     Ok(Selector {
         identity,
         profile,
-        labels: config.labels.clone(),
+        labels: labels.clone(),
     })
+}
+
+fn requester_selector(
+    config: &RequesterSelectorConfig,
+    path: &str,
+) -> Result<RequesterSelector, PolicyRefusal> {
+    if let Some(surface) = &config.surface
+        && !is_plain_name(surface, NAME_MAX_BYTES)
+    {
+        return Err(invalid(format!("{path}.surface"), surface));
+    }
+    Ok(RequesterSelector {
+        kind: config.kind,
+        surface: config.surface.clone(),
+        agent: selector_of(&config.identity, &config.profile, &config.labels, path)?,
+    })
+}
+
+/// Every profile `selector` names is one of the mob's `profiles`.
+fn known_profiles(
+    selector: &Selector,
+    profiles: &BTreeSet<String>,
+    path: &str,
+) -> Result<(), PolicyRefusal> {
+    match selector
+        .profile
+        .iter()
+        .find(|profile| !profiles.contains(*profile))
+    {
+        Some(profile) => Err(refusal(
+            format!("{path}.profile"),
+            PolicyRefusalKind::UnknownProfile {
+                profile: profile.clone(),
+            },
+        )),
+        None => Ok(()),
+    }
 }
 
 fn peer_policy(config: &PeersConfig) -> Result<PeerPolicy, PolicyRefusal> {
@@ -773,11 +1001,7 @@ fn approval_policy(config: &ApprovalConfig) -> Result<ApprovalPolicy, PolicyRefu
             return Err(refusal(format!("{path}.change"), PolicyRefusalKind::Empty));
         }
         let changes = unique_keywords(&rule.change, &format!("{path}.change"), ChangeClass::token)?;
-        let requesters = unique_keywords(
-            &rule.requester,
-            &format!("{path}.requester"),
-            RequesterKind::token,
-        )?;
+        let requester = requester_selector(&rule.requester, &format!("{path}.requester"))?;
         let outcome = outcome_rule(&rule.outcome, &format!("{path}.outcome"), &timeouts)?;
         if changes.contains(&ChangeClass::Authority)
             && matches!(
@@ -792,7 +1016,7 @@ fn approval_policy(config: &ApprovalConfig) -> Result<ApprovalPolicy, PolicyRefu
         }
         rules.push(ApprovalRule {
             changes,
-            requesters,
+            requester,
             target: selector(&rule.target, &format!("{path}.target"))?,
             outcome,
         });

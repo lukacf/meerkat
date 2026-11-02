@@ -9,20 +9,23 @@
 //! creates is declared with the same spec as one a host's roster declares,
 //! and the rules govern the changes of any identity, however it came to
 //! be. Who asks is recorded and grants nothing: an approval rule selects by
-//! the change, the requester's kind, and the target's profile and authority
-//! labels. Context is no authority input: no selector reads it, and a host
-//! must not key policy on it.
+//! the change, the requester (its kind, host surface, agent identity,
+//! profile and authority labels), and the target's identity, profile and
+//! authority labels. Every label key a selector reads is reserved, so a
+//! request sets it only as an authority field, under a human decision.
+//! Context is no authority input: no selector reads it, and a host must not
+//! key policy on it.
 //!
 //! ```json
 //! {
 //!   "enabled": true,
 //!   "reserved_keys": {"labels": ["team", "clearance"]},
 //!   "authority_fields": {"clearance": {"values": ["basic", "elevated"]}},
-//!   "preparation": "none",
+//!   "preparation": {"assistant": {"mode": "required"}},
 //!   "peers": {"rules": [{"id": "core", "target": {"labels": {"team": "core"}},
 //!                        "outcome": "require_approval", "reason": "a core team member"}],
 //!             "default": "deny"},
-//!   "approval": {"rules": [{"change": ["create"], "requester": ["agent"],
+//!   "approval": {"rules": [{"change": ["create"], "requester": {"kind": "agent"},
 //!                           "target": {"profile": ["assistant"]},
 //!                           "outcome": {"kind": "require_approval",
 //!                                       "approver": {"id": "owner"}}}],
@@ -45,20 +48,18 @@ pub struct IdentityCreationConfig {
     /// disabled policy is still validated.
     #[serde(default)]
     pub enabled: bool,
-    /// The label keys only the host and approved authority fields may set.
+    /// The label keys a request sets only as an authority field, beside
+    /// every key a selector reads.
     #[serde(default)]
     pub reserved_keys: ReservedKeysConfig,
     /// The authority fields a request may set on any identity, by reserved
     /// label key. They become authority only under a human decision.
     #[serde(default)]
     pub authority_fields: BTreeMap<String, AuthorityFieldConfig>,
-    /// Whether the host prepares a new identity before its first use.
+    /// How the host prepares a new identity before its first use, by the
+    /// identity's profile. A profile the map does not name needs none.
     #[serde(default)]
-    pub preparation: PreparationMode,
-    /// For `preparation: "constructed"`: the host's setup deadline for the
-    /// held construction, in milliseconds.
-    #[serde(default)]
-    pub construction_deadline_ms: Option<u64>,
+    pub preparation: BTreeMap<String, PreparationConfig>,
     /// Which peers an identity may be wired to.
     #[serde(default)]
     pub peers: PeersConfig,
@@ -68,12 +69,14 @@ pub struct IdentityCreationConfig {
 }
 
 /// `reserved_keys`: label keys a request sets only as an authority field.
+/// Every key a selector reads is reserved too, without being listed here.
 /// Context has no reserved keys: it is no authority input.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct ReservedKeysConfig {
-    /// Reserved label keys, beside Meta's own.
+    /// Reserved label keys. Meta's own keys are Meta's: no policy lists
+    /// one.
     #[serde(default)]
     pub labels: Vec<String>,
 }
@@ -92,7 +95,23 @@ pub struct AuthorityFieldConfig {
     pub schema: Option<Value>,
 }
 
-/// Whether the host prepares a new identity before its first use.
+/// How the host prepares one profile's new identities before their first
+/// use: `{"mode": ..}`, and for `constructed` its
+/// `construction_deadline_ms`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct PreparationConfig {
+    /// The mode.
+    pub mode: PreparationMode,
+    /// For `constructed`: the host's setup deadline for the held
+    /// construction, in milliseconds.
+    #[serde(default)]
+    pub construction_deadline_ms: Option<u64>,
+}
+
+/// Whether the host prepares a new identity of a profile before its first
+/// use.
 #[derive(
     Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
 )]
@@ -153,8 +172,9 @@ pub struct PeerRuleConfig {
 }
 
 /// A selector over identities. Fields are all required to match; a list
-/// matches any of its values; an empty field matches anything. Selectors
-/// read authority labels only, never descriptive ones.
+/// matches any of its values; an empty field matches anything. Every label
+/// key a selector reads is reserved, so selectors read authority labels
+/// only.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
@@ -212,7 +232,8 @@ pub struct ApprovalConfig {
 }
 
 /// One approval rule. It governs a change of one of its classes, asked by a
-/// requester of one of its kinds, of an identity its target selects.
+/// requester its requester selector selects, of an identity its target
+/// selects.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
@@ -220,9 +241,10 @@ pub struct ApprovalRuleConfig {
     /// The changes it governs.
     #[serde(default)]
     pub change: Vec<ChangeClass>,
-    /// The kinds of requester it selects; empty selects any.
-    #[serde(default)]
-    pub requester: Vec<RequesterKind>,
+    /// Who asks, as the transport attributed it; empty selects any
+    /// requester.
+    #[serde(default, deserialize_with = "requester_selector")]
+    pub requester: RequesterSelectorConfig,
     /// The identities whose changes it governs, by identity, profile and
     /// authority labels; empty selects any.
     #[serde(default)]
@@ -230,6 +252,42 @@ pub struct ApprovalRuleConfig {
     /// The outcome it gives.
     #[serde(default)]
     pub outcome: ApprovalOutcomeConfig,
+}
+
+/// A selector over requesters. Fields are all required to match; a list
+/// matches any of its values; an empty field matches anything. A surface
+/// matches only the host on that surface, and an identity, a profile or
+/// labels only an agent that has them.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct RequesterSelectorConfig {
+    /// The requester's kind; absent selects any.
+    #[serde(default)]
+    pub kind: Option<RequesterKind>,
+    /// The host's surface (`console` for the console); absent selects any.
+    #[serde(default)]
+    pub surface: Option<String>,
+    /// Agent identities it selects.
+    #[serde(default)]
+    pub identity: Vec<String>,
+    /// Agent profiles it selects.
+    #[serde(default)]
+    pub profile: Vec<String>,
+    /// Authority labels a selected agent carries, all of them.
+    #[serde(default)]
+    pub labels: BTreeMap<String, String>,
+}
+
+/// A requester selector, from a JSON object only: a list, the kind list of
+/// an earlier form, is refused rather than read by position.
+fn requester_selector<'de, D>(deserializer: D) -> Result<RequesterSelectorConfig, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error as _;
+    let members = serde_json::Map::<String, Value>::deserialize(deserializer)?;
+    serde_json::from_value(Value::Object(members)).map_err(D::Error::custom)
 }
 
 /// What an approval rule gives.

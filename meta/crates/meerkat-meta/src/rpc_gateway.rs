@@ -809,19 +809,28 @@ fn launch_provider_auth_persistence(
 
 /// The identity policy a launch uses: the native host's Rust form
 /// ([`GatewayHostComposition::identity_creation_policy`]) or
-/// `runtime_options.identity_creation`, never both. A preparation that holds
-/// a construction needs a native host, and a launch without persistence
+/// `runtime_options.identity_creation`, never both, checked against the mob
+/// definition's profiles: a preparation or a selector that names a profile
+/// the mob lacks refuses the launch. A preparation that holds a
+/// construction needs a native host, and a launch without persistence
 /// (`persistent` false: no `persistent_state`) refuses a policy from either
 /// source, a disabled option included, rather than ignore it. The message of
 /// a refusal names the policy path.
 fn launch_identity_creation_policy(
     host: Option<&Arc<dyn GatewayHostComposition>>,
     option: crate::identity_creation::RuntimeOptionPolicy,
+    definition: &MobDefinition,
     persistent: bool,
 ) -> Result<Option<Arc<crate::identity_creation::IdentityCreationPolicy>>, String> {
+    let profiles: BTreeSet<String> = definition
+        .profiles
+        .keys()
+        .map(|name| name.as_str().to_owned())
+        .collect();
     crate::identity_creation::resolve_launch_policy(
         host.map(|host| host.identity_creation_policy()),
         option,
+        &profiles,
         persistent,
     )
     .map_err(|refusal| refusal.to_string())
@@ -17536,12 +17545,13 @@ external_addressable = true
         ));
     }
     // The identity policy, settled before the durable phase: the native
-    // host's Rust form or the init option, never both, and refused on a
-    // launch without persistence. Nothing acts on it yet; the operation
-    // executor takes it from here.
+    // host's Rust form or the init option, never both, checked against the
+    // definition's profiles, and refused on a launch without persistence.
+    // Nothing acts on it yet; the operation executor takes it from here.
     let _identity_creation = launch_identity_creation_policy(
         host,
         std::mem::take(&mut gateway_options.identity_creation),
+        &definition,
         persistent_state.is_some(),
     )
     .map_err(|message| fail_init(&request_id, -32602, message))?;
@@ -26260,13 +26270,21 @@ mod identity_creation_launch_tests {
         })
     }
 
+    /// The fixture mob: one profile, `default`.
+    fn definition() -> MobDefinition {
+        parse_mob_config(
+            "[mob]\nid = \"identity-creation\"\n\n[profiles.default]\nmodel = \"gpt-5.5\"\n",
+        )
+        .expect("a mob definition")
+    }
+
     /// The policy a launch of the fixture mob uses.
     fn launch(
         host: Option<&Arc<dyn GatewayHostComposition>>,
         option: RuntimeOptionPolicy,
         persistent: bool,
     ) -> Result<Option<Arc<IdentityCreationPolicy>>, String> {
-        launch_identity_creation_policy(host, option, persistent)
+        launch_identity_creation_policy(host, option, &definition(), persistent)
     }
 
     /// `runtime_options.identity_creation` is a known option, validated as it

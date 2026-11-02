@@ -8,12 +8,13 @@
 //! fields of that spec. Normalization checks everything the policy decides
 //! on its own: the profile against the mob's profiles, reserved keys,
 //! authority fields, peers against the peer rules, the batch, and the
-//! approval outcome. The requester is recorded, and its kind is all an
-//! approval rule reads of it; who created an identity is never read. What
-//! needs the identity's owner (names taken, open decisions, the identity's
-//! current revision, profile and authority labels) the executor reads, and
-//! hands in here where normalization needs it (`IdentityEntryFacts`,
-//! `PeerFacts`).
+//! approval outcome. The requester is recorded; an approval rule reads only
+//! what the transport attributed to it (its kind, host surface, agent
+//! identity, profile and authority labels), and who created an identity is
+//! never read. What needs the identity's owner (names taken, open
+//! decisions, the identity's spec digest, profile and authority labels) the
+//! executor reads, and hands in here where normalization needs it
+//! (`IdentityEntryFacts`, `PeerFacts`).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -29,6 +30,7 @@ use super::config::{ChangeClass, PeerOutcome, RequesterKind};
 use super::digest::{Sha256Digest, canonical_digest, canonical_json};
 use super::policy::{
     CORE_BATCH_MAX, DEFAULT_PEER_RULE_ID, IdentityCreationPolicy, PeerPolicy, PeerRule, is_key,
+    is_meta_label,
 };
 use super::refusal::{IdentityRefusal, IdentityRefusalKind, NameTakenBy, RequestProblem};
 
@@ -43,7 +45,6 @@ pub const REQUEST_BODY_MAX_BYTES: usize = 256 * 1024;
 
 const FORMAT_REQUEST: &str = "meerkat.identity.request.v1";
 const REFERENCE_MAX_BYTES: u64 = 1024;
-const LABEL_VALUE_MAX_BYTES: usize = 256;
 
 /// The `unsupported` feature of a runtime binding that carries a bootstrap
 /// token. The token is a credential, and a request, which a decision holds
@@ -91,6 +92,14 @@ impl Requester {
             Self::Host { .. } | Self::Human { .. } => None,
         }
     }
+
+    /// The host's surface, for a host requester.
+    pub fn surface(&self) -> Option<&str> {
+        match self {
+            Self::Host { surface } => Some(surface.as_str()),
+            Self::Agent { .. } | Self::Human { .. } => None,
+        }
+    }
 }
 
 /// What normalization knows of the requester, as the transport resolved
@@ -100,17 +109,25 @@ impl Requester {
 pub struct RequesterFacts {
     /// Who asks.
     pub requester: Requester,
-    /// An agent's authority labels, for the label approvers.
+    /// An agent's profile, for the requester selectors.
+    pub profile: Option<String>,
+    /// An agent's authority labels, for the requester selectors and the
+    /// label approvers.
     pub authority_labels: BTreeMap<String, String>,
 }
 
 impl RequesterFacts {
-    /// An agent with these authority labels.
-    pub fn agent(identity: impl Into<String>, authority_labels: BTreeMap<String, String>) -> Self {
+    /// An agent of this profile, with these authority labels.
+    pub fn agent(
+        identity: impl Into<String>,
+        profile: impl Into<String>,
+        authority_labels: BTreeMap<String, String>,
+    ) -> Self {
         Self {
             requester: Requester::Agent {
                 identity: identity.into(),
             },
+            profile: Some(profile.into()),
             authority_labels,
         }
     }
@@ -121,6 +138,7 @@ impl RequesterFacts {
             requester: Requester::Host {
                 surface: surface.into(),
             },
+            profile: None,
             authority_labels: BTreeMap::new(),
         }
     }
@@ -173,8 +191,12 @@ pub struct RequestContext<'a> {
 pub struct IdentityEntryFacts {
     /// Its identity.
     pub identity: String,
-    /// Its spec revision.
-    pub revision: u64,
+    /// The digest of its declared spec, as Meta registers it
+    /// (`registered_spec_digest`): a change names the digest it read.
+    pub spec_digest: Sha256Digest,
+    /// Its spec revision, for an identity Core's store holds; a roster
+    /// declares none.
+    pub revision: Option<u64>,
     /// Its profile.
     pub profile: String,
     /// Its authority labels.
@@ -234,7 +256,9 @@ pub struct RequestEnvelope {
 #[non_exhaustive]
 pub struct CreateIdentitySpec {
     /// The identity's declared spec: its name, its profile (which gives
-    /// its model, tools and wiring) and the rest of a roster row.
+    /// its model, tools and wiring) and the rest of a roster row. A member
+    /// the declared spec does not have is refused, never dropped.
+    #[serde(deserialize_with = "closed_spec")]
     pub spec: DurableAgentSpec,
     /// The peers, by identity.
     #[serde(default)]
@@ -249,6 +273,43 @@ impl CreateIdentitySpec {
             peers: Vec::new(),
         }
     }
+}
+
+/// The members of a declared spec, as `DurableAgentSpec` serializes them. A
+/// new field stops `normalized_spec`, which destructures every field, from
+/// compiling, and a create that sets it is refused until it is listed here.
+const SPEC_MEMBERS: &[&str] = &[
+    "identity",
+    "profile",
+    "addressability",
+    "display_name",
+    "labels",
+    "context",
+    "additional_instructions",
+    "initial_message",
+    "runtime_mode_override",
+    "backend",
+    "binding",
+    "placement",
+];
+
+/// A create's declared spec, closed on the request side: `DurableAgentSpec`
+/// drops a member it does not have, and a request refuses it instead (a
+/// tool list, a template or a misspelled field would otherwise do nothing).
+fn closed_spec<'de, D>(deserializer: D) -> Result<DurableAgentSpec, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error as _;
+    let value = Value::deserialize(deserializer)?;
+    if let Some(unknown) = value.as_object().and_then(|members| {
+        members
+            .keys()
+            .find(|key| !SPEC_MEMBERS.contains(&key.as_str()))
+    }) {
+        return Err(D::Error::unknown_field(unknown, SPEC_MEMBERS));
+    }
+    DurableAgentSpec::deserialize(value).map_err(D::Error::custom)
 }
 
 /// What an update changes: fields of the identity's declared spec, and its
@@ -292,28 +353,29 @@ pub struct UpdateSetSpec {
 }
 
 /// An update of one identity.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct UpdateIdentitySpec {
     /// The identity.
     pub identity: String,
-    /// The revision the requester read.
-    pub expected_revision: u64,
+    /// The digest of the spec the requester read: the identity's
+    /// `spec_digest` then.
+    pub expected_spec_digest: Sha256Digest,
     /// What changes.
     #[serde(default)]
     pub set: UpdateSetSpec,
 }
 
 /// A removal of one identity.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct RemoveIdentitySpec {
     /// The identity.
     pub identity: String,
-    /// The revision the requester read.
-    pub expected_revision: u64,
+    /// The digest of the spec the requester read.
+    pub expected_spec_digest: Sha256Digest,
 }
 
 /// Why an edge to a peer exists: the peer rule that allowed it. Who asked,
@@ -470,8 +532,8 @@ pub struct ProfileChange {
 pub struct UpdatedSpec {
     /// The identity.
     pub identity: String,
-    /// The revision it updates.
-    pub expected_revision: u64,
+    /// The digest of the spec it updates.
+    pub expected_spec_digest: Sha256Digest,
     /// The profile change: a role migration.
     pub profile: Option<ProfileChange>,
     /// The new addressability.
@@ -499,7 +561,7 @@ impl UpdatedSpec {
     pub fn change_classes(&self) -> BTreeSet<ChangeClass> {
         let Self {
             identity: _,
-            expected_revision: _,
+            expected_spec_digest: _,
             profile,
             addressability,
             runtime_mode_override,
@@ -552,8 +614,8 @@ pub enum RequestAction {
     Remove {
         /// The identity.
         identity: String,
-        /// The revision the requester read.
-        expected_revision: u64,
+        /// The digest of the spec the requester read.
+        expected_spec_digest: Sha256Digest,
     },
 }
 
@@ -682,7 +744,8 @@ fn check_size(text: &str, limit: u64, field: &str) -> Result<(), IdentityRefusal
     Ok(())
 }
 
-/// Whether the mob defines `profile`, which a request may then name.
+/// Whether the mob defines `profile`, which a request may then name; a
+/// profile it lacks is `profile_unknown`.
 fn mob_profile(
     context: &RequestContext<'_>,
     profile: &ProfileName,
@@ -692,7 +755,7 @@ fn mob_profile(
         return Ok(());
     }
     Err(refused(
-        IdentityRefusalKind::ProfileNotAllowed {
+        IdentityRefusalKind::ProfileUnknown {
             profile: profile.as_str().to_owned(),
         },
         field,
@@ -723,8 +786,9 @@ fn given_context(context: Option<&Value>, field: &str) -> Result<Option<Value>, 
 }
 
 /// A label that is no authority field: a key in the label key alphabet
-/// that is not reserved, and a value of at most 256 bytes without control
-/// characters.
+/// that is not reserved, and a value without control characters. A value
+/// has no length limit of its own; the request body's bound is the only
+/// one.
 fn descriptive_label(
     policy: &IdentityCreationPolicy,
     key: &str,
@@ -745,14 +809,6 @@ fn descriptive_label(
             field,
         ));
     }
-    if value.len() > LABEL_VALUE_MAX_BYTES {
-        return Err(refused(
-            IdentityRefusalKind::TextTooLarge {
-                limit: LABEL_VALUE_MAX_BYTES as u64,
-            },
-            format!("{field}.{key}"),
-        ));
-    }
     if value.chars().any(char::is_control) {
         return Err(refused(malformed, format!("{field}.{key}")));
     }
@@ -760,7 +816,8 @@ fn descriptive_label(
 }
 
 /// The authority fields among a declared spec's labels: each label on a
-/// key the policy declares an authority field, with a value it allows. Any
+/// key the policy declares an authority field, with a value it allows. A
+/// Meta key is refused before any authority field is looked up, and any
 /// other label is descriptive (`descriptive_label`).
 fn declared_authority(
     policy: &IdentityCreationPolicy,
@@ -769,6 +826,12 @@ fn declared_authority(
 ) -> Result<BTreeMap<String, String>, IdentityRefusal> {
     let mut authority = BTreeMap::new();
     for (key, value) in labels {
+        if is_meta_label(key) {
+            return Err(refused(
+                IdentityRefusalKind::ReservedKey { key: key.clone() },
+                field,
+            ));
+        }
         match policy.authority_field(key) {
             Some(rule) if rule.allows(value) => {
                 authority.insert(key.clone(), value.clone());
@@ -1024,14 +1087,14 @@ pub fn normalize_create(
     })
 }
 
-/// The identity an update or a remove names: the entry's, at the revision
-/// the requester read. An agent never changes its own identity; who
-/// created the identity is never asked.
+/// The identity an update or a remove names: the entry's, at the spec the
+/// requester read, by its digest. An agent never changes its own identity;
+/// who created the identity is never asked.
 fn check_entry(
     requester: &Requester,
     entry: &IdentityEntryFacts,
     identity: &str,
-    expected_revision: u64,
+    expected_spec_digest: &Sha256Digest,
 ) -> Result<(), IdentityRefusal> {
     if identity != entry.identity {
         return Err(refused(
@@ -1044,12 +1107,13 @@ fn check_entry(
     if requester.agent_identity() == Some(entry.identity.as_str()) {
         return Err(IdentityRefusal::new(IdentityRefusalKind::SelfChangeRefused));
     }
-    if expected_revision != entry.revision {
+    if *expected_spec_digest != entry.spec_digest {
         return Err(refused(
             IdentityRefusalKind::StaleSpec {
-                current: entry.revision,
+                current_digest: entry.spec_digest.clone(),
+                current_revision: entry.revision,
             },
-            "expected_revision",
+            "expected_spec_digest",
         ));
     }
     Ok(())
@@ -1078,7 +1142,7 @@ pub fn normalize_update(
         &requester.requester,
         entry,
         &spec.identity,
-        spec.expected_revision,
+        &spec.expected_spec_digest,
     )?;
     let UpdateSetSpec {
         profile,
@@ -1111,6 +1175,12 @@ pub fn normalize_update(
     let mut consequences = BTreeSet::new();
     if let Some(fields) = authority_fields {
         for (key, value) in fields {
+            if is_meta_label(key) {
+                return Err(refused(
+                    IdentityRefusalKind::ReservedKey { key: key.clone() },
+                    "set.authority_fields",
+                ));
+            }
             if !policy
                 .authority_field(key)
                 .is_some_and(|rule| rule.allows(value))
@@ -1156,7 +1226,7 @@ pub fn normalize_update(
     )?;
     let updated = UpdatedSpec {
         identity: entry.identity.clone(),
-        expected_revision: spec.expected_revision,
+        expected_spec_digest: spec.expected_spec_digest.clone(),
         profile,
         addressability: *addressability,
         runtime_mode_override: *runtime_mode_override,
@@ -1230,7 +1300,7 @@ pub fn normalize_remove(
         &requester.requester,
         entry,
         &spec.identity,
-        spec.expected_revision,
+        &spec.expected_spec_digest,
     )?;
     let classes = BTreeSet::from([ChangeClass::Remove]);
     let targets = [entry_target(entry)];
@@ -1251,7 +1321,7 @@ pub fn normalize_remove(
             source_evidence: envelope.source_evidence,
             action: RequestAction::Remove {
                 identity: entry.identity.clone(),
-                expected_revision: spec.expected_revision,
+                expected_spec_digest: spec.expected_spec_digest.clone(),
             },
             consequences: BTreeSet::new(),
         },

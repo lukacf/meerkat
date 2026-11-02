@@ -313,7 +313,9 @@ close, the membership commits, the remote commit and the dormant seat,
 refuses a reserved name: a ladder opened before the reservation seats no
 member, and the shell aborts it with the name's admission answer,
 `MobError::IdentityMember`), the worker reconcile helpers
-skip it, the declared apply refuses it typed (`RefusedNameTombstoned`,
+skip it, the worker ensure refuses it (`name_not_reserved` on
+`EnsureMemberRunningMissing`, which the shell answers with the name's
+admission answer), the declared apply refuses it typed (`RefusedNameTombstoned`,
 `RefusedNameUnreadable`), the legacy adoption answers `NotAdoptable`, and
 the agent lane's admission answers the name's member `IdentityMember`.
 Custody of one origin never takes

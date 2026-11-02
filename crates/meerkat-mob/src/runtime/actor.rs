@@ -17989,9 +17989,10 @@ impl MobActor {
     /// MobMachine reserved, as its admission answers the name
     /// (`IdentityNameReserved`): `MobError::IdentityMember`. It types a spawn
     /// ladder's close for a name reserved after the ladder opened
-    /// (`name_not_reserved` on the close arms), and refuses a fresh-life
-    /// respawn whose successor the reservation would refuse. `None` for any
-    /// other name.
+    /// (`name_not_reserved` on the close arms) and a worker ensure of a
+    /// reserved name (`name_not_reserved` on EnsureMemberRunningMissing), and
+    /// refuses a fresh-life respawn whose successor the reservation would
+    /// refuse. `None` for any other name.
     fn reserved_name_refusal(&self, agent_identity: &AgentIdentity) -> Option<MobError> {
         matches!(
             self.member_admission_verdict(agent_identity, false, false),
@@ -30930,8 +30931,26 @@ impl MobActor {
                         let _ = reply_tx.send(Err(error));
                         return ActorLoopControl::SkipBoundary;
                     }
+                    // MobMachine refuses a worker ensure of a reserved name (a
+                    // removed created entry's, or one whose entry this build
+                    // cannot read: `name_not_reserved` on
+                    // EnsureMemberRunningMissing). The refusal is the name's
+                    // admission answer, typed in this same step, as a spawn of
+                    // the name is answered.
+                    let ensured = match &*input {
+                        mob_dsl::MobMachineInput::EnsureMember { agent_identity } => {
+                            Some(AgentIdentity::from(agent_identity.0.as_str()))
+                        }
+                        _ => None,
+                    };
                     let result =
                         self.apply_dsl_input_collect_effects(*input, "apply_machine_input_effects");
+                    let result = match (result, ensured) {
+                        (Err(error), Some(identity)) => {
+                            Err(self.reserved_name_refusal(&identity).unwrap_or(error))
+                        }
+                        (result, _) => result,
+                    };
                     let _ = reply_tx.send(result);
                 }
                 MobCommand::ValidateCommandAuthority { reply_tx } => {

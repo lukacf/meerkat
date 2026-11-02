@@ -5441,8 +5441,10 @@ macro_rules! mob_catalog_machine_dsl {
         }
 
         // A worker reconcile never spawns or retires an identity entry: the
-        // reconcile helpers range over workers only, and every step that
-        // records an entry drops it from the reconcile sets.
+        // reconcile helpers range over workers only, the worker ensure
+        // records neither an entry's name nor a reserved one for a spawn,
+        // and every step that records an entry drops it from the reconcile
+        // sets.
         invariant worker_reconcile_spares_entries {
             for_all(id in self.members_to_spawn,
                 self.identity_entry_origins.contains_key(id) == false
@@ -9844,6 +9846,16 @@ macro_rules! mob_catalog_machine_dsl {
             guard "identity_absent" { self.identity_to_runtime.contains_key(agent_identity) == false }
             // A worker ensure never spawns an identity entry's name.
             guard "not_an_identity_entry" { self.identity_entry_origins.contains_key(agent_identity) == false }
+            // Nor a reserved name: a removed created entry's, or one whose
+            // created entry row this build cannot read. Such a name can be no
+            // entry and hold no member, and the ensure would then record it
+            // for a spawn (worker_reconcile_spares_entries). The shell answers
+            // the refusal with the name's admission answer,
+            // IdentityNameReserved.
+            guard "name_not_reserved" {
+                self.identity_entry_tombstones.contains(agent_identity) == false
+                && self.identity_entry_unreadable.contains(agent_identity) == false
+            }
             update {
                 self.desired_members.insert(agent_identity);
                 self.members_to_spawn.insert(agent_identity);

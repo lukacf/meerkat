@@ -3168,8 +3168,9 @@ async fn lookup_operator_identity(
 }
 
 /// Headers of the identity lookup: the GitHub token as the bearer, GitHub's
-/// API version, the configured User-Agent and the route's integration id, as
-/// on every other request that carries the token.
+/// API version and the configured User-Agent. No `Copilot-Integration-Id`:
+/// nothing establishes that `api.github.com` reads one, so the lookup sends
+/// none, as before.
 fn copilot_user_headers(
     config: &CopilotBackendConfig,
     token: &str,
@@ -3183,11 +3184,6 @@ fn copilot_user_headers(
         &config.token_api_version,
     )?;
     insert_header(&mut headers, "User-Agent", &config.user_agent)?;
-    insert_header(
-        &mut headers,
-        "Copilot-Integration-Id",
-        &config.integration_id,
-    )?;
     Ok(headers)
 }
 
@@ -6211,12 +6207,12 @@ mod tests {
         }
 
         /// A token route whose backend options set no `integration_id` sends
-        /// `Copilot-Integration-Id: copilot-developer-cli` on every request
-        /// that carries the operator token: the identity lookup, the model
-        /// listing and inference. That is the integration id the Copilot API
-        /// accepts for a GitHub token sent as its bearer, a personal access
-        /// token included; it refuses `vscode-chat`, the device sign-in's
-        /// default, for one.
+        /// `Copilot-Integration-Id: copilot-developer-cli` on every Copilot
+        /// API request that carries the operator token: the model listing and
+        /// inference. That is the integration id the Copilot API accepts for a
+        /// GitHub token sent as its bearer, a personal access token included;
+        /// it refuses `vscode-chat`, the device sign-in's default, for one.
+        /// GitHub's identity lookup gets no integration id.
         #[tokio::test]
         async fn token_routes_send_the_cli_integration_id_by_default() {
             let harness = Harness::new([Ok(svc_bot()), Ok(models_response())]);
@@ -6230,13 +6226,18 @@ mod tests {
 
             assert_eq!(
                 token_route_integration_ids(&harness, &resolved).await,
-                vec![Some("copilot-developer-cli".to_string()); 3],
+                vec![
+                    None,
+                    Some("copilot-developer-cli".to_string()),
+                    Some("copilot-developer-cli".to_string())
+                ],
                 "identity lookup, model listing, inference"
             );
         }
 
-        /// An `integration_id` the token route's backend options set is kept,
-        /// on every request that carries the operator token.
+        /// An `integration_id` the token route's backend options set is kept on
+        /// every Copilot API request that carries the operator token; GitHub's
+        /// identity lookup still gets none.
         #[tokio::test]
         async fn token_routes_keep_an_explicit_integration_id() {
             let harness = Harness::new([Ok(svc_bot()), Ok(models_response())]);
@@ -6256,7 +6257,11 @@ mod tests {
 
             assert_eq!(
                 token_route_integration_ids(&harness, &resolved).await,
-                vec![Some("enterprise-approved".to_string()); 3],
+                vec![
+                    None,
+                    Some("enterprise-approved".to_string()),
+                    Some("enterprise-approved".to_string())
+                ],
                 "identity lookup, model listing, inference"
             );
         }
@@ -9161,6 +9166,14 @@ mod tests {
                 .unwrap_or_else(|| panic!("{name} is required for this live probe"))
         }
 
+        /// The configuration the token routes use with no backend options,
+        /// which the live checks send, as `rkat auth login copilot
+        /// --non-interactive` does.
+        fn live_token_config() -> CopilotBackendConfig {
+            CopilotBackendConfig::from_token_options(&serde_json::Value::Null)
+                .expect("default token route options")
+        }
+
         /// Resolve the OpenAI route of a live token over real HTTP.
         async fn resolve_live(
             operator: &OperatorEnv,
@@ -9185,7 +9198,7 @@ mod tests {
         #[ignore = "live probe: needs COPILOT_LIVE_USER_TOKEN, a GitHub user token with Copilot access"]
         async fn live_operator_user_token_resolves_identity_and_models() {
             let token = live_token("COPILOT_LIVE_USER_TOKEN");
-            let identity = verify_operator_token(&token, &CopilotBackendConfig::default())
+            let identity = verify_operator_token(&token, &live_token_config())
                 .await
                 .expect("GitHub and Copilot accept the token");
             eprintln!(
@@ -9229,7 +9242,7 @@ mod tests {
         #[ignore = "live probe: needs COPILOT_LIVE_INSTALLATION_TOKEN, a GitHub App installation token"]
         async fn live_operator_installation_token_lists_models() {
             let token = live_token("COPILOT_LIVE_INSTALLATION_TOKEN");
-            let identity = verify_operator_token(&token, &CopilotBackendConfig::default())
+            let identity = verify_operator_token(&token, &live_token_config())
                 .await
                 .expect("Copilot accepts the installation token");
             assert!(
@@ -9259,7 +9272,7 @@ mod tests {
         #[ignore = "live probe: needs COPILOT_LIVE_REVOKED_TOKEN, a revoked GitHub user token"]
         async fn live_operator_revoked_token_requires_reauth() {
             let token = live_token("COPILOT_LIVE_REVOKED_TOKEN");
-            let checked = verify_operator_token(&token, &CopilotBackendConfig::default()).await;
+            let checked = verify_operator_token(&token, &live_token_config()).await;
             assert!(
                 matches!(
                     checked,
@@ -9288,7 +9301,7 @@ mod tests {
         #[ignore = "live probe: needs COPILOT_LIVE_NO_ACCESS_TOKEN, a GitHub token without Copilot access"]
         async fn live_operator_token_without_copilot_access_is_refused() {
             let token = live_token("COPILOT_LIVE_NO_ACCESS_TOKEN");
-            let refused = verify_operator_token(&token, &CopilotBackendConfig::default())
+            let refused = verify_operator_token(&token, &live_token_config())
                 .await
                 .expect_err("Copilot refuses the token");
             eprintln!("copilot-live-token refusal: {refused}");

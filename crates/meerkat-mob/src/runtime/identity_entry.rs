@@ -371,6 +371,11 @@ pub struct IdentityEntryView {
     /// session (a reset, a deletion), or the member's own session (a
     /// same-session successor).
     pub rotation_in_flight: Option<super::RotationTarget>,
+    /// The session the identity's member was bound to when its retirement
+    /// archived it, while no member holds the identity: an archived
+    /// identity's unarchive, and a declared entry's next seat, revive it on
+    /// that session.
+    pub archived_session: Option<SessionId>,
 }
 
 /// A worker member: a member whose identity is not an entry.
@@ -438,6 +443,49 @@ pub struct UnseatedEntryCounts {
     pub preparation_pending: usize,
     /// Archived store-owned identities ([`UnseatedEntryCause::Archived`]).
     pub archived: usize,
+}
+
+/// One page of [`super::MobHandle::identity_tombstones`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct IdentityTombstonePage {
+    /// The removed names after the page's start, of either custody, in
+    /// identity order: each is never an identity or a member again. Its
+    /// removal's record (who removed it, when, under which consent) is its
+    /// row's ([`super::MobHandle::identity_record`]).
+    pub removed: Vec<AgentIdentity>,
+    /// The name to start the next page after; `None` on the last page.
+    pub next: Option<AgentIdentity>,
+}
+
+/// The counts of [`super::MobHandle::identity_record_census`]: the mob's
+/// records in its identity store (its v2 rows) and what a downgrade cycle
+/// settles before it runs.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct IdentityRecordCensus {
+    /// Every v2 row of the mob: store-owned identities present, pending
+    /// their host's preparation or archived, removed names of either
+    /// custody (tombstones), and rows this build cannot read. Downgrade
+    /// tooling refuses while it is not zero.
+    pub created_rows: usize,
+    /// Rows of archived store-owned identities.
+    pub archived: usize,
+    /// Tombstones: the rows of removed names, of either custody.
+    pub tombstones: usize,
+    /// Rows this build cannot read.
+    pub unreadable: usize,
+    /// Identities of either custody awaiting their host's preparation before
+    /// their first seat: a host with retained issuance settles or removes
+    /// them before a downgrade.
+    pub preparations_open: usize,
+    /// Held construction attempts open, held or activating.
+    pub constructions_held: usize,
+    /// Seated store-owned identities whose member's last seat row predates
+    /// their row's labels or profile (their descriptive change applies at
+    /// the member's next build, its role at its restamp): restamped or
+    /// removed before a downgrade, which reads the seat row.
+    pub seats_stale: usize,
 }
 
 /// The counts of [`super::MobHandle::identity_census`].
@@ -946,6 +994,7 @@ fn entry_view(
             .get(identity)
             .copied()
             .map(super::RotationTarget::from_machine),
+        archived_session: None,
     })
 }
 
@@ -1043,6 +1092,20 @@ pub(crate) fn identity_entry_page(
         page.next = last.map(|identity| AgentIdentity::from(identity.0.as_str()));
     }
     Ok(page)
+}
+
+/// [`super::MobHandle::identity_tombstones`] over one published machine
+/// state.
+pub(crate) fn identity_tombstone_page(
+    state: &mob_dsl::MobMachineState,
+    after: Option<&AgentIdentity>,
+    limit: usize,
+) -> IdentityTombstonePage {
+    let _ = (state, after, limit);
+    IdentityTombstonePage {
+        removed: Vec::new(),
+        next: None,
+    }
 }
 
 /// [`super::MobHandle::identity_census`] over one published machine state.

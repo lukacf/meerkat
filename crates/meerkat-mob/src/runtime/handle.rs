@@ -10382,6 +10382,49 @@ impl MobHandle {
         })?
     }
 
+    /// One page of the mob's removed names, of either custody, in identity
+    /// order: the names after `after` (from the first with `None`), at most
+    /// `limit` of them, clamped to 1..=[`super::IDENTITY_ENTRY_PAGE_MAX`].
+    /// Read as [`Self::identity_entry`] is: no actor command, no wake, the
+    /// [`crate::ControlScope::List`] scope.
+    pub fn identity_tombstones(
+        &self,
+        after: Option<&AgentIdentity>,
+        limit: usize,
+    ) -> Result<super::IdentityTombstonePage, MobError> {
+        self.read_published_machine_state(crate::ControlScope::List, |state| {
+            super::identity_entry::identity_tombstone_page(state, after, limit)
+        })
+    }
+
+    /// `identity`'s record in the mob's identity store, its v2 row: a
+    /// store-owned identity's revision, spec, presence (its archived
+    /// session), pending role migration and provenance, and a removed
+    /// name's tombstone with its removal's record; a row this build cannot
+    /// read answers unreadable. `None` when the store holds no row of the
+    /// name (a roster-owned identity's record is its host's roster). A store
+    /// read, under the [`crate::ControlScope::List`] scope: no actor
+    /// command, and it never wakes a member.
+    pub async fn identity_record(
+        &self,
+        identity: &AgentIdentity,
+    ) -> Result<Option<crate::identity::CreatedIdentityObservation>, MobError> {
+        self.read_published_machine_state(crate::ControlScope::List, |_| ())?;
+        let _ = identity;
+        Ok(None)
+    }
+
+    /// The counts of the mob's records in its identity store and of what a
+    /// downgrade cycle settles first ([`super::IdentityRecordCensus`]): the
+    /// store's rows, read page by page, the published machine state, and,
+    /// for the stale seats, the journal's last seat row of each seated
+    /// store-owned identity. Under the [`crate::ControlScope::List`] scope;
+    /// it never wakes a member.
+    pub async fn identity_record_census(&self) -> Result<super::IdentityRecordCensus, MobError> {
+        self.read_published_machine_state(crate::ControlScope::List, |_| ())?;
+        Ok(super::IdentityRecordCensus::default())
+    }
+
     /// The members whose run starts this mob's host holds for `reason`, in
     /// identity order: the members whose session registration still
     /// stages that hold, as [`Self::release_member_run_starts`] would release

@@ -3550,3 +3550,165 @@ async fn an_activation_accepted_before_the_deadline_publishes_after_it_and_nothi
     ));
     assert_eq!(mob.origin(&name), Some(IdentityEntryOrigin::Created));
 }
+
+// ---------------------------------------------------------------------------
+// R2.12: the reads
+// ---------------------------------------------------------------------------
+
+/// Row (RED): the entry read shows a store-owned identity's revision, its
+/// provenance and its archive without waking it. After an update and an
+/// archive, the entry reads unseated, archived, on the session its member
+/// was bound to; its record reads the revision the update committed, the
+/// provenance its create wrote, and its archived presence; a name with no
+/// row reads none; and the reads build no member.
+///
+/// RED on the old tree: the entry view names no archived session and the
+/// handle reads no record.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_entry_read_shows_revision_provenance_and_archive_without_waking() {
+    let mob = StoreOwnedMob::new("read-record").await;
+    committed(
+        mob.create(host_create("create-read", &["read"]), ALLOW)
+            .await,
+    );
+    let session = mob.session("read").await;
+    mob.update(
+        "update-read",
+        spec("read", "worker").with_display_name("Renamed"),
+        &spec_digest(&spec("read", "worker")),
+    )
+    .await
+    .expect("the update commits");
+    committed(mob.archive("archive-read", "read").await);
+    mob.unseated_for("read", UnseatedEntryCause::Archived).await;
+    let builds = mob.builds().await;
+    match mob.read("read") {
+        IdentityEntryRead::Entry(view) => {
+            assert_eq!(
+                view.standing,
+                EntryStanding::Unseated(UnseatedEntryCause::Archived)
+            );
+            assert_eq!(view.archived_session, Some(session.clone()));
+        }
+        other => panic!("read reads {other:?}"),
+    }
+    let record = match mob
+        .handle
+        .identity_record(&id("read"))
+        .await
+        .expect("the record read answers")
+    {
+        Some(CreatedIdentityObservation::Created(record)) => record,
+        other => panic!("read has no readable record: {other:?}"),
+    };
+    assert_eq!(record.revision, 2);
+    assert_eq!(record.provenance.operation_id, "create-read");
+    assert!(matches!(
+        record.provenance.entered,
+        crate::identity::IdentityEntered::Created
+    ));
+    assert_eq!(
+        record.presence,
+        CreatedIdentityPresence::Archived {
+            archived_session: Some(session)
+        }
+    );
+    assert!(
+        mob.handle
+            .identity_record(&id("no-such-name"))
+            .await
+            .expect("the record read answers")
+            .is_none(),
+        "a name with no row reads none"
+    );
+    assert_eq!(mob.builds().await, builds, "the reads build no member");
+}
+
+/// Row (RED): the tombstone page lists the removed names of either custody,
+/// in identity order, page by page, and no name that was not removed.
+///
+/// RED on the old tree: no tombstone page exists.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_tombstone_page_lists_removed_names_of_either_custody() {
+    let mob = StoreOwnedMob::new("tombstone-page").await;
+    mob.declare(&["listed"]).await;
+    committed(
+        mob.create(host_create("create-made", &["made", "kept"]), ALLOW)
+            .await,
+    );
+    committed(mob.remove("remove-listed", "listed").await);
+    committed(mob.remove("remove-made", "made").await);
+    mob.removed("listed").await;
+    mob.removed("made").await;
+    let first = mob
+        .handle
+        .identity_tombstones(None, 1)
+        .expect("the page answers");
+    assert_eq!(first.removed, vec![id("listed")]);
+    assert_eq!(first.next, Some(id("listed")));
+    let second = mob
+        .handle
+        .identity_tombstones(first.next.as_ref(), 1)
+        .expect("the page answers");
+    assert_eq!(second.removed, vec![id("made")]);
+    assert_eq!(second.next, None);
+    let all = mob
+        .handle
+        .identity_tombstones(None, crate::runtime::IDENTITY_ENTRY_PAGE_MAX)
+        .expect("the page answers");
+    assert_eq!(all.removed, vec![id("listed"), id("made")]);
+}
+
+/// Row (RED): the record census counts a seat whose labels its row moved
+/// past. A label change takes the row at once while the seated member's
+/// seat row keeps the old labels until its restamp, so the identity counts
+/// in `seats_stale`; the census also counts the mob's rows (present,
+/// pending, removed), its tombstones and its open preparations.
+///
+/// RED on the old tree: the census counts nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_census_counts_a_stale_seat_after_a_label_change() {
+    let mob = StoreOwnedMob::new("census-stale").await;
+    committed(
+        mob.create(host_create("create-desks", &["desk", "gone"]), ALLOW)
+            .await,
+    );
+    committed(
+        mob.create(
+            prepared_create(
+                "create-pending",
+                spec("pending", "worker"),
+                IdentityPreparationMode::Required,
+            ),
+            ALLOW,
+        )
+        .await,
+    );
+    let before = mob
+        .handle
+        .identity_record_census()
+        .await
+        .expect("the census answers");
+    assert_eq!(before.seats_stale, 0, "{before:?}");
+    mob.update(
+        "relabel-desk",
+        spec("desk", "worker")
+            .with_labels(BTreeMap::from([("team".to_string(), "beta".to_string())])),
+        &spec_digest(&spec("desk", "worker")),
+    )
+    .await
+    .expect("the update commits");
+    committed(mob.remove("remove-gone", "gone").await);
+    mob.removed("gone").await;
+    let census = mob
+        .handle
+        .identity_record_census()
+        .await
+        .expect("the census answers");
+    assert_eq!(census.seats_stale, 1, "{census:?}");
+    assert_eq!(census.created_rows, 3, "{census:?}");
+    assert_eq!(census.tombstones, 1, "{census:?}");
+    assert_eq!(census.preparations_open, 1, "{census:?}");
+    assert_eq!(census.archived, 0, "{census:?}");
+    assert_eq!(census.constructions_held, 0, "{census:?}");
+}

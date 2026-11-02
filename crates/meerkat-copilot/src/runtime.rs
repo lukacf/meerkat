@@ -8758,46 +8758,84 @@ mod tests {
             );
         }
 
-        /// A token the identity lookup does not answer has only the Copilot
-        /// API to vouch for it, as an installation token has: a 401 from its
-        /// model list is GitHub refusing the token itself
-        /// (`user_reauth_required`, and the lease withdraws it), at the first
-        /// listing and at a later one, which looks the account up no second
-        /// time. The CLI's check refuses it the same way. A 401 from the
-        /// lookup itself still refuses the token
-        /// (`revoked_token_marks_reauth_and_fails_fast`).
+        /// A Copilot API 401 does not mean the token is revoked: Copilot
+        /// answers 401 for a valid token without the Copilot Requests
+        /// permission, without a seat, or with its integration not allowed,
+        /// and an identity lookup that answered 403 or 404 had already
+        /// authenticated the token. So a 401 from the model list of a token
+        /// the lookup did not answer is Copilot refusing it (`refresh_failed`
+        /// with Copilot's message, the lease untouched), and the same token is
+        /// not asked about again for a minute; after it, the same token works
+        /// once Copilot accepts it. A 401 from a later listing runs the
+        /// identity lookup again, whose own 401 decides that the token is
+        /// revoked. The CLI's check reports the same Copilot refusal.
         #[tokio::test]
         async fn an_unanswered_lookup_then_a_rejected_model_list_refuses_the_token() {
-            let rejected = || -> Outcome {
+            let permission = || -> Outcome {
                 Ok(json_response(
                     401,
-                    serde_json::json!({"message": "Bad credentials"}),
+                    serde_json::json!({
+                        "message": "unauthorized: Personal Access Token does not have Copilot Requests permission"
+                    }),
                 ))
             };
+            let copilot_refusal = |refused: &Option<ProviderAuthError>| {
+                matches!(
+                    refused,
+                    Some(ProviderAuthError::Auth(AuthError::RefreshFailed(detail)))
+                        if detail.contains("401")
+                            && detail.contains("does not have Copilot Requests permission")
+                )
+            };
 
-            let harness = Harness::new([Ok(unanswered_lookup(403)), rejected()]);
+            let harness = Harness::new([
+                Ok(unanswered_lookup(403)),
+                permission(),
+                Ok(unanswered_lookup(403)),
+                Ok(models_response()),
+            ]);
             harness
                 .operator
-                .set("COPILOT_GITHUB_TOKEN", &user_token("rejected-at-first"));
-            assert_eq!(
-                harness.resolve(CopilotProviderRoute::OpenAi).await.err(),
-                Some(ProviderAuthError::Auth(AuthError::UserReauthRequired)),
-                "a 401 from the first model listing"
+                .set("COPILOT_GITHUB_TOKEN", &user_token("refused-at-first"));
+            let refused = harness.resolve(CopilotProviderRoute::OpenAi).await.err();
+            assert!(
+                copilot_refusal(&refused),
+                "a 401 from the first model listing is a Copilot refusal, not a revocation: {refused:?}"
             );
-            assert_eq!(
-                harness.operator.lease().phase,
-                Some(AuthLeasePhase::ReauthRequired)
-            );
+            assert_eq!(harness.operator.lease().phase, Some(AuthLeasePhase::Valid));
             assert_eq!(harness.transport.request_count(), 2);
+
+            harness.operator.advance(59);
+            let paused = harness.resolve(CopilotProviderRoute::OpenAi).await.err();
+            assert!(
+                copilot_refusal(&paused),
+                "the same refusal within the minute: {paused:?}"
+            );
+            assert_eq!(
+                harness.transport.request_count(),
+                2,
+                "no request for the same token within the minute"
+            );
+            harness.operator.advance(2);
+            harness
+                .resolve(CopilotProviderRoute::OpenAi)
+                .await
+                .expect("the same token works once Copilot accepts it");
+            assert_eq!(harness.transport.request_count(), 4);
+            assert_eq!(harness.operator.lease().phase, Some(AuthLeasePhase::Valid));
 
             let later = Harness::new([
                 Ok(unanswered_lookup(404)),
                 Ok(models_response()),
-                rejected(),
+                permission(),
+                Ok(json_response(
+                    401,
+                    serde_json::json!({"message": "Bad credentials"}),
+                )),
             ]);
             later
                 .operator
-                .set("COPILOT_GITHUB_TOKEN", &user_token("rejected-later"));
+                .set("COPILOT_GITHUB_TOKEN", &user_token("revoked-later"));
             let resolved = later
                 .resolve(CopilotProviderRoute::OpenAi)
                 .await
@@ -8808,7 +8846,7 @@ mod tests {
                 .concrete_authorizer()
                 .prepare_request()
                 .await
-                .expect_err("GitHub refused the token");
+                .expect_err("GitHub's identity lookup refused the token");
             assert_eq!(refused, AuthError::UserReauthRequired);
             assert_eq!(
                 later.operator.lease().phase,
@@ -8816,22 +8854,23 @@ mod tests {
             );
             assert_eq!(
                 later.transport.request_count(),
-                3,
-                "the later listing looks the account up no second time"
+                4,
+                "the later listing's 401 runs the identity lookup again, and its 401 decides"
             );
 
-            let check = OutcomeTransport::new([Ok(unanswered_lookup(403)), rejected()]);
-            assert_eq!(
-                verify_operator_token_with(
-                    check.as_ref(),
-                    &user_token("check-rejected"),
-                    &CopilotBackendConfig::from_token_options(&serde_json::Value::Null)
-                        .expect("default token route options"),
-                    Utc::now(),
-                )
-                .await
-                .err(),
-                Some(ProviderAuthError::Auth(AuthError::UserReauthRequired))
+            let check = OutcomeTransport::new([Ok(unanswered_lookup(403)), permission()]);
+            let checked = verify_operator_token_with(
+                check.as_ref(),
+                &user_token("check-refused"),
+                &CopilotBackendConfig::from_token_options(&serde_json::Value::Null)
+                    .expect("default token route options"),
+                Utc::now(),
+            )
+            .await
+            .err();
+            assert!(
+                copilot_refusal(&checked),
+                "the CLI's check reports Copilot's refusal: {checked:?}"
             );
         }
 

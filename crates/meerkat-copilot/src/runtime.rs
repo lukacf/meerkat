@@ -5070,6 +5070,57 @@ mod tests {
         }
     }
 
+    /// The device sign-in keeps `Copilot-Integration-Id: vscode-chat` on its
+    /// token exchange, its model listing and inference: only a token route
+    /// defaults to `copilot-developer-cli`.
+    #[tokio::test]
+    async fn device_sign_in_keeps_the_vscode_chat_integration_id() {
+        let (auth_binding, binding) = validated_binding();
+        let (env, _auth_lease) = resolver_environment(&auth_binding).await;
+        let transport = Arc::new(ScriptedTransport::new([
+            token_response("derived-integration"),
+            models_response(),
+        ]));
+        let runtime = CopilotRuntime::with_transport(transport.clone());
+        let resolved = runtime
+            .resolve(&binding, &env)
+            .await
+            .expect("the device route resolves");
+        let mut signed = Vec::new();
+        resolved
+            .concrete_authorizer()
+            .authorize_with_receipt(&mut HttpAuthorizationRequest {
+                method: "POST",
+                url: "https://copilot.example.test/responses",
+                headers: &mut signed,
+            })
+            .await
+            .expect("authorize a Copilot request");
+
+        let mut integration_ids = transport
+            .requests
+            .lock()
+            .iter()
+            .map(|(_, headers)| {
+                headers
+                    .get("copilot-integration-id")
+                    .and_then(|value| value.to_str().ok())
+                    .map(str::to_string)
+            })
+            .collect::<Vec<_>>();
+        integration_ids.push(
+            signed
+                .into_iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case("copilot-integration-id"))
+                .map(|(_, value)| value),
+        );
+        assert_eq!(
+            integration_ids,
+            vec![Some("vscode-chat".to_string()); 3],
+            "token exchange, model listing, inference"
+        );
+    }
+
     #[tokio::test]
     async fn concurrent_authorization_uses_one_derived_token_flight() {
         let (auth_binding, binding) = validated_binding();
@@ -5739,6 +5790,15 @@ mod tests {
             route: CopilotProviderRoute,
             source: CredentialSourceSpec,
         ) -> ValidatedBinding {
+            token_binding_with_options(route, source, serde_json::Value::Null)
+        }
+
+        /// A token route whose backend sets `options`.
+        fn token_binding_with_options(
+            route: CopilotProviderRoute,
+            source: CredentialSourceSpec,
+            options: serde_json::Value,
+        ) -> ValidatedBinding {
             let auth_binding = AuthBindingRef {
                 realm: RealmId::global(),
                 binding: BindingId::parse(route.binding_id()).expect("valid binding"),
@@ -5750,7 +5810,7 @@ mod tests {
                 provider: route.provider(),
                 backend_kind: "copilot".to_string(),
                 base_url: None,
-                options: serde_json::Value::Null,
+                options,
                 server: None,
             };
             let auth = AuthProfile {
@@ -5801,10 +5861,15 @@ mod tests {
             }
 
             fn bearer(&self, index: usize) -> Option<String> {
+                self.header(index, "authorization")
+            }
+
+            /// The value of header `name` on the `index`th request.
+            fn header(&self, index: usize, name: &str) -> Option<String> {
                 self.requests
                     .lock()
                     .get(index)
-                    .and_then(|(_, headers)| headers.get("authorization"))
+                    .and_then(|(_, headers)| headers.get(name))
                     .and_then(|value| value.to_str().ok())
                     .map(str::to_string)
             }
@@ -6079,6 +6144,104 @@ mod tests {
                     "{url}"
                 );
             }
+        }
+
+        /// Sign one Copilot request; return the value of its header `name`.
+        async fn signed_header(
+            authorizer: &CopilotAuthorizer,
+            url: &str,
+            name: &str,
+        ) -> Option<String> {
+            let mut headers = Vec::new();
+            authorizer
+                .authorize_with_receipt(&mut HttpAuthorizationRequest {
+                    method: "POST",
+                    url,
+                    headers: &mut headers,
+                })
+                .await
+                .expect("authorize a Copilot request");
+            headers
+                .into_iter()
+                .find(|(header, _)| header.eq_ignore_ascii_case(name))
+                .map(|(_, value)| value)
+        }
+
+        /// The `Copilot-Integration-Id` of a resolved token route's identity
+        /// lookup, its model listing and one request it signs, in that order.
+        async fn token_route_integration_ids(
+            harness: &Harness,
+            resolved: &CopilotResolvedAuth,
+        ) -> Vec<Option<String>> {
+            let signed = signed_header(
+                &resolved.concrete_authorizer(),
+                &format!("{BUSINESS_API}/responses"),
+                "copilot-integration-id",
+            )
+            .await;
+            assert_eq!(
+                harness.transport.urls(),
+                [
+                    GITHUB_COPILOT_USER_URL.to_string(),
+                    format!("{BUSINESS_API}/models")
+                ]
+            );
+            vec![
+                harness.transport.header(0, "copilot-integration-id"),
+                harness.transport.header(1, "copilot-integration-id"),
+                signed,
+            ]
+        }
+
+        /// A token route whose backend options set no `integration_id` sends
+        /// `Copilot-Integration-Id: copilot-developer-cli` on every request
+        /// that carries the operator token: the identity lookup, the model
+        /// listing and inference. That is the integration id the Copilot API
+        /// accepts for a GitHub token sent as its bearer, a personal access
+        /// token included; it refuses `vscode-chat`, the device sign-in's
+        /// default, for one.
+        #[tokio::test]
+        async fn token_routes_send_the_cli_integration_id_by_default() {
+            let harness = Harness::new([Ok(svc_bot()), Ok(models_response())]);
+            harness
+                .operator
+                .set("COPILOT_GITHUB_TOKEN", &user_token("integration"));
+            let resolved = harness
+                .resolve(CopilotProviderRoute::OpenAi)
+                .await
+                .expect("the operator token resolves");
+
+            assert_eq!(
+                token_route_integration_ids(&harness, &resolved).await,
+                vec![Some("copilot-developer-cli".to_string()); 3],
+                "identity lookup, model listing, inference"
+            );
+        }
+
+        /// An `integration_id` the token route's backend options set is kept,
+        /// on every request that carries the operator token.
+        #[tokio::test]
+        async fn token_routes_keep_an_explicit_integration_id() {
+            let harness = Harness::new([Ok(svc_bot()), Ok(models_response())]);
+            harness
+                .operator
+                .set("COPILOT_GITHUB_TOKEN", &user_token("explicit"));
+            let binding = token_binding_with_options(
+                CopilotProviderRoute::OpenAi,
+                env_source(),
+                serde_json::json!({"integration_id": "enterprise-approved"}),
+            );
+            let resolved = harness
+                .runtime
+                .resolve(&binding, &harness.operator.env)
+                .await
+                .expect("the operator token resolves");
+
+            assert_eq!(
+                token_route_integration_ids(&harness, &resolved).await,
+                vec![Some("enterprise-approved".to_string()); 3],
+                "identity lookup, model listing, inference"
+            );
         }
 
         /// T2: the documented route reads `COPILOT_GITHUB_TOKEN`, then

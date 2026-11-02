@@ -225,6 +225,21 @@ and the request is attempted normally. A known-unavailable error includes the
 compatible model IDs observed for that account; IDs outside Meerkat's built-in
 catalog also require a normal `[models.<id>]` configuration entry.
 
+The device sign-in's routes send a Copilot token that Meerkat obtains from the
+GitHub sign-in by a token exchange and replaces before it expires. A temporary
+failure of that exchange (a network failure or timeout, HTTP 408, 429 or 5xx,
+or a GitHub API rate limit) does not fail turns: the current token, minted from
+the current sign-in, keeps serving until it expires, and the exchange is tried
+again after its `Retry-After` (at least a second later), or after 30 seconds
+without one. Once no valid token is left, a turn fails with a retryable error
+(rate limited, server error, network timeout), which the agent loop retries. A
+token Copilot rejects with a 401 is replaced on its next use, and the
+account's routes stay resolvable. Restoring or waking a session, or building
+one whose output budget is set explicitly or in the configuration, succeeds
+during such an outage on the account's last known model list; the first
+request then performs the exchange. An exchange 401, or a 403 that asks for an
+account action, still needs a new sign-in.
+
 <Warning>
 GitHub does not currently publish a stable third-party Copilot inference
 contract. This native integration uses the observed GitHub device client
@@ -407,7 +422,14 @@ token is used again.
 and the account's lifecycle (`absent` before a process first uses a token from
 the environment, then `valid`, `reauth_required` or `released`).
 `rkat auth test copilot_openai` resolves the route and prints `account:` and
-`plan:`.
+`plan:`. A Rust host checks a token without storing it, as the CLI does before
+it stores one, with `meerkat_copilot::verify_operator_token(token, &config)`:
+it refuses a classic personal access token, looks up the Copilot identity and
+lists the account's models, with no AuthMachine, token store or cache effect,
+and answers the token's `CopilotAccountIdentity` (`login`, `plan`,
+`api_base`, and `installation` for a GitHub App installation token).
+`CopilotAuthorizer::account_identity` reads the identity a route's token
+resolved to.
 
 The token goes only to `api.github.com` (the identity lookup) and to an
 `https` `githubcopilot.com` API host; a redirect is refused, and the token

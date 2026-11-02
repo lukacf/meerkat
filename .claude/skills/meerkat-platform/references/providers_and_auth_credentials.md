@@ -151,6 +151,15 @@ default_model = "my-deployment"     # the Azure deployment name
   list is checked first: `Copilot account does not expose <endpoint> for
   <provider> model '<model>'` lists the ids the account offers. The
   integration is provisional (it uses an observed GitHub client contract).
+- Device sign-in (0.9.9): a temporary failure of the Copilot token exchange
+  (a network failure or timeout, HTTP 408, 429 or 5xx, a GitHub API rate
+  limit) does not fail turns while the current token is still valid; the
+  exchange is tried again after its `Retry-After` (or 30 s), and once no
+  valid token is left a turn fails with a retryable error the agent loop
+  retries. A token Copilot rejects with a 401 is replaced on its next use. A
+  session restore, a wake, or a build with a set output budget succeeds
+  during such an outage. An exchange 401, or a 403 that asks for an account
+  action, still needs a new sign-in.
 - `bedrock_aws_sigv4`, `vertex_google_auth` and `foundry_azure_ad` are
   compiled only with the `meerkat-anthropic` features `bedrock`, `vertex` and
   `foundry`, and `adc` / `compute_adc` only with `meerkat-gemini/adc`; the
@@ -264,7 +273,10 @@ the token store. It sets `[realm.global] default_binding` if none is set.
   id. The token is the Copilot API bearer, identity and API host come from
   GitHub's `copilot_internal/user`, a classic `ghp_` token is refused, and a
   token GitHub refuses moves the account to `reauth_required`. The routes hold
-  one method at a time: each login refuses routes set up for the other.
+  one method at a time: each login refuses routes set up for the other. A
+  Rust host checks a token without storing it with
+  `meerkat_copilot::verify_operator_token`, which answers its
+  `CopilotAccountIdentity` (`login`, `plan`, `api_base`, `installation`).
 - Zero-config: while `[realm.global]` configures no Copilot route, a request
   that names `global:copilot_openai`, `global:copilot_anthropic` or
   `global:copilot_gemini` resolves it in token mode from the same variables

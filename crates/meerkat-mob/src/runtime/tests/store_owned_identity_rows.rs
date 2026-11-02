@@ -2251,29 +2251,36 @@ async fn the_operation_read_is_refused_without_the_list_scope() {
 // recheck has no second mechanism
 // ---------------------------------------------------------------------------
 
-/// The shipped files that may read an identity entry's origin, each for a
-/// custody guard (the recovery source, the writer, the name guards and the
-/// reservations) or for the reads that show it:
-const ORIGIN_READERS: &[(&str, &str)] = &[
-    ("event.rs", "the journal codec of a seat row's origin token"),
+/// The shipped items that may read an identity entry's origin, by file:
+/// the custody guards (the recovery source, the writers, the name guards
+/// and the reservations) and the reads that show it. Each item is named by
+/// the start of its signature, and only its body may read the origin. A
+/// file with no shipped read has no entry: a whole-file entry would
+/// authorize in advance exactly the branch on custody R2.4 forbids.
+const ORIGIN_READERS: &[(&str, &[&str], &str)] = &[
     (
         "runtime/identity_entry.rs",
-        "the entry reads and the census, which show the origin",
+        &[
+            "impl IdentityEntryOrigin {",
+            "pub(crate) fn identity_census(",
+        ],
+        "the origin's machine conversions and journal token, and the census, which shows it",
     ),
     (
         "runtime/created_identity.rs",
+        &["fn owed_created_seats("],
         "the recovery source: the store-owned entries owed their seat",
     ),
     (
         "runtime/handle.rs",
-        "the legacy adoption's custody guard (adopt_legacy_identity_entry only)",
+        &["pub async fn adopt_legacy_identity_entry("],
+        "the legacy adoption's custody guard",
     ),
-    ("runtime/identity_change.rs", "the store-owned writer"),
     (
         "runtime/actor/declared_apply.rs",
-        "the roster writer, the declared apply",
+        &["pub(super) async fn declare_identity_entries("],
+        "the roster writer's custody guard of a store-owned update",
     ),
-    ("machines/mob_machine.rs", "the machine's own types"),
 ];
 
 /// The DSL transitions (by name prefix) and invariants that may read an
@@ -2309,54 +2316,114 @@ const ORIGIN_GUARD_INVARIANTS: &[&str] = &[
     "entry_ending_marks_are_seated_and_disjoint",
 ];
 
-/// The byte offsets of every read of an origin value
-/// (`IdentityEntryOrigin::Created` or `::Declared`) in `code`.
+/// The byte offsets of every read of an origin value in `code`: a path to
+/// `IdentityEntryOrigin::Created` or `::Declared`; `Self::Created` or
+/// `Self::Declared` in the type's own impl blocks; a `use` that renames the
+/// type or imports its variants (`as`, braces or a glob), which would hide
+/// every later read from the name; and a comparison of a stored token
+/// (`as_stored()` on a line that compares or matches: the token's type is
+/// not visible to the scan, so any such comparison counts).
 fn origin_value_reads(code: &str) -> Vec<usize> {
-    use super::fail_stop_cause::whole_identifier;
+    use super::fail_stop_cause::{brace_group_end, whole_identifier};
     const NAME: &str = "IdentityEntryOrigin";
-    code.match_indices(NAME)
-        .map(|(at, _)| at)
-        .filter(|at| whole_identifier(code, *at, NAME))
-        .filter(|at| {
-            let rest = code[at + NAME.len()..].trim_start();
-            rest.starts_with("::Created") || rest.starts_with("::Declared")
-        })
-        .collect()
+    let mut reads = Vec::new();
+    for (at, _) in code.match_indices(NAME) {
+        if !whole_identifier(code, at, NAME) {
+            continue;
+        }
+        let rest = code[at + NAME.len()..].trim_start();
+        if rest.starts_with("::Created") || rest.starts_with("::Declared") {
+            reads.push(at);
+        }
+        // The type's own impl block (`impl IdentityEntryOrigin` or
+        // `impl ... for IdentityEntryOrigin`): its `Self::` variants.
+        let before = code[..at].trim_end();
+        if (before.ends_with("impl") || before.ends_with("for")) && rest.starts_with('{') {
+            let open = code.len() - rest.len();
+            let end = brace_group_end(code, open);
+            for variant in ["Self::Created", "Self::Declared"] {
+                reads.extend(
+                    code[open..end]
+                        .match_indices(variant)
+                        .map(|(offset, _)| open + offset)
+                        .filter(|index| whole_identifier(code, *index, variant)),
+                );
+            }
+        }
+    }
+    for (use_at, _) in code.match_indices("use") {
+        if !whole_identifier(code, use_at, "use") {
+            continue;
+        }
+        let Some(end) = code[use_at..].find(';').map(|offset| use_at + offset) else {
+            continue;
+        };
+        for (offset, _) in code[use_at..end].match_indices(NAME) {
+            let at = use_at + offset;
+            if !whole_identifier(code, at, NAME) {
+                continue;
+            }
+            let rest = code[at + NAME.len()..end].trim_start();
+            let renamed = rest
+                .strip_prefix("as")
+                .is_some_and(|after| after.starts_with(char::is_whitespace));
+            if renamed || rest.starts_with("::{") || rest.starts_with("::*") {
+                reads.push(at);
+            }
+        }
+    }
+    for (at, _) in code.match_indices(".as_stored()") {
+        let line_start = code[..at].rfind('\n').map_or(0, |index| index + 1);
+        let line_end = code[at..].find('\n').map_or(code.len(), |index| at + index);
+        let line = &code[line_start..line_end];
+        if line.contains("==") || line.contains("!=") || line.contains("matches!") {
+            reads.push(at);
+        }
+    }
+    reads.sort_unstable();
+    reads.dedup();
+    reads
 }
 
 /// Row (source guard; RED leg: a scratch reader of
-/// `IdentityEntryOrigin::Created` added to any other shipped file, or to a
-/// DSL transition outside the custody guards, fails it): no code reads an
-/// identity's origin outside the custody guards and the reads that show it.
-/// Custody decides the recovery source, the writer, the name guards and the
-/// reservations, nothing else.
+/// `IdentityEntryOrigin::Created`, `Self::Created` in its impl, a renamed or
+/// glob import of it, or a compared stored token, added to any shipped item
+/// that is not an origin reader, or to a DSL transition outside the custody
+/// guards, fails it): no code reads an identity's origin outside the
+/// custody guards and the reads that show it. Custody decides the recovery
+/// source, the writer, the name guards and the reservations, nothing else.
+///
+/// Hardened (P2-9e): readers are listed per item, not per file; the files
+/// with no shipped read (the journal codec, the store-owned writer and the
+/// machine's own module) have no entry; renamed, brace and glob imports,
+/// `Self::` variants and stored-token comparisons count as reads; and a DSL
+/// read counts for an item only when it lies inside that item's braces.
 #[test]
 fn identity_entry_origin_is_read_only_by_the_custody_guards() {
-    use super::fail_stop_cause::{function_body, line_of, shipped_code, shipped_sources};
+    use super::fail_stop_cause::{
+        brace_group_end, function_body, line_of, shipped_code, shipped_sources,
+    };
     let mut strays = Vec::new();
     for (path, code) in shipped_sources() {
         let reads = origin_value_reads(&code);
         if reads.is_empty() {
             continue;
         }
-        if !ORIGIN_READERS.iter().any(|(reader, _)| *reader == path) {
-            strays.extend(
-                reads
-                    .iter()
-                    .map(|at| format!("{path}:{}", line_of(&code, *at))),
-            );
-            continue;
-        }
-        if path == "runtime/handle.rs" {
-            let adoption = function_body(&code, "pub async fn adopt_legacy_identity_entry(")
-                .expect("the legacy adoption");
-            strays.extend(
-                reads
-                    .iter()
-                    .filter(|at| !adoption.contains(*at))
-                    .map(|at| format!("{path}:{}", line_of(&code, *at))),
-            );
-        }
+        let allowed: Vec<std::ops::Range<usize>> = ORIGIN_READERS
+            .iter()
+            .filter(|(reader, ..)| *reader == path)
+            .flat_map(|(_, items, _)| items.iter())
+            .map(|item| {
+                function_body(&code, item)
+                    .unwrap_or_else(|| panic!("{path}: the origin reader `{item}` is gone"))
+            })
+            .collect();
+        strays.extend(
+            reads
+                .iter()
+                .filter(|at| !allowed.iter().any(|body| body.contains(*at)))
+                .map(|at| format!("{path}:{}", line_of(&code, *at))),
+        );
     }
 
     let dsl_path = std::path::PathBuf::from(
@@ -2372,17 +2439,23 @@ fn identity_entry_origin_is_read_only_by_the_custody_guards() {
             .filter_map(|keyword| before.rfind(keyword).map(|start| (start, *keyword)))
             .max_by_key(|(start, _)| *start);
         let allowed = item.is_some_and(|(start, keyword)| {
+            // The read lies inside the item's own braces, not after them.
+            let inside = dsl[start..]
+                .find('{')
+                .map(|offset| start + offset)
+                .is_some_and(|open| open < at && at < brace_group_end(&dsl, open));
             let name = dsl[start + keyword.len()..]
                 .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
                 .next()
                 .unwrap_or_default();
-            match keyword {
-                "transition " => ORIGIN_GUARD_TRANSITIONS
-                    .iter()
-                    .any(|prefix| name.starts_with(prefix)),
-                "invariant " => ORIGIN_GUARD_INVARIANTS.contains(&name),
-                _ => false,
-            }
+            inside
+                && match keyword {
+                    "transition " => ORIGIN_GUARD_TRANSITIONS
+                        .iter()
+                        .any(|prefix| name.starts_with(prefix)),
+                    "invariant " => ORIGIN_GUARD_INVARIANTS.contains(&name),
+                    _ => false,
+                }
         });
         if !allowed {
             strays.push(format!("mob_machine DSL:{}", line_of(&dsl, at)));

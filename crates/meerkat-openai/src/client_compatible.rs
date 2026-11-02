@@ -697,7 +697,7 @@ impl OpenAiCompatibleClient {
                 .await
                 .map_err(LlmError::from_authorizer)?;
             for (name, value) in headers {
-                request = request.header(name, value);
+                request = request.header(name, http::sensitive_header_value(&value)?);
             }
             receipt
         } else {

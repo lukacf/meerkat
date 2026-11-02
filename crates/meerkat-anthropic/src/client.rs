@@ -1452,7 +1452,7 @@ impl AnthropicClient {
                     }
                 }
             } else {
-                request = request.header(name, value);
+                request = request.header(name, http::sensitive_header_value(&value)?);
             }
         }
         Ok((request, receipt))

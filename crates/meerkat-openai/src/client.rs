@@ -1072,7 +1072,8 @@ impl OpenAiClient {
                 .await
                 .map_err(LlmError::from_authorizer)?;
             for (name, value) in extra {
-                request_builder = request_builder.header(name, value);
+                request_builder =
+                    request_builder.header(name, http::sensitive_header_value(&value)?);
             }
             receipt
         } else if let Some(api_key) = &self.api_key {

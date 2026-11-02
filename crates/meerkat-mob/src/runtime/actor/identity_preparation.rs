@@ -312,9 +312,17 @@ impl MobActor {
                         current: None,
                     })
                 };
+                // The receipt is sealed before anything is sent, so only the
+                // store write can fail after the activation left.
+                let receipt = receipt(IdentityChangeEntryOutcome::Activating)?;
                 // The acceptance's linearization point: the activation,
                 // decided before the deadline, goes to the hold now. A hold
-                // that already ended (its deadline) accepts nothing.
+                // that already ended (its deadline) accepts nothing. Should
+                // the store write below fail, MobMachine still holds the
+                // attempt unaccepted, so the publication's membership commit
+                // (which waits for this step) is refused, and the hold's end
+                // (a failed publication) ends the attempt with the identity
+                // still pending.
                 let held = self
                     .held_constructions
                     .held_mut(&commit.identity)
@@ -328,7 +336,6 @@ impl MobActor {
                 }
                 held.activation_sent = true;
                 let outcome = held.outcome.subscribe();
-                let receipt = receipt(IdentityChangeEntryOutcome::Activating)?;
                 let written = receipt.clone();
                 self.commit_prepared_dsl_input_after(prepared, move || async move {
                     let commit = store

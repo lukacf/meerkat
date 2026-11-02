@@ -11315,6 +11315,9 @@ impl AgentFactory {
     }
 }
 
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod account_model_tests;
 /// The live A→B `brain_swap` proof over the real runtime loop.
 ///
 /// It lives inside this module rather than in `crates/meerkat/tests/` because the

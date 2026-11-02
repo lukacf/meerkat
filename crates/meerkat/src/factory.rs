@@ -18080,6 +18080,18 @@ mod tests {
             self.admissions.lock().unwrap().clone()
         }
 
+        /// A build of the stand-in's model as a request makes it, without an
+        /// output budget. Image generation is off: its executors resolve
+        /// image bindings of their own (strictly, through the stand-in too),
+        /// so the admissions recorded are the session's own resolution's.
+        fn request() -> AgentBuildConfig {
+            let mut build = AgentBuildConfig::new("gpt-5.4");
+            build.provider = Some(Provider::OpenAI);
+            build.override_builtins = ToolCategoryOverride::Disable;
+            build.override_image_generation = ToolCategoryOverride::Disable;
+            build
+        }
+
         /// A build of `session` (a new one, or one to restore) on its own
         /// runtime bindings from `runtime`.
         async fn build_config(
@@ -18090,11 +18102,9 @@ mod tests {
                 .prepare_bindings(session.id().clone())
                 .await
                 .expect("session runtime bindings");
-            let mut build = AgentBuildConfig::new("gpt-5.4");
-            build.provider = Some(Provider::OpenAI);
+            let mut build = Self::request();
             build.resume_session = Some(session);
             build.runtime_build_mode = RuntimeBuildMode::SessionOwned(bindings);
-            build.override_builtins = ToolCategoryOverride::Disable;
             build
         }
     }

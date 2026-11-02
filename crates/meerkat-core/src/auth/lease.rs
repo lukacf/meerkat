@@ -227,6 +227,16 @@ pub trait HttpAuthorizer: Send + Sync {
     ) -> Result<HttpAuthorizationResponseAction, AuthError> {
         self.observe_response(response).await
     }
+
+    /// Remove the credential material this authorizer signed requests with
+    /// from `diagnostic`: a response body, a message decoded from one, or a
+    /// field a provider client logs. A proxy, gateway or provider can echo a
+    /// request's headers in an error, the bearer included, so provider
+    /// clients pass what they read from a response through this before they
+    /// parse, log or return it; successful content is never passed. The
+    /// default leaves `diagnostic` unchanged.
+    fn redact_response_diagnostic(&self, _diagnostic: &mut String) {}
+
     fn label(&self) -> &str;
 
     fn append_content_headers(

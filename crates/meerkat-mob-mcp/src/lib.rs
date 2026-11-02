@@ -114,6 +114,7 @@ use meerkat_core::types::{
 use meerkat_core::{AgentEvent, EventEnvelope, EventStream, Provider, StreamError};
 use meerkat_mob::definition::SkillSource;
 use meerkat_mob::machines::mob_machine::ControlScope;
+use meerkat_mob::machines::mob_store_restore_lifecycle as mob_store_dsl;
 use meerkat_mob::store::{
     ForkedParticipantStore, InMemoryForkedParticipantStore, InMemoryTemporaryCouncilStore,
     TemporaryCouncilStore,
@@ -247,57 +248,175 @@ struct HeldChildRosterRead {
     incarnation: Option<meerkat_core::service::MobIncarnationId>,
 }
 
-/// Why a persisted mob was not restored: its resume failed at restore. The
-/// mob has no actor, its store is kept exactly as found, and a lookup of its
-/// id answers this cause, as the same typed error each time (`MobError` is
-/// not `Clone`). One store that does not resume leaves the rest of the
-/// restore alone.
-#[derive(Clone)]
+/// A persisted mob store the restore could not restore, kept quarantined:
+/// its `MobStoreRestoreLifecycleMachine` record (the class, a re-attempt in
+/// flight, the attempts that ended), the mob id the store names (or, when
+/// the store cannot be read, the one its file name encodes) and the typed
+/// failure its last restore attempt met. The mob has no actor, its store is
+/// kept exactly as found, and a lookup of its id answers
+/// [`MobError::MobQuarantined`]. One store that does not restore leaves the
+/// rest of the restore alone.
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-enum UnrestoredMobCause {
-    IncarnationInconsistent(meerkat_mob::IncarnationInconsistency),
-    IncarnationDestroyed(meerkat_core::service::MobIncarnationId),
-    /// Any other refusal of the resume, as its message.
-    Refused(String),
-}
-
-#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-impl UnrestoredMobCause {
-    fn of(error: &MobError) -> Self {
-        match error {
-            MobError::IncarnationInconsistent { inconsistency, .. } => {
-                Self::IncarnationInconsistent(inconsistency.clone())
-            }
-            MobError::IncarnationDestroyed { incarnation, .. } => {
-                Self::IncarnationDestroyed(*incarnation)
-            }
-            other => Self::Refused(other.to_string()),
-        }
-    }
-
-    fn error(&self, mob_id: &MobId) -> MobError {
-        match self {
-            Self::IncarnationInconsistent(inconsistency) => MobError::IncarnationInconsistent {
-                mob_id: mob_id.clone(),
-                inconsistency: inconsistency.clone(),
-            },
-            Self::IncarnationDestroyed(incarnation) => MobError::IncarnationDestroyed {
-                mob_id: mob_id.clone(),
-                incarnation: *incarnation,
-            },
-            Self::Refused(reason) => {
-                MobError::Internal(format!("mob {mob_id} was not restored: {reason}"))
-            }
-        }
-    }
-}
-
-/// A persisted mob whose resume failed at restore: the id its store names,
-/// and why.
-#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-struct UnrestoredMob {
+struct QuarantinedStore {
     mob_id: MobId,
-    cause: UnrestoredMobCause,
+    record: mob_store_dsl::MobStoreRestoreLifecycleMachineAuthority,
+    cause: Arc<MobError>,
+}
+
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+impl QuarantinedStore {
+    /// The class the record holds.
+    fn class(&self) -> meerkat_mob::MobQuarantineClass {
+        self.record.state().class
+    }
+
+    /// The answer a lookup of the quarantined mob gets.
+    fn error(&self) -> MobError {
+        MobError::MobQuarantined {
+            mob_id: self.mob_id.clone(),
+            class: self.class(),
+            cause: Arc::clone(&self.cause),
+        }
+    }
+
+    /// The inventory row of the quarantined mob.
+    fn row(&self) -> QuarantinedMob {
+        let state = self.record.state();
+        QuarantinedMob {
+            mob_id: self.mob_id.clone(),
+            class: state.class,
+            retrying: state.lifecycle_phase
+                == mob_store_dsl::MobStoreRestoreLifecyclePhase::Retrying,
+            attempts: state.attempts,
+            cause: Arc::clone(&self.cause),
+        }
+    }
+}
+
+/// Why one persisted mob store was quarantined: the class it gets, the mob
+/// id its store names (`None` when it could not be read), and the typed
+/// failure.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+struct StoreQuarantine {
+    mob_id: Option<MobId>,
+    class: meerkat_mob::MobQuarantineClass,
+    cause: MobError,
+}
+
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+impl StoreQuarantine {
+    /// The store, or a record the restore reads before any resume, cannot
+    /// be opened or read. A store whose records disagree among themselves is
+    /// refused typed instead.
+    fn unreadable(error: MobError) -> Self {
+        let class = match &error {
+            MobError::IncarnationInconsistent { .. } | MobError::IncarnationDestroyed { .. } => {
+                meerkat_mob::MobQuarantineClass::ResumeRefused
+            }
+            _ => meerkat_mob::MobQuarantineClass::StoreUnreadable,
+        };
+        let mob_id = match &error {
+            MobError::IncarnationInconsistent { mob_id, .. }
+            | MobError::IncarnationDestroyed { mob_id, .. } => Some(mob_id.clone()),
+            _ => None,
+        };
+        Self {
+            mob_id,
+            class,
+            cause: error,
+        }
+    }
+
+    /// The mob's resume failed: classed by its typed failure
+    /// ([`MobError::restore_quarantine_class`]).
+    fn resume_failed(mob_id: Option<MobId>, error: MobError) -> Self {
+        Self {
+            mob_id,
+            class: error.restore_quarantine_class(),
+            cause: error,
+        }
+    }
+
+    /// A read of the mob's own store failed before any resume: classed by
+    /// the store's typed failure. A store that could not serve the read now
+    /// ([`meerkat_mob::store::MobStoreError::Unavailable`], a host store that
+    /// answered unavailable) is `store_unavailable`, so a later attempt may
+    /// restore it; any other failure is classed as [`Self::unreadable`]
+    /// classes it.
+    fn store_read(error: meerkat_mob::store::MobStoreError) -> Self {
+        if matches!(error, meerkat_mob::store::MobStoreError::Unavailable(_)) {
+            return Self {
+                mob_id: None,
+                class: meerkat_mob::MobQuarantineClass::StoreUnavailable,
+                cause: MobError::from(error),
+            };
+        }
+        Self::unreadable(MobError::from(error))
+    }
+}
+
+/// How restoring one persisted mob store ended, when it did not quarantine
+/// the store.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+enum StoreRestored {
+    /// Not a store this pass restores: one this state already manages, or
+    /// one whose destroy cleanup is owed.
+    Skipped,
+    /// The mob resumed and is managed.
+    Managed,
+    /// A child mob held before activation until its owner resolves.
+    Held,
+    /// An empty store swept, or a child torn down with its archived owner.
+    Settled,
+}
+
+/// One quarantined persisted mob, as [`MobMcpState::mob_inventory`] reports
+/// it.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct QuarantinedMob {
+    /// The id its store names, or the one its file name encodes when the
+    /// store cannot be read.
+    pub mob_id: MobId,
+    /// Why it is quarantined.
+    pub class: meerkat_mob::MobQuarantineClass,
+    /// A re-attempt of its restore is in flight.
+    pub retrying: bool,
+    /// Re-attempts that ended since this process quarantined it.
+    pub attempts: u64,
+    /// The failure its last restore attempt met.
+    pub cause: Arc<MobError>,
+}
+
+/// Every mob this state hosts, from one read: each mob id is in exactly one
+/// of the three sets.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct MobInventory {
+    /// The managed mobs, with their lifecycle as observed without asking
+    /// their actors (as [`MobMcpState::mob_list`] reports them).
+    pub managed: Vec<(MobId, meerkat_mob::MobLifecycleObservation)>,
+    /// The restored child mobs held before activation, with their owners.
+    pub held: Vec<(MobId, SessionId)>,
+    /// The persisted mobs the restore keeps quarantined.
+    pub quarantined: Vec<QuarantinedMob>,
+}
+
+/// How an explicit retry of a quarantined mob's restore ended
+/// ([`MobMcpState::mob_restore_retry`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum MobRestoreRetryOutcome {
+    /// The mob resumed and is managed.
+    Restored,
+    /// The mob is a child held before activation until its owner resolves.
+    Held,
+    /// The store held no mob any more and was swept, or the child was torn
+    /// down with its archived owner.
+    Settled,
+    /// The mob was not quarantined: it is managed or held.
+    NotQuarantined,
 }
 
 /// A parked child-teardown preflight (test seam).
@@ -1154,10 +1273,11 @@ pub struct MobMcpState {
     /// resumed, so no actor or producer exists for them and nothing in their
     /// durable state is changed by the hold.
     held_child_mobs: RwLock<BTreeMap<MobId, HeldChildMob>>,
-    /// Persisted mobs whose resume failed at the last restore pass, by store
-    /// path, with why: never registered, their stores kept as found. Each
-    /// pass rebuilds it.
-    unrestored_mobs: RwLock<BTreeMap<PathBuf, UnrestoredMob>>,
+    /// Persisted mob stores the restore keeps quarantined, by store path:
+    /// one `MobStoreRestoreLifecycleMachine` record each. Never registered,
+    /// their stores kept as found. Each restore pass derives them again; a
+    /// re-attempt that releases a store drops its record.
+    quarantined_stores: RwLock<BTreeMap<PathBuf, QuarantinedStore>>,
     /// Serializes moving a held child out of the hold. Its held row stays
     /// until the child is registered as managed (or confirmed gone), so a
     /// cancelled or failed transfer leaves it held, never unaccounted for.
@@ -1380,7 +1500,7 @@ impl MobMcpState {
             mobs: Arc::new(RwLock::new(BTreeMap::new())),
             retired_mobs: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
             held_child_mobs: RwLock::new(BTreeMap::new()),
-            unrestored_mobs: RwLock::new(BTreeMap::new()),
+            quarantined_stores: RwLock::new(BTreeMap::new()),
             #[cfg(not(target_arch = "wasm32"))]
             held_child_transfer: Mutex::new(()),
             #[cfg(test)]
@@ -2132,7 +2252,7 @@ impl MobMcpState {
     /// Every hosted roster that names `session_id` as a member's session: each
     /// managed mob's, read from its handle's own roster state, and each held
     /// child mob's, read from its store without activation. The roster of a
-    /// persisted mob left unrestored ([`Self::unrestored_mobs`]) is read from
+    /// quarantined persisted mob ([`Self::quarantined_mobs`]) is read from
     /// its store too, but never yields a match, since that mob's incarnation
     /// is in doubt: when it names the session, or cannot be read, the lookup
     /// refuses [`MobError::ProvenanceUnavailable`] naming that mob. It is one
@@ -2191,18 +2311,18 @@ impl MobMcpState {
                 }
             }
         }
-        // A persisted mob left unrestored is hosted too: its stored roster
+        // A quarantined persisted mob is hosted too: its stored roster
         // refuses the lookup when it names the session or cannot be read.
         #[cfg(not(target_arch = "wasm32"))]
         {
-            let unrestored = self
-                .unrestored_mobs
+            let quarantined = self
+                .quarantined_stores
                 .read()
                 .await
                 .iter()
-                .map(|(path, unrestored)| (path.clone(), unrestored.mob_id.clone()))
+                .map(|(path, quarantined)| (path.clone(), quarantined.mob_id.clone()))
                 .collect::<Vec<_>>();
-            for (path, mob_id) in unrestored {
+            for (path, mob_id) in quarantined {
                 Self::unrestored_member_lookup(&path, &mob_id, session_id).await?;
             }
         }
@@ -3603,10 +3723,13 @@ impl MobMcpState {
             let Some(root) = &self.persistent_storage_root else {
                 return Ok(());
             };
-            // Each pass finds the stores whose resume fails afresh: a store
-            // an earlier pass left unrestored and that resumes now is
-            // managed, never still listed as unrestored.
-            self.unrestored_mobs.write().await.clear();
+            // Each pass finds the stores it cannot restore afresh: a store an
+            // earlier pass quarantined and that restores now is managed,
+            // never still quarantined.
+            self.quarantined_stores.write().await.clear();
+            // Only the root itself is the realm's: a root that cannot be
+            // created, read or walked fails the restore. Every fault of one
+            // store below quarantines that store and the pass goes on.
             tokio::fs::create_dir_all(root).await.map_err(|error| {
                 MobError::Internal(format!(
                     "failed to create persistent mob root '{}': {error}",
@@ -3628,125 +3751,36 @@ impl MobMcpState {
                 ))
             })? {
                 let path = entry.path();
-                let file_type = entry.file_type().await.map_err(|error| {
-                    MobError::Internal(format!(
-                        "failed to inspect persistent mob entry '{}': {error}",
-                        path.display()
-                    ))
-                })?;
-                if !file_type.is_file()
-                    || path.extension().and_then(|ext| ext.to_str()) != Some("db")
-                {
-                    continue;
-                }
                 // Realm-scoped stores use reserved names. Only the prefixed
                 // per-mob database namespace is eligible for restore or empty
                 // sweep, so custody survives every individual mob lifecycle.
-                if !path
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .is_some_and(|name| name.starts_with(Self::MOB_STORE_FILE_PREFIX))
-                {
+                if !Self::is_mob_store_path(&path) {
                     continue;
                 }
-                // A store this state already registered (an earlier pass of
-                // this scan was cancelled after its owned resume finished)
-                // is the live mob: never resume the exact same store again.
-                if self.registered_store(&path).await {
-                    continue;
-                }
-                // The store of a mob this state destroyed is never resumed
-                // while its cleanup is owed.
-                if self.destroy_cleanup_owed_at(&path) {
-                    continue;
-                }
-
-                let storage = self.bind_realm_profile_store(MobStorage::persistent(&path)?);
-                if storage.is_event_log_empty().await? {
-                    // A creation record that is not finalized names a mob
-                    // whose log lost its MobCreated: the store disagrees with
-                    // itself, so it is left unrestored as found, never
-                    // swept. So is a store whose records disagree among
-                    // themselves. With no record, or one a finished destroy
-                    // finalized, the store is empty. Any other read fault
-                    // fails the restore.
-                    match storage.unfinalized_creation_mob().await {
-                        Ok(Some(mob_id)) => {
-                            self.keep_unrestored_mob(
-                                Some(mob_id.clone()),
-                                &path,
-                                MobError::IncarnationInconsistent {
-                                    mob_id,
-                                    inconsistency:
-                                        meerkat_mob::IncarnationInconsistency::RecordWithoutCreation,
-                                },
-                            )
-                            .await?;
-                            continue;
-                        }
-                        Ok(None) => {}
-                        Err(MobError::IncarnationInconsistent {
-                            mob_id,
-                            inconsistency,
-                        }) => {
-                            self.keep_unrestored_mob(
-                                Some(mob_id.clone()),
-                                &path,
-                                MobError::IncarnationInconsistent {
-                                    mob_id,
-                                    inconsistency,
-                                },
-                            )
-                            .await?;
-                            continue;
-                        }
-                        Err(error) => return Err(error),
-                    }
-                    if let Err(error) = Self::remove_storage_files(Some(path.as_path())).await {
-                        tracing::error!(error = %error, "empty mob store sweep failed");
-                    }
-                    continue;
-                }
-
-                // Decide before any actor exists: a child whose owner is
-                // archived is torn down without activation, and one whose
-                // owner is unresolved is held, never resumed. The resume, the
-                // teardown and the scavenge below are built in their own
-                // frames: at opt-level 0 each awaited future reserved twice
-                // its size in this poll frame, beneath every mob it restores.
-                match self.child_mob_restore_gate(&storage, &path).await? {
-                    ChildMobRestoreGate::Resume => {
-                        // A failed resume is kept under the id the store
-                        // names, read only then.
-                        let kept = storage.clone();
-                        let resumed = meerkat_runtime::stack_relief::box_in_own_frame(|| {
-                            self.resume_persisted_mob(storage, &path)
-                        })
+                match entry.file_type().await {
+                    Ok(file_type) if file_type.is_file() => {}
+                    Ok(_) => continue,
+                    Err(error) => {
+                        self.quarantine_store(
+                            &path,
+                            StoreQuarantine::unreadable(MobError::Internal(format!(
+                                "failed to inspect persistent mob entry '{}': {error}",
+                                path.display()
+                            ))),
+                        )
                         .await;
-                        if let Err(error) = resumed {
-                            let mob_id = kept
-                                .created_definition()
-                                .await
-                                .ok()
-                                .flatten()
-                                .map(|definition| definition.id);
-                            self.keep_unrestored_mob(mob_id, &path, error).await?;
-                        }
+                        continue;
                     }
-                    ChildMobRestoreGate::Teardown { mob_id, owner } => {
-                        if let Err(error) = meerkat_runtime::stack_relief::box_in_own_frame(|| {
-                            self.tear_down_archived_child_mob(storage, &path, mob_id.clone(), owner)
-                        })
-                        .await
-                        {
-                            tracing::warn!(
-                                mob_id = %mob_id,
-                                error = %error,
-                                "restored child mob of an archived owner was not torn down"
-                            );
-                        }
-                    }
-                    ChildMobRestoreGate::Hold(held) => self.hold_child_mob(held).await,
+                }
+                // The restore of one store is built in its own frame: at
+                // opt-level 0 each awaited future reserved twice its size in
+                // this poll frame, beneath every mob it restores.
+                let restored = meerkat_runtime::stack_relief::box_in_own_frame(|| {
+                    self.restore_one_store(&path)
+                })
+                .await;
+                if let Err(quarantine) = restored {
+                    self.quarantine_store(&path, quarantine).await;
                 }
             }
 
@@ -3756,6 +3790,208 @@ impl MobMcpState {
             .await;
             Ok(())
         }
+    }
+
+    /// Whether `path` names a per-mob store (`mob--<escaped id>.db`).
+    #[cfg(not(target_arch = "wasm32"))]
+    fn is_mob_store_path(path: &Path) -> bool {
+        path.extension().and_then(|ext| ext.to_str()) == Some("db")
+            && path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with(Self::MOB_STORE_FILE_PREFIX))
+    }
+
+    /// The mob id a per-mob store's file name encodes
+    /// ([`Self::persistent_storage_path`]), for a store whose own records
+    /// cannot be read. `None` when the name does not decode.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn mob_id_from_store_path(path: &Path) -> Option<MobId> {
+        let stem = path.file_stem()?.to_str()?;
+        let escaped = stem.strip_prefix(Self::MOB_STORE_FILE_PREFIX)?;
+        let mut bytes = Vec::with_capacity(escaped.len());
+        let mut chars = escaped.bytes();
+        while let Some(byte) = chars.next() {
+            if byte == b'%' {
+                let high = char::from(chars.next()?).to_digit(16)?;
+                let low = char::from(chars.next()?).to_digit(16)?;
+                bytes.push(u8::try_from(high * 16 + low).ok()?);
+            } else {
+                bytes.push(byte);
+            }
+        }
+        let id = String::from_utf8(bytes).ok()?;
+        (!id.is_empty()).then(|| MobId::from(id))
+    }
+
+    /// Restore the persisted mob store at `path`: resume it, hold it (a
+    /// child whose owner is unresolved), tear it down (a child whose owner
+    /// is archived), or sweep it (empty). A fault of this store answers why
+    /// it is quarantined instead; the caller keeps it so, and the rest of the
+    /// restore goes on.
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn restore_one_store(&self, path: &Path) -> Result<StoreRestored, StoreQuarantine> {
+        // A store this state already registered (an earlier pass of this scan
+        // was cancelled after its owned resume finished) is the live mob:
+        // never resume the exact same store again.
+        if self.registered_store(path).await {
+            return Ok(StoreRestored::Skipped);
+        }
+        // The store of a mob this state destroyed is never resumed while its
+        // cleanup is owed.
+        if self.destroy_cleanup_owed_at(path) {
+            return Ok(StoreRestored::Skipped);
+        }
+
+        let storage = self.bind_realm_profile_store(
+            MobStorage::persistent(path).map_err(StoreQuarantine::unreadable)?,
+        );
+        if storage
+            .is_event_log_empty()
+            .await
+            .map_err(StoreQuarantine::store_read)?
+        {
+            // A creation record that is not finalized names a mob whose log
+            // lost its MobCreated: the store disagrees with itself, so it is
+            // quarantined as found, never swept. So is a store whose records
+            // disagree among themselves, or whose record cannot be read. With
+            // no record, or one a finished destroy finalized, the store is
+            // empty.
+            match storage.unfinalized_creation_mob().await {
+                Ok(Some(mob_id)) => {
+                    return Err(StoreQuarantine::unreadable(
+                        MobError::IncarnationInconsistent {
+                            mob_id,
+                            inconsistency:
+                                meerkat_mob::IncarnationInconsistency::RecordWithoutCreation,
+                        },
+                    ));
+                }
+                Ok(None) => {}
+                Err(error) => return Err(StoreQuarantine::unreadable(error)),
+            }
+            if let Err(error) = Self::remove_storage_files(Some(path)).await {
+                tracing::error!(error = %error, "empty mob store sweep failed");
+            }
+            return Ok(StoreRestored::Settled);
+        }
+
+        // Decide before any actor exists: a child whose owner is archived is
+        // torn down without activation, and one whose owner is unresolved is
+        // held, never resumed. The resume, the teardown and the scavenge
+        // below are built in their own frames: at opt-level 0 each awaited
+        // future reserved twice its size in this poll frame, beneath every
+        // mob it restores.
+        match self
+            .child_mob_restore_gate(&storage, path)
+            .await
+            .map_err(StoreQuarantine::unreadable)?
+        {
+            ChildMobRestoreGate::Resume => {
+                // A failed resume is quarantined under the id the store
+                // names, read only then.
+                let kept = storage.clone();
+                let resumed = meerkat_runtime::stack_relief::box_in_own_frame(|| {
+                    self.resume_persisted_mob(storage, path)
+                })
+                .await;
+                match resumed {
+                    Ok(_) => Ok(StoreRestored::Managed),
+                    Err(error) => {
+                        let mob_id = kept
+                            .created_definition()
+                            .await
+                            .ok()
+                            .flatten()
+                            .map(|definition| definition.id);
+                        Err(StoreQuarantine::resume_failed(mob_id, error))
+                    }
+                }
+            }
+            ChildMobRestoreGate::Teardown { mob_id, owner } => {
+                match meerkat_runtime::stack_relief::box_in_own_frame(|| {
+                    self.tear_down_archived_child_mob(storage, path, mob_id.clone(), owner)
+                })
+                .await
+                {
+                    Ok(_) => Ok(StoreRestored::Settled),
+                    Err(error) => {
+                        tracing::warn!(
+                            mob_id = %mob_id,
+                            error = %error,
+                            "restored child mob of an archived owner was not torn down"
+                        );
+                        // A blocked teardown holds the child; any other
+                        // failure keeps its store quarantined, never
+                        // unaccounted for.
+                        if self.held_child_mobs.read().await.contains_key(&mob_id) {
+                            return Ok(StoreRestored::Held);
+                        }
+                        let cause = match error {
+                            MobMcpDestroyError::Mob(error) => error,
+                            other => MobError::Internal(other.to_string()),
+                        };
+                        Err(StoreQuarantine {
+                            mob_id: Some(mob_id),
+                            class: meerkat_mob::MobQuarantineClass::ResumeRefused,
+                            cause,
+                        })
+                    }
+                }
+            }
+            ChildMobRestoreGate::Hold(held) => {
+                self.hold_child_mob(held).await;
+                Ok(StoreRestored::Held)
+            }
+        }
+    }
+
+    /// Quarantine the persisted mob store at `path` for `quarantine`: a new
+    /// `MobStoreRestoreLifecycleMachine` record, under the id the store names
+    /// or, when it cannot be read, the one its file name encodes. The store
+    /// is kept exactly as found, no actor runs for it, and a lookup of its id
+    /// answers [`MobError::MobQuarantined`].
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn quarantine_store(&self, path: &Path, quarantine: StoreQuarantine) {
+        let Some(mob_id) = quarantine
+            .mob_id
+            .clone()
+            .or_else(|| Self::mob_id_from_store_path(path))
+        else {
+            tracing::error!(
+                path = %path.display(),
+                error = %quarantine.cause,
+                "a persisted mob store whose name and records name no mob is skipped"
+            );
+            return;
+        };
+        let mut record = mob_store_dsl::MobStoreRestoreLifecycleMachineAuthority::new();
+        if let Err(error) = mob_store_dsl::MobStoreRestoreLifecycleMachineMutator::apply(
+            &mut record,
+            mob_store_dsl::MobStoreRestoreLifecycleInput::Quarantine {
+                class: quarantine.class,
+            },
+        ) {
+            tracing::error!(
+                mob_id = %mob_id,
+                error = ?error,
+                "the quarantine record refused its classification"
+            );
+        }
+        tracing::warn!(
+            mob_id = %mob_id,
+            class = %quarantine.class,
+            error = %quarantine.cause,
+            "quarantining a persisted mob store: the rest of the restore goes on"
+        );
+        self.quarantined_stores.write().await.insert(
+            path.to_path_buf(),
+            QuarantinedStore {
+                mob_id,
+                record,
+                cause: Arc::new(quarantine.cause),
+            },
+        );
     }
 
     /// Stand this state down: close its admission and wait for the work it
@@ -4138,48 +4374,204 @@ impl MobMcpState {
             .insert(held.mob_id.clone(), held);
     }
 
-    /// Keep a persisted mob whose resume failed unrestored, under the id its
-    /// store names, so the rest of the restore goes on: it gets no actor, its
-    /// store stays as found, and a lookup of the id answers the failure. A
-    /// transport or persistence fault, which a later restore may get past,
-    /// and a store that names no mob still fail the restore.
-    #[cfg(not(target_arch = "wasm32"))]
-    async fn keep_unrestored_mob(
-        &self,
-        mob_id: Option<MobId>,
-        path: &Path,
-        error: MobError,
-    ) -> Result<(), MobError> {
-        let Some(mob_id) = mob_id else {
-            return Err(error);
-        };
-        if error.failure_class() == meerkat_mob::MobFailureClass::Transport {
-            return Err(error);
-        }
-        tracing::warn!(
-            mob_id = %mob_id,
-            error = %error,
-            "leaving a persisted mob unrestored: its resume failed"
-        );
-        self.unrestored_mobs.write().await.insert(
-            path.to_path_buf(),
-            UnrestoredMob {
-                mob_id,
-                cause: UnrestoredMobCause::of(&error),
-            },
-        );
-        Ok(())
-    }
-
-    /// The persisted mob `mob_id` that was not restored, as its lookup
-    /// answer.
-    async fn unrestored_mob_error(&self, mob_id: &MobId) -> Option<MobError> {
-        self.unrestored_mobs
+    /// The quarantined persisted mob `mob_id`, as its lookup answer
+    /// ([`MobError::MobQuarantined`]).
+    async fn quarantined_mob_error(&self, mob_id: &MobId) -> Option<MobError> {
+        self.quarantined_stores
             .read()
             .await
             .values()
-            .find(|unrestored| &unrestored.mob_id == mob_id)
-            .map(|unrestored| unrestored.cause.error(mob_id))
+            .find(|quarantined| &quarantined.mob_id == mob_id)
+            .map(QuarantinedStore::error)
+    }
+
+    /// Admit one re-attempt of the restore of the store `mob_id` is
+    /// quarantined under: its record moves to Retrying. `Ok(path)` when the
+    /// record admitted it; otherwise the answer the caller gets (the
+    /// quarantine, typed, while another re-attempt is in flight), or `None`
+    /// when no store of `mob_id` is quarantined. With `unavailable_only`,
+    /// only a store quarantined as `store_unavailable` is re-attempted: an
+    /// id-addressed verb never re-attempts a store that needs a repair.
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn admit_store_retry(
+        &self,
+        mob_id: &MobId,
+        unavailable_only: bool,
+    ) -> Option<Result<PathBuf, MobError>> {
+        let mut stores = self.quarantined_stores.write().await;
+        let (path, quarantined) = stores
+            .iter_mut()
+            .find(|(_, quarantined)| &quarantined.mob_id == mob_id)?;
+        if unavailable_only && !quarantined.class().is_retryable() {
+            return Some(Err(quarantined.error()));
+        }
+        let admitted = mob_store_dsl::MobStoreRestoreLifecycleMachineMutator::apply(
+            &mut quarantined.record,
+            mob_store_dsl::MobStoreRestoreLifecycleInput::RequestRetry {},
+        );
+        match admitted {
+            Ok(transition)
+                if transition.effects().iter().any(|effect| {
+                    matches!(
+                        effect,
+                        mob_store_dsl::MobStoreRestoreLifecycleEffect::RetryAdmitted { .. }
+                    )
+                }) =>
+            {
+                Some(Ok(path.clone()))
+            }
+            // A re-attempt is in flight: answer the quarantine at once, never
+            // waiting for it.
+            Ok(_) => Some(Err(quarantined.error())),
+            Err(error) => {
+                tracing::error!(
+                    mob_id = %mob_id,
+                    error = ?error,
+                    "the quarantine record refused a re-attempt"
+                );
+                Some(Err(quarantined.error()))
+            }
+        }
+    }
+
+    /// Run the re-attempt [`Self::admit_store_retry`] admitted for the store
+    /// at `path`, and resolve its record: a store the re-attempt released
+    /// (managed, held or settled) drops its record; a failed one stays
+    /// quarantined under the class it met, with its failure. The whole
+    /// re-attempt holds the transfer lock that moves mobs between the hosted
+    /// sets, so a reader of the sets finds the mob in exactly one of them.
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn run_store_retry(&self, path: &Path) -> Result<StoreRestored, MobError> {
+        let _transfer = self.held_child_transfer.lock().await;
+        let restored = match self.admit("mob restore retry") {
+            Ok(_admission) => {
+                meerkat_runtime::stack_relief::box_in_own_frame(|| self.restore_one_store(path))
+                    .await
+            }
+            Err(error) => Err(StoreQuarantine {
+                mob_id: None,
+                class: meerkat_mob::MobQuarantineClass::StoreUnavailable,
+                cause: error,
+            }),
+        };
+        let mut stores = self.quarantined_stores.write().await;
+        let Some(quarantined) = stores.get_mut(path) else {
+            return restored.map_err(|quarantine| quarantine.cause);
+        };
+        let (outcome, class) = match &restored {
+            Ok(StoreRestored::Managed | StoreRestored::Skipped) => (
+                mob_store_dsl::MobStoreRestoreOutcome::Managed,
+                quarantined.class(),
+            ),
+            Ok(StoreRestored::Held) => (
+                mob_store_dsl::MobStoreRestoreOutcome::Held,
+                quarantined.class(),
+            ),
+            Ok(StoreRestored::Settled) => (
+                mob_store_dsl::MobStoreRestoreOutcome::Settled,
+                quarantined.class(),
+            ),
+            Err(quarantine) => (
+                mob_store_dsl::MobStoreRestoreOutcome::Failed,
+                quarantine.class,
+            ),
+        };
+        if let Err(error) = mob_store_dsl::MobStoreRestoreLifecycleMachineMutator::apply(
+            &mut quarantined.record,
+            mob_store_dsl::MobStoreRestoreLifecycleInput::ResolveRetry { outcome, class },
+        ) {
+            tracing::error!(
+                path = %path.display(),
+                error = ?error,
+                "the quarantine record refused a re-attempt's outcome"
+            );
+        }
+        match restored {
+            Ok(restored) => {
+                if quarantined.record.state().lifecycle_phase
+                    == mob_store_dsl::MobStoreRestoreLifecyclePhase::Released
+                {
+                    stores.remove(path);
+                }
+                Ok(restored)
+            }
+            Err(quarantine) => {
+                tracing::warn!(
+                    mob_id = %quarantined.mob_id,
+                    class = %quarantine.class,
+                    error = %quarantine.cause,
+                    "a re-attempt left a persisted mob store quarantined"
+                );
+                quarantined.cause = Arc::new(quarantine.cause);
+                Err(quarantined.error())
+            }
+        }
+    }
+
+    /// For an id-addressed verb that found `mob_id` unmanaged: one
+    /// re-attempt of the restore of its store when it is quarantined as
+    /// `store_unavailable` (a store that could not serve may serve now), and
+    /// none while another re-attempt is in flight. True when the re-attempt
+    /// made the mob managed; the caller then reads the managed set again.
+    async fn reattempt_unavailable_quarantine(&self, mob_id: &MobId) -> bool {
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = mob_id;
+            false
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let Some(Ok(path)) = self.admit_store_retry(mob_id, true).await else {
+                return false;
+            };
+            matches!(
+                meerkat_runtime::stack_relief::box_in_own_frame(|| self.run_store_retry(&path))
+                    .await,
+                Ok(StoreRestored::Managed | StoreRestored::Skipped)
+            )
+        }
+    }
+
+    /// Re-attempt the restore of the persisted mob `mob_id`'s quarantined
+    /// store, for example after its store was repaired: any class, never
+    /// waiting for a re-attempt already in flight (that answers the
+    /// quarantine at once). The store is restored as a restore pass would:
+    /// resumed and managed, held as a child whose owner is unresolved, or
+    /// settled (swept empty, or a child torn down with its archived owner).
+    /// A failed re-attempt keeps it quarantined, under the class it met, and
+    /// answers [`MobError::MobQuarantined`]. A mob that is managed or held
+    /// answers [`MobRestoreRetryOutcome::NotQuarantined`]; an unknown id
+    /// [`MobError::MobNotFound`].
+    ///
+    /// Needs the console owner (`SendCommand`) and this state's admission.
+    pub async fn mob_restore_retry(
+        &self,
+        mob_id: &MobId,
+    ) -> Result<MobRestoreRetryOutcome, MobError> {
+        self.require_console_owner(ControlScope::SendCommand)?;
+        let _admission = self.admit("mob restore retry")?;
+        self.ensure_restored().await?;
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(admitted) = self.admit_store_retry(mob_id, false).await {
+            let path = admitted?;
+            return meerkat_runtime::stack_relief::box_in_own_frame(|| self.run_store_retry(&path))
+                .await
+                .map(|restored| match restored {
+                    StoreRestored::Managed | StoreRestored::Skipped => {
+                        MobRestoreRetryOutcome::Restored
+                    }
+                    StoreRestored::Held => MobRestoreRetryOutcome::Held,
+                    StoreRestored::Settled => MobRestoreRetryOutcome::Settled,
+                });
+        }
+        if self.mobs.read().await.contains_key(mob_id) {
+            return Ok(MobRestoreRetryOutcome::NotQuarantined);
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.held_child_mobs.read().await.contains_key(mob_id) {
+            return Ok(MobRestoreRetryOutcome::NotQuarantined);
+        }
+        Err(MobError::MobNotFound(mob_id.clone()))
     }
 
     /// A member lookup of `session_id` over the persisted mob `mob_id` left
@@ -4361,10 +4753,10 @@ impl MobMcpState {
         Ok(custody)
     }
 
-    /// The held child mob `mob_id`, or the persisted mob `mob_id` that was not
-    /// restored, as its operational lookup answer.
+    /// The held child mob `mob_id`, or the quarantined persisted mob
+    /// `mob_id`, as its operational lookup answer.
     async fn unmanaged_mob_error(&self, mob_id: &MobId) -> Option<MobError> {
-        if let Some(error) = self.unrestored_mob_error(mob_id).await {
+        if let Some(error) = self.quarantined_mob_error(mob_id).await {
             return Some(error);
         }
         self.held_child_mobs.read().await.get(mob_id).map(|held| {
@@ -4373,36 +4765,75 @@ impl MobMcpState {
     }
 
     /// The restored child mobs held before activation, with their owners.
-    pub async fn held_child_mobs(&self) -> Vec<(MobId, SessionId)> {
-        if !self.ensure_restored_best_effort("held_child_mobs").await {
-            return Vec::new();
-        }
-        self.held_child_mobs
+    /// Fails, rather than answer an empty list, when the restore of the
+    /// persisted mobs fails.
+    pub async fn held_child_mobs(&self) -> Result<Vec<(MobId, SessionId)>, MobError> {
+        self.ensure_restored().await?;
+        Ok(self
+            .held_child_mobs
             .read()
             .await
             .values()
             .map(|held| (held.mob_id.clone(), held.owner.clone()))
-            .collect()
+            .collect())
     }
 
-    /// The persisted mobs whose resume failed at restore, each with the typed
-    /// error a lookup of its id answers. They are not in [`Self::mob_list`];
-    /// their stores are kept as found.
-    pub async fn unrestored_mobs(&self) -> Vec<(MobId, MobError)> {
-        if !self.ensure_restored_best_effort("unrestored_mobs").await {
-            return Vec::new();
-        }
-        self.unrestored_mobs
+    /// The persisted mobs the restore keeps quarantined, each with its class
+    /// and the failure its last restore attempt met; a lookup of the id
+    /// answers [`MobError::MobQuarantined`]. They are not in
+    /// [`Self::mob_list`] (see [`Self::mob_inventory`]); their stores are
+    /// kept as found. Fails, rather than answer an empty list, when the
+    /// restore of the persisted mobs fails.
+    pub async fn quarantined_mobs(&self) -> Result<Vec<QuarantinedMob>, MobError> {
+        self.ensure_restored().await?;
+        Ok(self
+            .quarantined_stores
             .read()
             .await
             .values()
-            .map(|unrestored| {
-                (
-                    unrestored.mob_id.clone(),
-                    unrestored.cause.error(&unrestored.mob_id),
-                )
-            })
-            .collect()
+            .map(QuarantinedStore::row)
+            .collect())
+    }
+
+    /// Every mob this state hosts, from one read: the managed mobs (as
+    /// [`Self::mob_list`] reports them), the restored child mobs held before
+    /// activation, and the persisted mobs the restore keeps quarantined.
+    /// Each mob id is in exactly one of them: the sets are read under the
+    /// lock that every move between them holds. A read never re-attempts a
+    /// quarantined store's restore.
+    ///
+    /// Needs the console owner (`List`), as [`Self::mob_list`] does.
+    pub async fn mob_inventory(&self) -> Result<MobInventory, MobError> {
+        self.require_console_owner(ControlScope::List)?;
+        self.ensure_restored().await?;
+        #[cfg(not(target_arch = "wasm32"))]
+        let _transfer = self.held_child_transfer.lock().await;
+        let held = self
+            .held_child_mobs
+            .read()
+            .await
+            .values()
+            .map(|held| (held.mob_id.clone(), held.owner.clone()))
+            .collect::<Vec<_>>();
+        let quarantined = self
+            .quarantined_stores
+            .read()
+            .await
+            .values()
+            .map(QuarantinedStore::row)
+            .collect::<Vec<_>>();
+        let managed = self
+            .mobs
+            .read()
+            .await
+            .iter()
+            .map(|(id, managed)| (id.clone(), managed.handle.lifecycle_observation()))
+            .collect::<Vec<_>>();
+        Ok(MobInventory {
+            managed,
+            held,
+            quarantined,
+        })
     }
 
     /// Operator release of a held child mob whose owner never resolves: tear
@@ -4713,6 +5144,11 @@ impl MobMcpState {
         self.require_console_owner(ControlScope::SendCommand)?;
         let _admission = self.admit("mob callback route claim")?;
         self.ensure_restored().await?;
+        // A mob quarantined because its store could not serve gets one
+        // re-attempt of its restore first (see `Self::handle_for`).
+        if !self.mobs.read().await.contains_key(mob_id) {
+            self.reattempt_unavailable_quarantine(mob_id).await;
+        }
         let mobs = self.mobs.read().await;
         let Some(managed) = mobs.get(mob_id) else {
             drop(mobs);
@@ -4753,6 +5189,10 @@ impl MobMcpState {
         self.require_console_owner(ControlScope::SendCommand)?;
         let _admission = self.admit("mob callback claim token mint")?;
         self.ensure_restored().await?;
+        // As a claim: one re-attempt of an unavailable store's restore.
+        if !self.mobs.read().await.contains_key(mob_id) {
+            self.reattempt_unavailable_quarantine(mob_id).await;
+        }
         let mobs = self.mobs.read().await;
         let Some(managed) = mobs.get(mob_id) else {
             drop(mobs);
@@ -5023,8 +5463,8 @@ impl MobMcpState {
         if self.mobs.read().await.contains_key(&mob_id) {
             return Err(MobError::Internal(format!("mob already exists: {mob_id}")));
         }
-        // A store left unrestored is kept as found: no create takes its id.
-        if let Some(error) = self.unrestored_mob_error(&mob_id).await {
+        // A quarantined store is kept as found: no create takes its id.
+        if let Some(error) = self.quarantined_mob_error(&mob_id).await {
             return Err(error);
         }
         if self.destroy_cleanup_owed(&mob_id) {
@@ -7429,20 +7869,35 @@ impl MobMcpState {
     /// Every handle this console hands out is rebound to the console
     /// principal (chokepoint (b) principal minting, DEC-P5E-8): actor-routed
     /// verbs are then gated once, at chokepoint (a), against this principal.
+    ///
+    /// A mob quarantined because its store could not serve
+    /// (`store_unavailable`) gets one re-attempt of its restore first, and
+    /// the lookup answers the restored mob when it passes. While another
+    /// re-attempt is in flight, or when it fails, or for any other
+    /// quarantine, the lookup answers [`MobError::MobQuarantined`] at once.
     pub async fn handle_for(&self, mob_id: &MobId) -> Result<MobHandle, MobError> {
         self.ensure_restored().await?;
-        let handle = self.mobs.read().await.get(mob_id).map(|m| {
+        if let Some(handle) = self.console_bound_handle(mob_id).await {
+            return Ok(handle);
+        }
+        if self.reattempt_unavailable_quarantine(mob_id).await
+            && let Some(handle) = self.console_bound_handle(mob_id).await
+        {
+            return Ok(handle);
+        }
+        Err(self
+            .unmanaged_mob_error(mob_id)
+            .await
+            .unwrap_or_else(|| MobError::MobNotFound(mob_id.clone())))
+    }
+
+    /// The managed mob `mob_id`'s handle, rebound to the console principal.
+    async fn console_bound_handle(&self, mob_id: &MobId) -> Option<MobHandle> {
+        self.mobs.read().await.get(mob_id).map(|m| {
             m.handle
                 .clone()
                 .with_command_authority(CommandAuthority::principal(self.console_principal.clone()))
-        });
-        match handle {
-            Some(handle) => Ok(handle),
-            None => Err(self
-                .unmanaged_mob_error(mob_id)
-                .await
-                .unwrap_or_else(|| MobError::MobNotFound(mob_id.clone()))),
-        }
+        })
     }
 
     /// Resolve a console-bound handle and enter the actor-linearized scope
@@ -11855,6 +12310,10 @@ mod tests {
         /// When set, every session activation waits at this gate until the
         /// test releases it ([`MockSessionSvc::hold_activations`]).
         activation_gate: std::sync::Mutex<Option<Arc<ActivationGate>>>,
+        /// The next this many `list` calls answer the typed store failure a
+        /// store that cannot serve now gives
+        /// ([`MockSessionSvc::fail_next_lists`]).
+        list_unavailable: AtomicU64,
     }
 
     /// Holds each session activation (each member a restore materializes)
@@ -11947,7 +12406,15 @@ mod tests {
                 scripted_observations: std::sync::Mutex::default(),
                 archive_holds: std::sync::Mutex::default(),
                 activation_gate: std::sync::Mutex::default(),
+                list_unavailable: AtomicU64::new(0),
             }
+        }
+
+        /// The next `count` session listings answer the typed store failure
+        /// of a store that cannot serve now (a session store error the
+        /// store-failure split classes unavailable).
+        fn fail_next_lists(&self, count: u64) {
+            self.list_unavailable.store(count, Ordering::SeqCst);
         }
 
         /// Park every archive of `id` until the returned hold is released.
@@ -12045,6 +12512,7 @@ mod tests {
                 scripted_observations: std::sync::Mutex::default(),
                 archive_holds: std::sync::Mutex::default(),
                 activation_gate: std::sync::Mutex::default(),
+                list_unavailable: AtomicU64::new(0),
             }
         }
 
@@ -12452,6 +12920,19 @@ mod tests {
         }
 
         async fn list(&self, _query: SessionQuery) -> Result<Vec<SessionSummary>, SessionError> {
+            if self
+                .list_unavailable
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
+                    left.checked_sub(1)
+                })
+                .is_ok()
+            {
+                return Err(SessionError::Store(Box::new(
+                    meerkat_core::SessionStoreError::Internal(
+                        "session catalog unavailable: the store cannot serve now".to_string(),
+                    ),
+                )));
+            }
             Ok(self
                 .sessions
                 .read()
@@ -17247,7 +17728,14 @@ mod tests {
             restored.mob_list().await.is_ok(),
             "a held child does not fail the restore"
         );
-        assert_eq!(restored.held_child_mobs().await.len(), 1);
+        assert_eq!(
+            restored
+                .held_child_mobs()
+                .await
+                .expect("the held child mobs read")
+                .len(),
+            1
+        );
         assert_eq!(
             mob_store_files(root.path()),
             1,
@@ -17265,7 +17753,13 @@ mod tests {
                 .is_empty(),
             "a committed owner destroys nothing"
         );
-        assert!(restored.held_child_mobs().await.is_empty());
+        assert!(
+            restored
+                .held_child_mobs()
+                .await
+                .expect("the held child mobs read")
+                .is_empty()
+        );
         let status = restored
             .mob_member_status(&mob_id, &AgentIdentity::from("worker-1"))
             .await
@@ -17371,7 +17865,14 @@ mod tests {
             Ok(meerkat_mob::LiveDurableSourceObservation::Absent),
         );
         let restored = restored_state(&svc, root.path());
-        assert_eq!(restored.held_child_mobs().await.len(), 1);
+        assert_eq!(
+            restored
+                .held_child_mobs()
+                .await
+                .expect("the held child mobs read")
+                .len(),
+            1
+        );
         let held_path = restored
             .held_child_mobs
             .read()
@@ -17657,7 +18158,14 @@ mod tests {
             Ok(meerkat_mob::LiveDurableSourceObservation::Absent),
         );
         let restored = restored_state(&svc, root.path());
-        assert_eq!(restored.held_child_mobs().await.len(), 1);
+        assert_eq!(
+            restored
+                .held_child_mobs()
+                .await
+                .expect("the held child mobs read")
+                .len(),
+            1
+        );
         let first = restored
             .session_member_matches(&worker_session)
             .await
@@ -17948,7 +18456,14 @@ mod tests {
             Ok(meerkat_mob::LiveDurableSourceObservation::Absent),
         );
         let restored = restored_state(&svc, root.path());
-        assert_eq!(restored.held_child_mobs().await.len(), 1);
+        assert_eq!(
+            restored
+                .held_child_mobs()
+                .await
+                .expect("the held child mobs read")
+                .len(),
+            1
+        );
         let held_path = restored
             .held_child_mobs
             .read()
@@ -18102,7 +18617,13 @@ mod tests {
             restored.handle_for(&mob_id).await,
             Err(MobError::MobNotFound(_))
         ));
-        assert!(restored.held_child_mobs().await.is_empty());
+        assert!(
+            restored
+                .held_child_mobs()
+                .await
+                .expect("the held child mobs read")
+                .is_empty()
+        );
         assert_eq!(
             mob_store_files(root.path()),
             0,
@@ -18159,7 +18680,11 @@ mod tests {
             MobStateStandDown::Clean
         );
         assert!(
-            restored.held_child_mobs().await.is_empty(),
+            restored
+                .held_child_mobs()
+                .await
+                .expect("the held child mobs read")
+                .is_empty(),
             "the handoff moved the child into managed custody without its caller"
         );
         assert_eq!(svc.session_activation_count(), activations_before);
@@ -18207,7 +18732,13 @@ mod tests {
             vec![mob_id.clone()],
             "a later pass tears the child down"
         );
-        assert!(restored.held_child_mobs().await.is_empty());
+        assert!(
+            restored
+                .held_child_mobs()
+                .await
+                .expect("the held child mobs read")
+                .is_empty()
+        );
         assert_eq!(mob_store_files(root.path()), 0);
         assert_eq!(svc.session_activation_count(), activations_before);
     }
@@ -18312,7 +18843,13 @@ mod tests {
             .handle_for(&mob_id)
             .await
             .expect("an admitted destroy resumes into its recovery, not a hold");
-        assert!(restored.held_child_mobs().await.is_empty());
+        assert!(
+            restored
+                .held_child_mobs()
+                .await
+                .expect("the held child mobs read")
+                .is_empty()
+        );
         assert_eq!(
             handle.status().await.expect("recovered status"),
             meerkat_mob::MobState::Destroyed,
@@ -18349,7 +18886,13 @@ mod tests {
             .handle_for(&mob_id)
             .await
             .expect("a durable Destroy quiesce resumes into its recovery, not a hold");
-        assert!(restored.held_child_mobs().await.is_empty());
+        assert!(
+            restored
+                .held_child_mobs()
+                .await
+                .expect("the held child mobs read")
+                .is_empty()
+        );
     }
 
     /// RED control for the old scavenger: an owner that merely has no session
@@ -19192,8 +19735,444 @@ mod tests {
         );
     }
 
+    /// Structured-data `kind` of a quarantined mob's answer. A local copy:
+    /// the behavioural rows below compile over a base without the export.
+    const MOB_QUARANTINED_KIND: &str = "mob_quarantined";
+
+    /// The structured data `error` carries (`null` with none).
+    fn quarantine_data(error: &MobError) -> serde_json::Value {
+        error.structured_data().unwrap_or(serde_json::Value::Null)
+    }
+
+    /// A restart over `root` with the two mobs `restore-unavailable`
+    /// (Running) and `restore-stopped` (Stopped): only the running mob's
+    /// resume reads the session catalog.
+    async fn a_running_and_a_stopped_mob_before_a_restart(
+        svc: &Arc<MockSessionSvc>,
+        root: &std::path::Path,
+    ) -> (MobId, MobId) {
+        let state = restored_state(svc, root);
+        let running = state
+            .mob_create_definition(explicit_definition("restore-unavailable"))
+            .await
+            .expect("create the running mob");
+        let stopped = state
+            .mob_create_definition(explicit_definition("restore-stopped"))
+            .await
+            .expect("create the stopped mob");
+        state.mob_stop(&stopped).await.expect("stop the second mob");
+        // A restart: the predecessors give up their supervisor routes.
+        for mob_id in [&running, &stopped] {
+            state
+                .handle_for(mob_id)
+                .await
+                .expect("predecessor mob handle")
+                .shutdown()
+                .await
+                .expect("retire the predecessor supervisor route");
+        }
+        (running, stopped)
+    }
+
+    /// One store whose bytes are not a database does not abort the restore of
+    /// the realm. The healthy mob restores and serves; the undecodable store
+    /// is quarantined under the id its file name encodes (`store_unreadable`):
+    /// every lookup of that id, a create included, answers the typed
+    /// quarantine without re-attempting the restore, and the store is kept as
+    /// found.
     #[tokio::test]
-    async fn test_mob_list_surfaces_persistent_restore_failure() {
+    async fn a_realm_restore_quarantines_an_undecodable_store_and_restores_the_rest() {
+        let svc = Arc::new(MockSessionSvc::new());
+        let root = tempfile::tempdir().expect("tempdir");
+        let state = restored_state(&svc, root.path());
+        let healthy = state
+            .mob_create_definition(explicit_definition("restore-healthy"))
+            .await
+            .expect("create the mob that restores");
+        // A restart: the predecessor gives up its supervisor route.
+        state
+            .handle_for(&healthy)
+            .await
+            .expect("predecessor mob handle")
+            .shutdown()
+            .await
+            .expect("retire the predecessor supervisor route");
+        drop(state);
+        let mob_root = MobMcpState::persistent_mob_root(root.path());
+        let broken_store =
+            mob_root.join(format!("{}broken.db", MobMcpState::MOB_STORE_FILE_PREFIX));
+        tokio::fs::write(&broken_store, b"not a sqlite database")
+            .await
+            .expect("write an undecodable mob store");
+
+        let restored = restored_state(&svc, root.path());
+        let listed = restored
+            .mob_list()
+            .await
+            .expect("the realm restore goes on past the undecodable store");
+        assert!(
+            listed.iter().any(|(mob_id, _)| mob_id == &healthy),
+            "the healthy mob is restored: {listed:?}"
+        );
+        assert!(
+            listed.iter().all(|(mob_id, _)| mob_id.as_str() != "broken"),
+            "the undecodable store is not managed: {listed:?}"
+        );
+        restored
+            .mob_status(&healthy)
+            .await
+            .expect("the restored mob serves");
+
+        let broken = MobId::from("broken");
+        for _ in 0..3 {
+            let lookup = restored
+                .mob_status(&broken)
+                .await
+                .expect_err("the quarantined mob has no actor");
+            let data = quarantine_data(&lookup);
+            assert_eq!(data["kind"], MOB_QUARANTINED_KIND, "{lookup:?}");
+            assert_eq!(data["mob_id"], "broken", "{lookup:?}");
+            assert_eq!(data["class"], "store_unreadable", "{lookup:?}");
+            assert_eq!(data["retryable"], false, "{lookup:?}");
+        }
+        let create = restored
+            .mob_create_definition(explicit_definition("broken"))
+            .await
+            .expect_err("a create does not take the quarantined mob's id");
+        assert_eq!(
+            quarantine_data(&create)["kind"],
+            MOB_QUARANTINED_KIND,
+            "{create:?}"
+        );
+        assert!(
+            tokio::fs::metadata(&broken_store).await.is_ok(),
+            "the quarantined store is kept as found"
+        );
+    }
+
+    /// A resume that fails because a store could not serve now quarantines
+    /// only that mob (`store_unavailable`); the other mob restores. Once the
+    /// store serves again, the next verb that addresses the quarantined mob by
+    /// id re-attempts its restore once and serves the mob, with no explicit
+    /// retry.
+    #[tokio::test]
+    async fn an_unavailable_store_quarantines_only_its_mob_and_heals_on_the_next_access() {
+        let svc = Arc::new(MockSessionSvc::new());
+        let root = tempfile::tempdir().expect("tempdir");
+        let (running, stopped) =
+            a_running_and_a_stopped_mob_before_a_restart(&svc, root.path()).await;
+
+        let restored = restored_state(&svc, root.path());
+        // The first session listing (the running mob's resume) answers that
+        // the store cannot serve now.
+        svc.fail_next_lists(1);
+        let listed = restored
+            .mob_list()
+            .await
+            .expect("the realm restore goes on past the store that could not serve");
+        assert!(
+            listed.iter().any(|(mob_id, _)| mob_id == &stopped),
+            "the other mob is restored: {listed:?}"
+        );
+        assert!(
+            listed.iter().all(|(mob_id, _)| mob_id != &running),
+            "the mob whose resume met the outage is not managed: {listed:?}"
+        );
+
+        restored.mob_status(&running).await.expect(
+            "an id-addressed verb re-attempts an unavailable store's restore and serves the mob",
+        );
+        let listed = restored.mob_list().await.expect("the mobs read");
+        assert!(
+            listed.iter().any(|(mob_id, _)| mob_id == &running),
+            "the re-attempt made the mob managed: {listed:?}"
+        );
+    }
+
+    /// A host binding, as an activation hook takes one, that refuses a
+    /// second activation of a mob id while the handle it bound under the id
+    /// still observes a live mob (as a binding with per-mob authority does).
+    fn bind_activated_mobs_refusing_live_rebinds(
+        state: &MobMcpState,
+    ) -> Arc<std::sync::Mutex<BTreeMap<MobId, meerkat_mob::MobReadHandle>>> {
+        let bound = Arc::new(std::sync::Mutex::new(BTreeMap::new()));
+        let binder = Arc::clone(&bound);
+        let hook: meerkat_mob::MobBeforeActivation = Arc::new(move |handle| {
+            let mut bound = binder
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let live =
+                bound
+                    .get(handle.mob_id())
+                    .is_some_and(|earlier: &meerkat_mob::MobReadHandle| {
+                        let observation = earlier.lifecycle_observation();
+                        observation.failure.is_none()
+                            && matches!(observation.phase, MobState::Creating | MobState::Running)
+                    });
+            if !live {
+                bound.insert(handle.mob_id().clone(), handle);
+            }
+            Box::pin(async move {
+                if live {
+                    Err(MobError::Internal(
+                        "a live mob is already bound under this id".to_string(),
+                    ))
+                } else {
+                    Ok(())
+                }
+            })
+        });
+        state
+            .set_before_activation(hook)
+            .expect("bind the activation hook");
+        bound
+    }
+
+    /// Under a host binding, the resume that met the outage ran the activation
+    /// hook before it failed, and the handle the hook kept reads as a mob that
+    /// stopped, never as a live one. A host binding that refuses to replace a
+    /// live mob's binding therefore admits the on-demand re-attempt, and the
+    /// mob serves.
+    #[tokio::test]
+    async fn a_failed_resume_leaves_no_live_binding_in_the_way_of_its_re_attempt() {
+        let svc = Arc::new(MockSessionSvc::new());
+        let root = tempfile::tempdir().expect("tempdir");
+        let (running, _stopped) =
+            a_running_and_a_stopped_mob_before_a_restart(&svc, root.path()).await;
+        let restored = restored_state(&svc, root.path());
+        let bound = bind_activated_mobs_refusing_live_rebinds(&restored);
+        svc.fail_next_lists(1);
+        restored
+            .mob_list()
+            .await
+            .expect("the realm restore goes on past the store that could not serve");
+        let failed = bound
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&running)
+            .cloned()
+            .expect("the failed resume ran the activation hook");
+        let observation = failed.lifecycle_observation();
+        assert!(
+            observation.failure.is_some(),
+            "a resume that failed before its actor ran reads as stopped: {observation:?}"
+        );
+
+        restored
+            .mob_status(&running)
+            .await
+            .expect("the re-attempt binds the mob again and serves it");
+        let rebound = bound
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&running)
+            .cloned()
+            .expect("the re-attempt is bound");
+        assert!(
+            rebound.lifecycle_observation().failure.is_none(),
+            "the binding now observes the live mob"
+        );
+    }
+
+    /// Every mob id of `inventory` is in exactly one of its sets.
+    fn assert_one_set_per_id(inventory: &MobInventory) {
+        let mut seen = BTreeMap::new();
+        for mob_id in inventory
+            .managed
+            .iter()
+            .map(|(mob_id, _)| mob_id)
+            .chain(inventory.held.iter().map(|(mob_id, _)| mob_id))
+            .chain(inventory.quarantined.iter().map(|row| &row.mob_id))
+        {
+            let count: &mut usize = seen.entry(mob_id.clone()).or_default();
+            *count += 1;
+        }
+        assert!(
+            seen.values().all(|count| *count == 1),
+            "each mob id is in exactly one of managed, held or quarantined: {inventory:?}"
+        );
+    }
+
+    /// The quarantine row of `mob_id` in the inventory.
+    async fn quarantine_row(state: &MobMcpState, mob_id: &MobId) -> QuarantinedMob {
+        state
+            .mob_inventory()
+            .await
+            .expect("the inventory reads")
+            .quarantined
+            .into_iter()
+            .find(|row| &row.mob_id == mob_id)
+            .unwrap_or_else(|| panic!("{mob_id} is quarantined"))
+    }
+
+    /// Lists and inventory reads never re-attempt a quarantined store's
+    /// restore; an id-addressed verb re-attempts an unavailable store once and
+    /// answers the retryable quarantine when it fails; while a re-attempt is
+    /// in flight every other verb, and a second retry, answer the quarantine
+    /// at once; the retry that passes makes the mob managed, and a retry of a
+    /// managed mob answers that it is not quarantined. Each mob id stays in
+    /// exactly one hosted set throughout.
+    #[tokio::test]
+    async fn an_unavailable_quarantine_retries_single_flight_and_lists_never_retry() {
+        let svc = Arc::new(MockSessionSvc::new());
+        let root = tempfile::tempdir().expect("tempdir");
+        let (running, stopped) =
+            a_running_and_a_stopped_mob_before_a_restart(&svc, root.path()).await;
+        let restored = restored_state(&svc, root.path());
+        // The pass and the first on-demand re-attempt meet the outage.
+        svc.fail_next_lists(2);
+        let inventory = restored.mob_inventory().await.expect("the inventory reads");
+        assert_one_set_per_id(&inventory);
+        assert!(
+            inventory
+                .managed
+                .iter()
+                .any(|(mob_id, _)| mob_id == &stopped)
+        );
+        let row = quarantine_row(&restored, &running).await;
+        assert_eq!(row.class, meerkat_mob::MobQuarantineClass::StoreUnavailable);
+        assert_eq!(row.attempts, 0);
+        assert!(!row.retrying);
+
+        // Reads never re-attempt.
+        for _ in 0..3 {
+            restored.mob_list().await.expect("the mobs read");
+            restored.mob_inventory().await.expect("the inventory reads");
+            restored
+                .quarantined_mobs()
+                .await
+                .expect("the quarantined mobs read");
+        }
+        assert_eq!(quarantine_row(&restored, &running).await.attempts, 0);
+
+        // An id-addressed verb re-attempts once; the attempt meets the
+        // outage again and the verb answers the retryable quarantine.
+        let lookup = restored
+            .mob_status(&running)
+            .await
+            .expect_err("the re-attempt met the outage");
+        assert!(
+            matches!(
+                &lookup,
+                MobError::MobQuarantined {
+                    class: meerkat_mob::MobQuarantineClass::StoreUnavailable,
+                    ..
+                }
+            ),
+            "{lookup:?}"
+        );
+        assert_eq!(
+            lookup.wire_error_code(),
+            Some(meerkat_contracts::ErrorCode::SessionRuntimeUnavailable)
+        );
+        assert_eq!(quarantine_data(&lookup)["retryable"], true);
+        assert_eq!(quarantine_row(&restored, &running).await.attempts, 1);
+
+        // Hold the next re-attempt inside its resume.
+        let hold = Arc::new(InsertHold::default());
+        *restored
+            .resume_insert_hold
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&hold));
+        let retrying = {
+            let restored = Arc::clone(&restored);
+            let running = running.clone();
+            tokio::spawn(async move { restored.mob_restore_retry(&running).await })
+        };
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !hold.reached.load(std::sync::atomic::Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the retry reaches its resume");
+        let concurrent =
+            tokio::time::timeout(Duration::from_secs(5), restored.mob_status(&running))
+                .await
+                .expect("a verb during an attempt in flight does not wait for it")
+                .expect_err("the mob is quarantined while the attempt runs");
+        assert!(
+            matches!(
+                &concurrent,
+                MobError::MobQuarantined {
+                    class: meerkat_mob::MobQuarantineClass::StoreUnavailable,
+                    ..
+                }
+            ),
+            "{concurrent:?}"
+        );
+        let second =
+            tokio::time::timeout(Duration::from_secs(5), restored.mob_restore_retry(&running))
+                .await
+                .expect("a second retry does not wait for the first")
+                .expect_err("a second retry is refused while one runs");
+        assert!(
+            matches!(&second, MobError::MobQuarantined { .. }),
+            "{second:?}"
+        );
+        *restored
+            .resume_insert_hold
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        hold.release.notify_one();
+        let outcome = retrying
+            .await
+            .expect("the retry task joins")
+            .expect("the retry restores the mob once the store serves");
+        assert_eq!(outcome, MobRestoreRetryOutcome::Restored);
+
+        let inventory = restored.mob_inventory().await.expect("the inventory reads");
+        assert_one_set_per_id(&inventory);
+        assert!(inventory.quarantined.is_empty(), "{inventory:?}");
+        assert!(
+            inventory
+                .managed
+                .iter()
+                .any(|(mob_id, _)| mob_id == &running)
+        );
+        assert_eq!(
+            restored
+                .mob_restore_retry(&running)
+                .await
+                .expect("a retry of a managed mob answers"),
+            MobRestoreRetryOutcome::NotQuarantined
+        );
+        let unknown = restored
+            .mob_restore_retry(&MobId::from("never-existed"))
+            .await
+            .expect_err("an unknown id is not found");
+        assert!(matches!(unknown, MobError::MobNotFound(_)), "{unknown:?}");
+
+        // A new state over the same root restores the mob on its own pass.
+        for mob_id in [&running, &stopped] {
+            restored
+                .handle_for(mob_id)
+                .await
+                .expect("restored mob handle")
+                .shutdown()
+                .await
+                .expect("retire the restored supervisor route");
+        }
+        drop(restored);
+        let next = restored_state(&svc, root.path());
+        let inventory = next.mob_inventory().await.expect("the inventory reads");
+        assert_one_set_per_id(&inventory);
+        assert!(inventory.quarantined.is_empty(), "{inventory:?}");
+        assert!(
+            inventory
+                .managed
+                .iter()
+                .any(|(mob_id, _)| mob_id == &running),
+            "{inventory:?}"
+        );
+    }
+
+    /// A store that cannot be decoded stays quarantined and visible. Lookups
+    /// never re-attempt it on their own; an explicit retry does, keeps it
+    /// quarantined as `store_unreadable` while the store is not repaired, and
+    /// counts the attempt.
+    #[tokio::test]
+    async fn a_permanent_decode_error_stays_quarantined_and_visible() {
         let svc = Arc::new(MockSessionSvc::new());
         let root = tempfile::tempdir().expect("tempdir");
         let mob_root = MobMcpState::persistent_mob_root(root.path());
@@ -19205,29 +20184,88 @@ mod tests {
             b"not a sqlite database",
         )
         .await
-        .expect("write invalid mob store");
-
-        let state = Arc::new(
-            MobMcpState::new(svc, meerkat_mob::MobControlPrincipal::Owner)
-                .expect("construct runtime authority")
-                .with_persistent_storage_root(Some(root.path().to_path_buf())),
+        .expect("write an undecodable mob store");
+        let restored = restored_state(&svc, root.path());
+        let broken = MobId::from("broken");
+        for _ in 0..3 {
+            restored
+                .mob_status(&broken)
+                .await
+                .expect_err("the quarantined mob has no actor");
+        }
+        let row = quarantine_row(&restored, &broken).await;
+        assert_eq!(row.class, meerkat_mob::MobQuarantineClass::StoreUnreadable);
+        assert_eq!(
+            row.attempts, 0,
+            "a lookup never re-attempts an unreadable store"
         );
-        let err = state
+
+        for attempt in 1..=2 {
+            let retry = restored
+                .mob_restore_retry(&broken)
+                .await
+                .expect_err("the store is still undecodable");
+            assert!(
+                matches!(
+                    &retry,
+                    MobError::MobQuarantined {
+                        class: meerkat_mob::MobQuarantineClass::StoreUnreadable,
+                        ..
+                    }
+                ),
+                "{retry:?}"
+            );
+            assert_eq!(quarantine_data(&retry)["retryable"], false);
+            let row = quarantine_row(&restored, &broken).await;
+            assert_eq!(row.attempts, attempt);
+            assert!(!row.retrying);
+        }
+        let inventory = restored.mob_inventory().await.expect("the inventory reads");
+        assert_one_set_per_id(&inventory);
+        assert_eq!(inventory.quarantined.len(), 1, "{inventory:?}");
+    }
+
+    /// When the restore of the persisted mobs fails as a whole (the root
+    /// cannot be created), the reads of the hosted sets answer the failure,
+    /// never an empty list.
+    #[tokio::test]
+    async fn a_failed_restore_answers_err_rather_than_empty_hosted_sets() {
+        let svc = Arc::new(MockSessionSvc::new());
+        let root = tempfile::tempdir().expect("tempdir");
+        // The mob root's path is a file, so the root cannot be created.
+        let runtime_root = root.path().join("runtime");
+        tokio::fs::create_dir_all(&runtime_root)
+            .await
+            .expect("create runtime root");
+        tokio::fs::write(MobMcpState::persistent_mob_root(&runtime_root), b"a file")
+            .await
+            .expect("block the mob root with a file");
+        let restored = restored_state(&svc, &runtime_root);
+        restored
             .mob_list()
             .await
-            .expect_err("restore failure must not be reported as an empty successful list");
-
-        assert!(
-            err.to_string().contains("broken.db") || err.to_string().contains("database"),
-            "restore failure should preserve the typed storage error, got {err}"
-        );
+            .expect_err("the managed mobs read fails with the restore");
+        restored
+            .held_child_mobs()
+            .await
+            .expect_err("the held child mobs read fails, never empty");
+        restored
+            .quarantined_mobs()
+            .await
+            .expect_err("the quarantined mobs read fails, never empty");
+        restored
+            .mob_inventory()
+            .await
+            .expect_err("the inventory read fails, never empty");
     }
 
     /// A persisted mob whose resume is refused at restore no longer fails the
     /// whole restore: the other mob is restored and serves, and the refused
-    /// one is left unrestored with its store as found. A lookup of its id, a
-    /// create of that id included, answers the typed refusal. A later pass
-    /// whose resume of that store succeeds no longer lists it.
+    /// one is quarantined (`resume_refused`) with its store as found. A
+    /// lookup of its id, a create of that id included, answers the typed
+    /// quarantine whose cause is the refusal, and never re-attempts the
+    /// restore on its own. A later pass whose resume of that store succeeds
+    /// no longer lists it.
     #[tokio::test]
     async fn a_store_whose_resume_is_refused_is_left_unrestored_and_the_rest_restores() {
         let svc = Arc::new(MockSessionSvc::new());
@@ -19287,7 +20325,7 @@ mod tests {
             .await
             .expect("the restored mob serves");
 
-        let is_refusal = |error: &MobError| {
+        let is_refused_cause = |error: &MobError| {
             matches!(
                 error,
                 MobError::IncarnationInconsistent {
@@ -19298,26 +20336,51 @@ mod tests {
                 } if mob_id == &refused
             )
         };
+        let is_refusal = |error: &MobError| {
+            matches!(
+                error,
+                MobError::MobQuarantined {
+                    mob_id,
+                    class: meerkat_mob::MobQuarantineClass::ResumeRefused,
+                    cause,
+                } if mob_id == &refused && is_refused_cause(cause)
+            )
+        };
         let lookup = restored
             .mob_status(&refused)
             .await
             .expect_err("the refused mob was not restored");
         assert!(is_refusal(&lookup), "{lookup:?}");
-        let unrestored = restored.unrestored_mobs().await;
-        assert_eq!(unrestored.len(), 1, "{unrestored:?}");
-        assert_eq!(unrestored[0].0, refused);
-        assert!(is_refusal(&unrestored[0].1), "{:?}", unrestored[0].1);
+        let quarantined = restored
+            .quarantined_mobs()
+            .await
+            .expect("the quarantined mobs read");
+        assert_eq!(quarantined.len(), 1, "{quarantined:?}");
+        assert_eq!(quarantined[0].mob_id, refused);
+        assert_eq!(
+            quarantined[0].class,
+            meerkat_mob::MobQuarantineClass::ResumeRefused
+        );
+        assert_eq!(
+            quarantined[0].attempts, 0,
+            "a lookup never re-attempts a refused store's restore"
+        );
+        assert!(
+            is_refused_cause(&quarantined[0].cause),
+            "{:?}",
+            quarantined[0].cause
+        );
         let create = restored
             .mob_create_definition(explicit_definition("restore-refused"))
             .await
-            .expect_err("a create does not take the unrestored mob's id");
+            .expect_err("a create does not take the quarantined mob's id");
         assert!(is_refusal(&create), "{create:?}");
         assert!(
             tokio::fs::metadata(&refused_store).await.is_ok(),
-            "the unrestored mob's store is kept"
+            "the quarantined mob's store is kept"
         );
 
-        // A later restore pass rebuilds the unrestored set: the store whose
+        // A later restore pass rebuilds the quarantined set: the store whose
         // resume succeeds now is managed and no longer listed.
         *restored
             .refused_resume_store
@@ -19327,8 +20390,11 @@ mod tests {
             .restore_from_persistent_storage()
             .await
             .expect("a later restore pass");
-        let unrestored = restored.unrestored_mobs().await;
-        assert!(unrestored.is_empty(), "{unrestored:?}");
+        let quarantined = restored
+            .quarantined_mobs()
+            .await
+            .expect("the quarantined mobs read");
+        assert!(quarantined.is_empty(), "{quarantined:?}");
         restored
             .mob_status(&refused)
             .await
@@ -19444,9 +20510,9 @@ mod tests {
 
     /// The restore's empty-store sweep keeps a store whose log is empty but
     /// whose creation record is not finalized: its log lost the `MobCreated`
-    /// that record names, so the store is left unrestored under that mob,
-    /// typed, and never deleted. An empty store with no record is still
-    /// swept.
+    /// that record names, so the store is quarantined under that mob
+    /// (`resume_refused`), typed, and never deleted. An empty store with no
+    /// record is still swept.
     #[tokio::test]
     async fn the_restore_sweep_keeps_an_empty_log_whose_creation_record_is_live() {
         let svc = Arc::new(MockSessionSvc::new());
@@ -19474,19 +20540,26 @@ mod tests {
         drop(MobStorage::persistent(&empty_store).expect("an empty store with no record"));
 
         let restored = restored_state(&svc, root.path());
-        let unrestored = restored.unrestored_mobs().await;
-        assert_eq!(unrestored.len(), 1, "{unrestored:?}");
-        assert_eq!(unrestored[0].0, damaged);
+        let quarantined = restored
+            .quarantined_mobs()
+            .await
+            .expect("the quarantined mobs read");
+        assert_eq!(quarantined.len(), 1, "{quarantined:?}");
+        assert_eq!(quarantined[0].mob_id, damaged);
+        assert_eq!(
+            quarantined[0].class,
+            meerkat_mob::MobQuarantineClass::ResumeRefused
+        );
         assert!(
             matches!(
-                &unrestored[0].1,
+                quarantined[0].cause.as_ref(),
                 MobError::IncarnationInconsistent {
                     mob_id,
                     inconsistency: meerkat_mob::IncarnationInconsistency::RecordWithoutCreation,
                 } if mob_id == &damaged
             ),
             "{:?}",
-            unrestored[0].1
+            quarantined[0].cause
         );
         assert!(
             tokio::fs::metadata(&damaged_store).await.is_ok(),

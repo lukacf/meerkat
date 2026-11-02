@@ -286,18 +286,30 @@ longer manages the mob after a restart, because the record names its earlier
 generation; before the restart the session keeps the grant its create
 returned, and an operator grant over the mob restores manage.
 
-Unresumable stores at restore (since 0.9.4): one persisted mob whose resume is
-refused no longer fails `MobMcpState`'s whole restore (0.9.3 then failed every
-mob verb and brought no mob back). That mob is left unrestored with its store
-kept as found (`MobMcpState::unrestored_mobs`, not in `mob_list`), a lookup or
-create of its id answers its refusal (`IncarnationInconsistent` and
-`IncarnationDestroyed` keep their variants, any other refusal is `Internal`
-with its message), and the other mobs restore. Its stored roster still counts
-for provenance, so a create by a session it names is refused with
-`ProvenanceUnavailable`. An empty store whose creation record is not finalized
-is kept the same way (`IncarnationInconsistent`, `RecordWithoutCreation`;
-`MobStorage::unfinalized_creation_mob` reads it). A transport or persistence
-fault, or a store that names no mob, still fails the restore.
+Quarantined stores at restore (since 0.9.9): one persisted mob store that
+does not restore no longer fails `MobMcpState`'s restore (0.9.3 to 0.9.8
+failed every mob verb on any store fault other than a refused resume). The
+store is quarantined: kept exactly as found, with no actor, under the id the
+store names (or the one its file name encodes when it cannot be read), and
+the other mobs restore. Its class says why: `store_unavailable` (a store
+could not serve a read now; retryable), `store_unreadable` (the store, or
+stored state its restore needs, cannot be opened, read or decoded) or
+`resume_refused` (another typed refusal, such as `IncarnationInconsistent`).
+A lookup or create of its id answers `MobError::MobQuarantined` (structured
+`kind: "mob_quarantined"`, with `class`, `retryable` and the cause). An
+id-addressed verb re-attempts a `store_unavailable` store's restore once,
+one attempt at a time (a verb that meets an attempt in flight answers the
+quarantine at once); a list never does. `MobMcpState::mob_restore_retry`
+re-attempts any class after a repair, and every start classifies the stores
+again. `MobMcpState::mob_inventory` reads the managed, held and quarantined
+mobs in one read (each id in exactly one), and `quarantined_mobs` and
+`held_child_mobs` fail rather than answer empty when the restore fails. A
+quarantined store's roster still counts for provenance, so a create by a
+session it names is refused with `ProvenanceUnavailable`. An empty store
+whose creation record is not finalized is quarantined the same way
+(`resume_refused`: `IncarnationInconsistent`, `RecordWithoutCreation`;
+`MobStorage::unfinalized_creation_mob` reads it). Only a root that cannot be
+created, read or walked still fails the restore.
 
 Retire at scope (since 0.9.4): `retire_at_scope(&scope)` retires exactly the
 incarnation a `MemberDeliveryScope` names, with `retire`'s process-tree

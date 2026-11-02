@@ -2649,6 +2649,41 @@ impl MobError {
     /// Structured-data `kind` of [`Self::MobQuarantined`].
     pub const MOB_QUARANTINED_KIND: &'static str = "mob_quarantined";
 
+    /// The quarantine class of a persisted mob whose restore failed with
+    /// this error ([`MobQuarantineClass`]): a store that could not serve a
+    /// read now (a typed store read classed unavailable, or another transport
+    /// fault a later attempt may get past) is `StoreUnavailable`; stored state
+    /// that cannot be read or decoded, or a failure of the mob's own store,
+    /// is `StoreUnreadable`; any other typed refusal of the resume is
+    /// `ResumeRefused`.
+    #[must_use]
+    pub fn restore_quarantine_class(&self) -> MobQuarantineClass {
+        match self {
+            Self::SharedLifecycleFailure(error)
+            | Self::SharedRetirementFailure(error)
+            | Self::MemberStartupRecoveryFailed { cause: error, .. }
+            | Self::MemberCustodyDeferred { cause: error, .. } => error.restore_quarantine_class(),
+            Self::MobQuarantined { class, .. } => *class,
+            Self::StorageError(_) => MobQuarantineClass::StoreUnreadable,
+            Self::SessionError(error) => {
+                match MemberCustodyDeferralCause::of_session_store_failure(error) {
+                    Some(MemberCustodyDeferralCause::StoreUnreadable) => {
+                        MobQuarantineClass::StoreUnreadable
+                    }
+                    Some(_) => MobQuarantineClass::StoreUnavailable,
+                    None if self.failure_class() == MobFailureClass::Transport => {
+                        MobQuarantineClass::StoreUnavailable
+                    }
+                    None => MobQuarantineClass::ResumeRefused,
+                }
+            }
+            other if other.failure_class() == MobFailureClass::Transport => {
+                MobQuarantineClass::StoreUnavailable
+            }
+            _ => MobQuarantineClass::ResumeRefused,
+        }
+    }
+
     /// The wire code of a quarantined mob's answer: the runtime-unavailable
     /// code for a store that could not serve now (retryable), and the code
     /// of the failure its last restore attempt met otherwise.
@@ -4614,6 +4649,49 @@ mod tests {
         assert_eq!(
             MemberCustodyDeferralCause::StoreUnreadable.as_str(),
             "store_unreadable"
+        );
+    }
+
+    /// A failed restore classes its store's quarantine by the typed failure:
+    /// a store read that could not be served now is unavailable, stored state
+    /// that does not decode or the mob's own store failing is unreadable, and
+    /// a store whose records disagree is a refused resume.
+    #[test]
+    fn a_failed_restore_classes_its_quarantine_typed() {
+        let unavailable =
+            MobError::SessionError(meerkat_core::service::SessionError::Store(Box::new(
+                meerkat_runtime::store::RuntimeStoreError::Unavailable("down".to_string()),
+            )));
+        assert_eq!(
+            unavailable.restore_quarantine_class(),
+            MobQuarantineClass::StoreUnavailable
+        );
+        let corrupt = MobError::SessionError(meerkat_core::service::SessionError::Store(Box::new(
+            meerkat_runtime::store::RuntimeStoreError::Corrupt("checksum".to_string()),
+        )));
+        assert_eq!(
+            corrupt.restore_quarantine_class(),
+            MobQuarantineClass::StoreUnreadable
+        );
+        assert_eq!(
+            MobError::StorageError(Box::new(crate::store::MobStoreError::ReadFailed(
+                "file is not a database".to_string()
+            )))
+            .restore_quarantine_class(),
+            MobQuarantineClass::StoreUnreadable
+        );
+        assert_eq!(
+            MobError::IncarnationInconsistent {
+                mob_id: MobId::from("refused"),
+                inconsistency: IncarnationInconsistency::MultipleRecords { count: 2 },
+            }
+            .restore_quarantine_class(),
+            MobQuarantineClass::ResumeRefused
+        );
+        assert_eq!(
+            MobError::SharedLifecycleFailure(Arc::new(unavailable)).restore_quarantine_class(),
+            MobQuarantineClass::StoreUnavailable,
+            "a wrapped failure classes as its cause"
         );
     }
 

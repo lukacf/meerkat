@@ -8062,15 +8062,10 @@ async fn a_put_past_a_child_member_limit_is_refused_typed() {
 // Hosted listings
 // ---------------------------------------------------------------------------
 
-/// The agent mob tool state's listings as Meerkat answers them
-/// (meerkat-mob-mcp 0.9.2, the same at 0.9.3; the lines are 0.9.3's
-/// lib.rs):
-/// - `held_child_mobs` restores best effort and answers empty when the
-///   restore fails (3637-3646);
-/// - `mob_list` and `mob_handles_snapshot` fail until the restore is done,
-///   through `ensure_restored` (4496-4531);
-/// - activation registers a held mob as managed before it drops the hold
-///   (resume 3770-3776, teardown 3620-3625).
+/// The agent mob tool state's listings as Meerkat answers them:
+/// - `mob_list`, `held_child_mobs` and `mob_handles_snapshot` fail until
+///   the restore is done, through `ensure_restored`;
+/// - activation registers a held mob as managed before it drops the hold.
 ///
 /// This gateway's own mob `root` runs, `running` runs, `gone` is destroyed
 /// but still managed, and `child` is held after a restart. Calls are
@@ -8159,7 +8154,12 @@ impl super::native::HostedListings for CoreListings {
         .ok_or_else(restore_failed)
     }
 
-    async fn held_child_mobs(&self) -> Vec<(meerkat_mob::MobId, meerkat_core::types::SessionId)> {
+    async fn held_child_mobs(
+        &self,
+    ) -> std::result::Result<
+        Vec<(meerkat_mob::MobId, meerkat_core::types::SessionId)>,
+        meerkat_mob::MobError,
+    > {
         self.call(|state| {
             state
                 .held
@@ -8172,7 +8172,7 @@ impl super::native::HostedListings for CoreListings {
                 })
                 .collect()
         })
-        .unwrap_or_default()
+        .ok_or_else(restore_failed)
     }
 
     async fn mob_handles_snapshot(
@@ -8221,9 +8221,8 @@ async fn a_held_mob_that_activates_between_the_listings_stays_hosted() {
     assert_eq!(listings.calls(), 3);
 }
 
-/// A restore that fails fails the read. The held listing alone answers
-/// empty then, and a later listing whose own attempt restores would list
-/// the managed mobs without the held one.
+/// A restore that fails fails the read, never answers without the held
+/// mob: the next read, whose own attempt restores, lists it.
 #[tokio::test]
 async fn a_failed_restore_fails_the_hosted_listings() {
     let listings = CoreListings::new(usize::MAX, 1);

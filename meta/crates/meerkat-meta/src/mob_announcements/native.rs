@@ -777,9 +777,11 @@ pub(crate) trait HostedListings: Send + Sync {
         &self,
     ) -> Result<Vec<(meerkat_mob::MobId, meerkat_mob::MobState)>, meerkat_mob::MobError>;
 
-    /// The restored mobs held until their owner resolves. Empty when the
-    /// restore fails.
-    async fn held_child_mobs(&self) -> Vec<(meerkat_mob::MobId, meerkat_core::types::SessionId)>;
+    /// The restored mobs held until their owner resolves. Fails, rather
+    /// than answer empty, until the restore is done.
+    async fn held_child_mobs(
+        &self,
+    ) -> Result<Vec<(meerkat_mob::MobId, meerkat_core::types::SessionId)>, meerkat_mob::MobError>;
 
     /// The handles of the managed mobs not destroyed. Fails until the
     /// restore is done.
@@ -805,7 +807,10 @@ impl HostedListings for meerkat_mob_mcp::MobMcpState {
             .collect())
     }
 
-    async fn held_child_mobs(&self) -> Vec<(meerkat_mob::MobId, meerkat_core::types::SessionId)> {
+    async fn held_child_mobs(
+        &self,
+    ) -> Result<Vec<(meerkat_mob::MobId, meerkat_core::types::SessionId)>, meerkat_mob::MobError>
+    {
         meerkat_mob_mcp::MobMcpState::held_child_mobs(self).await
     }
 
@@ -819,17 +824,16 @@ impl HostedListings for meerkat_mob_mcp::MobMcpState {
 /// Every mob hosted here, this gateway's own included: managed and not
 /// destroyed, or restored and held until its owner resolves.
 ///
-/// The managed listing is read first only to finish the restore of
-/// persisted mobs: it fails rather than answer before the restore, where
-/// the held listing answers empty. Held mobs are then read before managed
-/// ones, because activation adds a held mob to the managed ones before it
-/// drops the hold: a mob that activates between the two reads is in one of
-/// them.
+/// The managed listing is read first to finish the restore of persisted
+/// mobs: every listing fails rather than answer before the restore. Held
+/// mobs are then read before managed ones, because activation adds a held
+/// mob to the managed ones before it drops the hold: a mob that activates
+/// between the two reads is in one of them.
 pub(crate) async fn hosted_set<L: HostedListings>(
     listings: &L,
 ) -> Result<BTreeSet<String>, NativeUnavailable> {
     managed_listing(listings).await?;
-    let held = held_listing(listings).await;
+    let held = held_listing(listings).await?;
     let managed = managed_listing(listings)
         .await?
         .into_iter()
@@ -846,7 +850,7 @@ pub(crate) async fn hosted_handles<L: HostedListings>(
     listings: &L,
 ) -> Result<(BTreeSet<String>, Vec<(meerkat_mob::MobId, L::Handle)>), NativeUnavailable> {
     managed_listing(listings).await?;
-    let held = held_listing(listings).await;
+    let held = held_listing(listings).await?;
     let running = listings
         .mob_handles_snapshot()
         .await
@@ -892,14 +896,18 @@ async fn managed_listing<L: HostedListings>(
         .map_err(|error| NativeUnavailable(error.to_string()))
 }
 
-/// The ids of the restored mobs held until their owner resolves.
-async fn held_listing<L: HostedListings>(listings: &L) -> BTreeSet<String> {
-    listings
+/// The ids of the restored mobs held until their owner resolves, once the
+/// restore of persisted mobs is finished.
+async fn held_listing<L: HostedListings>(
+    listings: &L,
+) -> Result<BTreeSet<String>, NativeUnavailable> {
+    Ok(listings
         .held_child_mobs()
         .await
+        .map_err(|error| NativeUnavailable(error.to_string()))?
         .into_iter()
         .map(|(mob_id, _)| mob_id.as_str().to_string())
-        .collect()
+        .collect())
 }
 
 /// The production seam over this gateway's mob runtime.

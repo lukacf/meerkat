@@ -4,10 +4,12 @@ Only synthetic interviews, private temporary source workspaces and inert worker
 substitutions are used. No model, SDK, native process or installed app executes.
 """
 import asyncio
+from contextlib import contextmanager
 from copy import deepcopy
 import hashlib
 import json
 import uuid
+from types import SimpleNamespace
 
 import pytest
 
@@ -51,7 +53,7 @@ def state(selected=True):
 
 async def test_guide_recomputes_bound_availability_and_never_persists_it(tmp_path, monkeypatch):
     monkeypatch.setattr("launchkit.guide.planner_capability", lambda: {"available": True})
-    service = GuideService(GuideStore(tmp_path / "guides"), object())
+    service = GuideService(GuideStore(tmp_path / "guides"), SimpleNamespace())
     saved = service.store.create(state())
     monkeypatch.setattr(compiler, "generate_package", lambda *a, **k: pytest.fail("Guide reads must not compile packages."))
     shown = await service.get(saved["id"])
@@ -121,6 +123,11 @@ class StaticGuide:
     async def get(self, identity):
         assert identity == self.state["id"]
         return deepcopy(self.state)
+
+    @contextmanager
+    def build_admission(self, identity):
+        assert identity == self.state["id"]
+        yield deepcopy(self.state)
 
 
 class InertService(ImplementationService):

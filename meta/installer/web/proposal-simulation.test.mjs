@@ -812,11 +812,17 @@ test('saved animation selection refuses another setup or changed code before own
     for(const saved of [{...valid,setup_id:'another-setup'},
       {...valid,model_hash:'b'.repeat(64)}, {...valid,artifact:{...valid.artifact,code:valid.artifact.code+' changed'}}]){
       ui.setLatest(saved,{allowForeign:true});
-      await ui.settle(async()=>{
+      ui.holdRecoveryValidation(true);
+      await ui.settle(()=>{
         [...ui.dom.window.document.querySelectorAll('button')].find(item=>item.textContent==='Use latest saved animation').click();
-        for(const deadline=performance.now()+5000;performance.now()<deadline && !ui.text().includes('does not match this proposal');)
-          await realDelay(1);
       });
+      // Flush this click before inspecting its result: the previous candidate's
+      // identical refusal must not satisfy the next selection's wait.
+      assert.match(ui.text(),/Opening saved animation/);
+      assert.doesNotMatch(ui.text(),/does not match this proposal/);
+      await ui.settle(()=>ui.releaseRecoveryValidation());
+      for(const deadline=performance.now()+5000;performance.now()<deadline && !ui.text().includes('does not match this proposal');)
+        await ui.settle(()=>realDelay(1));
       assert.equal(ui.adoptionPosts.length,0);assert.equal(ui.instances.length,1);assert.equal(ui.posts.length,1);
       assert.deepEqual(ui.visible(),[previous]);assert.match(ui.text(),/does not match this proposal/);
     }

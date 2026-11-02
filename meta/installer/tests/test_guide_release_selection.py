@@ -57,6 +57,23 @@ def test_the_guide_admits_its_selected_runtime(gateway):
     assert (selected.version, selected.core_version) == (SELECTED, SELECTED)
 
 
+def test_guide_uses_meta_declared_core_requirement_instead_of_version_equality(gateway, monkeypatch):
+    monkeypatch.setattr(guide_sdk, 'SELECTED_VERSION', '0.9.6')
+    monkeypatch.setattr(guide_sdk, 'CORE_REQUIREMENT', '=0.9.7')
+    value = SelectedGuideRuntime(gateway, '0.9.6', '0.9.7', 'a'*40, 'b'*40)
+    assert value.core_version == '0.9.7'
+    for meta, core in [('0.9.6','0.9.6'),('0.9.7','0.9.7'),('0.9.6','0.9.8')]:
+        with pytest.raises(GatewayInstallError):
+            SelectedGuideRuntime(gateway, meta, core, 'a'*40, 'b'*40)
+
+
+@pytest.mark.parametrize('requirement', [None, '0.9.7', '^0.9.7', '>=0.9.7', '=0.9.7 ', '=0.9.7-dev'])
+def test_guide_refuses_an_absent_or_nonexact_declared_core_requirement(monkeypatch, requirement):
+    monkeypatch.setattr(guide_sdk, 'CORE_REQUIREMENT', requirement)
+    with pytest.raises(ValueError, match='exact Core requirement'):
+        guide_sdk.require_pinned()
+
+
 @pytest.mark.parametrize("version, core_version", REFUSED)
 def test_the_guide_refuses_every_other_runtime_version(gateway, version, core_version):
     with pytest.raises(GatewayInstallError, match=re.escape(f"exact selected Meta {SELECTED} runtime")):

@@ -87,21 +87,53 @@ def test_selected_connect_role_guidance_does_not_promise_denied_peer_tools(produ
     ordinary = tomllib.loads(compiler.mob_toml(value))
     assert ordinary["skills"]["launch_comms"]["content"] == COMMS_PROTOCOL
     assert "does not expose ordinary peer messaging tools" in scoped["skills"]["launch_comms"]["content"]
+    assert "Native Recorder memory is unavailable" in scoped["skills"]["launch_comms"]["content"]
     for role in ("assistant_role", "setup_role"):
         assert "Use your connected peers when useful" in ordinary["skills"][role]["content"]
         assert "Use your connected peers when useful" not in scoped["skills"][role]["content"]
         assert "Ordinary peer messaging is unavailable" in scoped["skills"][role]["content"]
+        assert "Native Recorder memory is also unavailable" in scoped["skills"][role]["content"]
     state = {"id": "guide", "version": 1, "proposal": value}
     availability = guide_package_availability(state, runtime_target=target)
     assert availability["available"] is True
     assert len(availability["design_constraints"]) == 1
     assert "denies ordinary peer messaging tools" in availability["design_constraints"][0]
+    assert "disables native Recorder memory" in availability["design_constraints"][0]
     context = {"package_availability": availability}
     assert compact_guidance_context(context)["package_availability"] == availability
     assert "design_constraints" not in guide_package_availability(state)
     without_setup = deepcopy(state)
     without_setup["proposal"]["acquisition"] = None
     assert "design_constraints" not in guide_package_availability(without_setup, runtime_target=target)
+
+
+@pytest.mark.parametrize("requested_memory", [True, False])
+def test_helperless_guidance_reports_the_same_native_limits_as_compilation(product, requested_memory):
+    from launchkit.guide import compact_guidance_context, guide_package_availability
+
+    target = catalog_target(product)
+    value = setup_spec()
+    value["acquisition"] = None
+    for row in value["agent_classes"]:
+        row["tools"].update(rust_bundles=[], memory=requested_memory)
+    assert compiler.connect_route(value, target) is True
+    compiled = tomllib.loads(compiler.mob_toml(value, runtime_target=target))
+    ordinary = tomllib.loads(compiler.mob_toml(value, runtime_target=target, legacy_ordinary=True))
+    for name, profile in compiled["profiles"].items():
+        assert profile["tools"]["memory"] is False
+        assert "send_message" in profile["tools"]["deny"]
+        assert ordinary["profiles"][name]["tools"]["memory"] is requested_memory
+        assert "deny" not in ordinary["profiles"][name]["tools"]
+    state = {"id": "helperless", "version": 1, "proposal": value}
+    availability = guide_package_availability(state, runtime_target=target)
+    assert availability["available"] is True
+    constraints = availability["design_constraints"]
+    assert len(constraints) == 1
+    assert "denies ordinary peer messaging tools" in constraints[0]
+    assert "disables native Recorder memory" in constraints[0]
+    assert compact_guidance_context({"package_availability": availability})["package_availability"] == availability
+    assert "design_constraints" not in guide_package_availability(state)
+    assert all(row["tools"]["memory"] is requested_memory for row in value["agent_classes"])
 
 
 @pytest.mark.parametrize("add_setup", [True, False])

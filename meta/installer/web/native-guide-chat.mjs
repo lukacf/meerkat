@@ -111,6 +111,31 @@ function savedMessageEntry(message, index) {
   };
 }
 
+export function guideTranscriptSections(groups) {
+  const conversation = [], activity = [];
+  for (const group of groups) {
+    const visible = [], technical = [];
+    for (const entry of group.entries) {
+      if (["compaction_started", "compaction_completed"].includes(entry.runtimeEvent?.eventType)) {
+        technical.push(entry);
+      } else if (entry.identity.role === "assistant" && entry.blocks?.length) {
+        const isActivity = block => ["thinking", "tool-call"].includes(block.type);
+        const prose = entry.blocks.filter(block => !isActivity(block));
+        const details = entry.blocks.filter(isActivity);
+        // Copy actions must follow the displayed subset, not the original
+        // mixed prose/tool payload. Canonical entries stay unchanged.
+        if (prose.length) visible.push({ ...entry, blocks: prose, copyText: undefined });
+        if (details.length) technical.push({ ...entry, blocks: details, copyText: undefined });
+      } else {
+        visible.push(entry);
+      }
+    }
+    if (visible.length) conversation.push({ ...group, entries: visible, copyText: undefined });
+    if (technical.length) activity.push({ ...group, entries: technical, copyText: undefined });
+  }
+  return { conversation, activity };
+}
+
 export function guideConversation({ state, frames = [], bindings = [], pendingMessage = null }) {
   const savedIds = new Set((state.messages || []).map((message) => message.id));
   const published = new Set(bindings.filter((binding) => savedIds.has(binding.assistant_message_id))

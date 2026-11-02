@@ -2013,7 +2013,10 @@ def _venv_ready(root, owner):
             if info.st_uid != os.getuid():
                 _fail('unsafe-path')
             if stat.S_ISLNK(info.st_mode):
-                if not re.fullmatch(r'python(?:[0-9]+(?:\.[0-9]+)?)?', path.name) or path.resolve() != host_python:
+                # CPython 3.14's venv adds one more interpreter alias:
+                # U+1D70B (mathematical italic small pi) followed by 'thon'.
+                if (not re.fullmatch(r'python(?:[0-9]+(?:\.[0-9]+)?)?|\U0001d70bthon', path.name)
+                        or path.resolve() != host_python):
                     _fail('unsafe-path')
             elif not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
                 _fail('unsafe-path')

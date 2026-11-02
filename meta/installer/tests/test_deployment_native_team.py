@@ -121,7 +121,7 @@ def test_native_package_retains_maintained_startup_helper_export_exactly():
     assert read_package_source(files) == source
 
 
-@pytest.mark.parametrize("changed", ["content", "mode", "duplicate-manifest-key"])
+@pytest.mark.parametrize("changed", ["content", "mode", "member-request-content", "member-request-mode", "duplicate-manifest-key"])
 def test_native_source_tampering_fails_closed(changed):
     payload, _, _ = compile_native_source(accepted_guide().state, 4)
     files = package_files(payload)
@@ -129,6 +129,12 @@ def test_native_source_tampering_fails_closed(changed):
         files["app.py"] = (b"replaced", files["app.py"][1])
     elif changed == "mode":
         files["install.sh"] = (files["install.sh"][0], 0o644)
+    elif changed == "member-request-content":
+        name = "launchkit/connect_member_class_requests.py"
+        files[name] = (b"replaced request helper", files[name][1])
+    elif changed == "member-request-mode":
+        name = "launchkit/connect_member_class_requests.py"
+        files[name] = (files[name][0], 0o755)
     else:
         value = files[NATIVE_SOURCE][0]
         files[NATIVE_SOURCE] = (b'{"protocol":1,' + value[1:], 0o644)

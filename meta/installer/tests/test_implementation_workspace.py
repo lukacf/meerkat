@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import stat
 import subprocess
 import sys
 import threading
@@ -41,6 +42,39 @@ def workspace(tmp_path):
     result = ImplementationWorkspace(tmp_path / "implementation", starter_blueprint())
     result.seed()
     return result
+
+
+@pytest.mark.parametrize("mask", [0o002, 0o022])
+@pytest.mark.parametrize("operation", ["seed", "write", "batch"])
+def test_nested_source_creation_keeps_every_new_parent_private(tmp_path, monkeypatch, mask, operation):
+    name = "assets/new-parent/nested/retained.txt"
+    content = "Retained nested source.\n"
+    if operation == "seed":
+        monkeypatch.setattr(implementation, "generate_package", lambda blueprint: [
+            *generate_package(blueprint), PackageFile(name, content)])
+    result = ImplementationWorkspace(tmp_path / "implementation", starter_blueprint())
+    previous_mask = os.umask(mask)
+    try:
+        result.seed()
+        if operation == "write":
+            result.write_file(name, content)
+        elif operation == "batch":
+            result.apply_batch([{"kind": "write", "path": name,
+                                 "content": content, "expected_sha256": None}])
+    finally:
+        os.umask(previous_mask)
+    assert result.read_file(name) == content
+    for parent in ("assets", "assets/new-parent", "assets/new-parent/nested"):
+        assert stat.S_IMODE((result.project / parent).stat().st_mode) == 0o700
+    assert stat.S_IMODE((result.project / name).stat().st_mode) == 0o644
+
+
+def test_nested_source_write_does_not_chmod_existing_parent(workspace):
+    parent = workspace.project / "assets"
+    parent.mkdir(mode=0o700, exist_ok=True)
+    parent.chmod(0o750)
+    workspace.write_file("assets/new-parent/nested/retained.txt", "Retained source.\n")
+    assert stat.S_IMODE(parent.stat().st_mode) == 0o750
 
 
 def authored_feature(workspace, broken=False):

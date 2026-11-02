@@ -15,7 +15,7 @@ from pathlib import Path
 from .connect_installer_caller import (CustodyError, ExactFile, _preparation_setup_targets,
     _preparation_helper_catalog_request, _preparation_helper_catalog_capability,
     _preparation_helper_catalog_basis, _prepared_issuance_reference,
-    _selected_service_parent_administration, _selected_standing_policy, _same_member_classes)
+    _selected_service_parent_administration, _selected_standing_policy, _same_member_classes, _selected_console_domains)
 
 
 MAX_PLAN_BYTES = 256 * 1024
@@ -124,7 +124,9 @@ def _assemble(plan):
     _text(owner["deployment"], "Deployment")
     _array(owner["components"], "Selected components")
     native = _closed(owner["native_host"], {"realm", "grant_administrator", "remote_operator",
-        "ingress_domain", "members", "routes"}, "PreparedNativeHost", {"service_parent_administration", "member_classes"})
+        "ingress_domain", "members", "routes"}, "PreparedNativeHost", {"service_parent_administration", "member_classes",
+        "authentication_domain", "event_domain"})
+    _selected_console_domains(native)
     realm = _text(native["realm"], "Native realm")
     members = _array(native["members"], "Prepared native members")
     by_member = {}

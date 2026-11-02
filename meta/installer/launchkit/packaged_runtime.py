@@ -161,7 +161,8 @@ def selected_ordinary_gateway():
     return _selected_ordinary_gateway
 
 
-def create_app(*, retained_ordinary_applications=(), application_configuration_selection=None):
+def create_app(*, retained_ordinary_applications=(), application_configuration_selection=None,
+               saved_state_root=None):
     """Shipping Uvicorn factory entry: select before importing the server.
 
     A package that includes the selected Meta release's RPC gateway also
@@ -172,9 +173,14 @@ def create_app(*, retained_ordinary_applications=(), application_configuration_s
     ordinary installations. They are not inferred from package or receipt data.
     An optional original configuration supplier reaches the same registry;
     it selects complete field declarations for a guide/version at new Build.
+    A trusted launcher may also select its existing saved-state directory
+    before package selection and server import. This grants no native custody.
     """
     if type(retained_ordinary_applications) is not tuple:
         raise TypeError("Select the original retained ordinary applications as a tuple.")
+    if saved_state_root is not None:
+        from .startup_state import configure_saved_state_root
+        configure_saved_state_root(saved_state_root)
     selected = open_selection()
     gateway = selected_ordinary_gateway()
     custody = _application_model_custody

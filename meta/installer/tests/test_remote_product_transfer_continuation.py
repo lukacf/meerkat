@@ -321,17 +321,23 @@ async def test_product_connect_refuses_an_owner_that_changed_while_its_bundle_wa
     assert not list((f.service.root / ".connecting").iterdir())
 
 
-async def test_hook_control_below_the_product_glibc_floor_refuses_before_any_remote_request(
+async def test_hook_control_minimum_above_exact_product_glibc_refuses_before_any_remote_request(
         request, tmp_path, monkeypatch, inputs):
-    # The developer hook's Linux control admits guests from glibc 2.31; the
-    # product declares 2.39. Its guest-side check enforces only the control's
-    # own minimum, so the refusal belongs here, before the first connection.
+    # No host can satisfy both the exact product 2.39 declaration and the
+    # selected control's minimum 2.41. Refuse before contacting the guest.
+    original_control = selected_control
+    def newer_control(owner):
+        selected = original_control(owner)._selection
+        return control.ProductControlSelection(runtime_target=selected[0],
+            requirements=selected[1], wheels=selected[2], python_tag=selected[3],
+            abi_tag=selected[4], glibc_minimum=(2, 41), require_current=selected[6])
+    monkeypatch.setattr(sys.modules[__name__], "selected_control", newer_control)
     monkeypatch.setattr(product_fixtures, "RESOURCE_RECORD", {"runtime_compatibility": {
         "supported_host": product_fixtures.LINUX_HOST,
         "scope": "hash_bound_archive_metadata_and_declared_host_only_not_runtime_qualification"}})
     f = await origin_service(request, tmp_path, monkeypatch, inputs)
     with pytest.raises(DraftConflict,
-            match=r"need glibc 2\.39 or newer, but the selected Linux control admits computers with glibc 2\.31"):
+            match=r"requires exactly glibc 2\.39, but the selected Linux control requires glibc 2\.41 or newer"):
         await f.service._connect(GUIDE, 3, BUILD, ENDPOINT, str(f.destination), product_owner=f.selection)
     assert not f.transport.calls and not f.transport.frames
     with pytest.raises(LookupError, match="No remote installation"):

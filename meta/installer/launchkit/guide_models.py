@@ -122,6 +122,15 @@ class IncomingDataIntent(StrictModel):
     history_window: str = Field(default="", max_length=500)
     routes: list[IncomingDataRoute] = Field(default_factory=list, max_length=64)
     source_message_ids: list[str] = Field(min_length=1, max_length=40)
+    service_requirement_ids: list[str] = Field(default_factory=list, max_length=64,
+        description="Exact IDs of the service operations this source needs. These are plan associations, not native bindings, successful checks or permission to collect.")
+
+    @model_serializer(mode="wrap")
+    def omit_unselected_service_operations(self, handler):
+        data = handler(self)
+        if not self.service_requirement_ids:
+            data.pop("service_requirement_ids", None)
+        return data
 
     @model_validator(mode="after")
     def coherent_intent(self):
@@ -134,6 +143,28 @@ class IncomingDataIntent(StrictModel):
             raise ValueError("A history window belongs only to a bounded-history choice.")
         if len(self.source_message_ids) != len(set(self.source_message_ids)):
             raise ValueError("Incoming data evidence IDs must be distinct.")
+        if len(self.service_requirement_ids) != len(set(self.service_requirement_ids)):
+            raise ValueError("A source's required service operation IDs must be distinct.")
+        return self
+
+
+class ServiceRequirement(StrictModel):
+    """Desired service use, never credentials, a native selection or a check result."""
+
+    id: str = Field(pattern=r"^[a-z][a-z0-9_-]{0,79}$")
+    requirement_id: str = Field(pattern=r"^[a-z][a-z0-9_-]{0,79}$")
+    service: str = Field(min_length=1, max_length=200)
+    capability: Literal["read", "write", "incoming_interaction"]
+    operation: str = Field(min_length=1, max_length=1200,
+        description="The required useful operation in the user's terms, not executable code or a purported native tool selection.")
+    resource: str = Field(default="", max_length=1200,
+        description="The requested repository, channel, account or other resource scope. Empty means unresolved, never unrestricted access.")
+    source_message_ids: list[str] = Field(min_length=1, max_length=40)
+
+    @model_validator(mode="after")
+    def distinct_evidence(self):
+        if len(self.source_message_ids) != len(set(self.source_message_ids)):
+            raise ValueError("Service requirement evidence IDs must be distinct.")
         return self
 
 
@@ -142,12 +173,16 @@ class DesignBrief(StrictModel):
     requirements: list[RequestedFeature] = Field(default_factory=list, max_length=32)
     incoming_data: list[IncomingDataIntent] = Field(default_factory=list, max_length=32,
         description="Optional proposed incoming sources and routing choices. This is user intent, not native configuration, provider capability evidence or permission to collect. Track implementation and access in the linked requirement.")
+    service_requirements: list[ServiceRequirement] | None = Field(default=None, max_length=64,
+        description="Required service operations to resolve and check before Build. Separate read, write and incoming interaction. These are user requirements, not authentication, grants, selected native operations or successful checks. Null or omitted means not yet inventoried. An explicit empty list records that the current design needs no service operations.")
 
     @model_serializer(mode="wrap")
     def omit_unused_incoming_data(self, handler):
         data = handler(self)
         if not self.incoming_data:
             data.pop("incoming_data", None)
+        if self.service_requirements is None:
+            data.pop("service_requirements", None)
         return data
 
     @model_validator(mode="after")
@@ -159,6 +194,17 @@ class DesignBrief(StrictModel):
         requirements = {item.id for item in self.requirements}
         if any(item.requirement_id not in requirements for item in self.incoming_data):
             raise ValueError("Link incoming data to an existing requested feature so its implementation remains visible.")
+        if len({item.id for item in (self.service_requirements or [])}) != len(self.service_requirements or []):
+            raise ValueError("Give each required service operation its own ID.")
+        if any(item.requirement_id not in requirements for item in (self.service_requirements or [])):
+            raise ValueError("Link each service operation to an existing requested feature.")
+        services = {item.id: item for item in (self.service_requirements or [])}
+        for source in self.incoming_data:
+            if any(identity not in services for identity in source.service_requirement_ids):
+                raise ValueError("Link a source only to existing required service operations.")
+            if any(services[identity].requirement_id != source.requirement_id
+                   for identity in source.service_requirement_ids):
+                raise ValueError("A source and its required service operations must belong to the same requested feature.")
         return self
 
 
@@ -286,6 +332,19 @@ def validate_guide_publication(args: dict, context: dict, proposal: dict | None,
     old_sources = {item.id for item in old.incoming_data}
     if old_sources - {item.id for item in value.brief.incoming_data}:
         raise ValueError("Do not drop an incoming source. Revise its choices and record scope decisions in its linked feature.")
+    old_services = {item.id: item for item in (old.service_requirements or [])}
+    if old_services.keys() - {item.id for item in (value.brief.service_requirements or [])}:
+        raise ValueError("Do not drop a required service operation. Record scope decisions in its linked feature.")
+    if old.service_requirements is not None and value.brief.service_requirements is None:
+        raise ValueError("Preserve and refresh the recorded service inventory, including an explicit empty list when none are needed.")
+    for service in value.brief.service_requirements or []:
+        if any(identity not in evidence for identity in service.source_message_ids):
+            raise ValueError("Service requirements cite missing or non-user evidence.")
+        previous = old_services.get(service.id)
+        if previous and (service.capability, service.requirement_id) != (previous.capability, previous.requirement_id):
+            latest_source = max((positions.get(identity, -1) for identity in previous.source_message_ids), default=-1)
+            if not any(positions[identity] > latest_source for identity in service.source_message_ids):
+                raise ValueError("Changing a required service capability or its linked feature needs later user evidence; outbound tools do not replace incoming interaction.")
     for topic, fact in value.brief.facts.items():
         if any(identity not in evidence for identity in fact.source_message_ids):
             raise ValueError(f"The {topic} fact cites a missing or non-user message. Use evidence_messages IDs.")

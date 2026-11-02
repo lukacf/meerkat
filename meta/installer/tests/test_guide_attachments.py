@@ -57,6 +57,15 @@ def pdf_bytes(*, text='Fictional PDF evidence.', encrypted=False, pages=1):
     return output.getvalue()
 
 
+def retained_encrypted_pdf(store, guide_id, monkeypatch):
+    # Exercise read-time refusal separately from upload admission. Storage still
+    # contains a real encrypted PDF with its correct hash and original metadata.
+    with monkeypatch.context() as admission:
+        admission.setattr('launchkit.guide_attachments._text', lambda data, media_type: '')
+        ref, = store.save(guide_id, [('retained.pdf', 'application/pdf', pdf_bytes(encrypted=True))])
+    return ref
+
+
 def test_immutable_upload_redo_survives_new_store_and_returns_exact_bytes(attachments):
     store, guide_id, _ = attachments
     ref, = store.save(guide_id, [('sample.png', 'image/png', PNG)])

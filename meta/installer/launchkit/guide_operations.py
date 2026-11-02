@@ -54,10 +54,22 @@ class GuideOperations:
                 state["operation"] = operation
             return state
 
-    async def submit(self, service, identity, value):
+    async def submit(self, service, identity, value, *, command_id=None):
         body = value.model_dump(mode="json")
-        request_id = fingerprint({"guide_id": identity, **body})
+        request_id = fingerprint({"guide_id": identity, **body, **({"command_id": command_id} if command_id else {})})
         async with self.lock:
+            from .guide_commands import GuideCommand, pending_command
+            retained = None
+            if command_id is not None:
+                command = GuideCommand(service.store, command_id, identity, body)
+                retained = await asyncio.to_thread(command.load)
+                if retained and retained["applied"] is not None:
+                    return await service._with_implementation_evidence(retained["applied"]), False
+                if retained and retained["failure"] is not None:
+                    raise DraftConflict("This original command ended without a saved response. Submit a new command to try again.")
+            pending = await asyncio.to_thread(pending_command, service.store)
+            if pending is not None and pending != command_id:
+                raise DraftConflict("Recover the previous guide command before starting another.")
             previous = await asyncio.to_thread(service.store.operation, identity)
             saved = await service.get(identity)
             active = self.tasks.get(identity)
@@ -75,6 +87,7 @@ class GuideOperations:
                     raise DraftConflict("This setup changed. Reload the saved conversation before submitting.")
                 operation = {"request_id": request_id, "version": value.version, "status": "running",
                              "started_at": datetime.now(timezone.utc).isoformat(), "request": body,
+                             **({"command_id": command_id} if command_id else {}),
                              "detail": "Your guide is considering the answer and checking the design. You can leave and return here."}
                 await asyncio.to_thread(service.store.save_operation, identity, operation)
                 task = asyncio.create_task(self._run(service, identity, value, operation))
@@ -89,7 +102,8 @@ class GuideOperations:
 
     async def _run(self, service, identity, value, operation):
         try:
-            result = await service.respond(identity, value)
+            result = await service.respond(identity, value,
+                **({"command_id": operation["command_id"]} if "command_id" in operation else {}))
             operation.update(status="completed", detail="Your response is saved.")
             await asyncio.to_thread(service.store.save_operation, identity, operation)
             return result

@@ -1145,9 +1145,9 @@ def require_candidate_update_protocol(service, update):
     if dependency is not None:
         from .deployment_updates import _runtime_supervisor_paths, _sha256
         version = dependency.get("version") if type(dependency) is dict else None
-        if type(version) is not int or version not in {1, 2, 3, 4}:
+        if type(version) is not int or version not in {1, 2, 3, 4, 6}:
             raise DraftConflict("The staged runtime update has no supported frozen history contract.")
-        if version in {2, 3, 4}:
+        if version in {2, 3, 4, 6}:
             sources = dependency.get("required_supervisor_sources")
             files = service.get("host_files") or {}
             if (type(sources) is not dict or set(sources) != set(_runtime_supervisor_paths(version, sources=sources))

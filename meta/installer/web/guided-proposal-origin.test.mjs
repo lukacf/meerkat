@@ -1473,7 +1473,7 @@ test('first-minute editor descriptions clear after explicit submission enters th
     await typeStarting(document, 'Shape a useful research team for my next project.');
     assert.ok(document.querySelector('#setup-message').getAttribute('aria-describedby'));
     await act(async () => { document.querySelector('#setup-send').click(); await settle(); });
-    assert.equal(document.querySelector('#setup-message').getAttribute('aria-describedby'), null,
+    assert.equal(document.querySelector('#setup-message').getAttribute('aria-describedby') === null, true,
       'A continuing conversation does not reference opening-only guidance.');
     assert.equal(document.getElementById('setup-after-send') === null, true);
     assert.equal(calls.filter(call => call.method !== 'GET').length, 1, 'Only the explicit guide Send admits a turn.');

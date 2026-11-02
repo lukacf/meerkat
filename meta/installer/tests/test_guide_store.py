@@ -42,6 +42,60 @@ def test_concurrent_tabs_cannot_overwrite_each_other(tmp_path):
     assert GuideStore(tmp_path).get(created["id"]) == saved[0]
 
 
+@pytest.mark.parametrize("journal_mode", ["delete", "wal"])
+def test_build_admission_holds_saved_guide_and_operation_through_publication(tmp_path, journal_mode):
+    import sqlite3
+
+    store = GuideStore(tmp_path)
+    created = store.create(starter_state({}))
+    store.save_operation(created["id"], {"status": "completed"})
+    path = tmp_path / "guided-setups.sqlite3"
+    with sqlite3.connect(path) as db:
+        assert db.execute(f"PRAGMA journal_mode={journal_mode}").fetchone()[0] == journal_mode
+    with store.build_admission(created["id"]) as current:
+        assert current["version"] == created["version"]
+        assert current["operation"]["status"] == "completed"
+        # A second connection models the original store writer thread. Neither
+        # guide revisions nor same-version operation updates can commit here.
+        with sqlite3.connect(path, timeout=0) as writer:
+            for table in ("guided_setups", "guide_operations"):
+                with pytest.raises(sqlite3.OperationalError, match="locked"):
+                    writer.execute(f"UPDATE {table} SET body=body")
+    saved = store.save({**created, "summary": "Changed after publication"}, created["version"])
+    assert saved["version"] == created["version"] + 1
+
+
+def test_build_admission_refuses_busy_or_missing_store_without_creating_it(tmp_path):
+    import sqlite3
+
+    missing = GuideStore(tmp_path / "missing")
+    with pytest.raises(DraftConflict):
+        with missing.build_admission(str(uuid4())):
+            pytest.fail("Missing guide must not reach publication")
+    assert not missing.root.exists()
+    store = GuideStore(tmp_path / "existing")
+    created = store.create(starter_state({}))
+    with sqlite3.connect(store.root / "guided-setups.sqlite3") as writer:
+        writer.execute("BEGIN IMMEDIATE")
+        with pytest.raises(DraftConflict):
+            with store.build_admission(created["id"]):
+                pytest.fail("Busy guide must not reach publication")
+    with store.build_admission(created["id"]) as current:
+        assert current["id"] == created["id"]
+        assert "operation" not in current
+
+
+def test_failed_publication_releases_guide_without_saving_snapshot_edits(tmp_path):
+    store = GuideStore(tmp_path)
+    created = store.create(starter_state({}))
+    with pytest.raises(RuntimeError, match="Publication failed"):
+        with store.build_admission(created["id"]) as current:
+            current["summary"] = "Unsaved snapshot edit"
+            raise RuntimeError("Publication failed")
+    assert store.get(created["id"]) == created
+    assert store.save({**created, "summary": "Later saved revision"}, 1)["version"] == 2
+
+
 def test_creation_request_replays_after_restart_without_resetting_conversation(tmp_path):
     store = GuideStore(tmp_path)
     request_id = str(uuid4())

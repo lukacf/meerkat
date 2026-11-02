@@ -406,7 +406,7 @@ focused('closed prompt IDs suppress delayed private frames before first display 
 });
 
 focused('non-success exact completions retain truthful result without public committed-response success copy', async () => {
-  for (const completion of ['callback_pending', 'callback_batch_pending', 'cancelled', 'abandoned', 'abandoned_with_error', 'completed_with_finalization_failure', 'runtime_terminated']) {
+  for (const completion of ['callback_pending', 'callback_batch_pending', 'cancelled', 'abandoned', 'abandoned_with_error', 'completed_with_finalization_failure', 'runtime_terminated', 'outcome_unknown']) {
     const f = fixture(), view = f.mount(); await flush();
     f.overrides.set('/send', call => { f.host.state = busy('h:terminal'); return response({ association: call.body.association, request_id: 'h:terminal', status: 'pending' }, 202); });
     const input = f.container.querySelector('textarea'); input.value = 'Original terminal test'; f.submit('.toolkit-conversation form'); await flush();
@@ -417,6 +417,45 @@ focused('non-success exact completions retain truthful result without public com
     assert.ok(f.container.querySelector('.forge-setup__completion').textContent.startsWith('Last confirmed result:'));
     assert.equal(f.requests.filter(call => call.path === '/send').length, 1);
     view.dispose(); f.dom.window.close();
+  }
+});
+
+focused('outcome unknown from exact POST or retained result stays neutral without resending', async () => {
+  for (const route of ['post', 'result']) {
+    const f = fixture(), view = f.mount();
+    try {
+      await flush();
+      const id = 'h:unknown', draft = 'This work may already have run';
+      const terminal = { ...completed(id, 'outcome_unknown'), can_send: false };
+      const result = { scope: f.host.scope, send_request_id: id, completion: 'outcome_unknown', state: terminal };
+      f.overrides.set('/send', call => {
+        f.host.state = route === 'post' ? terminal : busy(id);
+        return response({ association: call.body.association, request_id: id,
+          status: route === 'post' ? 'completed' : 'pending', ...(route === 'post' ? { result } : {}) }, route === 'post' ? 200 : 202);
+      });
+      f.overrides.set(`/result/${encodeURIComponent(id)}`, () => {
+        f.host.state = terminal;
+        return response({ request_id: id, status: 'completed', result });
+      });
+      const input = f.container.querySelector('textarea'); input.value = draft;
+      f.submit('.toolkit-conversation form'); await flush();
+      assert.deepEqual(f.port.snapshot.state.last_completion, { send_request_id: id, completion: 'outcome_unknown' });
+      assert.equal(input.value, draft, 'An unknown outcome cannot clear the draft as a committed response');
+      assert.equal(f.container.querySelector('.forge-setup__completion').textContent, 'Last confirmed result: Outcome unknown');
+      assert.doesNotMatch(f.container.textContent, /Response received\. Complete|Run ended with an error|Agent run cancelled/);
+      assert.equal(f.port.canSend, false, 'The native sending capability remains authoritative');
+      assert.equal(f.port.canStop, false);
+      assert.equal(f.port.outcomeUncertain, false, 'A typed outcome is distinct from an unconfirmed transport request');
+      for (let index = 0; index < 3; index++) { await f.port.refresh(); await flush(); }
+      view.dispose();
+      const reopened = f.mount();
+      try {
+        await flush();
+        assert.equal(f.container.querySelector('.forge-setup__completion').textContent, 'Last confirmed result: Outcome unknown');
+        assert.equal(f.requests.filter(call => call.path === '/send').length, 1);
+        assert.equal(f.requests.some(call => ['/cancel', '/answer'].includes(call.path)), false);
+      } finally { reopened.dispose(); }
+    } finally { view.dispose(); f.dom.window.close(); }
   }
 });
 

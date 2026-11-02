@@ -288,11 +288,11 @@ async def test_original_private_parent_closes_source_and_project_scope_before_la
 
     from launchkit import runtime_candidates as candidates
     inflated = []
-    original_entries = candidates.product_prefix_entries
+    original_entries = candidates._product_prefix_stream
     def entries(content, prefix):
         inflated.append(prefix)
         return original_entries(content, prefix)
-    monkeypatch.setattr(candidates, "product_prefix_entries", entries)
+    monkeypatch.setattr(candidates, "_product_prefix_stream", entries)
     monkeypatch.setattr(installed, "open_installed_product_source", observe_open)
     monkeypatch.setattr(service, "_launch", launch)
     monkeypatch.setattr(service, "status", status)
@@ -412,9 +412,10 @@ def _forget_kept_inventory(f):
 
 async def _start_until_spawn(f, monkeypatch):
     """Run one actual product Start up to its inert spawn boundary."""
+    # Observe the shared walker, including direct open-file archive reads.
     from launchkit import runtime_candidates as candidates
     inflated, sources = [], []
-    original_entries = candidates.product_prefix_entries
+    original_entries = candidates._product_prefix_stream
     def entries(content, prefix):
         inflated.append(prefix)
         return original_entries(content, prefix)
@@ -428,7 +429,7 @@ async def _start_until_spawn(f, monkeypatch):
     async def spawn(supervisor, *args, **options):
         raise SpawnBoundary("Inert application spawn boundary reached")
     with monkeypatch.context() as held:
-        held.setattr(candidates, "product_prefix_entries", entries)
+        held.setattr(candidates, "_product_prefix_stream", entries)
         held.setattr(worker.Supervisor, "_verify_candidate_runtime", verify)
         held.setattr(worker.Supervisor, "spawn_child", spawn)
         held.setattr(worker, "require_available_console_port", lambda port: {"available": True})
@@ -554,7 +555,7 @@ def _child_counts(monkeypatch, f):
     counts = {"inflated": 0, "reads": 0}
     prefix = f.selected.destination / ".bin" / f.source.artifacts.prefix
     gateway = prefix / "bin/toolkit_gateway"
-    original_entries, original_read = candidates.product_prefix_entries, adapter.read_owned
+    original_entries, original_read = candidates._product_prefix_stream, adapter.read_owned
     def entries(content, name):
         counts["inflated"] += 1
         return original_entries(content, name)
@@ -562,7 +563,7 @@ def _child_counts(monkeypatch, f):
         if prefix in Path(path).parents and Path(path) != gateway:
             counts["reads"] += 1
         return original_read(path, *args, **kwargs)
-    monkeypatch.setattr(candidates, "product_prefix_entries", entries)
+    monkeypatch.setattr(candidates, "_product_prefix_stream", entries)
     monkeypatch.setattr(adapter, "read_owned", read_owned)
     return counts
 
@@ -651,8 +652,13 @@ def test_product_child_start_refuses_a_changed_kept_inventory(installed_bootstra
         _invoke_child(f)
 
 
-def _descriptor_target(descriptor):
-    return os.readlink(f"/proc/self/fd/{descriptor}")
+def _descriptor_target(descriptor, directory):
+    # Match the real open file within this fixture, without a /proc dependency.
+    opened = os.fstat(descriptor)
+    for path in (directory, *directory.iterdir()):
+        if os.path.samestat(opened, path.stat()):
+            return str(path)
+    return ""
 
 
 async def test_failed_lazy_inventory_write_keeps_the_start_and_the_next_start_is_full(
@@ -662,7 +668,7 @@ async def test_failed_lazy_inventory_write_keeps_the_start_and_the_next_start_is
     failing = [True]
     original = os.fsync
     def fsync(descriptor):
-        if failing[0] and ".native-prefix-receipt-" in _descriptor_target(descriptor):
+        if failing[0] and ".native-prefix-receipt-" in _descriptor_target(descriptor, f.directory):
             raise OSError(errno.ENOSPC, "No space left on device")
         return original(descriptor)
     monkeypatch.setattr(os, "fsync", fsync)
@@ -682,7 +688,7 @@ async def test_lazy_inventory_is_durable_before_the_receipt_names_it(installed_b
     events = []
     original_fsync, original_replace, original_write = os.fsync, os.replace, storage_setup.write_private
     def fsync(descriptor):
-        target = _descriptor_target(descriptor)
+        target = _descriptor_target(descriptor, f.directory)
         if "native-prefix-receipt-" in target:
             events.append("file fsync")
         elif target == str(f.directory):

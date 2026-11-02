@@ -112,21 +112,23 @@ class ProductControlSelection:
         _require(self._selection == self._original, "The original control selection changed.")
         from .templates.install_candidate import _read_selected_dependency_wheels
         from .runtime_selection import selected_runtime_artifacts
-        # The guest checks its glibc against this control's minimum only, so
-        # a minimum below the product's declared floor is refused here.
+        # Wheel compatibility uses a minimum; the selected resource library
+        # requires an exact host. Carry both into the sealed guest manifest.
         floor, minimum = selected_runtime_artifacts(self.runtime_target).glibc_floor, self._selection[5]
-        if floor is not None and minimum < floor:
+        if floor is not None and minimum > floor:
             from .projects import DraftConflict
             needed = f"glibc {floor[0]}.{floor[1]}"
-            raise DraftConflict(f"This product's native programs need {needed} or newer, but the selected Linux "
-                f"control admits computers with glibc {minimum[0]}.{minimum[1]}. Raise the control selection's glibc "
-                f"minimum to {floor[0]}.{floor[1]} and install on a Linux computer with {needed} or newer.")
+            raise DraftConflict(f"This product's selected resource library requires exactly {needed}, but the selected "
+                f"Linux control requires glibc {minimum[0]}.{minimum[1]} or newer. Select control dependencies "
+                f"compatible with {needed}.")
         pending = _read_selected_dependency_wheels(self._selection[1], self._selection[2])
         names = {row[0] for row in pending}
         _require({"pydantic", "pydantic-core", "httpx"} <= names,
             "The owner-selected control dependency batch lacks its actual host imports.")
         interpreter = {"python_tag": self._selection[3], "abi_tag": self._selection[4],
             "glibc_minimum": list(self._selection[5]), "machine": "x86_64", "implementation": "cpython"}
+        if floor is not None:
+            interpreter["product_glibc"] = list(floor)
         for _, filename, _, _ in pending:
             _require(_wheel_compatible(filename, interpreter),
                 "The selected control wheel differs from its actual guest interpreter/platform.")
@@ -244,6 +246,13 @@ def guest_interpreter(manifest):
         and actual == value["python_tag"] == value["abi_tag"]
         and libc == "glibc" and glibc >= tuple(value["glibc_minimum"]),
         "The original selected control interpreter/platform differs from this guest.")
+    required = value.get("product_glibc")
+    if required is not None:
+        _require(type(required) is list and len(required) == 2
+            and all(type(part) is int and part >= 0 for part in required),
+            "The selected product's glibc declaration is invalid.")
+        _require(glibc == tuple(required),
+            f"The selected product requires exactly glibc {required[0]}.{required[1]} on this guest.")
     return {"python_tag": actual, "abi_tag": actual, "machine": platform.machine(),
         "implementation": sys.implementation.name, "glibc": list(glibc)}
 

@@ -85,7 +85,8 @@ def test_staged_runtime_refusal_admits_an_interpreter_the_product_supports(produ
     assert deployment.staged_runtime_refusal(staged_product_update(product.target)) is None
 
 
-def test_staged_runtime_refusal_names_a_glibc_floor_above_this_computer(product, monkeypatch):
+@pytest.mark.parametrize("host_glibc", [[2, 35], [2, 41]])
+def test_staged_runtime_refusal_requires_exact_product_glibc(product, monkeypatch, host_glibc):
     # Apply asks Stage's glibc question before the worker moves the runtime
     # aside. The inert product's floor is modelled at its cheap reader.
     from launchkit import runtime_candidates
@@ -96,9 +97,9 @@ def test_staged_runtime_refusal_names_a_glibc_floor_above_this_computer(product,
         assert candidate_selection(target) == selected
         return (2, 39)
     monkeypatch.setattr(runtime_candidates, "declared_glibc_floor", declared)
-    monkeypatch.setattr(deployment, "forge_interpreter", lambda: {**CP311_LINUX, "glibc_minimum": [2, 35]})
+    monkeypatch.setattr(deployment, "forge_interpreter", lambda: {**CP311_LINUX, "glibc_minimum": host_glibc})
     refusal = deployment.staged_runtime_refusal(staged_product_update(product.target))
-    assert re.search(r"glibc 2\.39 or newer, but this computer has glibc 2\.35", refusal or "")
+    assert re.search(rf"exactly glibc 2\.39, but this computer has glibc {host_glibc[0]}\.{host_glibc[1]}", refusal or "")
 
 
 @pytest.mark.parametrize("update", [{}, {"runtime_dependency_update": None},

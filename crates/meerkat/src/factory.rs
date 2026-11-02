@@ -2525,7 +2525,9 @@ impl CreateSessionModelResolutionError {
                     | meerkat_core::ProviderBindingError::UnknownProviderName(_)
                     | meerkat_core::ProviderBindingError::InvalidRealmId { .. }
                     | meerkat_core::ProviderBindingError::ServerRequiresSelfHostedProvider { .. }
-                    | meerkat_core::ProviderBindingError::EmptySelfHostedServerId { .. },
+                    | meerkat_core::ProviderBindingError::EmptySelfHostedServerId { .. }
+                    | meerkat_core::ProviderBindingError::CopilotAccountRouteConflict { .. }
+                    | meerkat_core::ProviderBindingError::CopilotAccountSourceUnsupported { .. },
                 ..
             }
             | meerkat_core::ConnectionTargetError::ProviderMismatch { .. }

@@ -128,7 +128,7 @@ Run these in order after any DSL edit:
 
 1. `make machine-codegen` — re-emit TLA+ specs + generated protocol adapters from the current DSL. Must run after any DSL change.
 2. `make machine-check-drift` — compare freshly generated artifacts against committed on-disk versions. Fails if DSL was edited without re-running codegen.
-3. `make machine-verify` — run TLC model-checker on the TLA+ specs. Proves invariants across the bounded state space (CI uses 2-3 concurrent entities per domain; can be expanded).
+3. `make machine-verify`: run TLC model-checker on the TLA+ specs. Proves invariants across the bounded state space (CI uses 2-3 concurrent entities per domain; can be expanded). Since 0.9.9 a schema can narrow an unsigned input field's TLC samples in the CI profile alone (`InputFieldDomainKind::CiValues`, declared with `MachineSchemaMetadata::with_input_field_domain`): the generated model ranges the field over a constant that `ci.cfg` assigns the declared values and `deep.cfg` those together with the default `0..2`, a composition explores the Deep set, and the generated machine is unchanged. `SessionDocumentMachine` uses it to keep its CI run within the per-run cap.
 4. Parity tests — `runtime_schema_parity`, `runtime_alphabet_parity`, and render-contract audits guard catalog/production equality, typed command coverage, and generated-source provenance.
 
 All required passes green = DSL + runtime are in sync, generated artifacts match the catalog, and the machine cannot enter an invalid state given typed inputs within the verified bounds.

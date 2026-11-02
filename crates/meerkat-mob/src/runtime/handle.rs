@@ -7296,12 +7296,11 @@ pub struct SpawnMemberSpec {
     /// retains for the identity before the spawn's membership step. Set only
     /// by the rotation's plan; never taken from caller-supplied arguments.
     pub(crate) fresh_life: bool,
-    /// Whether the request acts for the created identity entry of its name
-    /// ([`crate::IdentityEntryOrigin::Created`]), owed its seat: the seat of
-    /// such an entry on its archived session at a start. A dormant seat with
-    /// it takes only that entry's name, never another's, and keeps its
-    /// member a created entry. Never taken from caller-supplied arguments;
-    /// a spawn ignores it.
+    /// Whether the request acts for the store-owned identity entry of its
+    /// name ([`crate::IdentityEntryOrigin::Created`]) that no member holds
+    /// ([`Self::with_created_custody`]). A spawn or a dormant seat with it
+    /// takes only that entry's name, never another's, and keeps its member a
+    /// store-owned entry. An agent-lane request never carries it.
     pub(crate) created_custody: bool,
 }
 
@@ -7482,6 +7481,21 @@ impl SpawnMemberSpec {
     #[must_use]
     pub fn with_entry_custody(mut self, entry_custody: bool) -> Self {
         self.entry_custody = entry_custody;
+        self
+    }
+
+    /// Set whether the request acts for the store-owned identity entry of
+    /// its name ([`crate::IdentityEntryOrigin::Created`]) that no member
+    /// holds: it takes only that entry's name, never another's, and keeps
+    /// its member a store-owned entry. The host's spawn that
+    /// creates a store-owned identity hosted on its first use (a placed or
+    /// externally bound one) or held for its host's held protocol
+    /// ([`MobHandle::spawn_held_until`]) holds it, as a roster-owned
+    /// identity's host spawn holds [`Self::entry_custody`]. A request may
+    /// hold one custody, never both. An agent-lane request never carries it.
+    #[must_use]
+    pub fn with_created_custody(mut self, created_custody: bool) -> Self {
+        self.created_custody = created_custody;
         self
     }
 

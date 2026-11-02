@@ -150,29 +150,45 @@ pub enum IdentityChangeConsentInput<'a> {
     Imported(&'a ConsentProvenance),
 }
 
-/// One identity a store-owned create commits: its declared spec, and how its
+/// One identity a store-owned create commits: its declared spec, how its
 /// host prepares it before its first use (the host's rule for the spec's
-/// profile).
+/// profile), and whether its host holds its creation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct CreatedIdentityRequest {
     pub spec: CreatedIdentitySpec,
     pub preparation: IdentityPreparationMode,
+    /// Whether the host holds the identity's creation for its held protocol
+    /// ([`super::MobHandle::spawn_held_until`] of a spec with created
+    /// custody, [`super::SpawnMemberSpec::with_created_custody`]): the
+    /// commit seats nothing, the identity awaits its held creation, and no
+    /// start seats it Dormant before its host created it, as a roster-owned
+    /// identity declared held awaits its held creation.
+    pub held_creation: bool,
 }
 
 impl CreatedIdentityRequest {
-    /// `spec`, with no host preparation.
+    /// `spec`, with no host preparation, created by the commit.
     #[must_use]
     pub fn new(spec: CreatedIdentitySpec) -> Self {
         Self {
             spec,
             preparation: IdentityPreparationMode::None,
+            held_creation: false,
         }
     }
 
     #[must_use]
     pub fn with_preparation(mut self, preparation: IdentityPreparationMode) -> Self {
         self.preparation = preparation;
+        self
+    }
+
+    /// Whether the host holds the identity's creation for its held protocol
+    /// ([`Self::held_creation`]).
+    #[must_use]
+    pub fn with_held_creation(mut self, held_creation: bool) -> Self {
+        self.held_creation = held_creation;
         self
     }
 }

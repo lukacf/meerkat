@@ -2679,3 +2679,266 @@ async fn a_present_store_owned_entry_retired_by_an_older_build_is_reseated_with_
         "the seat carries the row's labels"
     );
 }
+
+// ---------------------------------------------------------------------------
+// R2.7: placement and held creation for store-owned identities
+// ---------------------------------------------------------------------------
+
+/// The admission verdict MobMachine answers a spawn of `name` holding the
+/// given custodies, probed on a copy of the mob's published state (nothing
+/// is applied to the mob).
+fn probed_admission(
+    mob: &StoreOwnedMob,
+    name: &str,
+    entry_custody: bool,
+    created_custody: bool,
+) -> crate::machines::mob_machine::MemberAdmissionVerdictKind {
+    use crate::machines::mob_machine as dsl;
+    let state = mob.handle.machine_state_watch_rx.borrow().clone();
+    let mut authority =
+        dsl::MobMachineAuthority::recover_from_state(state).expect("the published state recovers");
+    let transition = dsl::MobMachineMutator::apply(
+        &mut authority,
+        dsl::MobMachineInput::ProbeMemberAdmission {
+            agent_identity: dsl::AgentIdentity::from_domain(&id(name)),
+            entry_custody,
+            created_custody,
+        },
+    )
+    .expect("the probe answers");
+    transition
+        .effects()
+        .iter()
+        .find_map(|effect| match effect {
+            dsl::MobMachineEffect::MemberAdmissionProbed { verdict, .. } => Some(*verdict),
+            _ => None,
+        })
+        .expect("the probe's verdict")
+}
+
+/// Row (RED): a placed store-owned identity is hosted on its first use. The
+/// create commits its row and records it unseated, hosted on its first use,
+/// and seats nothing; a dormant seat of it is refused; and the spawn that
+/// creates it is its host's spawn holding its created custody, which
+/// MobMachine admits for it (a placed spawn's admission among them), while a
+/// spawn without custody is refused its name. The placed ladder's own steps
+/// are the machine row
+/// `a_placed_ladder_under_created_custody_takes_a_hosted_store_owned_entry`.
+///
+/// RED on the old tree: a placed store-owned create is refused unsupported.
+#[tokio::test]
+async fn a_placed_store_owned_identity_is_hosted_on_first_use_by_a_placed_spawn() {
+    let mob = StoreOwnedMob::new("placed-store-owned").await;
+    let placed = spec("placed", "worker")
+        .with_placement(meerkat_contracts::WireHostRef("placed-host".to_string()));
+    let receipt = committed(
+        mob.create(
+            StoreOwnedIdentityCreate::new(
+                operation("create-placed"),
+                IdentityChangeRequesterInput::host("console"),
+                vec![CreatedIdentityRequest::new(placed)],
+            ),
+            ALLOW,
+        )
+        .await,
+    );
+    assert_eq!(
+        receipt.identities[0].outcome,
+        IdentityChangeEntryOutcome::HostedOnFirstUse
+    );
+    mob.unseated_for("placed", UnseatedEntryCause::HostedOnFirstUse)
+        .await;
+    assert!(!mob.is_member("placed").await, "nothing is seated");
+    let refused = mob
+        .handle
+        .seat_dormant_members(vec![
+            SpawnMemberSpec::host_root("worker", id("placed")).with_created_custody(true),
+        ])
+        .await
+        .expect("the seat batch answers");
+    assert!(
+        matches!(
+            refused[0],
+            crate::runtime::DormantSeatOutcome::Refused { .. }
+        ),
+        "a dormant seat never creates a hosted identity: {refused:?}"
+    );
+    assert!(!mob.is_member("placed").await);
+    use crate::machines::mob_machine::MemberAdmissionVerdictKind as Verdict;
+    assert_eq!(
+        probed_admission(&mob, "placed", false, true),
+        Verdict::Admitted,
+        "its host's spawn holding its created custody creates it"
+    );
+    assert_eq!(
+        probed_admission(&mob, "placed", false, false),
+        Verdict::IdentityMemberRejected,
+        "a spawn without custody is refused its name"
+    );
+    assert_eq!(
+        probed_admission(&mob, "placed", true, false),
+        Verdict::IdentityMemberOfAnotherOrigin,
+        "entry custody never takes a store-owned identity's name"
+    );
+}
+
+/// A mob whose members are registered and finished by a selecting host, so
+/// fresh members can be held, over in-memory storage with its identity store.
+/// A restart resumes the same storage over a cold-restarted session service.
+struct HeldMob {
+    storage: MobStorage,
+    handle: MobHandle,
+    service: Arc<MockSessionService>,
+}
+
+impl HeldMob {
+    fn compose(service: &MockSessionService) {
+        let machine = Arc::new(
+            meerkat_runtime::MeerkatMachine::ephemeral()
+                .with_native_work_authorization_host(Arc::new(super::held_spawn::AdmitsNothing))
+                .expect("install the governed work host"),
+        );
+        service.set_runtime_adapter(machine);
+        service.decide_tool_surface_at_create();
+    }
+
+    async fn new(label: &str) -> Self {
+        let storage = MobStorage::in_memory();
+        let service = Arc::new(MockSessionService::new());
+        Self::compose(&service);
+        let handle = MobBuilder::new(store_owned_definition(label), storage.clone())
+            .with_session_service(service.clone())
+            .with_member_runtime_registration_hook(Arc::new(
+                super::held_spawn::SelectingHost::default(),
+            ))
+            .create()
+            .await
+            .expect("create the mob");
+        Self {
+            storage,
+            handle,
+            service,
+        }
+    }
+
+    async fn restart(&mut self) {
+        let restarted = Arc::new(self.service.cold_restart_preserving_durable_state().await);
+        Self::compose(&restarted);
+        crash_stop_and_release_routes(self.handle.clone()).await;
+        self.service = restarted;
+        self.handle = tokio::time::timeout(
+            STEP,
+            Box::pin(
+                MobBuilder::for_resume(self.storage.clone())
+                    .with_session_service(self.service.clone())
+                    .with_member_runtime_registration_hook(Arc::new(
+                        super::held_spawn::SelectingHost::default(),
+                    ))
+                    .notify_orchestrator_on_resume(false)
+                    .resume(),
+            ),
+        )
+        .await
+        .expect("the restart answers")
+        .expect("the restart succeeds");
+    }
+
+    fn standing(&self, name: &str) -> Option<EntryStanding> {
+        match self
+            .handle
+            .identity_entry(&id(name))
+            .expect("the entry read answers")
+        {
+            IdentityEntryRead::Entry(view) => Some(view.standing),
+            _ => None,
+        }
+    }
+
+    fn origin(&self, name: &str) -> Option<IdentityEntryOrigin> {
+        match self
+            .handle
+            .identity_entry(&id(name))
+            .expect("the entry read answers")
+        {
+            IdentityEntryRead::Entry(view) => Some(view.origin),
+            _ => None,
+        }
+    }
+}
+
+/// Row (RED): a store-owned identity whose host holds its creation is
+/// created by the held protocol and never seated Dormant. The create
+/// records it awaiting its held creation and seats nothing; a dormant seat
+/// of it is refused; a restart keeps it awaiting its held creation (its row
+/// keeps the fact); and its host's held spawn holding its created custody
+/// creates it once activated, a store-owned entry.
+///
+/// RED on the old tree: the create seats the identity Dormant.
+#[tokio::test]
+async fn a_held_store_owned_identity_is_created_by_the_held_protocol_and_never_seated_dormant() {
+    let mut mob = HeldMob::new("held-store-owned").await;
+    let held = spec("held", "worker");
+    committed(
+        tokio::time::timeout(
+            STEP,
+            mob.handle.create_store_owned_identities(
+                StoreOwnedIdentityCreate::new(
+                    operation("create-held"),
+                    IdentityChangeRequesterInput::host("console"),
+                    vec![CreatedIdentityRequest::new(held).with_held_creation(true)],
+                ),
+                ALLOW,
+            ),
+        )
+        .await
+        .expect("the create answers"),
+    );
+    let awaiting = Some(EntryStanding::Unseated(UnseatedEntryCause::HeldCreation));
+    assert_eq!(
+        mob.standing("held"),
+        awaiting,
+        "it awaits its held creation"
+    );
+    let refused = mob
+        .handle
+        .seat_dormant_members(vec![
+            SpawnMemberSpec::host_root("worker", id("held")).with_created_custody(true),
+        ])
+        .await
+        .expect("the seat batch answers");
+    assert!(
+        matches!(
+            refused[0],
+            crate::runtime::DormantSeatOutcome::Refused { .. }
+        ),
+        "a dormant seat never creates a held identity: {refused:?}"
+    );
+
+    mob.restart().await;
+    assert_eq!(
+        mob.standing("held"),
+        awaiting,
+        "a restart keeps it awaiting its held creation"
+    );
+
+    let mut spec = SpawnMemberSpec::host_root("worker", id("held")).with_created_custody(true);
+    spec.runtime_mode = Some(crate::MobRuntimeMode::TurnDriven);
+    let spawn = tokio::time::timeout(
+        STEP,
+        mob.handle
+            .spawn_held_within(spec, tokio::time::Instant::now() + STEP),
+    )
+    .await
+    .expect("the held spawn reaches its hold point")
+    .expect("the identity is held");
+    tokio::time::timeout(STEP, spawn.activate())
+        .await
+        .expect("the activation answers")
+        .expect("the activation publishes the member");
+    assert!(
+        matches!(mob.standing("held"), Some(EntryStanding::Seated(_))),
+        "{:?}",
+        mob.standing("held")
+    );
+    assert_eq!(mob.origin("held"), Some(IdentityEntryOrigin::Created));
+}

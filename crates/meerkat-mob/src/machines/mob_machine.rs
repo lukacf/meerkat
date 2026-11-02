@@ -16148,6 +16148,138 @@ mod tests {
         );
     }
 
+    /// A store-owned entry hosted on its first use is created by its host's
+    /// placed spawn holding its created custody: the remote ladder opens for
+    /// it under that custody (a ladder without custody is refused its name),
+    /// and its abort drops the custody and leaves the entry hosted on its
+    /// first use.
+    #[test]
+    fn a_placed_ladder_under_created_custody_takes_a_hosted_store_owned_entry() {
+        let mut authority = MobMachineAuthority::new();
+        let identity = AgentIdentity::from("placed-created");
+        let transition = MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::RecordCreatedIdentityEntry {
+                agent_identity: identity.clone(),
+                cause: UnseatedEntryCause::HostedOnFirstUse,
+            },
+        )
+        .expect("the record answers");
+        assert!(
+            transition.effects().iter().any(|effect| matches!(
+                effect,
+                MobMachineEffect::CreatedIdentityEntryRecorded {
+                    verdict: CreatedIdentityRecordVerdict::Recorded,
+                    ..
+                }
+            )),
+            "a new store-owned entry may be hosted on its first use"
+        );
+        let host = HostId("placed-created-host".to_string());
+        let spawn_id = PlacedSpawnId("placed-created-spawn".to_string());
+        authorize_remote_placed_spawn(&mut authority, &identity, &host, "spec-digest");
+        assert!(
+            MobMachineMutator::apply(
+                &mut authority,
+                begin_remote_placed_spawn(&identity, &host, &spawn_id),
+            )
+            .is_err(),
+            "a placed spawn without custody is refused the entry's name"
+        );
+        let begin = match begin_remote_placed_spawn(&identity, &host, &spawn_id) {
+            MobMachineInput::BeginSpawnExec {
+                agent_identity,
+                agent_runtime_id,
+                fence_token,
+                generation,
+                profile_material_digest,
+                external_addressable,
+                runtime_mode,
+                bridge_session_id,
+                replacing,
+                placement,
+                workgraph_required,
+                rust_bundles_present,
+                per_spawn_external_tools_present,
+                mob_default_external_tools_present,
+                default_llm_client_override_present,
+                host_surface_mcp_allowlist_present,
+                inherited_tool_filter_present,
+                shell_env_present,
+                mcp_stdio_env_present,
+                mcp_http_headers_present,
+                memory_required,
+                mcp_required,
+                resume_session_id,
+                placed_spawn_id,
+                placed_provision_operation_id,
+                placed_operation_owner_session_id,
+                effective_profile_override_present,
+                effective_model_override_present,
+                ..
+            } => MobMachineInput::BeginSpawnExec {
+                agent_identity,
+                agent_runtime_id,
+                fence_token,
+                generation,
+                profile_material_digest,
+                external_addressable,
+                runtime_mode,
+                bridge_session_id,
+                replacing,
+                placement,
+                workgraph_required,
+                rust_bundles_present,
+                per_spawn_external_tools_present,
+                mob_default_external_tools_present,
+                default_llm_client_override_present,
+                host_surface_mcp_allowlist_present,
+                inherited_tool_filter_present,
+                shell_env_present,
+                mcp_stdio_env_present,
+                mcp_http_headers_present,
+                memory_required,
+                mcp_required,
+                resume_session_id,
+                placed_spawn_id,
+                placed_provision_operation_id,
+                placed_operation_owner_session_id,
+                effective_profile_override_present,
+                effective_model_override_present,
+                entry_custody: false,
+                created_custody: true,
+            },
+            other => panic!("the placed spawn opens with BeginSpawnExec, got {other:?}"),
+        };
+        MobMachineMutator::apply(&mut authority, begin)
+            .expect("the placed ladder opens under created custody");
+        let state = authority.state();
+        assert_eq!(
+            state.spawn_exec_phase.get(&identity),
+            Some(&SpawnExecPhase::MaterializePending)
+        );
+        assert!(state.spawn_exec_created_custody.contains(&identity));
+        assert!(!state.spawn_exec_entry_custody.contains(&identity));
+        MobMachineMutator::apply(
+            &mut authority,
+            MobMachineInput::AbortSpawnExec {
+                agent_identity: identity.clone(),
+            },
+        )
+        .expect("the ladder aborts");
+        let state = authority.state();
+        assert!(!state.spawn_exec_created_custody.contains(&identity));
+        assert_eq!(
+            state.identity_entry_unseated.get(&identity),
+            Some(&UnseatedEntryCause::HostedOnFirstUse),
+            "the entry stays hosted on its first use"
+        );
+        assert_eq!(
+            state.identity_entry_origins.get(&identity),
+            Some(&IdentityEntryOrigin::Created)
+        );
+    }
+
     /// The admission of one identity change answers in its precedence: a
     /// receipt of the same request replays it even when its spec is no
     /// longer current, a changes hold refuses it first, and a store-owned

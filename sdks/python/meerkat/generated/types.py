@@ -638,6 +638,9 @@ class ToolsRegisterResult:
 class WorkEventsResult:
     """Result envelope for work-event list reads (`workgraph/events`)."""
     events: list[Any]
+    event_high_water_mark: Optional[int] = None
+    next_after_seq: Optional[int] = None
+    truncated: Optional[bool] = None
 
     @classmethod
     def from_wire(cls, value: Any) -> "WorkEventsResult":
@@ -646,7 +649,10 @@ class WorkEventsResult:
         """
         data = _expect_wire_object(value, 'WorkEventsResult')
         return cls(
+            event_high_water_mark=(_expect_wire_int(data['event_high_water_mark'], 'WorkEventsResult.event_high_water_mark') if data.get('event_high_water_mark') is not None else None),
             events=list(_expect_wire_list(_require_wire_field(data, 'events', 'WorkEventsResult'), 'WorkEventsResult.events')),
+            next_after_seq=(_expect_wire_int(data['next_after_seq'], 'WorkEventsResult.next_after_seq') if data.get('next_after_seq') is not None else None),
+            truncated=(_expect_wire_bool(data['truncated'], 'WorkEventsResult.truncated') if data.get('truncated') is not None else None),
         )
 
 
@@ -654,6 +660,9 @@ class WorkEventsResult:
 class WorkItemsResult:
     """Result envelope for work-item list reads (`workgraph/list`, `workgraph/ready`)."""
     items: list[Any]
+    anchor_event_seq: Optional[int] = None
+    changed_since_anchor: Optional[bool] = None
+    next_cursor: Optional[str] = None
     total_items: Optional[int] = None
     truncated: Optional[bool] = None
 
@@ -664,7 +673,10 @@ class WorkItemsResult:
         """
         data = _expect_wire_object(value, 'WorkItemsResult')
         return cls(
+            anchor_event_seq=(_expect_wire_int(data['anchor_event_seq'], 'WorkItemsResult.anchor_event_seq') if data.get('anchor_event_seq') is not None else None),
+            changed_since_anchor=(_expect_wire_bool(data['changed_since_anchor'], 'WorkItemsResult.changed_since_anchor') if data.get('changed_since_anchor') is not None else None),
             items=list(_expect_wire_list(_require_wire_field(data, 'items', 'WorkItemsResult'), 'WorkItemsResult.items')),
+            next_cursor=(_expect_wire_str(data['next_cursor'], 'WorkItemsResult.next_cursor') if data.get('next_cursor') is not None else None),
             total_items=(_expect_wire_int(data['total_items'], 'WorkItemsResult.total_items') if data.get('total_items') is not None else None),
             truncated=(_expect_wire_bool(data['truncated'], 'WorkItemsResult.truncated') if data.get('truncated') is not None else None),
         )
@@ -4398,6 +4410,7 @@ class GoalStatusResult:
 @dataclass
 class ReadyWorkFilter:
     """Request payload for ReadyWorkFilter."""
+    cursor: Optional[str] = None
     labels: Optional[list[str]] = None
     limit: Optional[int] = None
     namespace: Optional[str] = None
@@ -4452,6 +4465,9 @@ class WorkGraphEventFilter:
 class WorkGraphEventsResponse:
     """Wire payload for WorkGraphEventsResponse."""
     events: list[WorkGraphEvent]
+    event_high_water_mark: Optional[int] = None
+    next_after_seq: Optional[int] = None
+    truncated: Optional[bool] = None
 
     @classmethod
     def from_wire(cls, value: Any) -> "WorkGraphEventsResponse":
@@ -4460,7 +4476,10 @@ class WorkGraphEventsResponse:
         """
         data = _expect_wire_object(value, 'WorkGraphEventsResponse')
         return cls(
+            event_high_water_mark=(_expect_wire_int(data['event_high_water_mark'], 'WorkGraphEventsResponse.event_high_water_mark') if data.get('event_high_water_mark') is not None else None),
             events=[WorkGraphEvent.from_wire(_item) for _item in _expect_wire_list(_require_wire_field(data, 'events', 'WorkGraphEventsResponse'), 'WorkGraphEventsResponse.events')],
+            next_after_seq=(_expect_wire_int(data['next_after_seq'], 'WorkGraphEventsResponse.next_after_seq') if data.get('next_after_seq') is not None else None),
+            truncated=(_expect_wire_bool(data['truncated'], 'WorkGraphEventsResponse.truncated') if data.get('truncated') is not None else None),
         )
 
 
@@ -4478,6 +4497,9 @@ class WorkGraphItemsResponse:
     """One page of work items: `list` (most recently updated first) or `ready`
 (priority, then creation time, then id)."""
     items: list[WorkItem]
+    anchor_event_seq: Optional[int] = None
+    changed_since_anchor: Optional[bool] = None
+    next_cursor: Optional[str] = None
     total_items: Optional[int] = None
     truncated: Optional[bool] = None
 
@@ -4488,7 +4510,10 @@ class WorkGraphItemsResponse:
         """
         data = _expect_wire_object(value, 'WorkGraphItemsResponse')
         return cls(
+            anchor_event_seq=(_expect_wire_int(data['anchor_event_seq'], 'WorkGraphItemsResponse.anchor_event_seq') if data.get('anchor_event_seq') is not None else None),
+            changed_since_anchor=(_expect_wire_bool(data['changed_since_anchor'], 'WorkGraphItemsResponse.changed_since_anchor') if data.get('changed_since_anchor') is not None else None),
             items=[WorkItem.from_wire(_item) for _item in _expect_wire_list(_require_wire_field(data, 'items', 'WorkGraphItemsResponse'), 'WorkGraphItemsResponse.items')],
+            next_cursor=(_expect_wire_str(data['next_cursor'], 'WorkGraphItemsResponse.next_cursor') if data.get('next_cursor') is not None else None),
             total_items=(_expect_wire_int(data['total_items'], 'WorkGraphItemsResponse.total_items') if data.get('total_items') is not None else None),
             truncated=(_expect_wire_bool(data['truncated'], 'WorkGraphItemsResponse.truncated') if data.get('truncated') is not None else None),
         )
@@ -4503,9 +4528,12 @@ class WorkGraphSnapshot:
     items: list[WorkItem]
     ready_item_ids: list[str]
     realm_id: str
+    anchor_event_seq: Optional[int] = None
     attention: Optional[list[WorkAttentionBinding]] = None
+    changed_since_anchor: Optional[bool] = None
     event_high_water_mark: Optional[int] = None
     namespace: Optional[str] = None
+    next_cursor: Optional[str] = None
     total_items: Optional[int] = None
     truncated: Optional[bool] = None
 
@@ -4517,12 +4545,15 @@ class WorkGraphSnapshot:
         data = _expect_wire_object(value, 'WorkGraphSnapshot')
         return cls(
             all_namespaces=_expect_wire_bool(_require_wire_field(data, 'all_namespaces', 'WorkGraphSnapshot'), 'WorkGraphSnapshot.all_namespaces'),
+            anchor_event_seq=(_expect_wire_int(data['anchor_event_seq'], 'WorkGraphSnapshot.anchor_event_seq') if data.get('anchor_event_seq') is not None else None),
             attention=([WorkAttentionBinding.from_wire(_item) for _item in _expect_wire_list(data['attention'], 'WorkGraphSnapshot.attention')] if data.get('attention') is not None else None),
             captured_at=_expect_wire_str(_require_wire_field(data, 'captured_at', 'WorkGraphSnapshot'), 'WorkGraphSnapshot.captured_at'),
+            changed_since_anchor=(_expect_wire_bool(data['changed_since_anchor'], 'WorkGraphSnapshot.changed_since_anchor') if data.get('changed_since_anchor') is not None else None),
             edges=[WorkEdge.from_wire(_item) for _item in _expect_wire_list(_require_wire_field(data, 'edges', 'WorkGraphSnapshot'), 'WorkGraphSnapshot.edges')],
             event_high_water_mark=(_expect_wire_int(data['event_high_water_mark'], 'WorkGraphSnapshot.event_high_water_mark') if data.get('event_high_water_mark') is not None else None),
             items=[WorkItem.from_wire(_item) for _item in _expect_wire_list(_require_wire_field(data, 'items', 'WorkGraphSnapshot'), 'WorkGraphSnapshot.items')],
             namespace=(_expect_wire_str(data['namespace'], 'WorkGraphSnapshot.namespace') if data.get('namespace') is not None else None),
+            next_cursor=(_expect_wire_str(data['next_cursor'], 'WorkGraphSnapshot.next_cursor') if data.get('next_cursor') is not None else None),
             ready_item_ids=[_expect_wire_str(_item, 'WorkGraphSnapshot.ready_item_ids[]') for _item in _expect_wire_list(_require_wire_field(data, 'ready_item_ids', 'WorkGraphSnapshot'), 'WorkGraphSnapshot.ready_item_ids')],
             realm_id=_expect_wire_str(_require_wire_field(data, 'realm_id', 'WorkGraphSnapshot'), 'WorkGraphSnapshot.realm_id'),
             total_items=(_expect_wire_int(data['total_items'], 'WorkGraphSnapshot.total_items') if data.get('total_items') is not None else None),
@@ -4534,6 +4565,7 @@ class WorkGraphSnapshot:
 class WorkGraphSnapshotFilter:
     """Request payload for WorkGraphSnapshotFilter."""
     all_namespaces: Optional[bool] = None
+    cursor: Optional[str] = None
     include_terminal: Optional[bool] = None
     labels: Optional[list[str]] = None
     limit: Optional[int] = None
@@ -4606,6 +4638,7 @@ class WorkItem:
 class WorkItemFilter:
     """Request payload for WorkItemFilter."""
     all_namespaces: Optional[bool] = None
+    cursor: Optional[str] = None
     include_terminal: Optional[bool] = None
     labels: Optional[list[str]] = None
     limit: Optional[int] = None

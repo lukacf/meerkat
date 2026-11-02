@@ -28183,11 +28183,34 @@
       },
       "WorkGraphEventsResponse": {
         "properties": {
+          "event_high_water_mark": {
+            "description": "The ledger's highest sequence in the namespace at this read, internal\nexecution events included, so it can pass the last public event.\nAbsent when the ledger is empty, and from a server that predates the\nfield.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
           "events": {
             "items": {
               "$ref": "#/components/schemas/WorkGraphEvent"
             },
             "type": "array"
+          },
+          "next_after_seq": {
+            "description": "Pass back as `after_seq` for the next page: the `seq` of the last\nevent returned. Present exactly when `truncated` is true, except on a\n`limit: 0` page.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "truncated": {
+            "description": "Matching events exist after the last event returned. Absent only from\na server that predates the field, which does not mean the page is\ncomplete.",
+            "type": [
+              "boolean",
+              "null"
+            ]
           }
         },
         "required": [
@@ -28280,14 +28303,36 @@
       "WorkGraphItemsResponse": {
         "description": "One page of work items: `list` (most recently updated first) or `ready`\n(priority, then creation time, then id).",
         "properties": {
+          "anchor_event_seq": {
+            "description": "The event ledger's high-water mark when the walk began: read before\nthe first page's rows, then carried by the cursor. Absent when the\nledger had no event then, and from a server that predates the field.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "changed_since_anchor": {
+            "description": "The ledger has moved past `anchor_event_seq`: an item can have\nchanged or appeared since the walk began, and a later page can miss\nit. `events` with `after_seq` set to `anchor_event_seq` names every\nsuch item. Absent only from a server that predates the field.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
           "items": {
             "items": {
               "$ref": "#/components/schemas/WorkItem"
             },
             "type": "array"
           },
+          "next_cursor": {
+            "description": "Pass back as `cursor` for the next page. Present exactly when\n`truncated` is true, except on a `limit: 0` page, which returns only\nthe totals.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "total_items": {
-            "description": "Items that matched the filter at this read (for `ready`, the ready\nitems), before `limit` cut them. Absent only from a server that\npredates the field.",
+            "description": "Items that matched the filter at this read (for `ready`, the ready\nitems), before the cursor and `limit` cut them. Absent only from a\nserver that predates the field.",
             "format": "uint",
             "minimum": 0,
             "type": [
@@ -28314,6 +28359,14 @@
           "all_namespaces": {
             "type": "boolean"
           },
+          "anchor_event_seq": {
+            "description": "The event ledger's high-water mark when the walk began: the first\npage's own `event_high_water_mark`, then carried by the cursor. Absent\nwhen the ledger had no event then, and from a server that predates the\nfield.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
           "attention": {
             "default": [],
             "items": {
@@ -28324,6 +28377,13 @@
           "captured_at": {
             "format": "date-time",
             "type": "string"
+          },
+          "changed_since_anchor": {
+            "description": "The ledger has moved past `anchor_event_seq`: an item can have\nchanged or appeared since the walk began, and a later page can miss\nit. `events` with `after_seq` set to `anchor_event_seq` names every\nsuch item. Absent only from a server that predates the field.",
+            "type": [
+              "boolean",
+              "null"
+            ]
           },
           "edges": {
             "items": {
@@ -28350,6 +28410,13 @@
               "null"
             ]
           },
+          "next_cursor": {
+            "description": "Pass back as `cursor` for the next page. Present exactly when\n`truncated` is true, except on a `limit: 0` page, which returns only\nthe totals.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "ready_item_ids": {
             "items": {
               "type": "string"
@@ -28360,7 +28427,7 @@
             "type": "string"
           },
           "total_items": {
-            "description": "Items that matched the filter in this snapshot, before `limit` cut\nthem. Absent only from a server that predates the field.",
+            "description": "Items that matched the filter in this snapshot, before the cursor and\n`limit` cut them. Absent only from a server that predates the field.",
             "format": "uint",
             "minimum": 0,
             "type": [
@@ -31971,6 +32038,14 @@
               "format": "int64",
               "type": "integer"
             }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -32091,6 +32166,14 @@
               "format": "int64",
               "type": "integer"
             }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -32183,6 +32266,14 @@
             "schema": {
               "format": "int64",
               "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "type": "string"
             }
           }
         ],

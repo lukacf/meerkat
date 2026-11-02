@@ -41525,6 +41525,13 @@
   "ReadyWorkFilter": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "properties": {
+      "cursor": {
+        "description": "Continue a walk: the `next_cursor` the previous page of this read\nreturned. The page holds the rows after the cursor's position, in the\nsame order.",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
       "labels": {
         "items": {
           "type": "string"
@@ -50705,6 +50712,13 @@
         "default": false,
         "type": "boolean"
       },
+      "cursor": {
+        "description": "Continue a walk: the `next_cursor` the previous page of this read\nreturned. The page holds the rows after the cursor's position, in the\nsame order.",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
       "include_terminal": {
         "default": false,
         "type": "boolean"
@@ -50764,6 +50778,13 @@
       "all_namespaces": {
         "default": false,
         "type": "boolean"
+      },
+      "cursor": {
+        "description": "Continue a walk: the `next_cursor` the previous page of this read\nreturned. The page holds the rows after the cursor's position, in the\nsame order.",
+        "type": [
+          "string",
+          "null"
+        ]
       },
       "include_terminal": {
         "default": false,

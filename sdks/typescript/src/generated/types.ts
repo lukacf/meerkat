@@ -501,11 +501,17 @@ export interface ToolsRegisterResult {
 }
 
 export interface WorkEventsResult {
+  event_high_water_mark?: number | null;
   events: unknown[];
+  next_after_seq?: number | null;
+  truncated?: boolean | null;
 }
 
 export interface WorkItemsResult {
+  anchor_event_seq?: number | null;
+  changed_since_anchor?: boolean | null;
   items: unknown[];
+  next_cursor?: string | null;
   total_items?: number | null;
   truncated?: boolean | null;
 }
@@ -3251,6 +3257,7 @@ export interface GoalStatusResult {
 }
 
 export interface ReadyWorkFilter {
+  cursor?: string | null;
   labels?: string[];
   limit?: number | null;
   namespace?: string | null;
@@ -3279,7 +3286,10 @@ export interface WorkGraphEventFilter {
 }
 
 export interface WorkGraphEventsResponse {
+  event_high_water_mark?: number | null;
   events: WorkGraphEvent[];
+  next_after_seq?: number | null;
+  truncated?: boolean | null;
 }
 
 export interface WorkGraphIdParams {
@@ -3289,19 +3299,25 @@ export interface WorkGraphIdParams {
 }
 
 export interface WorkGraphItemsResponse {
+  anchor_event_seq?: number | null;
+  changed_since_anchor?: boolean | null;
   items: WorkItem[];
+  next_cursor?: string | null;
   total_items?: number | null;
   truncated?: boolean | null;
 }
 
 export interface WorkGraphSnapshot {
   all_namespaces: boolean;
+  anchor_event_seq?: number | null;
   attention?: WorkAttentionBinding[];
   captured_at: string;
+  changed_since_anchor?: boolean | null;
   edges: WorkEdge[];
   event_high_water_mark?: number | null;
   items: WorkItem[];
   namespace?: string | null;
+  next_cursor?: string | null;
   ready_item_ids: string[];
   realm_id: string;
   total_items?: number | null;
@@ -3310,6 +3326,7 @@ export interface WorkGraphSnapshot {
 
 export interface WorkGraphSnapshotFilter {
   all_namespaces?: boolean;
+  cursor?: string | null;
   include_terminal?: boolean;
   labels?: string[];
   limit?: number | null;
@@ -3346,6 +3363,7 @@ export interface WorkItem {
 
 export interface WorkItemFilter {
   all_namespaces?: boolean;
+  cursor?: string | null;
   include_terminal?: boolean;
   labels?: string[];
   limit?: number | null;
@@ -7869,7 +7887,10 @@ export function parseWorkGraphEvent(value: unknown): WorkGraphEvent {
 export function parseWorkGraphItemsResponse(value: unknown): WorkGraphItemsResponse {
   const data = expectWireObject(value, "WorkGraphItemsResponse");
   return {
+    ...(data["anchor_event_seq"] === undefined || data["anchor_event_seq"] === null ? {} : { anchor_event_seq: expectWireInteger(data["anchor_event_seq"], "WorkGraphItemsResponse.anchor_event_seq") }),
+    ...(data["changed_since_anchor"] === undefined || data["changed_since_anchor"] === null ? {} : { changed_since_anchor: expectWireBoolean(data["changed_since_anchor"], "WorkGraphItemsResponse.changed_since_anchor") }),
     items: expectWireArray(requireWireField(data, "items", "WorkGraphItemsResponse"), "WorkGraphItemsResponse.items").map((entry) => parseWorkItem(entry)),
+    ...(data["next_cursor"] === undefined || data["next_cursor"] === null ? {} : { next_cursor: expectWireString(data["next_cursor"], "WorkGraphItemsResponse.next_cursor") }),
     ...(data["total_items"] === undefined || data["total_items"] === null ? {} : { total_items: expectWireInteger(data["total_items"], "WorkGraphItemsResponse.total_items") }),
     ...(data["truncated"] === undefined || data["truncated"] === null ? {} : { truncated: expectWireBoolean(data["truncated"], "WorkGraphItemsResponse.truncated") }),
   };
@@ -7879,7 +7900,10 @@ export function parseWorkGraphItemsResponse(value: unknown): WorkGraphItemsRespo
 export function parseWorkGraphEventsResponse(value: unknown): WorkGraphEventsResponse {
   const data = expectWireObject(value, "WorkGraphEventsResponse");
   return {
+    ...(data["event_high_water_mark"] === undefined || data["event_high_water_mark"] === null ? {} : { event_high_water_mark: expectWireInteger(data["event_high_water_mark"], "WorkGraphEventsResponse.event_high_water_mark") }),
     events: expectWireArray(requireWireField(data, "events", "WorkGraphEventsResponse"), "WorkGraphEventsResponse.events").map((entry) => parseWorkGraphEvent(entry)),
+    ...(data["next_after_seq"] === undefined || data["next_after_seq"] === null ? {} : { next_after_seq: expectWireInteger(data["next_after_seq"], "WorkGraphEventsResponse.next_after_seq") }),
+    ...(data["truncated"] === undefined || data["truncated"] === null ? {} : { truncated: expectWireBoolean(data["truncated"], "WorkGraphEventsResponse.truncated") }),
   };
 }
 
@@ -7888,12 +7912,15 @@ export function parseWorkGraphSnapshot(value: unknown): WorkGraphSnapshot {
   const data = expectWireObject(value, "WorkGraphSnapshot");
   return {
     all_namespaces: expectWireBoolean(requireWireField(data, "all_namespaces", "WorkGraphSnapshot"), "WorkGraphSnapshot.all_namespaces"),
+    ...(data["anchor_event_seq"] === undefined || data["anchor_event_seq"] === null ? {} : { anchor_event_seq: expectWireInteger(data["anchor_event_seq"], "WorkGraphSnapshot.anchor_event_seq") }),
     ...(data["attention"] === undefined || data["attention"] === null ? {} : { attention: expectWireArray(data["attention"], "WorkGraphSnapshot.attention").map((entry) => parseWorkAttentionBinding(entry)) }),
     captured_at: expectWireString(requireWireField(data, "captured_at", "WorkGraphSnapshot"), "WorkGraphSnapshot.captured_at"),
+    ...(data["changed_since_anchor"] === undefined || data["changed_since_anchor"] === null ? {} : { changed_since_anchor: expectWireBoolean(data["changed_since_anchor"], "WorkGraphSnapshot.changed_since_anchor") }),
     edges: expectWireArray(requireWireField(data, "edges", "WorkGraphSnapshot"), "WorkGraphSnapshot.edges").map((entry) => parseWorkEdge(entry)),
     ...(data["event_high_water_mark"] === undefined || data["event_high_water_mark"] === null ? {} : { event_high_water_mark: expectWireInteger(data["event_high_water_mark"], "WorkGraphSnapshot.event_high_water_mark") }),
     items: expectWireArray(requireWireField(data, "items", "WorkGraphSnapshot"), "WorkGraphSnapshot.items").map((entry) => parseWorkItem(entry)),
     ...(data["namespace"] === undefined || data["namespace"] === null ? {} : { namespace: expectWireString(data["namespace"], "WorkGraphSnapshot.namespace") }),
+    ...(data["next_cursor"] === undefined || data["next_cursor"] === null ? {} : { next_cursor: expectWireString(data["next_cursor"], "WorkGraphSnapshot.next_cursor") }),
     ready_item_ids: expectWireArray(requireWireField(data, "ready_item_ids", "WorkGraphSnapshot"), "WorkGraphSnapshot.ready_item_ids").map((entry) => expectWireString(entry, "WorkGraphSnapshot.ready_item_ids[]")),
     realm_id: expectWireString(requireWireField(data, "realm_id", "WorkGraphSnapshot"), "WorkGraphSnapshot.realm_id"),
     ...(data["total_items"] === undefined || data["total_items"] === null ? {} : { total_items: expectWireInteger(data["total_items"], "WorkGraphSnapshot.total_items") }),
@@ -7905,7 +7932,10 @@ export function parseWorkGraphSnapshot(value: unknown): WorkGraphSnapshot {
 export function parseWorkItemsResult(value: unknown): WorkItemsResult {
   const data = expectWireObject(value, "WorkItemsResult");
   return {
+    ...(data["anchor_event_seq"] === undefined || data["anchor_event_seq"] === null ? {} : { anchor_event_seq: expectWireInteger(data["anchor_event_seq"], "WorkItemsResult.anchor_event_seq") }),
+    ...(data["changed_since_anchor"] === undefined || data["changed_since_anchor"] === null ? {} : { changed_since_anchor: expectWireBoolean(data["changed_since_anchor"], "WorkItemsResult.changed_since_anchor") }),
     items: expectWireArray(requireWireField(data, "items", "WorkItemsResult"), "WorkItemsResult.items"),
+    ...(data["next_cursor"] === undefined || data["next_cursor"] === null ? {} : { next_cursor: expectWireString(data["next_cursor"], "WorkItemsResult.next_cursor") }),
     ...(data["total_items"] === undefined || data["total_items"] === null ? {} : { total_items: expectWireInteger(data["total_items"], "WorkItemsResult.total_items") }),
     ...(data["truncated"] === undefined || data["truncated"] === null ? {} : { truncated: expectWireBoolean(data["truncated"], "WorkItemsResult.truncated") }),
   };
@@ -7915,7 +7945,10 @@ export function parseWorkItemsResult(value: unknown): WorkItemsResult {
 export function parseWorkEventsResult(value: unknown): WorkEventsResult {
   const data = expectWireObject(value, "WorkEventsResult");
   return {
+    ...(data["event_high_water_mark"] === undefined || data["event_high_water_mark"] === null ? {} : { event_high_water_mark: expectWireInteger(data["event_high_water_mark"], "WorkEventsResult.event_high_water_mark") }),
     events: expectWireArray(requireWireField(data, "events", "WorkEventsResult"), "WorkEventsResult.events"),
+    ...(data["next_after_seq"] === undefined || data["next_after_seq"] === null ? {} : { next_after_seq: expectWireInteger(data["next_after_seq"], "WorkEventsResult.next_after_seq") }),
+    ...(data["truncated"] === undefined || data["truncated"] === null ? {} : { truncated: expectWireBoolean(data["truncated"], "WorkEventsResult.truncated") }),
   };
 }
 

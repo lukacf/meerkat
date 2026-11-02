@@ -137,7 +137,8 @@ fn commit_membership_input(
 
 /// Drive the full machine-driven spawn ladder (`BeginSpawnExec` →
 /// `CommitSpawnMembership` → `CommitSpawnActivation`) the way the actor's
-/// `finalize_spawn_admit`/`finalize_spawn_activate` do, and return the
+/// `start_spawn_activation_from_pending`, `finalize_spawn_admit` and
+/// `finalize_spawn_activate` do, and return the
 /// membership-commit transition (which carries the `MemberSessionBindingChanged`
 /// effect). `CommitSpawnActivation` settles the per-identity spawn-exec phase so
 /// a later respawn of the same identity can open a fresh window. A rejected

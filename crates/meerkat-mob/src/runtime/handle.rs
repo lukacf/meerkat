@@ -13950,77 +13950,116 @@ impl MobHandle {
     /// Core `ensure_member` worker invoked by `execute_machine_command`.
     ///
     /// Tries to spawn the member; on [`MobError::MemberAlreadyExists`],
-    /// resolves the existing member via [`list_members`] and wraps it as
-    /// [`EnsureMemberOutcome::Existed`]. Other spawn errors propagate
-    /// unchanged.
+    /// waits for the in-flight spawn that owns the identity and wraps the
+    /// member it seats as [`EnsureMemberOutcome::Existed`]. Other spawn
+    /// errors propagate unchanged.
     async fn handle_ensure_member(
         &self,
         spec: SpawnMemberSpec,
     ) -> Result<EnsureMemberOutcome, MobError> {
         let identity = spec.identity.clone();
-        // MobMachine owns the spawn-vs-retain decision: `EnsureMember` emits
-        // `MemberSpawnRequired` (member absent) or `MemberRetainRequired`
-        // (member already present). The handle mirrors the emitted effect.
-        let effects = self
-            .apply_machine_input_effects(mob_dsl::MobMachineInput::EnsureMember {
-                agent_identity: mob_dsl::AgentIdentity::from_domain(&identity),
-            })
-            .await?;
-        let mut spawn_required = false;
-        let mut retain_required = false;
-        for effect in effects {
-            match effect {
-                mob_dsl::MobMachineEffect::MemberSpawnRequired { .. } => spawn_required = true,
-                mob_dsl::MobMachineEffect::MemberRetainRequired { .. } => retain_required = true,
-                _ => {}
-            }
-        }
-        match (spawn_required, retain_required) {
-            (true, false) => {
-                // `Box::pin` breaks the compiler-visible recursion:
-                // handle_ensure_member -> spawn_spec -> execute_machine_command
-                // -> (MobMachineCommand::Spawn arm, which never re-enters here).
-                match Box::pin(self.spawn_spec(spec)).await {
-                    Ok(spawn_result) => Ok(EnsureMemberOutcome::Spawned(spawn_result)),
-                    Err(MobError::MemberAlreadyExists(existing_identity))
-                        if existing_identity == identity =>
-                    {
-                        // A concurrent ensure may have advanced the exact
-                        // identity from machine-owned pending admission to a
-                        // committed member after this EnsureMember decision.
-                        // Converge on that winner instead of surfacing a
-                        // duplicate-call failure.
-                        let existing = self.await_machine_member_projection(&identity).await?;
-                        Ok(EnsureMemberOutcome::Existed(Box::new(existing)))
+        // One ready-wait budget for the whole convergence, decisions included.
+        let started = Instant::now();
+        loop {
+            // MobMachine owns the spawn-vs-retain decision: `EnsureMember`
+            // emits `MemberSpawnRequired` (member absent) or
+            // `MemberRetainRequired` (member already present). The handle
+            // mirrors the emitted effect.
+            let effects = self
+                .apply_machine_input_effects(mob_dsl::MobMachineInput::EnsureMember {
+                    agent_identity: mob_dsl::AgentIdentity::from_domain(&identity),
+                })
+                .await?;
+            let mut spawn_required = false;
+            let mut retain_required = false;
+            for effect in effects {
+                match effect {
+                    mob_dsl::MobMachineEffect::MemberSpawnRequired { .. } => {
+                        spawn_required = true;
                     }
-                    Err(error) => Err(error),
+                    mob_dsl::MobMachineEffect::MemberRetainRequired { .. } => {
+                        retain_required = true;
+                    }
+                    _ => {}
                 }
             }
-            (false, true) => {
-                // Membership commits before the mechanical roster projection.
-                // The machine's retain verdict is authoritative even when a
-                // concurrent ensure lands in that short projection interval.
-                let existing = self.await_machine_member_projection(&identity).await?;
-                Ok(EnsureMemberOutcome::Existed(Box::new(existing)))
+            match (spawn_required, retain_required) {
+                (true, false) => {
+                    // `Box::pin` breaks the compiler-visible recursion:
+                    // handle_ensure_member -> spawn_spec -> execute_machine_command
+                    // -> (MobMachineCommand::Spawn arm, which never re-enters here).
+                    match Box::pin(self.spawn_spec(spec.clone())).await {
+                        Ok(spawn_result) => return Ok(EnsureMemberOutcome::Spawned(spawn_result)),
+                        Err(MobError::MemberAlreadyExists(existing_identity))
+                            if existing_identity == identity =>
+                        {
+                            // An in-flight spawn owns this identity. Wait while
+                            // MobMachine shows it (pending admission or an open
+                            // spawn-exec ladder). When the machine shows
+                            // nothing in flight and no member, decide again: a
+                            // spawn still preparing off the actor loop refuses
+                            // the new spawn as a duplicate until it stages, and
+                            // a first spawn that failed leaves this ensure to
+                            // spawn the member itself.
+                            match self
+                                .await_machine_member_projection(&identity, started)
+                                .await?
+                            {
+                                Some(existing) => {
+                                    return Ok(EnsureMemberOutcome::Existed(Box::new(existing)));
+                                }
+                                None => {
+                                    if started.elapsed() >= DEFAULT_READY_WAIT_TIMEOUT {
+                                        return Err(MobError::ReadyWaitTimedOut {
+                                            pending_member_ids: vec![identity.clone()],
+                                        });
+                                    }
+                                    tokio::time::sleep(Duration::from_millis(10)).await;
+                                }
+                            }
+                        }
+                        Err(error) => return Err(error),
+                    }
+                }
+                (false, true) => {
+                    // Membership commits before the mechanical roster
+                    // projection. The machine's retain verdict is
+                    // authoritative even when a concurrent ensure lands in
+                    // that short projection interval.
+                    return match self
+                        .await_machine_member_projection(&identity, started)
+                        .await?
+                    {
+                        Some(existing) => Ok(EnsureMemberOutcome::Existed(Box::new(existing))),
+                        None => Err(MobError::MemberNotFound(identity.clone())),
+                    };
+                }
+                _ => {
+                    return Err(MobError::Internal(format!(
+                        "ensure_member: MobMachine emitted no decisive spawn/retain verdict for '{identity}' (spawn_required={spawn_required}, retain_required={retain_required})"
+                    )));
+                }
             }
-            _ => Err(MobError::Internal(format!(
-                "ensure_member: MobMachine emitted no decisive spawn/retain verdict for '{identity}' (spawn_required={spawn_required}, retain_required={retain_required})"
-            ))),
         }
     }
 
+    /// The member `identity` once MobMachine has it live and the roster
+    /// lists it, or `None` once MobMachine shows neither a live member nor an
+    /// in-flight spawn of it (a pending admission or an open spawn-exec
+    /// ladder).
     async fn await_machine_member_projection(
         &self,
         identity: &AgentIdentity,
-    ) -> Result<MobMemberListEntry, MobError> {
-        let started = Instant::now();
+        started: Instant,
+    ) -> Result<Option<MobMemberListEntry>, MobError> {
         let dsl_identity = mob_dsl::AgentIdentity::from_domain(identity);
         loop {
             let machine_state = self.machine_state_watch_rx.borrow().clone();
             let lifecycle = machine_state.member_lifecycle_for_identity(&dsl_identity);
-            let pending = machine_state
+            let in_flight = machine_state
                 .pending_spawn_sessions
-                .contains_key(&dsl_identity);
+                .contains_key(&dsl_identity)
+                || machine_state.spawn_exec_phase.contains_key(&dsl_identity);
 
             if lifecycle.status == mob_dsl::MobMemberLifecycleStatus::Active
                 && let Some(entry) = self
@@ -14029,11 +14068,11 @@ impl MobHandle {
                     .into_iter()
                     .find(|entry| entry.agent_identity == *identity)
             {
-                return Ok(entry);
+                return Ok(Some(entry));
             }
 
-            if !pending && lifecycle.status != mob_dsl::MobMemberLifecycleStatus::Active {
-                return Err(MobError::MemberNotFound(identity.clone()));
+            if !in_flight && lifecycle.status != mob_dsl::MobMemberLifecycleStatus::Active {
+                return Ok(None);
             }
             if started.elapsed() >= DEFAULT_READY_WAIT_TIMEOUT {
                 return Err(MobError::ReadyWaitTimedOut {

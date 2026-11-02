@@ -9711,6 +9711,100 @@ mod tests {
             assert_eq!(harness.transport.request_count(), 2);
         }
 
+        /// The connection a provider runtime builds for `binding` over
+        /// `resolved`.
+        fn copilot_connection(
+            binding: &ValidatedBinding,
+            resolved: &CopilotResolvedAuth,
+        ) -> meerkat_llm_core::provider_runtime::ResolvedConnection {
+            meerkat_llm_core::provider_runtime::ResolvedConnection {
+                provider: binding.provider(),
+                backend: binding.backend(),
+                backend_profile: binding.backend_profile().clone(),
+                credential_identity: binding.credential_identity().clone(),
+                auth_lease: Arc::new(
+                    meerkat_llm_core::provider_runtime::DynamicLease::from_authorizer(
+                        resolved.authorizer(),
+                        resolved.metadata().clone(),
+                        crate::GITHUB_COPILOT_AUTHORIZER_LABEL,
+                    ),
+                ),
+            }
+        }
+
+        /// A fresh runtime holds no account state. The first build of a model
+        /// only the account defines resolves its route first, which looks the
+        /// account up and loads its model list, and only then reads the list:
+        /// the model is offered on the first resolution, and reading the list
+        /// makes no request of its own.
+        #[tokio::test]
+        async fn a_fresh_runtime_defines_an_account_model_once_its_route_resolves() {
+            use meerkat_llm_core::provider_runtime::AccountModelLookup;
+
+            let harness = Harness::new([Ok(svc_bot()), Ok(models_response())]);
+            harness
+                .operator
+                .set("COPILOT_GITHUB_TOKEN", &user_token("fresh-runtime"));
+            let binding = token_binding(CopilotProviderRoute::OpenAi, env_source());
+            let resolved = harness
+                .runtime
+                .resolve(&binding, &harness.operator.env)
+                .await
+                .expect("the first resolution looks the account up and lists its models");
+            assert_eq!(
+                harness.transport.request_count(),
+                2,
+                "the identity lookup and the model list"
+            );
+            let connection = copilot_connection(&binding, &resolved);
+            match harness.runtime.account_model(&connection, "claude-test") {
+                AccountModelLookup::Offered(definition) => {
+                    assert_eq!(definition.provider, Provider::Anthropic);
+                }
+                other => panic!("the listed model is offered on the first resolution: {other:?}"),
+            }
+            assert_eq!(
+                harness.transport.request_count(),
+                2,
+                "reading the list makes no request"
+            );
+        }
+
+        /// The model list defines no model only when the account's model
+        /// discovery failed: GitHub answers the identity lookup and the
+        /// model list fails with a server error, so the route still resolves
+        /// (a looked-up token serves without its list), and a model only the
+        /// list could define is refused as unavailable, typed.
+        #[tokio::test]
+        async fn an_account_model_is_unavailable_only_after_its_model_list_failed() {
+            use meerkat_llm_core::provider_runtime::{AccountModelLookup, AccountModelRefusal};
+
+            let harness = Harness::new([
+                Ok(svc_bot()),
+                Ok(json_response(
+                    503,
+                    serde_json::json!({"message": "service unavailable"}),
+                )),
+            ]);
+            harness
+                .operator
+                .set("COPILOT_GITHUB_TOKEN", &user_token("listing-fails"));
+            let binding = token_binding(CopilotProviderRoute::OpenAi, env_source());
+            let resolved = harness
+                .runtime
+                .resolve(&binding, &harness.operator.env)
+                .await
+                .expect("a looked-up token resolves without its model list");
+            let connection = copilot_connection(&binding, &resolved);
+            assert_eq!(
+                harness.runtime.account_model(&connection, "claude-test"),
+                AccountModelLookup::Refused(AccountModelRefusal::ModelsUnavailable {
+                    credential: account_identity(),
+                    model: "claude-test".to_string(),
+                })
+            );
+        }
+
         /// The device sign-in still requires its stored token, and names the
         /// token method as the way to use an operator-supplied one.
         #[tokio::test]

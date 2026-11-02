@@ -600,3 +600,118 @@ fn configured_once_copilot_routes_keep_their_account_through_a_fallback() {
         meerkat_core::ProviderNativeToolPolicy::DisableAll
     );
 }
+
+/// A session created on a zero-config Copilot route resumes on that route.
+/// Its durable identity names the route (provider, model and binding),
+/// never a credential identity, so nothing durable differs from a session
+/// created before account routes resolved through their account. The
+/// rebuilt session's credential identity is the route's account: the
+/// identity its connection and the account's AuthMachine lease have always
+/// used (it was the binding's own before, a key no lease of the route
+/// carried).
+#[tokio::test]
+async fn a_zero_config_session_resumes_on_its_route_with_its_account_identity() {
+    let harness = Harness::new("", Some(account_definition(Provider::OpenAI)));
+    let catalog_model =
+        meerkat_models::default_model(Provider::OpenAI).expect("an OpenAI catalog model");
+    let mut agent = harness
+        .build(catalog_model, Provider::OpenAI, OPENAI_ROUTE)
+        .await
+        .unwrap_or_else(|error| panic!("a catalog model builds on a zero-config route: {error}"));
+    agent
+        .run(PROMPT.to_string().into())
+        .await
+        .expect("the first turn runs");
+    let created = durable_identity(&agent);
+    assert_eq!(
+        (created.provider, created.auth_binding.clone()),
+        (Provider::OpenAI, Some(route(OPENAI_ROUTE))),
+        "the durable identity names the zero-config route"
+    );
+    let durable = agent.session().clone();
+    drop(agent);
+    harness.log.clear();
+
+    let mut resume = AgentBuildConfig::new(catalog_model);
+    resume.override_image_generation = ToolCategoryOverride::Disable;
+    resume.resume_session = Some(durable);
+    let mut resumed = harness
+        .factory
+        .build_agent(resume, &harness.config)
+        .await
+        .unwrap_or_else(|error| panic!("the zero-config session resumes: {error}"));
+    resumed
+        .run(PROMPT.to_string().into())
+        .await
+        .expect("the resumed turn runs");
+    let identity = durable_identity(&resumed);
+    assert_eq!(
+        (
+            identity.provider,
+            identity.model.clone(),
+            identity.auth_binding.clone()
+        ),
+        (
+            created.provider,
+            created.model.clone(),
+            created.auth_binding.clone()
+        ),
+        "the resumed session keeps its route"
+    );
+    assert_eq!(
+        harness.log.resolved(),
+        vec![(Provider::OpenAI, route(OPENAI_ROUTE))],
+        "the resume resolves the session's own route"
+    );
+    assert_eq!(
+        AgentFactory::credential_identity_for_llm_identity(&harness.config, &identity)
+            .expect("the credential identity"),
+        Some(github_copilot_credential()),
+        "the session's credential identity is the route's account"
+    );
+}
+
+/// Create-session account affinity never leaves its credential account. An
+/// account whose routes are of one provider (every account but a Copilot
+/// one: its contract is that provider's own auth method) has no route for
+/// another provider, so a model of another provider keeps the strict
+/// mismatch.
+#[test]
+fn a_non_copilot_credential_account_keeps_the_strict_mismatch() {
+    let config: Config = toml::from_str(
+        r#"
+[realm.global.backend.openai_key]
+provider = "openai"
+backend_kind = "openai_api"
+
+[realm.global.auth.openai_key]
+provider = "openai"
+auth_method = "api_key"
+source = { kind = "env", env = "OPENAI_API_KEY" }
+
+[realm.global.binding.openai_key]
+backend_profile = "openai_key"
+auth_profile = "openai_key"
+credential_account = "team_key"
+"#,
+    )
+    .expect("an API key route on a credential account");
+    let anthropic_model =
+        meerkat_models::default_model(Provider::Anthropic).expect("an Anthropic catalog model");
+    let error = crate::resolve_create_session_model(
+        &config,
+        crate::CreateSessionModelResolutionRequest {
+            model: Some(anthropic_model.to_string()),
+            provider: None,
+            auth_binding: Some(route("openai_key")),
+        },
+    )
+    .expect_err("a model of another provider than the account's routes is refused");
+    assert!(
+        matches!(
+            &error,
+            crate::CreateSessionModelResolutionError::ProviderModelMismatch(_)
+        ),
+        "{error}"
+    );
+}

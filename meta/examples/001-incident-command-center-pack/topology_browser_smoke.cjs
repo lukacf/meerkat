@@ -105,6 +105,8 @@ async function main() {
     await clickNav(page, "topology");
     const panel = page.getByTestId("topology-panel");
     await panel.waitFor({ state: "visible", timeout: 30000 });
+    // Edit connections lives in the panel's overflow menu.
+    await page.getByTestId("topology-menu").click();
     await page.getByTestId("topology-view:connections").waitFor({ state: "visible", timeout: 30000 });
     assert.equal(await panel.getByText(/connect all/i).count(), 0, "stock console must not expose Connect all");
     await page.getByTestId("topology-view:connections").click();
@@ -167,6 +169,7 @@ async function main() {
       await page.reload({ waitUntil: "domcontentloaded" });
       await page.getByTestId("meerkat-console").waitFor({ state: "visible", timeout: 30000 });
       await clickNav(page, "topology");
+      await page.getByTestId("topology-menu").click();
       await page.getByTestId("topology-view:connections").waitFor({ state: "visible", timeout: 30000 });
       await page.getByTestId("topology-view:connections").click();
       await selectConnectionSource(page, commanderEndpointId);

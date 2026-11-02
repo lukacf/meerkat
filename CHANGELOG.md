@@ -534,6 +534,24 @@ them.
 
 ### Fixed
 
+- `meerkat-mob`: a concurrent `mob/ensure_member` or `mob/ingress_interaction`
+  for a member whose first spawn is still in flight no longer answers
+  `MemberNotFound`. The second call waited for the first spawn, but gave up
+  while that spawn was still being prepared, or while it was checking its
+  member's endpoint (the member's comms and the supervisor trust install),
+  and answered that the member did not exist, although the spawn seated it
+  moments later. The second call now waits until the member is seated and
+  answers with it; if the first spawn fails, it spawns the member itself.
+
+- `meerkat-mob`: a second spawn of a member that races the first spawn's
+  endpoint check no longer fail-stops the mob. While the first spawn was
+  checking its member's endpoint, a second spawn of the same member (or a
+  second `mob/ensure_member` for it) was admitted and seated the member
+  first; the first spawn then stopped the whole mob ("spawn admission
+  observation lost its exact owner"), its caller got no answer, and its
+  session stayed behind. The second spawn is now refused with
+  `MemberAlreadyExists` until the first one settles.
+
 - `meerkat-openai`: on the GitHub Copilot Responses route, a response with
   two or more reasoning or message items that are identical apart from their
   ids and ciphertext (for example reasoning without a summary) no longer

@@ -431,8 +431,8 @@ trap 'rm -rf "$tlc_env_tmp"' EXIT
 # measured one), a coverage block in which each covered action of every run
 # generated a state (an arm a run fires only through a named wrapper read
 # under the wrapper's name, by the runner's closed alias table: the
-# wrappers print so below, and a check further down drops the archive
-# run's and the recovered run's in turn), its seventy
+# wrappers print so below, and a check further down drops the scan, names,
+# archive and recovered runs' wrapper lines in turn), its seventy
 # step witnesses violated, and with --mutants each seeded defect's generated
 # invariant, audit invariant, totality invariant or action property
 # violated and its created_custody_local_kept, recovered_removal_unmarked
@@ -1053,6 +1053,7 @@ printf '%s\n' \
   'echo "Error: Invariant archived_entry_is_store_owned is violated."' \
   'echo "Error: Action property AuditStoreUpdateKeepsStanding is violated."' \
   'echo "Error: Action property AuditCreatedEntryNeverDeclared is violated."' \
+  'echo "<C1RecoverInBootOrder line 1, col 1 to line 1, col 2 of module created_identity_audit>: 1:1"' \
   'echo "<ArchiveRetireReleasing line 1, col 1 to line 1, col 2 of module created_identity_audit>: 1:1"' \
   'echo "<RecoveredRetireReleasing line 1, col 1 to line 1, col 2 of module created_identity_audit>: 1:1"' \
   'for action in SetOperatorInstructionNewRunning SetOperatorInstructionAdvanceRunning SetOperatorInstructionDuplicateRunning SetOperatorInstructionStaleRunning SetOperatorInstructionConflictRunning RevokeOperatorInstructionUnknownSlotRunning RevokeOperatorInstructionStaleRunning RevokeOperatorInstructionDuplicateRunning RevokeOperatorInstructionConflictRunning RevokeOperatorInstructionAdvanceRunning PrepareMemberInstructionDeliveryNotOwedRunning PrepareMemberInstructionDeliveryDeliverRunning PrepareMemberInstructionDeliveryUnbornRunning PrepareMemberInstructionDeliveryUnboundRunning RecordMemberInstructionTargetNotOwedRunning RecordMemberInstructionTargetStaleSessionRunning RecordMemberInstructionTargetSupersededRunning RecordMemberInstructionTargetCurrentRunning RecordMemberInstructionTargetUnmintedRunning RefuseMemberInstructionTargetNotOwedRunning RefuseMemberInstructionTargetStaleSessionRunning RefuseMemberInstructionTargetSupersededRunning RefuseMemberInstructionTargetBlockedRunning PrepareMemberInstructionDeliveryRetiringRunning RetireRunningReleasingArchiveOnly ResolveMemberInstructionReleaseAuthorizedRunning ResolveMemberInstructionReleaseNotNeededRunning; do echo "<$action line 1, col 1 to line 1, col 2 of module model>: 1:1"; done' \
@@ -1199,7 +1200,9 @@ rm -rf "$absent_tlc_tmp"
 # arm's own line.
 alias_tlc_tmp="$(mktemp -d)"
 alias_failures=""
-for alias_case in "archive:ArchiveRetireReleasing:RetireRunningReleasingArchiveOnly" \
+for alias_case in "scan:C1RecoverInBootOrder:RecoverRosterMemberRunning" \
+  "names:C1RecoverInBootOrder:RecoverRosterMemberRunning" \
+  "archive:ArchiveRetireReleasing:RetireRunningReleasingArchiveOnly" \
   "recovered:RecoveredRetireReleasing:RetireRunningReleasingArchiveOnly"; do
   alias_run="${alias_case%%:*}"
   alias_wrapper="${alias_case#*:}"

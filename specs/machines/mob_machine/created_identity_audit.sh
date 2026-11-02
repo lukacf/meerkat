@@ -16,12 +16,16 @@
 # as a CI shard does). Its recovery part (--part recovery):
 #
 # - scan: member 1 recovered and bound, its Declared entry row replayed or
-#   not, before or after the scan of its rows, member 2 with no member, and
-#   the boot scan of a row of either with every presence and revival record,
-#   in a running and a stopped mob, until the boot plan's seal. Exactly one
-#   arm answers every row while the replay runs and none after the seal
-#   (AuditRecoverExactlyOne), and no step turns a Created entry Declared
-#   (AuditCreatedEntryNeverDeclared; the names run checks it too).
+#   not, before or after the scan of its rows (its own replay never after
+#   the scan of its row pending its host's preparation: the boot replays
+#   first, runtime/builder.rs:9362 and :9369 before :9424, an order
+#   MobMachine relies on for such a row; the names run keeps it too),
+#   member 2 with no member, and the boot scan of a row of either with every
+#   presence and revival record, in a running and a stopped mob, until the
+#   boot plan's seal. Exactly one arm answers every row while the replay
+#   runs and none after the seal (AuditRecoverExactlyOne), and no step turns
+#   a Created entry Declared (AuditCreatedEntryNeverDeclared; the names run
+#   checks it too).
 # - reseat: the scan of rows of two identities without a member (without a
 #   revival record, but member 2's Present row), a ladder without custody
 #   for member 1 and one with each pair of custodies for member 2, seated on
@@ -590,6 +594,8 @@ recovered_covered_actions=(
 # name. A closed table of <run>:<wrapper>:<arm>; never a match on a
 # coverage line's location.
 covered_aliases=(
+  "scan:C1RecoverInBootOrder:RecoverRosterMemberRunning"
+  "names:C1RecoverInBootOrder:RecoverRosterMemberRunning"
   "archive:ArchiveRetireReleasing:RetireRunningReleasingArchiveOnly"
   "recovered:RecoveredRetireReleasing:RetireRunningReleasingArchiveOnly"
 )

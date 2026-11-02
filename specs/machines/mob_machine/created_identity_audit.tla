@@ -30,21 +30,23 @@
 \*
 \*   scan (ScanSpec): member 1 recovered and bound (a seated local member),
 \*     its Declared entry row replayed or not, before or after the scan of
-\*     its rows; member 2 with no member; the scan of a row of either with
-\*     every presence and revival record, in a running and a stopped mob;
-\*     the boot plan's seal.
+\*     its rows (its own replay never after the scan of its row pending its
+\*     host's preparation: the boot's order, C1RecoverInBootOrder); member 2
+\*     with no member; the scan of a row of either with every presence and
+\*     revival record, in a running and a stopped mob; the boot plan's seal.
 \*   reseat (ReseatSpec): neither member recovered; the scan of their rows,
 \*     without a revival record but member 2's Present row (session 2); a
 \*     spawn ladder for member 1 without custody, seated on session 1, and
 \*     one for member 2 with each pair of custodies, seated on its revival
 \*     record (session 2) or a fresh session (session 3); their aborts; the
 \*     worker reconcile of both members or of none; the forced destroy.
-\*   names (NamesSpec): member 1 recovered and bound, its Declared entry
-\*     row replayed or not; member 2 with no member; the scan of their rows,
-\*     without a revival record; the declarations, the seal over every
-\*     desired set, the legacy adoption, the agent lane and the admission
-\*     probe with each pair of custodies, under the build seed's composition
-\*     authority, in a running and a stopped mob.
+\*   names (NamesSpec): member 1 recovered and bound (in the boot's order,
+\*     as in the scan run), its Declared entry row replayed or not; member 2
+\*     with no member; the scan of their rows, without a revival record; the
+\*     declarations, the seal over every desired set, the legacy adoption,
+\*     the agent lane and the admission probe with each pair of custodies,
+\*     under the build seed's composition authority, in a running and a
+\*     stopped mob.
 \*   placed (PlacedScanSpec): one member host bound and member 2 seated
 \*     there by the placed spawn ladder, its activation committed; the scan
 \*     of its row at any point of the ladder (a row under the open ladder
@@ -209,12 +211,27 @@ C1Bind == RecoverMemberSessionBindingFreshRunning(Id1, Rid1, Sess1, None)
 C1Declared == RecoverIdentityEntrySeatedRunning(Id1, Rid1, "Declared")
 CStop == AuditQuiesceStop \/ StopRunning \/ ResumeStopped
 
+\* A boot-order precondition the scan and names runs keep: the boot replays
+\* the journal (runtime/builder.rs:9362, seed_mob_authority_sync_from_events,
+\* then :9369, recover_current_committed_placed_carrier_signals) before it
+\* scans the created entry rows (:9424, recover_created_identity_entries).
+\* MobMachine relies on that order for a row pending its host's
+\* preparation: scanned first, the row records an identity without a member
+\* awaiting its preparation, and a replay that seats the identity after it
+\* drops that cause, so the start would neither settle the row of a
+\* published construction nor reserve the name a member contradicts. So
+\* member 1's replay never follows the scan of its pending row; a named
+\* wrapper of one arm, which the runner's alias table counts for it.
+C1RecoverInBootOrder ==
+    /\ Unseated(Id1) # Some("PreparationPending")
+    /\ C1Recover
+
 (***************************************************************************)
 (* The scan run.                                                           *)
 (***************************************************************************)
 
 ScanNext ==
-    \/ C1Recover
+    \/ C1RecoverInBootOrder
     \/ C1Bind
     \/ C1Declared
     \/ RecoverScan
@@ -447,7 +464,7 @@ NamesLaneArm(id) ==
 NamesScan == \E id \in CreatedIds, presence \in Presences : RecoverArm(id, presence, None)
 
 NamesNext ==
-    \/ C1Recover
+    \/ C1RecoverInBootOrder
     \/ C1Bind
     \/ C1Declared
     \/ NamesScan

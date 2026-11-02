@@ -907,7 +907,8 @@ fi
 # fourteen runs over their whole reachable space, in two parts. Its
 # recovery part's scan run
 # replays a seated member with or without its Declared entry's row (before
-# or after the scan of its rows: no replay turns a Created entry Declared)
+# or after the scan of its rows: no replay turns a Created entry Declared;
+# its own replay never after the scan of its pending row, the boot's order)
 # beside an identity without a member, and scans a row of either with every
 # presence and revival record, in a running and a stopped mob, until the
 # boot plan's seal: a Present row of a seated local member records a Created

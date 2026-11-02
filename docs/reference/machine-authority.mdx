@@ -295,7 +295,15 @@ replay of a Declared row over the Created entry is refused. A Created row
 may replay over a Declared origin: the journal records no end of an entry
 that ends unseated (the seal's or a one-entry unlist's), so a later
 store-owned incarnation's row takes over the stale origin of a roster-owned
-identity whose entry ended. The replay
+identity whose entry ended. MobMachine does rely on the boot's order for a
+row pending its host's preparation: the start replays the journal
+(`seed_mob_authority_sync_from_events`, then the placed carriers'
+`recover_current_committed_placed_carrier_signals`) before it scans the
+created entry rows (`recover_created_identity_entries`). Scanned first, a
+pending row would record an identity without a member awaiting its
+preparation, and a replay that seated the identity after it would drop that
+cause: the start would neither settle the row of a published construction
+nor reserve the name a member contradicts. The replay
 reserves the name of a member row whose origin token this build does not
 know the same way. A removed entry's name is never an entry or a member
 again; an unreadable name keeps what the replay recorded for it (a
@@ -390,7 +398,9 @@ entries' arms in fourteen runs, in two parts. Its recovery part has four:
 - The scan run scans a row of every presence, with and without a revival
   record, in Running and Stopped, until the boot plan's seal. The rows are
   for a replayed seated member (with or without its `Declared` entry's row,
-  replayed before or after the scan) and for an identity without a member.
+  replayed before or after the scan; the member's own replay never follows
+  the scan of its row pending its host's preparation, the boot's order,
+  which the names run keeps too) and for an identity without a member.
   The run reaches every outcome, the contradicted rows included, exactly
   one arm answers every row, and no step turns a `Created` entry `Declared`.
 - The reseat run opens, aborts and seats spawn ladders with every pair of

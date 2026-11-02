@@ -87,6 +87,14 @@ fn refusal<T: std::fmt::Debug>(result: Result<T, MobError>) -> IdentityChangeRef
     }
 }
 
+/// Whether `refused` is an `invalid_request` whose detail names `reason`.
+fn invalid_request_naming(refused: &IdentityChangeRefusal, reason: &str) -> bool {
+    matches!(
+        refused,
+        IdentityChangeRefusal::InvalidRequest { problem } if problem.contains(reason)
+    )
+}
+
 /// The receipt of a change that committed now.
 fn committed(result: Result<IdentityChangeOutcome, MobError>) -> crate::IdentityChangeReceipt {
     match result {
@@ -2060,10 +2068,11 @@ async fn a_removal_or_archive_of_another_profile_than_admitted_is_refused_invali
         agent(mob.admit_for(&session, "remove-pending", &worker).await),
         "pending",
     );
-    assert!(matches!(
-        refusal(mob.handle.remove_identity(pending, ALLOW).await),
-        IdentityChangeRefusal::InvalidRequest { .. }
-    ));
+    let refused = refusal(mob.handle.remove_identity(pending, ALLOW).await);
+    assert!(
+        invalid_request_naming(&refused, "its host's roster holds its spec"),
+        "the refusal names its reason: {refused:?}"
+    );
     mob.unseated_for("pending", UnseatedEntryCause::PreparationPending)
         .await;
     assert!(!mob.rows().await.contains_key(&id("pending")));
@@ -2201,10 +2210,11 @@ async fn a_roster_owned_removal_naming_a_spec_digest_is_refused_invalid_request(
         "listed",
     )
     .with_expected_spec_digest(digest("a roster spec"));
-    assert!(matches!(
-        refusal(mob.handle.remove_identity(removal, ALLOW).await),
-        IdentityChangeRefusal::InvalidRequest { .. }
-    ));
+    let refused = refusal(mob.handle.remove_identity(removal, ALLOW).await);
+    assert!(
+        invalid_request_naming(&refused, "its host's roster checks its spec"),
+        "the refusal names its reason: {refused:?}"
+    );
     assert!(mob.is_member("listed").await);
     assert!(
         !mob.rows().await.contains_key(&id("listed")),

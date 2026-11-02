@@ -1398,7 +1398,7 @@ async fn write_created_owner_fixture(name: &str, peer: FixturePeer) {
         .expect("store the created row");
 }
 
-fn rollback_fixture_dir(name: &str) -> std::path::PathBuf {
+pub(super) fn rollback_fixture_dir(name: &str) -> std::path::PathBuf {
     let dir = std::path::PathBuf::from(
         std::env::var_os("MEERKAT_ROLLBACK_FIXTURE_DIR")
             .expect("MEERKAT_ROLLBACK_FIXTURE_DIR names the fixture directory"),

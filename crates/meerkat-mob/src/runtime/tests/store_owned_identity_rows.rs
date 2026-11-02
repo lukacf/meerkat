@@ -3712,3 +3712,376 @@ async fn the_census_counts_a_stale_seat_after_a_label_change() {
     assert_eq!(census.archived, 0, "{census:?}");
     assert_eq!(census.constructions_held, 0, "{census:?}");
 }
+
+// ---------------------------------------------------------------------------
+// Rollback (cl-design-v2 11.2): what a published predecessor finds of each
+// 0.9.9 identity state. A predecessor replays the journal's member rows and
+// reads a v2 row as unreadable for its identity alone; an in-process leg
+// checks the facts it reads, and a lane-run leg writes the fixture the
+// published pairs run (`lane:rollback`).
+// ---------------------------------------------------------------------------
+
+/// Whether the journal holds a member row of `name`: what a predecessor
+/// would replay and run.
+fn journals_a_member(journal: &[MobEvent], name: &str) -> bool {
+    journal.iter().any(|event| {
+        matches!(
+            &event.kind,
+            MobEventKind::MemberSpawned(spawned) if spawned.agent_identity == id(name)
+        )
+    })
+}
+
+/// Rollback row RB-CL2-1, in-process leg: an identity awaiting its host's
+/// preparation, with no construction, leaves a predecessor nothing to run.
+/// Its create journals no member row and builds no session; a restart of
+/// this build keeps it pending with its row unchanged, and its settle then
+/// seats it Dormant.
+#[tokio::test]
+async fn rb_cl2_1_a_pending_preparation_leaves_a_predecessor_nothing_to_run() {
+    let mut mob = StoreOwnedMob::new("rb-cl2-1").await;
+    let builds = mob.builds().await;
+    committed(
+        mob.create(
+            prepared_create(
+                "create-pending",
+                spec("pending", "worker"),
+                IdentityPreparationMode::Required,
+            ),
+            ALLOW,
+        )
+        .await,
+    );
+    assert!(!journals_a_member(&mob.journal().await, "pending"));
+    assert_eq!(mob.builds().await, builds, "no session is built");
+    let row = mob.row("pending").await;
+
+    mob.restart_as(MobCompositionAuthority::Authoritative).await;
+    mob.unseated_for("pending", UnseatedEntryCause::PreparationPending)
+        .await;
+    assert_eq!(mob.row("pending").await, row, "the row is unchanged");
+    settle(&mob.handle, "settle-pending", "pending", None)
+        .await
+        .expect("the settle commits");
+    assert!(mob.seated_dormant("pending"));
+}
+
+/// Rollback row RB-CL2-1, lane-run leg:
+/// `a_pending_preparation_under_<pair>_runs_nothing` for each published
+/// pair.
+///
+/// This build writes the fixture: `pending`, a store-owned identity
+/// awaiting its host's `required` preparation. The lane serves it with the
+/// pair and checks: no member runs under the name, its row reads
+/// unreadable to the predecessor for that identity alone and stays
+/// byte-identical; rolled forward to this build, it reads awaiting its
+/// preparation and its settle seats it Dormant.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "lane:rollback - writes the fixture the published pairs run"]
+async fn rb_cl2_1_pending_preparation_fixture() {
+    let name = "store-owned-pending";
+    let dir = super::created_identity_rows::rollback_fixture_dir(name);
+    super::identity_entry_rows::write_rollback_fixture(
+        &dir,
+        &format!("rollback-{name}"),
+        |handle| async move {
+            committed(
+                handle
+                    .create_store_owned_identities(
+                        prepared_create(
+                            "create-pending",
+                            spec("pending", "worker")
+                                .with_runtime_mode_override(crate::MobRuntimeMode::TurnDriven),
+                            IdentityPreparationMode::Required,
+                        ),
+                        ALLOW,
+                    )
+                    .await,
+            );
+        },
+    )
+    .await;
+}
+
+/// Rollback row RB-CL2-3, Core's leg: an approved decision outlives a
+/// rollback, since a predecessor never reads the decision store. Back on
+/// this build (a restart here), the approved change re-executes under its
+/// permit and commits once, a retry replays its receipt, and a decision
+/// whose deadline passed meanwhile is refused `decision_closed` and writes
+/// nothing. The executor's leg (settlement-first recovery, revalidation)
+/// is Meta's.
+#[tokio::test]
+async fn rb_cl2_3_an_approved_change_re_executes_after_a_restart_and_an_expired_one_writes_nothing()
+{
+    let mut mob = StoreOwnedMob::new("rb-cl2-3").await;
+    let now = now_ms();
+    let approved = decided_permit(&operation("create-approved"), now, now + 600_000);
+    let lapsed = decided_permit(&operation("create-lapsed"), now - 120_000, now - 60_000);
+
+    mob.restart_as(MobCompositionAuthority::Authoritative).await;
+    committed(
+        mob.create(
+            host_create("create-approved", &["approved"]),
+            IdentityChangeConsentInput::Decided(&approved),
+        )
+        .await,
+    );
+    assert!(matches!(
+        mob.create(
+            host_create("create-approved", &["approved"]),
+            IdentityChangeConsentInput::Decided(&approved),
+        )
+        .await,
+        Ok(IdentityChangeOutcome::Replayed { .. })
+    ));
+    assert_eq!(
+        refusal(
+            mob.create(
+                host_create("create-lapsed", &["lapsed"]),
+                IdentityChangeConsentInput::Decided(&lapsed),
+            )
+            .await
+        ),
+        IdentityChangeRefusal::DecisionClosed { state: "expired" }
+    );
+    let rows = mob.rows().await;
+    assert!(rows.contains_key(&id("approved")));
+    assert!(!rows.contains_key(&id("lapsed")), "nothing was written");
+}
+
+/// Rollback row RB-CL2-4a, lane-run leg:
+/// `a_store_owned_member_under_<pair>_runs_as_a_member_of_its_profile` for
+/// each published pair. The in-process leg is R2.2's
+/// `a_store_owned_seat_equals_the_roster_owned_seat_of_the_same_spec`: the
+/// seat row a predecessor replays is a roster-owned seat's.
+///
+/// This build writes the fixture: `desk`, a store-owned identity seated
+/// Dormant on the worker profile. The lane serves it with the pair and
+/// checks: `desk` is a plain member of its profile, built from the profile
+/// and the host's build, and a delivery wakes it and runs a turn; rolled
+/// forward, it is a store-owned identity again on the same session.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "lane:rollback - writes the fixture the published pairs run"]
+async fn rb_cl2_4a_store_owned_member_fixture() {
+    let name = "store-owned-member";
+    let dir = super::created_identity_rows::rollback_fixture_dir(name);
+    super::identity_entry_rows::write_rollback_fixture(
+        &dir,
+        &format!("rollback-{name}"),
+        |handle| async move {
+            committed(
+                handle
+                    .create_store_owned_identities(
+                        StoreOwnedIdentityCreate::new(
+                            operation("create-desk"),
+                            IdentityChangeRequesterInput::host("console"),
+                            vec![CreatedIdentityRequest::new(
+                                spec("desk", "worker")
+                                    .with_runtime_mode_override(crate::MobRuntimeMode::TurnDriven),
+                            )],
+                        ),
+                        ALLOW,
+                    )
+                    .await,
+            );
+        },
+    )
+    .await;
+}
+
+/// Rollback row RB-CL2-4b, first leg (without Apply now), in-process: a
+/// label change after the member's seat takes the row at once, while the
+/// seat row a predecessor replays keeps the labels it was seated with, and
+/// the record census counts the seat stale. The second leg (with Apply
+/// now) waits for the Apply now ruling: no change writes the row's labels
+/// into a seat row yet.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rb_cl2_4b_a_label_change_leaves_the_seat_row_a_predecessor_reads_stale() {
+    let mob = StoreOwnedMob::new("rb-cl2-4b").await;
+    committed(
+        mob.create(host_create("create-desk", &["desk"]), ALLOW)
+            .await,
+    );
+    let seated_with = mob.spawn_row("desk").await.labels;
+    let moved = BTreeMap::from([("team".to_string(), "beta".to_string())]);
+    mob.update(
+        "relabel-desk",
+        spec("desk", "worker").with_labels(moved),
+        &spec_digest(&spec("desk", "worker")),
+    )
+    .await
+    .expect("the update commits");
+    let row = mob.row("desk").await;
+    assert_eq!(
+        row.spec
+            .expect("the row holds its spec")
+            .labels
+            .get("team")
+            .map(String::as_str),
+        Some("beta"),
+        "the row takes the labels at once"
+    );
+    assert_eq!(
+        mob.spawn_row("desk").await.labels,
+        seated_with,
+        "the seat row keeps its labels"
+    );
+    let census = mob
+        .handle
+        .identity_record_census()
+        .await
+        .expect("the census answers");
+    assert_eq!(census.seats_stale, 1, "{census:?}");
+}
+
+/// Rollback row RB-CL2-4b, first leg, lane-run:
+/// `a_stale_seat_under_<pair>_runs_with_its_seat_rows_labels` for each
+/// published pair.
+///
+/// This build writes the fixture: `desk`, a store-owned identity seated
+/// Dormant, whose labels an update moved after its seat. The lane serves it
+/// with the pair and checks: `desk` runs with the labels of its seat row;
+/// rolled forward, its row's labels apply at its next build, and the record
+/// census counts it in `seats_stale` until then.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "lane:rollback - writes the fixture the published pairs run"]
+async fn rb_cl2_4b_stale_seat_fixture() {
+    let name = "store-owned-stale-seat";
+    let dir = super::created_identity_rows::rollback_fixture_dir(name);
+    super::identity_entry_rows::write_rollback_fixture(
+        &dir,
+        &format!("rollback-{name}"),
+        |handle| async move {
+            let seated = spec("desk", "worker")
+                .with_runtime_mode_override(crate::MobRuntimeMode::TurnDriven);
+            let expected = spec_digest(&seated);
+            committed(
+                handle
+                    .create_store_owned_identities(
+                        StoreOwnedIdentityCreate::new(
+                            operation("create-desk"),
+                            IdentityChangeRequesterInput::host("console"),
+                            vec![CreatedIdentityRequest::new(seated)],
+                        ),
+                        ALLOW,
+                    )
+                    .await,
+            );
+            handle
+                .update_store_owned_identity(
+                    crate::runtime::StoreOwnedIdentityUpdate::new(
+                        operation("relabel-desk"),
+                        IdentityChangeRequesterInput::host("console"),
+                        spec("desk", "worker")
+                            .with_runtime_mode_override(crate::MobRuntimeMode::TurnDriven)
+                            .with_labels(BTreeMap::from([(
+                                "team".to_string(),
+                                "beta".to_string(),
+                            )])),
+                        &expected,
+                    ),
+                    ALLOW,
+                )
+                .await
+                .expect("the update commits");
+        },
+    )
+    .await;
+}
+
+/// Rollback row RB-CL2-5, in-process leg: a held construction open at a
+/// stop leaves no member. Its member was never published, so the journal
+/// holds no member row for the identity (what a predecessor would run);
+/// after the restart the identity still awaits its preparation, its row
+/// keeps the attempt, and a new attempt is held and activated.
+#[tokio::test]
+async fn rb_cl2_5_a_held_construction_open_at_a_stop_leaves_no_member() {
+    let mut mob = HeldMob::new("rb-cl2-5").await;
+    mob.create_constructed("built").await;
+    let held = mob
+        .construct("construct-built", "built")
+        .await
+        .expect("the construction is held");
+
+    mob.restart().await;
+    let journal = mob
+        .storage
+        .events
+        .replay_all()
+        .await
+        .expect("read the journal");
+    assert!(
+        !journals_a_member(&journal, "built"),
+        "no member was published"
+    );
+    assert_eq!(
+        mob.standing("built"),
+        Some(EntryStanding::Unseated(
+            UnseatedEntryCause::PreparationPending
+        ))
+    );
+    let again = mob
+        .construct("construct-again", "built")
+        .await
+        .expect("a new attempt is held");
+    assert!(again.attempt() > held.attempt(), "the row kept the attempt");
+    settle(&mob.handle, "settle-built", "built", Some(again.attempt()))
+        .await
+        .expect("the new attempt activates");
+    assert!(matches!(
+        mob.standing("built"),
+        Some(EntryStanding::Seated(_))
+    ));
+}
+
+/// Rollback row RB-CL2-5, lane-run leg:
+/// `a_held_construction_under_<pair>_leaves_no_member` for each published
+/// pair.
+///
+/// This build writes the fixture: `built`, a store-owned identity whose
+/// `constructed` preparation holds an open construction when the process
+/// stops. The lane serves it with the pair and checks: no member runs under
+/// the name and its row reads unreadable for that identity alone; rolled
+/// forward, the identity awaits its preparation, and a new attempt is held
+/// and activated.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "lane:rollback - writes the fixture the published pairs run"]
+async fn rb_cl2_5_held_construction_fixture() {
+    let name = "store-owned-held-construction";
+    let dir = super::created_identity_rows::rollback_fixture_dir(name);
+    let service = Arc::new(MockSessionService::new());
+    HeldMob::compose(&service);
+    let mut definition = store_owned_definition(name);
+    definition.id = MobId::from(format!("rollback-{name}").as_str());
+    let handle = MobBuilder::new(
+        definition,
+        MobStorage::persistent(dir.join("mob.sqlite")).expect("open the fixture store"),
+    )
+    .with_session_service(service)
+    .with_member_runtime_registration_hook(Arc::new(super::held_spawn::SelectingHost::default()))
+    .create()
+    .await
+    .expect("create the fixture mob");
+    committed(
+        handle
+            .create_store_owned_identities(
+                prepared_create(
+                    "create-built",
+                    spec("built", "worker")
+                        .with_runtime_mode_override(crate::MobRuntimeMode::TurnDriven),
+                    IdentityPreparationMode::Constructed,
+                ),
+                ALLOW,
+            )
+            .await,
+    );
+    handle
+        .construct_identity(crate::runtime::IdentityConstructionRequest::new(
+            operation("construct-built"),
+            "built",
+            tokio::time::Instant::now() + STEP,
+        ))
+        .await
+        .expect("the construction is held");
+    crash_stop_and_release_routes(handle).await;
+}

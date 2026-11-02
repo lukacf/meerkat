@@ -8526,8 +8526,8 @@ pub enum UnseatedEntryCause {
     HostedOnFirstUse,
     #[serde(rename = "HeldCreation")]
     HeldCreation,
-    #[serde(rename = "TemplatePreparation")]
-    TemplatePreparation,
+    #[serde(rename = "PreparationPending")]
+    PreparationPending,
 }
 impl UnseatedEntryCause {
     pub fn as_str(&self) -> &'static str {
@@ -8535,7 +8535,7 @@ impl UnseatedEntryCause {
             Self::SeatOwed => "SeatOwed",
             Self::HostedOnFirstUse => "HostedOnFirstUse",
             Self::HeldCreation => "HeldCreation",
-            Self::TemplatePreparation => "TemplatePreparation",
+            Self::PreparationPending => "PreparationPending",
         }
     }
 }
@@ -8546,7 +8546,7 @@ impl std::convert::TryFrom<&str> for UnseatedEntryCause {
             "SeatOwed" => Ok(Self::SeatOwed),
             "HostedOnFirstUse" => Ok(Self::HostedOnFirstUse),
             "HeldCreation" => Ok(Self::HeldCreation),
-            "TemplatePreparation" => Ok(Self::TemplatePreparation),
+            "PreparationPending" => Ok(Self::PreparationPending),
             other => Err(format!("invalid UnseatedEntryCause value `{other}`")),
         }
     }

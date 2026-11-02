@@ -24339,7 +24339,7 @@ RecoverCreatedIdentityEntryPendingRunning(agent_identity, presence, last_session
     /\ members_to_spawn' = (members_to_spawn \ {agent_identity})
     /\ members_to_retire' = (members_to_retire \ {agent_identity})
     /\ identity_entry_origins' = MapSet(identity_entry_origins, agent_identity, "Created")
-    /\ identity_entry_unseated' = MapSet(identity_entry_unseated, agent_identity, "TemplatePreparation")
+    /\ identity_entry_unseated' = MapSet(identity_entry_unseated, agent_identity, "PreparationPending")
     /\ UnchangedFrame_3908b598eaac0e9a
 
 
@@ -24357,7 +24357,7 @@ RecoverCreatedIdentityEntryPendingStopped(agent_identity, presence, last_session
     /\ members_to_spawn' = (members_to_spawn \ {agent_identity})
     /\ members_to_retire' = (members_to_retire \ {agent_identity})
     /\ identity_entry_origins' = MapSet(identity_entry_origins, agent_identity, "Created")
-    /\ identity_entry_unseated' = MapSet(identity_entry_unseated, agent_identity, "TemplatePreparation")
+    /\ identity_entry_unseated' = MapSet(identity_entry_unseated, agent_identity, "PreparationPending")
     /\ UnchangedFrame_3908b598eaac0e9a
 
 
@@ -27379,7 +27379,7 @@ archived_session_record_is_unseated == (\A id \in DOMAIN identity_entry_archived
 role_hold_belongs_to_an_entry == (\A id \in DOMAIN member_host_preparation_causes : (IF ((IF (id \in DOMAIN member_host_preparation_causes) THEN Some((IF id \in DOMAIN member_host_preparation_causes THEN member_host_preparation_causes[id] ELSE "None")) ELSE None) # Some("RoleMigrationUndeclared")) THEN TRUE ELSE ((id \in DOMAIN identity_entry_origins) = TRUE)))
 placed_entry_custody_is_hosted_on_first_use == (\A id \in spawn_exec_entry_custody : (IF ((id \in DOMAIN member_placement) = FALSE) THEN TRUE ELSE ((IF (id \in DOMAIN identity_entry_unseated) THEN Some((IF id \in DOMAIN identity_entry_unseated THEN identity_entry_unseated[id] ELSE "None")) ELSE None) = Some("HostedOnFirstUse"))))
 worker_reconcile_spares_entries == ((\A id \in members_to_spawn : (((id \in DOMAIN identity_entry_origins) = FALSE) /\ ((id \in identity_entry_tombstones) = FALSE) /\ ((id \in identity_entry_unreadable) = FALSE))) /\ (\A id \in members_to_retire : (((id \in DOMAIN identity_entry_origins) = FALSE) /\ ((id \in identity_entry_unreadable) = FALSE))))
-unseated_created_entry_is_preparing_or_owed == (\A id \in DOMAIN identity_entry_unseated : (IF ((IF (id \in DOMAIN identity_entry_origins) THEN Some((IF id \in DOMAIN identity_entry_origins THEN identity_entry_origins[id] ELSE "None")) ELSE None) # Some("Created")) THEN TRUE ELSE (IF ((IF (id \in DOMAIN identity_entry_unseated) THEN Some((IF id \in DOMAIN identity_entry_unseated THEN identity_entry_unseated[id] ELSE "None")) ELSE None) = Some("SeatOwed")) THEN TRUE ELSE ((IF (id \in DOMAIN identity_entry_unseated) THEN Some((IF id \in DOMAIN identity_entry_unseated THEN identity_entry_unseated[id] ELSE "None")) ELSE None) = Some("TemplatePreparation")))))
+unseated_created_entry_is_preparing_or_owed == (\A id \in DOMAIN identity_entry_unseated : (IF ((IF (id \in DOMAIN identity_entry_origins) THEN Some((IF id \in DOMAIN identity_entry_origins THEN identity_entry_origins[id] ELSE "None")) ELSE None) # Some("Created")) THEN TRUE ELSE (IF ((IF (id \in DOMAIN identity_entry_unseated) THEN Some((IF id \in DOMAIN identity_entry_unseated THEN identity_entry_unseated[id] ELSE "None")) ELSE None) = Some("SeatOwed")) THEN TRUE ELSE ((IF (id \in DOMAIN identity_entry_unseated) THEN Some((IF id \in DOMAIN identity_entry_unseated THEN identity_entry_unseated[id] ELSE "None")) ELSE None) = Some("PreparationPending")))))
 tombstone_is_never_an_entry == (\A id \in identity_entry_tombstones : (((id \in DOMAIN identity_entry_origins) = FALSE) /\ ((id \in DOMAIN identity_to_runtime) = FALSE)))
 entry_custodies_are_disjoint == (\A id \in spawn_exec_created_custody : (((id \in spawn_exec_entry_custody) = FALSE) /\ ((IF (id \in DOMAIN identity_entry_origins) THEN Some((IF id \in DOMAIN identity_entry_origins THEN identity_entry_origins[id] ELSE "None")) ELSE None) = Some("Created")) /\ ((IF (id \in DOMAIN spawn_exec_phase) THEN Some((IF id \in DOMAIN spawn_exec_phase THEN spawn_exec_phase[id] ELSE "None")) ELSE None) = Some("Opened"))))
 entry_custody_ladder_is_open == (\A id \in spawn_exec_entry_custody : (IF ((IF (id \in DOMAIN spawn_exec_phase) THEN Some((IF id \in DOMAIN spawn_exec_phase THEN spawn_exec_phase[id] ELSE "None")) ELSE None) = Some("Opened")) THEN TRUE ELSE ((IF (id \in DOMAIN spawn_exec_phase) THEN Some((IF id \in DOMAIN spawn_exec_phase THEN spawn_exec_phase[id] ELSE "None")) ELSE None) = Some("MaterializePending"))))

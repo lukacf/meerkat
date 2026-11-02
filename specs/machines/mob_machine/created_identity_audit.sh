@@ -30,14 +30,16 @@
 #   revival record, but member 2's Present row), a ladder without custody
 #   for member 1 and one with each pair of custodies for member 2, seated on
 #   member 2's revival record or a fresh session, their aborts, the worker
-#   reconcile of both members or of none and the forced destroy: no ladder
-#   opens for a reserved name (AuditNoLadderForReservedName), a ladder's
-#   custody matches its name's origin (AuditLadderCustodyMatchesOrigin), a
-#   seat under created custody binds the revival record
-#   (AuditCreatedSeatTakesRecord), no ladder close seats a member under a
-#   reserved name, so a ladder opened before the reservation is aborted
-#   (AuditNoSeatUnderReservedName), and exactly one arm answers every row
-#   and every admission probe, ladders and reseated members included.
+#   ensure of either member, the worker reconcile of both members or of
+#   none and the forced destroy: no ladder opens for a reserved name
+#   (AuditNoLadderForReservedName), a ladder's custody matches its name's
+#   origin (AuditLadderCustodyMatchesOrigin), a seat under created custody
+#   binds the revival record (AuditCreatedSeatTakesRecord), no ladder close
+#   seats a member under a reserved name, so a ladder opened before the
+#   reservation is aborted (AuditNoSeatUnderReservedName), no worker ensure
+#   records a reserved name for a spawn (worker_reconcile_spares_entries),
+#   and exactly one arm answers every row and every admission probe,
+#   ladders and reseated members included.
 # - names: the scan of both identities' rows (without a revival record),
 #   then the declarations, the seal over every desired set, the legacy
 #   adoption, the agent lane and the admission probe, under either
@@ -211,7 +213,7 @@ in_part() {
 # run's floor may be `unmeasured` until then, which checks no floor and
 # prints the run's distinct-state count.
 scan_states=3264
-reseat_states=6597
+reseat_states=13193
 names_states=2880
 placed_states=198
 admit_states=12
@@ -268,6 +270,8 @@ reseat_covered_actions=(
   AbortSpawnExecActiveRunning
   CommitDormantSeatRunning
   ReconcileRunning
+  EnsureMemberRunningExisting
+  EnsureMemberRunningMissing
   BeginPlacedCompletionLifecycleQuiesceFresh
   DestroyFromAny
 )
@@ -986,6 +990,7 @@ for witness in \
   "reseat:Action property:ReseatOnRecord" "reseat:Action property:CreatedCustodyAborted" \
   "reseat:Action property:ScanContradictedLadder" "reseat:Action property:ReservedLadderAborted" \
   "reseat:Action property:ReconcileSparesReserved" "reseat:Action property:DestroyClearsReserved" \
+  "reseat:Action property:EnsureSparesReserved" \
   "names:Action property:SealKeepsCreated" "names:Action property:SealSkipsUnreadable" \
   "names:Action property:ProbeOtherOrigin" \
   "placed:Action property:ScanContradictedPlaced" \
@@ -1307,6 +1312,12 @@ PY
   # The worker reconcile retires an unreadable name's member.
   mutate reseat reconcile_retires_unreadable "Invariant worker_reconcile_spares_entries" <<'PY'
 replace_text(" /\\ member \\notin arg_identity_entry_unreadable }\n    ELSE {}", " }\n    ELSE {}")
+PY
+
+  # The worker ensure records a reserved name for a spawn (its
+  # name_not_reserved guard dropped).
+  mutate reseat ensure_takes_reserved "Invariant worker_reconcile_spares_entries" <<'PY'
+drop_guard("EnsureMemberRunningMissing", "identity_entry_tombstones) = FALSE)")
 PY
 
   # The admission probe admits a reserved name (its name_not_reserved guard

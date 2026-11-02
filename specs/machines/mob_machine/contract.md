@@ -4507,6 +4507,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `coordinator_bound`
   - `identity_absent`
   - `not_an_identity_entry`
+  - `name_not_reserved`
 - Emits: `MemberSpawnRequired`
 - To: `Running`
 

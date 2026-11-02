@@ -2626,6 +2626,16 @@ them.
   refused with `MemberAlreadyExists`, and a second `ensure_member` waits for
   the member and answers with it.
 
+- `meerkat-machine-schema`, `meerkat-mob`: `MobHandle::ensure_member` (and
+  the RPC methods built on it) refuses the name of a removed identity, or a
+  name this build cannot read, with `IdentityMember` before anything is
+  recorded or created, as a spawn of the name is refused. The mob machine's
+  ensure checked only that the name held no member and was no identity
+  entry, so it recorded such a name for a spawn, against the machine's own
+  invariant `worker_reconcile_spares_entries`: a debug build failed that
+  check and stopped the mob, and a release build refused only the
+  follow-up spawn.
+
 - `meerkat-openai`: on the GitHub Copilot Responses route, a response with
   two or more reasoning or message items that are identical apart from their
   ids and ciphertext (for example reasoning without a summary) no longer

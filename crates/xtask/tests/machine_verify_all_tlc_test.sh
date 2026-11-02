@@ -967,10 +967,11 @@ fi
 # opens, aborts and seats their spawn ladders with every pair of custodies:
 # created custody seats a Created entry owed its seat again, on its revival
 # record, and a ladder opened before its name was reserved seats no member
-# and is aborted; then the worker reconcile and the forced destroy. The names
-# run scans the rows and then drives the declarations, the seal over every
-# desired set, the legacy adoption, the agent lane and the admission probe in
-# a running and a stopped mob; the placed run scans the row of a member
+# and is aborted; then the worker ensure, the worker reconcile and the forced
+# destroy. The names run scans the rows and then drives the declarations, the
+# seal over every desired set, the legacy adoption, the agent lane and the
+# admission probe in a running and a stopped mob; the placed run scans the
+# row of a member
 # seated on a member host, before or after its remote commit. They check
 # every generated invariant (the created entries' among them: only a
 # store-owned entry is archived, a removed entry's name is never an entry

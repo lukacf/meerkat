@@ -677,6 +677,67 @@ async fn a_spawn_never_takes_a_tombstoned_or_unreadable_name() {
     assert_eq!(mob.journal_len().await, journal, "no refusal wrote a row");
 }
 
+/// No worker ensure takes a removed created entry's name or one whose entry
+/// this build cannot read: MobMachine refuses the ensure, which would
+/// otherwise put the reserved name in the worker reconcile's spawn set, and
+/// the ensure is answered the name's admission refusal,
+/// `MobError::IdentityMember`, as a spawn of the name is, before anything is
+/// recorded, created or written. The mob keeps serving: a plain name is
+/// still ensured.
+///
+/// RED: drop `name_not_reserved` from `EnsureMemberRunningMissing`: the
+/// ensure records the reserved name for a spawn, against
+/// `worker_reconcile_spares_entries`, whose debug check panics the mob's
+/// actor, and the ensure answers `MobError::ActorReplyChannelClosed`. Drop
+/// the actor's typed answer to the refused ensure (`reserved_name_refusal`
+/// in its `ApplyMachineInputEffects` step): the ensure answers the machine's
+/// untyped refusal, `MobError::Internal`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_worker_ensure_never_takes_a_tombstoned_or_unreadable_name() {
+    let mut mob = CreatedMob::new("created-ensure").await;
+    mob.put_created("removed", CreatedIdentityPresence::Removed)
+        .await;
+    mob.put_raw("unreadable", later_build_row()).await;
+    mob.restart().await;
+    assert_eq!(mob.read("removed"), IdentityEntryRead::Removed);
+    assert!(matches!(
+        mob.read("unreadable"),
+        IdentityEntryRead::Unreadable { member: None }
+    ));
+    let journal = mob.journal_len().await;
+
+    for name in ["removed", "unreadable"] {
+        let error = tokio::time::timeout(STEP, mob.handle.ensure_member(worker_spec(name)))
+            .await
+            .expect("the ensure answers")
+            .expect_err("no worker ensure takes a reserved name");
+        assert!(is_identity_member(&error, name), "{name}: {error:?}");
+        let dsl_name = crate::machines::mob_machine::AgentIdentity::from_domain(&id(name));
+        assert!(
+            !mob.handle
+                .machine_state_watch_rx
+                .borrow()
+                .members_to_spawn
+                .contains(&dsl_name),
+            "{name}: the refused ensure records no spawn"
+        );
+        assert!(!mob.is_member(name).await, "{name}");
+    }
+    assert_eq!(mob.journal_len().await, journal, "no refusal wrote a row");
+
+    let ensured = tokio::time::timeout(STEP, mob.handle.ensure_member(worker_spec("plain")))
+        .await
+        .expect("the ensure answers")
+        .expect("a plain name is ensured");
+    assert!(
+        matches!(
+            &ensured,
+            crate::runtime::reconcile::EnsureMemberOutcome::Spawned(_)
+        ),
+        "{ensured:?}"
+    );
+}
+
 /// The declared apply never declares over a created entry, a removed one or
 /// an unreadable one: the created entry's listing is left as it is with a
 /// typed note (CL-2: a store-owned name's listing is a quiet steady state,

@@ -432,7 +432,7 @@ trap 'rm -rf "$tlc_env_tmp"' EXIT
 # generated a state (an arm a run fires only through a named wrapper read
 # under the wrapper's name, by the runner's closed alias table: the
 # wrappers print so below, and a check further down drops each wrapper's
-# line in turn), its seventy
+# line in turn), its seventy-one
 # step witnesses violated, and with --mutants each seeded defect's generated
 # invariant, audit invariant, totality invariant or action property
 # violated and its created_custody_local_kept, recovered_removal_unmarked
@@ -968,6 +968,7 @@ printf '%s\n' \
   'echo "Error: Action property NotAuditWitnessCreatedCustodyAborted is violated."' \
   'echo "Error: Action property NotAuditWitnessScanContradictedLadder is violated."' \
   'echo "Error: Action property NotAuditWitnessReconcileSparesReserved is violated."' \
+  'echo "Error: Action property NotAuditWitnessEnsureSparesReserved is violated."' \
   'echo "Error: Action property NotAuditWitnessDestroyClearsReserved is violated."' \
   'echo "Error: Action property NotAuditWitnessSealKeepsCreated is violated."' \
   'echo "Error: Action property NotAuditWitnessSealSkipsUnreadable is violated."' \

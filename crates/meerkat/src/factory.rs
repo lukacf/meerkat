@@ -6603,8 +6603,7 @@ impl AgentFactory {
         else {
             return Ok(None);
         };
-        let meerkat_core::AuthCredentialIdentity::Account(account) =
-            target.credential_identity.clone()
+        let meerkat_core::AuthCredentialIdentity::Account(account) = &target.credential_identity
         else {
             return Ok(None);
         };
@@ -6616,7 +6615,6 @@ impl AgentFactory {
             RuntimeBuildMode::SessionOwned(bindings) => Some(bindings.auth_lease().clone()),
             RuntimeBuildMode::StandaloneEphemeral => None,
         };
-        #[allow(unused_mut)]
         let mut env = self.host_resolver_environment();
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -6659,14 +6657,14 @@ impl AgentFactory {
         build_config.provider = Some(provider);
         if fresh_build && provider != target.backend.provider {
             let Some(route) = meerkat_core::resolve_credential_account_binding_for_provider(
-                config, provider, &account,
+                config, provider, account,
             )
             .map_err(|error| BuildAgentError::LlmClient(FactoryError::ConnectionTarget(error)))?
             else {
                 return Err(BuildAgentError::LlmClient(FactoryError::ConnectionTarget(
                     meerkat_core::ConnectionTargetError::NoCredentialAccountRoute {
                         provider,
-                        account,
+                        account: account.clone(),
                     },
                 )));
             };

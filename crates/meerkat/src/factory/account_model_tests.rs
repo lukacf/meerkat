@@ -379,9 +379,9 @@ async fn a_model_only_the_account_defines_builds_on_the_route_its_protocol_needs
         (
             identity.provider,
             identity.model.as_str(),
-            identity.auth_binding.clone()
+            &identity.auth_binding
         ),
-        (Provider::OpenAI, ACCOUNT_MODEL, Some(route(OPENAI_ROUTE))),
+        (Provider::OpenAI, ACCOUNT_MODEL, &Some(route(OPENAI_ROUTE))),
         "the session runs on the account's route of the model's protocol"
     );
     let resolved = harness.log.resolved();
@@ -415,8 +415,8 @@ async fn a_model_only_the_account_defines_builds_on_a_configured_once_account() 
     assert_eq!(reply.text, answer_for(Provider::Anthropic));
     let identity = durable_identity(&agent);
     assert_eq!(
-        (identity.provider, identity.auth_binding.clone()),
-        (Provider::Anthropic, Some(route(ANTHROPIC_ROUTE)))
+        (identity.provider, &identity.auth_binding),
+        (Provider::Anthropic, &Some(route(ANTHROPIC_ROUTE)))
     );
 }
 
@@ -509,8 +509,8 @@ async fn a_resumed_session_on_an_account_model_reads_the_account_again() {
     );
     let identity = durable_identity(&resumed);
     assert_eq!(
-        (identity.provider, identity.auth_binding.clone()),
-        (Provider::OpenAI, Some(route(OPENAI_ROUTE)))
+        (identity.provider, &identity.auth_binding),
+        (Provider::OpenAI, &Some(route(OPENAI_ROUTE)))
     );
 }
 
@@ -624,8 +624,8 @@ async fn a_zero_config_session_resumes_on_its_route_with_its_account_identity() 
         .expect("the first turn runs");
     let created = durable_identity(&agent);
     assert_eq!(
-        (created.provider, created.auth_binding.clone()),
-        (Provider::OpenAI, Some(route(OPENAI_ROUTE))),
+        (created.provider, &created.auth_binding),
+        (Provider::OpenAI, &Some(route(OPENAI_ROUTE))),
         "the durable identity names the zero-config route"
     );
     let durable = agent.session().clone();
@@ -646,16 +646,8 @@ async fn a_zero_config_session_resumes_on_its_route_with_its_account_identity() 
         .expect("the resumed turn runs");
     let identity = durable_identity(&resumed);
     assert_eq!(
-        (
-            identity.provider,
-            identity.model.clone(),
-            identity.auth_binding.clone()
-        ),
-        (
-            created.provider,
-            created.model.clone(),
-            created.auth_binding.clone()
-        ),
+        (identity.provider, &identity.model, &identity.auth_binding),
+        (created.provider, &created.model, &created.auth_binding),
         "the resumed session keeps its route"
     );
     assert_eq!(

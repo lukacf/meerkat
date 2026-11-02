@@ -2651,11 +2651,12 @@ impl MobError {
 
     /// The quarantine class of a persisted mob whose restore failed with
     /// this error ([`MobQuarantineClass`]): a store that could not serve a
-    /// read now (a typed store read classed unavailable, or another transport
-    /// fault a later attempt may get past) is `StoreUnavailable`; stored state
-    /// that cannot be read or decoded, or a failure of the mob's own store,
-    /// is `StoreUnreadable`; any other typed refusal of the resume is
-    /// `ResumeRefused`.
+    /// read now (a typed store read classed unavailable, the mob's own store
+    /// answering [`crate::store::MobStoreError::Unavailable`], or another
+    /// transport fault a later attempt may get past) is `StoreUnavailable`;
+    /// stored state that cannot be read or decoded, or any other failure of
+    /// the mob's own store, is `StoreUnreadable`; any other typed refusal of
+    /// the resume is `ResumeRefused`.
     #[must_use]
     pub fn restore_quarantine_class(&self) -> MobQuarantineClass {
         match self {
@@ -2664,7 +2665,19 @@ impl MobError {
             | Self::MemberStartupRecoveryFailed { cause: error, .. }
             | Self::MemberCustodyDeferred { cause: error, .. } => error.restore_quarantine_class(),
             Self::MobQuarantined { class, .. } => *class,
-            Self::StorageError(_) => MobQuarantineClass::StoreUnreadable,
+            // A store that could not serve the read now may serve a later
+            // attempt; any other failure of the mob's own store needs it
+            // repaired.
+            Self::StorageError(source) => {
+                if matches!(
+                    source.downcast_ref::<crate::store::MobStoreError>(),
+                    Some(crate::store::MobStoreError::Unavailable(_))
+                ) {
+                    MobQuarantineClass::StoreUnavailable
+                } else {
+                    MobQuarantineClass::StoreUnreadable
+                }
+            }
             Self::SessionError(error) => {
                 match MemberCustodyDeferralCause::of_session_store_failure(error) {
                     Some(MemberCustodyDeferralCause::StoreUnreadable) => {

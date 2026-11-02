@@ -213,8 +213,17 @@ fn write_error(error: SpiError) -> MobStoreError {
     MobStoreError::WriteFailed(format!("host store: {error}"))
 }
 
+/// The error a read answers. A host store that could not serve now stays
+/// [`MobStoreError::Unavailable`], so a restore classes the mob as a store a
+/// later attempt may restore; every other failure, host data that does not
+/// decode included, is a read failure.
 fn read_error(error: SpiError) -> MobStoreError {
-    MobStoreError::ReadFailed(format!("host store: {error}"))
+    match error {
+        SpiError::Host(meerkat_core::host_store::HostStoreError::Unavailable(_)) => {
+            MobStoreError::Unavailable(format!("host store: {error}"))
+        }
+        error => MobStoreError::ReadFailed(format!("host store: {error}")),
+    }
 }
 
 fn corrupt(detail: impl std::fmt::Display) -> MobStoreError {

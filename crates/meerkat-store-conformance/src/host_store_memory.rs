@@ -108,6 +108,18 @@ struct Realm {
     landed: BTreeMap<CommitId, u64>,
     /// The read faults a test set, by scope.
     read_faults: BTreeMap<ScopeRef, HostStoreReadFault>,
+    /// The read faults a test set for every scope of a kind.
+    kind_read_faults: BTreeMap<ScopeKind, HostStoreReadFault>,
+}
+
+impl Realm {
+    /// The read fault set for `scope`: its own, else its kind's.
+    fn read_fault(&self, scope: &ScopeRef) -> Option<HostStoreReadFault> {
+        self.read_faults
+            .get(scope)
+            .or_else(|| self.kind_read_faults.get(&scope.kind))
+            .copied()
+    }
 }
 
 /// A read fault the reference store answers for one scope while it is set
@@ -191,6 +203,21 @@ impl InMemoryHostStore {
             timing,
             clock: StoreClock(Some(Arc::new(now))),
             realm: Mutex::default(),
+        }
+    }
+
+    /// Answer every head and row read of every scope of `kind` with `fault`
+    /// while it is set (`None` clears it). A scope's own fault
+    /// ([`Self::set_read_fault`]) wins. Commits and listings are untouched.
+    pub fn set_kind_read_fault(&self, kind: ScopeKind, fault: Option<HostStoreReadFault>) {
+        let mut realm = self.realm();
+        match fault {
+            Some(fault) => {
+                realm.kind_read_faults.insert(kind, fault);
+            }
+            None => {
+                realm.kind_read_faults.remove(&kind);
+            }
         }
     }
 
@@ -389,7 +416,7 @@ impl HostStore for InMemoryHostStore {
 
     async fn load_head(&self, scope: &ScopeRef) -> Result<Option<VersionedHead>, HostStoreError> {
         let realm = self.realm();
-        if let Some(fault) = realm.read_faults.get(scope) {
+        if let Some(fault) = realm.read_fault(scope) {
             return Err(fault.error(scope));
         }
         Ok(realm.scopes.get(scope).map(ScopeState::versioned_head))
@@ -435,7 +462,7 @@ impl HostStore for InMemoryHostStore {
         limit: usize,
     ) -> Result<Vec<Row>, HostStoreError> {
         let realm = self.realm();
-        if let Some(fault) = realm.read_faults.get(scope) {
+        if let Some(fault) = realm.read_fault(scope) {
             return Err(fault.error(scope));
         }
         let Some(state) = realm.scopes.get(scope) else {

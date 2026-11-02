@@ -740,7 +740,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   or whose records disagree among themselves fails with
   `MobRuntimeError::Mob(MobError::MobQuarantined)` and its class
   (`store_unavailable`, retryable, or `store_unreadable` and `resume_refused`,
-  which need a repair) instead of the untyped store error.
+  which need a repair) instead of the untyped store error. On a host store
+  realm, a root mob storage the host store could not open (its scopes
+  unavailable now, or holding data that does not decode) fails the build with
+  the same typed quarantine
+  (`UnifiedRuntimeBuilderError::Bootstrap(UnifiedRuntimeBootstrapError::Mob(..))`)
+  instead of `UnifiedRuntimeBuilderError::Io` text.
 - The durable resume gate checks every WorkGraph claim a resumed worker
   holds: it pages through every open item with the WorkGraph list cursor.
   It read one page of 1,000 open items and warned that a claim past it went

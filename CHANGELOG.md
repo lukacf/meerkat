@@ -79,6 +79,11 @@ them.
   `SESSION_STORE_ERROR`) carrying the typed `RuntimeStoreError`, where it
   failed with `SessionError::Agent` (`AGENT_ERROR`). Other read failures are
   unchanged.
+- `meerkat-mob`: `MobStoreError` gains `Unavailable(String)`, appended last:
+  a mob store over the host store interface answers it for a read the host
+  store could not serve now (`HostStoreError::Unavailable`), where it
+  answered `ReadFailed`, and a restore classes it `store_unavailable`. A
+  `match` over every variant adds an arm for it.
 - `meerkat-runtime`: `MeerkatMachine::archive_runtime_residue_present`
   answers `Result<bool, RuntimeStoreError>`: its one failure, the read of the
   runtime's machine lifecycle record, keeps the store's typed error, where it
@@ -2699,11 +2704,6 @@ them.
   the calling member may manage, does not list quarantined mobs: a
   quarantined mob has no actor to read its grants from. The operator
   surfaces list them.
-- `meerkat-mob`: a mob's own store read over the host store interface
-  reports a host store that could not serve as an unreadable store
-  (`MobStoreError::ReadFailed`), so a host that types the failed resume of
-  such a mob (Meerkat Meta, for its own mob) classes it `store_unreadable`,
-  not `store_unavailable`.
 
 - `meerkat`: a host that supplies its own stores keeps durable decisions in
   `approval_decisions.sqlite3` under its store path, as it keeps

@@ -1607,6 +1607,13 @@ struct CachedCopilotToken {
     generation: u64,
     token: String,
     source_generation: u64,
+    /// The expiry of the source credential's publication this entry serves,
+    /// which the authorizer reports (`HttpAuthorizer::expires_at`): the
+    /// device sign-in's GitHub token expiry, or in token mode the expiry
+    /// the account lease's publication declares (a command source's
+    /// `refresh_interval_ms`; none otherwise). An agent build compares it
+    /// with the lease before it publishes the lease again, so it must be the
+    /// lease's own.
     source_expires_at: Option<DateTime<Utc>>,
     /// When the next token exchange is due. Never later than `expires_at`.
     refresh_at: DateTime<Utc>,
@@ -2459,10 +2466,12 @@ impl CopilotAuthorizer {
                 return Err(ProviderAuthError::Auth(AuthError::LeaseAbsent));
             }
         }
+        let publication = auth_lease.snapshot(&lease_key);
         Ok(OperatorTokenMaterial {
             token: token.to_string(),
             kind,
-            generation: auth_lease.snapshot(&lease_key).generation,
+            generation: publication.generation,
+            expires_at: publication.expires_at,
         })
     }
 
@@ -2582,11 +2591,19 @@ impl CopilotAuthorizer {
             model_discovery_due: false,
             identity: Some(Arc::clone(&identity)),
         };
+        // The account serves the lease publication the token was admitted
+        // under, so it reports that publication's expiry: an agent build
+        // that finds it equal to the lease's publishes nothing again, and a
+        // command source runs at the interval it declares.
+        let source_expires_at = material
+            .expires_at
+            .and_then(|expires_at| i64::try_from(expires_at).ok())
+            .and_then(|expires_at| DateTime::<Utc>::from_timestamp(expires_at, 0));
         *self.state.cache.write() = Some(CachedCopilotToken {
             generation,
             token: material.token,
             source_generation: material.generation,
-            source_expires_at: None,
+            source_expires_at,
             refresh_at: DateTime::<Utc>::MAX_UTC,
             expires_at: DateTime::<Utc>::MAX_UTC,
             api_base: identity.api_base.clone(),
@@ -3023,6 +3040,9 @@ struct OperatorTokenMaterial {
     kind: GitHubTokenKind,
     /// The account lease generation the token was admitted under.
     generation: u64,
+    /// The expiry that publication declares (epoch seconds), read with its
+    /// generation.
+    expires_at: Option<u64>,
 }
 
 /// Why GitHub or Copilot did not accept an operator token.

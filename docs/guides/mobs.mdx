@@ -120,7 +120,12 @@ part of a mob definition:
   of a member with activated host instructions is refused before anything is
   committed, with the typed `fork_instruction_refused` error.
 - `reactivate_inherited`: the fork appends the child's own activation of every
-  key that was effective in the source, and the child runs at once.
+  key that was effective in the source, and the child runs at once. A fork
+  (durable, or `fork_helper` below) whose carried head of a key is a row whose
+  body a compaction of the source retired (a later row of that key, past the
+  fork point, superseded it) is refused with the typed cause
+  `head_body_retired` before anything is committed; a fork at a later boundary
+  carries the superseding row with its body.
 - `refuse`: every fork whose child would inherit an activation is refused.
 
 A durable fork child's model never reads the body of an activation it

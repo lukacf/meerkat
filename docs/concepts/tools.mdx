@@ -260,7 +260,8 @@ confinement all still apply to every call it opens.
   deadline is refused even when the boundary that showed the tool ran before
   it. A refusal is an ordinary `policy_denied` tool error with the code
   `tool_grant_required`, `tool_grant_expired`, `tool_grant_revoked` or
-  `tool_grant_unavailable`. When the grants cannot be read, the gate stays
+  `tool_grant_unavailable`, which the model reads as
+  `Tool call denied (<code>): <message>`. When the grants cannot be read, the gate stays
   closed and the session records a warning notice.
 - **Lifecycle.** The canonical `ToolGrantLifecycleMachine` owns each grant:
   issued, then expired at its fixed deadline or revoked before it. Expired and

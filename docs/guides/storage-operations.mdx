@@ -83,6 +83,15 @@ The report covers:
 - orphaned lock, lease, index, and registered backup artifacts
 - the SQLite lock profile of the `rkat` binary itself (see
   [SQLite Lock Profile](/guides/deploying#sqlite-lock-profile))
+- what a rollback to a release before 0.9.9 would refuse, as informational
+  findings: the sessions written at session envelope 5
+  (`operator-instruction-envelope`: their documents hold operator-instruction
+  facts, a retired instruction activation body, or a rewrite record that
+  moved an instruction activation row), in SQLite realms and in the runtime
+  store of JSONL realms, and the per-mob databases that hold
+  operator-instruction events at mob event schema 10
+  (`operator-instruction-mob-events`). A host-store realm keeps its documents
+  and mob events in the host's store, which the disk sweep does not read
 
 Exit status is `0` when there are no error-severity findings and `1` when
 errors are present. Warnings and informational findings alone do not make the

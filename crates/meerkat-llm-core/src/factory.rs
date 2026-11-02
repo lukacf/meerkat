@@ -81,9 +81,17 @@ pub enum FactoryError {
     /// The build's model is one the model registry does not define, and the
     /// account behind the build's route, which was asked about it
     /// ([`crate::provider_runtime::ProviderRuntime::account_model`]), cannot
-    /// serve it. No other route or credential is tried in its place.
+    /// serve it. No other route or credential is tried in its place. The
+    /// refusal is boxed so the error stays small; a refusal converts into it
+    /// with `From`.
     #[error("account model refused: {0}")]
-    AccountModel(#[from] crate::provider_runtime::errors::AccountModelRefusal),
+    AccountModel(#[source] Box<crate::provider_runtime::errors::AccountModelRefusal>),
+}
+
+impl From<crate::provider_runtime::errors::AccountModelRefusal> for FactoryError {
+    fn from(refusal: crate::provider_runtime::errors::AccountModelRefusal) -> Self {
+        Self::AccountModel(Box::new(refusal))
+    }
 }
 
 #[cfg(test)]

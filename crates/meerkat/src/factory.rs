@@ -6648,7 +6648,7 @@ impl AgentFactory {
             AccountModelLookup::Offered(definition) => definition,
             AccountModelLookup::Refused(refusal) => {
                 return Err(BuildAgentError::LlmClient(FactoryError::AccountModel(
-                    refusal,
+                    Box::new(refusal),
                 )));
             }
             _ => return Ok(None),

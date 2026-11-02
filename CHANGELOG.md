@@ -1175,8 +1175,9 @@ them.
   `ProviderBindingError` (meerkat-core) gains
   `CopilotAccountRouteConflict { route }` and
   `CopilotAccountSourceUnsupported { source_kind }`, and `FactoryError`
-  (meerkat-llm-core) gains `AccountModel(AccountModelRefusal)`, each appended
-  last, so an exhaustive match needs their arms.
+  (meerkat-llm-core) gains `AccountModel(Box<AccountModelRefusal>)` (a
+  refusal converts into it with `From`), each appended last, so an
+  exhaustive match needs their arms.
 
 ### Added
 

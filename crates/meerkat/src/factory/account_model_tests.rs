@@ -430,13 +430,16 @@ async fn a_model_the_account_does_not_offer_is_refused_typed_without_another_cre
         .build(ACCOUNT_MODEL, Provider::OpenAI, OPENAI_ROUTE)
         .await
     {
-        Err(BuildAgentError::LlmClient(meerkat_client::FactoryError::AccountModel(
-            AccountModelRefusal::NotOffered {
-                credential, model, ..
-            },
-        ))) => {
-            assert_eq!(model, ACCOUNT_MODEL);
-            assert_eq!(credential, github_copilot_credential());
+        Err(BuildAgentError::LlmClient(meerkat_client::FactoryError::AccountModel(refusal))) => {
+            match *refusal {
+                AccountModelRefusal::NotOffered {
+                    credential, model, ..
+                } => {
+                    assert_eq!(model, ACCOUNT_MODEL);
+                    assert_eq!(credential, github_copilot_credential());
+                }
+                other => panic!("expected the account's NotOffered refusal, got {other}"),
+            }
         }
         Err(other) => panic!("expected the account's typed refusal, got {other}"),
         Ok(_) => panic!("a model the account does not offer must not build"),

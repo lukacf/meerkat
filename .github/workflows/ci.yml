@@ -981,8 +981,10 @@ jobs:
   # roles and hosted parts (180, 230, 196 and 212 s locally with 4
   # workers), and six (audits-q through audits-v) for the created identity
   # audit's runs, two for its recovery part and four for its changes part,
-  # each sized to at most 348 s locally (800 s hosted at a 2.3x runner
-  # factor); none of these fifteen is measured on a hosted runner yet.
+  # each projected, not yet measured as a shard, to stay within 348 s
+  # locally (800 s hosted at a 2.3x runner factor) from its TLC runs'
+  # start-up and spaces (the lane test's notes); none of these fifteen is
+  # measured on a hosted runner yet.
   # The `machine-verify --all` sweep stays on nightly, the release gate and
   # the release-tag graph.
   tlc-audits:
@@ -992,7 +994,8 @@ jobs:
     runs-on: ubuntu-24.04
     # On a pull request a shard past about 17.5 minutes fails the execution
     # budget anyway (CI_MAX_EXEC_SECONDS, 1080 s, less about 30 s of change
-    # classification); 20 leaves headroom over the expected 6-10 minutes.
+    # classification); 20 leaves headroom over a shard's at most about 14
+    # minutes (800 s of TLC hosted at a 2.3x runner factor, and its setup).
     timeout-minutes: 20
     strategy:
       fail-fast: false

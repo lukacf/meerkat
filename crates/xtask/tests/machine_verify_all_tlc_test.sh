@@ -1294,8 +1294,11 @@ run_machine_verify() {
 # The created identity audit runs in six shards, each with --mutants and
 # the runs its --part names; each TLC run's JVM start and model parse took
 # about 5 s on a 4-worker local run (2026-11-02), so a shard holds at most
-# about 40 TLC runs, and each must stay within 348 s locally (800 s hosted
-# at a 2.3x runner factor):
+# about 40 TLC runs. Each shard is projected, not yet measured as a shard,
+# to stay within 348 s locally (800 s hosted at a 2.3x runner factor): its
+# TLC runs' start-up (the run counts below, about 5 s each) plus the
+# searches of the spaces below. A shard a measured run finds past 348 s is
+# split again:
 # audits-q = its scan and placed runs (two whole-space runs, 9 witnesses,
 # 12 mutants: 23 TLC runs) and audits-v = its reseat and names runs (two
 # runs, 9 witnesses, 19 mutants: 30 TLC runs). As one shard (--part
@@ -1333,12 +1336,13 @@ run_machine_verify() {
 # invariants only.
 # None of audits-g through audits-o and audits-q through audits-v has been
 # measured on a hosted runner yet.
-# Each job adds about 20 s of checkout and TLC setup: 6-10 minutes a shard,
-# inside the 1080 s execution budget even on a runner 1.6x slower than the
-# faster ones here. As three shards these audits ran 13-18 minutes (audits-a),
-# 15 minutes and past the 20-minute job timeout (audits-b), and past it on
-# both runs (audits-c). A new audit joins the lightest shard, or a new shard
-# when it would take that shard past 10 minutes. Shard of the two audits the
+# Each job adds about 20 s of checkout and TLC setup: a shard within 348 s
+# locally takes at most about 14 minutes hosted (800 s of TLC at a 2.3x
+# runner factor, and its setup), inside the 1080 s execution budget. As
+# three shards these audits ran 13-18 minutes (audits-a), 15 minutes and
+# past the 20-minute job timeout (audits-b), and past it on both runs
+# (audits-c). A new audit joins the lightest shard, or a new shard when it
+# would take that shard past 348 s locally. Shard of the two audits the
 # `all` lane runs concurrently with machine-verify below:
 durable_steer_shard="audits-b"
 live_context_outbox_shard="audits-d"

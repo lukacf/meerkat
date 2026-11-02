@@ -2265,6 +2265,45 @@ mod tests {
         );
     }
 
+    /// A static bearer token travels in an `Authorization` value marked
+    /// sensitive, as an authorizer's credential does.
+    #[tokio::test]
+    async fn static_bearer_header_is_sensitive() {
+        const KEY_CANARY: &str = "c4n4ryStaticBearer";
+        let client = OpenAiCompatibleClient::new_with_options(
+            OpenAiCompatibleMode::ChatCompletions,
+            "remote-model".to_string(),
+            "http://127.0.0.1:9".to_string(),
+            Some(KEY_CANARY.to_string()),
+            options(true, true, true, true),
+        );
+        let url = client.chat_completions_endpoint();
+        let (builder, _) = client
+            .apply_dynamic_auth_with_receipt(
+                reqwest::Client::new().post(&url),
+                "POST",
+                &url,
+                "application/json",
+                meerkat_core::HttpAuthorizationContent::default(),
+            )
+            .await
+            .expect("the bearer signs the request");
+        let request = builder.build().expect("the request builds");
+        let authorization = request
+            .headers()
+            .get(reqwest::header::AUTHORIZATION)
+            .expect("an Authorization header");
+        assert_eq!(
+            authorization.to_str().ok(),
+            Some(format!("Bearer {KEY_CANARY}").as_str())
+        );
+        assert!(
+            authorization.is_sensitive(),
+            "the static bearer's Authorization value must be marked sensitive"
+        );
+        assert!(!format!("{request:?}").contains(KEY_CANARY), "{request:?}");
+    }
+
     /// Records the fields of every Meerkat event and span as text.
     #[derive(Clone, Default)]
     struct LogCapture(Arc<Mutex<String>>);

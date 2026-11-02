@@ -5098,6 +5098,49 @@ mod tests {
         );
     }
 
+    /// A static API key travels in a header value marked sensitive: the
+    /// `Authorization` bearer of the public API and Azure OpenAI's `api-key`,
+    /// so the request's `Debug` (and HTTP/2 header compression) never keeps
+    /// the key.
+    #[tokio::test]
+    async fn static_api_key_headers_are_sensitive() {
+        const KEY_CANARY: &str = "c4n4ryStaticApiKey";
+        for (azure, header) in [(false, "authorization"), (true, "api-key")] {
+            let client = OpenAiClient::new_with_base_url(
+                KEY_CANARY.to_string(),
+                "http://127.0.0.1:9".to_string(),
+            );
+            let client = if azure {
+                client.with_azure_openai_wire(AzureOpenAiWireConfig::default())
+            } else {
+                client
+            };
+            let endpoint = client.responses_endpoint();
+            let (builder, _) = client
+                .apply_request_headers_with_receipt(
+                    reqwest::Client::new().post(&endpoint),
+                    &endpoint,
+                    &[],
+                )
+                .await
+                .expect("the key signs the request");
+            let request = builder.build().expect("the request builds");
+            let value = request
+                .headers()
+                .get(header)
+                .unwrap_or_else(|| panic!("a {header} header"));
+            assert!(
+                value.to_str().is_ok_and(|value| value.contains(KEY_CANARY)),
+                "{header}"
+            );
+            assert!(
+                value.is_sensitive(),
+                "the static key's {header} value must be marked sensitive"
+            );
+            assert!(!format!("{request:?}").contains(KEY_CANARY), "{request:?}");
+        }
+    }
+
     /// Records the fields of every Meerkat event and span as text.
     #[derive(Clone, Default)]
     struct LogCapture(Arc<Mutex<String>>);

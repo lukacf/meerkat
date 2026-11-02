@@ -5321,6 +5321,34 @@ mod tests {
         );
     }
 
+    /// A static API key travels in an `x-api-key` value marked sensitive, as
+    /// an authorizer's credential does.
+    #[tokio::test]
+    async fn static_api_key_header_is_sensitive() {
+        const KEY_CANARY: &str = "c4n4ryStaticXApiKey";
+        let client = AnthropicClient::builder(KEY_CANARY.to_string())
+            .base_url("http://127.0.0.1:9".to_string())
+            .build()
+            .expect("client");
+        let url = client.messages_endpoint();
+        let mut betas = Vec::new();
+        let (builder, _) = client
+            .apply_authorization(reqwest::Client::new().post(&url), &url, false, &mut betas)
+            .await
+            .expect("the key signs the request");
+        let request = builder.build().expect("the request builds");
+        let key = request
+            .headers()
+            .get("x-api-key")
+            .expect("an x-api-key header");
+        assert_eq!(key.to_str().ok(), Some(KEY_CANARY));
+        assert!(
+            key.is_sensitive(),
+            "the static key's x-api-key value must be marked sensitive"
+        );
+        assert!(!format!("{request:?}").contains(KEY_CANARY), "{request:?}");
+    }
+
     /// Records the fields of every Meerkat event and span as text.
     #[derive(Clone, Default)]
     struct LogCapture(Arc<Mutex<String>>);

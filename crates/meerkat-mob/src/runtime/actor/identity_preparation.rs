@@ -114,14 +114,14 @@ impl MobActor {
             {
                 PreparationSettlement::ActivationPending { attempt }
             } else {
-                let end = match self.held_constructions.ended(identity) {
-                    Some((ended, end)) if ended == attempt => end,
-                    _ => ConstructionEnd::PublicationInterrupted,
+                let (end, cause) = match self.held_constructions.ended(identity) {
+                    Some(ended) if ended.attempt == attempt => (ended.end, ended.cause.clone()),
+                    _ => (ConstructionEnd::PublicationInterrupted, None),
                 };
                 PreparationSettlement::PublicationEnded {
                     attempt,
                     end,
-                    cause: None,
+                    cause,
                 }
             },
         )
@@ -594,6 +594,19 @@ impl MobActor {
             Err(error) => {
                 let activation_sent = held.as_ref().is_some_and(|held| held.activation_sent);
                 let (end, cleanup) = construction_end_of(&error, activation_sent);
+                // The error that ended the attempt is kept with its end: the
+                // settle's answer and its replay carry it, and the log names
+                // it.
+                tracing::warn!(
+                    mob_id = %self.definition.id,
+                    agent_identity = %identity,
+                    attempt,
+                    end = end.as_str(),
+                    activation_sent,
+                    error = %error,
+                    "a held construction ended without its publication"
+                );
+                let cause = Some(error.to_string());
                 if let Some(kind) = end.machine_kind() {
                     self.apply_dsl_input(
                         mob_dsl::MobMachineInput::EndPreparationConstruction {
@@ -605,11 +618,12 @@ impl MobActor {
                     )?;
                     self.publish_machine_state_projection();
                 }
-                self.held_constructions.record_end(&identity, attempt, end);
+                self.held_constructions
+                    .record_end(&identity, attempt, end, cause.clone());
                 ConstructionOutcome::Ended {
                     end,
                     cleanup,
-                    cause: None,
+                    cause,
                 }
             }
         };
@@ -648,7 +662,7 @@ impl MobActor {
             }
         };
         self.held_constructions
-            .record_end(identity, attempt, ConstructionEnd::Aborted);
+            .record_end(identity, attempt, ConstructionEnd::Aborted, None);
         report
     }
 

@@ -416,6 +416,15 @@ pub(super) struct HeldConstruction {
     pub(super) activation_sent: bool,
 }
 
+/// How an identity's attempt ended, in this process: its end, and the error
+/// that ended it, if one did.
+#[derive(Debug, Clone)]
+pub(super) struct EndedAttempt {
+    pub(super) attempt: u64,
+    pub(super) end: ConstructionEnd,
+    pub(super) cause: Option<String>,
+}
+
 /// The mob's registry of held constructions (the actor's): the hold of each
 /// identity's open attempt, the end of each identity's last ended attempt
 /// in this process, and the last attempt each roster-owned identity held in
@@ -424,7 +433,7 @@ pub(super) struct HeldConstruction {
 pub(super) struct HeldConstructions {
     #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
     held: BTreeMap<AgentIdentity, HeldConstruction>,
-    ended: BTreeMap<AgentIdentity, (u64, ConstructionEnd)>,
+    ended: BTreeMap<AgentIdentity, EndedAttempt>,
     #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
     roster_attempts: BTreeMap<AgentIdentity, u64>,
 }
@@ -433,7 +442,7 @@ impl HeldConstructions {
     /// The next attempt of a roster-owned identity in this process.
     #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
     pub(super) fn next_roster_attempt(&mut self, identity: &AgentIdentity) -> u64 {
-        let ended = self.ended.get(identity).map_or(0, |(attempt, _)| *attempt);
+        let ended = self.ended.get(identity).map_or(0, |ended| ended.attempt);
         let last = self.roster_attempts.get(identity).copied().unwrap_or(0);
         let next = last.max(ended).saturating_add(1);
         self.roster_attempts.insert(identity.clone(), next);
@@ -441,19 +450,28 @@ impl HeldConstructions {
     }
 
     /// How `identity`'s last ended attempt ended, in this process.
-    pub(super) fn ended(&self, identity: &AgentIdentity) -> Option<(u64, ConstructionEnd)> {
-        self.ended.get(identity).copied()
+    pub(super) fn ended(&self, identity: &AgentIdentity) -> Option<&EndedAttempt> {
+        self.ended.get(identity)
     }
 
-    /// Record how `identity`'s `attempt` ended.
+    /// Record how `identity`'s `attempt` ended, with the error that ended
+    /// it, if one did.
     #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
     pub(super) fn record_end(
         &mut self,
         identity: &AgentIdentity,
         attempt: u64,
         end: ConstructionEnd,
+        cause: Option<String>,
     ) {
-        self.ended.insert(identity.clone(), (attempt, end));
+        self.ended.insert(
+            identity.clone(),
+            EndedAttempt {
+                attempt,
+                end,
+                cause,
+            },
+        );
     }
 
     /// The hold of `identity`'s open attempt.
@@ -952,11 +970,11 @@ impl super::MobHandle {
             } => {
                 let settlement = match construction_outcome(outcome).await {
                     ConstructionOutcome::Published => PreparationSettlement::Activated { attempt },
-                    ConstructionOutcome::Ended { end, .. } => {
+                    ConstructionOutcome::Ended { end, cause, .. } => {
                         PreparationSettlement::PublicationEnded {
                             attempt,
                             end,
-                            cause: None,
+                            cause,
                         }
                     }
                 };

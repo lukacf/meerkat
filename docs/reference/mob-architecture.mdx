@@ -674,9 +674,13 @@ attempt's deadline, a refused construction, a crash or a removal ends the
 attempt (`EndPreparationConstruction`), and the identity stays pending. Once
 accepted, nothing replaces the activation until its publication ends:
 published (the membership commit that seats the member ends the attempt, and
-a store-owned identity's row is present again), failed, or interrupted by a
-crash (a retry of the settle answers `ConstructionEnd::PublicationInterrupted`),
-after which the identity stays pending and a new attempt may follow. A
+a store-owned identity's row is present again), failed (the settle answers
+the error that ended it, `PreparationSettlement::PublicationEnded`'s
+`cause`, and the mob logs it), or interrupted by a crash (a retry of the
+settle answers `ConstructionEnd::PublicationInterrupted`), after which the
+identity stays pending and a new attempt may follow. The construction's own
+spawn opens its spawn ladder at its publication, after the settle accepted
+its activation. A
 `Constructed` preparation is never settled without an attempt
 (`ConstructionRequired`), and at most one attempt of an identity is open,
 held or activating. A roster-owned identity's attempts count within one

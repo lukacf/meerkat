@@ -363,8 +363,10 @@ the attempt's deadline and binding its construction, moving it to
 ends an attempt by its abort, its deadline, a refused construction or a
 failed publication, an activating one only by a failed publication. A spawn
 ladder takes an entry awaiting its preparation only while a construction is
-held for it, and the membership commit that publishes it requires its
-accepted activation and ends the attempt. At most one attempt of an identity
+open for it, held or activating (the construction's own spawn opens its
+ladder at its publication, after the settle accepted its activation), and
+the membership commit that publishes it requires its accepted activation and
+ends the attempt. At most one attempt of an identity
 is open (`construction_is_held_or_activating`).
 
 The ci profile has no identities, so the hand-written audit

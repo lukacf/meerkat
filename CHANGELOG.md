@@ -1453,8 +1453,10 @@ them.
   accepted an abort (`MobHandle::abort_identity_construction`), the
   deadline, a refused construction, a crash or the identity's removal ends
   it (`ConstructionEnd`) with the identity still pending; once accepted,
-  nothing replaces the activation until its publication ends, and a retry of
-  the settle after a crash that interrupted it answers
+  nothing replaces the activation until its publication ends; a failed
+  publication answers the error that ended it
+  (`PreparationSettlement::PublicationEnded`'s `cause`), and a retry of the
+  settle after a crash that interrupted it answers
   `ConstructionEnd::PublicationInterrupted`. Refusals are typed
   (`PreparationNotPending`, `NotConstructed`, `ConstructionRequired`,
   `ConstructionOpen`, `StaleAttempt`, `PreparationMismatch`,

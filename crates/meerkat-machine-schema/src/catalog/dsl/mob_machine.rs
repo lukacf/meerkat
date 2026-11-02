@@ -8766,21 +8766,25 @@ macro_rules! mob_catalog_machine_dsl {
             // Declared entry's name, created custody a Created entry no member
             // holds that is owed its seat, hosted on its first use or held for
             // its creation (never one archived). An entry awaiting its host's
-            // preparation is taken only by the spawn of a construction held
-            // for it. Never both custodies.
+            // preparation is taken only by the spawn of a construction open
+            // for it: held, or activating once a settle accepted its
+            // activation (the construction's own spawn opens its ladder at
+            // its publication). Never both custodies.
             guard "entry_name_free" {
                 (self.identity_entry_origins.contains_key(agent_identity) == false && created_custody == false)
                 || (entry_custody == true && created_custody == false
                     && self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Declared)
                     && (self.identity_entry_unseated.get_cloned(agent_identity) != Some(UnseatedEntryCause::PreparationPending)
-                        || self.identity_entry_constructions_held.contains_key(agent_identity) == true))
+                        || (self.identity_entry_constructions_held.contains_key(agent_identity) == true
+                            || self.identity_entry_constructions_activating.contains_key(agent_identity) == true)))
                 || (created_custody == true && entry_custody == false
                     && self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Created)
                     && (self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::SeatOwed)
                         || self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::HostedOnFirstUse)
                         || self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::HeldCreation)
                         || (self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::PreparationPending)
-                            && self.identity_entry_constructions_held.contains_key(agent_identity) == true)))
+                            && (self.identity_entry_constructions_held.contains_key(agent_identity) == true
+                            || self.identity_entry_constructions_activating.contains_key(agent_identity) == true))))
             }
             // No spawn takes a reserved name: a removed created entry's, or
             // one whose created entry row this build cannot read.
@@ -8835,21 +8839,25 @@ macro_rules! mob_catalog_machine_dsl {
             // Declared entry's name, created custody a Created entry no member
             // holds that is owed its seat, hosted on its first use or held for
             // its creation (never one archived). An entry awaiting its host's
-            // preparation is taken only by the spawn of a construction held
-            // for it. Never both custodies.
+            // preparation is taken only by the spawn of a construction open
+            // for it: held, or activating once a settle accepted its
+            // activation (the construction's own spawn opens its ladder at
+            // its publication). Never both custodies.
             guard "entry_name_free" {
                 (self.identity_entry_origins.contains_key(agent_identity) == false && created_custody == false)
                 || (entry_custody == true && created_custody == false
                     && self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Declared)
                     && (self.identity_entry_unseated.get_cloned(agent_identity) != Some(UnseatedEntryCause::PreparationPending)
-                        || self.identity_entry_constructions_held.contains_key(agent_identity) == true))
+                        || (self.identity_entry_constructions_held.contains_key(agent_identity) == true
+                            || self.identity_entry_constructions_activating.contains_key(agent_identity) == true)))
                 || (created_custody == true && entry_custody == false
                     && self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Created)
                     && (self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::SeatOwed)
                         || self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::HostedOnFirstUse)
                         || self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::HeldCreation)
                         || (self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::PreparationPending)
-                            && self.identity_entry_constructions_held.contains_key(agent_identity) == true)))
+                            && (self.identity_entry_constructions_held.contains_key(agent_identity) == true
+                            || self.identity_entry_constructions_activating.contains_key(agent_identity) == true))))
             }
             // No spawn takes a reserved name: a removed created entry's, or
             // one whose created entry row this build cannot read.
@@ -9420,21 +9428,25 @@ macro_rules! mob_catalog_machine_dsl {
             // Declared entry's name, created custody a Created entry no member
             // holds that is owed its seat, hosted on its first use or held for
             // its creation (never one archived). An entry awaiting its host's
-            // preparation is taken only by the spawn of a construction held
-            // for it. Never both custodies.
+            // preparation is taken only by the spawn of a construction open
+            // for it: held, or activating once a settle accepted its
+            // activation (the construction's own spawn opens its ladder at
+            // its publication). Never both custodies.
             guard "entry_name_free" {
                 (self.identity_entry_origins.contains_key(agent_identity) == false && created_custody == false)
                 || (entry_custody == true && created_custody == false
                     && self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Declared)
                     && (self.identity_entry_unseated.get_cloned(agent_identity) != Some(UnseatedEntryCause::PreparationPending)
-                        || self.identity_entry_constructions_held.contains_key(agent_identity) == true))
+                        || (self.identity_entry_constructions_held.contains_key(agent_identity) == true
+                            || self.identity_entry_constructions_activating.contains_key(agent_identity) == true)))
                 || (created_custody == true && entry_custody == false
                     && self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Created)
                     && (self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::SeatOwed)
                         || self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::HostedOnFirstUse)
                         || self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::HeldCreation)
                         || (self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::PreparationPending)
-                            && self.identity_entry_constructions_held.contains_key(agent_identity) == true)))
+                            && (self.identity_entry_constructions_held.contains_key(agent_identity) == true
+                            || self.identity_entry_constructions_activating.contains_key(agent_identity) == true))))
             }
             // No spawn takes a reserved name: a removed created entry's, or
             // one whose created entry row this build cannot read.
@@ -12566,14 +12578,16 @@ macro_rules! mob_catalog_machine_dsl {
                 || (entry_custody == true && created_custody == false
                     && self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Declared)
                     && (self.identity_entry_unseated.get_cloned(agent_identity) != Some(UnseatedEntryCause::PreparationPending)
-                        || self.identity_entry_constructions_held.contains_key(agent_identity) == true))
+                        || (self.identity_entry_constructions_held.contains_key(agent_identity) == true
+                            || self.identity_entry_constructions_activating.contains_key(agent_identity) == true)))
                 || (created_custody == true && entry_custody == false
                     && self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Created)
                     && (self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::SeatOwed)
                         || self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::HostedOnFirstUse)
                         || self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::HeldCreation)
                         || (self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::PreparationPending)
-                            && self.identity_entry_constructions_held.contains_key(agent_identity) == true)))
+                            && (self.identity_entry_constructions_held.contains_key(agent_identity) == true
+                            || self.identity_entry_constructions_activating.contains_key(agent_identity) == true))))
             }
             guard "name_not_reserved" {
                 self.identity_entry_tombstones.contains(agent_identity) == false
@@ -12597,14 +12611,16 @@ macro_rules! mob_catalog_machine_dsl {
                 || (entry_custody == true && created_custody == false
                     && self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Declared)
                     && (self.identity_entry_unseated.get_cloned(agent_identity) != Some(UnseatedEntryCause::PreparationPending)
-                        || self.identity_entry_constructions_held.contains_key(agent_identity) == true))
+                        || (self.identity_entry_constructions_held.contains_key(agent_identity) == true
+                            || self.identity_entry_constructions_activating.contains_key(agent_identity) == true)))
                 || (created_custody == true && entry_custody == false
                     && self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Created)
                     && (self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::SeatOwed)
                         || self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::HostedOnFirstUse)
                         || self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::HeldCreation)
                         || (self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::PreparationPending)
-                            && self.identity_entry_constructions_held.contains_key(agent_identity) == true)))
+                            && (self.identity_entry_constructions_held.contains_key(agent_identity) == true
+                            || self.identity_entry_constructions_activating.contains_key(agent_identity) == true))))
             }
             guard "name_not_reserved" {
                 self.identity_entry_tombstones.contains(agent_identity) == false
@@ -12650,14 +12666,16 @@ macro_rules! mob_catalog_machine_dsl {
                     && self.identity_entry_origins.contains_key(agent_identity) == true
                     && (self.identity_entry_origins.get_cloned(agent_identity) != Some(IdentityEntryOrigin::Declared)
                         || (self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::PreparationPending)
-                            && self.identity_entry_constructions_held.contains_key(agent_identity) == false)))
+                            && (self.identity_entry_constructions_held.contains_key(agent_identity) == false
+                                && self.identity_entry_constructions_activating.contains_key(agent_identity) == false))))
                 || (created_custody == true && entry_custody == false
                     && (self.identity_entry_origins.get_cloned(agent_identity) != Some(IdentityEntryOrigin::Created)
                         || (self.identity_entry_unseated.get_cloned(agent_identity) != Some(UnseatedEntryCause::SeatOwed)
                             && self.identity_entry_unseated.get_cloned(agent_identity) != Some(UnseatedEntryCause::HostedOnFirstUse)
                             && self.identity_entry_unseated.get_cloned(agent_identity) != Some(UnseatedEntryCause::HeldCreation)
                             && (self.identity_entry_unseated.get_cloned(agent_identity) != Some(UnseatedEntryCause::PreparationPending)
-                                || self.identity_entry_constructions_held.contains_key(agent_identity) == false))))
+                                || (self.identity_entry_constructions_held.contains_key(agent_identity) == false
+                                && self.identity_entry_constructions_activating.contains_key(agent_identity) == false)))))
                 || (entry_custody == true && created_custody == true)
             }
             guard "name_not_reserved" {

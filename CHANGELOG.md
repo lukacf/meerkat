@@ -524,6 +524,14 @@ them.
   exclusion, which a step refused to rebuild waits for; the waiting helper
   admission reads it for entered fences.
 
+- `meerkat-llm-core`: `ResolverEnvironment::admitting_pending_account_limits`
+  lets a resolution succeed while a temporary outage keeps a provider from
+  obtaining an account's stated limits (its model list and output limits),
+  for a build that reads none of them, such as one whose output budget is
+  set before resolution; the first request then obtains them.
+  `ResolverEnvironment::admits_pending_account_limits` reads it. Off by
+  default; it has no effect on wasm32.
+
 ### Fixed
 
 - `meerkat-openai`: on the GitHub Copilot Responses route, a response with
@@ -585,8 +593,9 @@ them.
   its waking message refused. The build now succeeds on the account's
   last known model list, or without one when no token was minted yet; the
   first request performs the exchange and fails with a retryable error
-  while the outage lasts, and once the exchange answers it moves to the
-  account's route and is retried. A new session whose output budget comes
+  while the outage lasts, and once the exchange answers the session
+  continues on the account's route (moving to it, with one retry, when the
+  build had no model list). A new session whose output budget comes
   from the account's model limit still fails to build until the exchange
   answers, so no session is created with a budget the account refuses. An
   exchange 401, or a 403 that asks for an account action, still fails the

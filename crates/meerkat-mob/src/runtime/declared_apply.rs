@@ -1682,6 +1682,13 @@ impl super::MobHandle {
                     request = request.with_profile(entry.spec.role_name.clone());
                 }
                 request = request.with_runtime_mode(runtime_mode);
+                // A store-owned identity's restamp seats its row's labels:
+                // the update wrote them into the row, and the seat takes
+                // them in the same rotation. A roster-owned seat keeps its
+                // labels, as the declared apply stores none.
+                if entry.spec.created_custody {
+                    request = request.with_labels(entry.spec.labels.clone().unwrap_or_default());
+                }
                 match self.respawn_member(identity.clone(), request).await {
                     Ok(receipt) => {
                         let generation = receipt.runtime_id().generation;

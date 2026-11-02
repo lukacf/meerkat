@@ -208,9 +208,11 @@ impl MemberRotationRecord {
 /// Dormant at the next generation on the SAME session, in one machine step:
 /// its conversation and comms key are kept, and under the member's own role
 /// its endpoint and wiring edges too. The next incarnation keeps the
-/// member's labels, spawner, wiring exemption and continuity, and its
-/// profile and runtime mode unless this request names others (a declared
-/// role migration, a runtime-mode restamp). Under another profile the next
+/// member's spawner, wiring exemption and continuity, and its profile,
+/// runtime mode and labels unless this request names others (a declared
+/// role migration, a runtime-mode restamp, a store-owned identity's row
+/// labels: Apply now for a seat its row's labels moved past, which the
+/// record census counts in `seats_stale`). Under another profile the next
 /// incarnation runs under that role's comms name: its endpoint is the
 /// member's key under that name, the member's edges end, and it is wired to
 /// the edges the definition declares for its role.

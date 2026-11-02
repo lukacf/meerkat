@@ -14808,9 +14808,13 @@ impl MobHandle {
     /// host record.
     ///
     /// The next incarnation keeps the member's conversation (its session),
-    /// comms key, labels, spawner, wiring exemption and continuity, and the
-    /// profile and runtime mode the member has unless `request` names others
-    /// (a declared role migration, a runtime-mode restamp). Under the
+    /// comms key, spawner, wiring exemption and continuity, and the profile,
+    /// runtime mode and labels the member has unless `request` names others
+    /// (a declared role migration, a runtime-mode restamp, a store-owned
+    /// identity's row labels: `MemberRespawn::new().with_labels(<the row's
+    /// labels>)` is the Apply now of a seat whose row's labels moved past
+    /// it, which [`Self::identity_record_census`] counts in `seats_stale`).
+    /// Under the
     /// member's own profile it keeps the member's endpoint and wiring edges
     /// too. Under another profile it runs under that role's comms name, so
     /// it keeps neither: its endpoint is the member's key under the new name

@@ -2952,11 +2952,17 @@ impl super::MobHandle {
     /// revision and the change's receipt in one store transaction; the
     /// verdict is then realized as a roster-owned identity's change of the
     /// same spec is ([`IdentityUpdateOutcome::applied`]). A descriptive
-    /// change (display name, labels, context, instructions) keeps the
-    /// member, and its next build applies it; a runtime-mode change is a
-    /// restamp on the member's own session; a profile change is the declared
-    /// migration from the member's current role, kept in the row until the
-    /// restamp commits (a crash before it is carried out by the next start);
+    /// change (display name, labels, context, instructions) keeps the member
+    /// and is in the row at once: a seat whose session no build created yet
+    /// takes the new context and instructions at its first build; otherwise
+    /// the seat keeps its recorded build inputs, as a roster-owned
+    /// identity's does, and its labels change when it is seated again or
+    /// respawned with them ([`super::MemberRespawn::with_labels`], counted
+    /// in `seats_stale` until then). A runtime-mode change is a restamp on
+    /// the member's own session; a profile change is the declared migration
+    /// from the member's current role, kept in the row until the restamp
+    /// commits (a crash before it is carried out by the next start); either
+    /// restamp seats the row's labels;
     /// a placement, binding or backend change is read only while no member
     /// holds the identity. An archived identity's update, and the update of
     /// one awaiting its host's preparation, changes its row only: MobMachine

@@ -1571,7 +1571,14 @@ impl MobActor {
         let mut spec =
             super::super::handle::SpawnMemberSpec::new(role.clone(), agent_identity.clone());
         spec.runtime_mode = Some(request.runtime_mode.unwrap_or(entry.runtime_mode));
-        spec.labels = Some(entry.labels.clone());
+        // The request's labels (a store-owned identity's row labels), or
+        // the member's own. The rotation's record keeps them.
+        spec.labels = Some(
+            request
+                .labels
+                .clone()
+                .unwrap_or_else(|| entry.labels.clone()),
+        );
         // The member's own overrides apply to its own role; a declared role
         // migration resolves the new role from the definition.
         if role == entry.role {

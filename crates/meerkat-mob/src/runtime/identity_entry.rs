@@ -474,8 +474,10 @@ pub struct IdentityTombstonePage {
 pub struct IdentityRecordCensus {
     /// Every v2 row of the mob: store-owned identities present, pending
     /// their host's preparation or archived, removed names of either
-    /// custody (tombstones), and rows this build cannot read. Downgrade
-    /// tooling refuses while it is not zero.
+    /// custody (tombstones), and rows this build cannot read. This build has
+    /// no step that deletes one (a removal writes its name's tombstone, an
+    /// archive keeps its row): a mob that holds any has no supported
+    /// downgrade before the export and purge steps.
     pub created_rows: usize,
     /// Rows of archived store-owned identities.
     pub archived: usize,
@@ -490,9 +492,11 @@ pub struct IdentityRecordCensus {
     /// Held construction attempts open, held or activating.
     pub constructions_held: usize,
     /// Seated store-owned identities whose member's last seat row predates
-    /// their row's labels or profile (their descriptive change applies at
-    /// the member's next build, its role at its restamp): restamped or
-    /// removed before a downgrade, which reads the seat row.
+    /// their row's labels or profile: the seat keeps its labels until it is
+    /// seated again or respawned with the row's labels (Apply now,
+    /// [`super::MemberRespawn::with_labels`]), and its role until its
+    /// restamp. Respawned or removed before a downgrade, which reads the
+    /// seat row.
     pub seats_stale: usize,
 }
 

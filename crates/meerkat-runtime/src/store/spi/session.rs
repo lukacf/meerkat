@@ -39,7 +39,14 @@ fn refused(operation: &str) -> SessionStoreError {
 }
 
 fn read_failed(error: &RuntimeStoreError) -> SessionStoreError {
-    SessionStoreError::Internal(format!("host store session read failed: {error}"))
+    match error {
+        // Stored data that does not decode reads as a session state that
+        // cannot be decoded: permanent until it is repaired.
+        RuntimeStoreError::Corrupt(_) => {
+            SessionStoreError::Serialization(format!("host store session read failed: {error}"))
+        }
+        _ => SessionStoreError::Internal(format!("host store session read failed: {error}")),
+    }
 }
 
 fn meta_of(entry: &RuntimeSessionCatalogEntry) -> SessionMeta {

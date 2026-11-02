@@ -871,6 +871,13 @@ pub enum HostStoreError {
         holder: FenceToken,
         remaining: Duration,
     },
+    /// The stored data cannot be served as it is: it does not decode, or it
+    /// fails the store's own integrity check. Nothing was applied, and a
+    /// re-read answers the same until the data is repaired. Core reads it as
+    /// unreadable state (a mob whose restore meets it is quarantined as
+    /// `store_unreadable`), never as an outage that a retry may get past.
+    #[error("corrupt: {0}")]
+    Corrupt(String),
 }
 
 /// The storage interface a host implements for one realm. Core is the only

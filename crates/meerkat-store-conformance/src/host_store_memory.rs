@@ -23,6 +23,12 @@
 //! It is not durable across processes. A conformance factory hands out
 //! handles over one shared instance, which is how a test kills every Core
 //! object and reopens over the same store: the store outlives the "process".
+//!
+//! Its data never decays, so on its own it never answers
+//! [`HostStoreError::Unavailable`] for a read or [`HostStoreError::Corrupt`].
+//! A test that drives Core through a store that cannot serve a scope now, or
+//! whose stored data for a scope is corrupt, sets a read fault on that scope
+//! ([`InMemoryHostStore::set_read_fault`]).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -100,6 +106,32 @@ struct Realm {
     /// Every commit id that landed, with a fingerprint of its updates, so
     /// that a retry acts once and a reused id is caught.
     landed: BTreeMap<CommitId, u64>,
+    /// The read faults a test set, by scope.
+    read_faults: BTreeMap<ScopeRef, HostStoreReadFault>,
+}
+
+/// A read fault the reference store answers for one scope while it is set
+/// ([`InMemoryHostStore::set_read_fault`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum HostStoreReadFault {
+    /// Reads of the scope answer [`HostStoreError::Unavailable`]: the store
+    /// cannot serve them now.
+    Unavailable,
+    /// Reads of the scope answer [`HostStoreError::Corrupt`]: its stored data
+    /// cannot be served as it is.
+    Corrupt,
+}
+
+impl HostStoreReadFault {
+    fn error(self, scope: &ScopeRef) -> HostStoreError {
+        match self {
+            Self::Unavailable => {
+                HostStoreError::Unavailable(format!("{scope}: injected read fault"))
+            }
+            Self::Corrupt => HostStoreError::Corrupt(format!("{scope}: injected read fault")),
+        }
+    }
 }
 
 impl Realm {
@@ -159,6 +191,20 @@ impl InMemoryHostStore {
             timing,
             clock: StoreClock(Some(Arc::new(now))),
             realm: Mutex::default(),
+        }
+    }
+
+    /// Make every read of `scope` (its head and its rows) answer `fault`, or
+    /// serve it again with `None`. Commits and listings are untouched.
+    pub fn set_read_fault(&self, scope: ScopeRef, fault: Option<HostStoreReadFault>) {
+        let mut realm = self.realm();
+        match fault {
+            Some(fault) => {
+                realm.read_faults.insert(scope, fault);
+            }
+            None => {
+                realm.read_faults.remove(&scope);
+            }
         }
     }
 
@@ -342,11 +388,11 @@ impl HostStore for InMemoryHostStore {
     }
 
     async fn load_head(&self, scope: &ScopeRef) -> Result<Option<VersionedHead>, HostStoreError> {
-        Ok(self
-            .realm()
-            .scopes
-            .get(scope)
-            .map(ScopeState::versioned_head))
+        let realm = self.realm();
+        if let Some(fault) = realm.read_faults.get(scope) {
+            return Err(fault.error(scope));
+        }
+        Ok(realm.scopes.get(scope).map(ScopeState::versioned_head))
     }
 
     async fn list_heads(
@@ -389,6 +435,9 @@ impl HostStore for InMemoryHostStore {
         limit: usize,
     ) -> Result<Vec<Row>, HostStoreError> {
         let realm = self.realm();
+        if let Some(fault) = realm.read_faults.get(scope) {
+            return Err(fault.error(scope));
+        }
         let Some(state) = realm.scopes.get(scope) else {
             return Ok(Vec::new());
         };

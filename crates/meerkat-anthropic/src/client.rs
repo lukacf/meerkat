@@ -1399,6 +1399,65 @@ impl AnthropicClient {
             .is_some_and(|authorizer| authorizer.label() == CLAUDE_AI_OAUTH_AUTHORIZER_LABEL)
     }
 
+    /// Sign a Messages request: with an authorizer, the headers it adds for
+    /// this request (its `anthropic-beta` values merged into
+    /// `request_betas`, never sent twice); without one, the `x-api-key`
+    /// header. Returns the request and the authorization's receipt.
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn apply_authorization(
+        &self,
+        mut request: reqwest::RequestBuilder,
+        url: &str,
+        has_images: bool,
+        request_betas: &mut Vec<String>,
+    ) -> Result<
+        (
+            reqwest::RequestBuilder,
+            meerkat_core::HttpAuthorizationReceipt,
+        ),
+        LlmError,
+    > {
+        let Some(authorizer) = &self.authorizer else {
+            return Ok((
+                request.header("x-api-key", &self.api_key),
+                meerkat_core::HttpAuthorizationReceipt::untracked(),
+            ));
+        };
+        let mut extra = Vec::new();
+        authorizer
+            .append_content_headers(
+                meerkat_core::HttpAuthorizationContent { has_images },
+                &mut extra,
+            )
+            .map_err(|error| LlmError::AuthenticationFailed {
+                message: error.to_string(),
+            })?;
+        let receipt = authorizer
+            .authorize_with_receipt(&mut meerkat_core::HttpAuthorizationRequest {
+                method: "POST",
+                url,
+                headers: &mut extra,
+            })
+            .await
+            .map_err(LlmError::from_authorizer)?;
+        for (name, value) in extra {
+            if name.eq_ignore_ascii_case("anthropic-beta") {
+                for beta in value
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|beta| !beta.is_empty())
+                {
+                    if !request_betas.iter().any(|existing| existing == beta) {
+                        request_betas.push(beta.to_string());
+                    }
+                }
+            } else {
+                request = request.header(name, value);
+            }
+        }
+        Ok((request, receipt))
+    }
+
     async fn send_messages_request(
         &self,
         url: &str,
@@ -1477,55 +1536,18 @@ impl AnthropicClient {
         let mut request_betas = betas.to_vec();
         #[cfg(target_arch = "wasm32")]
         let request_betas = betas.to_vec();
-        let mut request = http
+        let request = http
             .post(url)
             .header("anthropic-version", "2023-06-01")
             .header("Content-Type", "application/json");
         #[cfg(not(target_arch = "wasm32"))]
-        let receipt = if let Some(authorizer) = &self.authorizer {
-            let mut extra = Vec::new();
-            authorizer
-                .append_content_headers(
-                    meerkat_core::HttpAuthorizationContent { has_images },
-                    &mut extra,
-                )
-                .map_err(|error| LlmError::AuthenticationFailed {
-                    message: error.to_string(),
-                })?;
-            let receipt = authorizer
-                .authorize_with_receipt(&mut meerkat_core::HttpAuthorizationRequest {
-                    method: "POST",
-                    url,
-                    headers: &mut extra,
-                })
-                .await
-                .map_err(LlmError::from_authorizer)?;
-            for (name, value) in extra {
-                if name.eq_ignore_ascii_case("anthropic-beta") {
-                    for beta in value
-                        .split(',')
-                        .map(str::trim)
-                        .filter(|beta| !beta.is_empty())
-                    {
-                        if !request_betas.iter().any(|existing| existing == beta) {
-                            request_betas.push(beta.to_string());
-                        }
-                    }
-                } else {
-                    request = request.header(name, value);
-                }
-            }
-            receipt
-        } else {
-            request = request.header("x-api-key", &self.api_key);
-            meerkat_core::HttpAuthorizationReceipt::untracked()
-        };
+        let (mut request, receipt) = self
+            .apply_authorization(request, url, has_images, &mut request_betas)
+            .await?;
         #[cfg(target_arch = "wasm32")]
-        {
-            request = request
-                .header("x-api-key", &self.api_key)
-                .header("anthropic-dangerous-direct-browser-access", "true");
-        }
+        let mut request = request
+            .header("x-api-key", &self.api_key)
+            .header("anthropic-dangerous-direct-browser-access", "true");
         #[cfg(target_arch = "wasm32")]
         let receipt = meerkat_core::HttpAuthorizationReceipt::untracked();
         if !request_betas.is_empty() {

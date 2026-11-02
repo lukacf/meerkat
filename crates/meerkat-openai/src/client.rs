@@ -1107,6 +1107,30 @@ impl OpenAiClient {
             .map(|(request, _)| request)
     }
 
+    /// Remove from `diagnostic`, text a response carried, any credential the
+    /// authorizer signed the request with: a provider, proxy or gateway can
+    /// echo the request's headers in an error.
+    fn redact_diagnostic(&self, diagnostic: &mut String) {
+        if let Some(authorizer) = &self.authorizer {
+            authorizer.redact_response_diagnostic(diagnostic);
+        }
+    }
+
+    /// `diagnostic` redacted as [`Self::redact_diagnostic`] does, for a log
+    /// field.
+    fn redacted(&self, diagnostic: &str) -> String {
+        let mut diagnostic = diagnostic.to_owned();
+        self.redact_diagnostic(&mut diagnostic);
+        diagnostic
+    }
+
+    /// `error` with every field that can carry provider text redacted as
+    /// [`Self::redact_diagnostic`] does; its class is kept.
+    fn redacted_error(&self, mut error: LlmError) -> LlmError {
+        error.redact_diagnostics(|message| self.redact_diagnostic(message));
+        error
+    }
+
     fn responses_endpoint(&self) -> String {
         format!(
             "{}/{}",
@@ -1625,13 +1649,18 @@ impl OpenAiClient {
                 return Ok(response);
             }
             let headers = response.headers().clone();
-            let text = response
+            let mut text = response
                 .text()
                 .await
                 .map_err(|error| LlmError::StreamParseError {
                     message: format!("cannot read Responses rejection body: {error}"),
                 })?;
-            let rejection = LlmError::from_http_response(status, text.clone(), &headers);
+            // The body is redacted before it is classified, and the decoded
+            // error again: a JSON escape can hide an echoed credential from
+            // the first pass and decoding reveals it.
+            self.redact_diagnostic(&mut text);
+            let rejection =
+                self.redacted_error(LlmError::from_http_response(status, text.clone(), &headers));
             // A policy stop must reach the recovery owner before auth refresh
             // or stateless continuation fallback can issue another request.
             if matches!(rejection, LlmError::PolicyStop { .. }) {
@@ -3069,7 +3098,8 @@ impl OpenAiClient {
                                                         continue;
                                                     }
                                                     let Some(name) = item.get("name").and_then(|n| n.as_str()) else {
-                                                        tracing::warn!(call_id, "function_call missing name");
+                                                        let call_id = self.redacted(call_id);
+                                                        tracing::warn!(call_id = call_id.as_str(), "function_call missing name");
                                                         continue;
                                                     };
                                                     // arguments is a JSON string. Missing arguments
@@ -3336,7 +3366,8 @@ impl OpenAiClient {
                                     continue;
                                 }
                                 let Some(name) = item.get("name").and_then(Value::as_str) else {
-                                    tracing::warn!(call_id, "function_call output item missing name");
+                                    let call_id = self.redacted(call_id);
+                                    tracing::warn!(call_id = call_id.as_str(), "function_call output item missing name");
                                     continue;
                                 };
                                 let (_, args_value) = match item
@@ -3462,9 +3493,11 @@ impl OpenAiClient {
                                 .and_then(|c| c.as_str())
                                 .unwrap_or("server_error");
 
+                            let logged_code = self.redacted(error_code);
+                            let logged_message = self.redacted(error_msg);
                             tracing::error!(
-                                code = error_code,
-                                message = error_msg,
+                                code = logged_code.as_str(),
+                                message = logged_message.as_str(),
                                 "OpenAI response failed"
                             );
 
@@ -3491,9 +3524,11 @@ impl OpenAiClient {
                                 .or(event.code.as_deref())
                                 .unwrap_or("unknown");
 
+                            let logged_code = self.redacted(error_code);
+                            let logged_message = self.redacted(error_msg);
                             tracing::error!(
-                                code = error_code,
-                                message = error_msg,
+                                code = logged_code.as_str(),
+                                message = logged_message.as_str(),
                                 "OpenAI streaming error"
                             );
 
@@ -3517,7 +3552,12 @@ impl OpenAiClient {
             }
         });
 
-        streaming::ensure_terminal_done(inner)
+        // Every error the stream ends with is redacted here, whichever path
+        // built it (a rejection body, an error event, a parse failure).
+        streaming::redact_stream_diagnostics(
+            streaming::ensure_terminal_done(inner),
+            self.authorizer.as_deref(),
+        )
     }
 }
 

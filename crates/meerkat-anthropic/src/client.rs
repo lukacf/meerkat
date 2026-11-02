@@ -1399,6 +1399,30 @@ impl AnthropicClient {
             .is_some_and(|authorizer| authorizer.label() == CLAUDE_AI_OAUTH_AUTHORIZER_LABEL)
     }
 
+    /// Remove from `diagnostic`, text a response carried, any credential the
+    /// authorizer signed the request with: a provider, proxy or gateway can
+    /// echo the request's headers in an error.
+    fn redact_diagnostic(&self, diagnostic: &mut String) {
+        if let Some(authorizer) = &self.authorizer {
+            authorizer.redact_response_diagnostic(diagnostic);
+        }
+    }
+
+    /// `diagnostic` redacted as [`Self::redact_diagnostic`] does, for a log
+    /// field.
+    fn redacted(&self, diagnostic: &str) -> String {
+        let mut diagnostic = diagnostic.to_owned();
+        self.redact_diagnostic(&mut diagnostic);
+        diagnostic
+    }
+
+    /// `error` with every field that can carry provider text redacted as
+    /// [`Self::redact_diagnostic`] does; its class is kept.
+    fn redacted_error(&self, mut error: LlmError) -> LlmError {
+        error.redact_diagnostics(|message| self.redact_diagnostic(message));
+        error
+    }
+
     /// Sign a Messages request: with an authorizer, the headers it adds for
     /// this request (its `anthropic-beta` values merged into
     /// `request_betas`, never sent twice); without one, the `x-api-key`
@@ -1847,15 +1871,16 @@ impl AnthropicClient {
                 Ok(response.bytes_stream())
             } else {
                 let headers = response.headers().clone();
-                let text = response.text().await.unwrap_or_default();
-                Err(
+                let mut text = response.text().await.unwrap_or_default();
+                self.redact_diagnostic(&mut text);
+                Err(self.redacted_error(
                     crate::request_support::provider_forced_tool_choice_rejection(
                         request,
                         status_code,
                         &text,
                     )
                     .unwrap_or_else(|| LlmError::from_http_response(status_code, text, &headers)),
-                )
+                ))
             };
             let mut stream = stream_result?;
             let mut lines = meerkat_llm_core::streaming::Utf8LineBuffer::with_capacity(SSE_BUFFER_CAPACITY);
@@ -2211,9 +2236,11 @@ impl AnthropicClient {
                                 .and_then(|t| t.as_str())
                                 .unwrap_or("unknown");
 
+                            let logged_type = self.redacted(error_type);
+                            let logged_message = self.redacted(error_msg);
                             tracing::error!(
-                                error_type,
-                                error_msg,
+                                error_type = logged_type.as_str(),
+                                error_msg = logged_message.as_str(),
                                 "Anthropic streaming error"
                             );
 
@@ -2358,7 +2385,12 @@ impl AnthropicClient {
 
         });
 
-        streaming::ensure_terminal_done(inner)
+        // Every error the stream ends with is redacted here, whichever path
+        // built it (a rejection body, an error event, a parse failure).
+        streaming::redact_stream_diagnostics(
+            streaming::ensure_terminal_done(inner),
+            self.authorizer.as_deref(),
+        )
     }
 }
 

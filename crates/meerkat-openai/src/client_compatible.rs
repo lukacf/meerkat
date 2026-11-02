@@ -244,6 +244,22 @@ impl OpenAiCompatibleClient {
         self
     }
 
+    /// Remove from `diagnostic`, text a response carried, any credential the
+    /// authorizer signed the request with: a provider, proxy or gateway can
+    /// echo the request's headers in an error.
+    fn redact_diagnostic(&self, diagnostic: &mut String) {
+        if let Some(authorizer) = &self.authorizer {
+            authorizer.redact_response_diagnostic(diagnostic);
+        }
+    }
+
+    /// `error` with every field that can carry provider text redacted as
+    /// [`Self::redact_diagnostic`] does; its class is kept.
+    fn redacted_error(&self, mut error: LlmError) -> LlmError {
+        error.redact_diagnostics(|message| self.redact_diagnostic(message));
+        error
+    }
+
     fn chat_completions_endpoint(&self) -> String {
         format!("{}/chat/completions", self.base_url)
     }
@@ -880,7 +896,10 @@ impl OpenAiCompatibleClient {
                         }
                     }
                 });
-                streaming::ensure_terminal_done(inner)
+                streaming::redact_stream_diagnostics(
+                    streaming::ensure_terminal_done(inner),
+                    self.authorizer.as_deref(),
+                )
             }
             OpenAiCompatibleMode::ChatCompletions => {
                 let inner: LlmStream<'a> = Box::pin(async_stream::try_stream! {
@@ -941,8 +960,13 @@ impl OpenAiCompatibleClient {
                         Ok(response.bytes_stream())
                     } else {
                         let headers = response.headers().clone();
-                        let text = response.text().await.unwrap_or_default();
-                        Err(LlmError::from_http_response(status_code, text, &headers))
+                        let mut text = response.text().await.unwrap_or_default();
+                        self.redact_diagnostic(&mut text);
+                        Err(self.redacted_error(LlmError::from_http_response(
+                            status_code,
+                            text,
+                            &headers,
+                        )))
                     };
                     let mut stream = stream_result?;
                     let mut lines = meerkat_llm_core::streaming::Utf8LineBuffer::with_capacity(512);
@@ -1322,7 +1346,13 @@ impl OpenAiCompatibleClient {
                     };
                 });
 
-                streaming::ensure_terminal_done(inner)
+                // Every error the stream ends with is redacted here, whichever
+                // path built it (a rejection body, an error envelope, a data
+                // line that does not parse, an incomplete buffer).
+                streaming::redact_stream_diagnostics(
+                    streaming::ensure_terminal_done(inner),
+                    self.authorizer.as_deref(),
+                )
             }
         }
     }
@@ -1446,8 +1476,9 @@ impl LlmClient for OpenAiCompatibleClient {
             Ok(())
         } else {
             let headers = response.headers().clone();
-            let text = response.text().await.unwrap_or_default();
-            Err(LlmError::from_http_response(status, text, &headers))
+            let mut text = response.text().await.unwrap_or_default();
+            self.redact_diagnostic(&mut text);
+            Err(self.redacted_error(LlmError::from_http_response(status, text, &headers)))
         }
     }
 

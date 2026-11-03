@@ -148,7 +148,7 @@ fn selected(owner: Arc<ApplicationConsentOwner>) -> ApplicationOperationReview {
 
 #[tokio::test]
 async fn installed_review_binds_actual_owner_and_preserves_ordinary_none() {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = private_root();
     let root = directory.path().canonicalize().unwrap();
     let selection = installed(&root);
     let pipe = InstalledPipe::open(&selection).await;
@@ -244,7 +244,7 @@ async fn installed_review_binds_actual_owner_and_preserves_ordinary_none() {
 
 #[tokio::test]
 async fn installed_review_reopen_retains_exact_issuer_through_review_and_settlement() {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = private_root();
     let root = directory.path().canonicalize().unwrap();
     let selection = installed(&root);
     let pipe = InstalledPipe::open(&selection).await;

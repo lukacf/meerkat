@@ -636,7 +636,12 @@ fn durable_consent_predecessor_child() {
 }
 async fn predecessor(pipes: Pipes) {
     let parent = PathBuf::from(std::env::var_os(ROOT_ENV).expect("parent-owned root"));
-    let directory = tempfile::tempdir_in(&parent).unwrap();
+    // The consent issuer refuses a parent with group or other access. Set
+    // this owned root's mode instead of inheriting the process umask.
+    let directory = tempfile::Builder::new()
+        .permissions(std::fs::Permissions::from_mode(0o700))
+        .tempdir_in(&parent)
+        .unwrap();
     let root = directory.path().canonicalize().unwrap();
     let client = Arc::new(ScriptedProvider::default());
     let observed = client.clone();

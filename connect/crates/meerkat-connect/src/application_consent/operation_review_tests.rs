@@ -41,7 +41,7 @@ fn with_review(review: Arc<BoundOperationReview>, claim: &HostingClaim) -> ToolD
 
 #[test]
 fn application_review_binding_refuses_wrong_owner_changed_history_and_zero_bounds() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = private_root();
     let root = temp.path().canonicalize().unwrap();
     let prepared = prepared(&root);
     let identity = ConsentApplicationIdentity::from_preparation(&prepared).unwrap();
@@ -88,7 +88,7 @@ fn application_review_binding_refuses_wrong_owner_changed_history_and_zero_bound
 
 #[tokio::test]
 async fn application_review_without_human_route_refuses_r3_without_consent_or_effect() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = private_root();
     let root = temp.path().canonicalize().unwrap();
     let prepared = prepared(&root);
     let owner = ApplicationConsentOwner::create(
@@ -137,7 +137,7 @@ async fn application_review_without_human_route_refuses_r3_without_consent_or_ef
 
 #[tokio::test]
 async fn application_review_uses_exact_persistent_issuer_and_retains_lease_through_settlement() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = private_root();
     let root = temp.path().canonicalize().unwrap();
     let prepared = prepared(&root);
     let identity = ConsentApplicationIdentity::from_preparation(&prepared).unwrap();

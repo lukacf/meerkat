@@ -65,6 +65,15 @@ fn hosting(root: &Path) -> HostingCapability {
         database: None,
     }))
 }
+/// A test-owned private (0700) root for a consent issuer, which refuses a
+/// parent with group or other access. The mode is set at creation instead of
+/// inherited from the process umask, which concurrent tests share.
+pub(crate) fn private_root() -> tempfile::TempDir {
+    tempfile::Builder::new()
+        .permissions(fs::Permissions::from_mode(0o700))
+        .tempdir()
+        .unwrap()
+}
 pub(crate) fn artifact(path: &Path, bytes: &[u8]) -> SelectedHostArtifact {
     create_file(path, bytes).unwrap();
     SelectedHostArtifact {
@@ -413,7 +422,7 @@ struct Child {
 }
 impl Child {
     fn spawn(spent: bool) -> Self {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = private_root();
         let root = temp.path().canonicalize().unwrap();
         let mut command = tokio::process::Command::new(std::env::current_exe().unwrap());
         command
@@ -618,7 +627,7 @@ async fn persistent_consent_owner_preserves_store_failure_and_unknown_settlement
 
 #[test]
 fn persistent_consent_selection_never_replaces_missing_or_changed_issuer_history() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = private_root();
     let root = temp.path().canonicalize().unwrap();
     let owner = ApplicationConsentOwner::create(&root, identity()).unwrap();
     let selection = owner.selection().clone();

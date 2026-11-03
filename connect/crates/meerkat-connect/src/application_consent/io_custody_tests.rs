@@ -103,7 +103,7 @@ impl AgentToolDispatcher for SqliteProbe {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn consumed_native_review_is_not_used_while_cancelled_sqlite_write_remains_live() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = private_root();
     // The real issuer requires a canonical private parent. macOS TMPDIR may
     // name /var while the same directory's canonical identity is /private/var.
     let root = temp.path().canonicalize().unwrap();

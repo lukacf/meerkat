@@ -52,13 +52,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   configured once, by a `[realm.<realm>.copilot]` section, lists the
   account's routes (`copilot_openai`, `copilot_anthropic` and
   `copilot_gemini`) as configured targets, and first-target setup is refused
-  next to the section. The lists of existing targets, in the terminal and in
-  the private-pipe setup conversation's provider prompt, offer only the
-  targets a session for the requested model runs on, and the chosen target's
-  details show the route that session runs on. Before, such a realm looked
-  unconfigured there, and the lists offered each Copilot route for a model
-  of one provider family: choosing `copilot_openai` for an Anthropic model
-  ran the session on `copilot_anthropic`.
+  next to the section. For a model whose provider family Meerkat knows
+  locally (a catalog model or a `[models.<id>]` entry), the lists of
+  existing targets, in the terminal and in the private-pipe setup
+  conversation's provider prompt, offer only the targets a session for that
+  model runs on, and the chosen target's details show the route that
+  session runs on; for a model only the Copilot account lists, see Known
+  limitations. Before, such a realm looked unconfigured there, and the lists
+  offered each Copilot route for a model of one provider family: choosing
+  `copilot_openai` for an Anthropic model ran the session on
+  `copilot_anthropic`.
 
 ### Upgrade notes
 
@@ -80,3 +83,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   `rkat storage doctor` and handle the sessions and mobs it lists under
   `operator-instruction-envelope` and `operator-instruction-mob-events` as
   Core's CHANGELOG describes.
+
+### Known limitations
+
+- For a GitHub Copilot model that only the account lists (absent from
+  Meerkat's model catalog and from `[models.<id>]` configuration), the lists
+  of existing targets in the terminal and in the private-pipe setup
+  conversation still offer every Copilot route of the account: setup makes
+  no provider or account-model request, so it cannot tell the model's
+  family. When the session starts, it runs on the account's route for the
+  protocol the account's model list gives the model, on the same account,
+  which can differ from the route chosen in setup.

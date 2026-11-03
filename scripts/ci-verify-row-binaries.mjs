@@ -7,7 +7,11 @@
 // lib); those may be listed, but none of their tests may be selected. The plan's static coverage check
 // (scripts/ci-hook-coverage.mjs) proves the rows cover the pre-push hook's
 // binaries; this proves the job built and selected what the row says, so a
-// row cannot pass by running fewer binaries than planned.
+// row cannot pass by running fewer binaries than planned. The one exception is
+// a test the planner lists by name as one no hosted runner can run
+// (HOSTED_RUNNER_EXCLUDED_TESTS): the row's filter leaves it out, and it must
+// be left out, so a listed test that is still selected, or that its binary no
+// longer has, fails the row too.
 //
 // usage: ci-verify-row-binaries.mjs <nextest-list.json> [--partition count:K/N] <binary-id>...
 //   <nextest-list.json> is `cargo nextest list ... --message-format json`
@@ -17,6 +21,7 @@
 //   check requires all of, so only they may be left out here.
 
 import { readFileSync } from "node:fs";
+import { HOSTED_RUNNER_EXCLUDED_TESTS } from "./ci-cargo-lanes.mjs";
 
 function main() {
   const args = process.argv.slice(2);
@@ -38,9 +43,11 @@ function main() {
   if (!suites || typeof suites !== "object") throw new Error(`${listPath} has no rust-suites`);
   const wanted = new Set(expected);
   const problems = [];
+  const planned = new Map(HOSTED_RUNNER_EXCLUDED_TESTS.map(({ binary, tests }) => [binary, new Set(tests)]));
   let matched = 0;
   let ignored = 0;
   let elsewhere = 0;
+  let excluded = 0;
   for (const [id, suite] of Object.entries(suites)) {
     if (!wanted.has(id)) {
       const selected = Object.entries(suite.testcases ?? {}).filter(([, testCase]) => testCase["filter-match"]?.status === "matches");
@@ -53,9 +60,25 @@ function main() {
       problems.push(`${id} was not listed (status ${suite.status ?? "missing"})`);
       continue;
     }
+    const out = planned.get(id) ?? new Set();
+    for (const name of out) {
+      if (!Object.hasOwn(suite.testcases ?? {}, name)) {
+        problems.push(`${id} has no test ${name}, which HOSTED_RUNNER_EXCLUDED_TESTS lists`);
+      }
+    }
     for (const [name, testCase] of Object.entries(suite.testcases ?? {})) {
       const match = testCase["filter-match"] ?? {};
-      if (match.status === "matches") {
+      if (out.has(name)) {
+        if (match.status === "matches") {
+          problems.push(`${id} ${name} is selected, but HOSTED_RUNNER_EXCLUDED_TESTS leaves it out of the row`);
+        } else if (match.reason === "expression") {
+          excluded += 1;
+        } else if (match.reason === "ignored") {
+          ignored += 1;
+        } else {
+          problems.push(`${id} ${name} is filtered out (${match.reason ?? match.status ?? "unknown"})`);
+        }
+      } else if (match.status === "matches") {
         matched += 1;
       } else if (match.reason === "ignored") {
         ignored += 1;
@@ -76,6 +99,7 @@ function main() {
   }
   process.stdout.write(
     `row binaries verified: ${wanted.size} listed as planned, ${matched} tests selected, ${ignored} ignored` +
+      (excluded > 0 ? `, ${excluded} left out as HOSTED_RUNNER_EXCLUDED_TESTS lists` : "") +
       (partition !== null ? `, ${elsewhere} in the other partitions of ${partition}` : "") +
       "\n",
   );

@@ -271,6 +271,7 @@ import { pathToFileURL } from "node:url";
 import {
   HOOK_SCRIPT,
   checkHookCoverage,
+  excludedTestsFilter,
   hookModel,
   laneSelections,
   parseFilter,
@@ -360,6 +361,48 @@ export const HOSTED_RUNNER_EXCLUDED_BINARIES = [
       "an absolute per-30-second CPU budget calibrated on real hardware: shared hosted runners read 3-4 s " +
       "where real machines read 0.5-2 s, even scheduled alone (Meta's own CI left it out the same way; " +
       "its release-gate protocol runs it)",
+  },
+];
+// Tests no hosted runner can run, in a binary whose other tests run: each
+// needs an environment only its product's own lane provides. Keyed by the
+// binary (package::test-target) and listed by exact name, with the reason.
+// The closure-tests row that holds the binary runs it without them (the
+// row's `filter`, ci-hook-coverage's excludedTestsFilter), the plan names them with the reason
+// in `hosted_runner_excluded_tests`, and scripts/ci-verify-row-binaries.mjs
+// accepts exactly these as filtered out of their binary. A renamed or
+// removed test fails that check, so the list follows the binary.
+export const HOSTED_RUNNER_EXCLUDED_TESTS = [
+  {
+    binary: "meerkat-connect::cli_paired_host",
+    reason:
+      "needs the assembled pin-built synthetic resource prefix (CONNECT_LAZY_SERVICES_FIXTURE_PREFIX), " +
+      "which only Connect's native lane provides",
+    tests: [
+      "actual_cli_combined_roles_preserve_inspection_choice_and_exact_approval",
+      "actual_cli_configured_browser_login_precedes_pairing_and_uses_same_native_session",
+      "actual_cli_configured_managed_api_key_is_hidden_and_reaches_native_model",
+      "actual_cli_default_frontend_uses_the_pinned_reviewed_setup_helper",
+      "actual_cli_denied_setup_helper_review_leaves_native_realm_unmaterialized",
+      "actual_cli_denied_setup_model_review_retains_only_helper_effects_and_no_input",
+      "actual_cli_device_cancel_before_start_sends_no_auth_request",
+      "actual_cli_device_cancel_during_interval_stops_without_polling_or_pairing",
+      "actual_cli_device_cancel_during_ready_poll_joins_storage_without_pairing",
+      "actual_cli_device_login_paces_polls_persists_native_account_then_reaches_pairing",
+      "actual_cli_explicit_memory_pairing_can_exit_after_retained_setup_before_request",
+      "actual_cli_failed_read_turn_accepts_only_explicit_followup_in_same_session",
+      "actual_cli_failed_uncertain_submission_allows_only_explicit_exact_status_turn",
+      "actual_cli_names_new_realm_with_existing_inventory_and_preserves_old_realm",
+      "actual_cli_new_realm_invalid_name_quit_eof_and_interrupt_leave_realms_unchanged",
+      "actual_cli_pairs_without_os_store_and_submits_exact_review_after_supplied_setup",
+      "actual_cli_provider_callback_cancel_joins_without_pairing_or_exchange",
+      "actual_cli_provider_exchange_cancel_waits_for_native_settlement_without_pairing",
+      "actual_cli_provider_exchange_failure_redacts_and_never_retries",
+      "actual_cli_reads_service_recipes_without_resources_in_original_session",
+      "actual_cli_refuses_private_document_and_keeps_original_conversation",
+      "actual_cli_secret_intent_approval_hands_entry_only_to_terminal_and_reads_host_status",
+      "actual_cli_startup_cancel_joins_native_refresh_and_closes_without_input",
+      "actual_cli_startup_cancel_preserves_native_refresh_failure_without_input",
+    ],
   },
 ];
 const CLOSURE_TEST_PROFILE = "ci-integration";
@@ -1946,7 +1989,7 @@ function countCanaryTests(source, prefix) {
 // product's rows select exactly that product's packages (`-p` each), its own
 // workspace's resolution. `laneFeatures` holds each member's features under
 // its own product's selection; `selections` the selections' flags.
-function hookParityRows({ scope, byName, laneFeatures, selections, model, maxTestRows, nextestText, hook, libRowRunner, productOf = () => "core", productStack = () => null, excluded = new Set() }) {
+function hookParityRows({ scope, byName, laneFeatures, selections, model, maxTestRows, nextestText, hook, libRowRunner, productOf = () => "core", productStack = () => null, excluded = new Set(), excludedTests = [] }) {
   const rows = [];
   const flagsOf = (product) => {
     const selection = selections.selections.get(product);
@@ -2087,6 +2130,8 @@ function hookParityRows({ scope, byName, laneFeatures, selections, model, maxTes
     }
     // Label by the heaviest part, which the packing placed first.
     const [heaviest] = bin.units;
+    // A binary with planned test exclusions runs without them.
+    const filter = excludedTestsFilter(binaries, excludedTests);
     rows.push({
       name: `tests ${shortName(heaviest.package)}${heaviest.part}${bin.units.length > 1 ? `+${bin.units.length - 1}` : ""}`,
       lane: "tests",
@@ -2095,6 +2140,7 @@ function hookParityRows({ scope, byName, laneFeatures, selections, model, maxTes
       package_flags: flagsOf(bin.product),
       test_flags: tests.map((test) => `--test ${test}`).join(" "),
       profile: CLOSURE_TEST_PROFILE,
+      ...(filter ? { filter } : {}),
       binaries,
       no_tests: "warn",
       rust_min_stack: productStack(bin.product) ?? HOOK_TEST_STACK,
@@ -3018,6 +3064,20 @@ function plan(args) {
     }
     return result.test_scope.includes(name);
   });
+  result.hosted_runner_excluded_tests = HOSTED_RUNNER_EXCLUDED_TESTS.filter(({ binary, tests }) => {
+    const [name, test] = binary.split("::");
+    if (!byName.has(name)) throw new Error(`hosted-runner test exclusion names unknown package ${name}`);
+    if (!byName.get(name).targets.some((target) => target.kind.includes("test") && target.name === test)) {
+      throw new Error(`hosted-runner test exclusion names unknown test target ${binary}`);
+    }
+    if (tests.length === 0 || new Set(tests).size !== tests.length) {
+      throw new Error(`hosted-runner test exclusion of ${binary} lists no test or a test twice`);
+    }
+    if (HOSTED_RUNNER_EXCLUDED_BINARIES.some((entry) => entry.binary === binary)) {
+      throw new Error(`${binary} is excluded both whole and by test`);
+    }
+    return result.test_scope.includes(name);
+  });
   const rows = result.test_scope.length > 0
     ? hookParityRows({
       scope: result.test_scope,
@@ -3032,6 +3092,7 @@ function plan(args) {
       productOf: (name) => productOf.get(name) ?? CORE,
       productStack: (product) => products.find((candidate) => candidate.name === product)?.testStack ?? null,
       excluded: new Set(result.hosted_runner_excluded.map(({ binary }) => binary)),
+      excludedTests: result.hosted_runner_excluded_tests,
     })
     : [];
   // A pull-request plan is checked against the rows its push runs.

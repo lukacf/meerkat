@@ -8091,6 +8091,249 @@ mod governed_operation_tests {
         );
     }
 
+    /// The publication facts a [`StaleReadWork`] and its decisions share.
+    #[derive(Default)]
+    struct StaleReadFacts {
+        sequence: std::sync::atomic::AtomicU64,
+        /// Preparations still to meet another actor's owner change, which
+        /// publishes and completes while they read.
+        stale_reads: std::sync::atomic::AtomicUsize,
+        /// Stagings of the execution policy gate still to complete a change
+        /// of their own after recording their entry, and to arm one stale
+        /// read for the preparation their final check then makes.
+        gate_stagings: std::sync::atomic::AtomicUsize,
+        /// Whether a stale read's change revokes the work's authority.
+        revokes: bool,
+        revoked: AtomicBool,
+        prepares: std::sync::atomic::AtomicUsize,
+    }
+
+    impl StaleReadFacts {
+        /// Facts whose next `stale_reads` preparations, and the
+        /// preparations after the next `gate_stagings` gate stagings, read
+        /// stale; their changes revoke the work's authority when `revokes`.
+        fn scripted(stale_reads: usize, gate_stagings: usize, revokes: bool) -> Arc<Self> {
+            Arc::new(Self {
+                stale_reads: std::sync::atomic::AtomicUsize::new(stale_reads),
+                gate_stagings: std::sync::atomic::AtomicUsize::new(gate_stagings),
+                revokes,
+                ..Self::default()
+            })
+        }
+
+        /// Another actor's owner change publishes and completes: the
+        /// sequence moves two steps, and none is in progress afterwards.
+        fn complete_change(&self, revoke: bool) {
+            if revoke {
+                self.revoked.store(true, Ordering::SeqCst);
+            }
+            self.sequence.fetch_add(2, Ordering::SeqCst);
+        }
+    }
+
+    /// A work owner whose reads end stale after a change they never saw in
+    /// progress, as a read that waits for an owner's lock while another
+    /// actor's change holds it does: a scripted preparation meets a change
+    /// that completes while it reads and refuses to rebuild
+    /// (`ReprepareRequired`), and `owner_change_in_progress` names nothing.
+    /// Once a revoking change completed, every preparation is `Denied`.
+    struct StaleReadWork(Arc<StaleReadFacts>);
+
+    struct StaleReadPrepared {
+        facts: Arc<StaleReadFacts>,
+        at: u64,
+    }
+
+    impl WorkAuthorization for StaleReadWork {
+        fn prepare(
+            &self,
+            _binding: &PreparedAuthorizationBinding,
+        ) -> Result<Arc<dyn PreparedOperationAuthorization>, OperationAuthorizationError> {
+            let facts = &self.0;
+            facts.prepares.fetch_add(1, Ordering::SeqCst);
+            if facts.revoked.load(Ordering::SeqCst) {
+                return Err(OperationRefused::new(OperationRefusalKind::Denied).into());
+            }
+            if facts
+                .stale_reads
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
+                    left.checked_sub(1)
+                })
+                .is_ok()
+            {
+                facts.complete_change(facts.revokes);
+                return Err(OperationRefused::new(OperationRefusalKind::ReprepareRequired).into());
+            }
+            Ok(Arc::new(StaleReadPrepared {
+                facts: Arc::clone(facts),
+                at: facts.sequence.load(Ordering::SeqCst),
+            }))
+        }
+
+        fn review_operation_context(
+            &self,
+            _binding: &PreparedAuthorizationBinding,
+        ) -> Result<
+            crate::authorization::ReviewOperationContextResolution,
+            OperationAuthorizationError,
+        > {
+            Ok(crate::authorization::ReviewOperationContextResolution::NotApplicable)
+        }
+    }
+
+    impl PreparedOperationAuthorization for StaleReadPrepared {
+        fn review_tier(&self) -> crate::authorization::OperationReviewTier {
+            crate::authorization::OperationReviewTier::R1
+        }
+
+        fn check_current(
+            &self,
+            _binding: &PreparedAuthorizationBinding,
+        ) -> Result<(), OperationAuthorizationError> {
+            if self.facts.sequence.load(Ordering::SeqCst) != self.at {
+                return Err(OperationRefused::new(OperationRefusalKind::ReprepareRequired).into());
+            }
+            Ok(())
+        }
+
+        fn observe(
+            &self,
+            _binding: &PreparedAuthorizationBinding,
+            event: OperationObservation,
+        ) -> Result<(), OperationObservationError> {
+            if matches!(
+                event,
+                OperationObservation::Entry(
+                    crate::authorization::OperationEntryBoundary::ToolExecutionPolicy
+                )
+            ) && self
+                .facts
+                .gate_stagings
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
+                    left.checked_sub(1)
+                })
+                .is_ok()
+            {
+                self.facts.complete_change(false);
+                self.facts.stale_reads.fetch_add(1, Ordering::SeqCst);
+            }
+            Ok(())
+        }
+    }
+
+    fn stale_read_context(facts: &Arc<StaleReadFacts>) -> ToolDispatchContext {
+        ToolDispatchContext::default().with_work_authorization(Some(
+            crate::WorkAuthorizationContext::new(
+                Arc::new(StaleReadWork(Arc::clone(facts))),
+                crate::OperationExecutionScope::Domain,
+            ),
+        ))
+    }
+
+    /// The call-level execution policy gate's staging finds its decision
+    /// stale (a change completed after it was prepared) and prepares it
+    /// again while another actor's owner change publishes and completes:
+    /// that read refuses to rebuild with no change in progress any more. The
+    /// gate pauses one backoff step and stages again from the owners, as one
+    /// of the dispatch attempt's free rebuilds: the call enters once when
+    /// its authority still holds, and is refused with the owners' current
+    /// answer (`Denied`, certified not dispatched) when that change revoked
+    /// it.
+    ///
+    /// RED on the base: the gate's staging answered the stale read as its
+    /// own certified refusal (`reprepare_required`, `tool_invoked: false`)
+    /// in both cases.
+    #[tokio::test(start_paused = true)]
+    async fn a_policy_gated_entry_rebuilds_after_a_stale_read_whose_change_completed() {
+        let mut rows: Vec<CertifiedRow> = Vec::new();
+        for revokes in [false, true] {
+            let facts = StaleReadFacts::scripted(0, 1, revokes);
+            let inner = Arc::new(SourceKindDispatcher::default());
+            let gated: Arc<dyn AgentToolDispatcher> =
+                Arc::new(crate::ExecutionPolicyGatedDispatcher::new(
+                    Arc::clone(&inner),
+                    crate::ToolExecutionPolicy::unrestricted(),
+                ));
+            let result = fenced(&gated, "read_file", &stale_read_context(&facts)).await;
+            assert_eq!(
+                facts.sequence.load(Ordering::SeqCst),
+                4,
+                "revokes={revokes}: two changes, both completed"
+            );
+            if revokes {
+                rows.push((
+                    "policy gate staging after a revoking change",
+                    result,
+                    inner.0.load(Ordering::SeqCst),
+                    OperationRefusalKind::Denied,
+                ));
+                continue;
+            }
+            assert!(
+                result
+                    .as_ref()
+                    .is_ok_and(|outcome| !outcome.result.is_error),
+                "the gate stages again after the stale read, then enters: {:?}",
+                refusal_and_data(&result).map(|(_, data)| data)
+            );
+            assert_eq!(inner.0.load(Ordering::SeqCst), 1, "the body ran once");
+            assert_eq!(
+                facts.prepares.load(Ordering::SeqCst),
+                3,
+                "prepared at the entry, read stale at the gate, prepared again after it"
+            );
+        }
+        assert_certified_not_dispatched(rows);
+    }
+
+    /// The common prepared entry's first preparation meets another actor's
+    /// owner change, which publishes and completes while it reads: it
+    /// refuses to rebuild with no change in progress any more. The entry
+    /// pauses one backoff step and prepares the same operation again from
+    /// the owners, as one of its free rebuilds: the call enters once when its
+    /// authority still holds, and is refused with the owners' current answer
+    /// (`Denied`, certified not dispatched) when that change revoked it.
+    ///
+    /// RED on the base: the entry answered the stale read as its certified
+    /// refusal (`reprepare_required`, `tool_invoked: false`) in both cases.
+    #[tokio::test(start_paused = true)]
+    async fn a_tool_entry_rebuilds_after_a_stale_read_whose_change_completed() {
+        let mut rows: Vec<CertifiedRow> = Vec::new();
+        for revokes in [false, true] {
+            let facts = StaleReadFacts::scripted(1, 0, revokes);
+            let dispatcher = Arc::new(SourceKindDispatcher::default());
+            let result = fenced(&dispatcher, "read_file", &stale_read_context(&facts)).await;
+            assert_eq!(
+                facts.sequence.load(Ordering::SeqCst),
+                2,
+                "revokes={revokes}: one change, completed"
+            );
+            if revokes {
+                rows.push((
+                    "prepared entry after a revoking change",
+                    result,
+                    dispatcher.0.load(Ordering::SeqCst),
+                    OperationRefusalKind::Denied,
+                ));
+            } else {
+                assert!(
+                    result
+                        .as_ref()
+                        .is_ok_and(|outcome| !outcome.result.is_error),
+                    "the entry prepares again after the stale read, then enters: {:?}",
+                    refusal_and_data(&result).map(|(_, data)| data)
+                );
+                assert_eq!(dispatcher.0.load(Ordering::SeqCst), 1, "the body ran once");
+            }
+            assert_eq!(
+                facts.prepares.load(Ordering::SeqCst),
+                2,
+                "revokes={revokes}: read stale, then prepared again after it"
+            );
+        }
+        assert_certified_not_dispatched(rows);
+    }
+
     /// The reviewed tool the body-entry check refused for a change that
     /// began after its review: the wait ends with a decision prepared from
     /// current owners, the review check point finds the reviewed one

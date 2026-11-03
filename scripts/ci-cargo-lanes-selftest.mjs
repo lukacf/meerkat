@@ -2402,6 +2402,22 @@ for (const path of [
     assert.equal(prepared.status, 2, `the Connect test Python for ${flags.join(" ")}: ${prepared.stderr}`);
     assert.match(prepared.stderr, /DIR must be an absolute path/, `the Connect test Python for ${flags.join(" ")}`);
   }
+  // Its packages are an exact, hash-pinned closure: every requirement names
+  // one version and its wheel's sha256, mcp==2.2.0 among them, and the script
+  // installs only those, so pip resolves nothing.
+  const pins = readFileSync(resolve(root, "scripts/connect-test-python-requirements.txt"), "utf8")
+    .split("\n")
+    .map((line) => line.split("#")[0].trim())
+    .filter(Boolean);
+  for (const pin of pins) {
+    assert.match(pin, /^[a-z0-9-]+==[^\s=]+ --hash=sha256:[0-9a-f]{64}$/, `connect-test-python pins ${pin} exactly, with its hash`);
+  }
+  assert.ok(pins.some((pin) => pin.startsWith("mcp==2.2.0 ")), "connect-test-python pins mcp==2.2.0");
+  assert.match(
+    readFileSync(resolve(root, "scripts/connect-test-python"), "utf8"),
+    /--require-hashes --no-deps --only-binary=:all: -r "\$\{requirements\}"/,
+    "connect-test-python installs the pinned closure only",
+  );
   // An unrelated leaf change carries no pull-request suite; docs carry none anywhere.
   assert.deepEqual(planFor(["crates/meerkat-sqlite/src/lib.rs"]).unit_feature_shards, []);
   const docs = planFor(["docs/index.mdx"]);

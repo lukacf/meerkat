@@ -15,12 +15,15 @@
 #   dependencies.
 # Controls that need only the standard library run on it unchanged.
 #
-# The interpreter is a venv at DIR (an absolute path) made from a Python >=
-# 3.11: mcp==2.2.0 installed from wheels, and a .pth file in its
-# site-packages that names the two in-tree SDK source roots, so both load
-# from this checkout, never from a published release, under any flags but
-# -S. An existing DIR is reused only when it is that interpreter for this
-# checkout; any other existing DIR is refused, never replaced.
+# The interpreter is a venv at DIR (an absolute path) made from CPython 3.12
+# ($PYTHON, else python3.12): exactly the hash-pinned wheels of
+# scripts/connect-test-python-requirements.txt (mcp==2.2.0 and its whole
+# closure, installed with --require-hashes --no-deps, so pip resolves
+# nothing), and a .pth file in its site-packages that names the two in-tree
+# SDK source roots, so both load from this checkout, never from a published
+# release, under any flags but -S. An existing DIR is reused only when it is
+# that interpreter for this checkout and this requirements file; any other
+# existing DIR is refused, never replaced.
 #
 # - With `--if-needed DIR <cargo package flags>` (`-p NAME`, `--package NAME`,
 #   `--workspace`, `--exclude NAME`; other flags such as `--features LIST` are
@@ -35,10 +38,10 @@
 #   python="$(scripts/connect-test-python --if-needed "${RUNNER_TEMP}/connect-test-python" ${PACKAGES})"
 set -euo pipefail
 
-mcp_version="2.2.0"
 readers=(meerkat-connect toolkit-mobkit meerkat-toolkit)
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+requirements="${root}/scripts/connect-test-python-requirements.txt"
 sdk="${root}/connect/sdk/python/src"
 meta="${root}/meta/sdk/python"
 
@@ -92,7 +95,7 @@ if [[ "${dir}" != /* ]]; then
   echo "connect-test-python: DIR must be an absolute path, got '${dir}'" >&2
   exit 2
 fi
-for source in "${sdk}/meerkat_toolkit/member_classes.py" "${meta}/meerkat_meta/__init__.py"; do
+for source in "${requirements}" "${sdk}/meerkat_toolkit/member_classes.py" "${meta}/meerkat_meta/__init__.py"; do
   if [[ ! -f "${source}" ]]; then
     echo "connect-test-python: this checkout has no ${source#"${root}/"}" >&2
     exit 1
@@ -100,24 +103,45 @@ for source in "${sdk}/meerkat_toolkit/member_classes.py" "${meta}/meerkat_meta/_
 done
 
 python="${dir}/bin/python3"
+marker="${dir}/connect-test-python.sha256"
 
-# The interpreter's own MCP SDK, under the isolated mode the shared setup
-# controls use, and this checkout's SDK and Meta source by module file, as
-# the private host participant checks it.
+requirements_sha256() {
+  "${python}" -I -c 'import hashlib, sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' \
+    "${requirements}"
+}
+
+# Exactly the pinned distributions, and the interpreter's own MCP SDK under
+# the isolated mode the shared setup controls use; then this checkout's SDK
+# and Meta source by module file, as the private host participant checks it.
 verify() {
   (cd / && "${python}" -I -B -c '
 import importlib.metadata
+import re
 import sys
+
+def name(value):
+    return re.sub(r"[-_.]+", "-", value).lower()
+
+pinned = {}
+for line in open(sys.argv[1], encoding="utf-8"):
+    line = line.split("#", 1)[0].strip()
+    if line:
+        requirement = line.split()[0]
+        package, version = requirement.split("==")
+        pinned[name(package)] = version
+installed = {
+    name(dist.metadata["Name"]): dist.version
+    for dist in importlib.metadata.distributions()
+    if name(dist.metadata["Name"]) != "pip"
+}
+if installed != pinned:
+    raise SystemExit(f"installed {sorted(installed.items())}, pinned {sorted(pinned.items())}")
 
 import anyio, jsonschema, referencing
 import mcp.server.stdio
 from mcp import types
 from mcp.server import Server
-
-version = importlib.metadata.version("mcp")
-if version != sys.argv[1]:
-    raise SystemExit(f"mcp {version} is installed, not {sys.argv[1]}")
-' "${mcp_version}") &&
+' "${requirements}") &&
     (cd / && "${python}" -I -B -c '
 import pathlib
 import sys
@@ -134,7 +158,9 @@ if loaded != expected:
 }
 
 if [[ -e "${dir}" ]]; then
-  if [[ -x "${python}" ]] && verify >/dev/null 2>&1; then
+  if [[ -x "${python}" && -f "${marker}" ]] &&
+    [[ "$(cat "${marker}")" == "$(requirements_sha256 2>/dev/null)" ]] &&
+    verify >/dev/null 2>&1; then
     printf '%s\n' "${python}"
     exit 0
   fi
@@ -142,14 +168,20 @@ if [[ -e "${dir}" ]]; then
   exit 1
 fi
 
-base="$("${root}/scripts/require-python" 3.11 connect-test-python)"
+base="${PYTHON:-python3.12}"
+if ! "${base}" -c 'import sys; raise SystemExit(0 if sys.implementation.name == "cpython" and sys.version_info[:2] == (3, 12) else 1)' 2>/dev/null; then
+  echo "connect-test-python: needs CPython 3.12 (the pinned wheels are cp312); set PYTHON to one, got '${base}'" >&2
+  exit 1
+fi
 "${base}" -m venv "${dir}" >&2
-"${python}" -m pip install --quiet --disable-pip-version-check --no-input --only-binary=:all: \
-  "mcp==${mcp_version}" >&2
+"${python}" -m pip install --quiet --disable-pip-version-check --no-input \
+  --require-hashes --no-deps --only-binary=:all: -r "${requirements}" >&2
+"${python}" -m pip check --disable-pip-version-check >&2
 purelib="$("${python}" -I -c 'import sysconfig; print(sysconfig.get_path("purelib"))')"
 printf '%s\n%s\n' "${sdk}" "${meta}" >"${purelib}/meerkat-connect-test-sources.pth"
 if ! verify; then
-  echo "connect-test-python: ${python} does not import MCP ${mcp_version} and this checkout's Connect and Meta SDKs" >&2
+  echo "connect-test-python: ${python} does not import the pinned MCP closure and this checkout's Connect and Meta SDKs" >&2
   exit 1
 fi
+requirements_sha256 >"${marker}"
 printf '%s\n' "${python}"

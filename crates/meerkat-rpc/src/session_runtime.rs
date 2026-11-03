@@ -9039,6 +9039,24 @@ impl SessionRuntime {
             self.continuation_bindings.source_custody_changed();
             return Ok(());
         }
+        // A runtime-loop apply (`AlreadyHeld`) runs on this session's own
+        // attached executor and holds the session's turn-finalization boundary
+        // for its whole lap. Its attachment failing the check above means the
+        // registration stopped serving it: an unregister began, draining the
+        // registration and taking the attachment. Nothing below can settle
+        // from inside that lap: it takes the boundary the lap holds, and a
+        // draining registration joins its unregister, which waits for this
+        // very loop to hand its executor off. Refuse it with the typed
+        // teardown-in-progress answer, the refusal `prepare_bindings` gives a
+        // captured unregister: the loop fails the apply, observes its stop and
+        // hands the executor off, and the unregister completes.
+        if matches!(boundary, LlmReconfigureBoundaryOwnership::AlreadyHeld) {
+            return Err(runtime_driver_error_to_rpc(
+                RuntimeDriverError::UnregisterInProgress {
+                    runtime_id: meerkat_runtime::LogicalRuntimeId::for_session(session_id),
+                },
+            ));
+        }
 
         // Existence is committed metadata: a session whose durable run is
         // open at a committed round exists, and the attach below, not this
@@ -24263,6 +24281,86 @@ mod tests {
             before,
             "a refused reuse announces nothing"
         );
+    }
+
+    /// A runtime-loop apply runs on the session's own attached executor and
+    /// holds the session's turn-finalization boundary for its whole lap
+    /// (`LlmReconfigureBoundaryOwnership::AlreadyHeld`). Once an unregister
+    /// begins under that lap (the registration drains, so the apply's own
+    /// executor no longer passes the serving check), ensuring the executor
+    /// from the apply answers at once with the typed teardown-in-progress
+    /// refusal. It must not ask again for the boundary the lap holds: the
+    /// loop would park on its own guard, the unregister would wait for the
+    /// loop forever, and so would every caller joined to that unregister,
+    /// such as the completion cleanup that answers an immediate
+    /// `session/create` whose first build failed.
+    #[tokio::test]
+    async fn runtime_loop_apply_refuses_a_draining_executor_without_retaking_its_boundary() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let runtime = make_runtime(temp_factory(&temp), 10);
+        runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None, Vec::new())
+            .await
+            .expect("create_session");
+        runtime
+            .ensure_runtime_executor(&session_id)
+            .await
+            .expect("attach the session's runtime loop");
+
+        // The runtime loop's lap: it holds the boundary while it applies.
+        let lap_boundary = runtime
+            .service
+            .acquire_runtime_turn_finalization_guard(&session_id)
+            .await;
+        // An unregister begins under the lap: it drains the registration and
+        // waits for the loop to hand its executor off.
+        let unregister = tokio::spawn({
+            let runtime = Arc::clone(&runtime);
+            let session_id = session_id.clone();
+            async move { runtime.archive_runtime_cleanup().run(&session_id).await }
+        });
+        tokio::time::timeout(Duration::from_secs(30), async {
+            while runtime
+                .runtime_adapter
+                .session_has_executor(&session_id)
+                .await
+                .expect("executor presence")
+            {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the unregister drains the registration under the held lap");
+
+        let refused = tokio::time::timeout(
+            Duration::from_secs(10),
+            runtime.ensure_runtime_executor_with_turn_boundary(
+                &session_id,
+                LlmReconfigureBoundaryOwnership::AlreadyHeld,
+            ),
+        )
+        .await
+        .expect("a runtime-loop apply must not wait for the turn boundary its own lap holds")
+        .expect_err("a draining registration cannot be ensured from its own runtime loop");
+        assert_eq!(
+            refused
+                .data
+                .as_ref()
+                .and_then(|data| data.get("kind"))
+                .and_then(serde_json::Value::as_str),
+            Some(SessionError::RUNTIME_TEARDOWN_IN_PROGRESS_KIND),
+            "the refusal is the typed teardown-in-progress answer: {refused:?}"
+        );
+
+        // The lap ends: the loop hands its executor off and the unregister
+        // completes.
+        drop(lap_boundary);
+        tokio::time::timeout(Duration::from_secs(30), unregister)
+            .await
+            .expect("the unregister completes once the lap ends")
+            .expect("unregister task")
+            .expect("unregister");
     }
 
     /// A mob member's executor is attached by the member's own mob runtime,

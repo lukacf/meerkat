@@ -103,6 +103,29 @@ pub(super) async fn add(fixture: &Fixture, name: &str) -> meerkat_core::SessionI
 }
 
 pub(super) async fn ready(fixture: &Fixture, session: &meerkat_core::SessionId) {
+    // A reopened host restores its members Dormant (Core's on-demand member
+    // restore). This pin needs the live actor, so it first goes through
+    // Core's session-owner wake for exactly this session, the supported path
+    // of a session-keyed live operation. A live member is not woken.
+    if fixture
+        .service
+        .live_session_actor_witness(session)
+        .await
+        .is_none()
+    {
+        let woke = meerkat_core::session_owner_wake::SessionOwnerWakeRegistry::global()
+            .wake(session)
+            .await;
+        assert!(
+            matches!(
+                woke,
+                Some(Ok(
+                    meerkat_core::session_owner_wake::SessionOwnerWakeOutcome::Ready
+                ))
+            ),
+            "the restored member wakes on its own session: {woke:?}"
+        );
+    }
     let lease = fixture
         .service
         .acquire_live_session_actor_turn_boundary_lease(session)

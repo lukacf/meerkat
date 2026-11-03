@@ -98,16 +98,38 @@ async fn child() {
             assert!(!observed_host.closing.load(Ordering::SeqCst));
             let runtime = observed_source.bound_identity_runtime().unwrap();
             let machine = observed_source.machine().unwrap();
+            let pins = observed_source.controller_pin_source.get().and_then(std::sync::Weak::upgrade).unwrap();
+            let handle = runtime.owner().handle();
             for (index, spec) in roster.iter().enumerate() {
                 let status = runtime.status(&spec.identity).await.unwrap();
                 assert_eq!(status.state, IdentityLifecycleState::Active);
                 assert_eq!(status.session_id.as_ref(), Some(&observed_sessions[index]),
                     "actual roster restoration must keep each original session, with no fresh fallback");
-                assert!(machine.current_session_registration_witness(&observed_sessions[index]).await.is_some());
+                // Residency-neutral: each restored member is seated on its
+                // exact original session, its durable binding. The default
+                // on-demand restore may leave a member Dormant or live, which
+                // is the owner's internal state, so neither is asserted.
+                let member = meerkat_mob::AgentIdentity::from(
+                    status.member_id.as_deref().expect("a seated roster member"),
+                );
+                assert_eq!(handle.resolve_bridge_session_id(&member).await.as_ref(), Some(&observed_sessions[index]),
+                    "each member stays bound to its original session");
             }
+            // The pin below needs G's live actor. When no live actor serves
+            // G's session, wake exactly that session through Core's
+            // session-owner wake: no input and no turn.
+            if pins.live_actor(&observed_sessions[2]).await.is_none() {
+                let woke = meerkat_core::session_owner_wake::SessionOwnerWakeRegistry::global()
+                    .wake(&observed_sessions[2])
+                    .await;
+                assert!(
+                    matches!(woke, Some(Ok(meerkat_core::session_owner_wake::SessionOwnerWakeOutcome::Ready))),
+                    "the restored lead wakes on its own session: {woke:?}"
+                );
+            }
+            assert!(machine.current_session_registration_witness(&observed_sessions[2]).await.is_some());
             // Reuse the seed's controlled credential on the new actual native
             // owner, selecting its identity from the real reconstructed pin.
-            let pins = observed_source.controller_pin_source.get().and_then(std::sync::Weak::upgrade).unwrap();
             let actor = pins.live_actor(&observed_sessions[2]).await.unwrap();
             let pin = pins.pin_actor(&actor).await.unwrap();
             assert_eq!(Some(pin.selection()), model.controller_model_selection().as_ref());

@@ -1094,6 +1094,25 @@ impl<
             &sessions[2..3]
         };
         for session in selected_sessions {
+            // A reopened host restores its members Dormant (Core's on-demand
+            // member restore): an Active identity is not a live actor. This
+            // pin needs the live actor, so it first goes through Core's
+            // session-owner wake for exactly this session, the supported path
+            // of a session-keyed live operation. A live member is not woken.
+            if service.live_actor(session).await.is_none() {
+                let woke = meerkat_core::session_owner_wake::SessionOwnerWakeRegistry::global()
+                    .wake(session)
+                    .await;
+                assert!(
+                    matches!(
+                        woke,
+                        Some(Ok(
+                            meerkat_core::session_owner_wake::SessionOwnerWakeOutcome::Ready
+                        ))
+                    ),
+                    "the restored member wakes on its own session: {woke:?}"
+                );
+            }
             let actor = service.live_actor(session).await.unwrap();
             let pin = service.pin_actor(&actor).await.unwrap();
             meerkat_core::publish_token_lifecycle_acquired_for_identity_within(

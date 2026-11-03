@@ -548,10 +548,10 @@ pub use host_schedule::HostObservationScheduleMobHost;
 pub use identity_entry::{
     EntryStanding, HistoryUnavailable, HostPreparationCause, IDENTITY_ENTRY_PAGE_MAX,
     IdentityCensus, IdentityEntryOrigin, IdentityEntryPage, IdentityEntryRead, IdentityEntryView,
-    IdentityRecordCensus, IdentityTombstonePage, LegacyIdentityEntryAdoption, MemberBrokenFact,
-    MemberLifecycleEvent, MemberLifecyclePage, MemberLifecycleRecord, MemberRetirementCause,
-    MobJournalCursor, RetiredRotation, SeatRotation, SeatedMember, UnseatedEntryCause,
-    UnseatedEntryCounts, WorkerMember,
+    IdentityRecordCensus, IdentityRecordRows, IdentityRecordRowsReadError, IdentityTombstonePage,
+    LegacyIdentityEntryAdoption, MemberBrokenFact, MemberLifecycleEvent, MemberLifecyclePage,
+    MemberLifecycleRecord, MemberRetirementCause, MobJournalCursor, RetiredRotation, SeatRotation,
+    SeatedMember, UnseatedEntryCause, UnseatedEntryCounts, WorkerMember,
 };
 pub use identity_local_services::{
     IdentityLocalExternalToolsError, IdentityLocalExternalToolsProvider,

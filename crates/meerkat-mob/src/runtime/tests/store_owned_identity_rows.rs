@@ -5719,6 +5719,161 @@ async fn the_census_counts_a_stale_seat_after_a_label_change() {
     assert_eq!(census.constructions_held, 0, "{census:?}");
 }
 
+/// Row (RED): with no running mob, a store-level read counts the rows a
+/// running mob's census counts, by the same rule. Over a persistent store,
+/// before any change, both readers answer nothing. After a create of three
+/// identities, an archive of one and the removal of another (its
+/// tombstone), the census, the path reader of the store file (read
+/// read-only beside the live mob) and the storage reader each count 3 rows:
+/// 1 archived, 1 tombstone, none unreadable.
+///
+/// RED on the old tree: no store-level reader counts the rows.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_store_level_row_readers_count_what_the_census_counts() {
+    let dir = tempfile::tempdir().expect("a store directory");
+    let path = dir.path().join("mob.db");
+    let mob = StoreOwnedMob::build(
+        store_owned_definition("census-readers"),
+        MobStorage::persistent(&path).expect("open the store"),
+        |builder| builder,
+    )
+    .await;
+    assert!(
+        MobStorage::read_identity_record_rows(&path)
+            .await
+            .expect("read the store")
+            .is_empty()
+    );
+    assert!(
+        mob.storage
+            .identity_record_rows()
+            .await
+            .expect("read the storage")
+            .is_empty()
+    );
+
+    committed(
+        mob.create(
+            host_create("create-desks", &["kept", "shelved", "gone"]),
+            ALLOW,
+        )
+        .await,
+    );
+    committed(mob.archive("archive-shelved", "shelved").await);
+    mob.unseated_for("shelved", UnseatedEntryCause::Archived)
+        .await;
+    committed(mob.remove("remove-gone", "gone").await);
+    mob.removed("gone").await;
+
+    let census = mob
+        .handle
+        .identity_record_census()
+        .await
+        .expect("the census answers");
+    let counted = crate::runtime::IdentityRecordRows {
+        created_rows: census.created_rows,
+        archived: census.archived,
+        tombstones: census.tombstones,
+        unreadable: census.unreadable,
+    };
+    assert_eq!(
+        counted,
+        crate::runtime::IdentityRecordRows {
+            created_rows: 3,
+            archived: 1,
+            tombstones: 1,
+            unreadable: 0,
+        },
+        "{census:?}"
+    );
+    let expected = BTreeMap::from([(mob.mob_id(), counted)]);
+    assert_eq!(
+        MobStorage::read_identity_record_rows(&path)
+            .await
+            .expect("read the live mob's store"),
+        expected
+    );
+    assert_eq!(
+        mob.storage
+            .identity_record_rows()
+            .await
+            .expect("read the storage"),
+        expected
+    );
+}
+
+/// Row (RED): the storage reader counts the rows of a mob storage kept in a
+/// host store (Core's published reference host store) by the census's
+/// rule, as the census of the mob over it counts them.
+///
+/// RED on the old tree: no store-level reader counts the rows.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_storage_row_reader_counts_a_host_store_storage() {
+    let host = Arc::new(meerkat_store_conformance::InMemoryHostStore::new());
+    let realm = meerkat_runtime::store::spi::SpiRealm::open(
+        Arc::clone(&host) as Arc<dyn meerkat_core::host_store::HostStore>,
+        meerkat_runtime::store::spi::SpiRealmConfig::default(),
+    )
+    .await
+    .expect("open the host store realm");
+    let mobs = crate::store::SpiMobStoreHost::for_realm(&realm)
+        .await
+        .expect("claim the mob families");
+    let storage = mobs
+        .open("root")
+        .await
+        .expect("open the mob's storage")
+        .storage();
+    assert!(
+        storage
+            .identity_record_rows()
+            .await
+            .expect("read the empty storage")
+            .is_empty()
+    );
+    let mob = StoreOwnedMob::build(
+        store_owned_definition("census-host-store"),
+        storage,
+        |builder| builder,
+    )
+    .await;
+    committed(
+        mob.create(host_create("create-desks", &["kept", "gone"]), ALLOW)
+            .await,
+    );
+    committed(mob.remove("remove-gone", "gone").await);
+    mob.removed("gone").await;
+
+    let census = mob
+        .handle
+        .identity_record_census()
+        .await
+        .expect("the census answers");
+    let counted = crate::runtime::IdentityRecordRows {
+        created_rows: census.created_rows,
+        archived: census.archived,
+        tombstones: census.tombstones,
+        unreadable: census.unreadable,
+    };
+    assert_eq!(
+        counted,
+        crate::runtime::IdentityRecordRows {
+            created_rows: 2,
+            archived: 0,
+            tombstones: 1,
+            unreadable: 0,
+        },
+        "{census:?}"
+    );
+    assert_eq!(
+        mob.storage
+            .identity_record_rows()
+            .await
+            .expect("read the host store storage"),
+        BTreeMap::from([(mob.mob_id(), counted)])
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Rollback (cl-design-v2 11.2): what a published predecessor finds of each
 // 0.9.9 identity state. A predecessor replays the journal's member rows and

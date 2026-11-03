@@ -408,10 +408,10 @@ pub use runtime::{DurableResumeGate, DurableResumeRequest, DurableResumeVerdict}
 pub use runtime::{
     EntryStanding, HistoryUnavailable, HostPreparationCause, IDENTITY_ENTRY_PAGE_MAX,
     IdentityCensus, IdentityEntryOrigin, IdentityEntryPage, IdentityEntryRead, IdentityEntryView,
-    IdentityRecordCensus, IdentityTombstonePage, LegacyIdentityEntryAdoption, MemberBrokenFact,
-    MemberLifecycleEvent, MemberLifecyclePage, MemberLifecycleRecord, MemberRetirementCause,
-    MobJournalCursor, RetiredRotation, SeatRotation, SeatedMember, UnseatedEntryCause,
-    UnseatedEntryCounts, WorkerMember,
+    IdentityRecordCensus, IdentityRecordRows, IdentityRecordRowsReadError, IdentityTombstonePage,
+    LegacyIdentityEntryAdoption, MemberBrokenFact, MemberLifecycleEvent, MemberLifecyclePage,
+    MemberLifecycleRecord, MemberRetirementCause, MobJournalCursor, RetiredRotation, SeatRotation,
+    SeatedMember, UnseatedEntryCause, UnseatedEntryCounts, WorkerMember,
 };
 pub use runtime::{FlowFrameKernel, FlowFrameMutator};
 pub use runtime::{
@@ -467,7 +467,10 @@ pub use store::{
 };
 #[cfg(all(any(test, feature = "test-support"), not(target_arch = "wasm32")))]
 #[doc(hidden)]
-pub use store::{ParkedStoreReadForTest, StoreReadReleaseForTest, park_next_store_read_for_test};
+pub use store::{
+    IDENTITY_CENSUS_TEST_MOB, IDENTITY_CENSUS_TEST_OTHER_MOB, ParkedStoreReadForTest,
+    StoreReadReleaseForTest, park_next_store_read_for_test, seed_identity_census_rows_for_test,
+};
 #[cfg(not(target_arch = "wasm32"))]
 pub use store::{
     SqliteMobEventStore, SqliteMobObserverDrain, SqliteMobObserverDrainRefused,

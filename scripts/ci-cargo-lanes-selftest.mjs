@@ -2344,9 +2344,10 @@ for (const path of [
   // one, so every unit job selects it, whichever wave or event holds the row.
   // A row of a Connect package whose tests read it selects the qualified
   // interpreter scripts/connect-test-python prepares (this checkout's Connect
-  // and Meta Python SDKs, MCP 2.2.0) instead. The tests see it only when the
-  // shell that runs nextest exported it first: in that step, before the
-  // nextest command.
+  // and Meta Python SDKs, MCP 2.2.0) instead, also as the shared setup native
+  // case's TOOLKIT_D5_TEST_PYTHON. The tests see them only when the shell
+  // that runs nextest exported them first: in that step, before the nextest
+  // command.
   const unitJobs = readFileSync(resolve(root, ".github/workflows/ci.yml"), "utf8");
   for (const job of ["unit", "main-unit", "main-unit-rest"]) {
     const jobBody = jobLines(unitJobs, job);
@@ -2357,8 +2358,8 @@ for (const path of [
     );
     assert.match(
       jobBody.join("\n"),
-      /^ {10}connect_python="\$\(scripts\/connect-test-python --if-needed "\$\{RUNNER_TEMP\}\/connect-test-python" \$\{PACKAGES\}\)"\n {10}if \[\[ -n "\$\{connect_python\}" \]\]; then\n {12}export TOOLKIT_SHARED_TEST_PYTHON="\$\{connect_python\}"$/m,
-      `${job} selects the qualified Python of a Connect row`,
+      /^ {10}connect_python="\$\(scripts\/connect-test-python --if-needed "\$\{RUNNER_TEMP\}\/connect-test-python" \$\{PACKAGES\}\)"\n {10}if \[\[ -n "\$\{connect_python\}" \]\]; then\n {12}export TOOLKIT_SHARED_TEST_PYTHON="\$\{connect_python\}" TOOLKIT_D5_TEST_PYTHON="\$\{connect_python\}"$/m,
+      `${job} selects the qualified Python of a Connect row, for the shared setup native case too`,
     );
     const exportAt = jobBody.indexOf("          export TOOLKIT_SHARED_TEST_PYTHON");
     const qualifiedAt = jobBody.findIndex((line) => line.startsWith("            export TOOLKIT_SHARED_TEST_PYTHON="));

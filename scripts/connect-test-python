@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Print the absolute path of the Python interpreter that Connect's native
-# tests select through TOOLKIT_SHARED_TEST_PYTHON.
+# tests select through TOOLKIT_SHARED_TEST_PYTHON, and the shared setup native
+# case through TOOLKIT_D5_TEST_PYTHON.
 #
 # Those tests never guess an interpreter: the executor selects it, and some of
 # their protocol children need more than a standard library.
@@ -24,12 +25,12 @@
 # - With `--if-needed DIR <cargo package flags>` (`-p NAME`, `--package NAME`,
 #   `--workspace`, `--exclude NAME`; other flags such as `--features LIST` are
 #   ignored), it prints nothing and prepares nothing unless a selected package
-#   is one whose unit tests read the selection: meerkat-connect,
+#   is one whose unit tests read these selections: meerkat-connect,
 #   toolkit-mobkit or meerkat-toolkit.
 #
 # Usage:
-#   TOOLKIT_SHARED_TEST_PYTHON="$(scripts/connect-test-python /absolute/dir)"
-#   export TOOLKIT_SHARED_TEST_PYTHON
+#   python="$(scripts/connect-test-python /absolute/dir)"
+#   export TOOLKIT_SHARED_TEST_PYTHON="${python}" TOOLKIT_D5_TEST_PYTHON="${python}"
 #
 #   python="$(scripts/connect-test-python --if-needed "${RUNNER_TEMP}/connect-test-python" ${PACKAGES})"
 set -euo pipefail

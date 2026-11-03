@@ -1282,11 +1282,13 @@ jobs:
           # SDKs, and the shared setup controls run the consumer-setup MCP
           # adapter on MCP 2.2.0. A row of a package whose tests read the
           # selection gets the interpreter scripts/connect-test-python
-          # prepares; it prints nothing for any other row.
+          # prepares; it prints nothing for any other row. The shared setup
+          # native case selects that same interpreter as
+          # TOOLKIT_D5_TEST_PYTHON.
           # shellcheck disable=SC2086
           connect_python="$(scripts/connect-test-python --if-needed "${RUNNER_TEMP}/connect-test-python" ${PACKAGES})"
           if [[ -n "${connect_python}" ]]; then
-            export TOOLKIT_SHARED_TEST_PYTHON="${connect_python}"
+            export TOOLKIT_SHARED_TEST_PYTHON="${connect_python}" TOOLKIT_D5_TEST_PYTHON="${connect_python}"
             echo "Connect test Python: ${connect_python}"
           fi
           # shellcheck disable=SC2086
@@ -2004,11 +2006,13 @@ jobs:
           # SDKs, and the shared setup controls run the consumer-setup MCP
           # adapter on MCP 2.2.0. A row of a package whose tests read the
           # selection gets the interpreter scripts/connect-test-python
-          # prepares; it prints nothing for any other row.
+          # prepares; it prints nothing for any other row. The shared setup
+          # native case selects that same interpreter as
+          # TOOLKIT_D5_TEST_PYTHON.
           # shellcheck disable=SC2086
           connect_python="$(scripts/connect-test-python --if-needed "${RUNNER_TEMP}/connect-test-python" ${PACKAGES})"
           if [[ -n "${connect_python}" ]]; then
-            export TOOLKIT_SHARED_TEST_PYTHON="${connect_python}"
+            export TOOLKIT_SHARED_TEST_PYTHON="${connect_python}" TOOLKIT_D5_TEST_PYTHON="${connect_python}"
             echo "Connect test Python: ${connect_python}"
           fi
           # shellcheck disable=SC2086
@@ -2132,11 +2136,13 @@ jobs:
           # SDKs, and the shared setup controls run the consumer-setup MCP
           # adapter on MCP 2.2.0. A row of a package whose tests read the
           # selection gets the interpreter scripts/connect-test-python
-          # prepares; it prints nothing for any other row.
+          # prepares; it prints nothing for any other row. The shared setup
+          # native case selects that same interpreter as
+          # TOOLKIT_D5_TEST_PYTHON.
           # shellcheck disable=SC2086
           connect_python="$(scripts/connect-test-python --if-needed "${RUNNER_TEMP}/connect-test-python" ${PACKAGES})"
           if [[ -n "${connect_python}" ]]; then
-            export TOOLKIT_SHARED_TEST_PYTHON="${connect_python}"
+            export TOOLKIT_SHARED_TEST_PYTHON="${connect_python}" TOOLKIT_D5_TEST_PYTHON="${connect_python}"
             echo "Connect test Python: ${connect_python}"
           fi
           # shellcheck disable=SC2086

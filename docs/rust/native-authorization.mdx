@@ -768,7 +768,15 @@ bounds.
   retained-resume check (`ScopedRetainedResume`) and
   `require_source_original_live` called outside an exclusion of owner changes
   answer a change one of those reads meets with readiness `PolicyChanged` as
-  well. A review read, which reads its material once by design, refuses as
+  well. Each of these admission reads, controller admission's included, is
+  first made once more in place when the change it met has completed:
+  `LocalGrantAuthority::owner_change_in_progress` (a waiting hint that mirrors
+  `WorkAuthorization::owner_change_in_progress`, never a permission) names
+  none. Admission never waits, because it runs inside the session's ingress
+  transaction, so a change still in progress, or back-to-back changes, still
+  answer `PolicyChanged`. A host that submits again waits first, outside its
+  own locks, with a bounded `OwnerChangeChurn::wait_after_stale_read`, then
+  resubmits once. A review read, which reads its material once by design, refuses as
   stale (`ToolError::AuthorizationRefused`
   with `ReprepareRequired`) instead of an unavailable review context, and a
   fresh attempt reads it again. `AgentInstallationGrant` reports a change it

@@ -35,6 +35,17 @@ them.
 
 ## [Unreleased]
 
+### Added
+
+- `meerkat-authorization`: `LocalGrantAuthority::owner_change_in_progress`,
+  the owner change in progress on the grant authority's publication: a
+  published change that has not completed, or a reservation of the
+  publication's writer held now that has not published. It mirrors
+  `WorkAuthorization::owner_change_in_progress` for a caller that holds the
+  grant authority rather than a work and, like it, is a waiting hint only,
+  never a permission. Native admission reads it to tell a change that has
+  completed from one still in progress (see Fixed).
+
 ### Fixed
 
 - `meerkat-core`: a governed tool dispatch no longer refuses a call because
@@ -54,6 +65,28 @@ them.
   answer, typed as before: a call whose authority the change revoked is
   refused with that answer (`denied`). Shell synchronization only: no
   machine input, wire type or error variant changes.
+
+- `meerkat-authorization`, `meerkat-runtime`: native admission no longer
+  refuses governed input as a changed policy because an owner change
+  completed while it read the grant publication. Its reads (controller
+  admission, `GrantBackedWorkPolicy::validate_controller_admission`, and a
+  scoped original's own mandate and named contributors' liveness in
+  `ScopedOriginalIngress`, which `require_source_original_live` and the
+  retained-resume checks share) each observed the publication once and never
+  rebuilt. A read that waited for an owner's lock while a change held it (for
+  example during a concurrent grant issuance) ended stale with no change in
+  progress, and admission answered `ControllerReadinessUnavailable` with
+  `PolicyChanged`. When the change it met has completed
+  (`LocalGrantAuthority::owner_change_in_progress` names none), each such read
+  is now made once more in place from the owners, as a grant-backed
+  preparation rebuilds once: the input is admitted while its authority holds,
+  and refused with the owners' current answer (`InputRefused` with `Denied`)
+  when the change revoked it. Admission still never waits, because it runs
+  inside the session's ingress transaction: a change still in progress, or
+  another one met by the second read (back-to-back changes), answers
+  `PolicyChanged` as before. A host that submits again after `PolicyChanged`
+  waits first, outside its own locks, with a bounded
+  `OwnerChangeChurn::wait_after_stale_read`, then resubmits once.
 
 ## [0.9.9] - 2026-11-03
 

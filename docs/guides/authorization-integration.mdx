@@ -163,6 +163,15 @@ Map typed errors before rendering text:
   named contributor's liveness) and a retained resume report a change they meet
   as `ControllerReadinessFailure::PolicyChanged` too, and so does
   `require_source_original_live` called outside an exclusion of owner changes.
+  Each of these admission reads, controller admission's included, is first
+  made once more in place when the change it met has completed
+  (`LocalGrantAuthority::owner_change_in_progress` names none), as a
+  preparation rebuilds once. Admission never waits, because it runs inside the
+  session's ingress transaction, so a change still in progress, or back-to-back
+  changes, still answer `PolicyChanged`. A host that submits again waits first,
+  outside its own locks, with a bounded
+  `meerkat_core::authorization::OwnerChangeChurn::wait_after_stale_read`, then
+  resubmits once.
   A governed helper's admission fence and a helper child issuance answer
   `Unavailable` rather than `Denied` when their check refuses to rebuild. A
   poisoned publication, failed durable grant custody and a clock failure still

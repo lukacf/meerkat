@@ -16,8 +16,16 @@ fn composition(
     ServicePreparationPresenter,
     Arc<private_attempt::PrivateCustody>,
 ) {
+    // The native add stages through the router's generated surface authority,
+    // which session construction binds in production. This fixture builds no
+    // session, so the router carries the runtime's own ephemeral authority, as
+    // the other preparation-attempt fixtures do; an unbound router refuses the
+    // stage and the handoff stays unconfirmed.
     let (router, custody) = private_attempt::PrivateCustody::new(
-        McpRouter::new_with_stdio_profile(McpStdioLaunchProfile::trusted_host()),
+        McpRouter::new_with_surface_handle_and_stdio_profile(
+            Arc::new(meerkat_runtime::RuntimeExternalToolSurfaceHandle::ephemeral()),
+            McpStdioLaunchProfile::trusted_host(),
+        ),
         SessionId::new(),
     );
     let custody = Arc::new(custody);

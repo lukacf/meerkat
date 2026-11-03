@@ -64,6 +64,25 @@ them.
   umask. A store file an older version left readable by others becomes
   private on its next commit.
 
+- `meerkat-mob-mcp`: restart recovery of live voice delegations no longer
+  stalls on mob members that are not materialized. At start, the live
+  delegation coordinator (`openai-live` feature) recovers the delegations a
+  previous process left by reading each member's session. A member that is
+  seated but not materialized has no runtime registration: the default under
+  lazy restore (`member_restore: on_demand`), an identity whose first wake is
+  deferred, or a member whose materialization was released. Reading it
+  failed, so the whole recovery retried every second for as long as any
+  member stayed dormant, logging "ClientContext restart inventory capture
+  remains pending" at 1 Hz, and a live channel opened on that host waited for
+  the recovery with no limit. Recovery now skips such a member without waking
+  it. Its delegations stay durable and are recovered once, when the member is
+  woken, or before the first live channel opened on it, whichever comes
+  first. A live channel open waits at most 30 seconds for the recovery and is
+  otherwise refused with an error that names it. A recovery step that keeps
+  failing warns on its 1st, 2nd, 4th, 8th and later power-of-two failures
+  instead of every second. Affects hosts up to 0.9.9 that compose the live
+  delegation coordinator with lazily restored members.
+
 ## [0.9.9] - 2026-11-03
 
 ### Highlights

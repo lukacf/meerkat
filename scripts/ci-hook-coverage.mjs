@@ -512,16 +512,30 @@ function parsePackageFlags(flags, byName, selections) {
   return { packages, enabled, selection: null };
 }
 
+// The nextest filter that leaves planned test exclusions (the planner's
+// HOSTED_RUNNER_EXCLUDED_TESTS entries, `{ binary, tests }`) of `binaries`
+// out of a row, or null when none of them has any.
+export function excludedTestsFilter(binaries, entries) {
+  const parts = entries
+    .filter((entry) => binaries.includes(entry.binary))
+    .map((entry) => `(binary_id(${entry.binary}) & (${entry.tests.map((test) => `test(=${test})`).join(" | ")}))`);
+  return parts.length > 0 ? `not (${parts.join(" | ")})` : null;
+}
+
 // The binaries a row runs: Cargo's target selection (with its
 // required-features refusal for named targets), then the profile's
-// default-filter and the row's own filter, as its bound step runs them.
-function rowBinaries(row, spec, byName, nextestText, selections) {
+// default-filter and the row's own filter, as its bound step runs them. A
+// row filter that is exactly the row's planned test exclusions leaves named
+// tests out, never a binary (the job's binary check holds the names), so it
+// selects every binary.
+function rowBinaries(row, spec, byName, nextestText, selections, excludedTests = []) {
   const { packages, enabled, selection } = parsePackageFlags(row.package_flags, byName, selections);
   const targetTokens = spec.targets ?? (row.test_flags ?? "").split(/\s+/).filter(Boolean);
   const profile = spec.profile ?? row.profile;
   if (!profile) throw new Error(`row ${row.name} names no nextest profile`);
   const profileFilterFn = parseFilter(profileFilter(nextestText, profile));
-  const rowFilterFn = row.filter ? parseFilter(row.filter) : () => true;
+  const plannedExclusions = excludedTestsFilter(row.binaries ?? [], excludedTests);
+  const rowFilterFn = row.filter && row.filter !== plannedExclusions ? parseFilter(row.filter) : () => true;
   const selected = [];
   const errors = [];
   const add = (pkg, target) => selected.push({ pkg, target });
@@ -676,7 +690,7 @@ export function checkHookCoverage(
       }
       let read;
       try {
-        read = rowBinaries(row, spec, byName, nextest, selections);
+        read = rowBinaries(row, spec, byName, nextest, selections, plan.hosted_runner_excluded_tests ?? []);
       } catch (error) {
         errors.push(`row ${row.name} (${spec.job}): ${error.message}`);
         continue;

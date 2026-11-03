@@ -15,6 +15,7 @@ import {
   HOOK_SCRIPT,
   bindRowSteps,
   checkHookCoverage,
+  excludedTestsFilter,
   hookModel,
   featureClosure,
   laneSelections,
@@ -32,6 +33,7 @@ import {
   GOVERNANCE_DOC_PATTERNS,
   GUARD_LANE_INPUTS,
   HOSTED_RUNNER_EXCLUDED_BINARIES,
+  HOSTED_RUNNER_EXCLUDED_TESTS,
   MOB_CHAIN_CLIPPY_HEADS,
   MOB_CHAIN_INVALIDATED,
   PARTITIONED_UNIT_PACKAGES,
@@ -3379,6 +3381,32 @@ for (const path of [
       "a partitioned row still fails a profile-filtered test",
     );
     assert.equal(verify({ "p::a": suite({ t1: match }) }, ["--partition", "hash:1/2", "p::a"]).status, 2, "only count partitions");
+    // A test HOSTED_RUNNER_EXCLUDED_TESTS lists is left out of its binary's
+    // row by the row's filter: only such a test may be, and it must be.
+    const [{ binary, tests: listed }] = HOSTED_RUNNER_EXCLUDED_TESTS;
+    const [first] = listed;
+    const byExpression = { "filter-match": { status: "mismatch", reason: "expression" } };
+    const plannedOut = Object.fromEntries(listed.map((name) => [name, byExpression]));
+    const leftOut = verify({ [binary]: suite({ another_test: match, ...plannedOut }) }, [binary]);
+    assert.equal(leftOut.status, 0, leftOut.stderr);
+    assert.match(leftOut.stdout, new RegExp(`${listed.length} left out as HOSTED_RUNNER_EXCLUDED_TESTS lists`));
+    assert.equal(
+      verify({ [binary]: suite({ another_test: byExpression, ...plannedOut }) }, [binary]).status,
+      1,
+      "a test the list does not name may not be filtered out",
+    );
+    assert.equal(
+      verify({ [binary]: suite({ another_test: match, ...plannedOut, [first]: match }) }, [binary]).status,
+      1,
+      "a listed test that is still selected fails",
+    );
+    const { [first]: _gone, ...renamed } = plannedOut;
+    assert.equal(
+      verify({ [binary]: suite({ another_test: match, ...renamed }) }, [binary]).status,
+      1,
+      "a listed test its binary no longer has fails",
+    );
+    assert.equal(verify({ "p::a": suite({ t1: match, [first]: byExpression }) }, ["p::a"]).status, 1, "the list is per binary");
   } finally {
     rmSync(scratch, { recursive: true, force: true });
   }
@@ -3470,6 +3498,33 @@ for (const path of [
             !plan.closure_test_rows.some((row) => row.binaries.includes(binary)),
             `${label}: no closure-tests row runs ${binary}`,
           );
+        }
+        // A test no hosted runner can run is named with its reason, and the
+        // row that holds its binary runs the binary without it.
+        for (const entry of HOSTED_RUNNER_EXCLUDED_TESTS) {
+          const inScope = plan.test_scope.includes(entry.binary.split("::")[0]);
+          assert.equal(
+            plan.hosted_runner_excluded_tests.some((named) => named.binary === entry.binary && named.reason === entry.reason),
+            inScope,
+            `${label}: ${entry.binary}'s excluded tests are named exactly when its package is in the test scope`,
+          );
+          const holders = plan.closure_test_rows.filter((row) => row.binaries.includes(entry.binary));
+          assert.equal(holders.length, inScope ? 1 : 0, `${label}: one closure-tests row holds ${entry.binary}`);
+          for (const row of holders) {
+            assert.equal(
+              row.filter,
+              excludedTestsFilter(row.binaries, plan.hosted_runner_excluded_tests),
+              `${label}: ${row.name} leaves ${entry.binary}'s excluded tests out`,
+            );
+            for (const test of entry.tests) {
+              assert.ok(row.filter.includes(`binary_id(${entry.binary}) & (`) && row.filter.includes(`test(=${test})`), `${label}: ${row.name} leaves ${test} out`);
+            }
+          }
+        }
+        for (const row of plan.closure_test_rows) {
+          if (row.lane === "tests" && !row.binaries.some((binary) => HOSTED_RUNNER_EXCLUDED_TESTS.some((entry) => entry.binary === binary))) {
+            assert.equal(row.filter, undefined, `${label}: ${row.name} filters no test`);
+          }
         }
         assert.equal(plan.deferred_to_push, null);
       } else {

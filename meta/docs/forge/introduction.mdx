@@ -1,0 +1,117 @@
+---
+title: "Meta Forge"
+description: "Design an agent team in a guided conversation, then build, try and install it as a Meta application on your own computer."
+icon: "hammer"
+---
+
+Meta Forge is the setup and application authoring tool in Meerkat Meta. You
+describe a useful job, answer one focused question at a time, and inspect the
+proposed team of agents and its behavior. Forge then installs the result on
+your computer, or gives you a package you can review and install yourself.
+
+<Note>
+Forge is a developer alpha. A running process or an attractive simulation does
+not establish that your job works. Try a real task in the installed
+application, correct it, and restart it before you rely on it.
+</Note>
+
+## How Forge fits with Core, Meta and Connect
+
+| Part | Role |
+| --- | --- |
+| Meerkat Core | Runs agents and mobs. Owns agent, session, communication and workflow semantics. |
+| Meerkat Meta | Composes applications around Core with lasting identities, policy and the Console, and provides the SDKs and gateways. |
+| Meta Forge | Owns the desired design (the blueprint), reviewable proposals, compilation and packaging. |
+| Meerkat Connect | Optional integration setup. A Forge release package carries a selected Connect product, and an application built with it can offer **Connect setup** in its installed Console. |
+
+Forge runs on your own computer as a local web application. It is a
+single-user tool, not a multi-tenant public server, and it listens only on
+`127.0.0.1`.
+
+Forge is not required to use Meta. If you compose your own application with
+the Meta SDKs, start with the [Meta quickstart](/quickstart) instead.
+
+## What you can build
+
+<CardGroup cols={2}>
+  <Card title="Agent team" icon="users">
+    Your agents, their configured tools and the native Console. Forge compiles
+    the team directly and installs the published Meta release it pins. It adds
+    no custom application code.
+  </Card>
+  <Card title="Custom application" icon="code">
+    For outcomes that need custom screens or application code. A builder agent
+    writes the code and its tests, and an independent reviewer checks them
+    before you can install the result.
+  </Card>
+</CardGroup>
+
+## The guided workflow
+
+1. **Describe one job.** A rough sentence is enough. Forge asks about the
+   audience, scale, interaction, reliability and deployment before it narrows
+   down tools and connectors.
+2. **Shape the proposal.** Forge's own setup team, a durable four-agent team
+   (deployment architect, integration specialist, systems reviewer and
+   visualization programmer), asks the next question and publishes the
+   proposal. An animation shows the proposed agents and how they collaborate.
+3. **Accept the plan.** **Use this plan** saves the design and its choices. It
+   creates no infrastructure.
+4. **Build.** Install the agent team directly, or build a custom application
+   that the builder writes and an independent reviewer checks. Optional trials
+   run the design or the built application with sample data.
+5. **Install and use it.** Forge installs on the same computer when the plan's
+   destination matches it, and checks startup and runtime health. You then try
+   a real task through the application or its Console.
+6. **Return.** Saved setups, installations and their history stay on your
+   computer. Start, stop, change private settings and apply checked updates
+   from the same saved setup.
+
+## What Forge checks and what you still verify
+
+Each stage is a separate outcome:
+
+| Stage | What it tells you |
+| --- | --- |
+| Proposal animation | An illustration of the current design. It does not run the agents. |
+| Agent design trial | Real native collaboration with sample data, without live services or application adapters. |
+| Checked application build | The code passed the build and independent review. Behavior on the destination still needs testing. |
+| Built application trial | Actual application callbacks run with isolated sample data. It does not install the application or verify live integrations. |
+| Installation | Startup and runtime availability. A useful job remains to be demonstrated. |
+
+## Current scope
+
+- Each release package names the one destination it supports. Forge 0.3.0
+  supports Linux x86_64 with exactly glibc 2.39, and Apple Silicon macOS 13.5
+  or newer. Other platforms and cloud deployment are not qualified by these
+  packages.
+- Generated applications support static durable identities, native flows and
+  the Console, scoped tools, local notes and an optional knowledge service.
+- Authenticated end-user applications, inbound messaging adapters, automatic
+  recurring triggers, data-driven rosters, ephemeral worker fleets and
+  synchronized ingestion are application extensions. The builder can write
+  them as ordinary code.
+- Forge installs on the computer it runs on. To run an agent team on another
+  computer, download its package and install it there from a terminal.
+- Forge also contains guided installation on an existing Linux computer over
+  SSH and on a Google Cloud VM, for ordinary application packages. It refuses
+  applications built on a selected Meta and Toolkit runtime, which is what the
+  release packages build, and a complete live cloud journey remains
+  unverified in this alpha.
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="play" href="/forge/quickstart">
+    Download and verify Forge, then install a first agent team.
+  </Card>
+  <Card title="Concepts" icon="diagram-project" href="/forge/concepts">
+    Setups, blueprints, builds, trials, installations and updates.
+  </Card>
+  <Card title="Reference" icon="book" href="/forge/reference">
+    Commands, settings, files, blueprint fields and limits.
+  </Card>
+  <Card title="Troubleshooting" icon="life-ring" href="/forge/troubleshooting">
+    Messages Forge prints and what to do about them.
+  </Card>
+</CardGroup>

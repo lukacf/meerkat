@@ -250,7 +250,7 @@ class CandidateProtocolTests(unittest.TestCase):
             names = []
             for prefix, binary in helper.BINARY_NAMES.items():
                 name = f"{prefix}-{VERSION}-{target}.{extension}"
-                inner = f"target/{target}/release/{binary}.exe" if extension == "zip" else binary
+                inner = f"target/{target}/release-meta/{binary}.exe" if extension == "zip" else binary
                 content = f"original-signed-{binary}-{target}".encode()
                 path = folder / name
                 path.write_bytes(archive_bytes(inner, content, extension))
@@ -1319,7 +1319,7 @@ class CandidateProtocolTests(unittest.TestCase):
                 with self.subTest(target=target, binary=binary):
                     path = self.target_files[f"{prefix}-{VERSION}-{target}.{extension}"]
                     record = helper.describe_archive(path, VERSION, target)
-                    expected = f"target/{target}/release/{binary}.exe" if extension == "zip" else binary
+                    expected = f"target/{target}/release-meta/{binary}.exe" if extension == "zip" else binary
                     self.assertEqual(record["inner"]["name"], expected)
                     self.assertEqual(record["inner"]["sha256"],
                                      helper.hash_bytes(f"original-signed-{binary}-{target}".encode()))
@@ -1330,15 +1330,17 @@ class CandidateProtocolTests(unittest.TestCase):
 
     def test_windows_zip_refuses_every_nonproducer_path_and_nonregular_member(self):
         target = "x86_64-pc-windows-msvc"
-        expected = f"target/{target}/release/rpc_gateway.exe"
+        expected = f"target/{target}/release-meta/rpc_gateway.exe"
         path = self.target_files[f"meta-rpc-gateway-{VERSION}-{target}.zip"]
         cases = [
             ("rpc_gateway.exe", stat.S_IFREG << 16, False, None),
             ("elsewhere/rpc_gateway.exe", stat.S_IFREG << 16, False, None),
             (f"target/{target}/debug/rpc_gateway.exe", stat.S_IFREG << 16, False, None),
-            ("target/aarch64-apple-darwin/release/rpc_gateway.exe", stat.S_IFREG << 16, False, None),
-            (f"target/{target}/release/meta_gateway.exe", stat.S_IFREG << 16, False, None),
-            (f"target/{target}/release/../release/rpc_gateway.exe", stat.S_IFREG << 16, False, None),
+            ("target/aarch64-apple-darwin/release-meta/rpc_gateway.exe", stat.S_IFREG << 16, False, None),
+            (f"target/{target}/release-meta/meta_gateway.exe", stat.S_IFREG << 16, False, None),
+            (f"target/{target}/release-meta/../release-meta/rpc_gateway.exe", stat.S_IFREG << 16, False, None),
+            # The standalone producer's path, before the release-meta profile.
+            (f"target/{target}/release/rpc_gateway.exe", stat.S_IFREG << 16, False, None),
             ("/" + expected, stat.S_IFREG << 16, False, None),
             ("C:/" + expected, stat.S_IFREG << 16, False, None),
             (expected.replace("/", "\\"), stat.S_IFREG << 16, False, None),

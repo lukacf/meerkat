@@ -687,14 +687,14 @@ jobs:
       - name: Deprecated backend stays unreferenced
         run: make deprecated-backend-gate
 
-      # The Mintlify parse and link check of the docs site (docs/, the MobKit
-      # mirror included) and of MobKit's source pages (meta/docs), last in the
-      # job on the Node.js it sets up itself. publish-mobkit-docs.yml runs the
+      # The Mintlify parse and link check of the docs site (docs/, the Meta
+      # mirror included) and of Meta's source pages (meta/docs), last in the
+      # job on the Node.js it sets up itself. publish-meta-docs.yml runs the
       # same check on docs/ only after a merge to main, where an MDX error (a
       # raw angle-bracket placeholder in prose, or a code span broken across
       # lines inside a component, say) fails the publication; here it fails
       # the pull request instead. The mint version is the one
-      # publish-mobkit-docs.yml pins; change both together. Each directory's
+      # publish-meta-docs.yml pins; change both together. Each directory's
       # .mintignore keeps its internal records, which MDX cannot parse, out
       # of the check.
       - name: Setup Node.js for the Mintlify docs parse
@@ -1030,7 +1030,15 @@ jobs:
     needs: changes
     if: ${{ needs.changes.outputs.rust_changed == 'true' && needs.changes.outputs.shard_first_count != '0' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    # A push lints every target of a whole product or chain head, and
+    # splitting such a row saves little: every split row lints the library
+    # first. Meta's row lints meerkat-meta's library (14-16 minutes) before
+    # its 170 test targets, and took 39m41s of its 40 minutes on main push
+    # 41608949055, where meerkat-mob's change also left the chain below it
+    # uncached; meerkat-rpc's row took 29-37 minutes on recent pushes
+    # (37m26s on main push 41217791146). A push gets 60 minutes, as the
+    # feature-check rows do; a pull request keeps 40.
+    timeout-minutes: ${{ github.event_name == 'pull_request' && 40 || 60 }}
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.changes.outputs.shard_matrix) }}
@@ -1112,7 +1120,7 @@ jobs:
     # a copy of that job, which scripts/ci-cargo-lanes-selftest.mjs checks.
     if: ${{ needs.changes.outputs.rust_changed == 'true' && needs.changes.outputs.shard_rest_count != '0' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    timeout-minutes: ${{ github.event_name == 'pull_request' && 40 || 60 }}
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.changes.outputs.shard_rest_matrix) }}

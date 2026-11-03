@@ -33,7 +33,7 @@ name: Nightly
 #   wasm-contract     - wasm-pack browser contract test in headless Chrome
 #   release-packaging - per-crate `cargo package` dry-run (release hygiene)
 #   audit             - daily cargo-deny advisory sweep
-#   mobkit-docs-lag   - docs/mobkit mirror vs main: fails while a main commit
+#   meta-docs-lag     - docs/meta mirror vs main: fails while a main commit
 #                       that changed meta/docs after the mirrored one is not
 #                       mirrored (publication has stalled silently)
 
@@ -46,7 +46,7 @@ name: Nightly
 #      in parallel);
 #   2. then five sequential chains: each job `needs` the previous one and
 #      runs under !cancelled(), so a red job never skips the rest:
-#        release-packaging (140 min) > mobkit-docs-lag
+#        release-packaging (140 min) > meta-docs-lag
 #        e2e-system (100) > sdk-web (24) > audit > machine-verify-deep
 #          (new, up to its 90-minute timeout)
 #        feature-matrix (89) > workspace-int (46)
@@ -929,13 +929,13 @@ jobs:
       - name: Cargo deny
         run: make audit
 
-  mobkit-docs-lag:
-    name: MobKit docs mirror lag
+  meta-docs-lag:
+    name: Meta docs mirror lag
     needs: release-packaging
     if: ${{ !cancelled() && !inputs.graph_only }}
     runs-on: ubuntu-24.04
     steps:
-      # The lag is read from this repository's own history (MobKit's docs
+      # The lag is read from this repository's own history (Meta's docs
       # are meta/docs here), so the checkout needs all of it: a shallow
       # checkout cannot place the mirrored commit and fails as "lag unknown"
       # rather than report zero lag.
@@ -947,8 +947,8 @@ jobs:
       - name: Compare the mirrored commit with the main commits that changed meta/docs
         run: |
           set -euo pipefail
-          python3 scripts/check-mobkit-docs-lag.py \
-            --manifest docs/mobkit/_source.json \
+          python3 scripts/check-meta-docs-lag.py \
+            --manifest docs/meta/_source.json \
             --max-lag 0
 
   # A red nightly on main opens one tracking issue, or comments on it while

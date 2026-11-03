@@ -1,0 +1,428 @@
+---
+title: "Forge troubleshooting"
+description: "Messages that Forge and its packages print, what they mean and what to do."
+icon: "life-ring"
+---
+
+Forge reports problems as messages in its terminal, in its pages, or in the
+terminal of an installed package. Most recovery actions keep your saved setups,
+private settings and installed state; prefer the action Forge offers over
+manual changes to its folders.
+
+## Starting Forge
+
+### A source checkout instead of a package
+
+```text
+Meta Forge 0.9 startup needs its prepared product runtime.
+Unpack the complete owner-prepared Forge candidate archive into a new folder, then run bash start.sh there.
+```
+
+`start.sh` was run from a source checkout, which lacks the selected Meta SDK,
+guide gateway and Connect product. Download a release package and run
+`bash start.sh` in its extracted folder; see the [quickstart](/forge/quickstart).
+
+### Python is missing or too old
+
+```text
+Python 3.11 or newer is required before starting Meta Forge.
+Set PYTHON_BIN to a Python 3.11+ executable.
+```
+
+Install CPython 3.11 and select it, for example:
+
+```sh
+uv python install 3.11
+PYTHON_BIN="$(uv python find 3.11)" bash start.sh
+```
+
+Use CPython 3.11 even when a newer Python is available: the application
+packages in the current release are built for it.
+
+### The existing environment uses the wrong Python
+
+```text
+The existing .venv cannot run Python 3.11 or newer.
+```
+
+`PYTHON_BIN` does not upgrade an existing `.venv`. Forge stopped before
+changing anything. Move only `.venv` aside and start again with a supported
+Python; your saved setups stay in place:
+
+```sh
+test ! -e .venv.previous && test ! -L .venv.previous && mv .venv .venv.previous
+PYTHON_BIN="$(uv python find 3.11)" bash start.sh
+```
+
+If `.venv.previous` already exists, choose another unused backup name.
+
+### Python cannot create the environment
+
+```text
+Python could not create Forge's private .venv.
+```
+
+Or `Pip could not be prepared in Forge's private .venv.` Use a complete Python
+3.11 installation with `venv` and `ensurepip`, for example one installed with
+`uv python install 3.11`, or `python3.11` and `python3.11-venv` from the
+deadsnakes PPA on Ubuntu. If an incomplete `.venv` remains, move it aside as
+shown above, then retry with the command Forge printed.
+
+### Dependency preparation did not finish
+
+```text
+Forge dependency preparation did not finish: installing pinned dependencies.
+The web server was not started. Dependencies may be partially prepared in .venv.
+```
+
+The step name can also be `installing the bundled SDKs`,
+`checking installed dependencies` or `checking the bundled product runtime`.
+Read the error printed above this message and correct it; a download failure
+usually needs restored internet access. Keep `.venv` and your saved state in
+place, then run the retry command Forge printed. It keeps your Python, port,
+state folder and other settings, and `--prepare-only` if you used it.
+
+### The package is incomplete
+
+```text
+The standalone runtime selection is invalid. Unpack a fresh copy.
+```
+
+Or `The standalone SDK selection is missing. Unpack a fresh copy.` Forge could
+not read a valid runtime or SDK selection from the extracted package. Verify
+the download again and extract it into a new folder.
+
+### A gateway override is set
+
+```text
+This Forge candidate selects its bundled Meta runtime. Remove MOBKIT_GATEWAY_BIN and retry.
+```
+
+Run `unset MOBKIT_GATEWAY_BIN`, then start Forge again.
+
+### The port is invalid or taken
+
+```text
+META_FORGE_PORT (or MOBKIT_LAUNCH_PORT) must be a port number from 1 to 65535.
+```
+
+Choose a valid port. If Forge is already running, reopen the address printed in
+its terminal instead of starting another copy. If port 8787 belongs to an
+unrelated application, start Forge on another port:
+
+```sh
+META_FORGE_PORT=8788 bash start.sh
+```
+
+A different port changes the address, not the saved state.
+
+### The organization plugin does not load
+
+```text
+The selected Forge organization plugin must be installed exactly once.
+```
+
+```text
+The selected Forge organization plugin could not supply valid version 1 context.
+```
+
+An explicit `META_FORGE_ORGANIZATION` that is missing, ambiguous or invalid
+stops startup instead of falling back to the stock examples. Install the
+plugin into Forge's own `.venv`, check its entry-point name and fields against
+the [plugin contract](/forge/reference#organization-plugins), or unset the
+variable.
+
+### The SSH profiles are refused
+
+```text
+Configured SSH profiles are unavailable or unsafe. Check the private META_FORGE_SSH_PROFILES files and restart Forge after correcting them. Remote work may still be running; no replacement connection was admitted.
+```
+
+The profile file and the files it names must be ordinary files owned by the
+user running Forge, with no group or other permissions, hard links or symlinks
+in their paths. Correct them while Forge is stopped, then restart it. See
+[SSH profiles](/forge/reference#ssh-profiles).
+
+## The guide and model providers
+
+### The guide needs a provider
+
+When no model provider is available, the send button reads **Connect your
+guide** and opens provider setup without sending your idea. Open **Guide
+settings**, choose a provider, enter its key, choose **Save locally**, then
+**Start guide**. Saving does not test the key; the next guide message does.
+
+### The provider rejects the key
+
+Wait for current work to finish. In **Guide settings**, choose **Stop setup
+team** and wait for the confirmed stop. Enter a replacement key for the same
+provider, choose **Save locally**, then **Start guide**. Return to the
+conversation and use its offered retry; the failed answer is not resent
+automatically.
+
+```text
+This provider is configured by the server environment and cannot be replaced here.
+```
+
+The key comes from `OPENAI_API_KEY`, `ANTHROPIC_API_KEY` or `GEMINI_API_KEY` in
+the environment Forge was started with, and such keys are read-only in the
+wizard. Stop Forge, change the variable and start Forge again from the same
+folder.
+
+### The setup team does not start
+
+```text
+The setup team could not start. Automatic startup is paused. Retry the setup team when ready.
+```
+
+Forge shows **Setup team could not start**. Choose **Retry setup team** and
+wait for its status; this keeps your conversation and does not resend your
+answer. **Check guide status** reads the current state without starting
+anything. Related messages:
+
+- `Connect the provider used by this saved setup team before starting it.`
+  The saved setup team uses another provider: configure that provider's key.
+- `Set MOBKIT_VISUALIZER_REASONING to low, medium or high.` Correct or unset
+  the variable and restart Forge.
+
+### A message is not confirmed
+
+If Forge shows **Conversation creation is not confirmed** or **Message
+delivery is not confirmed**, choose **Check saved conversation**. Your writing
+and uploaded files stay available, and checking does not send the message
+again.
+
+After an interrupted guide response, choose **Reload saved conversation**. If
+**Your submitted answer is saved** appears, **Retry saved answer** deliberately
+resends that saved answer with its original files.
+
+If an attachment keeps uploading, choose **Stop waiting**, then **Retry upload**
+or **Remove** the files. Neither action sends your message.
+
+## Designs and packages
+
+### Package preparation is pending
+
+**Accepted design - package preparation pending** means the plan needs a
+connection setup helper or a custom native tool bundle that the current
+installer cannot package yet. The design and its choices are saved, but new
+packages and builds wait for that support. Keep the design for later, or
+choose **Revise with guide** to discuss an explicit, reduced alternative.
+Enabling an optional Toolkit catalog or setup controller does not remove this
+limitation.
+
+### A model is not available to the agent team
+
+```text
+The Meta 0.9.6 runtime this agent team installs does not list PROVIDER MODEL. Listed PROVIDER models include MODELS. Choose a listed model for those classes. Your plan is preserved.
+```
+
+The message names each unlisted provider and model, and some models the pinned
+release does list. Change the model of those classes, with the guide or in the
+**Advanced editor**, and export or install again.
+
+### The plan acceptance is not confirmed
+
+If acceptance is waiting or cannot be confirmed, choose **Check saved plan**.
+It reads the saved conversation without accepting again. **Try saving this
+plan again** then deliberately saves the same reviewed plan.
+
+## Building applications
+
+### Application checks are unavailable
+
+```text
+Checker preparation requires supported macOS sandbox-exec or functional Linux bubblewrap isolation. Checks on this host remain unavailable.
+```
+
+Forge never runs generated checks without isolation. On Linux, install the
+isolation prerequisites in the
+[quickstart](/forge/quickstart#build-a-custom-application-instead). On Ubuntu
+24.04 and later, also load the `bwrap-userns-restrict` AppArmor profile; if
+`/etc/apparmor.d` already has a profile for `/usr/bin/bwrap`, reload that file
+with `sudo apparmor_parser -r` instead of adding a second one. Check the
+isolation before opening Forge:
+
+```sh
+bwrap --unshare-user --unshare-pid --unshare-net --ro-bind /usr /usr \
+  --ro-bind /lib /lib --ro-bind-try /lib64 /lib64 -- /usr/bin/true
+```
+
+A container host also needs a real PID 1 reaper, such as Docker's `--init`, and
+an outer policy that lets bubblewrap create its namespaces and `/proc`.
+
+```text
+The verified Node checker could not start inside isolation. Check this computer's runtime libraries before building.
+```
+
+Install the checker's runtime libraries: on Debian and Ubuntu, `libatomic1`
+and `libstdc++6`.
+
+```text
+Private checker preparation supports macOS Intel/ARM64 and Linux Intel/ARM64 with glibc 2.28+ and kernel 4.18+. Executable checks also require a supported OS sandbox.
+```
+
+This computer cannot run application checks. Agent teams do not need them.
+
+### Preparation or a build seems stuck
+
+- **Preparing...** stays visible: choose **Check preparation status**. It
+  reads the status without starting another download.
+- **Build status is unavailable**: choose **Review build status**, then
+  **Refresh build status**. Your note and saved source are kept, and
+  refreshing does not start a build.
+- **Your saved build needs attention**: Forge found source without a usable
+  build selection. Choose **Find your saved build**, then **Restore saved
+  build** for the build you want. This restores only the selection.
+- **Stopping builder...** or **Closing build runtime...**: wait for the
+  existing build runtime to close. **Retry cleanup** retries it when offered;
+  another build waits until cleanup is confirmed.
+
+## Installing and running
+
+### Forge runs another CPython
+
+```text
+This product's application packages are built for CPython 3.11, but this Forge runs CPython 3.12, so installing them would fail midway. Stop Forge, move only its .venv folder aside and start it again with PYTHON_BIN set to a CPython 3.11 interpreter, as the README describes. Your saved setups are kept.
+```
+
+Forge refused before installing anything. Move `.venv` aside and restart Forge
+with CPython 3.11 as shown
+[above](#the-existing-environment-uses-the-wrong-python).
+
+### The computer has another glibc
+
+```text
+This product's selected resource library requires exactly glibc 2.39, but this computer has glibc 2.35. Use a Linux computer with glibc 2.39, or obtain a product whose resource library supports this computer.
+```
+
+The Linux package's application runtime supports exactly glibc 2.39. Use a
+Linux computer with that version, or a package whose runtime supports this
+computer.
+
+### A candidate can only update an existing installation
+
+If Forge says **This private runtime candidate is admitted only through the
+checked update of an existing stopped installation**, this package cannot
+create a new installation. Keep the existing project folder and use its
+**Stage accepted update** or recovery controls. Do not extract the candidate
+into a new folder to work around the restriction.
+
+### Setup stays pending
+
+**Application setup is next** means the application is installed but stopped,
+with no running agents or interface links yet. Choose **Review private
+settings** if required settings are missing, then **Prepare application
+setup** and **Set up and start application** when they are offered. If
+**Setup pending** remains, keep the same folder and saved settings. **Check
+setup status** only reads availability; saving private settings or connecting
+the guide does not supply a missing setup runtime.
+
+### Background mode is unavailable on macOS
+
+```text
+macOS does not let a background login item read Desktop, Documents, Downloads, iCloud Drive or cloud storage folders. Move the Forge folder and the installation folder to a folder such as ~/MetaForge, or choose 'While Forge is open'.
+```
+
+Move the Forge folder and the installation folder to a folder such as
+`~/MetaForge`, or run the application **While Forge is open**. A service
+installed in one of those folders earlier is not moved.
+
+### A start fails or the status is unclear
+
+- After a failed start, choose **Stop and verify cleanup** when offered and
+  wait until Forge confirms that the installation is stopped. Then **Change
+  private settings**, save the correction and start the same installation
+  again.
+- **Installation status is unavailable**: choose **Review installation
+  status**, then **Check installation status**. The saved receipt describes
+  an earlier observation.
+- If an installation command reports an error, some of its work may already
+  have finished. Wait for the checked status before choosing another action,
+  and do not send another Stop just to clear the error.
+- A running application's UI link is missing: choose **Retry UI links**.
+
+### The Console password is forgotten
+
+For an installation on this computer, stop it in Forge and wait for cleanup.
+Choose **Change private settings**, enter a replacement Console password and
+choose **Save private settings**; blank fields keep their saved values. Start
+the same installation again and use its current Console link.
+
+### An update crosses into Meta 0.9.4
+
+Meta 0.9.4 keeps sessions and identities in Core's own stores and refuses a
+state folder that an earlier Meta release wrote and that was not migrated
+(`NativeStorageMigrationRequired`). Forge does not run that migration: it
+stages such an update as blocked and changes nothing. Back up the complete
+stopped project folder, including `.mobkit/`, and follow
+[Upgrading to Meta 0.9.4](/guides/upgrading-to-0-9-4).
+
+## Packages installed from a terminal
+
+### The project folder is writable by others
+
+```text
+This owned project folder allows group or other write access.
+Installation stopped before environment or application setup.
+```
+
+Run the non-recursive repair in the same project folder, then retry the same
+install command:
+
+```sh
+chmod go-w .
+```
+
+### Installation stops
+
+```text
+Application dependency preparation did not finish: installing pinned dependencies.
+```
+
+Correct the problem reported above it and run the printed retry command in the
+same folder. Keep `.venv`, `.env`, `workspace`, `data` and `.mobkit` in place.
+`Install Python 3.11 or newer, then run this installer again.` means the
+selected Python (`PYTHON_BIN`, default `python3`) was not found, and
+`Python 3.11 or newer is required` means it is too old.
+
+### Start refuses
+
+| Message | What to do |
+| --- | --- |
+| `Run bash install.sh first.` | The package is not installed in this folder yet. |
+| `This project is already running. Stop its other process first.` | Another process of the same installation holds its lock. Stop the running application first; commands such as `--list-flows` and `--run-flow` take the same lock. |
+| `Unknown flow ID. Use --list-flows.` | Use a flow ID that `bash start.sh --list-flows` prints. |
+| `Activating an edited definition is not available for this Meta package.` | Agent teams keep their installed definition. Build the changed team and install it into a new folder. |
+| `[needs setup]` lines from `--doctor` | Install the missing prerequisite or complete the named setting, then run `--doctor` again. |
+
+Startup failures print `Deployment needs attention:` followed by the reason.
+
+### A package refuses its shell commands
+
+```text
+Use the offered installation, application setup, update or recovery controls for this application in Forge. Shell entrypoints cannot select its native setup inputs.
+```
+
+The package is a custom application built on a selected Meta and Toolkit
+runtime. Install, set up, update and recover it only from its saved setup in
+Forge.
+
+```text
+This package targets a local operating system. Cloud deployment and tunneling require an explicitly selected GCP package. Use the existing installation owner for this host.
+```
+
+The cloud scripts of a package built for a local destination refuse. Change
+the plan's destination with the guide and build the package again.
+
+## Google Cloud
+
+If Forge says the Google Cloud CLI was not detected when it started, install
+it and sign in, then stop Forge normally and start it again from the same
+folder and state folder: installing the CLI does not update a running Forge.
+
+Stopping an application does not remove billed cloud resources. **Review cloud
+removal** names the original VM, disk and access rule; removing them
+permanently loses the disk's data, and Forge makes no backup. Keep the
+original removal request and choose **Recheck removal** until all three are
+confirmed absent; until then, charges may continue.

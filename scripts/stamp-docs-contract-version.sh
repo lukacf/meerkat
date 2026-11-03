@@ -107,12 +107,12 @@ paths.extend(
 )
 for path in sorted(set(paths)):
     rel = path.relative_to(root).as_posix()
-    # MobKit (Meta, under meta/) is released on its own cycle. docs/mobkit is
+    # Meta (under meta/) is released on its own cycle. docs/meta is
     # generated from meta/docs at the main commit recorded in
-    # docs/mobkit/_source.json (scripts/sync-mobkit-docs.py) and validated by
-    # docs-check, so Meerkat release stamping must not rewrite MobKit package
+    # docs/meta/_source.json (scripts/sync-meta-docs.py) and validated by
+    # docs-check, so Meerkat release stamping must not rewrite Meta package
     # or protocol versions.
-    if rel.startswith("docs/mobkit/"):
+    if rel.startswith("docs/meta/"):
         continue
     # docs/internal holds unpublished working notes, audits and archives that
     # quote historical versions verbatim; they are not release projections.

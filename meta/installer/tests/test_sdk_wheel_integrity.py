@@ -92,7 +92,7 @@ def test_exact_selected_pair_preserves_source_and_license_facts_without_import(p
 
 @pytest.mark.parametrize(("meta_version", "toolkit_version"), [
     ("0.9.0", "0.9.0"), ("0.9.1", "0.9.0"), ("0.9.4", "0.9.0"), ("0.9.4", "0.9.4"),
-    ("0.9.5", "0.9.5"), ("0.9.6", "0.9.5"), ("0.9.7", "0.9.5")])
+    ("0.9.5", "0.9.5"), ("0.9.6", "0.9.5"), ("0.9.7", "0.9.5"), ("0.9.9", "0.9.5")])
 def test_selected_meta_version_is_bound_to_exact_toolkit_native_host_metadata(meta_version, toolkit_version):
     pair = (InertWheel("meerkat-meta", version=meta_version),
             InertWheel("meerkat-toolkit", version=toolkit_version, meta_version=meta_version))
@@ -102,7 +102,7 @@ def test_selected_meta_version_is_bound_to_exact_toolkit_native_host_metadata(me
 
 
 @pytest.mark.parametrize(("meta_version", "required_version"), [("0.9.0", "0.9.1"), ("0.9.1", "0.9.0"),
-    ("0.9.1", "0.9.4"), ("0.9.4", "0.9.1")])
+    ("0.9.1", "0.9.4"), ("0.9.4", "0.9.1"), ("0.9.7", "0.9.9"), ("0.9.9", "0.9.7")])
 def test_selected_meta_cross_pair_mismatch_refuses(meta_version, required_version):
     pair = (InertWheel("meerkat-meta", version=meta_version),
             InertWheel("meerkat-toolkit", meta_version=required_version))

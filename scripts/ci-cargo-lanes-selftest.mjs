@@ -2212,15 +2212,15 @@ for (const path of [
 }
 
 // Format + governance ends with the Mintlify parse and link check of the docs
-// site (docs/) and of MobKit's source pages (meta/docs): Node.js 22, then the
-// mint version the MobKit mirror's publication pins, so an MDX error fails the
+// site (docs/) and of Meta's source pages (meta/docs): Node.js 22, then the
+// mint version the Meta mirror's publication pins, so an MDX error fails the
 // pull request rather than the publication after the merge. Each directory's
 // .mintignore keeps its internal records, which MDX cannot parse, out of it.
 {
   const workflow = readFileSync(resolve(root, ".github/workflows/ci.yml"), "utf8");
-  const publish = readFileSync(resolve(root, ".github/workflows/publish-mobkit-docs.yml"), "utf8");
+  const publish = readFileSync(resolve(root, ".github/workflows/publish-meta-docs.yml"), "utf8");
   const pin = publish.match(/npx --yes (mint@[0-9.]+) broken-links/);
-  assert.ok(pin, "the MobKit docs publication pins its mint version");
+  assert.ok(pin, "the Meta docs publication pins its mint version");
   const mint = pin[1].replaceAll(".", "\\.");
   const expected = [
     /^      - name: Setup Node\.js for the Mintlify docs parse$/,

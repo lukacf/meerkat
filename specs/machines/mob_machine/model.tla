@@ -24617,6 +24617,7 @@ RecoverCreatedIdentityEntryTombstoneRunning(agent_identity, presence, last_sessi
     /\ ((agent_identity \in DOMAIN identity_to_runtime) = FALSE)
     /\ ((agent_identity \in identity_entry_unreadable) = FALSE)
     /\ ((agent_identity \in identity_entry_tombstones) = FALSE)
+    /\ ((agent_identity \in identity_entry_archiving) = FALSE)
     /\ ((agent_identity \in DOMAIN spawn_exec_phase) = FALSE)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
@@ -24636,6 +24637,7 @@ RecoverCreatedIdentityEntryTombstoneStopped(agent_identity, presence, last_sessi
     /\ ((agent_identity \in DOMAIN identity_to_runtime) = FALSE)
     /\ ((agent_identity \in identity_entry_unreadable) = FALSE)
     /\ ((agent_identity \in identity_entry_tombstones) = FALSE)
+    /\ ((agent_identity \in identity_entry_archiving) = FALSE)
     /\ ((agent_identity \in DOMAIN spawn_exec_phase) = FALSE)
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
@@ -24754,6 +24756,7 @@ RecoverCreatedIdentityEntryArchivedRunning(agent_identity, presence, last_sessio
     /\ ((IF (agent_identity \in DOMAIN identity_entry_origins) THEN Some((IF agent_identity \in DOMAIN identity_entry_origins THEN identity_entry_origins[agent_identity] ELSE "None")) ELSE None) # Some("Declared"))
     /\ ((agent_identity \in identity_entry_unreadable) = FALSE)
     /\ ((agent_identity \in identity_entry_tombstones) = FALSE)
+    /\ ((agent_identity \in identity_entry_removing) = FALSE)
     /\ ((agent_identity \in DOMAIN spawn_exec_phase) = FALSE)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
@@ -24773,6 +24776,7 @@ RecoverCreatedIdentityEntryArchivedStopped(agent_identity, presence, last_sessio
     /\ ((IF (agent_identity \in DOMAIN identity_entry_origins) THEN Some((IF agent_identity \in DOMAIN identity_entry_origins THEN identity_entry_origins[agent_identity] ELSE "None")) ELSE None) # Some("Declared"))
     /\ ((agent_identity \in identity_entry_unreadable) = FALSE)
     /\ ((agent_identity \in identity_entry_tombstones) = FALSE)
+    /\ ((agent_identity \in identity_entry_removing) = FALSE)
     /\ ((agent_identity \in DOMAIN spawn_exec_phase) = FALSE)
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1

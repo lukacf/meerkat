@@ -277,10 +277,11 @@ def valid_tag(tag):
 def binary_member_name(binary, target):
     require(binary in BINARY_NAMES.values() and target in dict(assets.TARGET_ARCHIVES),
             "unknown binary/target")
-    # The unchanged Windows 7z producer retains this build-tree path; Unix tar
+    # The Windows 7z producer retains this build-tree path, the directory of
+    # the release-meta profile meta-release.yml builds with; Unix tar
     # explicitly changes directory and stores only the executable basename.
     if dict(assets.TARGET_ARCHIVES)[target] == "zip":
-        return f"target/{target}/release/{binary}.exe"
+        return f"target/{target}/release-meta/{binary}.exe"
     return binary
 
 

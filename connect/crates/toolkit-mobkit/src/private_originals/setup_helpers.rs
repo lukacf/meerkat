@@ -709,6 +709,7 @@ impl PrivateOriginals {
         content: String,
         source_deadline: tokio::time::Instant,
         review: crate::review_custody::ReviewCustody,
+        dispatch: Option<&ToolDispatchContext>,
     ) -> Result<SetupHelperSubmission, PrivateOriginalError> {
         self.with_new_work_admission(|| ())?;
         if tokio::time::Instant::now() >= source_deadline {
@@ -764,6 +765,8 @@ impl PrivateOriginals {
         // change may rebuild its current binding once, never its source/key.
         let input = Input::Prompt(PromptInput::new(content, None));
         let mut reprepared = false;
+        // One churn for this submission's wait, never re-armed.
+        let mut churn = dispatch.map(ToolDispatchContext::owner_change_churn);
         let result = loop {
             // Meta may await the current member/controller before calling the
             // binder. Check here as well as inside that actual binder.
@@ -793,6 +796,31 @@ impl PrivateOriginals {
                     return Ok(SetupHelperSubmission::ReprepareRequired);
                 }
                 reprepared = true;
+                // The publication changed under native admission's check. On
+                // the Find dispatch, wait that change out with Core's bounded
+                // stale-read wait, within the dispatch's remaining tool time
+                // and the source deadline, holding no guard, before the one
+                // rebind; a change that will not settle still ends the wait.
+                if let (Some(context), Some(churn)) = (dispatch, churn.as_mut())
+                    && let Some(work) = context.work_authorization()
+                {
+                    let request =
+                        source_deadline.saturating_duration_since(tokio::time::Instant::now());
+                    let budget = context
+                        .remaining_tool_time()
+                        .map_or(request, |tool| tool.min(request));
+                    if !budget.is_zero() {
+                        let _settled = churn
+                            .wait_after_stale_read(
+                                work.authorization().as_ref(),
+                                Some(budget),
+                                "toolkit.setup_helper.submission",
+                                None,
+                            )
+                            .await
+                            .settled();
+                    }
+                }
                 continue;
             }
             break result;

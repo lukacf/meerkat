@@ -529,6 +529,7 @@ impl InstalledAcquisition {
                 content,
                 source_deadline,
                 review.clone(),
+                Some(context),
             )
             .await
             .map_err(|error| {

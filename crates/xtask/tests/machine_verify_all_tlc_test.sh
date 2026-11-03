@@ -312,7 +312,7 @@ if [[ ! -x "${run_start_hold_audit}" ]]; then
   echo "error: run-start hold audit runner is missing from workspace runfiles: ${run_start_hold_audit}" >&2
   exit 1
 fi
-if run_part audits-c; then
+if run_part audits-q; then
   echo "running bounded run-start hold TLC audit"
   TLC_WORKERS="${tlc_workers}" "${run_start_hold_audit}" "${RUN_START_HOLD_AUDIT_MAX_STEPS:-12}"
 fi
@@ -588,7 +588,7 @@ if [[ ! -x "${generation_highwater_audit}" ]]; then
   echo "error: generation high-water audit runner is missing from workspace runfiles: ${generation_highwater_audit}" >&2
   exit 1
 fi
-if run_part audits-f; then
+if run_part audits-r; then
   echo "running bounded generation high-water TLC audit"
   TLC_WORKERS="${tlc_workers}" "${generation_highwater_audit}" "${GENERATION_HIGHWATER_AUDIT_MAX_STEPS:-4}" --mutants
 fi
@@ -952,7 +952,8 @@ fi
 # opposed to one the host declared) are recorded by the boot's scan of the
 # identity store's created entry rows, which the ci profile cannot reach
 # either. A hand-written audit over the same generated model
-# (created_identity_audit.tla, shards audits-q through audits-v) checks
+# (created_identity_audit.tla, shards audits-q, audits-r and audits-t
+# through audits-v) checks
 # fourteen runs over their whole reachable space, in two parts. Its
 # recovery part's scan run
 # replays a seated member with or without its Declared entry's row (before
@@ -1031,12 +1032,11 @@ if [[ ! -x "${created_identity_audit}" ]]; then
   echo "error: created identity audit runner is missing from workspace runfiles: ${created_identity_audit}" >&2
   exit 1
 fi
-# Its runs are split over six shards (sized below): the recovery part's
+# Its runs are split over five shards (sized below): the recovery part's
 # scan and placed runs in audits-q and its reseat and names runs in
 # audits-v; the changes part's admit, commit and update runs in audits-r,
-# its removal run in audits-s, its archive, unlist, placement and
-# recovered runs in audits-t, and its preparation and prepverdicts runs in
-# audits-u.
+# its archive, unlist, placement and recovered runs in audits-t, and its
+# removal, preparation and prepverdicts runs in audits-u.
 if run_part audits-q; then
   echo "running bounded created identity scans TLC audit"
   TLC_WORKERS="${tlc_workers}" "${created_identity_audit}" --mutants --part scan,placed
@@ -1049,7 +1049,7 @@ if run_part audits-r; then
   echo "running bounded created identity admissions and records TLC audit"
   TLC_WORKERS="${tlc_workers}" "${created_identity_audit}" --mutants --part admit,commit,update
 fi
-if run_part audits-s; then
+if run_part audits-u; then
   echo "running bounded created identity removals TLC audit"
   TLC_WORKERS="${tlc_workers}" "${created_identity_audit}" --mutants --part removal
 fi
@@ -1251,161 +1251,74 @@ run_machine_verify() {
 
 # Shard assignment balances measured audit cost on hosted 4-vCPU CI runners
 # (4 TLC workers, default bounds), where each TLC run's JVM start and model
-# parse is most of a small audit. Hosted seconds per audit on pull-request
-# run 40721495692 and push run 40721504088 (2026-10-28), the faster runner's
-# first; the two runners of one shard differed by 1.2-1.5x:
-# audits-a = live unregister cleanup 234-324, mob operator grant with
-# --mutants 180-235: 414-559 s;
-# audits-b = durable in-turn steer with its per-kind goal runs 368-535 (368
-# on the push; cut off after 451 on the pull request's runner, 1.45x slower
-# on the rest of its shard), live delegation steer 37-51: 405-586 s;
-# audits-c = run-start hold 209-256, materialization-rollback keep with
-# --mutants 212-259, live worker start after close 20-27, approval
-# entered-step with --mutants 16-24: 457-566 s; the run-start hold audit's
-# reasons run (2026-10-30, the HostPreparation reason) adds about 13 s locally
-# with 4 TLC workers (114 s for the whole audit, 101 s before);
-# audits-d = durable-tail recovery ownership with --mutants 179-233,
-# live-context outbox 122-153, peer request maps with --mutants 93-131,
-# live-context result barrier with --mutants 27-37: 421-554 s;
-# audits-e = member lifecycle with --mutants 307-458, empty-resume residency
-# with --mutants 45-64, durable-tail classification with --mutants 24-40, the
-# MobMachine arm coverage gate under 1: 376-562 s. The member lifecycle
-# audit's two RetireAbsent mutants (2026-10-31) add two scope runs to the 20
-# TLC runs it made in these measurements, about 15-23 s each at its average
-# per run (not measured yet): about 407-608 s for the shard;
-# audits-f = live media health 147-171, requeue-across-stop 122-147,
-# live-context causal-tail batch with --mutants 98-122, generation high-water
-# with --mutants 56-71: 423-511 s. On the 0.9.9 release branch (2026-11-03)
-# the shard, which then also ran the AuthMachine source-credential
-# publication audit and the tool grant expiry audit, ran past its 20-minute
-# job timeout on a hosted runner (20m18s; another run was still unfinished
-# at 19m04s): its four audits took about 11m49s there, and the
-# source-credential publication audit alone 7m53s. Locally with 4 TLC
-# workers the four took 354 s (requeue-across-stop 144, live media health
-# 89, causal-tail batch 57, generation high-water 64), the
-# source-credential publication audit 168 s and the tool grant expiry
-# audit 7 s, so those two moved to audits-s and audits-u;
-# audits-g = member residency's whole-space runs (--part spaces), alone: on
-# the push, when the shard ran the whole audit, its eight whole-space runs
-# took 165 s and its first 23 of 32 witness runs 173 s before the job timeout
-# cut it off, about 430 s in all, and about 525 s on the pull request's
-# runner, 1.22x slower on the rest of its shard. The wiring exemption of side
-# chats (2026-10-29) about doubled its seat, wake and retire spaces (46248,
-# 3198 and 11174 distinct states) and brought it to 34 witnesses: locally,
-# with 4 TLC workers, the whole audit took 299 s (its eight whole-space runs
-# 140 s of TLC time, the seat run 67 s of it), where the same lane took about
-# 230 s before. With eleven whole-space runs and 44 witnesses (2026-10-30)
-# the whole audit took about 390 s locally with 4 TLC workers, past 10
-# minutes on a hosted runner, so its witness runs moved to a shard of their
-# own: its eleven whole-space runs took 179 s locally with 4 TLC workers;
-# audits-h = input controller hold with --mutants: its safety run (1617
-# distinct states at 14 steps), nine witness runs and nine single-worker
-# mutant runs took 100 s on a 4-worker local run; the SessionDocumentMachine
-# instruction boundary audit with --mutants joined it after these
-# measurements: its sixteen runs (a safety run over 9203 distinct states,
-# five witness runs and ten mutant runs, over a model that does not extend
-# meerkat_machine) took 19 s of TLC time and the whole shard 121 s on a
-# 4-worker local run (2026-10-31); since session_document's ci.cfg bounds
-# the steps at 5, its safety run covers 2720 distinct states; it has since
-# grown to nineteen runs (six witness runs and twelve mutant runs) over a
-# space the session's binding fact and its takeover witness grow, not yet
-# re-measured at that bound; the MobMachine
-# operator-instruction delivery audit with --mutants joined it after these
-# measurements (not yet measured: two whole-space runs, eleven witness runs
-# and six mutant runs over the MobMachine model, whose JVM start and model
-# parse are about 5 s a run in audits-i, so an estimated 110-200 s locally
-# with its small spaces, and the shard about 230-320 s; if the first hosted
-# run takes the shard past 10 minutes, the audit moves to a shard of its
-# own); the SessionDocumentMachine activation-body retirement audit with
-# --mutants joined it later (twelve runs over the same model: a safety run,
-# three witness runs and eight mutant runs; not yet measured); the
+# parse is most of a small audit. Hosted seconds per audit are the lowest and
+# highest of the 0.9.9 release runs (pull requests 41473326233 and
+# 41581056376, main pushes 41594713659, 41605379855 and 41608949055,
+# 2026-11-02 and 2026-11-03), and each shard's job time is its range on the
+# three pushes, 7-26 s of it checkout and TLC setup:
+# audits-a = live unregister cleanup 238-341, mob operator grant with
+# --mutants 158-240: 414-602 s;
+# audits-b = durable in-turn steer with its per-kind goal runs 348-610, live
+# delegation steer 34-51: 514-685 s;
+# audits-c = materialization-rollback keep with --mutants 267-309, live
+# worker start after close 25-29, approval entered-step with --mutants
+# 20-24: 656-663 s with the run-start hold audit (242-293), which moved to
+# audits-q, so about 370-375 s;
+# audits-d = durable-tail recovery ownership with --mutants 143-238,
+# live-context outbox 100-146, peer request maps with --mutants 87-134,
+# live-context result barrier with --mutants 25-39: 383-555 s;
+# audits-e = member lifecycle with --mutants 441-522, empty-resume residency
+# with --mutants 52-64, durable-tail classification with --mutants 36-48, the
+# MobMachine arm coverage gate under 1: 558-646 s;
+# audits-f = requeue-across-stop 222-303, live media health 125-176,
+# live-context causal-tail batch with --mutants 86-125: 618-742 s with the
+# generation high-water audit with --mutants (102-126), which moved to
+# audits-r, so about 516-616 s. On the 0.9.9 release branch the shard also
+# ran the AuthMachine source-credential publication audit and the tool grant
+# expiry audit, and a pull request's run passed its 20-minute job timeout
+# (20m18s on 41581056376); those two moved to audits-s and audits-u;
+# audits-g = member residency's whole-space runs (--part spaces), alone: the
+# audit 473-627, the shard 605-630 s;
+# audits-h = input controller hold with --mutants 126-192, the MobMachine
+# operator-instruction delivery audit with --mutants 82-134, the
+# SessionDocumentMachine instruction boundary audit with --mutants 41-70 and
+# activation-body retirement audit with --mutants 15-23, and the
 # ScheduleLifecycleMachine superseded-ack retention audit with --mutants
-# joined it too: its safety run (1382 distinct states at 6 steps), three
-# witness runs and eight mutant runs took about 5 s on a 4-worker local run;
-# audits-i = member residency's witness runs (--part witnesses), alone: its
-# 44 witness runs took 212 s locally with 4 TLC workers, each run's JVM start
-# and model parse most of it;
-# audits-j = durable decision with --mutants, alone: its safety run (36073
-# distinct states at 6 steps, 65 s), fifteen witness runs and twenty-four
-# mutant runs took 146 s on a 4-worker local run (about 235-340 s hosted at
-# the 1.6-2.3x runner factor);
-# audits-l = the identity entry audit's entry part with --mutants (--part
-# entry), alone: its two whole-space runs, 25 witnesses and 12 mutants took
-# 281 s locally with 4 TLC workers (2026-10-31), most of it each run's JVM
-# start and model parse. It ran in audits-c, which took 562 and 576 s
-# without it on main's push runs 41049255980 and 41005570193 (2026-10-30):
-# together past 10 minutes; the first hosted run measures it;
+# 7-11: 389-445 s;
+# audits-i = member residency's witness runs (--part witnesses), alone: the
+# audit 346-542, the shard 357-565 s;
+# audits-j = durable decision with --mutants, alone: the audit 182-372, the
+# shard 206-398 s;
 # audits-k, audits-m, audits-n and audits-o = the identity entry audit's
-# declared apply parts with --mutants, alone, locally with 4 TLC workers
-# (2026-10-31): apply (one whole-space run, 15 witnesses, 15 mutants)
-# 180 s; legacy (one run, 13 witnesses, 16 mutants) 230 s; roles (two
-# runs, 13 witnesses, 9 mutants) 196 s; hosted (three runs, 14 witnesses,
-# 16 mutants) 212 s, with one witness and one mutant more since (the
-# in-flight seal's, not measured yet). As one part (five runs, 28
-# witnesses, 17 mutants) the declared apply took 300-305 s; with its seven
-# runs, 55 witnesses and 56 mutants it would take about 818 s, past 10
-# minutes on a hosted runner.
-# The created identity entries' machine costs each whole-space run about a
-# quarter more per state; to keep that cost down the entry run's probe
-# totality counts its six arms of a spawn without created custody, and the
-# declared apply's runs count their fifteen declaration arms, none of these
-# runs recording a created entry or a reserved name (created_identity_audit
-# counts every arm).
-# The created identity audit runs in six shards, each with --mutants and
-# the runs its --part names; each TLC run's JVM start and model parse took
-# about 5 s on a 4-worker local run (2026-11-02), so a shard holds at most
-# about 40 TLC runs. Each shard is projected, not yet measured as a shard,
-# to stay within 348 s locally (800 s hosted at a 2.3x runner factor): its
-# TLC runs' start-up (the run counts below, about 5 s each) plus the
-# searches of the spaces below. A shard a measured run finds past 348 s is
-# split again:
-# audits-q = its scan and placed runs (two whole-space runs, 9 witnesses,
-# 12 mutants: 23 TLC runs) and audits-v = its reseat and names runs (two
-# runs, 9 witnesses, 19 mutants: 30 TLC runs). As one shard (--part
-# recovery) they took 225 s locally with 4 TLC workers (2026-10-31), and
-# 235 s (2026-11-02) before the scan and names runs' witnesses and mutants
-# had run: the scan, reseat and names spaces about doubled with the 0.9.9
-# rows. To keep them small the reseat run spawns member 1 without custody
-# only, gives a revival record only to member 2's Present row and
-# reconciles both members or none, its names run's rows carry no revival
-# record, and the reseat run's row totality counts rows without one (no
-# arm's guard reads it).
-# audits-r = its admit, commit and update runs (three whole-space runs, 11
-# witnesses, 7 mutants: 21 TLC runs). The commit run alone took 884 s
-# locally (2026-11-02) for 7680 distinct states and 2,337,953 generated: a
-# change's admission, a pure verdict over 288 combinations of its facts
-# that changes nothing, added 288 self-loops (2,211,840 of the generated
-# states) and 3168 ENABLED evaluations of its totality to every state. The
-# admission is the admit run's now, over the only facts it reads (tens of
-# states); the commit run keeps its 7680 states with about 1.3e5 generated.
-# audits-s = its removal run (38976 states, 41 s locally; 9 witnesses, 6
-# mutants: 16 TLC runs, its deep witnesses each exploring much of the
-# space), which took 2m47s-3m03s hosted as the shard's only audit
-# (2026-11-03), and the AuthMachine source-credential publication audit
-# (7m53s hosted, 168 s locally), moved from audits-f.
-# audits-t = its archive (2016 states, 11 s locally), unlist, placement and
-# recovered runs (four whole-space runs, 18 witnesses, 17 mutants: 39 TLC
-# runs, each space in the thousands of states or fewer).
-# audits-u = its preparation and prepverdicts runs (two whole-space runs, 14
-# witnesses, 8 mutants: 24 TLC runs): the preparation run fires only the
-# attempts' arms that change state, in the initial authoritative
-# composition, and the verdict run every arm over the facts the verdicts
-# read. The shard took 3m04s-4m17s hosted (2026-11-03) before the tool grant
-# expiry audit with --mutants (7 s locally) moved to it from audits-f.
-# A witness run, and a mutant that expects neither a totality invariant nor
-# an action property, leaves out its run's ENABLED totality invariants and
-# its action properties (the whole-space run checks them in every state and
-# step); a mutant that expects an action property leaves out the totality
-# invariants only.
-# None of audits-g through audits-o, audits-q, audits-r, audits-t and
-# audits-v has been measured on a hosted runner yet.
-# Each job adds about 20 s of checkout and TLC setup: a shard within 348 s
-# locally takes at most about 14 minutes hosted (800 s of TLC at a 2.3x
-# runner factor, and its setup), inside the 1080 s execution budget. As
-# three shards these audits ran 13-18 minutes (audits-a), 15 minutes and
-# past the 20-minute job timeout (audits-b), and past it on both runs
-# (audits-c). A new audit joins the lightest shard, or a new shard when it
-# would take that shard past 348 s locally. Shard of the two audits the
+# declared apply parts with --mutants, each alone: apply 384-460 (the shard
+# 396-484 s), legacy 596-726 (605-751 s), roles 563-740 (604-745 s, and
+# 776 s on a pull request's runner) and hosted 353-623 (366-640 s);
+# audits-l = the identity entry audit's entry part with --mutants (--part
+# entry), alone: the audit 404-715, the shard 588-741 s;
+# audits-q = the created identity audit's scan and placed runs 170-272 (the
+# shard 183-277 s) and the run-start hold audit, from audits-c: about
+# 471-568 s;
+# audits-r = its admit, commit and update runs 135-231 (the shard
+# 146-249 s) and the generation high-water audit, from audits-f: about
+# 248-375 s;
+# audits-s = the AuthMachine source-credential publication audit, 250-479
+# hosted (168 s locally): 712-719 s with the created identity removal run
+# (158-233), which moved to audits-u, so about 479-489 s;
+# audits-t = its archive, unlist, placement and recovered runs: 228-335,
+# the shard 320-364 s;
+# audits-u = its preparation and prepverdicts runs 161-237 and the tool
+# grant expiry audit with --mutants 13-16 (the shard 228-264 s), and the
+# removal run, from audits-s: about 454-497 s;
+# audits-v = its reseat and names runs: 500-665, the shard 525-690 s.
+# The "about" figures are those runs' job times with the moved audit's own
+# time added or taken away, not yet measured as one job. Hosted time ran
+# about 1.2-3.8x the local times with 4 TLC workers recorded for these
+# audits, so size a new audit by a hosted run. The job times out at 20
+# minutes; each shard is sized to stay within about 720 s hosted, 60
+# percent of that. audits-l, audits-m and audits-n, one audit part each,
+# reach 741-776 s and get shorter only when their parts split. A new audit
+# joins the lightest shard, or a new shard when it would take that shard
+# past about 720 s hosted. Shard of the two audits the
 # `all` lane runs concurrently with machine-verify below:
 durable_steer_shard="audits-b"
 live_context_outbox_shard="audits-d"

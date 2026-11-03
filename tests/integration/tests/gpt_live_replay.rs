@@ -356,6 +356,7 @@ fn replay_config() -> Config {
         default_binding: Some(BINDING.to_string()),
         parent: None,
         connector_client: BTreeMap::new(),
+        copilot: None,
     };
     section.backend.insert(
         "openai_api".to_string(),

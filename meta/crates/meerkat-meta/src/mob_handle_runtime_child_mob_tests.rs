@@ -2570,12 +2570,33 @@ async fn a_weak_identity_runtime_retains_none_of_the_agent_tool_composition() {
         before.0.0.is_some() && before.0.1.is_some(),
         "the composition release and the identity runtime slot exist"
     );
+    // The composition's own background work (the agent mob-tool state's
+    // restore passes and sweeps, which bootstrap starts, hold the state and
+    // its session service while they run) can take or drop strong references
+    // between any two reads, however long the test waits first, so the reads
+    // around one downgrade cannot be compared for equality. A strong
+    // reference a link held would be held once per link: `LINKS` links held
+    // together move such a count by `LINKS`, far beyond what that background
+    // work moves it by.
+    const LINKS: usize = 1024;
     let weak = view.downgrade();
-    assert_eq!(
-        (counts(&runtime), Arc::strong_count(&identity)),
-        before,
-        "the weak link holds no strong reference into the composition"
-    );
+    let more_links = (1..LINKS).map(|_| view.downgrade()).collect::<Vec<_>>();
+    let ((release, slot, service, state), identity_count) = before;
+    let ((release_now, slot_now, service_now, state_now), identity_now) =
+        (counts(&runtime), Arc::strong_count(&identity));
+    for (part, held, now) in [
+        ("composition release", release, release_now),
+        ("identity runtime slot", slot, slot_now),
+        ("session service", service, service_now),
+        ("mob-tool state", state, state_now),
+        ("identity runtime", Some(identity_count), Some(identity_now)),
+    ] {
+        assert!(
+            now.unwrap_or(0) < held.unwrap_or(0) + LINKS / 2,
+            "the weak links hold strong references to the {part}: {held:?} before {LINKS} links, {now:?} with them"
+        );
+    }
+    drop(more_links);
 
     drop(view);
     let upgraded = weak.upgrade().expect("upgrades while the mob is owned");

@@ -10,10 +10,30 @@ use meerkat_core::{ImageGenerationProviderProfile, Provider};
 use crate::provider_runtime::binding::{
     ResolvedConnection, ResolvedRealtimeTarget, ResolvedTextTarget, ValidatedBinding,
 };
-use crate::provider_runtime::errors::{ProviderAuthError, ProviderClientError};
+use crate::provider_runtime::errors::{
+    AccountModelRefusal, ProviderAuthError, ProviderClientError,
+};
 use crate::provider_runtime::registry::ResolverEnvironment;
 use crate::realtime_session::RealtimeSessionFactory;
 use crate::{ImageGenerationExecutor, LlmClient};
+
+/// What the account behind a resolved connection states about one model,
+/// for a backend whose accounts state the models they serve (a GitHub
+/// Copilot account's model list). Asked only about a model the model
+/// registry does not define itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum AccountModelLookup {
+    /// The backend's accounts state no model list: the model registry alone
+    /// defines its models.
+    NotReported,
+    /// The account offers the model: its definition for the model registry,
+    /// every value taken from the account's model list. Its `provider` is
+    /// the provider family whose protocol the account serves the model on.
+    Offered(meerkat_core::config::CustomModelConfig),
+    /// The account cannot serve the model.
+    Refused(AccountModelRefusal),
+}
 
 /// Non-mutating readiness of one binding's credential, observed without
 /// materializing, refreshing, or persisting it.
@@ -85,6 +105,15 @@ pub trait ProviderRuntime: Send + Sync {
         _env: &ResolverEnvironment,
     ) -> Result<CredentialReadiness, ProviderAuthError> {
         Ok(CredentialReadiness::MaterializedAtOpen)
+    }
+
+    /// What the account behind `connection` states about `model`, for a
+    /// backend whose accounts state the models they serve. Asked after
+    /// `connection` resolved, and only about a model the model registry does
+    /// not define. The default reports [`AccountModelLookup::NotReported`]:
+    /// the backend's accounts state no model list.
+    fn account_model(&self, _connection: &ResolvedConnection, _model: &str) -> AccountModelLookup {
+        AccountModelLookup::NotReported
     }
 
     /// Construct a concrete LlmClient from the resolved connection.
@@ -258,5 +287,51 @@ mod tests {
         // own module tests.
         let _ = std::marker::PhantomData::<NormalizedBackendKind>;
         let _ = std::marker::PhantomData::<NormalizedAuthMethod>;
+    }
+
+    /// A runtime whose backend states no account model list leaves the model
+    /// registry the only definition of its models, and so does a registry
+    /// with no runtime for the connection's provider.
+    #[test]
+    fn a_runtime_reports_no_account_models_by_default() {
+        use crate::provider_runtime::binding::StaticLease;
+        use crate::provider_runtime::registry::ProviderRuntimeRegistry;
+
+        let connection = ResolvedConnection {
+            provider: Provider::OpenAI,
+            backend: NormalizedBackendKind::OpenAi(
+                meerkat_core::provider_matrix::OpenAiBackendKind::OpenAiApi,
+            ),
+            backend_profile: Arc::new(meerkat_core::BackendProfile {
+                id: "b".into(),
+                provider: Provider::OpenAI,
+                backend_kind: "openai_api".into(),
+                base_url: None,
+                options: serde_json::Value::Null,
+                server: None,
+            }),
+            credential_identity: meerkat_core::AuthCredentialIdentity::from_auth_binding(
+                &meerkat_core::AuthBindingRef {
+                    realm: meerkat_core::RealmId::parse("dev").expect("valid realm"),
+                    binding: meerkat_core::BindingId::parse("openai").expect("valid binding"),
+                    profile: None,
+                    origin: meerkat_core::BindingOrigin::Configured,
+                },
+            ),
+            auth_lease: Arc::new(StaticLease::inline_secret(
+                "secret".into(),
+                AuthMetadata::default(),
+                None,
+                "test",
+            )),
+        };
+        assert_eq!(
+            MockRuntime.account_model(&connection, "account-model-1"),
+            AccountModelLookup::NotReported
+        );
+        assert_eq!(
+            ProviderRuntimeRegistry::empty().account_model(&connection, "account-model-1"),
+            AccountModelLookup::NotReported
+        );
     }
 }

@@ -824,7 +824,12 @@ them.
   `ReleaseInputControllerIdle`, `ReleaseInputControllerAttached`,
   `ReleaseInputControllerRunning`, `ReleaseInputControllerRetired` and
   `ReleaseInputControllerStopped`. Every new variant is appended last, so no
-  existing variant's implicit discriminant moves. Every enum named here is
+  existing variant's implicit discriminant moves, except in
+  `MeerkatMachineRuntimeInternalInput` (meerkat-runtime), where
+  `ReplaceToolGrantGate` and `ApplyToolGrantOpenSet` (the scoped tool grant
+  gate's inputs) sit directly before `AbandonDeferredSessionPromotion`, so
+  the implicit discriminants of `AbandonDeferredSessionPromotion` and of the
+  existing variants after it move. Every enum named here is
   exhaustive, so a downstream exhaustive match needs the new arms, or a
   wildcard arm; a `MeerkatMachineState` literal that ends with
   `..Default::default()` keeps compiling.

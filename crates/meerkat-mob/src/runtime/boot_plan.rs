@@ -198,7 +198,7 @@ pub(crate) struct MemberResidencyConfig {
     pub(crate) identity_changes_held: bool,
     /// The host's mint of a member's grant, for the reads that build nothing
     /// (`MobBuilder::with_member_grant_mint`).
-    pub(crate) member_grant_mint: Option<Arc<dyn super::MemberGrantMint>>,
+    pub(crate) member_grant_mint: Option<std::sync::Arc<dyn super::MemberGrantMint>>,
 }
 
 impl Default for MemberResidencyConfig {

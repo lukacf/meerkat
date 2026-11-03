@@ -1,0 +1,441 @@
+---
+title: "Forge reference"
+description: "Release packages, the Forge launcher and its settings, files and folders, generated package commands, blueprint fields and limits."
+icon: "book"
+---
+
+*Mirrored from Meerkat Meta main at [26f5ae9da1fd](https://github.com/lukacf/meerkat/commit/26f5ae9da1fd3caac378f1cd847ce50f9ec5ac92) on 2026-11-03; Meta version 0.9.9 at that commit.*
+
+## Releases
+
+Forge ships as a GitHub prerelease, separate from Core's and Meta's releases.
+
+| Release | Tag | Packages |
+| --- | --- | --- |
+| Meta Forge 0.3.0 | [`forge-v0.3.0`](https://github.com/lukacf/meerkat-meta/releases/tag/forge-v0.3.0) in `lukacf/meerkat-meta` | `meta-forge-0.3.0-linux-x86_64.zip`, `meta-forge-0.3.0-macos-arm64.zip` |
+
+Each package has a `.sha256` file, a provenance record and a GitHub build
+attestation. `forge-candidate-manifest.json` binds the packages, and
+`forge-candidate-selection.json` records the accepted candidate. To verify a
+0.3.0 package:
+
+```sh
+sha256sum -c meta-forge-0.3.0-linux-x86_64.zip.sha256
+gh attestation verify meta-forge-0.3.0-linux-x86_64.zip --repo lukacf/meerkat-meta \
+  --signer-workflow lukacf/meerkat-meta/.github/workflows/forge-release.yml \
+  --source-ref refs/heads/main \
+  --source-digest 174dce50b292e730f9b03603d73d6325743019ad
+```
+
+On macOS, use `shasum -a 256 -c` in place of `sha256sum -c`.
+
+Each package's `README.md` names the destination it supports and its exact
+runtime selections:
+
+| Package | Supported destination | Guide runtime | Application runtime | Agent team runtime |
+| --- | --- | --- | --- | --- |
+| `linux-x86_64` | Linux x86_64 with exactly glibc 2.39 | Meta 0.9.3, Core 0.9.3 | Meta 0.9.7 and Toolkit 0.9.5 | Meta 0.9.6 |
+| `macos-arm64` | Apple Silicon macOS 13.5 or newer | Meta 0.9.3, Core 0.9.3 | Meta 0.9.4 and Toolkit 0.9.4 | Meta 0.9.6 |
+
+Forge releases made from the Meerkat monorepo are published in
+`lukacf/meerkat` under the tag `meta-installer-v<version>`, as packages named
+`meta-installer-<version>-<target>.zip`, and never become that repository's
+latest release. Verify them with:
+
+```sh
+gh attestation verify meta-installer-<version>-<target>.zip --repo lukacf/meerkat \
+  --signer-workflow lukacf/meerkat/.github/workflows/meta-installer-release.yml \
+  --source-ref refs/heads/main
+sha256sum -c meta-installer-<version>-<target>.zip.sha256
+```
+
+The release notes give the same command with the release's `--source-digest`.
+
+## Forge launcher
+
+```sh
+bash start.sh [--prepare-only]
+```
+
+Run it from the extracted Forge folder. `start.sh`:
+
+1. checks the port setting and selects Python: `PYTHON_BIN`, else an existing
+   `.venv/bin/python`, else `python3` (3.11 or newer);
+2. reads the package's `standalone-manifest.json` and its bundled SDK
+   selection;
+3. creates `.venv` if it does not exist, prepares pip, installs the pinned
+   dependencies from `requirements-standalone.txt` and the bundled SDK wheels,
+   and runs `pip check`;
+4. checks the bundled Meta and Connect runtime;
+5. serves Forge on `127.0.0.1` and prints the address, for example
+   `Open Meta Forge at http://127.0.0.1:8787`.
+
+`--prepare-only` stops after step 4 and prints this line:
+
+```text
+Meta Forge preparation is complete. The web server and native runtime were not started.
+```
+
+Press Ctrl+C to stop a running Forge.
+
+### Settings
+
+Set these in the environment before running `start.sh`.
+
+| Setting | Default | Purpose |
+| --- | --- | --- |
+| `PYTHON_BIN` | `.venv/bin/python` if it exists, else `python3` | Python for setup checks and for creating a new `.venv`. It does not upgrade an existing `.venv`. |
+| `META_FORGE_PORT` | `8787` | Local port of the Forge web server, from 1 to 65535. Changing it does not separate saved state. |
+| `META_FORGE_HOME` | `.studio` in the Forge folder | Private state folder. Keep using the same one when you return; separate running copies need separate state folders. |
+| `MOBKIT_LAUNCH_PORT`, `MOBKIT_LAUNCH_HOME` | none | Compatibility aliases. When both names are set, the `META_FORGE_*` value wins. |
+| `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY` | none | Model provider keys for Forge's own agents. Keys from the environment are read-only in **Guide settings**. A fresh setup uses the first configured provider in this order. |
+| `MOBKIT_ARCHITECT_MODEL` | `gpt-6.1-sol`, `claude-sonnet-4-6` or `gemini-3.1-pro-preview` for the provider | Model of the setup team. It must belong to the configured provider. |
+| `MOBKIT_VISUALIZER_MODEL` | The setup team's model | Model of the animation programmer. |
+| `MOBKIT_VISUALIZER_REASONING` | `medium` | Reasoning effort of the OpenAI animation programmer: `low`, `medium` or `high`. |
+| `MOBKIT_IMPLEMENTATION_MODEL` | As for the setup team | Model of the application builder. |
+| `META_FORGE_ORGANIZATION` | none | Entry-point name of an installed [organization plugin](#organization-plugins). |
+| `META_FORGE_SSH_PROFILES` | none | Absolute path to an [SSH profile file](#ssh-profiles) for remote Linux destinations. |
+| `MOBKIT_TOOLKIT_CATALOG_CONFIG` | none | Host configuration for an optional, hash-pinned Toolkit catalog that the integration specialist can search. Without it, ordinary registry discovery stays available. |
+| `MOBKIT_TOOLKIT_SETUP_CONFIG` | none | Host binding for Toolkit's software setup controller, which can install local software for connections. |
+| `MOBKIT_TOOLKIT_SAVED_REQUEST_CONFIG`, `MOBKIT_TOOLKIT_SAVED_REQUEST_ARCHIVE` | none | Both together enable the **Saved tools** panel, which reviews a connection from a Toolkit recovery file. |
+| `META_FORGE_APPLICATION_HOST_FACTORY` | none | Developer hook: an importable `module:factory` that selects a host-managed Meta and Toolkit application runtime. An invalid selection stops startup. |
+
+`MOBKIT_GATEWAY_BIN` is refused by the release packages, which select their
+bundled Meta runtime.
+
+### Prepare the application checker
+
+```sh
+.venv/bin/python -m launchkit.checker_runtime
+```
+
+Run from the Forge folder, this is the command-line form of **Prepare app
+checks**. It downloads the checksum-pinned official Node.js 25.9.0 archive and
+installs only its Node executable under the Forge folder's `.tools`. It
+supports macOS on Intel or ARM64, and Linux on Intel or ARM64 with glibc 2.28
+or newer and kernel 4.18 or newer. It does not replace the system Node.js. On
+success it prints `Verified private Node.js 25.9.0 checker:` and the path;
+otherwise it prints `Checker preparation needs attention:` and the reason.
+
+### Version and runtimes
+
+```sh
+curl -s http://127.0.0.1:8787/api/capabilities
+```
+
+The local `GET /api/capabilities` endpoint reports Forge's release as
+`version`, the public Meta release that agent teams install as
+`agent_team_runtime`, and the Meta runtime and gateway selected for
+applications without a connection setup helper as `ordinary_runtime`.
+
+## Forge folder
+
+| Path | Contents |
+| --- | --- |
+| `start.sh` | The launcher. |
+| `README.md` | This package's runtime selections, supported destination and exact source revisions. |
+| `GETTING_STARTED.md` | The full guided journey and its recovery controls. |
+| `standalone-manifest.json` | Pins the package's source, assets, SDKs, native product, checker dependencies and guide gateway. |
+| `requirements-standalone.txt` | Forge's exact Python dependency pins. |
+| `launchkit/`, `web/` | Forge's server and prebuilt interface. |
+| `vendor/guide/` | The guide's Meta RPC gateway and Meta SDK wheel. |
+| `vendor/product/` | The application runtime: Meta and Toolkit SDK wheels, the Connect gateway archive, dependency wheels and the model catalog. |
+| `vendor/ordinary/` | The Meta RPC gateway for applications without a connection setup helper. |
+| `checker-dependencies/` | The dependency closure for application DOM checks. |
+| `.venv/` | Created on first start: Forge's private Python environment. |
+| `.studio/` | Created by Forge: saved setups, drafts, provider settings and the setup team's state (or the folder `META_FORGE_HOME` names). |
+| `.tools/` | Created by **Prepare app checks**: the private Node.js checker. |
+
+## Installed application folder
+
+A package, installed by Forge or from a terminal, contains:
+
+| Path | Contents |
+| --- | --- |
+| `README.md` | Install, use, change and backup instructions for this package. |
+| `blueprint.json` | The source design: classes, grants, workflows, topology and provenance. |
+| `deployment.json` | The compiled desired roster, tool grants and settings interview. |
+| `config/mob.toml` | Native profiles, shared role skills and native flows. |
+| `config/console.toml` | Native Console presentation only. |
+| `config/connections.json` | Exact MCP commands, endpoints and source provenance. |
+| `app.py`, `mcp_connections.py`, `connectors.py` | Host integration and scoped tools. |
+| `install.sh`, `start.sh`, `deploy/` | [Package commands](#generated-package-commands). |
+| `requirements.txt` | Pinned host dependencies. Agent team packages also have `requirements.sdk.txt`, the hash-pinned Meta SDK. |
+| `.env.example`, `.env` | Settings template and the private, mode-600 settings, including `MOBKIT_PORT`. |
+| `SHA256SUMS` | Checksums of the package files. |
+| `application/`, `tests/` | Custom application code and tests, when built. |
+| `knowledge/` | Knowledge service helper, when one is selected. |
+| `workspace/` | Text references that classes with workspace access can read. |
+| `data/notes.sqlite3` | Shared application notes, restricted by class grants. |
+| `.mobkit/state/` | Native sessions, memory, events, flow run state and blobs. |
+| `.mobkit/home` | The agents' communication identity keys. |
+
+Back up the complete project folder while the application is stopped,
+including `.mobkit/`, `data/`, `workspace/` and private configuration.
+
+## Generated package commands
+
+These commands apply to agent team packages and other packages that install
+from a terminal. A custom application built on a selected Meta and Toolkit
+runtime refuses them; use its saved setup in Forge.
+
+### install.sh
+
+```sh
+bash install.sh [--non-interactive]
+```
+
+`install.sh` runs on macOS or Linux with Python 3.11 or newer, selected with
+`PYTHON_BIN` (default `python3`). It refuses a project folder that allows group
+or other write access. It then:
+
+1. creates `.venv` and installs the pinned dependencies: for an agent team
+   first the hash-pinned Meta SDK, and `requirements.application.txt` when
+   present;
+2. installs the package's verified gateway;
+3. creates `workspace`, `data` and `.mobkit/state`, and `.env` from
+   `.env.example` with mode 600;
+4. runs `app.py --check`;
+5. runs the private settings interview, unless `--non-interactive` is given.
+
+The interview shows each field's help, keeps a configured value when you press
+Enter, accepts `:remove` for an optional value, asks again for missing
+required values and saves atomically. Run `bash install.sh` again from the same
+folder after correcting a reported problem; it keeps `.venv`, `.env`,
+`workspace`, `data` and `.mobkit`.
+
+### start.sh
+
+```sh
+bash start.sh [option]
+```
+
+`start.sh` runs `app.py` in the package's `.venv`. With no option it starts
+the agents, the application's background work and the Console, and prints the
+Console URL, by default `http://127.0.0.1:4110/console` (the plan's port, or
+`MOBKIT_PORT` in `.env`).
+
+| Option | What it does |
+| --- | --- |
+| `--check` | Syntax-checks the application source and validates its setting declarations without starting anything, then prints `Valid deployment:` with the class and agent counts. |
+| `--doctor` | Prints `[ready]` or `[needs setup]` for Python 3.11+, the Meta SDK, the official MCP SDK, the RPC gateway, the storage maintenance tool, required settings, MCP executables and application source. Local checks only. |
+| `--connections-check` | Connects the selected MCP servers and validates the class grants and tool names, without AI requests. It starts the configured third-party servers. |
+| `--application-check` | Loads the custom application's integration and scoped callbacks without starting adapters or invoking tools. |
+| `--smoke` | Makes one paid model request to the entrypoint agent. |
+| `--list-flows` | Lists the native flows. |
+| `--run-flow FLOW_ID` | Runs a native flow and waits for its terminal result. |
+| `--params JSON` | Activation parameters for `--run-flow`; default `{}`. |
+| `--definition-revision` | Reads the native definition revision from the structural event ledger, without agent requests. |
+| `--activate-revision N` | Activates an edited `config/mob.toml` against the observed revision `N`. Agent team packages refuse it: build the changed team into a new folder. |
+
+Stop the normal process before running `--list-flows` or `--run-flow`; both
+take the same deployment lock. For example:
+
+```sh
+bash start.sh --list-flows
+bash start.sh --run-flow briefing --params '{"topic":"Your research question"}'
+```
+
+### Service and cloud scripts
+
+| Command | What it does |
+| --- | --- |
+| `bash deploy/install-service.sh` | Linux only. Runs the private setup interview, checks the application and starts an owned systemd user service. It asks before enabling operation after logout, which can require sudo. |
+| `bash deploy/install-service.sh status` (or `stop`, `restart`, `remove-service`) | Operates that exact unit. Removal keeps source, private configuration and native state. |
+| `bash deploy/deploy-gcp.sh --dry-run` | Google Cloud packages: shows the plan, the billed resources and the changes before anything is created. |
+| `bash deploy/deploy-gcp.sh` | Asks for the exact project ID, then creates a Debian 12 VM, its boot disk and an IAP SSH firewall rule, and installs the package. |
+| `bash deploy/deploy-gcp.sh --setup` (or `--status`, `--stop`, `--restart`, `--remove-service`) | Runs the private interview and the verified service start on the VM, or operates the service. Stopping the service does not stop VM charges. |
+| `bash deploy/deploy-gcp.sh --resume` | Retries upload and installation after a failure, without creating another VM. |
+| `bash deploy/tunnel-gcp.sh` | Opens the IAP tunnel to the VM's Console port. |
+
+A package for a local destination ships `deploy/deploy-gcp.sh` and
+`deploy/tunnel-gcp.sh` as scripts that refuse.
+
+### Knowledge helper
+
+When a knowledge service is selected, `.venv/bin/python knowledge/manage.py`
+takes `setup`, `renew`, `up`, `stop`, `verify`, `search QUERY` and
+`ingest PATH [--title TITLE]`. Start a local service with `up` and check access
+with `verify`. The package's `knowledge/README.md` describes the
+prerequisites.
+
+## Optional application files
+
+A custom application can declare these files. Forge reads them from the exact
+checked or installed source.
+
+| File | Purpose |
+| --- | --- |
+| `application/__init__.py` | Exports `build(context)`, returning an integration with optional `tools_for_agent(agent)`, `schedule_runnables()`, `start()` and `stop()` hooks. The generated `README.md` documents the complete hook contract. |
+| `application/configuration.json` | Declares the private setup fields the installation form and interview ask for. |
+| `application/console.json` | `{"authentication":"local-password"}` adds a password login to the Console, with the required fields `CONSOLE_USER_ID` and `CONSOLE_LOGIN_PASSWORD` (at least 12 characters). |
+| `application/experience.json` | Declares custom UI links: a label, an absolute URL path and a loopback port or port setting. |
+| `application/first-use.json` | First-task suggestions shown under **Use your application**. |
+| `application/trial.json` | Sample jobs for **Built application** trials: 1 to 12 cases in at most 100 KB, with labels up to 160 characters and requests up to 6,000 characters. |
+| `application/tool-policy.json` | Explicit per-identity tool lists for a fixed roster. |
+| `requirements.application.txt` | Extra pinned Python dependencies, installed by `install.sh`. |
+
+For example, `application/trial.json`:
+
+```json
+{"cases": [{"label": "A plain-language job", "request": "A realistic request", "fixtures": {}}]}
+```
+
+## Blueprint fields
+
+`blueprint.json` uses schema version 2. Unknown fields are rejected.
+
+| Field | Values |
+| --- | --- |
+| `schema_version` | `2` |
+| `project` | `name` (1 to 80 characters), `slug` (2 to 40 lowercase letters, digits and hyphens, starting with a letter), `description` (10 to 6,000 characters) |
+| `provider` | `openai` (default), `anthropic` or `gemini`; the default for classes |
+| `model` | Default model for classes. It must belong to the provider: `gpt-`, `chatgpt-`, `o1`, `o3` or `o4` for OpenAI, `claude-` for Anthropic, `gemini-` for Gemini. |
+| `target` | `mac` (default), `linux` or `gcp` |
+| `storage` | `sqlite` |
+| `gcp` | `project`, `region` (default `europe-west1`), `zone` (default `europe-west1-b`, inside the region), `machine_type` (`e2-small`, `e2-medium` (default), `e2-standard-2`, `e2-standard-4`, `e2-standard-8` or `e2-standard-16`), `disk_gb` (30 to 2,000, default 30), `provisioning` (`new_vm` (default) or `existing_host`), `existing_instance`, `existing_zone_confirmed` |
+| `advanced.port` | Console port, 1024 to 65535, default 4110 |
+| `agent_classes` | 1 to 32 [agent classes](#agent-class) |
+| `connections` | Up to 32 [MCP connections](#mcp-connection) |
+| `topology` | The [topology](#topology) |
+| `flows` | Up to 32 [flows](#flow) |
+| `knowledge` | The [knowledge service](#knowledge) |
+| `acquisition` | Optional connection setup helper: the helper identity and its capability ceiling (`preparation`, `inert_acquisition` or `checked_installation`) |
+
+### Agent class
+
+| Field | Values |
+| --- | --- |
+| `id` | A lowercase letter, then up to 39 lowercase letters, digits, `_` or `-` |
+| `name`, `description`, `instructions` | 1 to 80, 1 to 1,000 and 10 to 12,000 characters |
+| `provider`, `model` | Inherited from the blueprint when omitted |
+| `model_auth` | `api_key` (default) or `managed_host` |
+| `instances` | 0 to 512, default 1. Zero keeps a reusable profile with no initial identity. |
+| `members` | Named members, each with a `key` (a lowercase letter, then up to 19 lowercase letters, digits, `_` or `-`), a `name` and `instructions` (10 to 4,000 characters). When present, their count equals `instances`. |
+| `tools` | The class's tool grants |
+
+Identities are `ID:main` for one unnamed instance, `ID:1` to `ID:N` for
+several, and `ID:KEY` for named members.
+
+The tool grants are:
+
+| Grant | Default | Meaning |
+| --- | --- | --- |
+| `workspace` | `false` | Read visible text in `workspace/`, or in `FILES_ROOT` when set |
+| `notes` | `none` | Shared SQLite notes: `none`, `read` (search) or `write` (search and save) |
+| `knowledge` | `false` | Read-only knowledge service access; needs a configured knowledge service |
+| `memory` | `true` | Native identity memory |
+| `builtins`, `shell`, `workgraph`, `schedule` | `false` | Native builtin tools, shell, WorkGraph and scheduling tools |
+| `mcp` | none | Up to 32 grants of `connection_id` and `tool_names` (up to 200 exact names). An empty list grants all of the connection's tools, including tools the server adds later. |
+| `read_only` | `false` | Native execution policy: only tools declared read-only may run |
+| `rust_bundles` | none | Native tool bundle names that the selected host must register |
+
+### MCP connection
+
+| Field | Values |
+| --- | --- |
+| `id`, `name` | Connection ID and a 1 to 100 character name |
+| `transport` | `stdio` (with `command`, `args` and `env`) or `http` (with `url` and `headers`) |
+| `env` | Values must be local `${ENV_NAME}` references |
+| `headers` | Values must be a `${ENV_NAME}` reference, optionally prefixed with `Bearer`, `Basic`, `Token` or `ApiKey` |
+| `url` | HTTPS, or HTTP on loopback only, without embedded credentials |
+| `source` | Provenance: `registry_id`, `repository`, `version`, `url` |
+| `setup_inputs` | Settings the installation asks for: `name`, `description`, `secret` (default `true`), `required` (default `true`), `default` (not allowed for secrets) |
+| `description`, `required_environment`, `optional_args`, `tool_evidence` | Description, required variable names, indexes of optional arguments, and the publisher evidence for the tool names |
+
+### Topology
+
+| Field | Values |
+| --- | --- |
+| `mode` | `hub` (default; the entrypoint to every other identity), `mesh` (every pair), `pipeline` (consecutive identities) or `manual` |
+| `entrypoint` | An existing identity, the team's front door |
+| `edges` | For `manual`: unique pairs `a` and `b` of two different identities |
+
+### Flow
+
+| Field | Values |
+| --- | --- |
+| `id`, `name`, `description` | Flow ID, a 1 to 100 character name and a description |
+| `steps` | 1 to 1,024 steps, each with an `id`, a target identity `agent`, a `prompt` (up to 12,000 characters), `depends_on` (step IDs) and `timeout_ms` (1,000 to 1,800,000, default 120,000). Dependencies must exist and form no cycle. |
+
+### Knowledge
+
+| Field | Values |
+| --- | --- |
+| `mode` | `none` (default), `remote` or `local` |
+| `url` | The knowledge service's read-only `/mcp/agent` endpoint, with no query. A local service needs a loopback HTTP URL with a port from 1024 to 65535; the default is `http://127.0.0.1:8091/mcp/agent`. |
+| `token_env`, `space_env` | Names of the settings that hold the access token and the expected space ID |
+| `source_repository`, `source_revision` | Source of a local knowledge service build |
+
+A local knowledge service on a new Google Cloud VM needs `e2-standard-8` or
+larger and at least 100 GB of disk.
+
+## Limits
+
+| Limit | Value |
+| --- | --- |
+| Agent classes | 32 |
+| Instances per class | 512 |
+| Identities | 4,096 |
+| Peer edges | 131,072 |
+| MCP connections | 32 |
+| Flows | 32 |
+| Steps per flow | 1,024 |
+| Attachments per message | 4 files, 8 MiB each, 16 MiB in total |
+| PDF attachments | 100 pages, one million extracted characters |
+| Trials | 10 turns, 5 minutes waiting for a follow-up, 10 minutes in total |
+
+The blueprint limits are validation bounds, not performance guarantees.
+
+## Organization plugins
+
+An organization plugin is an installed Python package that registers an entry
+point in the group `meerkat_forge.organizations.v1`. Forge loads the one named
+by `META_FORGE_ORGANIZATION` once at startup and validates the returned data;
+no plugin is loaded by default.
+
+| Field | Meaning |
+| --- | --- |
+| `schema_version` | `1` |
+| `id`, `version`, `label` | The contribution's identity and visible label |
+| `description` | Optional opening copy |
+| `guide_context` | Optional text for the guide, up to 6,000 characters, for example how to reach workplace tools |
+| `starting_examples` | Up to eight examples, each with `id`, `title`, `outcome` and `initial_brief`, and optional `context` and `integration_hints` |
+
+Every field may be shown to the setup's viewers and sent to its model, so keep
+credentials out of it. The Meerkat repository has an installable example in
+`meta/installer/examples/workplace-starters`. Install a plugin into Forge's own
+environment, then select it:
+
+```sh
+.venv/bin/python -m pip install /path/to/workplace-starters
+META_FORGE_ORGANIZATION=workplace bash start.sh
+```
+
+## SSH profiles
+
+For an existing Linux destination, Forge uses this computer's default SSH
+identities or SSH agent and trusted host files, and does not read
+`~/.ssh/config`. To use specific files for exact destinations, set
+`META_FORGE_SSH_PROFILES` to an absolute path to a JSON file before starting
+Forge:
+
+```json
+{
+  "version": 1,
+  "profiles": [
+    {
+      "endpoint": {"host": "host.example.com", "user": "deploy", "ssh_port": 22},
+      "identity_file": "/absolute/private/ssh-identity",
+      "known_hosts_file": "/absolute/private/verified-known-hosts"
+    }
+  ]
+}
+```
+
+The JSON file and both selected files must be ordinary files owned by the user
+running Forge, with no group or other permissions, hard links or symlinks in
+their paths. The identity must work without an SSH agent or password prompt,
+and the host key must come from an independently verified entry. A file can
+select at most 32 endpoints, and host, login and port must match exactly.
+Correct or rotate these files while Forge is stopped.

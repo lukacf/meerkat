@@ -74,6 +74,36 @@ semver_fetch_release_tag() {
     return 0
 }
 
+# A product's baseline tag (meta-v<version>). Sets baseline_tag_absent:
+# false when the tag is local or was fetched from origin; true when origin
+# answers that it has no such tag, which is the case for a product release
+# cut before the product's tags lived in this repository (Meta 0.9.7 and
+# earlier were tagged v<version> in their own repository). The caller then
+# measures every release crate against the registry release of that
+# version, which is exactly what was published. Returns 1 (after saying
+# why) when origin could not be asked: that is no evidence the tag is
+# missing. Core's tags always live here; Core does not call this.
+resolve_product_baseline_tag() {
+    local tag="$1" fetch_status
+    baseline_tag_absent=false
+    if git rev-parse -q --verify "refs/tags/${tag}^{commit}" >/dev/null 2>&1; then
+        return 0
+    fi
+    if semver_fetch_release_tag "$tag"; then
+        fetch_status=0
+    else
+        fetch_status=$?
+    fi
+    case "$fetch_status" in
+        0) return 0 ;;
+        2)
+            baseline_tag_absent=true
+            return 0
+            ;;
+        *) return 1 ;;
+    esac
+}
+
 # Returns non-zero, after explaining why on stderr, when no baseline applies.
 resolve_semver_baseline() {
     baseline_version="${MEERKAT_SEMVER_BASELINE_VERSION:-}"

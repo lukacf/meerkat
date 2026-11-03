@@ -50,7 +50,7 @@ prompt, so it is not the instruction-activation authority.
 ### A parallel activation ledger or pending table
 
 Rejected. It would create a second answer to what entered model context and a
-cross-store commit problem. Desired rollout is application/MobKit state;
+cross-store commit problem. Desired rollout is application/Meta state;
 effective durable context is Meerkat transcript state.
 
 ### Generic append metadata or string conventions
@@ -191,7 +191,7 @@ activation identity cannot coexist. All constructors, deserialization paths,
 head materialization, rewrites, compaction, and activation validate this
 closed invariant.
 
-`origin_session_id` is the lineage fact. Meerkat does not infer a MobKit
+`origin_session_id` is the lineage fact. Meerkat does not infer a Meta
 generation or invent a second lineage identifier. In the origin session, the
 latest activation for a key is effective. In a fork whose `SessionId` differs,
 copied rows are inherited historical context until that child appends an
@@ -312,7 +312,7 @@ the lock released. A caller already on a blocking thread, such as the SQLite
 RuntimeStore, uses `execute_if_current_blocking`, where an implementation may
 wait a bounded time for a lock whose holders never wait for Meerkat (the
 SQLite identity fence waits up to 2 seconds for its database's write lock).
-MobKit uses the seam for stable identity, generation, session, and
+Meta uses the seam for stable identity, generation, session, and
 fencing-token continuity. Meerkat does not persist or interpret a transient
 runtime alias, and the fence remains a precondition on the existing
 RuntimeStore commit rather than another activation authority. RuntimeStore
@@ -493,7 +493,7 @@ and an optional next offset. When the query names one exact namespace and key,
 it also returns core-derived `InstructionActivationKeyState`: the effective
 origin-local record, chronological head, child explicit-activation
 requirement, and exact expectation/supersedes values for the next request.
-MobKit consumes this state instead of reimplementing transcript or fork
+Meta consumes this state instead of reimplementing transcript or fork
 semantics.
 
 Stable `InstructionActivationErrorCode` variants are:
@@ -554,7 +554,7 @@ errors. They do not classify state or rebuild receipts.
 | Fact | Canonical owner | Failure behavior |
 | --- | --- | --- |
 | Content, evaluation, approval | Application | Meerkat validates declared identity and digest only |
-| Desired rollout | Application composition / MobKit | Never treated as adoption proof |
+| Desired rollout | Application composition / Meta | Never treated as adoption proof |
 | Ordered effective activation | Persistent Meerkat Session via RuntimeStore | No commit means no effective change |
 | Active-turn boundary | MeerkatMachine admission plus runtime facade | Wait behind the finalization boundary, then commit |
 | Model/live compatibility | Resolved Meerkat runtime capabilities | Typed refusal before append |

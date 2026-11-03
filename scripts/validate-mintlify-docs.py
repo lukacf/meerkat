@@ -226,32 +226,32 @@ def main() -> int:
 
     slug_cache = {path: heading_slugs(path) for path in public_files}
 
-    mobkit_root = DOCS / "mobkit"
-    mobkit_manifest_path = mobkit_root / "_source.json"
-    if mobkit_root.exists():
-        if not mobkit_manifest_path.is_file():
-            errors.append("generated MobKit docs are missing docs/mobkit/_source.json")
+    meta_root = DOCS / "meta"
+    meta_manifest_path = meta_root / "_source.json"
+    if meta_root.exists():
+        if not meta_manifest_path.is_file():
+            errors.append("generated Meta docs are missing docs/meta/_source.json")
         else:
-            manifest = json.loads(mobkit_manifest_path.read_text(encoding="utf-8"))
+            manifest = json.loads(meta_manifest_path.read_text(encoding="utf-8"))
             if manifest.get("generated") is not True:
-                errors.append("docs/mobkit/_source.json does not identify a generated snapshot")
+                errors.append("docs/meta/_source.json does not identify a generated snapshot")
             if manifest.get("source_docs_dirty") is not False:
-                errors.append("generated MobKit docs must come from a clean main checkout")
-            # The mirror tracks MobKit main; documentation carries no version tag.
+                errors.append("generated Meta docs must come from a clean main checkout")
+            # The mirror tracks Meta's docs on main; documentation carries no version tag.
             if manifest.get("source_branch") != "main" or manifest.get("source_ref") != "main":
-                errors.append("generated MobKit docs must be mirrored from MobKit main")
+                errors.append("generated Meta docs must be mirrored from main")
             if not isinstance(manifest.get("source_version"), str) or not manifest["source_version"]:
-                errors.append("generated MobKit docs manifest names no MobKit workspace version")
+                errors.append("generated Meta docs manifest names no Meta version")
             source_commit = manifest.get("source_commit")
             if not isinstance(source_commit, str) or not re.fullmatch(
                 r"[0-9a-f]{40}", source_commit
             ):
-                errors.append("generated MobKit docs source commit is not a full Git SHA")
+                errors.append("generated Meta docs source commit is not a full Git SHA")
             expected_digest = manifest.get("content_sha256")
-            actual_digest = tree_digest(mobkit_root)
+            actual_digest = tree_digest(meta_root)
             if expected_digest != actual_digest:
                 errors.append(
-                    "generated MobKit docs were edited outside the sync workflow "
+                    "generated Meta docs were edited outside the sync workflow "
                     f"(expected {expected_digest}, got {actual_digest})"
                 )
 

@@ -810,10 +810,10 @@ class DocsPublicationWorkflowTests(unittest.TestCase):
 
     def test_docs_are_mirrored_from_the_tree_without_a_dispatch(self):
         # Meta lives under meta/ in the Meerkat repository: the root workflow
-        # publish-mobkit-docs.yml mirrors meta/docs on every push to main that
+        # publish-meta-docs.yml mirrors meta/docs on every push to main that
         # changes it, so Meta dispatches nothing.
         self.assertFalse(RELEASE_WORKFLOW.with_name("publish-docs.yml").exists())
-        mirror = (ROOT.parent / ".github/workflows/publish-mobkit-docs.yml").read_text()
+        mirror = (ROOT.parent / ".github/workflows/publish-meta-docs.yml").read_text()
         self.assertIn('- "meta/docs/**"', mirror)
         self.assertNotIn("repository_dispatch", mirror)
 

@@ -205,7 +205,8 @@ async fn run_phases(end: End) {
         assert!(prefix.is_absolute()&&binary.is_absolute());assert!(fs::symlink_metadata(&binary).unwrap().is_file());
         assert_eq!(binary.parent(),Some(prefix.join("bin").as_path()));
         assert_eq!(file_digest(&binary),std::env::var("CONNECT_SERVICE_COLLECTION_HOST_SHA256").unwrap());
-        assert_eq!(file_digest(&prefix.join("libexec/meerkat-connect/resources.json")),option_env!("MEERKAT_CONNECT_RESOURCES_SHA256").unwrap());
+        let Some(pin)=option_env!("MEERKAT_CONNECT_RESOURCES_SHA256") else { panic!("matching test/host resource pin") };
+        assert_eq!(file_digest(&prefix.join("libexec/meerkat-connect/resources.json")),pin);
         cli=Some(StdioCli::start_selected_with_multi_collection_host(&provider.origin,binary,40,Duration::from_secs(300)));
         let cli=cli.as_mut().unwrap();let original_pid=cli.child.as_ref().unwrap().id();
         let (scope,first_session)=initialize(cli,&mut provider).await;

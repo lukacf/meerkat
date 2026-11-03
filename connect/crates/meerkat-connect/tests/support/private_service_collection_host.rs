@@ -38,8 +38,8 @@ fn main() {
             // Actual returned Rust error custody, not a received pipe frame.
             // Keep the original error alive through this private artifact write.
             let evidence = (|| -> Result<(), Box<dyn std::error::Error>> {
-                if let meerkat_connect::ConnectError::Native { source, .. } = &error {
-                    if let Some(retained)=source.downcast_ref::<meerkat_connect::service_collection::ServiceCollectionFailure>() {
+                if let meerkat_connect::ConnectError::Native { source, .. } = &error
+                    && let Some(retained)=source.downcast_ref::<meerkat_connect::service_collection::ServiceCollectionFailure>() {
                     use std::io::Write;use std::os::unix::fs::OpenOptionsExt;
                     let path=binding.root.join("returned-collection-failure.json");
                     let mut file=std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(path)?;
@@ -47,7 +47,6 @@ fn main() {
                         "delivery":"not_claimed","original_error_retained":true}))?;
                     file.write_all(&bytes)?;file.sync_all()?;std::fs::File::open(&binding.root)?.sync_all()?;
                     let _=retained.original_error();
-                }
                 }
                 Ok(())
             })();

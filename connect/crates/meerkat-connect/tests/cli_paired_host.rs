@@ -7674,22 +7674,23 @@ async fn actual_stdio_forge_configuration_remount_cancel_and_retire() {
         serde_json::to_vec_pretty(&cli.rows).unwrap(),
     )
     .unwrap();
-    let recorded = provider
-        .requests
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    fs::write(
-        cli.root.path().join("model-requests.json"),
-        serde_json::to_vec_pretty(
-            &recorded
-                .iter()
-                .map(|request| &request.body)
-                .collect::<Vec<_>>(),
+    {
+        let recorded = provider
+            .requests
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        fs::write(
+            cli.root.path().join("model-requests.json"),
+            serde_json::to_vec_pretty(
+                &recorded
+                    .iter()
+                    .map(|request| &request.body)
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap(),
         )
-        .unwrap(),
-    )
-    .unwrap();
-    drop(recorded);
+        .unwrap();
+    }
     let failure_text = |failure: &Box<dyn std::any::Any + Send>| {
         failure
             .downcast_ref::<String>()

@@ -93,39 +93,39 @@ impl PlanningScript {
         }
         let key = format!("{tag}-planning-find");
         for message in &request.messages {
-            if let Message::ToolResults { results, .. } = message {
-                if let Some(result) = results.iter().find(|row| row.tool_use_id == key) {
-                    assert!(
-                        !result.is_error,
-                        "the actual planning Find was refused ({key}): {}",
-                        {
-                            let body = serde_json::from_str::<Value>(&result.text_content()).ok();
-                            let field = |name: &str| {
-                                body.as_ref()
-                                    .and_then(|value| value.get(name))
-                                    .and_then(Value::as_str)
-                                    .map(|value| {
-                                        value
-                                            .chars()
-                                            .filter(|ch| !ch.is_control())
-                                            .take(512)
-                                            .collect::<String>()
-                                    })
-                            };
-                            json!({"error":field("error"), "message":field("message")})
-                        }
-                    );
-                    let value: Value = serde_json::from_str(&result.text_content()).unwrap();
-                    let mut retained = self.results.lock().unwrap();
-                    if let Some(old) = retained.get(&key) {
-                        assert_eq!(old, &value);
-                    } else {
-                        retained.insert(key.clone(), value);
+            if let Message::ToolResults { results, .. } = message
+                && let Some(result) = results.iter().find(|row| row.tool_use_id == key)
+            {
+                assert!(
+                    !result.is_error,
+                    "the actual planning Find was refused ({key}): {}",
+                    {
+                        let body = serde_json::from_str::<Value>(&result.text_content()).ok();
+                        let field = |name: &str| {
+                            body.as_ref()
+                                .and_then(|value| value.get(name))
+                                .and_then(Value::as_str)
+                                .map(|value| {
+                                    value
+                                        .chars()
+                                        .filter(|ch| !ch.is_control())
+                                        .take(512)
+                                        .collect::<String>()
+                                })
+                        };
+                        json!({"error":field("error"), "message":field("message")})
                     }
-                    return done(
-                        "Shared planning admission observed; this waiter still needs its own context delivery and decision.",
-                    );
+                );
+                let value: Value = serde_json::from_str(&result.text_content()).unwrap();
+                let mut retained = self.results.lock().unwrap();
+                if let Some(old) = retained.get(&key) {
+                    assert_eq!(old, &value);
+                } else {
+                    retained.insert(key.clone(), value);
                 }
+                return done(
+                    "Shared planning admission observed; this waiter still needs its own context delivery and decision.",
+                );
             }
         }
         assert!(

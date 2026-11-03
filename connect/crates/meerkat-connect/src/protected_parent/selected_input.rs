@@ -110,7 +110,7 @@ impl SelectedInput {
             .map_err(|_| refused())?;
         if success { Ok(()) } else { Err(refused()) }
     }
-    #[cfg(test)]
+    #[cfg(all(test, feature = "console"))]
     pub(crate) fn failed_for_test(&self) -> bool {
         self.phase.load(Ordering::Acquire) == 3
     }

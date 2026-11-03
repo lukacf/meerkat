@@ -161,12 +161,6 @@ fn response(request: &Request, phase: usize, lazy_add: bool) -> String {
 }
 // A gate holds only the fixture model response. Both native calls are admitted
 // by the real owner, and their tool results still come from the public service.
-async fn start_provider() -> (
-    Server,
-    tokio::sync::mpsc::Receiver<(String, oneshot::Sender<()>)>,
-) {
-    start_provider_with_gate_bound(BOUND).await
-}
 async fn start_provider_with_gate_bound(
     gate_bound: Duration,
 ) -> (

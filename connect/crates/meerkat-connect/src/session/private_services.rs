@@ -117,9 +117,12 @@ impl SessionStartup {
             current(admission)?;
             let model = resolve_create_session_model(&self.config, model.clone())
                 .map_err(|error| ConnectError::native("Resolve next-service controller", error))?;
-            let mut build = SessionBuildOptions::default();
-            build.realm_id = Some(self.storage.locator.realm.clone());
-            build.provider = Some(model.provider); build.auth_binding = model.auth_binding;
+            let build = SessionBuildOptions {
+                realm_id: Some(self.storage.locator.realm.clone()),
+                provider: Some(model.provider),
+                auth_binding: model.auth_binding,
+                ..Default::default()
+            };
             let request = CreateSessionRequest { model:model.model, prompt:String::new().into(),
                 injected_context:Vec::new(), system_prompt:SystemPromptOverride::Inherit, max_tokens:None,
                 event_tx:None, initial_turn:InitialTurnPolicy::Defer,
@@ -311,7 +314,7 @@ impl SessionStartup {
             research,
             self.connector_auth.take(),
             None,
-            &[helper.name.clone()],
+            std::slice::from_ref(&helper.name),
         )
         .await?;
         match setup.owner() {

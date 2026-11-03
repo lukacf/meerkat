@@ -67,7 +67,7 @@ fn response(request: &Request, phase: usize) -> String {
         prior::selected(),
         public::OPERATION,
         true,
-        |request, job, operation| public::public_access(request, job, operation),
+        public::public_access,
     )
 }
 // Hold the actual reopened model request, after native construction and MCP
@@ -102,13 +102,13 @@ async fn start_provider() -> (Server, oneshot::Receiver<()>, oneshot::Sender<()>
             assert_eq!(received.path, "/v1/chat/completions");
             assert_eq!(received.headers["authorization"], format!("Bearer {TOKEN}"));
             assert_eq!(received.body["model"], "cli-fixture-remote");
-            if is_probe(&received) {
-                if let Some((seen, released)) = gate.take() {
-                    seen.send(())
-                        .expect("retained parent observes native probe construction");
-                    tokio::select! {biased;_= &mut stopped=>break,
-                    joined=timeout(BOUND,released)=>joined.unwrap().expect("parent releases model response")};
-                }
+            if is_probe(&received)
+                && let Some((seen, released)) = gate.take()
+            {
+                seen.send(())
+                    .expect("retained parent observes native probe construction");
+                tokio::select! {biased;_= &mut stopped=>break,
+                joined=timeout(BOUND,released)=>joined.unwrap().expect("parent releases model response")};
             }
             let body = response(&received, phase);
             let running = received.body["messages"]

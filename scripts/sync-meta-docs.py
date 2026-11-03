@@ -1,23 +1,23 @@
 #!/usr/bin/env python3
-"""Publish MobKit's canonical docs into the docs.rkat.ai source tree.
+"""Publish Meta's canonical docs into the docs.rkat.ai source tree.
 
-MobKit (Meta) authors its public documentation in meta/docs of this
+Meerkat Meta authors its public documentation in meta/docs of this
 repository. The Mintlify project for docs.rkat.ai deploys from this
 repository's docs/, so this script creates the namespaced snapshot consumed by
-the MobKit product navigation (docs/mobkit/** and docs/docs.json).
+the Meta product navigation (docs/meta/** and docs/docs.json).
 
 The mirror tracks main. Documentation carries no version tag: every push to
 main that changes meta/docs regenerates this snapshot (see
-.github/workflows/publish-mobkit-docs.yml), and releases do not publish docs.
+.github/workflows/publish-meta-docs.yml), and releases do not publish docs.
 The generated manifest records the exact source commit, the docs path and the
-MobKit version at that commit (meta/crates/meerkat-meta/Cargo.toml) as
+Meta version at that commit (meta/crates/meerkat-meta/Cargo.toml) as
 information, not as an identity. A standalone meerkat-meta checkout (the
 repository Meta lived in before the monorepo) still renders, with that
 repository's links and its workspace version.
 
 Usage:
-    python3 scripts/sync-mobkit-docs.py meta
-    python3 scripts/sync-mobkit-docs.py meta --check
+    python3 scripts/sync-meta-docs.py meta
+    python3 scripts/sync-meta-docs.py meta --check
 """
 
 from __future__ import annotations
@@ -37,7 +37,12 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DESTINATION = ROOT / "docs" / "mobkit"
+# The mirror is the Meta product of docs/docs.json, served under /meta/ on
+# docs.rkat.ai. It was served under /mobkit/ before the product's rename;
+# docs/docs.json redirects those URLs to /meta/.
+PRODUCT = "Meta"
+NAMESPACE = "meta"
+DESTINATION = ROOT / "docs" / NAMESPACE
 SITE_CONFIG = ROOT / "docs" / "docs.json"
 # The repository the in-tree source (meta/) belongs to, and the one a
 # standalone checkout (a workspace Cargo.toml at its root) belongs to.
@@ -74,7 +79,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "source",
         type=Path,
-        help="MobKit's source: meta (in this repository) or a standalone meerkat-meta checkout",
+        help="Meta's source: meta (in this repository) or a standalone meerkat-meta checkout",
     )
     parser.add_argument(
         "--check",
@@ -131,13 +136,13 @@ def site_config_for_source(
     source_config: dict[str, object],
     site_config: dict[str, object],
 ) -> dict[str, object]:
-    """Replace the MobKit product tabs from the release-owned navigation."""
+    """Replace the Meta product tabs from the release-owned navigation."""
     source_navigation = source_config.get("navigation")
     if not isinstance(source_navigation, dict):
-        raise SystemExit("MobKit docs config has no navigation object")
+        raise SystemExit("Meta docs config has no navigation object")
     source_tabs = source_navigation.get("tabs")
     if not isinstance(source_tabs, list) or not source_tabs:
-        raise SystemExit("MobKit docs navigation contains no tabs")
+        raise SystemExit("Meta docs navigation contains no tabs")
 
     rendered = copy.deepcopy(site_config)
     site_navigation = rendered.get("navigation")
@@ -146,14 +151,14 @@ def site_config_for_source(
     products = site_navigation.get("products")
     if not isinstance(products, list):
         raise SystemExit("docs/docs.json navigation has no products")
-    mobkit_products = [
+    meta_products = [
         product
         for product in products
-        if isinstance(product, dict) and product.get("product") == "MobKit"
+        if isinstance(product, dict) and product.get("product") == PRODUCT
     ]
-    if len(mobkit_products) != 1:
-        raise SystemExit("docs/docs.json must contain exactly one MobKit product")
-    mobkit_products[0]["tabs"] = namespace_navigation(source_tabs, "mobkit")
+    if len(meta_products) != 1:
+        raise SystemExit(f"docs/docs.json must contain exactly one {PRODUCT} product")
+    meta_products[0]["tabs"] = namespace_navigation(source_tabs, NAMESPACE)
     return rendered
 
 
@@ -203,7 +208,7 @@ def rewrite_root_links(text: str) -> str:
     return rewrite_prose(
         text,
         lambda segment: ROOT_LINK_RE.sub(
-            lambda match: f"{match.group('prefix')}/mobkit/{match.group('path')}",
+            lambda match: f"{match.group('prefix')}/{NAMESPACE}/{match.group('path')}",
             segment,
         ),
     )
@@ -279,10 +284,10 @@ def normalize_released_heading(
 def frontmatter_close(text: str, page_id: str) -> int:
     """Return the offset of the newline that starts the closing frontmatter fence."""
     if not text.startswith("---\n"):
-        raise SystemExit(f"MobKit page lacks frontmatter: {page_id}")
+        raise SystemExit(f"Meta page lacks frontmatter: {page_id}")
     end = text.find("\n---", 4)
     if end == -1:
-        raise SystemExit(f"MobKit page has unclosed frontmatter: {page_id}")
+        raise SystemExit(f"Meta page has unclosed frontmatter: {page_id}")
     return end
 
 
@@ -304,15 +309,15 @@ def version_stamp(
     """Return the one-line provenance stamp every mirrored page carries.
 
     docs.rkat.ai serves this snapshot until the next publication succeeds. The
-    stamp names the exact commit the page was rendered from and the MobKit
+    stamp names the exact commit the page was rendered from and the Meta
     version at that commit, so a reader can tell how current the page is and
     which version it was written against. The commit is the identity; the
     version is information.
     """
     commit = f"[{source_commit[:12]}]({source_repository}/commit/{source_commit})"
     return (
-        f"*Mirrored from MobKit {source_ref} at {commit} on {source_date}; "
-        f"MobKit version {source_version} at that commit.*"
+        f"*Mirrored from Meerkat Meta {source_ref} at {commit} on {source_date}; "
+        f"Meta version {source_version} at that commit.*"
     )
 
 
@@ -354,11 +359,11 @@ def package_version(cargo_toml: Path) -> str:
 
 
 def source_identity(source: Path) -> tuple[str, str, str]:
-    """Return the repository, MobKit version and docs path of a source.
+    """Return the repository, Meta version and docs path of a source.
 
     The in-tree source (meta/ in this repository) has no workspace manifest of
-    its own: Meta's crates carry explicit versions, and meerkat-meta's is
-    MobKit's. A standalone meerkat-meta checkout keeps its workspace version.
+    its own: Meta's crates carry explicit versions, and meerkat-meta's is the
+    product's. A standalone meerkat-meta checkout keeps its workspace version.
     The docs path is relative to the source's repository root (meta/docs, or
     docs for a standalone checkout), so the lag check knows which commits the
     mirror must follow.
@@ -401,11 +406,11 @@ def build_snapshot(
     source_docs = source / "docs"
     config_path = source_docs / "docs.json"
     if not config_path.is_file():
-        raise SystemExit(f"MobKit docs config not found: {config_path}")
+        raise SystemExit(f"Meta docs config not found: {config_path}")
 
     source_dirty = bool(git_output(source, "status", "--short", "--", "docs"))
     if require_clean and source_dirty:
-        raise SystemExit("MobKit documentation source has uncommitted changes")
+        raise SystemExit("Meta documentation source has uncommitted changes")
 
     source_repository, source_version, source_docs_path = source_identity(source)
     if source_ref is None:
@@ -415,9 +420,9 @@ def build_snapshot(
     config = json.loads(config_path.read_text(encoding="utf-8"))
     page_ids = flatten_pages(config.get("navigation", {}))
     if not page_ids:
-        raise SystemExit("MobKit docs navigation contains no pages")
+        raise SystemExit("Meta docs navigation contains no pages")
     if len(page_ids) != len(set(page_ids)):
-        raise SystemExit("MobKit docs navigation contains duplicate pages")
+        raise SystemExit("Meta docs navigation contains duplicate pages")
 
     source_commit = git_output(source, "rev-parse", "HEAD")
     source_date = git_output(source, "show", "-s", "--format=%cs", "HEAD")
@@ -428,7 +433,7 @@ def build_snapshot(
     for page_id in page_ids:
         source_page = source_docs / f"{page_id}.mdx"
         if not source_page.is_file():
-            raise SystemExit(f"MobKit navigation page not found: {source_page}")
+            raise SystemExit(f"Meta navigation page not found: {source_page}")
         destination_page = destination / f"{page_id}.mdx"
         destination_page.parent.mkdir(parents=True, exist_ok=True)
         rendered = source_page.read_text(encoding="utf-8")
@@ -472,16 +477,16 @@ def main() -> int:
     source = args.source.resolve()
     source_config_path = source / "docs" / "docs.json"
     if not source_config_path.is_file():
-        raise SystemExit(f"MobKit docs config not found: {source_config_path}")
+        raise SystemExit(f"Meta docs config not found: {source_config_path}")
     source_config = json.loads(source_config_path.read_text(encoding="utf-8"))
     site_config = json.loads(SITE_CONFIG.read_text(encoding="utf-8"))
     expected_site_config = site_config_for_source(source_config, site_config)
 
     if args.check:
         if not DESTINATION.is_dir():
-            raise SystemExit(f"MobKit docs snapshot not found: {DESTINATION}")
-        with tempfile.TemporaryDirectory(prefix="mobkit-docs-") as temp:
-            expected = Path(temp) / "mobkit"
+            raise SystemExit(f"Meta docs snapshot not found: {DESTINATION}")
+        with tempfile.TemporaryDirectory(prefix="meta-docs-") as temp:
+            expected = Path(temp) / NAMESPACE
             build_snapshot(
                 source,
                 expected,
@@ -494,15 +499,15 @@ def main() -> int:
             )
             if comparison.returncode:
                 raise SystemExit(
-                    "MobKit docs snapshot is stale; run "
-                    f"python3 scripts/sync-mobkit-docs.py {source}"
+                    "Meta docs snapshot is stale; run "
+                    f"python3 scripts/sync-meta-docs.py {source}"
                 )
         if site_config != expected_site_config:
             raise SystemExit(
-                "MobKit docs navigation is stale; run "
-                f"python3 scripts/sync-mobkit-docs.py {source}"
+                "Meta docs navigation is stale; run "
+                f"python3 scripts/sync-meta-docs.py {source}"
             )
-        print("mobkit-docs-sync: ok")
+        print("meta-docs-sync: ok")
         return 0
 
     if DESTINATION.exists():
@@ -519,7 +524,7 @@ def main() -> int:
     )
     manifest = json.loads((DESTINATION / "_source.json").read_text())
     print(
-        "mobkit-docs-sync: wrote "
+        "meta-docs-sync: wrote "
         f"{manifest['public_pages']} pages from {manifest['source_commit']}"
     )
     return 0

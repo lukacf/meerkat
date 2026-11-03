@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Unit tests for the MobKit documentation snapshot transformer."""
+"""Unit tests for the Meta documentation snapshot transformer."""
 
 from __future__ import annotations
 
@@ -11,19 +11,19 @@ import unittest
 from pathlib import Path
 
 
-SCRIPT = Path(__file__).with_name("sync-mobkit-docs.py")
-SPEC = importlib.util.spec_from_file_location("sync_mobkit_docs", SCRIPT)
+SCRIPT = Path(__file__).with_name("sync-meta-docs.py")
+SPEC = importlib.util.spec_from_file_location("sync_meta_docs", SCRIPT)
 assert SPEC and SPEC.loader
 sync = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(sync)
 
 
-class SyncMobKitDocsTests(unittest.TestCase):
+class SyncMetaDocsTests(unittest.TestCase):
     def test_namespaces_root_relative_links_and_assets(self) -> None:
         source = '<Card href="/quickstart" />\n<img src="/images/a.png" />\n'
         rendered = sync.rewrite_root_links(source)
-        self.assertIn('href="/mobkit/quickstart"', rendered)
-        self.assertIn('src="/mobkit/images/a.png"', rendered)
+        self.assertIn('href="/meta/quickstart"', rendered)
+        self.assertIn('src="/meta/images/a.png"', rendered)
 
     def test_root_links_preserve_code_fences(self) -> None:
         for fence in ("```", "````", "~~~"):
@@ -160,7 +160,7 @@ class SyncMobKitDocsTests(unittest.TestCase):
                 "products": [
                     {"product": "Meerkat", "tabs": []},
                     {
-                        "product": "MobKit",
+                        "product": "Meta",
                         "description": "preserved",
                         "tabs": [
                             {
@@ -169,7 +169,7 @@ class SyncMobKitDocsTests(unittest.TestCase):
                                     {
                                         "group": "Plans",
                                         "pages": [
-                                            "mobkit/plans/storage-unification-plan"
+                                            "meta/plans/storage-unification-plan"
                                         ],
                                     }
                                 ],
@@ -182,33 +182,34 @@ class SyncMobKitDocsTests(unittest.TestCase):
 
         rendered = sync.site_config_for_source(source_config, site_config)
 
-        mobkit = rendered["navigation"]["products"][1]
-        self.assertEqual(mobkit["description"], "preserved")
+        meta = rendered["navigation"]["products"][1]
+        self.assertEqual(meta["description"], "preserved")
         self.assertEqual(
-            mobkit["tabs"][0]["groups"][0]["pages"],
-            ["mobkit/introduction", "mobkit/quickstart"],
+            meta["tabs"][0]["groups"][0]["pages"],
+            ["meta/introduction", "meta/quickstart"],
         )
         self.assertNotIn("storage-unification-plan", json.dumps(rendered))
         self.assertEqual(site_config["navigation"]["products"][1]["tabs"][0]["tab"], "Plans")
 
-    def test_release_navigation_requires_one_mobkit_product(self) -> None:
+    def test_release_navigation_requires_one_meta_product(self) -> None:
         source_config = {"navigation": {"tabs": [{"tab": "Docs", "groups": []}]}}
-        with self.assertRaisesRegex(SystemExit, "exactly one MobKit product"):
+        with self.assertRaisesRegex(SystemExit, "exactly one Meta product"):
             sync.site_config_for_source(
                 source_config,
                 {"navigation": {"products": []}},
             )
 
-    def test_version_stamp_names_the_source_commit_date_and_mobkit_version(self) -> None:
+    def test_version_stamp_names_the_source_commit_date_and_meta_version(self) -> None:
         commit = "a" * 40
         stamp = sync.version_stamp("1.2.3", "main", commit, "2026-09-22")
-        self.assertIn("Mirrored from MobKit main at", stamp)
+        self.assertIn("Mirrored from Meerkat Meta main at", stamp)
         self.assertIn(f"[{commit[:12]}](https://github.com/lukacf/meerkat/commit/{commit})", stamp)
         self.assertIn("on 2026-09-22", stamp)
-        self.assertIn("MobKit version 1.2.3 at that commit", stamp)
+        self.assertIn("Meta version 1.2.3 at that commit", stamp)
+        self.assertNotIn("MobKit", stamp)
         standalone = sync.version_stamp("1.2.3", "main", commit, "2026-09-22", sync.STANDALONE_REPOSITORY)
         self.assertIn(f"[{commit[:12]}](https://github.com/lukacf/meerkat-meta/commit/{commit})", standalone)
-        self.assertNotIn("This page documents MobKit v", stamp)
+        self.assertNotIn("This page documents Meta v", stamp)
         self.assertTrue(stamp.startswith("*") and stamp.endswith("*"))
         self.assertNotIn("\n", stamp)
 
@@ -228,7 +229,7 @@ class SyncMobKitDocsTests(unittest.TestCase):
 
     def test_snapshot_stamps_every_page_with_the_manifest_version(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
-            source = Path(temp) / "meerkat-mobkit"
+            source = Path(temp) / "meerkat-meta"
             docs = source / "docs"
             (docs / "guides").mkdir(parents=True)
             (docs / "api").mkdir()
@@ -303,7 +304,7 @@ class SyncMobKitDocsTests(unittest.TestCase):
             subprocess.run([*git, "tag", "v1.2.3"], check=True)
             subprocess.run([*git, "branch", "-M", "main"], check=True)
 
-            destination = Path(temp) / "mobkit"
+            destination = Path(temp) / "meta"
             sync.build_snapshot(source, destination, source_ref=None, require_clean=True)
 
             manifest = json.loads((destination / "_source.json").read_text(encoding="utf-8"))
@@ -339,18 +340,18 @@ class SyncMobKitDocsTests(unittest.TestCase):
                     f"{page.name} does not open with the version stamp:\n{body[:200]}",
                 )
             introduction = (destination / "introduction.mdx").read_text(encoding="utf-8")
-            self.assertIn("[deploy](/mobkit/guides/deploy)", introduction)
-            self.assertIn("Mirrored from MobKit main at", introduction)
-            self.assertIn("MobKit version 1.2.3 at that commit", introduction)
+            self.assertIn("[deploy](/meta/guides/deploy)", introduction)
+            self.assertIn("Mirrored from Meerkat Meta main at", introduction)
+            self.assertIn("Meta version 1.2.3 at that commit", introduction)
             self.assertNotIn("v1.2.3", introduction)
             self.assertIn('icon: "boxes-stacked"', introduction)
             for page_id in ("quickstart", "api/rpc"):
                 rendered = (destination / f"{page_id}.mdx").read_text(encoding="utf-8")
                 self.assertIn(
-                    "/mobkit/concepts/roster#profiles-are-templates-and-members-are-declared",
+                    "/meta/concepts/roster#profiles-are-templates-and-members-are-declared",
                     rendered,
                 )
-                self.assertIn("/mobkit/concepts/roster#runtime-modes", rendered)
+                self.assertIn("/meta/concepts/roster#runtime-modes", rendered)
                 self.assertIn(legacy, (docs / f"{page_id}.mdx").read_text(encoding="utf-8"))
             self.assertEqual(sync.git_output(source, "status", "--porcelain"), "")
             roster = (destination / "concepts" / "roster.mdx").read_text(encoding="utf-8")
@@ -372,7 +373,7 @@ class SyncMobKitDocsTests(unittest.TestCase):
             meta = repo / "meta"
             docs = meta / "docs"
             docs.mkdir(parents=True)
-            # The repository's own workspace version is not MobKit's.
+            # The repository's own workspace version is not Meta's.
             (repo / "Cargo.toml").write_text(
                 '[workspace]\n\n[workspace.package]\nversion = "9.9.9"\n',
                 encoding="utf-8",
@@ -400,7 +401,7 @@ class SyncMobKitDocsTests(unittest.TestCase):
             # Uncommitted work outside meta/docs does not make the docs dirty.
             (repo / "README.md").write_text("edited\n", encoding="utf-8")
 
-            destination = Path(temp) / "mobkit"
+            destination = Path(temp) / "meta-mirror"
             sync.build_snapshot(meta, destination, source_ref=None, require_clean=True)
 
             manifest = json.loads((destination / "_source.json").read_text(encoding="utf-8"))
@@ -413,8 +414,8 @@ class SyncMobKitDocsTests(unittest.TestCase):
             self.assertIs(manifest["source_docs_dirty"], False)
             introduction = (destination / "introduction.mdx").read_text(encoding="utf-8")
             self.assertIn(f"[{commit[:12]}](https://github.com/lukacf/meerkat/commit/{commit})", introduction)
-            self.assertIn("MobKit version 0.9.8 at that commit", introduction)
-            self.assertIn("[deploy](/mobkit/guides/deploy)", introduction)
+            self.assertIn("Meta version 0.9.8 at that commit", introduction)
+            self.assertIn("[deploy](/meta/guides/deploy)", introduction)
 
             (docs / "introduction.mdx").write_text("dirty", encoding="utf-8")
             with self.assertRaisesRegex(SystemExit, "uncommitted changes"):

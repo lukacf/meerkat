@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Fail when the docs.rkat.ai MobKit mirror lags main.
+"""Fail when the docs.rkat.ai Meta mirror lags main.
 
-docs/mobkit is a generated snapshot of MobKit's documentation (meta/docs in
-this repository) at one main commit, recorded in docs/mobkit/_source.json as
+docs/meta is a generated snapshot of Meta's documentation (meta/docs in this
+repository) at one main commit, recorded in docs/meta/_source.json as
 `source_commit`, with the docs path as `source_path`. Every push to main that
 changes meta/docs is supposed to regenerate the snapshot through the Publish
-MobKit docs workflow, but a publication can fail (or wait on a pull request)
+Meta docs workflow, but a publication can fail (or wait on a pull request)
 after main moved on. This ratchet counts the commits on the checked-out main
 after the mirrored one that change the docs path, and fails when there are
 more than `--max-lag` of them.
@@ -21,7 +21,7 @@ history): a mirror rendered from a commit main does not contain (a branch, a
 squashed pull request) is a lag that cannot be measured, not a zero lag.
 
 Usage (a full-history checkout of main):
-    python3 scripts/check-mobkit-docs-lag.py [--manifest docs/mobkit/_source.json] [--max-lag 0]
+    python3 scripts/check-meta-docs-lag.py [--manifest docs/meta/_source.json] [--max-lag 0]
 """
 
 from __future__ import annotations
@@ -34,7 +34,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_MANIFEST = ROOT / "docs" / "mobkit" / "_source.json"
+DEFAULT_MANIFEST = ROOT / "docs" / "meta" / "_source.json"
 REPOSITORY = "https://github.com/lukacf/meerkat"
 DEFAULT_DOCS_PATH = "meta/docs"
 
@@ -58,7 +58,7 @@ def parse_args() -> argparse.Namespace:
         "--manifest",
         type=Path,
         default=DEFAULT_MANIFEST,
-        help="generated MobKit docs manifest (default: docs/mobkit/_source.json)",
+        help="generated Meta docs manifest (default: docs/meta/_source.json)",
     )
     parser.add_argument(
         "--repo",
@@ -94,7 +94,7 @@ def manifest_source(manifest_path: Path) -> tuple[str, str]:
     if repository != REPOSITORY:
         raise LagCheckError(
             f"{manifest_path} mirrors {repository!r}, not this repository: regenerate it from meta/docs "
-            "(`make docs-sync-mobkit`)"
+            "(`make docs-sync-meta`)"
         )
     docs_path = manifest.get("source_path", DEFAULT_DOCS_PATH)
     if not isinstance(docs_path, str) or not docs_path or docs_path.startswith("/") or ".." in docs_path.split("/"):
@@ -134,19 +134,19 @@ def main() -> int:
         source_commit, docs_path = manifest_source(args.manifest)
         lag = docs_lag(args.repo, source_commit, docs_path)
     except LagCheckError as error:
-        print(f"mobkit-docs-lag: cannot determine lag: {error}")
+        print(f"meta-docs-lag: cannot determine lag: {error}")
         return 2
     unmirrored = len(lag.docs_commits)
     print(
-        f"mobkit-docs-lag: mirror renders {docs_path} at {source_commit[:12]}; HEAD is "
+        f"meta-docs-lag: mirror renders {docs_path} at {source_commit[:12]}; HEAD is "
         f"{lag.head_sha[:12]}; {lag.ahead_by} commit(s) ahead, {unmirrored} changing {docs_path}, "
         f"tolerated {args.max_lag}"
     )
     if unmirrored > args.max_lag:
         print(
-            f"mobkit-docs-lag: docs/mobkit misses {unmirrored} commit(s) changing {docs_path}: "
-            f"{', '.join(lag.docs_commits)}. Run the Publish MobKit docs workflow (workflow_dispatch) "
-            "or `make docs-sync-mobkit` on a clean main."
+            f"meta-docs-lag: docs/meta misses {unmirrored} commit(s) changing {docs_path}: "
+            f"{', '.join(lag.docs_commits)}. Run the Publish Meta docs workflow (workflow_dispatch) "
+            "or `make docs-sync-meta` on a clean main."
         )
         return 1
     return 0

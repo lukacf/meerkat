@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Contract tests for main-tracking MobKit documentation publication."""
+"""Contract tests for main-tracking Meta documentation publication."""
 
 from __future__ import annotations
 
@@ -8,10 +8,10 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-WORKFLOW = ROOT / ".github" / "workflows" / "publish-mobkit-docs.yml"
+WORKFLOW = ROOT / ".github" / "workflows" / "publish-meta-docs.yml"
 
 
-class PublishMobKitDocsWorkflowTests(unittest.TestCase):
+class PublishMetaDocsWorkflowTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.workflow = WORKFLOW.read_text(encoding="utf-8")
@@ -22,7 +22,7 @@ class PublishMobKitDocsWorkflowTests(unittest.TestCase):
         self.assertIn("- main", on)
         self.assertIn('- "meta/docs/**"', on)
         # The script renders the mirror: a change to it changes the mirror.
-        self.assertIn('- "scripts/sync-mobkit-docs.py"', on)
+        self.assertIn('- "scripts/sync-meta-docs.py"', on)
         self.assertIn("workflow_dispatch:", on)
         # Meta lives under meta/ in this repository: no cross-repository
         # dispatch to wait for, and no nightly catch-up (the nightly lag check
@@ -39,7 +39,7 @@ class PublishMobKitDocsWorkflowTests(unittest.TestCase):
 
     def test_mirrors_the_in_tree_meta_docs_at_the_main_head(self) -> None:
         # One checkout, of this repository's main with its history; the
-        # standalone MobKit repository is never read.
+        # standalone Meta repository is never read.
         self.assertEqual(self.workflow.count("uses: actions/checkout@"), 1)
         self.assertNotIn("repository:", self.workflow)
         self.assertNotIn("meerkat-meta", self.workflow)
@@ -48,28 +48,28 @@ class PublishMobKitDocsWorkflowTests(unittest.TestCase):
         resolve = self.workflow.index("Resolve the source commit")
         self.assertIn("ref: main", self.workflow[checkout:resolve])
         self.assertIn("fetch-depth: 0", self.workflow[checkout:resolve])
-        generate = self.workflow.index("python3 scripts/sync-mobkit-docs.py meta")
+        generate = self.workflow.index("python3 scripts/sync-meta-docs.py meta")
         self.assertLess(resolve, generate)
         self.assertIn("source_sha=$(git rev-parse HEAD)", self.workflow[resolve:generate])
         self.assertIn('if [[ "$(git rev-parse origin/main)" != "$source_sha" ]]', self.workflow[resolve:generate])
 
     def test_generates_from_clean_main_source(self) -> None:
-        self.assertIn("scripts/sync-mobkit-docs.py meta", self.workflow)
+        self.assertIn("scripts/sync-meta-docs.py meta", self.workflow)
         self.assertIn("--source-ref main", self.workflow)
         self.assertIn("--require-clean", self.workflow)
 
     def test_validates_then_stages_only_generated_paths(self) -> None:
         docs_check = self.workflow.index("run: make docs-check")
         mint_check = self.workflow.index("mint@4.2.728 broken-links")
-        stage = self.workflow.index("git add docs/mobkit docs/docs.json")
+        stage = self.workflow.index("git add docs/meta docs/docs.json")
         self.assertLess(docs_check, stage)
         self.assertLess(mint_check, stage)
-        self.assertIn("grep -Ev '^docs/(mobkit/|docs\\.json$)'", self.workflow[stage:])
-        self.assertIn('git commit -m "docs: mirror MobKit main ${SOURCE_SHORT}"', self.workflow[stage:])
+        self.assertIn("grep -Ev '^docs/(meta/|docs\\.json$)'", self.workflow[stage:])
+        self.assertIn('git commit -m "docs: mirror Meta main ${SOURCE_SHORT}"', self.workflow[stage:])
         self.assertIn('echo "changed=true" >> "${GITHUB_OUTPUT}"', self.workflow[stage:])
 
     def test_direct_publication_needs_the_admin_token_and_follows_the_path_guard(self) -> None:
-        stage = self.workflow.index("git add docs/mobkit docs/docs.json")
+        stage = self.workflow.index("git add docs/meta docs/docs.json")
         direct = self.workflow.index("id: direct")
         self.assertLess(stage, direct)
         self.assertIn(
@@ -115,7 +115,7 @@ class PublishMobKitDocsWorkflowTests(unittest.TestCase):
         handler = self.workflow.index("if: failure() && steps.stage.outputs.changed == 'true'")
         self.assertLess(merge, handler)
         report = self.workflow[handler:]
-        self.assertIn("python3 scripts/report-mobkit-docs-publication-failure.py", report)
+        self.assertIn("python3 scripts/report-meta-docs-publication-failure.py", report)
         self.assertIn('--source "main@${SOURCE_SHORT}"', report)
         self.assertIn('--branch "${PR_BRANCH:-unpushed}"', report)
         self.assertIn('--pull-request-url "${PR_URL}"', report)
@@ -133,7 +133,7 @@ class PublishMobKitDocsWorkflowTests(unittest.TestCase):
         triggers = parsed[True]
         self.assertEqual(set(triggers), {"push", "workflow_dispatch"})
         self.assertEqual(triggers["push"]["branches"], ["main"])
-        self.assertEqual(triggers["push"]["paths"], ["meta/docs/**", "scripts/sync-mobkit-docs.py"])
+        self.assertEqual(triggers["push"]["paths"], ["meta/docs/**", "scripts/sync-meta-docs.py"])
         self.assertIsNone(triggers["workflow_dispatch"])
         steps = {step.get("id", step["name"]): step for step in parsed["jobs"]["publish"]["steps"]}
         checkouts = [
@@ -141,8 +141,8 @@ class PublishMobKitDocsWorkflowTests(unittest.TestCase):
         ]
         self.assertEqual(len(checkouts), 1)
         self.assertEqual(checkouts[0]["with"], {"ref": "main", "fetch-depth": 0})
-        generate = steps["Generate MobKit documentation from main"]["run"]
-        self.assertIn("python3 scripts/sync-mobkit-docs.py meta", generate)
+        generate = steps["Generate Meta documentation from main"]["run"]
+        self.assertIn("python3 scripts/sync-meta-docs.py meta", generate)
         self.assertEqual(parsed["permissions"]["issues"], "write")
         self.assertEqual(steps["direct"]["if"], "steps.stage.outputs.changed == 'true' && env.MOBKIT_DOCS_PR_TOKEN != ''")
         self.assertEqual(steps["branch"]["if"], "steps.stage.outputs.changed == 'true' && env.MOBKIT_DOCS_PR_TOKEN == ''")

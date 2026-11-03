@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tests for the MobKit docs mirror lag ratchet (mirror vs main's meta/docs)."""
+"""Tests for the Meta docs mirror lag ratchet (mirror vs main's meta/docs)."""
 
 from __future__ import annotations
 
@@ -12,8 +12,8 @@ import unittest
 from pathlib import Path
 
 
-SCRIPT = Path(__file__).with_name("check-mobkit-docs-lag.py")
-SPEC = importlib.util.spec_from_file_location("check_mobkit_docs_lag", SCRIPT)
+SCRIPT = Path(__file__).with_name("check-meta-docs-lag.py")
+SPEC = importlib.util.spec_from_file_location("check_meta_docs_lag", SCRIPT)
 assert SPEC and SPEC.loader
 lag = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = lag
@@ -21,7 +21,7 @@ SPEC.loader.exec_module(lag)
 
 
 class Repo:
-    """A throwaway repository with meta/docs, code and a docs/mobkit manifest."""
+    """A throwaway repository with meta/docs, code and a docs/meta manifest."""
 
     def __init__(self, root: Path) -> None:
         self.root = root
@@ -79,8 +79,8 @@ class DocsLagTests(unittest.TestCase):
 
     def test_commits_outside_meta_docs_are_not_lag(self) -> None:
         self.repo.commit({"crates/a.rs": "fn a() { 1; }\n"}, "code")
-        # The mirror publication itself changes docs/mobkit, not meta/docs.
-        self.repo.commit({"docs/mobkit/introduction.mdx": "mirrored\n"}, "mirror")
+        # The mirror publication itself changes docs/meta, not meta/docs.
+        self.repo.commit({"docs/meta/introduction.mdx": "mirrored\n"}, "mirror")
         result = lag.docs_lag(self.repo.root, self.mirrored, "meta/docs")
         self.assertEqual(result.ahead_by, 2)
         self.assertEqual(result.docs_commits, ())
@@ -144,7 +144,7 @@ class DocsLagTests(unittest.TestCase):
 
 class SourceAgreementTests(unittest.TestCase):
     def test_the_check_follows_the_repository_and_path_the_sync_script_records_for_meta(self) -> None:
-        spec = importlib.util.spec_from_file_location("sync_mobkit_docs", SCRIPT.with_name("sync-mobkit-docs.py"))
+        spec = importlib.util.spec_from_file_location("sync_meta_docs", SCRIPT.with_name("sync-meta-docs.py"))
         assert spec and spec.loader
         sync = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(sync)

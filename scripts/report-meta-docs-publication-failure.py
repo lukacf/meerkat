@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-"""Make a failed MobKit docs publication actionable instead of silent.
+"""Make a failed Meta docs publication actionable instead of silent.
 
-publish-mobkit-docs.yml pushes the generated snapshot to a publication branch
+publish-meta-docs.yml pushes the generated snapshot to a publication branch
 and then opens a protected pull request with `gh pr create`. When the
 repository forbids Actions from opening pull requests, or the dedicated token
 is missing or expired, that step fails after the branch is already pushed: the
 run turns red without saying what a human has to do, and the next release
 repeats the same red run. Every publication run between 2026-08-24 and
 2026-09-03 that reached that step died there (two 2026-08-29 runs failed
-earlier, at `make docs-check`), and docs.rkat.ai served MobKit 0.8.22 for those
-ten days while 0.8.23 through 0.8.30 shipped.
+earlier, at `make docs-check`), and docs.rkat.ai served the 0.8.22 docs for
+those ten days while 0.8.23 through 0.8.30 shipped.
 
 This script runs from the workflow's failure handler. It writes the pushed
 branch and the exact recovery commands to the job summary and opens or updates
@@ -17,9 +17,9 @@ one tracking issue. The issue title is stable, so repeated failures append a
 comment to the open issue instead of creating a new one per run.
 
 Usage:
-    python3 scripts/report-mobkit-docs-publication-failure.py \\
+    python3 scripts/report-meta-docs-publication-failure.py \\
         --repository lukacf/meerkat --source main@1234567890ab \\
-        --branch codex/publish-mobkit-docs-0.8.30-123 \\
+        --branch codex/publish-meta-docs-1234567890ab-123 \\
         --run-url https://github.com/lukacf/meerkat/actions/runs/123 \\
         --summary "$GITHUB_STEP_SUMMARY" [--pull-request-url URL]
 """
@@ -33,7 +33,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-TRACKING_ISSUE_TITLE = "MobKit docs publication needs a human to open the pull request"
+TRACKING_ISSUE_TITLE = "Meta docs publication needs a human to open the pull request"
 
 
 @dataclass(frozen=True)
@@ -45,7 +45,7 @@ class PublicationFailure:
     pull_request_url: str | None
 
     def pull_request_title(self) -> str:
-        return f"docs: mirror MobKit {self.source}"
+        return f"docs: mirror Meta {self.source}"
 
     def recovery_commands(self) -> list[str]:
         """Commands a maintainer runs from any checkout to finish the publication."""
@@ -57,7 +57,7 @@ class PublicationFailure:
             (
                 f"gh pr create --repo {self.repository} --base main --head {self.branch} "
                 f'--title "{self.pull_request_title()}" '
-                f'--body "Mirror MobKit {self.source} documentation snapshot '
+                f'--body "Mirror Meta {self.source} documentation snapshot '
                 f'pushed by {self.run_url}."'
             ),
             f"gh pr merge --repo {self.repository} --auto --merge {self.branch}",
@@ -78,9 +78,9 @@ class PublicationFailure:
         heading = "#" * heading_level
         commands = "\n".join(self.recovery_commands())
         return (
-            f"{heading} MobKit {self.source} docs publication needs a human\n\n"
+            f"{heading} Meta {self.source} docs publication needs a human\n\n"
             f"{self.what_failed()}\n\n"
-            f"- MobKit source: `{self.source}`\n"
+            f"- Meta source: `{self.source}`\n"
             f"- Pushed branch: `{self.branch}`\n"
             f"- Failed run: {self.run_url}\n\n"
             "Finish the publication by hand:\n\n"
@@ -90,15 +90,15 @@ class PublicationFailure:
             f"under Settings > Actions > General for `{self.repository}`.\n"
             "2. Add a `MOBKIT_DOCS_PR_TOKEN` repository secret holding a fine-grained "
             f"token held by a repository admin with Contents: read and write on `{self.repository}`. "
-            "`publish-mobkit-docs.yml` then pushes the guarded snapshot commit "
-            "(docs/mobkit/** and docs/docs.json only) straight to main.\n"
+            "`publish-meta-docs.yml` then pushes the guarded snapshot commit "
+            "(docs/meta/** and docs/docs.json only) straight to main.\n"
         )
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repository", required=True, help="owner/name of this repository")
-    parser.add_argument("--source", required=True, help="MobKit source being mirrored, e.g. main@abc123def456")
+    parser.add_argument("--source", required=True, help="Meta source being mirrored, e.g. main@abc123def456")
     parser.add_argument("--branch", required=True, help="publication branch that was pushed")
     parser.add_argument("--run-url", required=True, help="URL of the failed workflow run")
     parser.add_argument(

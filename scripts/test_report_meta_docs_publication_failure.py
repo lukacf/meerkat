@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tests for the MobKit docs publication failure reporter.
+"""Tests for the Meta docs publication failure reporter.
 
 The reporter shells out to `gh`; these tests put a recording fake `gh` first on
 PATH so the issue upsert and the recovery text are exercised end to end.
@@ -17,8 +17,8 @@ import unittest
 from pathlib import Path
 
 
-SCRIPT = Path(__file__).with_name("report-mobkit-docs-publication-failure.py")
-SPEC = importlib.util.spec_from_file_location("report_mobkit_docs_publication_failure", SCRIPT)
+SCRIPT = Path(__file__).with_name("report-meta-docs-publication-failure.py")
+SPEC = importlib.util.spec_from_file_location("report_meta_docs_publication_failure", SCRIPT)
 assert SPEC and SPEC.loader
 report = importlib.util.module_from_spec(SPEC)
 # Dataclasses resolve postponed annotations through sys.modules; register
@@ -28,7 +28,7 @@ SPEC.loader.exec_module(report)
 
 REPOSITORY = "lukacf/meerkat"
 SOURCE = "main@1234567890ab"
-BRANCH = "codex/publish-mobkit-docs-1234567890ab-777"
+BRANCH = "codex/publish-meta-docs-1234567890ab-777"
 RUN_URL = "https://github.com/lukacf/meerkat/actions/runs/777"
 PULL_REQUEST_URL = "https://github.com/lukacf/meerkat/pull/5"
 
@@ -59,7 +59,7 @@ esac
 """
 
 
-class ReportMobKitDocsPublicationFailureTests(unittest.TestCase):
+class ReportMetaDocsPublicationFailureTests(unittest.TestCase):
     def setUp(self) -> None:
         self._temp = tempfile.TemporaryDirectory()
         self.addCleanup(self._temp.cleanup)
@@ -126,7 +126,7 @@ class ReportMobKitDocsPublicationFailureTests(unittest.TestCase):
         self.assertIn(f"Pushed branch: `{BRANCH}`", summary)
         self.assertIn(
             f"gh pr create --repo {REPOSITORY} --base main --head {BRANCH} "
-            f'--title "docs: mirror MobKit {SOURCE}"',
+            f'--title "docs: mirror Meta {SOURCE}"',
             summary,
         )
         self.assertIn(f"gh pr merge --repo {REPOSITORY} --auto --merge {BRANCH}", summary)

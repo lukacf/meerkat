@@ -235,7 +235,7 @@
         ]
       },
       {
-        "product": "MobKit",
+        "product": "Meta",
         "description": "Application and orchestration layer for Meerkat",
         "icon": "/mobkit/logo.png",
         "tabs": [

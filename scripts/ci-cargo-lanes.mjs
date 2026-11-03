@@ -479,6 +479,7 @@ export const TOOLKIT_MOBKIT_KNOWN_REDS = [
   ["installed_host::acquisition::continuation::owner_tests::cold_source_tests::custody_recovery_wake_tests::terminal_census_wakes_existing_completion_after_native_source_restore", "census-wake-timeout"],
   ["private_originals::service_approved_input::attachment::tests::native::actual_public_attachment_loads_catalog_calls_mapped_read_and_completes_exact_b_once_with_cancellation", INTERMITTENT, { intermittent: true }],
   ["private_originals::governed_submit::tests::first_input_tests::helper_entry_native::fresh_helper_reset_catalog_calls_require_explicit_successor_parent", INTERMITTENT, { intermittent: true }],
+  ["private_originals::governed_submit::tests::closed_native_owner_does_not_withdraw_unresolved_candidate", INTERMITTENT, { intermittent: true }],
 ].map(([test, anchor, flags]) => ({ test, anchor, intermittent: flags?.intermittent === true }));
 
 export const FEATURE_UNIT_SUITES = [

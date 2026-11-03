@@ -213,11 +213,14 @@ def verify_once(
     downloader: Callable[[str], bytes] = _download_artifact,
     crate_sha256: dict[str, str] | None = None,
     only_crates: bool = False,
-) -> None:
+) -> list[str]:
+    """Check the release on each registry; return the registries checked."""
     failures: list[str] = []
+    checked: list[str] = []
     for registry, url, validator in _registry_checks(version, crate_sha256):
         if only_crates and registry not in {CRATE_REGISTRIES[name] for name in (crate_sha256 or {})}:
             continue
+        checked.append(registry)
         try:
             artifacts = validator(reader(url), version)
             for artifact in artifacts:
@@ -239,8 +242,33 @@ def verify_once(
             ValueError,
         ) as error:
             failures.append(f"{registry}: {error}")
+    if not checked:
+        raise RegistryVerificationError("no registry was checked")
     if failures:
         raise RegistryVerificationError("; ".join(failures))
+    return checked
+
+
+def success_line(version: str, checked: list[str], *, only_crates: bool = False) -> str:
+    """The success line, naming exactly the registries verify_once checked.
+
+    `--only-crates` checks crates.io alone, so its line names neither PyPI nor
+    npm as verified. It used to claim all three, even while npm answered 404
+    for the version.
+    """
+    crates = [name for name, registry in CRATE_REGISTRIES.items() if registry in checked]
+    parts: list[str] = []
+    if crates:
+        parts.append(f"{' and '.join(crates)} {version} on crates.io")
+    if "PyPI" in checked:
+        parts.append(f"{PYPI_NAME} {version} wheel+sdist on PyPI")
+    if "npm" in checked:
+        parts.append(f"{NPM_NAME} {version} on npm")
+    joined = ", ".join(parts[:-1]) + ", and " + parts[-1] if len(parts) > 2 else " and ".join(parts)
+    line = f"Verified exact registry metadata and checksummed artifacts for {joined}"
+    if only_crates:
+        line += " (--only-crates: PyPI and npm were not checked)"
+    return line
 
 
 def verify_with_retries(
@@ -262,8 +290,8 @@ def verify_with_retries(
     last_error: RegistryVerificationError | None = None
     for attempt in range(1, attempts + 1):
         try:
-            verify_once(version, reader=reader, downloader=downloader,
-                        crate_sha256=crate_sha256, only_crates=only_crates)
+            checked = verify_once(version, reader=reader, downloader=downloader,
+                                  crate_sha256=crate_sha256, only_crates=only_crates)
         except RegistryVerificationError as error:
             last_error = error
             if attempt == attempts:
@@ -273,11 +301,7 @@ def verify_with_retries(
             )
             sleeper(delay_seconds)
         else:
-            print(
-                f"Verified exact registry metadata and checksummed artifacts for "
-                f"{CRATE_NAME} and {EXTENSION_CRATE_NAME} {version} on crates.io, {PYPI_NAME} {version} "
-                f"wheel+sdist on PyPI, and {NPM_NAME} {version} on npm"
-            )
+            print(success_line(version, checked, only_crates=only_crates))
             return
 
     assert last_error is not None

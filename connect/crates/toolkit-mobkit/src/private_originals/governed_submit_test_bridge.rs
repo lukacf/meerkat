@@ -168,7 +168,7 @@ impl ObservedBridge {
                         .helper_admission_change
                         .lock()
                         .unwrap()
-                        .replace(association)
+                        .replace((association, NATIVE_CONTROLLER_ADMISSION_READS))
                         .is_none()
                 );
                 Some(AdmissionChangeArm(self.fault.clone()))
@@ -290,9 +290,19 @@ impl Drop for AdmissionChangeArm {
     }
 }
 
+/// The controller-admission reads of one native admission. Since 0.9.10 a
+/// read that met an owner change which has completed is made once more in
+/// place (`LocalGrantAuthority::observe_controller_admission` in
+/// meerkat-authorization's grants/mod.rs), and the answer of that second read
+/// stands: native admission answers `PolicyChanged` for a change met by both
+/// reads, as under back-to-back changes.
+const NATIVE_CONTROLLER_ADMISSION_READS: usize = 2;
+
 /// Forward the real policy unchanged, then invalidate its enclosing native
-/// admission observation. The earlier source/grant lookups remain unblocked.
-/// Native detects the changed stamp and produces the actual typed refusal.
+/// admission observation, and the one in-place re-read of it too, so that
+/// the admission meets back-to-back changes. The earlier source/grant
+/// lookups remain unblocked. Native detects the changed stamp and produces
+/// the actual typed refusal.
 pub(super) struct AdmissionChangingOwner {
     pub inner: Arc<dyn OperationPolicyOwner>,
     pub fault: Arc<DeliveryFault>,
@@ -310,11 +320,15 @@ impl OperationPolicyOwner for AdmissionChangingOwner {
             .authorize_controller_admission(association, facts, now_ms)?;
         let selected = {
             let mut selected = self.fault.helper_admission_change.lock().unwrap();
-            if selected.as_ref() == Some(association) {
-                selected.take();
-                true
-            } else {
-                false
+            match selected.as_mut() {
+                Some((armed, reads)) if *armed == *association => {
+                    *reads -= 1;
+                    if *reads == 0 {
+                        selected.take();
+                    }
+                    true
+                }
+                _ => false,
             }
         };
         if selected {

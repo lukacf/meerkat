@@ -35,6 +35,23 @@ them.
 
 ## [Unreleased]
 
+### Fixed
+
+- `meerkat-mob`: a Dormant member reads with its peer id and transport key in
+  every roster and member-list read (`MobHandle::get_member`, `roster`,
+  `list_all_members`, `list_members` and the member lists built on it, the
+  `mob_list_members` tool's included), as a live member does. A member seated
+  Dormant while its mob ran (a fresh `seat_dormant_members` seat, or the next
+  incarnation of a rotation or a same-session respawn) read with neither
+  until its first wake, although MobMachine recorded its endpoint at the
+  seat, while a member restored Dormant at a restart, or released after it
+  ran, read with them. A member seated and not materialized now reads with
+  the peer id and transport key of the endpoint MobMachine records for it,
+  the endpoint `member_peer_endpoint` answers and its wake presents, and the
+  read wakes nothing. A member on network comms has no recorded endpoint
+  until its first wake registers one, and reads with none until then, as
+  before.
+
 ## [0.9.9] - 2026-11-03
 
 ### Highlights

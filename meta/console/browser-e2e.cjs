@@ -108,10 +108,15 @@ async function clickSend(page) {
   await send.click();
 }
 
-async function clickLoadOlderHistory(pane) {
+// `olderPageRequested`, when given, reads the server's requests and says
+// whether the older page was asked for already: by the pane's own load at
+// the top, or by an earlier attempt's scroll. A click then would ask for the
+// page after it.
+async function clickLoadOlderHistory(pane, { olderPageRequested = () => false } = {}) {
   let lastError;
   for (let attempt = 0; attempt < 3; attempt += 1) {
     try {
+      if (olderPageRequested()) return;
       const button = pane.getByRole("button", { name: "Load older history" });
       await button.waitFor({ state: "visible", timeout: 30_000 });
       await button.scrollIntoViewIfNeeded();
@@ -131,7 +136,9 @@ async function clickLoadOlderHistory(pane) {
         // auto-loads there), which renames or removes this button. That load
         // was requested after the pane left the live edge, so it is the
         // demand the caller wants; clicking again is only needed otherwise.
-        if (!(await button.isVisible()) || !(await button.isEnabled())) return;
+        // A load that already landed has restored the button, so only the
+        // server's requests tell it from no load at all.
+        if (olderPageRequested() || !(await button.isVisible()) || !(await button.isEnabled())) return;
       }
       await button.evaluate((node) => node.click());
       return;
@@ -2777,7 +2784,12 @@ async function runChatPaneOlderHistoryAfterTodayPrefillProof() {
     assert.equal(await countLine(500), 0, "no frame older than the pre-filled ones before Load older history");
     assert.equal(identityRequests().filter((payload) => payload.params?.before !== undefined).length, 0, "no older page before Load older history");
 
-    await clickLoadOlderHistory(pane);
+    // One demand for the older page: the scroll to the button can make the
+    // pane ask for it itself, and a click after that load landed would ask
+    // for the page after it.
+    await clickLoadOlderHistory(pane, {
+      olderPageRequested: () => identityRequests().some((payload) => payload.params?.before !== undefined),
+    });
     await eventually(async () => { await revealAll(); return (await countLine(500)) === 1; }, "the older page lands next to the pre-filled frames", 20_000);
     const older = identityRequests().filter((payload) => payload.params?.before !== undefined);
     assert(older.length >= 1, `expected an older page request; saw ${JSON.stringify(identityRequests())}`);

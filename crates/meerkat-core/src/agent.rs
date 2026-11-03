@@ -7591,6 +7591,19 @@ mod governed_operation_tests {
             }))
         }
 
+        /// The plain unreviewed step runs its operation: this fixture's
+        /// exclusion is always free.
+        fn run_if_current_within(
+            &self,
+            _binding: &PreparedAuthorizationBinding,
+            _prepared: Option<&crate::authorization::OperationValidity>,
+            _further: &(dyn std::any::Any + Send + Sync),
+            operation: &mut dyn FnMut(),
+        ) -> Result<(), OperationAuthorizationError> {
+            operation();
+            Ok(())
+        }
+
         fn review_operation_context(
             &self,
             _binding: &PreparedAuthorizationBinding,
@@ -8682,6 +8695,202 @@ mod governed_operation_tests {
                 before + 1,
                 "{row}: the body ran"
             );
+        }
+    }
+
+    /// How [`EnteringLeaf`] reaches the effects it counts.
+    #[derive(Clone, Copy)]
+    enum LeafEffects {
+        /// Its one effect entry, immediately before its body, as a
+        /// `ConsumesAtEntry` leaf makes it.
+        EntryThenBody,
+        /// A body under each of two entries: an unreviewed entry spends
+        /// nothing, so the leaf may enter again.
+        TwoEntries,
+        /// A plain governed step that runs its operation, then the entry of
+        /// its body.
+        PlainStepThenEntry,
+    }
+
+    /// A leaf that enters its effects through the dispatch context it was
+    /// handed, counting the calls that reached it and the effects that ran.
+    struct EnteringLeaf {
+        effects: LeafEffects,
+        invoked: std::sync::atomic::AtomicUsize,
+        ran: std::sync::atomic::AtomicUsize,
+    }
+
+    impl EnteringLeaf {
+        fn new(effects: LeafEffects) -> Arc<Self> {
+            Arc::new(Self {
+                effects,
+                invoked: std::sync::atomic::AtomicUsize::new(0),
+                ran: std::sync::atomic::AtomicUsize::new(0),
+            })
+        }
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl AgentToolDispatcher for EnteringLeaf {
+        fn tools(&self) -> Arc<[Arc<crate::types::ToolDef>]> {
+            SourceKindDispatcher::default().tools()
+        }
+
+        fn review_entry_support(
+            &self,
+            _tool_name: &str,
+        ) -> crate::approval::review::ReviewEntrySupport {
+            crate::approval::review::ReviewEntrySupport::ConsumesAtEntry
+        }
+
+        async fn dispatch(
+            &self,
+            call: ToolCallView<'_>,
+        ) -> Result<crate::ops::ToolDispatchOutcome, crate::ToolError> {
+            self.dispatch_with_context(call, &ToolDispatchContext::default())
+                .await
+        }
+
+        async fn dispatch_with_context(
+            &self,
+            call: ToolCallView<'_>,
+            context: &ToolDispatchContext,
+        ) -> Result<crate::ops::ToolDispatchOutcome, crate::ToolError> {
+            self.invoked.fetch_add(1, Ordering::SeqCst);
+            let entries = match self.effects {
+                LeafEffects::EntryThenBody => 1,
+                LeafEffects::TwoEntries => 2,
+                LeafEffects::PlainStepThenEntry => {
+                    context
+                        .governed_operation(call)?
+                        .run_if_current_within(&(), &mut || {
+                            self.ran.fetch_add(1, Ordering::SeqCst);
+                        })?;
+                    1
+                }
+            };
+            for _ in 0..entries {
+                context.enter_reviewed_effect(call, None)?;
+                self.ran.fetch_add(1, Ordering::SeqCst);
+            }
+            Ok(crate::types::ToolResult::new(call.id.to_string(), "ran".to_string(), false).into())
+        }
+    }
+
+    /// `leaf` as a fenced dispatch's root: itself, or behind the call-level
+    /// execution policy gate, reached through its resolved entry point
+    /// (`Some(true)`) or through an adapter that lowers the call
+    /// (`Some(false)`).
+    fn leaf_root(leaf: &Arc<EnteringLeaf>, gate: Option<bool>) -> Arc<dyn AgentToolDispatcher> {
+        let leaf = Arc::clone(leaf) as Arc<dyn AgentToolDispatcher>;
+        let Some(resolved) = gate else {
+            return leaf;
+        };
+        let gated: Arc<dyn AgentToolDispatcher> =
+            Arc::new(crate::ExecutionPolicyGatedDispatcher::new(
+                leaf,
+                crate::ToolExecutionPolicy::unrestricted(),
+            ));
+        if resolved {
+            gated
+        } else {
+            Arc::new(Lowering(gated))
+        }
+    }
+
+    /// The effect entry is the boundary of the body it guards: a refusal it
+    /// meets while no effect of the call entered is certified not
+    /// dispatched, wherever the owner change that refused it landed. Here
+    /// the change begins right after the last check the fenced dispatch
+    /// (and the call-level execution policy gate, on both of its paths)
+    /// staged before handing the call on, so the leaf's own effect entry
+    /// meets it: the leaf was invoked, its body never ran, and the model
+    /// reads `tool_invoked: false`, as it does when the change lands before
+    /// the hand-off.
+    #[tokio::test(start_paused = true)]
+    async fn an_effect_entry_refusal_before_any_effect_is_certified_not_dispatched() {
+        // The current checks before the leaf's entry: the prepared entry's
+        // one and the root staging's two, then the gate staging's two.
+        for (row, gate, checks_before_entry) in [
+            ("fenced entry", None, 3),
+            ("policy gate (resolved)", Some(true), 5),
+            ("policy gate (lowered)", Some(false), 5),
+        ] {
+            let work = ChurnWork::held(
+                crate::authorization::OperationReviewTier::R1,
+                Some(checks_before_entry),
+            );
+            let leaf = EnteringLeaf::new(LeafEffects::EntryThenBody);
+            let root = leaf_root(&leaf, gate);
+            let result = fenced(&root, "read_file", &churn_context(&work)).await;
+            let (refusal, data) = refusal_and_data(&result).expect(row);
+            assert_eq!(
+                refusal.kind(),
+                OperationRefusalKind::ReprepareRequired,
+                "{row}"
+            );
+            assert_eq!(
+                refusal.dispatch(),
+                crate::authorization::RefusalDispatch::NotDispatched,
+                "{row}: met at the effect entry, before any effect"
+            );
+            assert_eq!(
+                data,
+                serde_json::json!({"kind": "reprepare_required", "tool_invoked": false}),
+                "{row}"
+            );
+            assert_eq!(
+                leaf.invoked.load(Ordering::SeqCst),
+                1,
+                "{row}: the fenced dispatch handed the call on"
+            );
+            assert_eq!(leaf.ran.load(Ordering::SeqCst), 0, "{row}: no body ran");
+        }
+    }
+
+    /// Once an effect of the call entered, a later refusal of its effect
+    /// entry makes no claim (`tool_invoked: "unknown"`): an unreviewed leaf
+    /// may enter twice, since an unreviewed entry spends nothing, and a leaf
+    /// may run a plain governed step before its entry. Either way an effect
+    /// ran before the refused entry.
+    #[tokio::test(start_paused = true)]
+    async fn an_effect_entry_refusal_after_an_effect_makes_no_claim() {
+        // The change begins right after the last current check of the first
+        // effect: the first entry's final check (the fifth), or the plain
+        // step's own check (the fourth).
+        for (row, effects, checks_before_refused_entry) in [
+            ("a second entry", LeafEffects::TwoEntries, 5),
+            (
+                "an entry after a plain step",
+                LeafEffects::PlainStepThenEntry,
+                4,
+            ),
+        ] {
+            let work = ChurnWork::held(
+                crate::authorization::OperationReviewTier::R1,
+                Some(checks_before_refused_entry),
+            );
+            let leaf = EnteringLeaf::new(effects);
+            let root = leaf_root(&leaf, None);
+            let result = fenced(&root, "read_file", &churn_context(&work)).await;
+            let (refusal, data) = refusal_and_data(&result).expect(row);
+            assert_eq!(
+                refusal.kind(),
+                OperationRefusalKind::ReprepareRequired,
+                "{row}"
+            );
+            assert_eq!(
+                refusal.dispatch(),
+                crate::authorization::RefusalDispatch::Unknown,
+                "{row}: an effect entered before the refused entry"
+            );
+            assert_eq!(
+                data,
+                serde_json::json!({"kind": "reprepare_required", "tool_invoked": "unknown"}),
+                "{row}"
+            );
+            assert_eq!(leaf.ran.load(Ordering::SeqCst), 1, "{row}: one effect ran");
         }
     }
 }

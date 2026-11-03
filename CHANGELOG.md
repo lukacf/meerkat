@@ -35,6 +35,14 @@ them.
 
 ## [Unreleased]
 
+### Fixed
+
+- `meerkat-store`: `FileApprovalStore` now creates its files private (0600)
+  on Unix regardless of the process umask, so consumers that verify private
+  decision files no longer refuse stores created under the common 022/002
+  umask. A store file an older version left readable by others becomes
+  private on its next commit.
+
 ## [0.9.9] - 2026-11-03
 
 ### Highlights

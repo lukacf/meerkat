@@ -1089,15 +1089,22 @@ impl GovernedDispatchOperation {
         check
             .require_unreviewed_entry()
             .map_err(crate::ToolError::from)?;
-        self.work
-            .authorization()
-            .run_if_current_within(
-                check.binding(),
-                check.validity().as_ref(),
-                further,
-                operation,
-            )
-            .map_err(crate::ToolError::from)
+        let mut ran = false;
+        let answer = self.work.authorization().run_if_current_within(
+            check.binding(),
+            check.validity().as_ref(),
+            further,
+            &mut || {
+                ran = true;
+                operation();
+            },
+        );
+        // An effect of this dispatch entered: a refusal of its effect entry
+        // from now on makes no not-dispatched claim.
+        if ran && let Some(entry) = self.context.review_entry.as_ref() {
+            entry.record_effect_entered();
+        }
+        answer.map_err(crate::ToolError::from)
     }
 
     /// [`Self::run_if_current_within`], waiting out what refused it to
@@ -2124,6 +2131,18 @@ impl ToolDispatchContext {
     /// `Used` projection is delivered after dispatch returns. A second call
     /// for the same operation refuses. R1 and ungoverned calls behave exactly
     /// like `observe_tool_entry`. Use the returned context when present.
+    ///
+    /// The entry is the boundary of the body it guards. An operation refusal
+    /// it meets in a fenced dispatch's context while no effect of the
+    /// dispatch entered (no earlier entry passed, no governed step ran its
+    /// operation) is certified
+    /// [`crate::authorization::RefusalDispatch::NotDispatched`], as the
+    /// fenced dispatch certifies one it meets before invoking the
+    /// dispatcher: the model reads `tool_invoked: false` wherever the owner
+    /// change that refused the call landed. A later entry's refusal, and one
+    /// met in a context outside a fenced dispatch, makes no claim. A leaf
+    /// that ran an effect of its own before this entry forwards its refusal
+    /// as `OperationRefused::new(refusal.kind())`.
     pub fn enter_reviewed_effect(
         &self,
         call: ToolCallView<'_>,
@@ -2145,12 +2164,13 @@ impl ToolDispatchContext {
         plan: Option<&crate::ResolvedToolExecutionPlan>,
     ) -> Result<(Option<Self>, crate::approval::review::ReviewedEntryCustody), crate::ToolError>
     {
-        let entering = self.observe_tool_entry_at(
+        self.observe_tool_entry_at(
             call,
             plan,
             crate::authorization::OperationEntryBoundary::ToolEffect,
-        )?;
-        self.spend_review_entry(entering)
+        )
+        .and_then(|entering| self.spend_review_entry(entering))
+        .map_err(|error| self.effect_entry_refusal(error))
     }
 
     /// [`Self::enter_reviewed_effect_held`] whose staging waits out an owner
@@ -2164,15 +2184,33 @@ impl ToolDispatchContext {
         plan: Option<&crate::ResolvedToolExecutionPlan>,
     ) -> Result<(Option<Self>, crate::approval::review::ReviewedEntryCustody), crate::ToolError>
     {
-        let entering = self
+        let staged = self
             .stage_tool_entry_after_owner_change(
                 call,
                 plan,
                 crate::authorization::OperationEntryBoundary::ToolEffect,
             )
             .await
-            .map_err(crate::approval::review::ReviewAdmissionRefusal::into_settled)?;
-        self.spend_review_entry(entering)
+            .map_err(crate::approval::review::ReviewAdmissionRefusal::into_settled);
+        staged
+            .and_then(|entering| self.spend_review_entry(entering))
+            .map_err(|error| self.effect_entry_refusal(error))
+    }
+
+    /// A failure of this dispatch's effect entry (its staging, final check,
+    /// review check point or spend), met before the body the entry guards.
+    /// While no effect of the dispatch entered, an operation refusal is
+    /// certified [`crate::authorization::RefusalDispatch::NotDispatched`]:
+    /// the same answer the fenced dispatch gives a refusal it meets before
+    /// invoking the dispatcher, whichever of them an owner change reaches
+    /// first. Once an effect entered, and in a context without the dispatch's
+    /// review entry (one that did not come through a fenced dispatch), the
+    /// failure is returned unchanged, with no claim.
+    fn effect_entry_refusal(&self, error: crate::ToolError) -> crate::ToolError {
+        match self.review_entry.as_ref() {
+            Some(entry) if !entry.effect_entered() => error.not_dispatched(),
+            _ => error,
+        }
     }
 
     /// Spend this dispatch's retained review once for the decision staging
@@ -2768,10 +2806,12 @@ pub trait AgentOwnedRelease: Send + Sync {
 /// An operation refusal certified
 /// [`crate::authorization::RefusalDispatch::NotDispatched`] speaks only for
 /// the tool code below the core component that certified it (the fenced
-/// dispatch, or the execution policy gate for its inner dispatcher). A
-/// dispatcher layer that runs tool code of its own before delegating to such
-/// a component forwards the refusal as `OperationRefused::new(refusal.kind())`,
-/// which makes no claim.
+/// dispatch, the execution policy gate for its inner dispatcher, or a leaf's
+/// effect entry, [`ToolDispatchContext::enter_reviewed_effect`], for the body
+/// it guards). A dispatcher layer that runs tool code of its own before
+/// delegating to such a component, a leaf that runs an effect before its
+/// effect entry included, forwards the refusal as
+/// `OperationRefused::new(refusal.kind())`, which makes no claim.
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 pub trait AgentToolDispatcher: Send + Sync {
@@ -3427,7 +3467,9 @@ impl<'a> StepOwnerChangeWait<'a> {
 /// [`crate::authorization::RefusalDispatch::NotDispatched`] at this entry's
 /// one boundary (`FencedOutcome`). What the dispatcher returns is
 /// forwarded unchanged: its tool code may have produced an effect before a
-/// later governed step refused.
+/// later governed step refused. A refusal its leaf's effect entry met before
+/// any effect of the call entered comes back already certified by that entry
+/// ([`ToolDispatchContext::enter_reviewed_effect`]).
 ///
 /// A context carrying an observation barrier
 /// ([`ToolDispatchContext::with_observation_barrier`]) awaits it after the
@@ -8253,6 +8295,10 @@ mod governed_operation_tests {
     ///   which has the approval owner it needs.
     /// - A consent attempt's own admission refuses only with review outcomes,
     ///   never an operation refusal, so it has no row.
+    /// - A leaf's effect entry certifies its own refusal met before any
+    ///   effect of the call entered, after the fenced entry invoked the
+    ///   dispatcher, in
+    ///   `an_effect_entry_refusal_before_any_effect_is_certified_not_dispatched`.
     #[tokio::test(start_paused = true)]
     async fn every_pre_invocation_refusal_is_certified_not_dispatched() {
         let mut rows: Vec<CertifiedRow> = Vec::new();

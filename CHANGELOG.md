@@ -77,6 +77,20 @@ them.
   names a provider, and an account with no route of the model's provider
   (every account but a Copilot one), keep the mismatch error.
 
+- Behaviour-only (not measured by the gate): `meerkat`: a session that
+  `AgentFactory` builds on a zero-config GitHub Copilot route
+  (`global:copilot_openai`, `global:copilot_anthropic` or
+  `global:copilot_gemini`) carries the route's account,
+  `global:account:github_copilot`, as its credential identity
+  (`SessionLlmRequestPolicy::credential_identity`), and runs with
+  provider-native tools off (`ProviderNativeToolPolicy::DisableAll`), as on
+  an explicit Copilot route. A session on a route of a
+  `[realm.<realm>.copilot]` account (see Added) does the same with that
+  account. In 0.9.9 a zero-config route's session carried the binding
+  itself as its credential identity
+  (`AuthCredentialIdentity::from_auth_binding`) and ran with provider-native
+  tools on (`ProviderNativeToolPolicy::Inherit`). See Changed.
+
 ### Added
 
 - GitHub Copilot configured once: `[realm.<realm>.copilot]` states a Copilot

@@ -353,16 +353,24 @@ async fn class_resource_requires_exact_native_admission_and_never_selects_helper
         machine.unregister_session(session).await.unwrap();
     }
     drop(pending);
-    let handle = meerkat_mob::MobBuilder::new(
-        phase.definition().clone(),
-        meerkat_mob::MobStorage::in_memory(),
-    )
-    .with_session_service(Arc::new(service))
-    .with_runtime_adapter(machine)
-    .with_member_runtime_registration_hook(hook.clone())
-    .create()
-    .await
-    .unwrap();
+    // The compiler's historical data fixture names a `research` skill that it
+    // never defines, a non-executable placeholder. Native mob construction
+    // resolves every profile's skill references, so this control defines that
+    // one skill; the compiled profiles, members and resources are unchanged.
+    let mut definition = phase.definition().clone();
+    definition.skills.insert(
+        "research".into(),
+        meerkat_mob::definition::SkillSource::Inline {
+            content: "Research placeholder for the resource class control.".into(),
+        },
+    );
+    let handle = meerkat_mob::MobBuilder::new(definition, meerkat_mob::MobStorage::in_memory())
+        .with_session_service(Arc::new(service))
+        .with_runtime_adapter(machine)
+        .with_member_runtime_registration_hook(hook.clone())
+        .create()
+        .await
+        .unwrap();
     let checked = std::panic::AssertUnwindSafe(async {
         for name in ["same-profile-not-admitted", "project-first"] {
             assert!(

@@ -4101,6 +4101,12 @@ them.
   grant gate no grant could honour: the create succeeds, and the refused
   build is only logged.
 
+- Meerkat Connect, which this repository builds but releases on its own
+  schedule: CI runs its native-host unit suite (`toolkit-mobkit` with
+  `native-host`) with its known failing tests excluded by name;
+  `connect/crates/toolkit-mobkit/NATIVE-HOST-TEST-DEBT.md` lists each one
+  with its class and owner.
+
 ## [0.9.8] - 2026-10-30
 
 ### Breaking

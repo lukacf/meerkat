@@ -2904,6 +2904,15 @@ them.
   replace a live mob's binding admits a later resume of the same store in
   the same process.
 
+- `meerkat-sandbox`: macOS confinement now explicitly denies process
+  information about processes outside the confined child's sandbox, so a
+  confined shell, command hook, stdio MCP server or stdio skill source
+  cannot read another process's arguments or environment on macOS versions
+  where the default deny does not cover that read. The Seatbelt profile
+  denies `process-info*` before it allows it for the child's own sandbox,
+  and the later matching rule wins, so the child's own processes stay
+  readable.
+
 - `meerkat-machine-schema`, `meerkat-mob`: the mob machine's forced destroy
   (`DestroyFromAny`) clears every member fact the mob destroy (`DestroyMob`)
   clears, so both leave the same state. It now drops every spawn ladder: a

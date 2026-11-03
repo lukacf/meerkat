@@ -1525,10 +1525,26 @@ async fn closed_native_owner_does_not_withdraw_unresolved_candidate() {
         .find(|held| held.reference == reference)
         .cloned()
         .unwrap();
+    let machine = Arc::downgrade(&fixture.machine);
     let cleanup = fixture.shutdown().await;
     drop(fixture);
-    let observed = source.reconcile_original_submission(&reference).await;
     assert!(cleanup.is_ok(), "{cleanup:?}");
+    // Shutdown completion can precede the final cleanup task dropping its
+    // machine clone. Observe this exact owner's end, not scheduler timing.
+    // A reference that survives WAIT is a retention failure, not a retry.
+    tokio::time::timeout(WAIT, async {
+        loop {
+            let live = machine.upgrade();
+            if live.is_none() {
+                break;
+            }
+            drop(live);
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("closed native owner remained retained after clean shutdown");
+    let observed = source.reconcile_original_submission(&reference).await;
     assert!(
         matches!(
             submitted,
@@ -1538,7 +1554,13 @@ async fn closed_native_owner_does_not_withdraw_unresolved_candidate() {
         submission_context(&submitted)
     );
     assert_eq!(inputs, Ok((1, 1)));
-    assert!(matches!(observed, Err(PrivateOriginalError::Unavailable)));
+    assert!(
+        matches!(observed, Err(PrivateOriginalError::Unavailable)),
+        "observed={:?} machine_strong={} unresolved={}",
+        observed.as_ref().map(serde_json::to_value),
+        machine.strong_count(),
+        held.unresolved.lock().unwrap().len()
+    );
     assert_eq!(held.unresolved.lock().unwrap().len(), 1);
     assert!(matches!(
         &*held.unresolved.lock().unwrap()[0].pending.lock().unwrap(),

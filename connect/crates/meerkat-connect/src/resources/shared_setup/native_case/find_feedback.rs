@@ -886,8 +886,10 @@ mod check_tests {
             OperationRefusalKind::Denied,
             OperationRefusalKind::MalformedFacts,
         ] {
-            // The model cannot distinguish these; the final audit must.
-            assert!(canonical_check_refusal(
+            // Core's model payload names the refusal kind (`data.kind`), so the
+            // controlled model never takes these for the one fresh-check
+            // signal. The final audit must still refuse them on its own.
+            assert!(!canonical_check_refusal(
                 &meerkat_core::ops::terminal_tool_outcome_for_error(
                     "b-helper-check",
                     ToolError::AuthorizationRefused {

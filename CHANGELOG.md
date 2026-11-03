@@ -949,7 +949,12 @@ them.
   `ReleaseInputControllerIdle`, `ReleaseInputControllerAttached`,
   `ReleaseInputControllerRunning`, `ReleaseInputControllerRetired` and
   `ReleaseInputControllerStopped`. Every new variant is appended last, so no
-  existing variant's implicit discriminant moves. Every enum named here is
+  existing variant's implicit discriminant moves, except in
+  `MeerkatMachineRuntimeInternalInput` (meerkat-runtime), where
+  `ReplaceToolGrantGate` and `ApplyToolGrantOpenSet` (the scoped tool grant
+  gate's inputs) sit directly before `AbandonDeferredSessionPromotion`, so
+  the implicit discriminants of `AbandonDeferredSessionPromotion` and of the
+  existing variants after it move. Every enum named here is
   exhaustive, so a downstream exhaustive match needs the new arms, or a
   wildcard arm; a `MeerkatMachineState` literal that ends with
   `..Default::default()` keeps compiling.
@@ -4225,6 +4230,12 @@ them.
   its first turn builds the session, so it does not report a scoped tool
   grant gate no grant could honour: the create succeeds, and the refused
   build is only logged.
+
+- Meerkat Connect, which this repository builds but releases on its own
+  schedule: CI runs its native-host unit suite (`toolkit-mobkit` with
+  `native-host`) with its known failing tests excluded by name;
+  `connect/crates/toolkit-mobkit/NATIVE-HOST-TEST-DEBT.md` lists each one
+  with its class and owner.
 
 ## [0.9.8] - 2026-10-30
 

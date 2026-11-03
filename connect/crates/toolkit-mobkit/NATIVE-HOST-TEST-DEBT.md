@@ -126,9 +126,3 @@ excludes them without requiring them to fail.
 - `private_originals::governed_submit::tests::first_input_tests::helper_entry_native::fresh_helper_reset_catalog_calls_require_explicit_successor_parent`:
   a single claim attempt right after the run settles; retry it within a
   deadline.
-- `private_originals::governed_submit::tests::closed_native_owner_does_not_withdraw_unresolved_candidate`:
-  after the fixture's shutdown, a reconcile of the retained reference
-  answered something other than `Unavailable` on its first CI run
-  (`governed_submit_tests.rs:1485`), while local runs went 6 of 6 green
-  (the CI-exact suite run and five isolated runs); the later asserts (one
-  unresolved, still `Pending`) never ran.

@@ -26,9 +26,7 @@ where the test expects the recovery to go on. One instrumented run with a
 diagnostic before each check in `cold_setup_admission.rs` and
 `custody_recovery/cold.rs` names the refusing step; then fix that step.
 
-- `installed_host::acquisition::continuation::owner_tests::cold_source_tests::cold_setup_a_first_and_pending_continuation_recover_without_resubmitting_a`
 - `installed_host::acquisition::continuation::owner_tests::cold_source_tests::cold_setup_a_historical_custody_cannot_validate_another_run_or_submission`
-- `installed_host::acquisition::continuation::owner_tests::cold_source_tests::cold_setup_a_targeted_selection_restores_its_exact_operation_projection`
 - `installed_host::acquisition::continuation::owner_tests::cold_source_tests::durable_owner_reopen_drains_same_pending_completion_after_source_recovery`
 - `private_originals::governed_submit::tests::first_input_tests::approved_fixture::custody_recovery_helper_cold_tests::cold_pending_helper_settles_retired_input_without_resubmission`
 - `private_originals::governed_submit::tests::first_input_tests::approved_fixture::custody_recovery_helper_cold_tests::cold_promoted_helper_restores_exact_input_and_refuses_tampered_or_legacy_bytes`
@@ -67,7 +65,6 @@ crate's own code. The fix for each is the expectation to update.
 |---|---|
 | `installed_host::tests::direct_rust_access_is_fenced_by_owner_close_or_selection_replacement` | Count the access rows from a baseline taken after `open`, or leave out the `toolkit.application-service-tool-policy` schema as `identity_binding.rs` does. |
 | `installed_host::tests::direct_rust_original_cancellation_is_fenced_and_does_not_revoke_standing_access` | The same. |
-| `installed_host::tests::gateway_identity::native_no_identity_path_refuses_toolkit_ready_before_input_or_publication` | The same, in `gateway_identity.rs`. |
 | `installed_host::operator_setup::tests::owner_tests::captured_answer_loss_during_child_admission_prevents_native_child_write` | Expect `Err(PrivateOriginalError::Denied)` and the row's `issuance.state == "native_refused"`. |
 | `private_originals::service_approved_input::admission_tests::live_attachment_preparation_reopens_cancelled_task_and_never_submits_b` | Build the control with `prepare_service_mcp_control`, as `attachment_entry_tests.rs` does. |
 | `private_originals::service_approved_input::admission_tests::cold_service_tests::cold_b_requires_complete_reserved_selection_and_retained_input` | Write the raw `RecordData`. |
@@ -78,7 +75,6 @@ crate's own code. The fix for each is the expectation to update.
 | `private_originals::service_approved_input::admission_tests::service_recovery_tests::operator_recovery_preserves_new_publication_and_other_approval_child` | Check only the published parent. Open question: whether `can_recover` should read `parent_state`. |
 | `private_originals::service_grants::mcp::tests::whole_set_replays_without_reissue_and_matches_only_its_access_bound_source` | Expect `Unavailable` for the unknown server and keep `Denied` for the known one. |
 | `private_originals::governed_submit::tests::first_input_tests::acquisition_approved::reviewed_original_runs_enrolled_acquisition_and_one_controller_only_helper` | Assert the enrolled form (revision 3, version 5), not equality with the held snapshot. |
-| `original_ingress::tests::native_original_disposition_waits_for_held_collection_before_reading_open_row` | Expect `PolicyUnavailable` while the collection is held and `Active` after its release; if waiting is the contract, make the product wait instead. |
 
 ## Decision source unknown field
 
@@ -92,16 +88,6 @@ make the variant `StandingRuleDecision {}` and update its match in
 `meerkat-connect`; the wire form does not change.
 
 - `private_host::tests::service_parent_controls::service_result_and_retire_cannot_supply_an_authorization_answer`
-
-## Double model request
-
-Status: open. Kind: not yet determined.
-
-The reconstruction sends a second model request where the test expects one,
-which may be a second run. One solo run that records where each request
-comes from decides the class before any fix.
-
-- `installed_host::operator_setup::tests::target_tests::explicit_correlated_targets_use_one_review_source_and_real_first_input`
 
 ## Intermittent races
 

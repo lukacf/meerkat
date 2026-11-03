@@ -448,9 +448,7 @@ const TOOL_RESULT = "tool-result-payload";
 const STALE = "stale-expectations";
 const INTERMITTENT = "intermittent-races";
 export const TOOLKIT_MOBKIT_KNOWN_REDS = [
-  ["installed_host::acquisition::continuation::owner_tests::cold_source_tests::cold_setup_a_first_and_pending_continuation_recover_without_resubmitting_a", COLD_RESTORE],
   ["installed_host::acquisition::continuation::owner_tests::cold_source_tests::cold_setup_a_historical_custody_cannot_validate_another_run_or_submission", COLD_RESTORE],
-  ["installed_host::acquisition::continuation::owner_tests::cold_source_tests::cold_setup_a_targeted_selection_restores_its_exact_operation_projection", COLD_RESTORE],
   ["installed_host::acquisition::continuation::owner_tests::cold_source_tests::durable_owner_reopen_drains_same_pending_completion_after_source_recovery", COLD_RESTORE],
   ["private_originals::governed_submit::tests::first_input_tests::approved_fixture::custody_recovery_helper_cold_tests::cold_pending_helper_settles_retired_input_without_resubmission", COLD_RESTORE],
   ["private_originals::governed_submit::tests::first_input_tests::approved_fixture::custody_recovery_helper_cold_tests::cold_promoted_helper_restores_exact_input_and_refuses_tampered_or_legacy_bytes", COLD_RESTORE],
@@ -462,7 +460,6 @@ export const TOOLKIT_MOBKIT_KNOWN_REDS = [
   ["installed_host::acquisition::enrollment::tests::production_leaves_reach_actual_bound_owner_but_not_missing_native_continuation", "interaction-lineage"],
   ["installed_host::tests::direct_rust_access_is_fenced_by_owner_close_or_selection_replacement", STALE],
   ["installed_host::tests::direct_rust_original_cancellation_is_fenced_and_does_not_revoke_standing_access", STALE],
-  ["installed_host::tests::gateway_identity::native_no_identity_path_refuses_toolkit_ready_before_input_or_publication", STALE],
   ["installed_host::operator_setup::tests::owner_tests::captured_answer_loss_during_child_admission_prevents_native_child_write", STALE],
   ["private_originals::service_approved_input::admission_tests::live_attachment_preparation_reopens_cancelled_task_and_never_submits_b", STALE],
   ["private_originals::service_approved_input::admission_tests::cold_service_tests::cold_b_requires_complete_reserved_selection_and_retained_input", STALE],
@@ -473,9 +470,7 @@ export const TOOLKIT_MOBKIT_KNOWN_REDS = [
   ["private_originals::service_approved_input::admission_tests::service_recovery_tests::operator_recovery_preserves_new_publication_and_other_approval_child", STALE],
   ["private_originals::service_grants::mcp::tests::whole_set_replays_without_reissue_and_matches_only_its_access_bound_source", STALE],
   ["private_originals::governed_submit::tests::first_input_tests::acquisition_approved::reviewed_original_runs_enrolled_acquisition_and_one_controller_only_helper", STALE],
-  ["original_ingress::tests::native_original_disposition_waits_for_held_collection_before_reading_open_row", STALE],
   ["private_host::tests::service_parent_controls::service_result_and_retire_cannot_supply_an_authorization_answer", "decision-source-unknown-field"],
-  ["installed_host::operator_setup::tests::target_tests::explicit_correlated_targets_use_one_review_source_and_real_first_input", "double-model-request"],
   ["installed_host::acquisition::continuation::owner_tests::cold_source_tests::custody_recovery_wake_tests::terminal_census_wakes_existing_completion_after_native_source_restore", INTERMITTENT, { intermittent: true }],
   ["private_originals::service_approved_input::attachment::tests::native::actual_public_attachment_loads_catalog_calls_mapped_read_and_completes_exact_b_once_with_cancellation", INTERMITTENT, { intermittent: true }],
   ["private_originals::governed_submit::tests::first_input_tests::helper_entry_native::fresh_helper_reset_catalog_calls_require_explicit_successor_parent", INTERMITTENT, { intermittent: true }],

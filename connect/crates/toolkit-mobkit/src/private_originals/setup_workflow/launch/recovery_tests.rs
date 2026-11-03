@@ -341,6 +341,101 @@ async fn canonical_interest_step_observes_stop_and_departure_after_page_read() {
     close(&c, body).await;
 }
 
+/// The waiter restoration the acquisition sweep runs for a selected interest
+/// holds the source writer across its canonical reads. The workflow lead's
+/// first wake arrives in that window: its registration capture is ordered by
+/// the publication, not the source writer, so G wakes while the restoration
+/// holds the writer. The released restoration then refuses its observation,
+/// which the capture made stale, and the same restoration run again
+/// completes. G registers exactly once, with no input and no model request.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn lead_capture_races_a_writer_held_waiter_restoration() {
+    use crate::private_originals::governed_submit::tests::first_input_tests::dedicated::LEAVE_LEAD_DORMANT;
+    use crate::private_originals::planning_source_evidence::WAITER_SOURCE_READ;
+    use meerkat_mobkit::identity_first::ControllerPinSource;
+    let saved = selected_then_close().await;
+    let c = LEAVE_LEAD_DORMANT
+        .scope((), PersistentDedicated::reopen(saved.durable.clone()))
+        .await;
+    let body = AssertUnwindSafe(Box::pin(async {
+        join_recovery_for_idle_restore(&c).await;
+        assert!(
+            c.f.service
+                .live_session_actor_witness(&c.lead_session)
+                .await
+                .is_none(),
+            "the reopen left G Dormant"
+        );
+        let hold = Arc::new((tokio::sync::Notify::new(), tokio::sync::Notify::new()));
+        let member = c.member.clone();
+        let waiter = c.f.original_reference().clone();
+        let restoration = tokio::spawn(WAITER_SOURCE_READ.scope(hold.clone(), async move {
+            member.restore_waiter_source(&waiter).await
+        }));
+        tokio::time::timeout(GUARD, hold.0.notified())
+            .await
+            .expect("the restoration holds the source writer at its canonical read");
+        assert!(
+            c.f.source.owner.try_source_writer().is_err(),
+            "the restoration holds the actual source writer"
+        );
+        let woke = meerkat_core::session_owner_wake::SessionOwnerWakeRegistry::global()
+            .wake(&c.lead_session)
+            .await;
+        assert!(
+            matches!(
+                woke,
+                Some(Ok(
+                    meerkat_core::session_owner_wake::SessionOwnerWakeOutcome::Ready
+                ))
+            ),
+            "G wakes while the restoration holds the writer: {woke:?}"
+        );
+        let registration =
+            c.f.machine
+                .current_session_registration_witness(&c.lead_session)
+                .await
+                .expect("G registered on its own session");
+        // The fixture's pin step for G, at this exact point.
+        let actor = c.f.service.live_actor(&c.lead_session).await.unwrap();
+        let pin = c.f.service.pin_actor(&actor).await.unwrap();
+        meerkat_core::publish_token_lifecycle_acquired_for_identity_within(
+            &c.f.machine.generated_auth_lease_handle(),
+            pin.selection().credential(),
+            &meerkat_core::auth::PersistedTokens::api_key("synthetic-controller-only-fixture"),
+            tokio::time::Instant::now() + GUARD,
+        )
+        .await
+        .unwrap();
+        hold.1.notify_one();
+        let first = tokio::time::timeout(GUARD, restoration)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            first,
+            Err(PrivateOriginalError::Unavailable),
+            "the capture made the restoration's observation stale"
+        );
+        c.member
+            .restore_waiter_source(c.f.original_reference())
+            .await
+            .unwrap();
+        assert_eq!(
+            c.f.machine
+                .current_session_registration_witness(&c.lead_session)
+                .await,
+            Some(registration),
+            "G registered exactly once"
+        );
+        assert_eq!(all_ids(&c).await, saved.ids, "no input");
+        assert_eq!(c.f.model_requests(), 0, "no model request");
+    }))
+    .catch_unwind()
+    .await;
+    close(&c, body).await;
+}
+
 /// After a restart the acquisition sweep's step for a selected interest
 /// wakes the Dormant workflow lead on its own session before it reads G's
 /// capture. The lead's capture changes the publication, so the first step

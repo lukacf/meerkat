@@ -1041,3 +1041,44 @@ async fn cold_restore_refuses_a_stale_owner_entering_its_wake_window() {
     .await;
     close(&c, body).await;
 }
+
+/// The workflow lead's first wake after a restart can arrive while the source
+/// writer is held (the custody worker's cold round or the acquisition sweep's
+/// restores hold it across canonical reads). Its registration capture is
+/// ordered by the publication, not the source writer, so the wake is not
+/// refused: here the fixture's pin step wakes G while the actual source
+/// writer is held. G registers once, and its later custody restoration
+/// reuses that registration.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn lead_wake_under_a_held_source_writer_registers_once() {
+    use crate::private_originals::governed_submit::tests::first_input_tests::dedicated::WAKE_UNDER_SOURCE_WRITER;
+    let saved = admit_then_close().await;
+    let c = WAKE_UNDER_SOURCE_WRITER
+        .scope((), PersistentDedicated::reopen(saved.durable.clone()))
+        .await;
+    let body = AssertUnwindSafe(Box::pin(async {
+        let registration =
+            c.f.machine
+                .current_session_registration_witness(&c.lead_session)
+                .await
+                .expect("the lead woke on its own session");
+        assert_eq!(
+            ids(&c, &c.lead_session).await,
+            saved.ids,
+            "the wake added no input"
+        );
+        assert_eq!(c.f.model_requests(), 0, "the wake made no model request");
+        join_recovery_for_idle_restore(&c).await;
+        c.member.restore_admitted_source().await.unwrap();
+        assert_eq!(
+            c.f.machine
+                .current_session_registration_witness(&c.lead_session)
+                .await,
+            Some(registration),
+            "the lead registered exactly once"
+        );
+    }))
+    .catch_unwind()
+    .await;
+    close(&c, body).await;
+}

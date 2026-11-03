@@ -13,6 +13,13 @@ use meerkat_workgraph::{
 use toolkit_package::{ContentDigest, Revision};
 
 tokio::task_local! {
+    // Same-crate control only: a reopened fixture's pin step wakes the lead
+    // while the actual source writer is held, as the custody worker or the
+    // acquisition sweep can hold it when a restored member first wakes.
+    pub(in crate::private_originals) static WAKE_UNDER_SOURCE_WRITER: ();
+}
+
+tokio::task_local! {
     // Same-crate control only: a reopened fixture skips its pin step and
     // leaves the lead Dormant, so a control can wake it at an exact point.
     pub(in crate::private_originals) static LEAVE_LEAD_DORMANT: ();
@@ -1109,9 +1116,14 @@ impl<
             // session-owner wake for exactly this session, the supported path
             // of a session-keyed live operation. A live member is not woken.
             if service.live_actor(session).await.is_none() {
+                let held = match WAKE_UNDER_SOURCE_WRITER.try_with(|_| ()) {
+                    Ok(()) => Some(source.owner.source_writer().await),
+                    Err(_) => None,
+                };
                 let woke = meerkat_core::session_owner_wake::SessionOwnerWakeRegistry::global()
                     .wake(session)
                     .await;
+                drop(held);
                 assert!(
                     matches!(
                         woke,

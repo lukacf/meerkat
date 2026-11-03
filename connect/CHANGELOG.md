@@ -52,12 +52,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   configured once, by a `[realm.<realm>.copilot]` section, lists the
   account's routes (`copilot_openai`, `copilot_anthropic` and
   `copilot_gemini`) as configured targets, and first-target setup is refused
-  next to the section. The terminal's list of existing targets offers only
-  the targets a session for the requested model runs on, and the chosen
-  target's details show the route that session runs on. Before, such a realm
-  looked unconfigured there, and the list offered each Copilot route for a
-  model of one provider family: choosing `copilot_openai` for an Anthropic
-  model ran the session on `copilot_anthropic`.
+  next to the section. The lists of existing targets, in the terminal and in
+  the private-pipe setup conversation's provider prompt, offer only the
+  targets a session for the requested model runs on, and the chosen target's
+  details show the route that session runs on. Before, such a realm looked
+  unconfigured there, and the lists offered each Copilot route for a model
+  of one provider family: choosing `copilot_openai` for an Anthropic model
+  ran the session on `copilot_anthropic`.
 
 ### Upgrade notes
 

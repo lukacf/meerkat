@@ -6,10 +6,13 @@ use meerkat_authorization_contracts::constraints::ResourceDomain;
 use meerkat_core::{PolicyId, PolicyProviderId, PolicyRevision};
 use meerkat_toolkit::{
     authority::Ceiling,
-    host_lifetime::policy::{
-        CompiledAgentSetupCapability, CompiledArtifactReference, CompiledLocalPolicy,
-        CompiledNativeHost, CompiledNativeMember, CompiledNativeSourceOrigin,
-        CompiledNativeSourceRoute, PreparedNativeHost,
+    host_lifetime::{
+        control::HostLifetimeError,
+        policy::{
+            CompiledAgentSetupCapability, CompiledArtifactReference, CompiledLocalPolicy,
+            CompiledNativeHost, CompiledNativeMember, CompiledNativeSourceOrigin,
+            CompiledNativeSourceRoute, PreparedNativeHost,
+        },
     },
 };
 use serde_json::json;
@@ -607,9 +610,37 @@ fn predecessor_owner_routes_and_retained_setup_bytes_are_checked_without_an_alte
             _ => unreachable!(),
         }
         let before = file_bytes(&root);
+        if case == "source_route" {
+            // The predecessor's selection and artifacts are valid on their own;
+            // only its compiled routes differ from the owner its retained setup
+            // selected. Reading that retained setup compares the two and refuses
+            // before the update could adopt either owner.
+            let predecessor = &fixture.selection.predecessor;
+            let (previous, _) = validate_candidate_selection(predecessor).unwrap();
+            let native = previous.native_host.as_ref().unwrap();
+            validate_installed_artifacts(native, |reference| {
+                read_bundle_artifact(predecessor, reference)
+            })
+            .unwrap();
+            assert!(
+                !fixture
+                    .prepared
+                    .native_owner
+                    .as_ref()
+                    .unwrap()
+                    .matches(&previous)
+            );
+            assert_eq!(
+                read_application_acquisition(native, |reference| {
+                    read_bundle_artifact(predecessor, reference)
+                })
+                .err(),
+                Some(HostLifetimeError::InvalidSelection)
+            );
+        }
         let error = fixture.selection.validate().err().unwrap();
         if case == "source_route" {
-            assert!(error.contains("exact owner and source routes"), "{error}");
+            assert_eq!(error, HostLifetimeError::InvalidSelection.to_string());
         }
         assert_eq!(file_bytes(&root), before);
         assert!(!root.join("state").exists());

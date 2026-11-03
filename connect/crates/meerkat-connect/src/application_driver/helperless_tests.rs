@@ -6,10 +6,6 @@ use meerkat_mobkit::identity_first::{
     DurabilityPolicy, HeldBootstrapStart, IdentityFirstRuntimeContext, IdentityRuntime,
     IdentityRuntimeConfig, LocalContinuityStore, LocalLeaseProvider, MutableRosterProvider,
 };
-use meerkat_toolkit::host_lifetime::{
-    control::HostBootstrapSelection,
-    policy::{CompiledArtifactReference, CompiledLocalPolicy, CompiledNativeHost},
-};
 use std::panic::{AssertUnwindSafe, resume_unwind};
 
 fn plan(root: &std::path::Path) -> ApplicationPreparationPlan {
@@ -66,101 +62,6 @@ fn helperless_plan_omits_helper_authorities_and_refuses_even_empty_present_field
     assert!(read_plan(&toolkit_package::canonical_json(&original).unwrap()).is_ok());
     // Presence checking is a wire constraint only. Actual route selection and
     // controller issuance still require the held native report and owner.
-}
-
-fn publish(root: &std::path::Path, prepared: &PreparedApplicationSetup) -> HostBootstrapSelection {
-    use crate::application_bootstrap::hash;
-    let bundle = root.join("shared/policy/helperless");
-    std::fs::create_dir_all(&bundle).unwrap();
-    for name in ["control", "data", "activations"] {
-        std::fs::create_dir_all(root.join("shared").join(name)).unwrap();
-    }
-    let mut artifacts = Vec::new();
-    let mut write = |name: &str, bytes: &[u8]| {
-        std::fs::write(bundle.join(name), bytes).unwrap();
-        let reference = CompiledArtifactReference {
-            name: name.into(),
-            sha256: hash(bytes),
-        };
-        artifacts.push(serde_json::json!({"path":name,"sha256":reference.sha256}));
-        reference
-    };
-    let setup = write(
-        "application-setup.json",
-        &toolkit_package::canonical_json(prepared).unwrap(),
-    );
-    let policy = write(
-        &prepared.application_tool_policy.name,
-        &std::fs::read(
-            prepared
-                .artifact_directory
-                .as_ref()
-                .unwrap()
-                .join(&prepared.application_tool_policy.name),
-        )
-        .unwrap(),
-    );
-    let carrier = write(
-        "application-only.json",
-        &toolkit_package::canonical_json(
-            &crate::application_acquisition::ApplicationOnlySelection {
-                schema: 2,
-                prepared_application_setup: setup,
-            },
-        )
-        .unwrap(),
-    );
-    let source = write("policy.json", br#"{"schema":1}"#);
-    let owner = prepared.native_owner.as_ref().unwrap();
-    let early = &owner.native_host;
-    let local = CompiledLocalPolicy {
-        schema: 7,
-        deployment: owner.deployment.clone(),
-        source_policy_sha256: source.sha256,
-        components: owner.components.clone(),
-        channels: owner.channels.clone(),
-        native_host: Some(CompiledNativeHost {
-            authentication_domain: None,
-            event_domain: None,
-            realm: early.realm.clone(),
-            grant_administrator: early.grant_administrator.clone(),
-            remote_operator: early.remote_operator.clone(),
-            service_parent_administration: early.service_parent_administration.clone(),
-            ingress_domain: early.ingress_domain.clone(),
-            application_tool_policy: policy,
-            setup: Some(carrier),
-            member_classes: early.member_classes.clone(),
-            members: prepared.native_members.clone(),
-            routes: early.routes.clone(),
-        }),
-    };
-    let local = write(
-        "toolkit-local-policy.json",
-        &toolkit_package::canonical_json(&local).unwrap(),
-    );
-    let manifest =
-        toolkit_package::canonical_json(&serde_json::json!({"artifacts":artifacts})).unwrap();
-    std::fs::write(bundle.join("manifest.json"), &manifest).unwrap();
-    let activation = toolkit_package::canonical_json(&serde_json::json!({"activation_id":"1","policy_bundle":{
-        "path":"shared/policy/helperless","policy_digest":format!("policy-v1:sha256:{}", hash(&manifest))}})).unwrap();
-    let activation_path = root.join("shared/activations/1.json");
-    std::fs::write(&activation_path, &activation).unwrap();
-    std::os::unix::fs::symlink("shared/activations/1.json", root.join("current")).unwrap();
-    HostBootstrapSelection {
-        deployment_root: root.to_owned(),
-        activation: SelectedHostArtifact {
-            path: activation_path,
-            sha256: hash(&activation),
-        },
-        policy_manifest: SelectedHostArtifact {
-            path: bundle.join("manifest.json"),
-            sha256: hash(&manifest),
-        },
-        local_policy: SelectedHostArtifact {
-            path: bundle.join("toolkit-local-policy.json"),
-            sha256: local.sha256,
-        },
-    }
 }
 
 struct NoOperationReview;
@@ -373,7 +274,13 @@ async fn held_case(review_selected: bool) {
                 && completed.resources.is_none()
                 && completed.native_members.is_empty()
         );
-        let selection = publish(&root, completed);
+        let selection = crate::application_setup::compilation::tests::publish_completed(
+            &root,
+            "helperless",
+            completed,
+            completed.artifact_directory.as_ref().unwrap(),
+            true,
+        );
         let prepared = driver.prepared.lock().unwrap().take().unwrap();
         let (owner, installed) = prepared.adopt(selection.clone()).unwrap();
         assert!(Arc::ptr_eq(&originals, &installed.originals()));

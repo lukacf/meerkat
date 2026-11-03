@@ -2326,6 +2326,117 @@ pub(crate) fn helperless_input(
     (input, owner)
 }
 
+/// Publish a completed application setup as the installation bundle its
+/// installed owner adopts: the compiler's own output files (tool policy and
+/// member surfaces, read from `compiled`) under `shared/policy/<name>`, the
+/// owner's compiled local policy, the bundle manifest and the current
+/// activation. `application_only` adds the schema 2 carrier a helperless
+/// application selects; otherwise `native_host.setup` stays absent.
+pub(crate) fn publish_completed(
+    root: &Path,
+    name: &str,
+    prepared: &PreparedApplicationSetup,
+    compiled: &Path,
+    application_only: bool,
+) -> meerkat_toolkit::host_lifetime::control::HostBootstrapSelection {
+    use crate::application_bootstrap::hash;
+    use meerkat_toolkit::host_lifetime::{
+        control::{HostBootstrapSelection, SelectedHostArtifact},
+        policy::{CompiledArtifactReference, CompiledLocalPolicy, CompiledNativeHost},
+    };
+    let bundle = root.join("shared/policy").join(name);
+    std::fs::create_dir_all(&bundle).unwrap();
+    for directory in ["control", "data", "activations"] {
+        std::fs::create_dir_all(root.join("shared").join(directory)).unwrap();
+    }
+    let mut artifacts = Vec::new();
+    let mut write = |name: &str, bytes: &[u8]| {
+        std::fs::write(bundle.join(name), bytes).unwrap();
+        let reference = CompiledArtifactReference {
+            name: name.into(),
+            sha256: hash(bytes),
+        };
+        artifacts.push(json!({"path":name,"sha256":reference.sha256}));
+        reference
+    };
+    let setup = write(
+        "application-setup.json",
+        &toolkit_package::canonical_json(prepared).unwrap(),
+    );
+    let policy = write(
+        &prepared.application_tool_policy.name,
+        &std::fs::read(compiled.join(&prepared.application_tool_policy.name)).unwrap(),
+    );
+    for member in &prepared.native_members {
+        write(
+            &member.initial_surface.name,
+            &std::fs::read(compiled.join(&member.initial_surface.name)).unwrap(),
+        );
+    }
+    let carrier = application_only.then(|| {
+        write(
+            "application-only.json",
+            &toolkit_package::canonical_json(
+                &crate::application_acquisition::ApplicationOnlySelection {
+                    schema: 2,
+                    prepared_application_setup: setup.clone(),
+                },
+            )
+            .unwrap(),
+        )
+    });
+    let source = write("policy.json", br#"{"schema":1}"#);
+    let owner = prepared.native_owner.as_ref().unwrap();
+    let early = &owner.native_host;
+    let local = CompiledLocalPolicy {
+        schema: 7,
+        deployment: owner.deployment.clone(),
+        source_policy_sha256: source.sha256,
+        components: owner.components.clone(),
+        channels: owner.channels.clone(),
+        native_host: Some(CompiledNativeHost {
+            authentication_domain: early.authentication_domain.clone(),
+            event_domain: early.event_domain.clone(),
+            realm: early.realm.clone(),
+            grant_administrator: early.grant_administrator.clone(),
+            remote_operator: early.remote_operator.clone(),
+            service_parent_administration: early.service_parent_administration.clone(),
+            ingress_domain: early.ingress_domain.clone(),
+            application_tool_policy: policy,
+            setup: carrier,
+            member_classes: early.member_classes.clone(),
+            members: prepared.native_members.clone(),
+            routes: early.routes.clone(),
+        }),
+    };
+    let local = write(
+        "toolkit-local-policy.json",
+        &toolkit_package::canonical_json(&local).unwrap(),
+    );
+    let manifest = toolkit_package::canonical_json(&json!({"artifacts":artifacts})).unwrap();
+    std::fs::write(bundle.join("manifest.json"), &manifest).unwrap();
+    let activation = toolkit_package::canonical_json(&json!({"activation_id":"1","policy_bundle":{
+        "path":format!("shared/policy/{name}"),"policy_digest":format!("policy-v1:sha256:{}", hash(&manifest))}})).unwrap();
+    let activation_path = root.join("shared/activations/1.json");
+    std::fs::write(&activation_path, &activation).unwrap();
+    std::os::unix::fs::symlink("shared/activations/1.json", root.join("current")).unwrap();
+    HostBootstrapSelection {
+        deployment_root: root.to_owned(),
+        activation: SelectedHostArtifact {
+            path: activation_path,
+            sha256: hash(&activation),
+        },
+        policy_manifest: SelectedHostArtifact {
+            path: bundle.join("manifest.json"),
+            sha256: hash(&manifest),
+        },
+        local_policy: SelectedHostArtifact {
+            path: bundle.join("toolkit-local-policy.json"),
+            sha256: local.sha256,
+        },
+    }
+}
+
 #[test]
 fn helperless_compiler_keeps_explicit_policy_and_writes_only_final_artifacts() {
     for empty in [false, true] {

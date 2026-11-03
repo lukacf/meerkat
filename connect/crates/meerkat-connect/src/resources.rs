@@ -85,6 +85,9 @@ pub(crate) use local_round::private_attempt::PrivateLocalRoundAttempts;
 pub use local_round::{LocalRoundGuard, LocalRoundOwner, OwnedLocalRoundGuard};
 #[cfg(unix)]
 mod shared_setup;
+// The SDK parent's private-host pipes, for other native test fixtures.
+#[cfg(all(unix, test, feature = "console"))]
+pub(crate) use shared_setup::sdk_host;
 #[cfg(all(unix, feature = "console"))]
 pub use shared_setup::{AbandonedPhysicalDisposition, SharedSetupAttemptReport};
 #[cfg(unix)]

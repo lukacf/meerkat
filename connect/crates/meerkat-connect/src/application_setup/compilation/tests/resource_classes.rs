@@ -1,4 +1,5 @@
-//! Resource boundary controls using real native construction identities. The
+//! Resource boundary controls using real native construction identities and
+//! the adopted installed host's own registration, which selects first. The
 //! hook refuses after the assertions, before actor/tool construction or a turn.
 //! These controls do not claim a published dynamic member or callback execution.
 use super::*;
@@ -99,6 +100,9 @@ impl meerkat_core::AgentToolDispatcher for EmptyClassFactory {
 }
 
 struct ResourceHook {
+    // The adopted installed host's own registration (forwarded by the prepared
+    // registration it adopted). It selects each destination before the checks.
+    installed: Arc<dyn MemberRuntimeRegistrationHook>,
     resource: Arc<SetupResourceSelection>,
     policy: PreparedInstalledToolPolicy,
     machine: Arc<meerkat_runtime::MeerkatMachine>,
@@ -126,7 +130,16 @@ impl MemberRuntimeRegistrationHook for ResourceHook {
             context_generation: self.instance.member.context_generation,
             audience: self.instance.member.audience.clone(),
         };
+        // The real installed registration selects first: for the admitted
+        // instance it records the class registration the checks below read,
+        // and it refuses any member it never admitted.
+        let installed = self.installed.select_destination(identity).await;
         if identity.member() == &self.instance.member.member {
+            assert_eq!(
+                installed.unwrap(),
+                expected,
+                "the installed hook selects the exact admitted destination"
+            );
             assert_eq!(
                 self.policy.member_class_destination(identity).unwrap(),
                 Some(expected.clone())
@@ -174,6 +187,10 @@ impl MemberRuntimeRegistrationHook for ResourceHook {
                 "revoked canonical admission cannot be reused"
             );
         } else {
+            assert!(
+                installed.is_err(),
+                "the installed hook refuses a member it never admitted"
+            );
             // The same packaged profile is not an admitted concrete member.
             assert!(
                 self.resource
@@ -205,9 +222,30 @@ impl MemberRuntimeRegistrationHook for ResourceHook {
     }
 }
 
-#[tokio::test]
-async fn class_resource_requires_exact_native_admission_and_never_selects_helper() {
+#[test]
+fn class_resource_requires_exact_native_admission_and_never_selects_helper() {
+    // The SDK parent's private-host pipes exist before the test runtime.
+    let (pipes, parent) = crate::resources::sdk_host::SdkParent::pair();
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(class_resource_control(pipes, parent));
+}
+
+async fn class_resource_control(
+    pipes: toolkit_mobkit::private_host::InheritedHostPipes,
+    parent: crate::resources::sdk_host::SdkParent,
+) {
     use futures_util::FutureExt;
+    use meerkat_toolkit::host_lifetime::control::{HostCloseState, PrivateHostLifetimeControl};
+    use toolkit_mobkit::{
+        installed_host::{
+            preparation::PreparationAuthorities, prepared_registration::PreparedMemberRegistration,
+        },
+        private_host::{PrivateHostConnection, PrivateHostStartup},
+    };
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().canonicalize().unwrap();
     let input = with_uninstantiated_class(&root);
@@ -246,7 +284,7 @@ async fn class_resource_requires_exact_native_admission_and_never_selects_helper
         current: current.clone(),
     });
     std::fs::create_dir_all(root.join("shared/data")).unwrap();
-    let prepared = PreparedInstallationOwner::open(
+    let mut prepared = PreparedInstallationOwner::open(
         root.clone(),
         selected,
         OperatorOwnerStartup::Initialize {
@@ -286,6 +324,91 @@ async fn class_resource_requires_exact_native_admission_and_never_selects_helper
         phase.resource_selection().unwrap(),
         configuration.configured_mcp_attachment.take(),
     )));
+    // As the driver does, the prepared owner finalizes its authorities (this
+    // control issues no helper grants), the compiler retains exactly that
+    // owner with both compiled members' surfaces, and its completed bundle is
+    // published as the current activation the installed owner adopts.
+    let finalized = prepared
+        .finalize_authorities_without_helper(&PreparationAuthorities::default())
+        .unwrap();
+    phase.capture(0, &surface(false)).unwrap();
+    phase.capture(1, &surface(true)).unwrap();
+    phase.retain_owner(finalized).unwrap();
+    let (completed, _) = phase.complete_bundle(&root.join("complete")).unwrap();
+    let selection =
+        super::publish_completed(&root, "classes", &completed, &root.join("complete"), false);
+    let registration = Arc::new(PreparedMemberRegistration::new(
+        phase.clone(),
+        phase.registry(),
+        {
+            let phase = phase.clone();
+            Arc::new(move |identity, destination| phase.selected_destination(identity, destination))
+        },
+    ));
+    let prepared_policy = prepared.policy();
+    // The supported private-host bootstrap adopts the published selection and
+    // composes the installed host with the prepared registration, which then
+    // forwards to the installed host's own registration hook.
+    let client = parent.enter();
+    let lifetime = Arc::new(std::sync::Mutex::new(None));
+    let adopted = Arc::new(std::sync::Mutex::new(None));
+    let server = {
+        let lifetime = lifetime.clone();
+        let saved = adopted.clone();
+        let registration = registration.clone();
+        async move {
+            let startup = PrivateHostStartup::read(pipes).await?;
+            PrivateHostConnection::bootstrap_prepared_with_controller_reviews(
+                startup,
+                move |selection| async move {
+                    let (owner, installed) = prepared.adopt(selection)?;
+                    let originals = installed.originals();
+                    *adopted.lock().unwrap() = Some(installed);
+                    Ok((owner, originals))
+                },
+                move |owner, closed, logins| async move {
+                    *lifetime.lock().unwrap() = Some(owner.clone());
+                    let installed = saved
+                        .lock()
+                        .unwrap()
+                        .take()
+                        .ok_or(HostLifetimeError::Unavailable)?;
+                    installed
+                        .compose_with_prepared_registration(
+                            owner,
+                            closed,
+                            registration,
+                            prepared_policy,
+                        )?
+                        .with_console_logins(logins)
+                },
+            )
+            .await
+        }
+    };
+    let request = {
+        let client = client.clone();
+        async move {
+            let mut client = client.lock().await;
+            let reply = client
+                .call(serde_json::json!({"kind":"bootstrap", "selection":selection}))
+                .await;
+            if reply.is_err() {
+                let _ = client.close().await;
+            }
+            reply
+        }
+    };
+    let (reply, server) =
+        tokio::join!(request, std::panic::AssertUnwindSafe(server).catch_unwind());
+    let (host, connection, local, remote) = match server {
+        Ok(Ok(value)) => value,
+        Ok(Err(error)) => panic!("private bootstrap refused: {error}"),
+        Err(panic) => std::panic::resume_unwind(panic),
+    };
+    drop(local);
+    drop(remote);
+    assert_eq!(reply.unwrap()["kind"], "bootstrap_accepted");
     let persistence = meerkat::PersistenceBundle::new_with_local_grant_authorization(
         Arc::new(meerkat::SqliteSessionStore::open(root.join("sessions.sqlite3")).unwrap()),
         Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
@@ -303,6 +426,7 @@ async fn class_resource_requires_exact_native_admission_and_never_selects_helper
     )
     .unwrap();
     let hook = Arc::new(ResourceHook {
+        installed: registration,
         resource: phase.resource_selection().unwrap(),
         policy,
         machine: machine.clone(),
@@ -393,7 +517,33 @@ async fn class_resource_requires_exact_native_admission_and_never_selects_helper
     .await;
     let stopped = handle.shutdown().await;
     drop(admitted);
+    // Close the SDK parent, its private host connection and the adopted
+    // lifetime in the order every private-host fixture uses.
+    let mut cleanup = Vec::new();
+    if let Err(error) = client.lock().await.close().await {
+        cleanup.push(error);
+    }
+    if let Err(error) = connection.finish().await {
+        cleanup.push(error.to_string());
+    }
+    let owner = lifetime.lock().unwrap().take();
+    match owner {
+        Some(owner) => match owner.host_lost() {
+            Ok(close) => match owner.join_close(&close.handle).await {
+                Ok(value) if value.state == HostCloseState::Settled => {}
+                Ok(_) => cleanup.push("private lifetime close remains unresolved".into()),
+                Err(error) => cleanup.push(error.to_string()),
+            },
+            Err(error) => cleanup.push(error.to_string()),
+        },
+        None => cleanup.push("the adopted lifetime was not retained".into()),
+    }
+    drop(host);
     assert!(stopped.is_ok());
+    assert!(
+        cleanup.is_empty(),
+        "the private host owners must be joined: {cleanup:?}"
+    );
     if let Err(panic) = checked {
         std::panic::resume_unwind(panic);
     }

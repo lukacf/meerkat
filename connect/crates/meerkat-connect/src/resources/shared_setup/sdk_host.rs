@@ -46,12 +46,12 @@ const BOUND: Duration = Duration::from_secs(20);
 
 /// The test's normal SDK parent owns these exact local endpoints. Construct
 /// them before the test runtime, matching InheritedHostPipes' entry contract.
-pub(super) struct SdkParent {
+pub(crate) struct SdkParent {
     commands: std::os::unix::net::UnixStream,
     responses: std::os::unix::net::UnixStream,
 }
 impl SdkParent {
-    pub(super) fn pair() -> (InheritedHostPipes, Self) {
+    pub(crate) fn pair() -> (InheritedHostPipes, Self) {
         let (commands, host_commands) = std::os::unix::net::UnixStream::pair().unwrap();
         let (host_responses, responses) = std::os::unix::net::UnixStream::pair().unwrap();
         let inherited =
@@ -65,7 +65,7 @@ impl SdkParent {
             },
         )
     }
-    pub(super) fn enter(self) -> Arc<tokio::sync::Mutex<SdkClient>> {
+    pub(crate) fn enter(self) -> Arc<tokio::sync::Mutex<SdkClient>> {
         self.commands.set_nonblocking(true).unwrap();
         self.responses.set_nonblocking(true).unwrap();
         Arc::new(tokio::sync::Mutex::new(SdkClient {
@@ -79,14 +79,14 @@ impl SdkParent {
 
 /// Only the existing framed commands are used. This is the bounded test
 /// parent's transport, not a product RPC server or an alternate admission API.
-pub(super) struct SdkClient {
+pub(crate) struct SdkClient {
     commands: tokio::net::UnixStream,
     responses: BufReader<tokio::net::UnixStream>,
     next: u64,
     poisoned: bool,
 }
 impl SdkClient {
-    pub(super) async fn call(&mut self, command: Value) -> Result<Value, String> {
+    pub(crate) async fn call(&mut self, command: Value) -> Result<Value, String> {
         if self.poisoned {
             return Err("private transport remains unresolved; only close is allowed".into());
         }
@@ -157,7 +157,7 @@ impl SdkClient {
         }
         Ok(value)
     }
-    pub(super) async fn close(&mut self) -> Result<(), String> {
+    pub(crate) async fn close(&mut self) -> Result<(), String> {
         self.commands
             .shutdown()
             .await

@@ -26,7 +26,7 @@ mod native_case;
 #[cfg(all(test, feature = "console"))]
 mod native_case_artifacts;
 #[cfg(all(test, feature = "console"))]
-mod sdk_host;
+pub(crate) mod sdk_host;
 #[cfg(feature = "console")]
 pub use attempt::SharedSetupAttemptReport;
 use control::Channel;

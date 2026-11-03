@@ -2129,12 +2129,14 @@ async fn run_client_context_restart_reconciler<R>(
     drop(current_owner);
     let mut deferred_warning = RetryWarning::default();
     let mut scan_warning = RetryWarning::default();
+    let mut capture_retry_delay = timing.retry_delay;
     retry_delay = timing.retry_delay;
     loop {
         // A deferred session MeerkatMachine holds registered again (its
         // member was materialized) is captured here, once; the preparation
         // of a channel on it may have captured it first.
         let deferred = inventory_ready.deferred_sessions().await;
+        let mut capture_failed = false;
         if !deferred.is_empty() {
             let Some(current_owner) = owner.upgrade() else {
                 return;
@@ -2158,11 +2160,17 @@ async fn run_client_context_restart_reconciler<R>(
             }
             drop(current_owner);
             match failure {
-                Some(error) => deferred_warning.log(
-                    "ClientContext restart capture of a materialized member session remains pending",
-                    &error,
-                ),
-                None => deferred_warning.reset(),
+                Some(error) => {
+                    capture_failed = true;
+                    deferred_warning.log(
+                        "ClientContext restart capture of a materialized member session remains pending",
+                        &error,
+                    );
+                }
+                None => {
+                    deferred_warning.reset();
+                    capture_retry_delay = timing.retry_delay;
+                }
             }
         }
         entries.extend(inventory_ready.take_captured().await);
@@ -2234,6 +2242,15 @@ async fn run_client_context_restart_reconciler<R>(
         }
         if in_flight {
             tokio::time::sleep(timing.in_flight_delay).await;
+            continue;
+        }
+        if capture_failed {
+            // A registered session's read failed: it is read again after
+            // the backoff, not at the next attachment.
+            tokio::time::sleep(capture_retry_delay).await;
+            capture_retry_delay = capture_retry_delay
+                .saturating_mul(2)
+                .min(timing.retry_max_delay);
             continue;
         }
 
@@ -3018,10 +3035,10 @@ impl ExperimentalLiveDelegationCoordinator {
                 if !seen_sessions.insert(session_id.clone()) {
                     continue;
                 }
-                match self
+                let operations = self
                     .registered_client_context_operations(&session_id)
-                    .await?
-                {
+                    .await?;
+                match operations {
                     Some(entries) => inventory.entries.extend(entries),
                     None => inventory.deferred.push(session_id),
                 }
@@ -8616,6 +8633,8 @@ mod tests {
         attachments: ScriptedAttachments,
         /// The scripted runtime is gone: its attachment notice is closed.
         runtime_gone: std::sync::atomic::AtomicBool,
+        /// Session captures that fail before the next one reads.
+        capture_failures: std::sync::atomic::AtomicUsize,
     }
 
     impl RestartRecoveryProbe {
@@ -8780,6 +8799,18 @@ mod tests {
             session_id: &SessionId,
         ) -> Result<Option<Vec<ClientContextRestartInventoryEntry>>, String> {
             self.probe.record(RestartRecoveryInvocation::CaptureSession);
+            if self
+                .probe
+                .capture_failures
+                .fetch_update(
+                    std::sync::atomic::Ordering::AcqRel,
+                    std::sync::atomic::Ordering::Acquire,
+                    |failures| failures.checked_sub(1),
+                )
+                .is_ok()
+            {
+                return Err("scripted session read failure".to_string());
+            }
             let operations = self
                 .probe
                 .registered
@@ -9421,6 +9452,55 @@ mod tests {
             inventory_ready.has_deferred_sessions().await,
             "the dormant member's session stays deferred, never read"
         );
+    }
+
+    /// A registered deferred session whose read fails is read again after
+    /// the capture backoff, not at the next attachment; it is captured once.
+    #[tokio::test]
+    async fn client_context_restart_retries_a_failed_deferred_capture_after_its_backoff() {
+        let armed = std::sync::atomic::AtomicBool::new(false);
+        let inventory_ready = Arc::new(ClientContextRestartInventoryReady::default());
+        let session_id = SessionId::new();
+        let operation_id = OperationId::new();
+        let (owner, probe) = ScriptedRestartRecoveryOwner::new(
+            vec![Ok(())],
+            vec![Ok(ScriptedRestartRecoveryOwner::deferring(&session_id))],
+            vec![Ok(vec![ScriptedRestartRecoveryOwner::report_for(
+                &operation_id,
+                ExperimentalClientContextRestartDisposition::Reconciled { completed: true },
+            )])],
+            false,
+        );
+        probe.materialize(&session_id, std::slice::from_ref(&operation_id));
+        probe
+            .capture_failures
+            .store(1, std::sync::atomic::Ordering::Release);
+        let task = try_arm_client_context_restart_reconciler(
+            &armed,
+            Arc::clone(&owner),
+            Arc::clone(&inventory_ready),
+            immediate_restart_reconcile_timing(),
+        )
+        .expect("arm restart reconciliation");
+        task.await.expect("restart reconciliation completes");
+        assert_eq!(
+            probe.invocations(),
+            vec![
+                RestartRecoveryInvocation::ForceRestore,
+                RestartRecoveryInvocation::CaptureInventory,
+                RestartRecoveryInvocation::CaptureSession,
+                RestartRecoveryInvocation::CaptureSession,
+                RestartRecoveryInvocation::ObservePass,
+            ]
+        );
+        assert_eq!(
+            probe.observed_inventories(),
+            vec![ScriptedRestartRecoveryOwner::inventory(
+                &session_id,
+                std::slice::from_ref(&operation_id),
+            )]
+        );
+        assert!(!inventory_ready.has_deferred_sessions().await);
     }
 
     /// A failure of a retried restart step warns on the first failure of a

@@ -207,13 +207,28 @@ async fn observe(
     Ok(Observation::Credential(status))
 }
 
+/// A realm's model targets as Core lowers its section. The routes of a GitHub
+/// Copilot account configured once (`[copilot]`) are targets too, though no
+/// raw backend, auth or binding table names them.
+fn realm_connection_set(
+    config: &meerkat_core::Config,
+    realm: &meerkat_core::RealmId,
+) -> Result<Option<meerkat_core::RealmConnectionSet>, ConnectError> {
+    config
+        .realm
+        .get(realm.as_str())
+        .map(|section| meerkat_core::RealmConnectionSet::from_config(realm.as_str(), section))
+        .transpose()
+        .map_err(|e| ConnectError::native("Read realm model targets", e))
+}
+
 fn configured_choices(startup: &SessionStartup) -> Result<Vec<AuthBindingRef>, ConnectError> {
     let chain = RealmChain::resolve(&startup.config, &startup.storage.locator.realm)
         .map_err(|e| ConnectError::native("Resolve model target inheritance", e))?;
     let mut choices = Vec::new();
     for realm in chain.realms() {
-        if let Some(section) = startup.config.realm.get(realm.as_str()) {
-            for binding in section.binding.keys() {
+        if let Some(set) = realm_connection_set(&startup.config, realm)? {
+            for binding in set.bindings.keys() {
                 let reference = AuthBindingRef {
                     realm: realm.clone(),
                     binding: BindingId::parse(binding.clone())
@@ -409,10 +424,25 @@ where
         )
         .map_err(|e| ConnectError::native("Write model setup status", e))?;
     }
-    let choices = configured_choices(startup)?;
+    let mut choices = configured_choices(startup)?;
     if choices.is_empty() {
         return first_target::present(startup, original, input, output, interrupt.as_mut()).await;
     }
+    let request_for = |reference: &AuthBindingRef| CreateSessionModelResolutionRequest {
+        model: model.clone(),
+        auth_binding: Some(reference.clone()),
+        ..Default::default()
+    };
+    // Core's account affinity runs a shared credential account's route of the
+    // model's family, whichever route of the account a request names. List
+    // only the targets the model's session runs on.
+    choices.retain(|reference| {
+        match resolve_create_session_model(&startup.config, request_for(reference)) {
+            Ok(selected) => selected.auth_binding.as_ref() == Some(reference),
+            // Choosing this target reports the refusal.
+            Err(_) => true,
+        }
+    });
     input
         .require_terminal()
         .map_err(|e| ConnectError::native("Require protected model setup terminal", e))?;
@@ -450,11 +480,7 @@ where
                 .map_err(|e| ConnectError::native("Write model target guidance", e))?;
             continue;
         };
-        let request = CreateSessionModelResolutionRequest {
-            model: model.clone(),
-            auth_binding: Some(reference.clone()),
-            ..Default::default()
-        };
+        let request = request_for(reference);
         let selected = match resolve_create_session_model(&startup.config, request.clone()) {
             Ok(selected) => selected,
             Err(CreateSessionModelResolutionError::ProviderModelMismatch(_)) => {
@@ -468,6 +494,12 @@ where
                     error,
                 ));
             }
+        };
+        // Show, observe and keep the route the session runs on.
+        let reference = selected.auth_binding.as_ref().unwrap_or(reference);
+        let request = CreateSessionModelResolutionRequest {
+            auth_binding: Some(reference.clone()),
+            ..request
         };
         let target = resolve_explicit_auth_binding_target(&startup.config, reference)
             .map_err(|e| ConnectError::native("Resolve chosen native credential owner", e))?;

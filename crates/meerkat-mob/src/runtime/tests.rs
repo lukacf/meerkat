@@ -53181,8 +53181,10 @@ async fn test_external_turn_autonomous_mode_uses_injector_dispatch() {
         .expect("external turn should execute");
 
     // Runtime adapter path: spawn uses accept_input_with_completion (1 keep-alive),
-    // send() uses inject (1).
-    tokio::time::sleep(Duration::from_millis(10)).await;
+    // send() uses inject (1). The inject is counted before send() returns; the
+    // spawn's keep-alive kickoff runs on a detached task, so its start_turn is
+    // awaited rather than assumed to have landed.
+    wait_for_keep_alive_start_turn_count(service.as_ref(), 1).await;
     assert_eq!(
         service.inject_call_count(),
         1,

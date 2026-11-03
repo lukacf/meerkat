@@ -626,6 +626,41 @@ recorded its mob's snapshot is written at session envelope 5, which 0.9.8
 refuses session by session; the doctor lists those sessions under
 `operator-instruction-envelope`.
 
+A Meta gateway's state directory is not a Core realm, and
+`rkat storage doctor` covers neither of the files that matter here: it does
+not read `runtime.sqlite`, where Meta keeps its sessions, or
+`event_log.sqlite3`, the gateway's own mob journal. Its
+`schema-from-the-future` error for `sessions.sqlite3` (ledger domain
+`session-store` at version 999999) is expected: that file is the retired
+stamp that `meta_gateway storage-migrate-native` leaves for Meta 0.9.3 to
+refuse. Meta's storage doctor (`meta/storage/doctor`) gains a supported
+census of both in Meta 0.9.10. Until then, on a state directory in the
+default disk layout, take it with two read-only queries
+(`sqlite3 -readonly <file> "<query>"`):
+
+- the sessions at envelope 5, on `runtime.sqlite` (`meta/status_identity`
+  names the `session_id` of each identity):
+
+  ```sql
+  SELECT session_id FROM session_heads WHERE version = 5
+  UNION
+  SELECT session_id FROM sessions
+   WHERE session_id NOT IN (SELECT session_id FROM session_heads)
+     AND json_extract(CAST(session_json AS TEXT), '$.version') = 5;
+  ```
+
+- the mob events at schema 10, on `event_log.sqlite3` and on each child mob
+  database under `mobs/` that has a `mob_events` table:
+
+  ```sql
+  SELECT count(*) FROM mob_events
+   WHERE json_extract(CAST(event_json AS TEXT), '$.schema_version') = 10;
+  ```
+
+Destroy, or move out of `mobs/`, each child mob database that counts rows.
+The gateway's own journal is not in `mobs/`: a gateway whose own journal
+counts rows does not start its mob on Meta 0.9.7 or 0.9.6.
+
 Durable decisions live in their own file, `approval_decisions.sqlite3`,
 beside `approvals.json` under the store path; 0.9.9 creates it with the first
 hold and changes no other file for them. 0.9.8 never opens that file and reads

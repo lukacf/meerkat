@@ -84,6 +84,7 @@ jobs:
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.12'
+          check-latest: true
       - run: python -m pip install -e ./installer
       - name: Agent team and application package on the published Meta release
         run: python installer/tests/installer_live_agent_team.py "$RUNNER_TEMP/agent-team-live"
@@ -114,6 +115,7 @@ jobs:
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.12'
+          check-latest: true
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: '22'

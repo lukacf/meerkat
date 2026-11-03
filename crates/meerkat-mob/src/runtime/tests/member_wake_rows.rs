@@ -2498,11 +2498,41 @@ async fn a_retire_during_a_wake_answers_its_callers_member_retiring() {
     );
 
     fixture.preparer.open_gate();
-    tokio::time::timeout(WAIT, retire)
+    // The retire answers within its own budget (2 s in a test build), and
+    // the stages after the wake's provision rolls back can outlast it under
+    // load. A retirement still running then answers that it is in progress
+    // (or, not yet admitted at the budget, that its admission is pending)
+    // and stays owned by the mob, which settles it on its own. Either way it
+    // must end `Retired`, and a retire after that answers at once.
+    let retired = tokio::time::timeout(WAIT, retire)
         .await
-        .expect("the retirement finishes once the wake's provision rolls back")
-        .expect("the retire task joins")
-        .expect("the member retires");
+        .expect("the retire answers once the wake's provision rolls back")
+        .expect("the retire task joins");
+    if let Err(error) = retired {
+        assert!(
+            matches!(
+                error,
+                MobError::MemberRetirementInProgress { .. }
+                    | MobError::MemberRetirementAdmissionPending { .. }
+            ),
+            "the member retires: {error:?}"
+        );
+        let mut settlement = fixture
+            .handle
+            .retirement_settlement(&member)
+            .expect("the owned retirement publishes its settlement");
+        let settled = tokio::time::timeout(WAIT, settlement.settled())
+            .await
+            .expect("the owned retirement settles");
+        assert!(
+            matches!(settled, Some(crate::runtime::RetirementSettlement::Retired)),
+            "the member retires: {settled:?}"
+        );
+        tokio::time::timeout(WAIT, fixture.handle.retire(member.clone()))
+            .await
+            .expect("a retire of the retired member answers")
+            .expect("a retire of the retired member answers Ok");
+    }
     fixture.finish().await;
 }
 

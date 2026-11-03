@@ -2299,39 +2299,6 @@ const ORIGIN_READERS: &[(&str, &[&str], &str)] = &[
     ),
 ];
 
-/// The DSL transitions (by name prefix) and invariants that may read an
-/// identity entry's origin: the custody guards of a spawn ladder and its
-/// commit, the admission probe, the declared apply and its seal (the roster
-/// writer), the recovery of entries (the recovery source), the legacy
-/// adoption, and the store-owned writer's record of a new entry.
-const ORIGIN_GUARD_TRANSITIONS: &[&str] = &[
-    "BeginSpawnExec",
-    "CommitSpawnMembership",
-    "CommitDormantSeat",
-    "ProbeMemberAdmission",
-    "DeclareIdentityEntry",
-    "SealDeclaredRoster",
-    "RecoverCreatedIdentityEntry",
-    "RecoverIdentityEntry",
-    "AdoptLegacyIdentityEntry",
-    "RecordCreatedIdentityEntry",
-    // The store's writes of an archive and an unarchive: a roster-owned
-    // identity's are its host's.
-    "ArchiveIdentityEntry",
-    "UnarchiveIdentityEntry",
-    "RemoveIdentityEntry",
-    // The roster writer's one-entry unlist, which acts on a Declared entry
-    // only.
-    "UnlistIdentityEntry",
-];
-
-const ORIGIN_GUARD_INVARIANTS: &[&str] = &[
-    "entry_custodies_are_disjoint",
-    "retiring_entry_is_a_declared_entry",
-    "archived_entry_is_store_owned",
-    "entry_ending_marks_are_seated_and_disjoint",
-];
-
 /// The body of an origin reader in `code`: the item `signature` names, or,
 /// for `impl header > method signature`, that method inside the impl block.
 fn origin_reader_body(code: &str, item: &str) -> Option<std::ops::Range<usize>> {
@@ -2430,21 +2397,23 @@ fn origin_value_reads(code: &str) -> Vec<usize> {
 /// Row (source guard; RED leg: a scratch reader of
 /// `IdentityEntryOrigin::Created`, `Self::Created` in its impl, a renamed or
 /// glob import of it, or a compared stored token, added to any shipped item
-/// that is not an origin reader, or to a DSL transition outside the custody
-/// guards, fails it): no code reads an identity's origin outside the
-/// custody guards and the reads that show it. Custody decides the recovery
-/// source, the writer, the name guards and the reservations, nothing else.
+/// that is not an origin reader, fails it): no code reads an identity's
+/// origin outside the custody guards and the reads that show it. Custody
+/// decides the recovery source, the writer, the name guards and the
+/// reservations, nothing else.
 ///
 /// Hardened: readers are listed per item, not per file, and the origin's
 /// impl per method; the files with no shipped read (the journal codec, the
 /// store-owned writer and the machine's own module) have no entry; renamed,
 /// brace and glob imports, `Self::` variants and stored tokens compared or
-/// matched (on one line or across lines) count as reads; and a DSL read
-/// counts for an item only when it lies inside that item's braces.
-/// `the_origin_scan_sees_each_read_form` pins each form.
+/// matched (on one line or across lines) count as reads.
+/// `the_origin_scan_sees_each_read_form` pins each form. The DSL's reads
+/// are guarded where the DSL lives, by meerkat-machine-schema's
+/// `identity_entry_origin_is_read_only_by_the_dsl_custody_guards`
+/// (`catalog/dsl/mob_machine.rs`), which reads its own source.
 #[test]
 fn identity_entry_origin_is_read_only_by_the_custody_guards() {
-    use super::fail_stop_cause::{line_of, shipped_code, shipped_sources};
+    use super::fail_stop_cause::{line_of, shipped_sources};
     let mut strays = Vec::new();
     for (path, code) in shipped_sources() {
         let reads = origin_value_reads(&code);
@@ -2467,61 +2436,18 @@ fn identity_entry_origin_is_read_only_by_the_custody_guards() {
                 .map(|at| format!("{path}:{}", line_of(&code, *at))),
         );
     }
-
-    let dsl_path = std::path::PathBuf::from(
-        std::env::var_os("CARGO_MANIFEST_DIR")
-            .expect("CARGO_MANIFEST_DIR is set for test processes"),
-    )
-    .join("../meerkat-machine-schema/src/catalog/dsl/mob_machine.rs");
-    let dsl = shipped_code(&std::fs::read_to_string(&dsl_path).expect("read the DSL"));
-    for at in origin_value_reads(&dsl) {
-        if !dsl_origin_read_allowed(&dsl, at) {
-            strays.push(format!("mob_machine DSL:{}", line_of(&dsl, at)));
-        }
-    }
     assert!(
         strays.is_empty(),
         "an identity's origin is read outside the custody guards: {strays:?}"
     );
 }
 
-/// Whether the origin read at `at` in the DSL lies inside the braces of a
-/// custody guard: a transition of [`ORIGIN_GUARD_TRANSITIONS`] or an
-/// invariant of [`ORIGIN_GUARD_INVARIANTS`], never after the item's closing
-/// brace and never in a helper.
-fn dsl_origin_read_allowed(dsl: &str, at: usize) -> bool {
-    use super::fail_stop_cause::brace_group_end;
-    let before = &dsl[..at];
-    let item = ["transition ", "invariant ", "helper "]
-        .iter()
-        .filter_map(|keyword| before.rfind(keyword).map(|start| (start, *keyword)))
-        .max_by_key(|(start, _)| *start);
-    item.is_some_and(|(start, keyword)| {
-        // The read lies inside the item's own braces, not after them.
-        let inside = dsl[start..]
-            .find('{')
-            .map(|offset| start + offset)
-            .is_some_and(|open| open < at && at < brace_group_end(dsl, open));
-        let name = dsl[start + keyword.len()..]
-            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
-            .next()
-            .unwrap_or_default();
-        inside
-            && match keyword {
-                "transition " => ORIGIN_GUARD_TRANSITIONS
-                    .iter()
-                    .any(|prefix| name.starts_with(prefix)),
-                "invariant " => ORIGIN_GUARD_INVARIANTS.contains(&name),
-                _ => false,
-            }
-    })
-}
-
 /// Row (the origin guard's own self-test): the scan finds each form of an
-/// origin read, on exactly its line, and nothing else; a reader's body is
-/// its listed method's, not its impl block's; and a DSL read is allowed
-/// only inside a custody guard's braces. A scan branch that broke would
-/// otherwise let the guard pass silently.
+/// origin read, on exactly its line, and nothing else; and a reader's body
+/// is its listed method's, not its impl block's. A scan branch that broke
+/// would otherwise let the guard pass silently. The DSL scan's verdicts are
+/// pinned where the DSL lives, by meerkat-machine-schema's
+/// `the_dsl_origin_scan_allows_only_reads_inside_a_custody_guard`.
 #[test]
 fn the_origin_scan_sees_each_read_form() {
     use super::fail_stop_cause::{line_of, shipped_code};
@@ -2579,32 +2505,6 @@ fn the_origin_scan_sees_each_read_form() {
     assert!(
         origin_reader_body(&code, "impl IdentityEntryOrigin { > fn unlisted(").is_none(),
         "a method the impl does not hold is no reader"
-    );
-
-    let dsl = shipped_code(
-        "transition DeclareIdentityEntryKept {\n\
-             guard { origin == Some(IdentityEntryOrigin::Declared) }\n\
-         }\n\
-         origin = IdentityEntryOrigin::Created;\n\
-         transition StopRunning {\n\
-             guard { origin == Some(IdentityEntryOrigin::Created) }\n\
-         }\n\
-         invariant archived_entry_is_store_owned {\n\
-             origin == Some(IdentityEntryOrigin::Created)\n\
-         }\n\
-         helper custody() -> bool {\n\
-             origin == Some(IdentityEntryOrigin::Declared)\n\
-         }\n",
-    );
-    let verdicts: Vec<(usize, bool)> = origin_value_reads(&dsl)
-        .into_iter()
-        .map(|at| (line_of(&dsl, at), dsl_origin_read_allowed(&dsl, at)))
-        .collect();
-    assert_eq!(
-        verdicts,
-        [(2, true), (4, false), (6, false), (9, true), (12, false)],
-        "a custody guard's read is allowed; one after its closing brace, in \
-         another transition or in a helper is not"
     );
 }
 

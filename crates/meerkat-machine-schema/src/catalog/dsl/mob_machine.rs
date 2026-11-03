@@ -39577,3 +39577,539 @@ impl Default for PlacedKickoffObligation {
         }
     }
 }
+
+/// The custody guards of an identity entry's origin in this DSL: an origin
+/// is read only inside a custody guard's braces. The test reads this file at
+/// compile time (`include_str!`), the way `live_close_classification_tests`
+/// reads `meerkat_machine.rs`, so it stays inside the package. meerkat-mob's
+/// `identity_entry_origin_is_read_only_by_the_custody_guards` guards the mob
+/// crate's own shipped sources.
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::panic)]
+mod origin_custody_guard_tests {
+    const SOURCE: &str = include_str!("mob_machine.rs");
+
+    /// The DSL transitions (by name prefix) and invariants that may read an
+    /// identity entry's origin: the custody guards of a spawn ladder and its
+    /// commit, the admission probe, the declared apply and its seal (the roster
+    /// writer), the recovery of entries (the recovery source), the legacy
+    /// adoption, and the store-owned writer's record of a new entry.
+    const ORIGIN_GUARD_TRANSITIONS: &[&str] = &[
+        "BeginSpawnExec",
+        "CommitSpawnMembership",
+        "CommitDormantSeat",
+        "ProbeMemberAdmission",
+        "DeclareIdentityEntry",
+        "SealDeclaredRoster",
+        "RecoverCreatedIdentityEntry",
+        "RecoverIdentityEntry",
+        "AdoptLegacyIdentityEntry",
+        "RecordCreatedIdentityEntry",
+        // The store's writes of an archive and an unarchive: a roster-owned
+        // identity's are its host's.
+        "ArchiveIdentityEntry",
+        "UnarchiveIdentityEntry",
+        "RemoveIdentityEntry",
+        // The roster writer's one-entry unlist, which acts on a Declared entry
+        // only.
+        "UnlistIdentityEntry",
+    ];
+
+    const ORIGIN_GUARD_INVARIANTS: &[&str] = &[
+        "entry_custodies_are_disjoint",
+        "retiring_entry_is_a_declared_entry",
+        "archived_entry_is_store_owned",
+        "entry_ending_marks_are_seated_and_disjoint",
+    ];
+
+    /// The byte offsets of every read of an origin value in `code`: a path to
+    /// `IdentityEntryOrigin::Created` or `::Declared`; `Self::Created` or
+    /// `Self::Declared` in the type's own impl blocks; a `use` that renames the
+    /// type or imports its variants (`as`, braces or a glob), which would hide
+    /// every later read from the name; and a stored token compared or matched
+    /// (`as_stored()` in an expression, between the statement or block
+    /// boundaries around it, that compares, matches or is a `match` scrutinee,
+    /// split across lines or not: the token's type is not visible to the scan,
+    /// so any such use counts).
+    fn origin_value_reads(code: &str) -> Vec<usize> {
+        const NAME: &str = "IdentityEntryOrigin";
+        let mut reads = Vec::new();
+        for (at, _) in code.match_indices(NAME) {
+            if !whole_identifier(code, at, NAME) {
+                continue;
+            }
+            let rest = code[at + NAME.len()..].trim_start();
+            if rest.starts_with("::Created") || rest.starts_with("::Declared") {
+                reads.push(at);
+            }
+            // The type's own impl block (`impl IdentityEntryOrigin` or
+            // `impl ... for IdentityEntryOrigin`): its `Self::` variants.
+            let before = code[..at].trim_end();
+            if (before.ends_with("impl") || before.ends_with("for")) && rest.starts_with('{') {
+                let open = code.len() - rest.len();
+                let end = brace_group_end(code, open);
+                for variant in ["Self::Created", "Self::Declared"] {
+                    reads.extend(
+                        code[open..end]
+                            .match_indices(variant)
+                            .map(|(offset, _)| open + offset)
+                            .filter(|index| whole_identifier(code, *index, variant)),
+                    );
+                }
+            }
+        }
+        for (use_at, _) in code.match_indices("use") {
+            if !whole_identifier(code, use_at, "use") {
+                continue;
+            }
+            let Some(end) = code[use_at..].find(';').map(|offset| use_at + offset) else {
+                continue;
+            };
+            for (offset, _) in code[use_at..end].match_indices(NAME) {
+                let at = use_at + offset;
+                if !whole_identifier(code, at, NAME) {
+                    continue;
+                }
+                let rest = code[at + NAME.len()..end].trim_start();
+                let renamed = rest
+                    .strip_prefix("as")
+                    .is_some_and(|after| after.starts_with(char::is_whitespace));
+                if renamed || rest.starts_with("::{") || rest.starts_with("::*") {
+                    reads.push(at);
+                }
+            }
+        }
+        for (at, _) in code.match_indices(".as_stored()") {
+            let start = code[..at]
+                .rfind([';', '{', '}'])
+                .map_or(0, |index| index + 1);
+            let end = code[at..]
+                .find([';', '{', '}'])
+                .map_or(code.len(), |index| at + index);
+            let expression = &code[start..end];
+            let scrutinee = expression
+                .match_indices("match")
+                .any(|(offset, _)| whole_identifier(expression, offset, "match"));
+            if expression.contains("==")
+                || expression.contains("!=")
+                || expression.contains("matches!")
+                || scrutinee
+            {
+                reads.push(at);
+            }
+        }
+        reads.sort_unstable();
+        reads.dedup();
+        reads
+    }
+
+    /// Whether the origin read at `at` in the DSL lies inside the braces of a
+    /// custody guard: a transition of [`ORIGIN_GUARD_TRANSITIONS`] or an
+    /// invariant of [`ORIGIN_GUARD_INVARIANTS`], never after the item's closing
+    /// brace and never in a helper.
+    fn dsl_origin_read_allowed(dsl: &str, at: usize) -> bool {
+        let before = &dsl[..at];
+        let item = ["transition ", "invariant ", "helper "]
+            .iter()
+            .filter_map(|keyword| before.rfind(keyword).map(|start| (start, *keyword)))
+            .max_by_key(|(start, _)| *start);
+        item.is_some_and(|(start, keyword)| {
+            // The read lies inside the item's own braces, not after them.
+            let inside = dsl[start..]
+                .find('{')
+                .map(|offset| start + offset)
+                .is_some_and(|open| open < at && at < brace_group_end(dsl, open));
+            let name = dsl[start + keyword.len()..]
+                .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                .next()
+                .unwrap_or_default();
+            inside
+                && match keyword {
+                    "transition " => ORIGIN_GUARD_TRANSITIONS
+                        .iter()
+                        .any(|prefix| name.starts_with(prefix)),
+                    "invariant " => ORIGIN_GUARD_INVARIANTS.contains(&name),
+                    _ => false,
+                }
+        })
+    }
+
+    /// Row (source guard; RED leg: a scratch `IdentityEntryOrigin::Created` in a
+    /// DSL transition outside the custody guards, after a guard's closing brace
+    /// or in a helper fails it): the DSL reads an identity entry's origin only
+    /// inside a custody guard: a transition of [`ORIGIN_GUARD_TRANSITIONS`] or
+    /// an invariant of [`ORIGIN_GUARD_INVARIANTS`]. The module itself is
+    /// test-only, so the scan never sees its own fixtures.
+    /// `the_dsl_origin_scan_allows_only_reads_inside_a_custody_guard` pins the
+    /// verdicts.
+    #[test]
+    fn identity_entry_origin_is_read_only_by_the_dsl_custody_guards() {
+        let dsl = shipped_code(SOURCE);
+        let mut strays = Vec::new();
+        for at in origin_value_reads(&dsl) {
+            if !dsl_origin_read_allowed(&dsl, at) {
+                strays.push(format!("mob_machine DSL:{}", line_of(&dsl, at)));
+            }
+        }
+        assert!(
+            strays.is_empty(),
+            "an identity's origin is read outside the custody guards: {strays:?}"
+        );
+    }
+
+    /// Row (the DSL origin scan's own self-test): a DSL read is allowed only
+    /// inside a custody guard's braces. A scan branch that broke would
+    /// otherwise let the guard pass silently.
+    #[test]
+    fn the_dsl_origin_scan_allows_only_reads_inside_a_custody_guard() {
+        let dsl = shipped_code(
+            "transition DeclareIdentityEntryKept {\n\
+                 guard { origin == Some(IdentityEntryOrigin::Declared) }\n\
+             }\n\
+             origin = IdentityEntryOrigin::Created;\n\
+             transition StopRunning {\n\
+                 guard { origin == Some(IdentityEntryOrigin::Created) }\n\
+             }\n\
+             invariant archived_entry_is_store_owned {\n\
+                 origin == Some(IdentityEntryOrigin::Created)\n\
+             }\n\
+             helper custody() -> bool {\n\
+                 origin == Some(IdentityEntryOrigin::Declared)\n\
+             }\n",
+        );
+        let verdicts: Vec<(usize, bool)> = origin_value_reads(&dsl)
+            .into_iter()
+            .map(|at| (line_of(&dsl, at), dsl_origin_read_allowed(&dsl, at)))
+            .collect();
+        assert_eq!(
+            verdicts,
+            [(2, true), (4, false), (6, false), (9, true), (12, false)],
+            "a custody guard's read is allowed; one after its closing brace, in \
+             another transition or in a helper is not"
+        );
+    }
+
+    // The lexer helpers below are copied verbatim from meerkat-mob's
+    // runtime/tests/fail_stop_cause.rs, whose comment and literal blanking and
+    // test-item removal are the facade's host launch scan's (the
+    // host_launch_sites test of the meerkat crate).
+
+    /// The 1-based line of byte `index` in `code`.
+    fn line_of(code: &str, index: usize) -> usize {
+        code[..index].matches('\n').count() + 1
+    }
+
+    /// Whether `name` occurs in `code` at `at` as a whole identifier.
+    fn whole_identifier(code: &str, at: usize, name: &str) -> bool {
+        let bytes = code.as_bytes();
+        let before = at.checked_sub(1).map(|index| bytes[index]);
+        let after = bytes.get(at + name.len()).copied();
+        let identifier = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'_';
+        !before.is_some_and(identifier) && !after.is_some_and(identifier)
+    }
+
+    /// The byte index just past the brace group that opens at `open`.
+    fn brace_group_end(code: &str, open: usize) -> usize {
+        let mut depth = 0usize;
+        for (offset, byte) in code.as_bytes()[open..].iter().enumerate() {
+            match byte {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return open + offset + 1;
+                    }
+                }
+                _ => {}
+            }
+        }
+        code.len()
+    }
+
+    /// `source` with comments and literals blanked and every test-only item
+    /// (`#[cfg(test)]`, `#[cfg(all(test, ..))]`, `#[test]` and `#[*::test]`)
+    /// removed, so only code a shipped build compiles remains.
+    fn shipped_code(source: &str) -> String {
+        let code = blank_comments_and_literals(source);
+        let bytes = code.as_bytes();
+        let mut out = String::with_capacity(code.len());
+        let mut index = 0;
+        while index < bytes.len() {
+            if bytes[index] == b'#'
+                && let Some((attribute, end)) = attribute_at(&code, index)
+            {
+                if gates_test_only(attribute) {
+                    let skipped_end = item_end(bytes, end);
+                    // Keep the line count, so a reported line is the source's.
+                    out.extend(code[index..skipped_end].chars().filter(|c| *c == '\n'));
+                    index = skipped_end;
+                    continue;
+                }
+                out.push_str(&code[index..end]);
+                index = end;
+                continue;
+            }
+            let Some(character) = code[index..].chars().next() else {
+                break;
+            };
+            out.push(character);
+            index += character.len_utf8();
+        }
+        out
+    }
+
+    /// The attribute starting at `start` (`#[...]` or `#![...]`) and the index
+    /// after it.
+    fn attribute_at(code: &str, start: usize) -> Option<(&str, usize)> {
+        let bytes = code.as_bytes();
+        let mut index = start + 1;
+        if bytes.get(index) == Some(&b'!') {
+            index += 1;
+        }
+        if bytes.get(index) != Some(&b'[') {
+            return None;
+        }
+        let mut depth = 0usize;
+        while index < bytes.len() {
+            match bytes[index] {
+                b'[' => depth += 1,
+                b']' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some((&code[start..=index], index + 1));
+                    }
+                }
+                _ => {}
+            }
+            index += 1;
+        }
+        None
+    }
+
+    /// Whether an attribute makes its item test-only.
+    fn gates_test_only(attribute: &str) -> bool {
+        let compact: String = attribute.chars().filter(|c| !c.is_whitespace()).collect();
+        compact == "#[test]"
+            || (compact.starts_with("#[") && compact.ends_with("::test]"))
+            || (compact.contains("::test(") && !compact.starts_with("#[cfg"))
+            || compact == "#[cfg(test)]"
+            || compact.starts_with("#[cfg(all(test,")
+            || (compact.starts_with("#[cfg(all(") && compact.contains(",test,"))
+            || (compact.starts_with("#[cfg(all(") && compact.contains(",test))"))
+    }
+
+    /// The index after the item that starts at or after `start`: past any
+    /// further attributes, through its matching closing brace, or its `;` when
+    /// it has no body. A match arm, field, variant or argument (anything that
+    /// does not start with an item or statement keyword) also ends at its `,`,
+    /// and any item ends where the construct enclosing it closes, so the code
+    /// after it is scanned.
+    fn item_end(bytes: &[u8], start: usize) -> usize {
+        let separated = !starts_with_item_keyword(bytes, start);
+        let mut index = start;
+        let mut depth = 0usize;
+        while index < bytes.len() {
+            match bytes[index] {
+                b'{' | b'(' | b'[' => depth += 1,
+                closing @ (b'}' | b')' | b']') => {
+                    if depth == 0 {
+                        return index;
+                    }
+                    depth -= 1;
+                    if depth == 0 && closing == b'}' {
+                        return index + 1;
+                    }
+                }
+                b';' if depth == 0 => return index + 1,
+                b',' if depth == 0 && separated => return index + 1,
+                _ => {}
+            }
+            index += 1;
+        }
+        bytes.len()
+    }
+
+    /// Whether the code at `start`, past whitespace and attributes, starts with
+    /// an item or statement keyword (whose `,` at the top level, as in generic
+    /// parameters, does not end it).
+    fn starts_with_item_keyword(bytes: &[u8], start: usize) -> bool {
+        const KEYWORDS: &[&str] = &[
+            "async",
+            "const",
+            "enum",
+            "extern",
+            "fn",
+            "impl",
+            "let",
+            "macro_rules",
+            "mod",
+            "pub",
+            "static",
+            "struct",
+            "trait",
+            "type",
+            "union",
+            "unsafe",
+            "use",
+        ];
+        let mut index = start;
+        loop {
+            while bytes.get(index).is_some_and(u8::is_ascii_whitespace) {
+                index += 1;
+            }
+            if bytes.get(index) != Some(&b'#') {
+                break;
+            }
+            let mut depth = 0usize;
+            while let Some(&byte) = bytes.get(index) {
+                index += 1;
+                match byte {
+                    b'[' => depth += 1,
+                    b']' => {
+                        depth = depth.saturating_sub(1);
+                        if depth == 0 {
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let word_end = bytes[index.min(bytes.len())..]
+            .iter()
+            .position(|byte| !(byte.is_ascii_alphanumeric() || *byte == b'_'))
+            .map_or(bytes.len(), |offset| index + offset);
+        let word = std::str::from_utf8(&bytes[index.min(bytes.len())..word_end]).unwrap_or("");
+        KEYWORDS.contains(&word)
+    }
+
+    /// `source` with every comment and string or character literal replaced by
+    /// spaces (newlines kept).
+    fn blank_comments_and_literals(source: &str) -> String {
+        let chars: Vec<char> = source.chars().collect();
+        let mut out = String::with_capacity(source.len());
+        let mut index = 0;
+        let blank = |out: &mut String, character: char| {
+            out.push(if character == '\n' { '\n' } else { ' ' });
+        };
+        while index < chars.len() {
+            let character = chars[index];
+            let next = chars.get(index + 1).copied();
+            if character == '/' && next == Some('/') {
+                while index < chars.len() && chars[index] != '\n' {
+                    blank(&mut out, chars[index]);
+                    index += 1;
+                }
+                continue;
+            }
+            if character == '/' && next == Some('*') {
+                let mut depth = 0usize;
+                while index < chars.len() {
+                    if chars[index] == '/' && chars.get(index + 1) == Some(&'*') {
+                        depth += 1;
+                        blank(&mut out, chars[index]);
+                        blank(&mut out, '*');
+                        index += 2;
+                        continue;
+                    }
+                    if chars[index] == '*' && chars.get(index + 1) == Some(&'/') {
+                        depth -= 1;
+                        blank(&mut out, '*');
+                        blank(&mut out, '/');
+                        index += 2;
+                        if depth == 0 {
+                            break;
+                        }
+                        continue;
+                    }
+                    blank(&mut out, chars[index]);
+                    index += 1;
+                }
+                continue;
+            }
+            // Raw strings: r"..", r#".."#, br#".."#.
+            let raw_start = match (character, next) {
+                ('r', Some('"' | '#')) => Some(index + 1),
+                ('b', Some('r')) if matches!(chars.get(index + 2), Some('"' | '#')) => {
+                    Some(index + 2)
+                }
+                _ => None,
+            };
+            if let Some(mut cursor) = raw_start
+                && !identifier_continues(&chars, index)
+            {
+                let mut hashes = 0usize;
+                while chars.get(cursor) == Some(&'#') {
+                    hashes += 1;
+                    cursor += 1;
+                }
+                if chars.get(cursor) == Some(&'"') {
+                    cursor += 1;
+                    while cursor < chars.len() {
+                        if chars[cursor] == '"'
+                            && (0..hashes)
+                                .all(|offset| chars.get(cursor + 1 + offset) == Some(&'#'))
+                        {
+                            cursor += 1 + hashes;
+                            break;
+                        }
+                        cursor += 1;
+                    }
+                    for &skipped in &chars[index..cursor.min(chars.len())] {
+                        blank(&mut out, skipped);
+                    }
+                    index = cursor;
+                    continue;
+                }
+            }
+            if character == '"' {
+                blank(&mut out, character);
+                index += 1;
+                while index < chars.len() {
+                    let current = chars[index];
+                    blank(&mut out, current);
+                    index += 1;
+                    if current == '\\' {
+                        if index < chars.len() {
+                            blank(&mut out, chars[index]);
+                            index += 1;
+                        }
+                    } else if current == '"' {
+                        break;
+                    }
+                }
+                continue;
+            }
+            if character == '\'' {
+                // A character literal ('x', '\n', '\u{..}'); a lifetime has no
+                // closing quote right after one character or escape.
+                let end = if next == Some('\\') {
+                    chars
+                        .get(index + 3..)
+                        .and_then(|rest| rest.iter().position(|&c| c == '\''))
+                        .map(|offset| index + 3 + offset)
+                } else if chars.get(index + 2) == Some(&'\'') {
+                    Some(index + 2)
+                } else {
+                    None
+                };
+                if let Some(end) = end {
+                    for &skipped in &chars[index..=end] {
+                        blank(&mut out, skipped);
+                    }
+                    index = end + 1;
+                    continue;
+                }
+            }
+            out.push(character);
+            index += 1;
+        }
+        out
+    }
+
+    /// Whether the character before `index` continues an identifier, so an `r`
+    /// or `b` there is not a literal prefix.
+    fn identifier_continues(chars: &[char], index: usize) -> bool {
+        index > 0 && (chars[index - 1].is_alphanumeric() || chars[index - 1] == '_')
+    }
+}

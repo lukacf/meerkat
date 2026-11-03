@@ -1155,19 +1155,6 @@
         ]
       }
     ],
-    "crates/meerkat-machine-schema/src/catalog/dsl/mob_machine.rs": [
-      {
-        "package": "meerkat-mob",
-        "target": "lib",
-        "scope": "target",
-        "tests": [
-          "identity_entry_origin_is_read_only_by_the_custody_guards"
-        ],
-        "sources": [
-          "crates/meerkat-mob/src/runtime/tests/store_owned_identity_rows.rs"
-        ]
-      }
-    ],
     "crates/meerkat-mcp-server/src/runtime_ingress.rs": [
       {
         "package": "meerkat-runtime",

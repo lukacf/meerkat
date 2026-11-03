@@ -218,7 +218,16 @@ async fn class_resource_requires_exact_native_admission_and_never_selects_helper
             .prepare(super::super::super::tests::prepared(&root))
             .unwrap(),
     );
-    let selected = owner_selection(&phase, Some(phase.input.members[0].logical_owner.clone()));
+    // Like the other registration fixtures, the native owner's operator is a
+    // service account distinct from the grant administrator that owns the
+    // class policy: the selection refuses an operator equal to it.
+    let operator = meerkat_core::PrincipalRef::in_domain(
+        meerkat_core::PrincipalKind::ServiceAccount,
+        "class-registration-admin",
+        meerkat_core::TrustDomainId::new("application-setup-fixture").unwrap(),
+    )
+    .unwrap();
+    let selected = owner_selection(&phase, Some(operator));
     let class = phase.input.member_classes[0].clone();
     let mut member = phase.input.members[0].clone();
     member.member.member = "project-first".into();

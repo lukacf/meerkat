@@ -454,9 +454,8 @@ and its CI must be green before a release tag (`require_ci_green`):
   on every change under `connect/`.
 - `fmt-governance` (always): fmt, docs-check, semver self-test, version
   parity, lock consistency, generated BUILD freshness
-  (`node scripts/generate-bazel-rust-builds.mjs --check`),
-  `make ci-lanes-selftest`,
-  `make path-classifier-selftest`, the ripgrep tombstone scans
+  (`node scripts/generate-bazel-rust-builds.mjs --check`), the ripgrep
+  tombstone scans
   (`legacy-surface-gate`, `session-control-gate`, `deprecated-backend-gate`;
   ripgrep is installed first, and each scan refuses to run without it), and
   the published crates' static standalone guard
@@ -466,6 +465,10 @@ and its CI must be green before a release tag (`require_ci_green`):
   test file is left out in both the crate's `[package] exclude` and
   `ci/standalone-workspace-only.toml`, and a crate whose tests need features
   or a stack prints the exact `cargo test` command in its README).
+- `ci-lanes-selftest` (`make ci-lanes-selftest`) and
+  `path-classifier-selftest` (`make path-classifier-selftest`) (always): the
+  planner self-tests, each in a job of its own beside `fmt-governance`; like
+  it they wait for no plan, and the `CI gate` requires both.
 - `ratchets`: generated-contract freshness when contract paths changed;
   `machine-check-drift`/`protocol-check-drift` when machine authority changed;
   `verify-machine-poster-coverage` when machine authority or a poster input

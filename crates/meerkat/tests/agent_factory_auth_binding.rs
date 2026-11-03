@@ -119,6 +119,7 @@ fn config_with_realm() -> Config {
         default_binding: Some("default_openai".into()),
         parent: None,
         connector_client: Default::default(),
+        copilot: None,
     };
 
     let mut config = Config::default();

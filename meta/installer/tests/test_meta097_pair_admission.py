@@ -71,8 +71,8 @@ def test_meta097_admission_still_requires_exact_original_bytes(defect):
         check_pair(pair, meta=(content, expectation))
 
 
-@pytest.mark.parametrize("sdk_files", [("0.9.6", "0.9.5"), ("0.9.7", "0.9.5"), ("0.9.9", "0.9.5")],
-    indirect=True)
+@pytest.mark.parametrize("sdk_files", [("0.9.6", "0.9.5"), ("0.9.7", "0.9.5"), ("0.9.9", "0.9.5"),
+    ("0.9.10", "0.9.10")], indirect=True)
 def test_readback_preserves_selected_version_and_original_bytes(sdk_files):
     original = {p: p.read_bytes() for p in sdk_files.site.rglob("*") if p.is_file()}
     facts = compare(sdk_files)

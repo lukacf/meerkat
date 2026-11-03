@@ -65,7 +65,7 @@ DERIVED = (base64.b64encode(f"__token__:{PYPI_SECRET}".encode()).decode(),)
 
 RELEASE = "2.0.0"
 PUBLISHED = "1.9.0"
-CORE_CRATES = ("meerkat-core", "meerkat-store", "rkat")
+CORE_CRATES = ("meerkat-core", "meerkat-store", "meerkat", "rkat")
 META_CRATES = ("meta-extension-state", "meerkat-meta")
 
 
@@ -568,7 +568,7 @@ class RuleAPublishedVersionOnly(Harness):
         self.assertEqual({c["sha256"] for c in calls}, {hashlib.sha256(wheel("meerkat-sdk", PUBLISHED)[1]).hexdigest()})
         rows = self.rows()
         for key in (("npm", "@rkat/sdk"), ("npm", "@rkat/web"), ("pypi", "meerkat-sdk"),
-                    ("crates", "meerkat-core"), ("crates", "rkat")):
+                    ("crates", "meerkat-core"), ("crates", "meerkat"), ("crates", "rkat")):
             self.assertEqual((rows[key]["verdict"], rows[key]["version"]), ("PASS", PUBLISHED), key)
         self.assertEqual(rows[("crates", "meerkat-store")]["verdict"], "SKIP")
         self.assertIn(RELEASE, json.loads(self.report.read_text())["never_probed_versions"])
@@ -605,7 +605,7 @@ class RuleAPublishedVersionOnly(Harness):
         self.assertEqual(rows[("crates", "meerkat-core")]["verdict"], "PASS")
 
     def test_a_a_crate_missing_from_crates_io_fails_as_a_first_publication(self) -> None:
-        self.registry.add_product("core", crates=("meerkat-core", "rkat"))
+        self.registry.add_product("core", crates=("meerkat-core", "meerkat", "rkat"))
         result = self.run_preflight("--product", "core", "--mode", "probe", "--registry", "crates")
         self.assertEqual(result.returncode, 1, self.output)
         row = self.rows()[("crates", "meerkat-store")]
@@ -658,18 +658,18 @@ class RuleCCratesRateLimit(Harness):
         self.registry.add_product("meta")
         result = self.run_preflight("--product", "core", "--mode", "probe", "--registry", "crates")
         self.assertEqual(result.returncode, 0, self.output)
-        self.assertEqual(sorted(w["package"] for w in self.token_writes("crates")), ["meerkat-core", "rkat"])
+        self.assertEqual(sorted(w["package"] for w in self.token_writes("crates")), ["meerkat", "meerkat-core", "rkat"])
         self.assertEqual(self.rows()[("crates", "meerkat-store")]["verdict"], "SKIP")
-        self.assertEqual(json.loads(self.report.read_text())["crates_sample"], ["meerkat-core", "rkat"])
+        self.assertEqual(json.loads(self.report.read_text())["crates_sample"], ["meerkat-core", "meerkat", "rkat"])
         self.registry.writes.clear()
         result = self.run_preflight("--product", "meta", "--mode", "probe", "--registry", "crates")
         self.assertEqual(result.returncode, 0, self.output)
         self.assertEqual(sorted(w["package"] for w in self.token_writes("crates")), sorted(META_CRATES))
-        self.assertEqual(preflight.PRODUCTS["core"].family_sample, ("meerkat-core", "rkat"))
+        self.assertEqual(preflight.PRODUCTS["core"].family_sample, ("meerkat-core", "meerkat", "rkat"))
         self.assertEqual(preflight.PRODUCTS["meta"].family_sample, ("meta-extension-state", "meerkat-meta"))
 
     def test_c_family_mode_fails_a_crate_the_sample_cannot_vouch_for(self) -> None:
-        self.registry.add_product("core", crates=("meerkat-core", "rkat"))
+        self.registry.add_product("core", crates=("meerkat-core", "meerkat", "rkat"))
         self.registry.add_crate("meerkat-store", owners=(("user", 2),))
         result = self.run_preflight("--product", "core", "--mode", "probe", "--registry", "crates")
         self.assertEqual(result.returncode, 1, self.output)
@@ -697,6 +697,34 @@ class RuleCCratesRateLimit(Harness):
                                     env={"GITHUB_WORKFLOW_REF": ref})
         self.assertEqual(result.returncode, 0, self.output)
         self.assertEqual(sorted(w["package"] for w in self.token_writes("crates")), sorted(CORE_CRATES))
+
+    def test_c_the_family_sample_covers_every_crate_scope_family_of_the_real_lists(self) -> None:
+        # A crates.io token's crate scope names a crate or a `prefix*` pattern,
+        # and `meerkat-*` does not cover the facade `meerkat`: one probed crate
+        # per family, so a token scoped to some families only fails the probe.
+        self.assertEqual(preflight.scope_family("meerkat-core"), "meerkat-*")
+        self.assertEqual(preflight.scope_family("meerkat"), "meerkat")
+        self.assertEqual(preflight.scope_family("rkat"), "rkat")
+        listed = subprocess.run(["bash", str(REPO_ROOT / "scripts" / "release-rust-crates.sh")], capture_output=True,
+                                text=True, check=True).stdout.split()
+        products = json.loads((REPO_ROOT / "ci" / "products.json").read_text())["products"]
+        lists = {"core": listed, "meta": next(p for p in products if p["name"] == "meta")["publish_order"]}
+        for product, crates in lists.items():
+            with self.subTest(product=product):
+                sample = preflight.PRODUCTS[product].family_sample
+                self.assertLessEqual(set(sample), set(crates))
+                self.assertEqual({preflight.scope_family(c) for c in sample},
+                                 {preflight.scope_family(c) for c in crates})
+                self.assertEqual(len({preflight.scope_family(c) for c in sample}), len(sample))
+        self.assertEqual(preflight.PRODUCTS["core"].family_sample, ("meerkat-core", "meerkat", "rkat"))
+        self.assertEqual(sum(len(p.family_sample) for p in preflight.PRODUCTS.values()), 5)
+
+    def test_c_a_crate_in_a_family_the_sample_misses_is_refused_before_any_request(self) -> None:
+        repo = make_repo(self.tmp / "new-family", core_crates=("meerkat-core", "meerkat", "rkat", "rkat-extra"))
+        result = self.run_preflight("--product", "core", repo=repo)
+        self.assertEqual(result.returncode, 2, self.output)
+        self.assertIn("covers no crate of the name family of ['rkat-extra']", self.output)
+        self.assertEqual(self.registry.log, [])
 
     def test_c_the_full_probe_is_paced_to_the_publish_rate_limit(self) -> None:
         delays = preflight.probe_delays(49, 20, 61)
@@ -744,6 +772,7 @@ class RuleDVerdictsAndAnswers(Harness):
             ("npm", "@rkat/web"): ("FAIL", 404, "Not found"),
             ("pypi", "meerkat-sdk"): ("FAIL", 403, "isn't allowed to upload to project"),
             ("crates", "meerkat-core"): ("PASS", 400, f"crate version `{PUBLISHED}` is already uploaded"),
+            ("crates", "meerkat"): ("PASS", 400, f"crate version `{PUBLISHED}` is already uploaded"),
             ("crates", "rkat"): ("FAIL", 403, "this token does not have the required permissions to perform this action"),
             ("crates", "meerkat-store"): ("SKIP", None, ""),
         }
@@ -755,10 +784,10 @@ class RuleDVerdictsAndAnswers(Harness):
                 self.assertTrue(rows[key]["detail"])
         self.assertIn(f'PASS         npm    @rkat/sdk {PUBLISHED}: HTTP 403 "You cannot publish over', self.output)
         self.assertIn(f'FAIL         npm    @rkat/web {PUBLISHED}: HTTP 404 "Not found"', self.output)
-        self.assertRegex(self.output, r"registry pre-flight core: 2 PASS, 3 FAIL, 0 INCONCLUSIVE, 1 SKIP: NOT OK")
+        self.assertRegex(self.output, r"registry pre-flight core: 3 PASS, 3 FAIL, 0 INCONCLUSIVE, 1 SKIP: NOT OK")
         report = json.loads(self.report.read_text())
         self.assertFalse(report["ok"])
-        self.assertEqual(report["counts"], {"PASS": 2, "FAIL": 3, "INCONCLUSIVE": 0, "SKIP": 1})
+        self.assertEqual(report["counts"], {"PASS": 3, "FAIL": 3, "INCONCLUSIVE": 0, "SKIP": 1})
         summary = self.summary.read_text()
         self.assertIn("| FAIL | npm | @rkat/web |", summary)
         self.assertIn("| PASS | crates | meerkat-core |", summary)
@@ -970,7 +999,7 @@ class Repository(Harness):
         stale = make_repo(self.tmp / "stale", core_crates=("meerkat-core", "meerkat-store"))
         result = self.run_preflight("--product", "core", repo=stale)
         self.assertEqual(result.returncode, 2, self.output)
-        self.assertIn("family sample names ['rkat']", self.output)
+        self.assertIn("family sample names ['meerkat', 'rkat']", self.output)
         self.assertEqual(self.registry.log, [])
 
 

@@ -35,10 +35,12 @@ Safety rules, each enforced here and covered by scripts/test_release_registry_pr
 (c) crates.io takes one token of the account's publish-update rate limit
     (burst 30, one more a minute) for each probe, even a refused one, before
     its duplicate check. `family` (the default, and the release-time gate)
-    probes a fixed sample, FAMILY_SAMPLE, and checks every other crate of the
-    product anonymously: it exists, is not trusted-publishing-only, and its
-    owners include every owner of the probed crates. `all` probes every crate,
-    paced (--crates-burst at most 30 back to back, then one per
+    probes a fixed sample, one crate per crate-scope name family (Core:
+    meerkat-core, meerkat, rkat; Meta: both crates), refuses to run when a
+    crate of the product falls in a family the sample misses, and checks
+    every other crate anonymously: it exists, is not trusted-publishing-only,
+    and its owners include every owner of the probed crates. `all` probes
+    every crate, paced (--crates-burst at most 30 back to back, then one per
     --crates-interval of at least 60 seconds), and is refused inside a
     release workflow: it is the early registry-preflight.yml dispatch only.
 (d) Every package of the product gets a row: PASS, FAIL, INCONCLUSIVE or SKIP
@@ -148,8 +150,10 @@ MAX_ANSWER = 600
 class ProductSpec:
     npm_manifests: tuple[str, ...]
     pypi_manifests: tuple[str, ...]
-    # One crate per crates.io crate-scope name family (a token's crate
-    # scope names a crate or a `prefix*` pattern).
+    # One crate per crate-scope name family (scope_family): a crates.io
+    # token's crate scope names a crate or a `prefix*` pattern, and a
+    # `meerkat-*` scope does not cover the facade `meerkat`, so the facade is
+    # sampled on its own.
     family_sample: tuple[str, ...]
 
 
@@ -157,7 +161,7 @@ PRODUCTS = {
     "core": ProductSpec(
         npm_manifests=("sdks/typescript/package.json", "sdks/web/package.json"),
         pypi_manifests=("sdks/python/pyproject.toml",),
-        family_sample=("meerkat-core", "rkat"),
+        family_sample=("meerkat-core", "meerkat", "rkat"),
     ),
     "meta": ProductSpec(
         npm_manifests=("meta/sdk/typescript/package.json",),
@@ -344,6 +348,12 @@ def _product_versions(repo: Path, product: str, crates: list[str]) -> set[str]:
     if not versions:
         raise UsageError(f"cannot read {product}'s release version from the repository")
     return versions
+
+
+def scope_family(crate: str) -> str:
+    """The crate-scope pattern family of a crate: `meerkat-*` for meerkat-core, else the name."""
+    head, separator, _ = crate.partition("-")
+    return f"{head}-*" if separator else crate
 
 
 def load_product(repo: Path, product: str, release_version: str | None) -> Product:
@@ -1151,6 +1161,13 @@ def main(argv: list[str] | None = None) -> int:
                 raise UsageError(
                     f"the {product.name} family sample names {stale}, which its crate list does not: "
                     "update PRODUCTS' family_sample"
+                )
+            sampled = {scope_family(crate) for crate in product.family_sample}
+            uncovered = sorted(crate for crate in product.crates if scope_family(crate) not in sampled)
+            if uncovered:
+                raise UsageError(
+                    f"the {product.name} family sample covers no crate of the name family of {uncovered}: "
+                    "add one to PRODUCTS' family_sample"
                 )
     except UsageError as error:
         print(f"release-registry-preflight: {error}", file=sys.stderr)

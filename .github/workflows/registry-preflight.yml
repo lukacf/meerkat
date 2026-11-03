@@ -19,10 +19,11 @@ name: Registry pre-flight
 # Dispatch only, on main only, read-only token. A job holds the secrets only
 # in probe mode, and only in its probe step. crates.io takes one publish token
 # of the account's rate limit per crate probe (burst 30, one more a minute),
-# shared with every release: `family` probes the fixed sample (two crates a
-# product); `all` probes every crate, paced, and must finish at least an hour
-# before a window's first crates.io publication. The products run one after
-# the other for the same reason.
+# shared with every release: `family` probes the fixed sample (one crate per
+# crate-scope name family: three for Core, both Meta crates); `all` probes
+# every crate, paced, and must finish at least an hour before a window's
+# first crates.io publication. The products run one after the other for the
+# same reason.
 
 on:
   workflow_dispatch:

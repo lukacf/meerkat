@@ -44,6 +44,14 @@ struct ApprovalStoreFile {
 /// without a directory barrier the store refuses to open rather than claim
 /// durability. A failed first create can leave an empty store file, which
 /// holds no approval.
+///
+/// Privacy (Unix): the store creates every file owner-only (0600), which no
+/// process umask widens, for consumers that require private files. A commit
+/// creates its temporary file and its marker new, never reusing a leftover,
+/// so the store file its rename publishes is private, and a store file an
+/// older version left readable by others is replaced by a private one on
+/// the next commit. An existing lock file is tightened on its own inode,
+/// never replaced, since its holders lock that inode.
 #[derive(Debug)]
 pub struct FileApprovalStore {
     path: PathBuf,
@@ -97,6 +105,88 @@ impl Drop for StoreLock {
     fn drop(&mut self) {
         let _ = self.0.unlock();
     }
+}
+
+/// Owner-only permission bits of every file the store creates (Unix).
+#[cfg(unix)]
+const PRIVATE_MODE: u32 = 0o600;
+
+/// Open the lock sidecar, created owner-only on Unix whatever the umask.
+/// An existing lock file keeps the mode it was created with (an older
+/// version took the umask's), so it is tightened on the same inode: owners
+/// already holding the lock hold that inode, and a replacement would end
+/// their mutual exclusion with this store. The lock carries no data and
+/// its mutual exclusion does not depend on its mode, so a tightening the
+/// filesystem refuses (another user's lock file) fails open: the lock is
+/// used as it is and the store stays available.
+#[cfg(unix)]
+fn open_lock_file(path: &Path) -> std::io::Result<File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(PRIVATE_MODE)
+        .open(path)?;
+    if let Err(error) = make_private_in_place(&lock) {
+        tracing::warn!(
+            path = %path.display(),
+            error = %error,
+            "approval file store lock file keeps group or other permissions"
+        );
+    }
+    Ok(lock)
+}
+
+/// Open the lock sidecar, as the platform creates files.
+#[cfg(not(unix))]
+fn open_lock_file(path: &Path) -> std::io::Result<File> {
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)
+}
+
+/// Make an open file owner-only, on its own inode, when it grants group or
+/// other any permission.
+#[cfg(unix)]
+fn make_private_in_place(file: &File) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    if file.metadata()?.permissions().mode() & 0o077 != 0 {
+        file.set_permissions(std::fs::Permissions::from_mode(PRIVATE_MODE))?;
+    }
+    Ok(())
+}
+
+/// Create a file of one commit (its temporary file or its marker) new and
+/// owner-only on Unix whatever the umask. A leftover of an earlier commit
+/// (a crash, a failed commit, or an older version) would keep its own mode
+/// and links if it were reopened, so it is removed first and the file is
+/// created exclusively: what the rename publishes is always this commit's
+/// own private file. Callers hold the exclusive store lock, so no reader
+/// observes the name in between.
+#[cfg(unix)]
+fn create_private(path: &Path) -> std::io::Result<File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    match std::fs::remove_file(path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(PRIVATE_MODE)
+        .open(path)
+}
+
+/// Create a file of one commit, as the platform creates files.
+#[cfg(not(unix))]
+fn create_private(path: &Path) -> std::io::Result<File> {
+    File::create(path)
 }
 
 impl FileApprovalStore {
@@ -259,13 +349,7 @@ impl FileApprovalStore {
     }
 
     fn lock_file(&self) -> Result<File, ApprovalStoreError> {
-        OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&self.lock_path)
-            .map_err(io_error)
+        open_lock_file(&self.lock_path).map_err(io_error)
     }
 
     /// Take the commit lock without waiting: another owner holding it is
@@ -323,14 +407,14 @@ impl FileApprovalStore {
         let tmp = self.path.with_extension("json.tmp");
         // Before the rename nothing is committed: a failed write or fsync of
         // the temporary file leaves the store unchanged.
-        let mut written = File::create(&tmp).map_err(io_error)?;
+        let mut written = create_private(&tmp).map_err(io_error)?;
         written.write_all(&bytes).map_err(io_error)?;
         self.sync.sync_file(&written).map_err(io_error)?;
         drop(written);
         // Mark the window in which the replacement may be visible but not
         // durable. Other instances and processes honour the marker; a crash
         // in the window is covered by the barrier every open runs.
-        File::create(&self.marker_path).map_err(io_error)?;
+        create_private(&self.marker_path).map_err(io_error)?;
         std::fs::rename(&tmp, &self.path).map_err(|error| {
             ApprovalStoreError::CommitUnknown(format!("approval file store rename: {error}"))
         })?;

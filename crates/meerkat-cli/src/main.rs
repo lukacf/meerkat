@@ -10188,6 +10188,8 @@ async fn handle_storage_doctor(
     }
 
     let diagnosis = storage_diagnosis_migrator().diagnose(&scope).await?;
+    #[cfg(feature = "mob")]
+    let diagnosis = with_identity_store_rows(diagnosis).await;
 
     if json {
         println!("{}", serde_json::to_string_pretty(&diagnosis)?);
@@ -10200,6 +10202,72 @@ async fn handle_storage_doctor(
         anyhow::bail!("storage doctor found {errors} error-severity finding(s)");
     }
     Ok(())
+}
+
+/// `diagnosis` with the identity-store census of every mob database the
+/// disk sweep inventoried (the databases with the `mob` ledger domain:
+/// `mobs/<name>.db` of each realm): one Info
+/// [`meerkat_store::doctor::FINDING_IDENTITY_STORE_ROWS`] finding for each
+/// database that holds identity-store rows of schema version 2 or later,
+/// with the counts only. The mob crate's reader
+/// ([`meerkat_mob::MobStorage::read_identity_record_rows`]) counts them by
+/// the rule a running mob's census counts by; the disk sweep sits below that
+/// crate and cannot call it. The reader opens each database read-only and
+/// writes nothing. A database it cannot count gets an Info finding saying
+/// so, never a silent zero.
+#[cfg(feature = "mob")]
+async fn with_identity_store_rows(
+    mut diagnosis: meerkat_core::StorageDiagnosis,
+) -> meerkat_core::StorageDiagnosis {
+    let mob_databases: Vec<(String, PathBuf)> = diagnosis
+        .inventory
+        .iter()
+        .flat_map(|entry| {
+            entry
+                .databases
+                .iter()
+                .filter(|database| database.domains.iter().any(|(domain, _)| domain == "mob"))
+                .map(move |database| (entry.realm.clone(), database.path.clone()))
+        })
+        .collect();
+    for (realm, path) in mob_databases {
+        let message = match meerkat_mob::MobStorage::read_identity_record_rows(&path).await {
+            Ok(mobs) => {
+                let meerkat_mob::IdentityRecordRows {
+                    created_rows,
+                    archived,
+                    tombstones,
+                    unreadable,
+                    ..
+                } = mobs.into_values().sum();
+                if created_rows == 0 {
+                    continue;
+                }
+                format!(
+                    "{created_rows} identity-store row(s) of schema version 2 or later \
+                     ({archived} archived, {tombstones} tombstone(s), {unreadable} unreadable): \
+                     the rows of store-owned identities and the tombstones of removed names. A \
+                     release before 0.9.9 does not read them (Core 0.9.8 reads each such \
+                     identity as unreadable and refuses every new identity-first adoption in \
+                     the mob), and this release has no step that deletes them, so a downgrade \
+                     of this mob to such a release is not supported while any remain"
+                )
+            }
+            Err(error) => format!(
+                "the identity-store rows of this mob database could not be counted: {error}"
+            ),
+        };
+        diagnosis.findings.push(
+            meerkat_core::StorageFinding::new(
+                meerkat_core::FindingSeverity::Info,
+                meerkat_store::doctor::FINDING_IDENTITY_STORE_ROWS,
+                message,
+            )
+            .with_path(path)
+            .with_realm(realm),
+        );
+    }
+    diagnosis
 }
 
 /// Offline migration framework (`rkat storage migrate`); dry-run by

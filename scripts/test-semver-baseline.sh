@@ -304,6 +304,47 @@ if [[ "$result" != red* || "$result" != *'`## [Unreleased]` has no `### Breaking
   fail "a new break after the release: expected red naming ## [Unreleased], got '$result'"
 fi
 
+# A product's baseline tag (resolve_product_baseline_tag, which
+# check-semver-breaks.sh calls for every product but Core): a tag origin
+# answers it lacks (a release cut before the product's tags lived in this
+# repository) is reported absent so the gate measures the registry release,
+# not an error; a tag on origin is fetched; a local tag needs no origin; and
+# an origin that cannot be asked refuses rather than counting as "absent".
+product_tag_in() {
+  local dir="$1" tag="$2"
+  (
+    cd "$dir"
+    # shellcheck source=scripts/semver-baseline.sh
+    source "$REPO_ROOT/scripts/semver-baseline.sh"
+    if resolve_product_baseline_tag "$tag" 2>"$dir/.selection-stderr"; then
+      printf 'absent=%s\n' "$baseline_tag_absent"
+    else
+      printf 'refused %s\n' "$(tr '\n' ' ' <"$dir/.selection-stderr")"
+    fi
+  )
+}
+repo="$TEST_ROOT/product-tag-absent"
+new_repo "$repo" 0.9.9 "$RELEASE_TREE"
+with_origin "$repo"
+expect "a product tag origin lacks" "absent=true" "$(product_tag_in "$repo" meta-v0.9.7)"
+repo="$TEST_ROOT/product-tag-on-origin"
+new_repo "$repo" 0.9.9 "$RELEASE_TREE"
+git -C "$repo" tag meta-v0.9.7
+with_origin "$repo"
+git -C "$repo" tag -d meta-v0.9.7 >/dev/null
+expect "a product tag on origin" "absent=false" "$(product_tag_in "$repo" meta-v0.9.7)"
+if ! git -C "$repo" rev-parse -q --verify refs/tags/meta-v0.9.7 >/dev/null; then
+  fail "a product tag on origin: meta-v0.9.7 was not made local"
+fi
+repo="$TEST_ROOT/product-tag-local"
+new_repo "$repo" 0.9.9 "$RELEASE_TREE"
+git -C "$repo" tag meta-v0.9.7
+expect "a local product tag" "absent=false" "$(product_tag_in "$repo" meta-v0.9.7)"
+repo="$TEST_ROOT/product-tag-no-origin"
+new_repo "$repo" 0.9.9 "$RELEASE_TREE"
+expect_refusal "a product tag with no origin to ask" "could not ask origin whether meta-v0.9.7 exists" \
+  "$(product_tag_in "$repo" meta-v0.9.7)"
+
 if [[ "$failures" -ne 0 ]]; then
   echo "semver baseline selection contract: ${failures} failure(s)" >&2
   exit 1

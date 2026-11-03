@@ -26,7 +26,7 @@ classifiers = [
 
 [project.urls]
 Homepage = "https://docs.rkat.ai/meta/introduction"
-Repository = "https://github.com/lukacf/meerkat-meta"
+Repository = "https://github.com/lukacf/meerkat"
 Documentation = "https://docs.rkat.ai/meta/introduction"
 
 [project.optional-dependencies]

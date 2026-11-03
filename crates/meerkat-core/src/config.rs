@@ -5177,6 +5177,292 @@ mob_enabled = false
         assert!(!config.tools.mob_enabled);
     }
 
+    /// The `[tools] tool_timeouts` reader of 0.9.9 and 0.9.8: serde's own
+    /// `Duration`, which reads only the `{ secs, nanos }` form. A host that
+    /// rolls back reads the configs this release wrote with it.
+    #[derive(Deserialize)]
+    struct StructOnlyToolTimeouts {
+        #[serde(default)]
+        tools: StructOnlyTools,
+    }
+
+    #[derive(Default, Deserialize)]
+    struct StructOnlyTools {
+        #[serde(default)]
+        tool_timeouts: HashMap<String, Duration>,
+    }
+
+    /// The documented per-tool timeout form, a humantime string, loads on
+    /// every config read path: a persisted document, a layered merge and a
+    /// JSON config.
+    #[test]
+    fn tool_timeouts_load_humantime_strings() {
+        let document = r#"
+[tools.tool_timeouts]
+my_tool = "840s"
+other_tool = "14m"
+third_tool = "1h 2m"
+"#;
+        let expected = HashMap::from([
+            ("my_tool".to_string(), Duration::from_mins(14)),
+            ("other_tool".to_string(), Duration::from_mins(14)),
+            ("third_tool".to_string(), Duration::from_mins(62)),
+        ]);
+
+        let (persisted, _) =
+            Config::from_persisted_toml(document).expect("the persisted document loads");
+        assert_eq!(persisted.tools.tool_timeouts, expected);
+
+        let mut layered = Config::default();
+        layered
+            .merge_toml_str(document)
+            .expect("the config layer merges");
+        assert_eq!(layered.tools.tool_timeouts, expected);
+
+        let json: Config = serde_json::from_value(serde_json::json!({
+            "tools": { "tool_timeouts": {
+                "my_tool": "840s",
+                "other_tool": "14m",
+                "third_tool": "1h 2m",
+            } }
+        }))
+        .expect("the JSON config loads");
+        assert_eq!(json.tools.tool_timeouts, expected);
+    }
+
+    /// The `{ secs, nanos }` form loads exactly as it did when it was the
+    /// only one: each document gives the same timeouts, or the same error
+    /// text, as serde's own `Duration` reader.
+    #[test]
+    fn tool_timeouts_struct_form_loads_exactly_as_serde_duration() {
+        for document in [
+            "[tools.tool_timeouts]\nmy_tool = { secs = 90, nanos = 0 }\n",
+            "[tools.tool_timeouts]\nmy_tool = { nanos = 5, secs = 0 }\n",
+            "[tools.tool_timeouts]\nmy_tool = { secs = 1, nanos = 1500000000 }\n",
+            "[tools.tool_timeouts.my_tool]\nsecs = 90\nnanos = 0\n",
+            "[tools.tool_timeouts]\nmy_tool = [90, 0]\n",
+            "[tools.tool_timeouts]\nmy_tool = { secs = 90 }\n",
+            "[tools.tool_timeouts]\nmy_tool = { secs = -1, nanos = 0 }\n",
+            "[tools.tool_timeouts]\nmy_tool = { secs = 90, nanos = 0, millis = 0 }\n",
+            "[tools.tool_timeouts]\nmy_tool = [90]\n",
+        ] {
+            let loaded = toml::from_str::<Config>(document)
+                .map(|config| config.tools.tool_timeouts)
+                .map_err(|error| error.to_string());
+            let reference = toml::from_str::<StructOnlyToolTimeouts>(document)
+                .map(|config| config.tools.tool_timeouts)
+                .map_err(|error| error.to_string());
+            assert_eq!(loaded, reference, "{document}");
+        }
+        for document in [
+            r#"{"tools":{"tool_timeouts":{"my_tool":{"secs":90,"nanos":0}}}}"#,
+            r#"{"tools":{"tool_timeouts":{"my_tool":[90,0]}}}"#,
+            r#"{"tools":{"tool_timeouts":{"my_tool":{"secs":90}}}}"#,
+            r#"{"tools":{"tool_timeouts":{"my_tool":{"secs":-1,"nanos":0}}}}"#,
+        ] {
+            let loaded = serde_json::from_str::<Config>(document)
+                .map(|config| config.tools.tool_timeouts)
+                .map_err(|error| error.to_string());
+            let reference = serde_json::from_str::<StructOnlyToolTimeouts>(document)
+                .map(|config| config.tools.tool_timeouts)
+                .map_err(|error| error.to_string());
+            assert_eq!(loaded, reference, "{document}");
+        }
+    }
+
+    #[test]
+    fn tool_timeouts_mixed_string_and_struct_entries_load() {
+        let document = r#"
+[tools.tool_timeouts]
+my_tool = "840s"
+other_tool = { secs = 90, nanos = 0 }
+
+[tools.tool_timeouts.third_tool]
+secs = 1
+nanos = 500000000
+"#;
+        let expected = HashMap::from([
+            ("my_tool".to_string(), Duration::from_mins(14)),
+            ("other_tool".to_string(), Duration::from_secs(90)),
+            ("third_tool".to_string(), Duration::from_millis(1500)),
+        ]);
+        let (config, _) = Config::from_persisted_toml(document).expect("mixed entries load");
+        assert_eq!(config.tools.tool_timeouts, expected);
+
+        let json: Config = serde_json::from_value(serde_json::json!({
+            "tools": { "tool_timeouts": {
+                "my_tool": "14m",
+                "other_tool": { "secs": 90, "nanos": 0 },
+                "third_tool": [1, 500_000_000],
+            } }
+        }))
+        .expect("mixed JSON entries load");
+        assert_eq!(json.tools.tool_timeouts, expected);
+    }
+
+    /// A per-tool timeout string that is not a duration fails the load with
+    /// a config error naming its key; it never loads as a default.
+    #[test]
+    fn tool_timeouts_invalid_string_is_an_error_naming_the_key() {
+        for invalid in ["nope", "", "14", "5 parsecs"] {
+            let document = format!("[tools.tool_timeouts]\nmy_tool = {invalid:?}\n");
+            let error = Config::from_persisted_toml(&document)
+                .expect_err("an invalid per-tool timeout fails the load");
+            assert!(
+                matches!(&error, ConfigError::Parse(_))
+                    && error.to_string().contains("`tools.tool_timeouts.my_tool`"),
+                "the load error names the key: {error}"
+            );
+            let error = Config::default()
+                .merge_toml_str(&document)
+                .expect_err("an invalid per-tool timeout fails the merge");
+            assert!(
+                error.to_string().contains("`tools.tool_timeouts.my_tool`"),
+                "the merge error names the key: {error}"
+            );
+            let error = serde_json::from_value::<Config>(serde_json::json!({
+                "tools": { "tool_timeouts": { "my_tool": invalid } }
+            }))
+            .expect_err("an invalid per-tool timeout fails the JSON load");
+            assert!(
+                error.to_string().contains("`tools.tool_timeouts.my_tool`"),
+                "the JSON error names the key: {error}"
+            );
+        }
+    }
+
+    /// Zero and negative strings follow the `{ secs, nanos }` form: zero
+    /// loads as a zero timeout, as `{ secs = 0, nanos = 0 }` does, and a
+    /// negative value is refused, as a negative `secs` is.
+    #[test]
+    fn tool_timeouts_zero_and_negative_strings_follow_the_struct_form() {
+        let load = |entry: &str| {
+            Config::from_persisted_toml(&format!("[tools.tool_timeouts]\nmy_tool = {entry}\n"))
+                .map(|(config, _)| config.tools.tool_timeouts.get("my_tool").copied())
+        };
+        assert_eq!(load("\"0s\"").expect("zero loads"), Some(Duration::ZERO));
+        assert_eq!(
+            load("{ secs = 0, nanos = 0 }").expect("zero loads"),
+            Some(Duration::ZERO)
+        );
+        assert!(load("\"-5s\"").is_err(), "a negative string is refused");
+        assert!(
+            load("{ secs = -5, nanos = 0 }").is_err(),
+            "a negative secs is refused"
+        );
+    }
+
+    /// Whatever form a per-tool timeout was read in, a config writes it in
+    /// the `{ secs, nanos }` form, in TOML and in JSON, and reads it back.
+    #[test]
+    fn tool_timeouts_serialize_in_the_struct_form() {
+        let (config, _) = Config::from_persisted_toml(
+            "[tools.tool_timeouts]\nmy_tool = \"840s\"\nother_tool = { secs = 90, nanos = 0 }\n",
+        )
+        .expect("the config loads");
+
+        for written in [
+            toml::to_string(&config).expect("the config serializes"),
+            toml::to_string_pretty(&config).expect("the config serializes"),
+        ] {
+            let table: toml::Table = toml::from_str(&written).expect("the written TOML parses");
+            let entry = table
+                .get("tools")
+                .and_then(|tools| tools.get("tool_timeouts"))
+                .and_then(|timeouts| timeouts.get("my_tool"))
+                .expect("the entry is written");
+            assert_eq!(
+                entry.get("secs").and_then(toml::Value::as_integer),
+                Some(840),
+                "{written}"
+            );
+            assert_eq!(
+                entry.get("nanos").and_then(toml::Value::as_integer),
+                Some(0),
+                "{written}"
+            );
+            let reread: Config = toml::from_str(&written).expect("the written TOML loads");
+            assert_eq!(reread.tools.tool_timeouts, config.tools.tool_timeouts);
+        }
+
+        let written = serde_json::to_value(&config).expect("the config serializes");
+        assert_eq!(
+            written["tools"]["tool_timeouts"]["my_tool"],
+            serde_json::json!({ "secs": 840, "nanos": 0 })
+        );
+        let reread: Config = serde_json::from_value(written).expect("the written JSON loads");
+        assert_eq!(reread.tools.tool_timeouts, config.tools.tool_timeouts);
+    }
+
+    /// A host that rolls back to 0.9.9 or 0.9.8 reads the per-tool timeouts
+    /// this release writes: the struct-only reader of those releases reads
+    /// the written TOML and JSON.
+    #[test]
+    fn tool_timeouts_output_reads_with_the_struct_only_reader() {
+        let (config, _) = Config::from_persisted_toml(
+            "[tools.tool_timeouts]\nmy_tool = \"840s\"\nother_tool = \"1h 2m\"\n",
+        )
+        .expect("the config loads");
+        assert_eq!(config.tools.tool_timeouts.len(), 2);
+
+        let written = toml::to_string_pretty(&config).expect("the config serializes");
+        let reader: StructOnlyToolTimeouts =
+            toml::from_str(&written).expect("the struct-only reader reads the written TOML");
+        assert_eq!(reader.tools.tool_timeouts, config.tools.tool_timeouts);
+
+        let written = serde_json::to_value(&config).expect("the config serializes");
+        let reader: StructOnlyToolTimeouts =
+            serde_json::from_value(written).expect("the struct-only reader reads the written JSON");
+        assert_eq!(reader.tools.tool_timeouts, config.tools.tool_timeouts);
+    }
+
+    /// A config patch that sets a per-tool timeout string writes it in the
+    /// `{ secs, nanos }` form, like a typed write, so the patched document
+    /// stays readable after a rollback to 0.9.9 or 0.9.8. A string that is
+    /// not a duration is refused, naming its key.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn tool_timeouts_patch_writes_strings_in_the_struct_form() {
+        for content in [
+            "",
+            "[tools.tool_timeouts]\nother_tool = { secs = 90, nanos = 0 }\nmy_tool = { secs = 1, nanos = 0 }\n",
+            "[tools.tool_timeouts]\nmy_tool = \"1m\"\n",
+        ] {
+            let patched = PersistedConfigDocument::patch_content(
+                content,
+                serde_json::json!({ "tools": { "tool_timeouts": { "my_tool": "840s" } } }),
+            )
+            .expect("the patch applies");
+            assert_eq!(
+                patched.config.tools.tool_timeouts.get("my_tool"),
+                Some(&Duration::from_mins(14)),
+                "{}",
+                patched.content
+            );
+            assert!(
+                !patched.content.contains("840s"),
+                "the patch writes the struct form: {}",
+                patched.content
+            );
+            let reader: StructOnlyToolTimeouts = toml::from_str(&patched.content)
+                .expect("the struct-only reader reads the patched document");
+            assert_eq!(
+                reader.tools.tool_timeouts,
+                patched.config.tools.tool_timeouts
+            );
+        }
+
+        let error = PersistedConfigDocument::patch_content(
+            "",
+            serde_json::json!({ "tools": { "tool_timeouts": { "my_tool": "nope" } } }),
+        )
+        .expect_err("an invalid per-tool timeout is refused");
+        assert!(
+            error.to_string().contains("`tools.tool_timeouts.my_tool`"),
+            "the refusal names the key: {error}"
+        );
+    }
+
     #[test]
     fn test_merge_toml_retry_omitted_fields_preserve_lower_layer() {
         let mut config = Config::default();

@@ -36,7 +36,7 @@ def test_actual_finalizer_export_imports_and_projects_without_forge_or_site_pack
     expected = {'launchkit/__init__.py', 'launchkit/connect_application_finalizer.py',
         'launchkit/connect_application_policy.py', 'launchkit/connect_installer_caller.py',
         'launchkit/connect_policy_input.py', 'launchkit/connect_application_startup.py',
-        'launchkit/connect_application_callbacks.py'}
+        'launchkit/connect_application_callbacks.py', 'launchkit/connect_member_class_requests.py'}
     assert {item.path for item in files} == expected
     for item in files:
         destination = root / item.path

@@ -392,8 +392,10 @@ async def test_lent_setup_provider_yields_to_the_selected_model_host(startup, mo
     service, controller = startup
     from launchkit import bootstrap, guide_sdk
     monkeypatch.setattr(guide_sdk, "SELECTED_VERSION", "0.9.4")
-    routed = bootstrap.SelectedGuideRuntime(bootstrap.selected_guide_runtime().gateway, "0.9.4", "0.9.4",
-        "a" * 40, "b" * 40, {"provider": "openai", "model": "gpt-6.1-sol", "auth_binding": "fixture-host-route"})
+    monkeypatch.setattr(guide_sdk, "CORE_REQUIREMENT", "=0.9.4")
+    routed = bootstrap.SelectedGuideRuntime(bootstrap.selected_guide_runtime().gateway,
+        guide_sdk.SELECTED_VERSION, guide_sdk.declared_core_version(),
+        "a" * 40, "b" * 40, {"provider": "openai", "model": "gpt-6.1-sol"})
     monkeypatch.setattr(bootstrap, "_selected_guide_runtime", routed)
     runtime_root = service.root / ("architect-runtime-meta-v1" if generation == "lent" else "architect-runtime-meta-v2")
     database = runtime_root / ".mobkit/state/event_log.sqlite3"

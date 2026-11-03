@@ -197,6 +197,7 @@ from .types import (
     MobResolveIdentityConvergenceBlockResult,
     MobRespawnParams,
     MobRespawnResult,
+    MobRestoreRetryResult,
     MobRetireResult,
     MobRevokeHostParams,
     MobRevokeHostResult,
@@ -1483,6 +1484,14 @@ class RpcRequest(Protocol):
         params: MobIdParams,
         /,
     ) -> Awaitable[MobRotateSupervisorResult]: ...
+
+    @overload
+    def __call__(
+        self,
+        method: Literal["mob/restore_retry"],
+        params: MobIdParams,
+        /,
+    ) -> Awaitable[MobRestoreRetryResult]: ...
 
     @overload
     def __call__(

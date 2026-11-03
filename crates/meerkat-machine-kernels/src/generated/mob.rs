@@ -985,6 +985,118 @@ impl std::fmt::Display for CompositionAuthorityKind {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum ConstructionEndKind {
+    #[default]
+    #[serde(rename = "Aborted")]
+    Aborted,
+    #[serde(rename = "Expired")]
+    Expired,
+    #[serde(rename = "Refused")]
+    Refused,
+    #[serde(rename = "PublicationFailed")]
+    PublicationFailed,
+}
+impl ConstructionEndKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Aborted => "Aborted",
+            Self::Expired => "Expired",
+            Self::Refused => "Refused",
+            Self::PublicationFailed => "PublicationFailed",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for ConstructionEndKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Aborted" => Ok(Self::Aborted),
+            "Expired" => Ok(Self::Expired),
+            "Refused" => Ok(Self::Refused),
+            "PublicationFailed" => Ok(Self::PublicationFailed),
+            other => Err(format!("invalid ConstructionEndKind value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for ConstructionEndKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for ConstructionEndKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum ConstructionEndVerdict {
+    #[default]
+    #[serde(rename = "Ended")]
+    Ended,
+    #[serde(rename = "NotOpen")]
+    NotOpen,
+    #[serde(rename = "ActivationPending")]
+    ActivationPending,
+}
+impl ConstructionEndVerdict {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Ended => "Ended",
+            Self::NotOpen => "NotOpen",
+            Self::ActivationPending => "ActivationPending",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for ConstructionEndVerdict {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Ended" => Ok(Self::Ended),
+            "NotOpen" => Ok(Self::NotOpen),
+            "ActivationPending" => Ok(Self::ActivationPending),
+            other => Err(format!("invalid ConstructionEndVerdict value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for ConstructionEndVerdict {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for ConstructionEndVerdict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum ControlScope {
     #[default]
     #[serde(rename = "List")]
@@ -1079,6 +1191,82 @@ impl From<&str> for CoordinationResourceRef {
 impl std::fmt::Display for CoordinationResourceRef {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum CreatedIdentityRecordVerdict {
+    #[default]
+    #[serde(rename = "Recorded")]
+    Recorded,
+    #[serde(rename = "NameHeldByIdentity")]
+    NameHeldByIdentity,
+    #[serde(rename = "NameHeldByWorker")]
+    NameHeldByWorker,
+    #[serde(rename = "NameTombstoned")]
+    NameTombstoned,
+    #[serde(rename = "NameUnreadable")]
+    NameUnreadable,
+    #[serde(rename = "NonAuthoritative")]
+    NonAuthoritative,
+    #[serde(rename = "ChangesHeld")]
+    ChangesHeld,
+    #[serde(rename = "MobNotRunning")]
+    MobNotRunning,
+}
+impl CreatedIdentityRecordVerdict {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Recorded => "Recorded",
+            Self::NameHeldByIdentity => "NameHeldByIdentity",
+            Self::NameHeldByWorker => "NameHeldByWorker",
+            Self::NameTombstoned => "NameTombstoned",
+            Self::NameUnreadable => "NameUnreadable",
+            Self::NonAuthoritative => "NonAuthoritative",
+            Self::ChangesHeld => "ChangesHeld",
+            Self::MobNotRunning => "MobNotRunning",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for CreatedIdentityRecordVerdict {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Recorded" => Ok(Self::Recorded),
+            "NameHeldByIdentity" => Ok(Self::NameHeldByIdentity),
+            "NameHeldByWorker" => Ok(Self::NameHeldByWorker),
+            "NameTombstoned" => Ok(Self::NameTombstoned),
+            "NameUnreadable" => Ok(Self::NameUnreadable),
+            "NonAuthoritative" => Ok(Self::NonAuthoritative),
+            "ChangesHeld" => Ok(Self::ChangesHeld),
+            "MobNotRunning" => Ok(Self::MobNotRunning),
+            other => Err(format!(
+                "invalid CreatedIdentityRecordVerdict value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for CreatedIdentityRecordVerdict {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for CreatedIdentityRecordVerdict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 #[allow(non_camel_case_types)]
@@ -2354,6 +2542,364 @@ impl std::fmt::Display for IdentityAuthorityCondition {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum IdentityChangeAdmissionKind {
+    #[default]
+    #[serde(rename = "Admitted")]
+    Admitted,
+    #[serde(rename = "Replayed")]
+    Replayed,
+    #[serde(rename = "OperationReused")]
+    OperationReused,
+    #[serde(rename = "NonAuthoritative")]
+    NonAuthoritative,
+    #[serde(rename = "ChangesHeld")]
+    ChangesHeld,
+    #[serde(rename = "DecisionUnbound")]
+    DecisionUnbound,
+    #[serde(rename = "DecisionExpired")]
+    DecisionExpired,
+    #[serde(rename = "ImportedNotHostOperator")]
+    ImportedNotHostOperator,
+    #[serde(rename = "GrantRevoked")]
+    GrantRevoked,
+    #[serde(rename = "MobNotRunning")]
+    MobNotRunning,
+    #[serde(rename = "StaleSpec")]
+    StaleSpec,
+}
+impl IdentityChangeAdmissionKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Admitted => "Admitted",
+            Self::Replayed => "Replayed",
+            Self::OperationReused => "OperationReused",
+            Self::NonAuthoritative => "NonAuthoritative",
+            Self::ChangesHeld => "ChangesHeld",
+            Self::DecisionUnbound => "DecisionUnbound",
+            Self::DecisionExpired => "DecisionExpired",
+            Self::ImportedNotHostOperator => "ImportedNotHostOperator",
+            Self::GrantRevoked => "GrantRevoked",
+            Self::MobNotRunning => "MobNotRunning",
+            Self::StaleSpec => "StaleSpec",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for IdentityChangeAdmissionKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Admitted" => Ok(Self::Admitted),
+            "Replayed" => Ok(Self::Replayed),
+            "OperationReused" => Ok(Self::OperationReused),
+            "NonAuthoritative" => Ok(Self::NonAuthoritative),
+            "ChangesHeld" => Ok(Self::ChangesHeld),
+            "DecisionUnbound" => Ok(Self::DecisionUnbound),
+            "DecisionExpired" => Ok(Self::DecisionExpired),
+            "ImportedNotHostOperator" => Ok(Self::ImportedNotHostOperator),
+            "GrantRevoked" => Ok(Self::GrantRevoked),
+            "MobNotRunning" => Ok(Self::MobNotRunning),
+            "StaleSpec" => Ok(Self::StaleSpec),
+            other => Err(format!(
+                "invalid IdentityChangeAdmissionKind value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for IdentityChangeAdmissionKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for IdentityChangeAdmissionKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum IdentityChangeConsentKind {
+    #[default]
+    #[serde(rename = "Policy")]
+    Policy,
+    #[serde(rename = "Decided")]
+    Decided,
+    #[serde(rename = "Imported")]
+    Imported,
+}
+impl IdentityChangeConsentKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Policy => "Policy",
+            Self::Decided => "Decided",
+            Self::Imported => "Imported",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for IdentityChangeConsentKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Policy" => Ok(Self::Policy),
+            "Decided" => Ok(Self::Decided),
+            "Imported" => Ok(Self::Imported),
+            other => Err(format!("invalid IdentityChangeConsentKind value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for IdentityChangeConsentKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for IdentityChangeConsentKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum IdentityChangeReceiptKind {
+    #[default]
+    #[serde(rename = "Absent")]
+    Absent,
+    #[serde(rename = "Same")]
+    Same,
+    #[serde(rename = "Other")]
+    Other,
+}
+impl IdentityChangeReceiptKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Absent => "Absent",
+            Self::Same => "Same",
+            Self::Other => "Other",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for IdentityChangeReceiptKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Absent" => Ok(Self::Absent),
+            "Same" => Ok(Self::Same),
+            "Other" => Ok(Self::Other),
+            other => Err(format!("invalid IdentityChangeReceiptKind value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for IdentityChangeReceiptKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for IdentityChangeReceiptKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum IdentityEntryChangeKind {
+    #[default]
+    #[serde(rename = "Remove")]
+    Remove,
+    #[serde(rename = "Archive")]
+    Archive,
+    #[serde(rename = "Unarchive")]
+    Unarchive,
+}
+impl IdentityEntryChangeKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Remove => "Remove",
+            Self::Archive => "Archive",
+            Self::Unarchive => "Unarchive",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for IdentityEntryChangeKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Remove" => Ok(Self::Remove),
+            "Archive" => Ok(Self::Archive),
+            "Unarchive" => Ok(Self::Unarchive),
+            other => Err(format!("invalid IdentityEntryChangeKind value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for IdentityEntryChangeKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for IdentityEntryChangeKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum IdentityEntryChangeVerdict {
+    #[default]
+    #[serde(rename = "Retiring")]
+    Retiring,
+    #[serde(rename = "Removed")]
+    Removed,
+    #[serde(rename = "AlreadyRemoved")]
+    AlreadyRemoved,
+    #[serde(rename = "Archiving")]
+    Archiving,
+    #[serde(rename = "Archived")]
+    Archived,
+    #[serde(rename = "AlreadyArchived")]
+    AlreadyArchived,
+    #[serde(rename = "Restored")]
+    Restored,
+    #[serde(rename = "NotArchived")]
+    NotArchived,
+    #[serde(rename = "OwnedByRoster")]
+    OwnedByRoster,
+    #[serde(rename = "Unknown")]
+    Unknown,
+    #[serde(rename = "InFlight")]
+    InFlight,
+    #[serde(rename = "NameUnreadable")]
+    NameUnreadable,
+    #[serde(rename = "NonAuthoritative")]
+    NonAuthoritative,
+    #[serde(rename = "ChangesHeld")]
+    ChangesHeld,
+    #[serde(rename = "MobNotRunning")]
+    MobNotRunning,
+    #[serde(rename = "PreparationPending")]
+    PreparationPending,
+}
+impl IdentityEntryChangeVerdict {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Retiring => "Retiring",
+            Self::Removed => "Removed",
+            Self::AlreadyRemoved => "AlreadyRemoved",
+            Self::Archiving => "Archiving",
+            Self::Archived => "Archived",
+            Self::AlreadyArchived => "AlreadyArchived",
+            Self::Restored => "Restored",
+            Self::NotArchived => "NotArchived",
+            Self::OwnedByRoster => "OwnedByRoster",
+            Self::Unknown => "Unknown",
+            Self::InFlight => "InFlight",
+            Self::NameUnreadable => "NameUnreadable",
+            Self::NonAuthoritative => "NonAuthoritative",
+            Self::ChangesHeld => "ChangesHeld",
+            Self::MobNotRunning => "MobNotRunning",
+            Self::PreparationPending => "PreparationPending",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for IdentityEntryChangeVerdict {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Retiring" => Ok(Self::Retiring),
+            "Removed" => Ok(Self::Removed),
+            "AlreadyRemoved" => Ok(Self::AlreadyRemoved),
+            "Archiving" => Ok(Self::Archiving),
+            "Archived" => Ok(Self::Archived),
+            "AlreadyArchived" => Ok(Self::AlreadyArchived),
+            "Restored" => Ok(Self::Restored),
+            "NotArchived" => Ok(Self::NotArchived),
+            "OwnedByRoster" => Ok(Self::OwnedByRoster),
+            "Unknown" => Ok(Self::Unknown),
+            "InFlight" => Ok(Self::InFlight),
+            "NameUnreadable" => Ok(Self::NameUnreadable),
+            "NonAuthoritative" => Ok(Self::NonAuthoritative),
+            "ChangesHeld" => Ok(Self::ChangesHeld),
+            "MobNotRunning" => Ok(Self::MobNotRunning),
+            "PreparationPending" => Ok(Self::PreparationPending),
+            other => Err(format!(
+                "invalid IdentityEntryChangeVerdict value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for IdentityEntryChangeVerdict {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for IdentityEntryChangeVerdict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum IdentityEntryOrigin {
     #[default]
     #[serde(rename = "Declared")]
@@ -2414,6 +2960,8 @@ pub enum IdentityEntryVerdict {
     HostedOnFirstUse,
     #[serde(rename = "AwaitHeldCreation")]
     AwaitHeldCreation,
+    #[serde(rename = "PreparationPending")]
+    PreparationPending,
     #[serde(rename = "RuntimeModeRestamp")]
     RuntimeModeRestamp,
     #[serde(rename = "RoleMigrate")]
@@ -2438,6 +2986,8 @@ pub enum IdentityEntryVerdict {
     RefusedNameTombstoned,
     #[serde(rename = "RefusedNameUnreadable")]
     RefusedNameUnreadable,
+    #[serde(rename = "RecordOnly")]
+    RecordOnly,
 }
 impl IdentityEntryVerdict {
     pub fn as_str(&self) -> &'static str {
@@ -2446,6 +2996,7 @@ impl IdentityEntryVerdict {
             Self::SeatOwed => "SeatOwed",
             Self::HostedOnFirstUse => "HostedOnFirstUse",
             Self::AwaitHeldCreation => "AwaitHeldCreation",
+            Self::PreparationPending => "PreparationPending",
             Self::RuntimeModeRestamp => "RuntimeModeRestamp",
             Self::RoleMigrate => "RoleMigrate",
             Self::RoleRotate => "RoleRotate",
@@ -2458,6 +3009,7 @@ impl IdentityEntryVerdict {
             Self::RefusedNameOwnedByCreated => "RefusedNameOwnedByCreated",
             Self::RefusedNameTombstoned => "RefusedNameTombstoned",
             Self::RefusedNameUnreadable => "RefusedNameUnreadable",
+            Self::RecordOnly => "RecordOnly",
         }
     }
 }
@@ -2469,6 +3021,7 @@ impl std::convert::TryFrom<&str> for IdentityEntryVerdict {
             "SeatOwed" => Ok(Self::SeatOwed),
             "HostedOnFirstUse" => Ok(Self::HostedOnFirstUse),
             "AwaitHeldCreation" => Ok(Self::AwaitHeldCreation),
+            "PreparationPending" => Ok(Self::PreparationPending),
             "RuntimeModeRestamp" => Ok(Self::RuntimeModeRestamp),
             "RoleMigrate" => Ok(Self::RoleMigrate),
             "RoleRotate" => Ok(Self::RoleRotate),
@@ -2481,6 +3034,7 @@ impl std::convert::TryFrom<&str> for IdentityEntryVerdict {
             "RefusedNameOwnedByCreated" => Ok(Self::RefusedNameOwnedByCreated),
             "RefusedNameTombstoned" => Ok(Self::RefusedNameTombstoned),
             "RefusedNameUnreadable" => Ok(Self::RefusedNameUnreadable),
+            "RecordOnly" => Ok(Self::RecordOnly),
             other => Err(format!("invalid IdentityEntryVerdict value `{other}`")),
         }
     }
@@ -3901,6 +4455,118 @@ impl std::convert::TryFrom<String> for MemberBootObligationCause {
     }
 }
 impl std::fmt::Display for MemberBootObligationCause {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum MemberCustodyCauseKind {
+    #[default]
+    #[serde(rename = "ServedElsewhere")]
+    ServedElsewhere,
+    #[serde(rename = "HostingUnavailable")]
+    HostingUnavailable,
+    #[serde(rename = "DurableTailUnprovable")]
+    DurableTailUnprovable,
+    #[serde(rename = "StoreUnavailable")]
+    StoreUnavailable,
+    #[serde(rename = "StoreUnreadable")]
+    StoreUnreadable,
+}
+impl MemberCustodyCauseKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::ServedElsewhere => "ServedElsewhere",
+            Self::HostingUnavailable => "HostingUnavailable",
+            Self::DurableTailUnprovable => "DurableTailUnprovable",
+            Self::StoreUnavailable => "StoreUnavailable",
+            Self::StoreUnreadable => "StoreUnreadable",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for MemberCustodyCauseKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "ServedElsewhere" => Ok(Self::ServedElsewhere),
+            "HostingUnavailable" => Ok(Self::HostingUnavailable),
+            "DurableTailUnprovable" => Ok(Self::DurableTailUnprovable),
+            "StoreUnavailable" => Ok(Self::StoreUnavailable),
+            "StoreUnreadable" => Ok(Self::StoreUnreadable),
+            other => Err(format!("invalid MemberCustodyCauseKind value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for MemberCustodyCauseKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for MemberCustodyCauseKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum MemberCustodyRestoreKind {
+    #[default]
+    #[serde(rename = "StartupBinding")]
+    StartupBinding,
+    #[serde(rename = "CleanupDelivery")]
+    CleanupDelivery,
+}
+impl MemberCustodyRestoreKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::StartupBinding => "StartupBinding",
+            Self::CleanupDelivery => "CleanupDelivery",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for MemberCustodyRestoreKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "StartupBinding" => Ok(Self::StartupBinding),
+            "CleanupDelivery" => Ok(Self::CleanupDelivery),
+            other => Err(format!("invalid MemberCustodyRestoreKind value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for MemberCustodyRestoreKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for MemberCustodyRestoreKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }
@@ -7543,6 +8209,160 @@ impl std::fmt::Display for PolicyDecision {
         f.write_str(self.as_str())
     }
 }
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum PreparationConstructionVerdict {
+    #[default]
+    #[serde(rename = "Held")]
+    Held,
+    #[serde(rename = "NotPending")]
+    NotPending,
+    #[serde(rename = "NotConstructed")]
+    NotConstructed,
+    #[serde(rename = "ConstructionOpen")]
+    ConstructionOpen,
+    #[serde(rename = "NonAuthoritative")]
+    NonAuthoritative,
+    #[serde(rename = "MobNotRunning")]
+    MobNotRunning,
+}
+impl PreparationConstructionVerdict {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Held => "Held",
+            Self::NotPending => "NotPending",
+            Self::NotConstructed => "NotConstructed",
+            Self::ConstructionOpen => "ConstructionOpen",
+            Self::NonAuthoritative => "NonAuthoritative",
+            Self::MobNotRunning => "MobNotRunning",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for PreparationConstructionVerdict {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Held" => Ok(Self::Held),
+            "NotPending" => Ok(Self::NotPending),
+            "NotConstructed" => Ok(Self::NotConstructed),
+            "ConstructionOpen" => Ok(Self::ConstructionOpen),
+            "NonAuthoritative" => Ok(Self::NonAuthoritative),
+            "MobNotRunning" => Ok(Self::MobNotRunning),
+            other => Err(format!(
+                "invalid PreparationConstructionVerdict value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for PreparationConstructionVerdict {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for PreparationConstructionVerdict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum PreparationSettleVerdict {
+    #[default]
+    #[serde(rename = "Seat")]
+    Seat,
+    #[serde(rename = "ActivationAccepted")]
+    ActivationAccepted,
+    #[serde(rename = "NotPending")]
+    NotPending,
+    #[serde(rename = "ConstructionRequired")]
+    ConstructionRequired,
+    #[serde(rename = "ConstructionOpen")]
+    ConstructionOpen,
+    #[serde(rename = "StaleAttempt")]
+    StaleAttempt,
+    #[serde(rename = "Expired")]
+    Expired,
+    #[serde(rename = "Mismatch")]
+    Mismatch,
+    #[serde(rename = "ActivationPending")]
+    ActivationPending,
+    #[serde(rename = "NonAuthoritative")]
+    NonAuthoritative,
+    #[serde(rename = "MobNotRunning")]
+    MobNotRunning,
+}
+impl PreparationSettleVerdict {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Seat => "Seat",
+            Self::ActivationAccepted => "ActivationAccepted",
+            Self::NotPending => "NotPending",
+            Self::ConstructionRequired => "ConstructionRequired",
+            Self::ConstructionOpen => "ConstructionOpen",
+            Self::StaleAttempt => "StaleAttempt",
+            Self::Expired => "Expired",
+            Self::Mismatch => "Mismatch",
+            Self::ActivationPending => "ActivationPending",
+            Self::NonAuthoritative => "NonAuthoritative",
+            Self::MobNotRunning => "MobNotRunning",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for PreparationSettleVerdict {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Seat" => Ok(Self::Seat),
+            "ActivationAccepted" => Ok(Self::ActivationAccepted),
+            "NotPending" => Ok(Self::NotPending),
+            "ConstructionRequired" => Ok(Self::ConstructionRequired),
+            "ConstructionOpen" => Ok(Self::ConstructionOpen),
+            "StaleAttempt" => Ok(Self::StaleAttempt),
+            "Expired" => Ok(Self::Expired),
+            "Mismatch" => Ok(Self::Mismatch),
+            "ActivationPending" => Ok(Self::ActivationPending),
+            "NonAuthoritative" => Ok(Self::NonAuthoritative),
+            "MobNotRunning" => Ok(Self::MobNotRunning),
+            other => Err(format!("invalid PreparationSettleVerdict value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for PreparationSettleVerdict {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for PreparationSettleVerdict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 pub type PrincipalId = meerkat_machine_schema::catalog::dsl::mob_machine::PrincipalId;
 #[allow(non_camel_case_types)]
 #[derive(
@@ -7564,18 +8384,24 @@ pub enum RecoveredPresence {
     Present,
     #[serde(rename = "PresentUnseated")]
     PresentUnseated,
+    #[serde(rename = "PendingConstruction")]
+    PendingConstruction,
     #[serde(rename = "Tombstone")]
     Tombstone,
     #[serde(rename = "Unreadable")]
     Unreadable,
+    #[serde(rename = "Archived")]
+    Archived,
 }
 impl RecoveredPresence {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Present => "Present",
             Self::PresentUnseated => "PresentUnseated",
+            Self::PendingConstruction => "PendingConstruction",
             Self::Tombstone => "Tombstone",
             Self::Unreadable => "Unreadable",
+            Self::Archived => "Archived",
         }
     }
 }
@@ -7585,8 +8411,10 @@ impl std::convert::TryFrom<&str> for RecoveredPresence {
         match value {
             "Present" => Ok(Self::Present),
             "PresentUnseated" => Ok(Self::PresentUnseated),
+            "PendingConstruction" => Ok(Self::PendingConstruction),
             "Tombstone" => Ok(Self::Tombstone),
             "Unreadable" => Ok(Self::Unreadable),
+            "Archived" => Ok(Self::Archived),
             other => Err(format!("invalid RecoveredPresence value `{other}`")),
         }
     }
@@ -8518,6 +9346,72 @@ impl std::fmt::Display for TurnTimeoutDisposition {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum UnlistEntryVerdict {
+    #[default]
+    #[serde(rename = "Retiring")]
+    Retiring,
+    #[serde(rename = "Removed")]
+    Removed,
+    #[serde(rename = "Deferred")]
+    Deferred,
+    #[serde(rename = "NotADeclaredEntry")]
+    NotADeclaredEntry,
+    #[serde(rename = "NonAuthoritative")]
+    NonAuthoritative,
+    #[serde(rename = "MobNotRunning")]
+    MobNotRunning,
+}
+impl UnlistEntryVerdict {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Retiring => "Retiring",
+            Self::Removed => "Removed",
+            Self::Deferred => "Deferred",
+            Self::NotADeclaredEntry => "NotADeclaredEntry",
+            Self::NonAuthoritative => "NonAuthoritative",
+            Self::MobNotRunning => "MobNotRunning",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for UnlistEntryVerdict {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Retiring" => Ok(Self::Retiring),
+            "Removed" => Ok(Self::Removed),
+            "Deferred" => Ok(Self::Deferred),
+            "NotADeclaredEntry" => Ok(Self::NotADeclaredEntry),
+            "NonAuthoritative" => Ok(Self::NonAuthoritative),
+            "MobNotRunning" => Ok(Self::MobNotRunning),
+            other => Err(format!("invalid UnlistEntryVerdict value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for UnlistEntryVerdict {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for UnlistEntryVerdict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum UnseatedEntryCause {
     #[default]
     #[serde(rename = "SeatOwed")]
@@ -8528,6 +9422,8 @@ pub enum UnseatedEntryCause {
     HeldCreation,
     #[serde(rename = "PreparationPending")]
     PreparationPending,
+    #[serde(rename = "Archived")]
+    Archived,
 }
 impl UnseatedEntryCause {
     pub fn as_str(&self) -> &'static str {
@@ -8536,6 +9432,7 @@ impl UnseatedEntryCause {
             Self::HostedOnFirstUse => "HostedOnFirstUse",
             Self::HeldCreation => "HeldCreation",
             Self::PreparationPending => "PreparationPending",
+            Self::Archived => "Archived",
         }
     }
 }
@@ -8547,6 +9444,7 @@ impl std::convert::TryFrom<&str> for UnseatedEntryCause {
             "HostedOnFirstUse" => Ok(Self::HostedOnFirstUse),
             "HeldCreation" => Ok(Self::HeldCreation),
             "PreparationPending" => Ok(Self::PreparationPending),
+            "Archived" => Ok(Self::Archived),
             other => Err(format!("invalid UnseatedEntryCause value `{other}`")),
         }
     }
@@ -8958,6 +9856,10 @@ pub struct State {
     pub concluded_objective_ids: std::collections::BTreeSet<String>,
     pub member_restore_failures: std::collections::BTreeMap<AgentIdentity, String>,
     pub member_restore_failure_codes: std::collections::BTreeMap<AgentIdentity, String>,
+    pub member_custody_unrestored:
+        std::collections::BTreeMap<AgentIdentity, MemberCustodyRestoreKind>,
+    pub member_custody_unrestored_causes:
+        std::collections::BTreeMap<AgentIdentity, MemberCustodyCauseKind>,
     pub runtime_retire_refusal_codes: std::collections::BTreeMap<AgentRuntimeId, String>,
     pub runtime_retire_refusal_reasons: std::collections::BTreeMap<AgentRuntimeId, String>,
     pub runtime_retire_pending_sessions: std::collections::BTreeMap<AgentRuntimeId, SessionId>,
@@ -9211,6 +10113,11 @@ pub struct State {
     pub identity_entry_tombstones: std::collections::BTreeSet<AgentIdentity>,
     pub identity_entry_unreadable: std::collections::BTreeSet<AgentIdentity>,
     pub spawn_exec_created_custody: std::collections::BTreeSet<AgentIdentity>,
+    pub identity_changes_held: bool,
+    pub identity_entry_removing: std::collections::BTreeSet<AgentIdentity>,
+    pub identity_entry_archiving: std::collections::BTreeSet<AgentIdentity>,
+    pub identity_entry_constructions_held: std::collections::BTreeMap<AgentIdentity, u64>,
+    pub identity_entry_constructions_activating: std::collections::BTreeMap<AgentIdentity, u64>,
     pub operator_instruction_revision: std::collections::BTreeMap<String, u64>,
     pub operator_instruction_effect: std::collections::BTreeMap<String, InstructionEffect>,
     pub operator_instruction_digest: std::collections::BTreeMap<String, String>,
@@ -9502,6 +10409,8 @@ pub mod inputs {
         pub privileged_tool_access_policy_present: bool,
         pub privileged_tooling_present: bool,
         pub privileged_auth_binding_present: bool,
+        pub privileged_binding_present: bool,
+        pub privileged_placement_present: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ResolveCurrentMobAdmission {
@@ -10715,6 +11624,8 @@ pub mod inputs {
         pub session_memory_only: bool,
         pub resume_session_role: Option<String>,
         pub first_boot: FirstBootRequestKind,
+        pub created_custody: bool,
+        pub preparation_required: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct SealDeclaredRoster {
@@ -10732,6 +11643,63 @@ pub mod inputs {
     pub struct CloseDeclaredApply {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct AdmitReset {}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AdmitIdentityChange {
+        pub receipt: IdentityChangeReceiptKind,
+        pub consent: IdentityChangeConsentKind,
+        pub permit_binds: bool,
+        pub permit_admits: bool,
+        pub host_operator: bool,
+        pub grant_current: bool,
+        pub spec_current: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecordCreatedIdentityEntry {
+        pub agent_identity: AgentIdentity,
+        pub preparation_required: bool,
+        pub placement: EntryPlacementKind,
+        pub held_creation: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SetIdentityChangesHeld {
+        pub held: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RemoveIdentityEntry {
+        pub agent_identity: AgentIdentity,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ArchiveIdentityEntry {
+        pub agent_identity: AgentIdentity,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct UnarchiveIdentityEntry {
+        pub agent_identity: AgentIdentity,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct BeginPreparationConstruction {
+        pub agent_identity: AgentIdentity,
+        pub attempt: u64,
+        pub constructed: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SettleHostPreparation {
+        pub agent_identity: AgentIdentity,
+        pub attempt: Option<u64>,
+        pub constructed: bool,
+        pub before_deadline: bool,
+        pub binding_matches: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct EndPreparationConstruction {
+        pub agent_identity: AgentIdentity,
+        pub attempt: u64,
+        pub end: ConstructionEndKind,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct UnlistIdentityEntry {
+        pub agent_identity: AgentIdentity,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -10980,6 +11948,16 @@ pub enum Input {
     OpenDeclaredApply(inputs::OpenDeclaredApply),
     CloseDeclaredApply(inputs::CloseDeclaredApply),
     AdmitReset(inputs::AdmitReset),
+    AdmitIdentityChange(inputs::AdmitIdentityChange),
+    RecordCreatedIdentityEntry(inputs::RecordCreatedIdentityEntry),
+    SetIdentityChangesHeld(inputs::SetIdentityChangesHeld),
+    RemoveIdentityEntry(inputs::RemoveIdentityEntry),
+    ArchiveIdentityEntry(inputs::ArchiveIdentityEntry),
+    UnarchiveIdentityEntry(inputs::UnarchiveIdentityEntry),
+    BeginPreparationConstruction(inputs::BeginPreparationConstruction),
+    SettleHostPreparation(inputs::SettleHostPreparation),
+    EndPreparationConstruction(inputs::EndPreparationConstruction),
+    UnlistIdentityEntry(inputs::UnlistIdentityEntry),
 }
 impl Input {
     pub fn kind(&self) -> InputKind {
@@ -11304,6 +12282,16 @@ impl Input {
             Self::OpenDeclaredApply(_) => InputKind::OpenDeclaredApply,
             Self::CloseDeclaredApply(_) => InputKind::CloseDeclaredApply,
             Self::AdmitReset(_) => InputKind::AdmitReset,
+            Self::AdmitIdentityChange(_) => InputKind::AdmitIdentityChange,
+            Self::RecordCreatedIdentityEntry(_) => InputKind::RecordCreatedIdentityEntry,
+            Self::SetIdentityChangesHeld(_) => InputKind::SetIdentityChangesHeld,
+            Self::RemoveIdentityEntry(_) => InputKind::RemoveIdentityEntry,
+            Self::ArchiveIdentityEntry(_) => InputKind::ArchiveIdentityEntry,
+            Self::UnarchiveIdentityEntry(_) => InputKind::UnarchiveIdentityEntry,
+            Self::BeginPreparationConstruction(_) => InputKind::BeginPreparationConstruction,
+            Self::SettleHostPreparation(_) => InputKind::SettleHostPreparation,
+            Self::EndPreparationConstruction(_) => InputKind::EndPreparationConstruction,
+            Self::UnlistIdentityEntry(_) => InputKind::UnlistIdentityEntry,
         }
     }
 }
@@ -11545,6 +12533,16 @@ pub enum InputKind {
     OpenDeclaredApply,
     CloseDeclaredApply,
     AdmitReset,
+    AdmitIdentityChange,
+    RecordCreatedIdentityEntry,
+    SetIdentityChangesHeld,
+    RemoveIdentityEntry,
+    ArchiveIdentityEntry,
+    UnarchiveIdentityEntry,
+    BeginPreparationConstruction,
+    SettleHostPreparation,
+    EndPreparationConstruction,
+    UnlistIdentityEntry,
 }
 
 pub mod signals {
@@ -12111,6 +13109,16 @@ pub mod signals {
         pub session_id: SessionId,
         pub disposal: MemberSessionDisposal,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecordMemberCustodyUnrestored {
+        pub agent_identity: AgentIdentity,
+        pub restore: MemberCustodyRestoreKind,
+        pub cause: MemberCustodyCauseKind,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveMemberCustodyRestored {
+        pub agent_identity: AgentIdentity,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -12218,6 +13226,8 @@ pub enum Signal {
     RecordMemberInstructionTarget(signals::RecordMemberInstructionTarget),
     RefuseMemberInstructionTarget(signals::RefuseMemberInstructionTarget),
     ResolveMemberInstructionRelease(signals::ResolveMemberInstructionRelease),
+    RecordMemberCustodyUnrestored(signals::RecordMemberCustodyUnrestored),
+    ResolveMemberCustodyRestored(signals::ResolveMemberCustodyRestored),
 }
 impl Signal {
     pub fn kind(&self) -> SignalKind {
@@ -12361,6 +13371,8 @@ impl Signal {
             Self::RecordMemberInstructionTarget(_) => SignalKind::RecordMemberInstructionTarget,
             Self::RefuseMemberInstructionTarget(_) => SignalKind::RefuseMemberInstructionTarget,
             Self::ResolveMemberInstructionRelease(_) => SignalKind::ResolveMemberInstructionRelease,
+            Self::RecordMemberCustodyUnrestored(_) => SignalKind::RecordMemberCustodyUnrestored,
+            Self::ResolveMemberCustodyRestored(_) => SignalKind::ResolveMemberCustodyRestored,
         }
     }
 }
@@ -12465,6 +13477,8 @@ pub enum SignalKind {
     RecordMemberInstructionTarget,
     RefuseMemberInstructionTarget,
     ResolveMemberInstructionRelease,
+    RecordMemberCustodyUnrestored,
+    ResolveMemberCustodyRestored,
 }
 
 pub mod effects {
@@ -13508,6 +14522,46 @@ pub mod effects {
     pub struct MemberInstructionReleaseNotNeeded {
         pub agent_identity: AgentIdentity,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct IdentityChangeAdmissionResolved {
+        pub verdict: IdentityChangeAdmissionKind,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct CreatedIdentityEntryRecorded {
+        pub agent_identity: AgentIdentity,
+        pub verdict: CreatedIdentityRecordVerdict,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct IdentityEntryChangeResolved {
+        pub agent_identity: AgentIdentity,
+        pub verdict: IdentityEntryChangeVerdict,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct PreparationConstructionResolved {
+        pub agent_identity: AgentIdentity,
+        pub attempt: u64,
+        pub verdict: PreparationConstructionVerdict,
+        pub held_attempt: Option<u64>,
+        pub activating_attempt: Option<u64>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct PreparationSettleResolved {
+        pub agent_identity: AgentIdentity,
+        pub verdict: PreparationSettleVerdict,
+        pub held_attempt: Option<u64>,
+        pub activating_attempt: Option<u64>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct PreparationConstructionEnded {
+        pub agent_identity: AgentIdentity,
+        pub attempt: u64,
+        pub verdict: ConstructionEndVerdict,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct IdentityEntryUnlisted {
+        pub agent_identity: AgentIdentity,
+        pub verdict: UnlistEntryVerdict,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -13701,6 +14755,13 @@ pub enum Effect {
     MemberInstructionTargetBlocked(effects::MemberInstructionTargetBlocked),
     MemberInstructionReleaseAuthorized(effects::MemberInstructionReleaseAuthorized),
     MemberInstructionReleaseNotNeeded(effects::MemberInstructionReleaseNotNeeded),
+    IdentityChangeAdmissionResolved(effects::IdentityChangeAdmissionResolved),
+    CreatedIdentityEntryRecorded(effects::CreatedIdentityEntryRecorded),
+    IdentityEntryChangeResolved(effects::IdentityEntryChangeResolved),
+    PreparationConstructionResolved(effects::PreparationConstructionResolved),
+    PreparationSettleResolved(effects::PreparationSettleResolved),
+    PreparationConstructionEnded(effects::PreparationConstructionEnded),
+    IdentityEntryUnlisted(effects::IdentityEntryUnlisted),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EffectKind {
@@ -13889,6 +14950,13 @@ pub enum EffectKind {
     MemberInstructionTargetBlocked,
     MemberInstructionReleaseAuthorized,
     MemberInstructionReleaseNotNeeded,
+    IdentityChangeAdmissionResolved,
+    CreatedIdentityEntryRecorded,
+    IdentityEntryChangeResolved,
+    PreparationConstructionResolved,
+    PreparationSettleResolved,
+    PreparationConstructionEnded,
+    IdentityEntryUnlisted,
 }
 
 pub mod command_capabilities {
@@ -15582,6 +16650,20 @@ pub enum TransitionId {
     ResolveExternalEdgeRealizationStaleStopped,
     ResolveExternalEdgeRealizationStaleCompleted,
     ResolveExternalEdgeRealizationStaleDestroyed,
+    RecordMemberCustodyUnrestoredSeatedRunning,
+    RecordMemberCustodyUnrestoredSeatedStopped,
+    RecordMemberCustodyUnrestoredSeatedCompleted,
+    RecordMemberCustodyUnrestoredNotSeatedRunning,
+    RecordMemberCustodyUnrestoredNotSeatedStopped,
+    RecordMemberCustodyUnrestoredNotSeatedCompleted,
+    RecordMemberCustodyUnrestoredDestroyed,
+    ResolveMemberCustodyRestoredRecordedRunning,
+    ResolveMemberCustodyRestoredRecordedStopped,
+    ResolveMemberCustodyRestoredRecordedCompleted,
+    ResolveMemberCustodyRestoredUnrecordedRunning,
+    ResolveMemberCustodyRestoredUnrecordedStopped,
+    ResolveMemberCustodyRestoredUnrecordedCompleted,
+    ResolveMemberCustodyRestoredUnrecordedDestroyed,
     RetireMemberArchiveOnly,
     AdmitDestroyMemberRetireArchiveOnlyRunning,
     AdmitDestroyMemberRetireArchiveOnlyStopped,
@@ -15806,6 +16888,117 @@ pub enum TransitionId {
     ResolveMemberInstructionReleaseNotNeededDestroyed,
     PrepareMemberInstructionDeliverySpawningRunning,
     PrepareMemberInstructionDeliverySpawningStopped,
+    AdmitIdentityChangeAdmitted,
+    AdmitIdentityChangeReplayed,
+    AdmitIdentityChangeOperationReused,
+    AdmitIdentityChangeNonAuthoritative,
+    AdmitIdentityChangeChangesHeld,
+    AdmitIdentityChangeDecisionUnbound,
+    AdmitIdentityChangeDecisionExpired,
+    AdmitIdentityChangeImportedNotHostOperator,
+    AdmitIdentityChangeGrantRevoked,
+    AdmitIdentityChangeMobNotRunningStopped,
+    AdmitIdentityChangeMobNotRunningCompleted,
+    AdmitIdentityChangeMobNotRunningDestroyed,
+    RecordCreatedIdentityEntryRecorded,
+    RecordCreatedIdentityEntryNameHeldByIdentity,
+    RecordCreatedIdentityEntryNameHeldByWorker,
+    RecordCreatedIdentityEntryNameTombstoned,
+    RecordCreatedIdentityEntryNameUnreadable,
+    RecordCreatedIdentityEntryNonAuthoritative,
+    RecordCreatedIdentityEntryChangesHeld,
+    RecordCreatedIdentityEntryMobNotRunningStopped,
+    RecordCreatedIdentityEntryMobNotRunningCompleted,
+    RecordCreatedIdentityEntryMobNotRunningDestroyed,
+    SetIdentityChangesHeldRunning,
+    SetIdentityChangesHeldStopped,
+    SetIdentityChangesHeldCompleted,
+    SetIdentityChangesHeldDestroyed,
+    RemoveIdentityEntryRetiring,
+    RemoveIdentityEntryRemoved,
+    RemoveIdentityEntryAlreadyRemoved,
+    RemoveIdentityEntryUnknown,
+    RemoveIdentityEntryInFlight,
+    RemoveIdentityEntryNameUnreadable,
+    RemoveIdentityEntryNonAuthoritative,
+    RemoveIdentityEntryChangesHeld,
+    RemoveIdentityEntryMobNotRunningStopped,
+    RemoveIdentityEntryMobNotRunningCompleted,
+    RemoveIdentityEntryMobNotRunningDestroyed,
+    ArchiveIdentityEntryArchiving,
+    ArchiveIdentityEntryArchived,
+    ArchiveIdentityEntryAlreadyArchived,
+    ArchiveIdentityEntryOwnedByRoster,
+    ArchiveIdentityEntryUnknown,
+    ArchiveIdentityEntryInFlight,
+    ArchiveIdentityEntryNameUnreadable,
+    ArchiveIdentityEntryNonAuthoritative,
+    ArchiveIdentityEntryChangesHeld,
+    ArchiveIdentityEntryMobNotRunningStopped,
+    ArchiveIdentityEntryMobNotRunningCompleted,
+    ArchiveIdentityEntryMobNotRunningDestroyed,
+    UnarchiveIdentityEntryRestored,
+    UnarchiveIdentityEntryNotArchived,
+    UnarchiveIdentityEntryOwnedByRoster,
+    UnarchiveIdentityEntryUnknown,
+    UnarchiveIdentityEntryInFlight,
+    UnarchiveIdentityEntryNameUnreadable,
+    UnarchiveIdentityEntryNonAuthoritative,
+    UnarchiveIdentityEntryChangesHeld,
+    UnarchiveIdentityEntryMobNotRunningStopped,
+    UnarchiveIdentityEntryMobNotRunningCompleted,
+    UnarchiveIdentityEntryMobNotRunningDestroyed,
+    RecoverCreatedIdentityEntryRemovingRunning,
+    RecoverCreatedIdentityEntryRemovingStopped,
+    RecoverCreatedIdentityEntryArchivingRunning,
+    RecoverCreatedIdentityEntryArchivingStopped,
+    RecoverCreatedIdentityEntryArchivedRunning,
+    RecoverCreatedIdentityEntryArchivedStopped,
+    AdmitIdentityChangeStaleSpec,
+    DeclareIdentityEntryPreparationPending,
+    BeginPreparationConstructionHeld,
+    BeginPreparationConstructionNotPending,
+    BeginPreparationConstructionNotConstructed,
+    BeginPreparationConstructionConstructionOpen,
+    BeginPreparationConstructionNonAuthoritative,
+    BeginPreparationConstructionMobNotRunningStopped,
+    BeginPreparationConstructionMobNotRunningCompleted,
+    BeginPreparationConstructionMobNotRunningDestroyed,
+    SettleHostPreparationSeat,
+    SettleHostPreparationActivationAccepted,
+    SettleHostPreparationNotPending,
+    SettleHostPreparationConstructionRequired,
+    SettleHostPreparationConstructionOpen,
+    SettleHostPreparationStaleAttempt,
+    SettleHostPreparationExpired,
+    SettleHostPreparationMismatch,
+    SettleHostPreparationActivationPending,
+    SettleHostPreparationNonAuthoritative,
+    SettleHostPreparationMobNotRunningStopped,
+    SettleHostPreparationMobNotRunningCompleted,
+    SettleHostPreparationMobNotRunningDestroyed,
+    EndPreparationConstructionEndedRunning,
+    EndPreparationConstructionEndedStopped,
+    EndPreparationConstructionEndedCompleted,
+    EndPreparationConstructionEndedDestroyed,
+    EndPreparationConstructionNotOpenRunning,
+    EndPreparationConstructionNotOpenStopped,
+    EndPreparationConstructionNotOpenCompleted,
+    EndPreparationConstructionNotOpenDestroyed,
+    EndPreparationConstructionActivationPendingRunning,
+    EndPreparationConstructionActivationPendingStopped,
+    EndPreparationConstructionActivationPendingCompleted,
+    EndPreparationConstructionActivationPendingDestroyed,
+    ArchiveIdentityEntryPreparationPending,
+    DeclareIdentityEntryRecordOnly,
+    UnlistIdentityEntryRetiring,
+    UnlistIdentityEntryRemoved,
+    UnlistIdentityEntryDeferred,
+    UnlistIdentityEntryNotADeclaredEntry,
+    UnlistIdentityEntryNonAuthoritative,
+    UnlistIdentityEntryMobNotRunningStopped,
+    UnlistIdentityEntryMobNotRunningCompleted,
+    UnlistIdentityEntryMobNotRunningDestroyed,
 }
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -15979,6 +17172,8 @@ pub fn initial_state() -> State {
         concluded_objective_ids: Default::default(),
         member_restore_failures: Default::default(),
         member_restore_failure_codes: Default::default(),
+        member_custody_unrestored: Default::default(),
+        member_custody_unrestored_causes: Default::default(),
         runtime_retire_refusal_codes: Default::default(),
         runtime_retire_refusal_reasons: Default::default(),
         runtime_retire_pending_sessions: Default::default(),
@@ -16191,6 +17386,11 @@ pub fn initial_state() -> State {
         identity_entry_tombstones: Default::default(),
         identity_entry_unreadable: Default::default(),
         spawn_exec_created_custody: Default::default(),
+        identity_changes_held: false,
+        identity_entry_removing: Default::default(),
+        identity_entry_archiving: Default::default(),
+        identity_entry_constructions_held: Default::default(),
+        identity_entry_constructions_activating: Default::default(),
         operator_instruction_revision: Default::default(),
         operator_instruction_effect: Default::default(),
         operator_instruction_digest: Default::default(),

@@ -446,15 +446,15 @@ pub(crate) async fn handle_create_with_member_external_tools(
 }
 
 pub async fn handle_list(id: Option<RpcId>, state: &Arc<MobMcpState>) -> RpcResponse {
-    let mobs = match state.mob_list().await {
-        Ok(mobs) => mobs,
-        Err(err) => return mob_call_error(id, &err),
-    };
-    let mobs = mobs
-        .into_iter()
-        .map(|(mob_id, observation)| meerkat_mob_mcp::wire_mob_status_row(&mob_id, &observation))
-        .collect::<Vec<_>>();
-    RpcResponse::success(id, MobListResult { mobs })
+    // One inventory read: the managed mobs and, when any persisted store
+    // did not restore, the quarantined ones (each id in one of them).
+    match state.mob_inventory().await {
+        Ok(inventory) => {
+            let result: MobListResult = meerkat_mob_mcp::wire_mob_list_result(&inventory);
+            RpcResponse::success(id, result)
+        }
+        Err(err) => mob_call_error(id, &err),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -2117,6 +2117,39 @@ pub async fn handle_rotate_supervisor(
             },
         ),
         Err(err) => mob_rotate_supervisor_error(id, &err),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// mob/restore_retry
+// ---------------------------------------------------------------------------
+
+/// Re-attempt the restore of a quarantined persisted mob, for example after
+/// its store was repaired. A re-attempt that fails answers the
+/// `mob_quarantined` refusal; a mob that is not quarantined answers
+/// `not_quarantined`.
+pub async fn handle_restore_retry(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    state: &Arc<MobMcpState>,
+) -> RpcResponse {
+    let params: MobIdParams = match parse_params(params) {
+        Ok(p) => p,
+        Err(resp) => return resp.with_id(id),
+    };
+    let mob_id = match parse_mob_id(id.clone(), &params.mob_id) {
+        Ok(m) => m,
+        Err(resp) => return resp,
+    };
+    match state.mob_restore_retry(&mob_id).await {
+        Ok(outcome) => RpcResponse::success(
+            id,
+            meerkat_contracts::MobRestoreRetryResult {
+                mob_id: mob_id.to_string(),
+                outcome: meerkat_mob_mcp::wire_mob_restore_retry_outcome(outcome),
+            },
+        ),
+        Err(err) => mob_call_error(id, &err),
     }
 }
 

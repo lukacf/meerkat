@@ -1171,6 +1171,157 @@ pub struct WireMobLifecycleFailure {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct MobListResult {
     pub mobs: Vec<MobStatusResult>,
+    /// The persisted mobs whose stores did not restore, kept quarantined.
+    /// A mob id is in `mobs` or here, never in both. Absent when there are
+    /// none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub quarantined: Vec<WireQuarantinedMob>,
+}
+
+/// One quarantined persisted mob on `mob/list`: its store did not restore
+/// and is kept exactly as found, with no actor. A lookup of its id answers
+/// the `mob_quarantined` refusal this row carries (`message`, `code`,
+/// `structured_data`); `mob/restore_retry` re-attempts its restore.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct WireQuarantinedMob {
+    pub mob_id: String,
+    /// Why the store is quarantined.
+    pub class: WireMobQuarantineClass,
+    /// Whether a later attempt may restore it with no repair (a store that
+    /// could not serve now): the next call that addresses the mob by id
+    /// re-attempts its restore.
+    pub retryable: bool,
+    /// A re-attempt of its restore is in flight.
+    #[serde(default)]
+    pub retrying: bool,
+    /// Re-attempts of its restore that ended since the server quarantined
+    /// it.
+    #[serde(default)]
+    pub attempts: u64,
+    /// The refusal a lookup of the mob answers, with the failure its last
+    /// restore attempt met.
+    pub message: String,
+    /// The code a lookup of the mob answers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<crate::ErrorCode>,
+    /// The structured data a lookup of the mob answers
+    /// (`kind: "mob_quarantined"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub structured_data: Option<Value>,
+}
+
+/// Why a persisted mob store is quarantined. The vocabulary may grow: a
+/// class this version does not know reads as [`Self::Unknown`] with the
+/// value as it was sent, and is written back the same.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(from = "String", into = "String")]
+#[non_exhaustive]
+pub enum WireMobQuarantineClass {
+    /// A store could not serve a read the restore needed now; a later
+    /// attempt may pass with no repair.
+    StoreUnavailable,
+    /// The mob's store, or stored state its restore needs, cannot be
+    /// opened, read or decoded.
+    StoreUnreadable,
+    /// The restore refused the store for another typed reason, such as
+    /// records that disagree among themselves.
+    ResumeRefused,
+    /// A class this version does not know, as it was sent.
+    Unknown(String),
+}
+
+impl WireMobQuarantineClass {
+    /// The value on the wire.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::StoreUnavailable => "store_unavailable",
+            Self::StoreUnreadable => "store_unreadable",
+            Self::ResumeRefused => "resume_refused",
+            Self::Unknown(raw) => raw,
+        }
+    }
+}
+
+impl From<String> for WireMobQuarantineClass {
+    fn from(raw: String) -> Self {
+        match raw.as_str() {
+            "store_unavailable" => Self::StoreUnavailable,
+            "store_unreadable" => Self::StoreUnreadable,
+            "resume_refused" => Self::ResumeRefused,
+            _ => Self::Unknown(raw),
+        }
+    }
+}
+
+impl From<WireMobQuarantineClass> for String {
+    fn from(class: WireMobQuarantineClass) -> Self {
+        match class {
+            WireMobQuarantineClass::Unknown(raw) => raw,
+            known => known.as_str().to_owned(),
+        }
+    }
+}
+
+/// The schema of the quarantine class vocabulary: the values this version
+/// knows. A reader accepts any other string as unknown.
+#[cfg(feature = "schema")]
+mod quarantine_class_schema {
+    /// Why a persisted mob store is quarantined. The vocabulary may grow: a
+    /// reader surfaces a class it does not know instead of refusing it.
+    #[derive(schemars::JsonSchema)]
+    #[schemars(rename_all = "snake_case")]
+    #[allow(dead_code)]
+    pub(super) enum WireMobQuarantineClass {
+        /// A store could not serve a read the restore needed now; a later
+        /// attempt may pass with no repair.
+        StoreUnavailable,
+        /// The mob's store, or stored state its restore needs, cannot be
+        /// opened, read or decoded.
+        StoreUnreadable,
+        /// The restore refused the store for another typed reason.
+        ResumeRefused,
+    }
+}
+
+#[cfg(feature = "schema")]
+impl schemars::JsonSchema for WireMobQuarantineClass {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "WireMobQuarantineClass".into()
+    }
+
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        <quarantine_class_schema::WireMobQuarantineClass as schemars::JsonSchema>::json_schema(
+            generator,
+        )
+    }
+}
+
+/// How a `mob/restore_retry` ended. A re-attempt that fails answers the
+/// `mob_quarantined` refusal instead.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum WireMobRestoreRetryOutcome {
+    /// The mob resumed and is managed.
+    Restored,
+    /// The mob is a child held before activation until its owner resolves.
+    Held,
+    /// The store held no mob any more and was swept, or the child was torn
+    /// down with its archived owner.
+    Settled,
+    /// The mob was not quarantined: it is managed or held.
+    NotQuarantined,
+}
+
+/// Response payload for `mob/restore_retry`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct MobRestoreRetryResult {
+    pub mob_id: String,
+    /// How the re-attempt of the mob's restore ended.
+    pub outcome: WireMobRestoreRetryOutcome,
 }
 
 /// Request payload for `mob/spawn`.
@@ -2992,6 +3143,10 @@ pub enum WireMemberCustodyDeferralCause {
     DurableTailUnprovable,
     /// A cause this version does not know, as it was sent.
     Unknown(String),
+    /// The store could not serve a read of the member's state now.
+    StoreUnavailable,
+    /// The member's persisted state cannot be read or decoded.
+    StoreUnreadable,
 }
 
 impl WireMemberCustodyDeferralCause {
@@ -3002,6 +3157,8 @@ impl WireMemberCustodyDeferralCause {
             Self::ServedElsewhere => "served_elsewhere",
             Self::HostingUnavailable => "hosting_unavailable",
             Self::DurableTailUnprovable => "durable_tail_unprovable",
+            Self::StoreUnavailable => "store_unavailable",
+            Self::StoreUnreadable => "store_unreadable",
             Self::Unknown(raw) => raw,
         }
     }
@@ -3013,6 +3170,8 @@ impl From<String> for WireMemberCustodyDeferralCause {
             "served_elsewhere" => Self::ServedElsewhere,
             "hosting_unavailable" => Self::HostingUnavailable,
             "durable_tail_unprovable" => Self::DurableTailUnprovable,
+            "store_unavailable" => Self::StoreUnavailable,
+            "store_unreadable" => Self::StoreUnreadable,
             _ => Self::Unknown(raw),
         }
     }
@@ -3058,6 +3217,10 @@ mod custody_deferral_schema {
         /// The member's durable tail could not be proven, and its recovery kept
         /// it.
         DurableTailUnprovable,
+        /// The store could not serve a read of the member's state now.
+        StoreUnavailable,
+        /// The member's persisted state cannot be read or decoded.
+        StoreUnreadable,
     }
 }
 
@@ -5097,6 +5260,113 @@ mod tests {
         assert!(decoded.custody_deferred.is_none());
     }
 
+    /// A `mob/list` with no quarantined mob keeps its earlier shape (no
+    /// `quarantined` key), and an answer without the key decodes as none.
+    #[test]
+    fn mob_list_without_quarantined_mobs_keeps_its_shape() {
+        let listed = MobListResult {
+            mobs: Vec::new(),
+            quarantined: Vec::new(),
+        };
+        let value = serde_json::to_value(&listed).expect("serialize mob list");
+        assert_eq!(value, serde_json::json!({ "mobs": [] }));
+        let decoded: MobListResult =
+            serde_json::from_value(serde_json::json!({ "mobs": [] })).expect("decode mob list");
+        assert!(decoded.quarantined.is_empty());
+    }
+
+    /// A quarantined row carries its class as a snake_case token, whether a
+    /// later attempt may restore it, the attempts so far and the refusal a
+    /// lookup answers; it round-trips.
+    #[test]
+    fn a_quarantined_mob_row_round_trips() {
+        for (class, wire, retryable) in [
+            (
+                WireMobQuarantineClass::StoreUnavailable,
+                "store_unavailable",
+                true,
+            ),
+            (
+                WireMobQuarantineClass::StoreUnreadable,
+                "store_unreadable",
+                false,
+            ),
+            (
+                WireMobQuarantineClass::ResumeRefused,
+                "resume_refused",
+                false,
+            ),
+        ] {
+            let row = WireQuarantinedMob {
+                mob_id: "broken".to_string(),
+                class: class.clone(),
+                retryable,
+                retrying: false,
+                attempts: 2,
+                message: "mob 'broken' is quarantined".to_string(),
+                code: Some(crate::ErrorCode::SessionRuntimeUnavailable),
+                structured_data: Some(serde_json::json!({ "kind": "mob_quarantined" })),
+            };
+            let listed = MobListResult {
+                mobs: Vec::new(),
+                quarantined: vec![row.clone()],
+            };
+            let value = serde_json::to_value(&listed).expect("serialize mob list");
+            assert_eq!(value["quarantined"][0]["class"], wire);
+            assert_eq!(value["quarantined"][0]["retryable"], retryable);
+            assert_eq!(value["quarantined"][0]["attempts"], 2);
+            let decoded: MobListResult =
+                serde_json::from_value(value).expect("the quarantined row decodes");
+            assert_eq!(decoded.quarantined, vec![row]);
+        }
+    }
+
+    /// The quarantine class vocabulary may grow: a class this version does
+    /// not know decodes as unknown with the value as sent, and is written
+    /// back unchanged. A value that is not a string still fails.
+    #[test]
+    fn a_quarantine_class_this_version_does_not_know_reads_as_unknown() {
+        let decoded: WireMobQuarantineClass =
+            serde_json::from_value(serde_json::json!("store_migrating")).expect("decode");
+        assert_eq!(
+            decoded,
+            WireMobQuarantineClass::Unknown("store_migrating".to_string())
+        );
+        assert_eq!(
+            serde_json::to_value(&decoded).expect("serialize"),
+            serde_json::json!("store_migrating")
+        );
+        assert!(serde_json::from_value::<WireMobQuarantineClass>(serde_json::json!(7)).is_err());
+    }
+
+    /// A restore retry answers the mob and how the re-attempt ended, as a
+    /// snake_case token.
+    #[test]
+    fn a_restore_retry_result_round_trips() {
+        for (outcome, wire) in [
+            (WireMobRestoreRetryOutcome::Restored, "restored"),
+            (WireMobRestoreRetryOutcome::Held, "held"),
+            (WireMobRestoreRetryOutcome::Settled, "settled"),
+            (
+                WireMobRestoreRetryOutcome::NotQuarantined,
+                "not_quarantined",
+            ),
+        ] {
+            let result = MobRestoreRetryResult {
+                mob_id: "broken".to_string(),
+                outcome,
+            };
+            let value = serde_json::to_value(&result).expect("serialize retry result");
+            assert_eq!(
+                value,
+                serde_json::json!({ "mob_id": "broken", "outcome": wire })
+            );
+            let decoded: MobRestoreRetryResult =
+                serde_json::from_value(value).expect("decode retry result");
+            assert_eq!(decoded, result);
+        }
+    }
+
     /// A deferred custody restore is a closed snake_case object at the top
     /// level of the status result: the restore and the cause its last
     /// attempt met.
@@ -5121,6 +5391,14 @@ mod tests {
                 (
                     WireMemberCustodyDeferralCause::DurableTailUnprovable,
                     "durable_tail_unprovable",
+                ),
+                (
+                    WireMemberCustodyDeferralCause::StoreUnavailable,
+                    "store_unavailable",
+                ),
+                (
+                    WireMemberCustodyDeferralCause::StoreUnreadable,
+                    "store_unreadable",
                 ),
             ] {
                 let deferral = WireMemberCustodyDeferral {

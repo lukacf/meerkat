@@ -184,7 +184,7 @@ of this full catalog.
 | `session/stream_open` | Session | `SessionStreamOpenParams` | `SessionStreamOpenResult` | Open a standalone session event stream |
 | `session/stream_close` | Session | `SessionStreamCloseParams` | `SessionStreamCloseResult` | Close a standalone session event stream |
 | `mob/create` | Mob | `MobCreateParams` | `MobCreateResult` | Create a mob from a definition (mob feature) |
-| `mob/list` | Mob | — | `MobListResult` | List mobs (mob feature) |
+| `mob/list` | Mob | - | `MobListResult` | List mobs, and under `quarantined` the persisted mobs whose stores did not restore (mob feature) |
 | `mob/status` | Mob | `MobIdParams` | `MobStatusResult` | Get mob status (mob feature) |
 | `mob/members` | Mob | `MobIdParams` | `MobMembersResult` | List mob members (mob feature) |
 | `mob/member_tool_declaration` | Mob | `MobMemberToolDeclarationParams` | `MobMemberToolDeclarationResult` | Read one durable member-tool declaration and fresh identity convergence status (mob feature) |
@@ -222,6 +222,7 @@ of this full catalog.
 | `mob/snapshot` | Mob | `MobIdParams` | `MobSnapshotResult` | Point-in-time aggregate of mob status plus member list (mob feature) |
 | `mob/destroy` | Mob | `MobIdParams` | `MobDestroyResult` | Destroy a mob and surface the structured MobDestroyReport (mob feature) |
 | `mob/rotate_supervisor` | Mob | `MobIdParams` | `MobRotateSupervisorResult` | Rotate the supervisor bridge for all members of a mob (mob feature) |
+| `mob/restore_retry` | Mob | `MobIdParams` | `MobRestoreRetryResult` | Re-attempt the restore of a quarantined persisted mob, for example after a repair (mob feature) |
 | `mob/claim_callback_route` | Mob | `MobClaimCallbackRouteParams` | `MobClaimCallbackRouteResult` | Bind a mob's member callback route to this connection with the mob's claim token (mob feature) |
 | `mob/submit_work` | Mob | `MobSubmitWorkParams` | `MobSubmitWorkResult` | Submit a unit of work to a mob member through the work lane (mob feature) |
 | `mob/conclude_objective` | Mob | `MobConcludeObjectiveParams` | `MobConcludeObjectiveResult` | Explicitly conclude a durable kickoff objective (mob feature) |
@@ -597,9 +598,9 @@ Handshake. Returns server capabilities.
   "result": {
     "server_info": {
       "name": "meerkat-rpc",
-      "version": "0.9.8"
+      "version": "0.9.9"
     },
-    "contract_version": "0.9.8",
+    "contract_version": "0.9.9",
     "methods": [
       "initialize", "initialized",
       "session/create", "session/list", "session/read",
@@ -910,7 +911,7 @@ Trajectory Interchange Format) v1.7 trajectory document.
   "params": {
     "session_id": "01936f8a-7b2c-7000-8000-000000000001",
     "agent_name": "meerkat",
-    "agent_version": "0.9.8",
+    "agent_version": "0.9.9",
     "model_name": "claude-opus-5"
   }
 }
@@ -3011,7 +3012,7 @@ Return the curated model catalog with provider profiles, capability metadata, an
   "jsonrpc": "2.0",
   "id": 17,
   "result": {
-    "contract_version": {"major": 0, "minor": 9, "patch": 8},
+    "contract_version": {"major": 0, "minor": 9, "patch": 9},
     "providers": [
       {
         "provider": "anthropic",
@@ -3075,7 +3076,7 @@ synthesized with that status.
   "jsonrpc": "2.0",
   "id": 8,
   "result": {
-    "contract_version": {"major": 0, "minor": 9, "patch": 8},
+    "contract_version": {"major": 0, "minor": 9, "patch": 9},
     "capabilities": [
       {
         "id": "sessions",

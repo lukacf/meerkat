@@ -100,7 +100,8 @@ def compare(files, *, facts=None, **options):
         sdk_python=options.get("sdk_python", files.python))
 
 
-@pytest.mark.parametrize("sdk_files", ["0.9.0", "0.9.1", "0.9.4", ("0.9.4", "0.9.4")], indirect=True)
+@pytest.mark.parametrize("sdk_files", ["0.9.0", "0.9.1", "0.9.4", ("0.9.4", "0.9.4"), ("0.9.6", "0.9.5")],
+                         indirect=True)
 def test_exact_installed_pair_returns_original_facts_and_no_receipt_or_process(sdk_files, monkeypatch):
     original = {path: path.read_bytes() for path in sdk_files.site.rglob("*") if path.is_file()}
     import builtins

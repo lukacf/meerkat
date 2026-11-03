@@ -534,6 +534,47 @@ pub(super) struct IdentityAuthorityState {
         (MobId, crate::identity::IdentityConvergenceResolutionId),
         IdentityConvergenceResolutionReceipt,
     >,
+    /// Identity changes' receipts, by mob and operation id: one per
+    /// operation, inserted once in the change's own write.
+    pub(super) change_receipts: BTreeMap<(MobId, String), crate::identity::IdentityChangeReceipt>,
+}
+
+/// How the created identity scan reads `key`'s row of the intents table, and
+/// whether the identity has any row there at all (a host-adopted intent's
+/// row reads as no created row, yet holds the name).
+fn created_row_observation(
+    state: &IdentityAuthorityState,
+    key: &(MobId, AgentIdentity),
+) -> Result<(bool, Option<crate::identity::CreatedIdentityObservation>), MobStoreError> {
+    if let Some(record) = state.created.get(key) {
+        let observation = if record.mob_id != key.0 || record.agent_identity != key.1 {
+            crate::identity::CreatedIdentityObservation::Unreadable {
+                evidence_digest: identity_evidence_digest(record)?,
+                detail: "created identity record does not match its physical mob/identity key"
+                    .to_string(),
+            }
+        } else {
+            match record.validate() {
+                Ok(()) => crate::identity::CreatedIdentityObservation::Created(record.clone()),
+                Err(error) => crate::identity::CreatedIdentityObservation::Unreadable {
+                    evidence_digest: identity_evidence_digest(record)?,
+                    detail: error.to_string(),
+                },
+            }
+        };
+        return Ok((true, Some(observation)));
+    }
+    if let Some(raw) = state.unreadable_intents.get(key) {
+        return Ok((
+            true,
+            raw.created_domain
+                .then(|| crate::identity::CreatedIdentityObservation::Unreadable {
+                    evidence_digest: raw.evidence_digest(),
+                    detail: raw.detail.clone(),
+                }),
+        ));
+    }
+    Ok((state.intents.contains_key(key), None))
 }
 
 /// One in-memory lock for the narrow identity slice's cross-resource atomic
@@ -1904,6 +1945,147 @@ impl MobIdentityMemberStore for InMemoryMobIdentityStore {
         mob_id: &MobId,
     ) -> Result<super::MemberBindingJournalRead, MobStoreError> {
         self.read_member_binding_journal_from(mob_id, 0).await
+    }
+
+    async fn commit_identity_change(
+        &self,
+        write: &super::IdentityChangeWrite,
+    ) -> Result<super::IdentityChangeCommit, MobStoreError> {
+        let Some(event_tx) = &self.event_tx else {
+            return Err(MobStoreError::IdentityMemberAtomicPersistenceUnavailable);
+        };
+        write.validate()?;
+        // One aggregate guard covers the receipts, the rows and the journal:
+        // everything is checked before anything changes, so a refusal leaves
+        // the store as it was.
+        let mut aggregate = self.aggregate.write().await;
+        let receipt_key = (
+            write.receipt.mob_id.clone(),
+            write.receipt.operation_id.clone(),
+        );
+        if let Some(existing) = aggregate.identity.change_receipts.get(&receipt_key) {
+            return Ok(if existing.request_digest == write.receipt.request_digest {
+                super::IdentityChangeCommit::Replayed {
+                    receipt: existing.clone(),
+                }
+            } else {
+                super::IdentityChangeCommit::OperationReused {
+                    receipt: existing.clone(),
+                }
+            });
+        }
+        for row in &write.rows {
+            let key = (row.record.mob_id.clone(), row.record.agent_identity.clone());
+            let (present, current) = created_row_observation(&aggregate.identity, &key)?;
+            if !super::created_row_matches(&row.expected, present, current.as_ref()) {
+                return Ok(super::IdentityChangeCommit::RowConflict {
+                    identity: key.1,
+                    current,
+                });
+            }
+        }
+        validate_initial_mob_created_events(&aggregate.events, &write.events)?;
+        refuse_raw_creation_over_record(aggregate.creation.as_ref(), &write.events)?;
+        let mut cursor = aggregate
+            .events
+            .last()
+            .map_or(Some(1), |existing| existing.cursor.checked_add(1));
+        let mut stored = Vec::with_capacity(write.events.len());
+        for event in &write.events {
+            let Some(at) = cursor else {
+                return Err(MobStoreError::Internal(
+                    "mob event cursor is exhausted".to_string(),
+                ));
+            };
+            stored.push(MobEvent {
+                cursor: at,
+                timestamp: event.timestamp.unwrap_or_else(Utc::now),
+                mob_id: event.mob_id.clone(),
+                kind: event.kind.clone(),
+            });
+            cursor = at.checked_add(1);
+        }
+
+        let state = &mut aggregate.identity;
+        for row in &write.rows {
+            let key = (row.record.mob_id.clone(), row.record.agent_identity.clone());
+            state.intents.remove(&key);
+            state.unreadable_intents.remove(&key);
+            state.created.insert(key, row.record.clone());
+        }
+        state
+            .change_receipts
+            .insert(receipt_key, write.receipt.clone());
+        aggregate.events.extend(stored.iter().cloned());
+        // Broadcast under the write lock so live subscribers see appends in
+        // cursor order; `send` never blocks.
+        for event in &stored {
+            let _ = event_tx.send(event.clone());
+        }
+        drop(aggregate);
+        Ok(super::IdentityChangeCommit::Committed { events: stored })
+    }
+
+    async fn settle_created_identity_row(
+        &self,
+        row: &super::CreatedIdentityRowWrite,
+    ) -> Result<bool, MobStoreError> {
+        if self.event_tx.is_none() {
+            return Err(MobStoreError::IdentityMemberAtomicPersistenceUnavailable);
+        }
+        row.record
+            .validate()
+            .map_err(|error| MobStoreError::Serialization(error.to_string()))?;
+        let mut aggregate = self.aggregate.write().await;
+        let key = (row.record.mob_id.clone(), row.record.agent_identity.clone());
+        let (present, current) = created_row_observation(&aggregate.identity, &key)?;
+        if !super::created_row_matches(&row.expected, present, current.as_ref()) {
+            return Ok(false);
+        }
+        let state = &mut aggregate.identity;
+        state.intents.remove(&key);
+        state.unreadable_intents.remove(&key);
+        state.created.insert(key, row.record.clone());
+        Ok(true)
+    }
+
+    async fn observe_identity_change_receipt(
+        &self,
+        mob_id: &MobId,
+        operation_id: &str,
+    ) -> Result<Option<crate::identity::IdentityChangeReceipt>, MobStoreError> {
+        if self.event_tx.is_none() {
+            return Err(MobStoreError::IdentityMemberAtomicPersistenceUnavailable);
+        }
+        Ok(self
+            .aggregate
+            .read()
+            .await
+            .identity
+            .change_receipts
+            .get(&(mob_id.clone(), operation_id.to_string()))
+            .cloned())
+    }
+
+    async fn scan_created_identity_rows(
+        &self,
+        mob_id: &MobId,
+        after: Option<&super::IdentityIntentScanCursor>,
+        limit: usize,
+    ) -> Result<super::CreatedIdentityScanPage, MobStoreError> {
+        MobIdentityStore::scan_created_identities_page(self, mob_id, after, limit).await
+    }
+
+    async fn observe_created_identity(
+        &self,
+        mob_id: &MobId,
+        identity: &AgentIdentity,
+    ) -> Result<Option<crate::identity::CreatedIdentityObservation>, MobStoreError> {
+        if self.event_tx.is_none() {
+            return Err(MobStoreError::IdentityMemberAtomicPersistenceUnavailable);
+        }
+        let aggregate = self.aggregate.read().await;
+        Ok(created_row_observation(&aggregate.identity, &(mob_id.clone(), identity.clone()))?.1)
     }
 
     async fn read_member_binding_journal_from(

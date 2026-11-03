@@ -2183,6 +2183,17 @@
 .setup-proposal-actions > summary strong { color: #423c34; }
 .setup-proposal-actions > summary span { display: block; margin: 3px 0 0 18px; font-size: 12px; }
 .setup-proposal-actions > summary:focus-visible { outline: 2px solid #85543b; outline-offset: 3px; border-radius: 4px; }
+.setup-phase { margin: 12px 0; border-top: 1px solid #dfd4c4; }
+.setup-phase[hidden] { display: none; }
+.setup-phase > summary, .setup-plan-details > summary, .setup-conversation-history > summary,
+.setup-other-steps > summary, .setup-status-options > summary { padding: 12px 0; cursor: pointer; color: #65584a; font-size: 13px; }
+.setup-phase > summary:focus-visible, .setup-plan-details > summary:focus-visible,
+.setup-conversation-history > summary:focus-visible { outline: 2px solid #85543b; outline-offset: 3px; }
+.setup-conversation-history { margin-bottom: 16px; }
+.setup-plan-details > summary { padding: 16px 20px; }
+.setup-status-options { padding: 0 20px 12px; }
+.setup-status-options button, .setup-status-options a { display: block; margin: 8px 0; }
+.setup-current-status-copy > p { max-width: 65ch; margin: 8px 0 0; font-size: 13px; line-height: 1.5; }
 .setup-progress-card { margin: 22px 0; padding: 18px 20px; border: 1px solid #d5c6b3; border-radius: 12px; background: #fbf8f2; }
 .setup-progress-card h1, .setup-progress-card h2 { margin: 7px 0; font-size: 18px; line-height: 1.3; letter-spacing: -.025em; }
 .setup-progress-card h1 { font-size: 22px; }
@@ -2195,4 +2206,21 @@
 @media (max-width: 760px) {
   .setup-native-chat .cc-message p,
   .setup-native-chat .cc-message li { font-size: 15px; }
+}
+
+/* Secondary controls share the header without covering the conversation. */
+.setup-header-actions { flex-wrap: wrap; overflow: visible; }
+[data-forge-workspace-slot] { min-width: 0; max-width: 100%; overflow: visible; }
+[data-forge-workspace-slot]:empty { display: none; }
+.setup-advanced-tools { position: relative; font-size: 12px; }
+.setup-advanced-tools > summary { cursor: pointer; padding: 7px 0; font-weight: 600; }
+.setup-advanced-tools-menu { position: absolute; right: 0; top: 100%; z-index: 40; display: grid;
+  gap: 8px; width: min(250px, 85vw); padding: 16px; border: 1px solid #d5dad3; border-radius: 12px;
+  background: #fff; box-shadow: 0 8px 24px #17231820; }
+.setup-advanced-tools-menu button, .setup-advanced-tools-menu button:last-child { width: auto; justify-content: flex-start; text-align: left; }
+.setup-requirement-details { margin-top: 18px; }
+.setup-requirement-details > summary { cursor: pointer; font-weight: 600; }
+@media (max-width: 760px) {
+  .setup-advanced-tools-menu { position: static; width: auto; box-shadow: none; }
+  [data-forge-workspace-slot] { flex-basis: 100%; }
 }

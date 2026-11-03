@@ -194,6 +194,7 @@ export type {
   MobLifecycleFailure,
   MobStatus,
   MobSummary,
+  QuarantinedMobSummary,
   MobTurnStartOptions,
   MobWireMembersBatchEdge,
   MobWireMembersBatchEdgeInput,
@@ -374,6 +375,12 @@ export type {
 } from "./generated/types.js";
 export { COMMS_SEND_ERROR_CODES, commsSendError } from "./comms-errors.js";
 export { mobDestroyIncompleteReport } from "./mob-destroy-report.js";
+export {
+  MOB_QUARANTINED_KIND,
+  MOB_QUARANTINE_CLASSES,
+  mobQuarantined,
+  type MobQuarantinedRefusal,
+} from "./mob-errors.js";
 export { BinaryIntegrityError } from "./binary-errors.js";
 export type { BinaryIntegrityFailure } from "./binary-errors.js";
 

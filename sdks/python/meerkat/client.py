@@ -155,6 +155,7 @@ from .generated.types import (
     MobRevokeHostParams,
     MobRevokeHostResult,
     MobRevokeScopesParams,
+    MobRestoreRetryResult,
     MobRotateSupervisorResult,
     MobRouteInstallsResult,
     MobRunParams,
@@ -3178,7 +3179,8 @@ class MeerkatClient:
         """List the managed mobs, one ``mob/list`` row each.
 
         A row's ``failure`` present means the mob's actor has stopped;
-        ``status`` is the last machine phase.
+        ``status`` is the last machine phase. A persisted mob whose store did
+        not restore is not listed here: see :meth:`list_quarantined_mobs`.
         """
         self.require_capability("mob")
         result = await self._request("mob/list", {})
@@ -3191,6 +3193,49 @@ class MeerkatClient:
             self._require_string_field(entry, "mob_id", "Invalid mob/list response")
             parsed.append(entry)
         return parsed
+
+    async def list_quarantined_mobs(self) -> list[dict[str, Any]]:
+        """List the persisted mobs whose stores did not restore, one
+        ``mob/list`` ``quarantined`` row each.
+
+        A quarantined mob's store is kept exactly as found and no actor runs
+        for it; every call that addresses its id answers the
+        ``mob_quarantined`` refusal (read it with
+        :func:`meerkat.mob_quarantined`). A row carries ``mob_id``, ``class``
+        (``"store_unavailable"``, ``"store_unreadable"`` or
+        ``"resume_refused"``; a class this SDK does not know is kept as
+        sent), ``retryable``, ``retrying``, ``attempts``, ``message`` and the
+        refusal's ``code`` and ``structured_data``. Re-attempt a restore
+        after a repair with :meth:`mob_restore_retry`. Empty when every
+        store restored.
+        """
+        self.require_capability("mob")
+        result = await self._request("mob/list", {})
+        context = "Invalid mob/list response"
+        rows = self._require_list_field(result, "quarantined", context)
+        parsed: list[dict[str, Any]] = []
+        for idx, row in enumerate(rows):
+            entry = self._require_dict(row, f"quarantined[{idx}]", context)
+            self._require_string_field(entry, "mob_id", context)
+            self._require_string_field(entry, "class", context)
+            self._require_bool_field(entry, "retryable", context)
+            parsed.append(entry)
+        return parsed
+
+    async def mob_restore_retry(self, mob_id: str) -> MobRestoreRetryResult:
+        """Re-attempt the restore of a quarantined persisted mob, for
+        example after its store was repaired.
+
+        Wraps the ``mob/restore_retry`` RPC. Answers ``{mob_id, outcome}``
+        with ``outcome`` ``"restored"`` (the mob is managed again),
+        ``"held"`` (a child mob held until its owner resolves),
+        ``"settled"`` (the store held no mob any more) or
+        ``"not_quarantined"``. A re-attempt that fails raises the
+        ``mob_quarantined`` refusal again (read it with
+        :func:`meerkat.mob_quarantined`), and the mob stays listed by
+        :meth:`list_quarantined_mobs` with its attempts counted.
+        """
+        return await self._request("mob/restore_retry", {"mob_id": mob_id})
 
     async def mob_status(self, mob_id: str) -> dict[str, Any]:
         result = await self._request("mob/status", {"mob_id": mob_id})
@@ -8512,7 +8557,13 @@ class MeerkatClient:
             "cause": (
                 cast(WireMemberCustodyDeferralCause, cause)
                 if cause
-                in {"served_elsewhere", "hosting_unavailable", "durable_tail_unprovable"}
+                in {
+                    "served_elsewhere",
+                    "hosting_unavailable",
+                    "durable_tail_unprovable",
+                    "store_unavailable",
+                    "store_unreadable",
+                }
                 else {"unknown": cause}
             ),
         }

@@ -188,7 +188,7 @@ test("a pending first Start exposes successive host phases without releasing its
     await act(async () => original.resolve(observed)); await settle();
     assert.equal(document.querySelector(".setup-provider").dataset.providerStep, "ready");
     assert.equal(document.querySelector(".setup-provider-startup") === null, true, "Finished startup does not leave an obsolete phase block");
-    assert.equal(button("Back to my draft").disabled, false);
+    assert.equal(button("Back to my idea").disabled, false);
     assert.equal(closes(), 0, "Readiness does not navigate or send the draft automatically");
     assertDraftAndAdmission(document, calls);
   });
@@ -345,7 +345,7 @@ test("manual ready observation owns startup presentation over a late background 
     assert.equal(document.querySelector(".setup-provider-startup") === null, true);
     assert.doesNotMatch(document.body.textContent, new RegExp(privateDiagnostic));
     assertDraftAndAdmission(document, calls);
-    await click("Back to my draft"); assert.equal(closes(), 1);
+    await click("Back to my idea"); assert.equal(closes(), 1);
     assertDraftAndAdmission(document, calls);
   });
 });

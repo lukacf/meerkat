@@ -304,6 +304,10 @@ async def test_failed_product_install_keeps_no_inventory(worker_fixture, monkeyp
 
 
 def descriptor_target(descriptor):
+    if sys.platform == "darwin":
+        import fcntl
+        # Darwin's F_GETPATH returns the real path for files and directories.
+        return os.fsdecode(fcntl.fcntl(descriptor, 50, bytes(1024)).split(b"\0", 1)[0])
     return os.readlink(f"/proc/self/fd/{descriptor}")
 
 
@@ -700,19 +704,19 @@ def linux_glibc_floor(monkeypatch):
 
 
 @pytest.mark.parametrize("host_glibc", [[2, 35], [2, 39], [2, 41]], ids=["glibc-2.35", "glibc-2.39", "glibc-2.41"])
-async def test_linux_host_below_the_declared_glibc_floor_refuses_fresh_install_before_publication(
+async def test_linux_host_must_match_declared_glibc_before_fresh_install(
         linux_glibc_floor, initial, monkeypatch, host_glibc):
     # Every selected wheel suits this host and Forge's CPython. Only the
-    # product's declared glibc floor decides; below it the application would
-    # install and then fail when its native programs start.
+    # product's exact declared host decides; a newer glibc is not admitted
+    # by the selected library's frozen runtime contract.
     monkeypatch.setattr(deployment, "forge_interpreter", lambda: {**CP311_LINUX, "glibc_minimum": host_glibc},
         raising=False)
     f = initial
     fresh = (await f.service.options(f.guide_id, f.build_id))["fresh_install"]
-    if host_glibc < [2, 39]:
+    if host_glibc != [2, 39]:
         assert fresh["available"] is False and "next_step" not in fresh
-        assert "glibc 2.39 or newer" in fresh["reason"] and "this computer has glibc 2.35" in fresh["reason"]
-        with pytest.raises(DraftConflict, match=r"glibc 2\.39 or newer"):
+        assert "exactly glibc 2.39" in fresh["reason"] and f"this computer has glibc {host_glibc[0]}.{host_glibc[1]}" in fresh["reason"]
+        with pytest.raises(DraftConflict, match=r"exactly glibc 2\.39"):
             await f.submit()
         assert not f.destination.exists() and not f.service.launched
     else:
@@ -721,8 +725,8 @@ async def test_linux_host_below_the_declared_glibc_floor_refuses_fresh_install_b
         assert receipt["status"] == "interrupted" and receipt["phase"] == "install"
 
 
-@pytest.mark.parametrize("host_glibc", [[2, 35], [2, 39]], ids=["glibc-2.35", "glibc-2.39"])
-async def test_worker_refuses_a_host_below_the_declared_glibc_floor_before_creating_the_venv(
+@pytest.mark.parametrize("host_glibc", [[2, 35], [2, 39], [2, 41]], ids=["glibc-2.35", "glibc-2.39", "glibc-2.41"])
+async def test_worker_requires_exact_product_glibc_before_creating_the_venv(
         tmp_path, monkeypatch, host_glibc):
     # Fresh installs and product updates both install through this step.
     monkeypatch.setattr(deployment, "forge_interpreter", lambda: {**CP311_LINUX, "glibc_minimum": host_glibc},
@@ -738,8 +742,8 @@ async def test_worker_refuses_a_host_below_the_declared_glibc_floor_before_creat
         raise RuntimeError("inert venv creation")
     install = worker._install_selected_product(supervisor, SimpleNamespace(selection=selected, glibc_floor=(2, 39)),
         lambda: True, command)
-    if host_glibc < [2, 39]:
-        with pytest.raises(DraftConflict, match=r"glibc 2\.39 or newer, but this computer has glibc 2\.35"):
+    if host_glibc != [2, 39]:
+        with pytest.raises(DraftConflict, match=rf"exactly glibc 2\.39, but this computer has glibc {host_glibc[0]}\.{host_glibc[1]}"):
             await install
         assert commands == [] and not (destination / ".venv").exists()
     else:
@@ -896,7 +900,7 @@ def test_generated_readme_names_the_cpython_of_a_compiled_closure():
     assert "You need a complete Python 3.11+ installation" in portable and "PYTHON_BIN" not in portable
 
 
-@pytest.mark.parametrize("floor, host", [((2, 41), "Linux x86_64 with glibc 2.41 or newer"), (None, "Linux x86_64")],
+@pytest.mark.parametrize("floor, host", [((2, 41), "Linux x86_64 with exactly glibc 2.41"), (None, "Linux x86_64")],
     ids=["declared", "undeclared"])
 def test_generated_readme_names_the_product_declared_glibc_floor(floor, host):
     from launchkit import product_distribution

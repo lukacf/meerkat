@@ -142,6 +142,7 @@ import {
   type MonitorsStartParams,
   type MonitorsStartResult,
   type MobWireMembersBatchEdge as WireMobWireMembersBatchEdge,
+  type MobRestoreRetryResult,
   type MobRotateSupervisorResult,
   type MobClaimCallbackRouteResult,
   type MobConcludeObjectiveParams,
@@ -473,6 +474,7 @@ import type {
   MobSpawnResult,
   MobStatus,
   MobSummary,
+  QuarantinedMobSummary,
   MobTurnStartOptions,
   MobWireMembersBatchEdgeInput,
   MobWireMembersBatchResult,
@@ -2572,6 +2574,61 @@ export class MeerkatClient {
         ? {}
         : { structuredData: record.structured_data }),
     };
+  }
+
+  /**
+   * List the persisted mobs whose stores did not restore, one `mob/list`
+   * `quarantined` row each. A quarantined mob's store is kept exactly as
+   * found and no actor runs for it; every call that addresses its id fails
+   * with the `mob_quarantined` refusal (read it with `mobQuarantined`).
+   * Re-attempt a restore after a repair with `mobRestoreRetry`. Empty when
+   * every store restored.
+   */
+  async listQuarantinedMobs(): Promise<QuarantinedMobSummary[]> {
+    this.requireCapability("mob");
+    const result = await this.request("mob/list", {});
+    const raw: unknown = result.quarantined;
+    if (raw === undefined || raw === null) {
+      return [];
+    }
+    const rows = MeerkatClient.requireRecordArray(raw, "Invalid mob/list response");
+    const context = "Invalid mob/list quarantined entry";
+    return rows.map((row) => {
+      const code = MeerkatClient.optionalStringField(row, "code", context);
+      return {
+        mobId: MeerkatClient.requireStringField(row, "mob_id", context),
+        quarantineClass: MeerkatClient.requireStringField(row, "class", context),
+        retryable: MeerkatClient.requireBooleanField(row, "retryable", context),
+        retrying:
+          row.retrying === undefined
+            ? false
+            : MeerkatClient.requireBooleanField(row, "retrying", context),
+        attempts:
+          row.attempts === undefined
+            ? 0
+            : MeerkatClient.requireNonNegativeIntegerField(row, "attempts", context),
+        message: MeerkatClient.requirePresentStringField(row, "message", context),
+        ...(code === undefined ? {} : { code }),
+        ...(row.structured_data === undefined || row.structured_data === null
+          ? {}
+          : { structuredData: row.structured_data }),
+      };
+    });
+  }
+
+  /**
+   * Re-attempt the restore of a quarantined persisted mob, for example after
+   * its store was repaired. Wraps the `mob/restore_retry` RPC: answers
+   * `{mob_id, outcome}` with `outcome` `"restored"` (the mob is managed
+   * again), `"held"` (a child mob held until its owner resolves),
+   * `"settled"` (the store held no mob any more) or `"not_quarantined"`. A
+   * re-attempt that fails rejects with the `mob_quarantined` refusal again
+   * (read it with `mobQuarantined`), and the mob stays listed by
+   * `listQuarantinedMobs` with its attempts counted.
+   */
+  async mobRestoreRetry(mobId: string): Promise<MobRestoreRetryResult> {
+    const result = await this.request("mob/restore_retry", { mob_id: mobId });
+    return result as unknown as MobRestoreRetryResult;
   }
 
   async mobStatus(mobId: string): Promise<{ mobId: string; status: string }> {
@@ -6546,6 +6603,8 @@ export class MeerkatClient {
       "served_elsewhere",
       "hosting_unavailable",
       "durable_tail_unprovable",
+      "store_unavailable",
+      "store_unreadable",
     ];
     const restore = record.restore;
     if (typeof restore !== "string") {

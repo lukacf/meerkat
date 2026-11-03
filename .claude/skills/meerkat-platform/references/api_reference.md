@@ -577,7 +577,8 @@ owner through `SessionRuntime::decision_service`, a Rust embedding through
 
 Lifecycle and identity:
 
-- `mob/create`, `mob/list`, `mob/status`, `mob/lifecycle`, `mob/destroy`, `mob/snapshot`
+- `mob/create`, `mob/list`, `mob/status`, `mob/lifecycle`, `mob/destroy`, `mob/snapshot`,
+  `mob/restore_retry` (`mob/list` names quarantined mobs under `quarantined`)
 - `mob/members`, `mob/list_members_matching`, `mob/member_status`
 - `mob/spawn`, `mob/spawn_many`, `mob/spawn_helper`, `mob/fork_helper`
 - `mob/ensure_member`, `mob/reconcile`
@@ -786,6 +787,7 @@ Client methods:
 - `get_blob(blob_id)` → `BlobPayload`
 - `create_mob(*, definition)` → `Mob` — call `await client.create_mob(definition=definition)`
 - `list_mobs()` → `list[dict[str, Any]]`
+- `list_quarantined_mobs()` → `list[dict[str, Any]]` / `mob_restore_retry(mob_id)`; `mob_quarantined(error)` reads the refusal
 - `get_config()` / `set_config(...)` / `patch_config(...)`
 - `mcp_add(session_id, server_config, *, persisted=False)`
 - `mcp_remove(session_id, server_name, *, persisted=False)`
@@ -928,6 +930,7 @@ Client methods:
 - `getBlob(blobId)` → `BlobPayload`
 - `createMob({ definition })` → `Mob` — call `await client.createMob({ definition })`; neither mob creation nor a mob role `Profile` declares an initial auth binding. Configure host/realm credentials, or select a preconfigured realm binding through supported per-member spawn/helper auth options.
 - `listMobs()` → `MobSummary[]`
+- `listQuarantinedMobs()` → `QuarantinedMobSummary[]` / `mobRestoreRetry(mobId)`; `mobQuarantined(err)` reads the refusal
 - `getConfig()` / `setConfig(...)` / `patchConfig(...)`
 - `mcpAdd(params)` / `mcpRemove(params)` / `mcpReload(params)`
 - `listSkills()`

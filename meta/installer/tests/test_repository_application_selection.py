@@ -50,10 +50,11 @@ async def test_explicit_application_model_owner_binds_original_registry_not_guid
     namespace = server_selection(f)
     select = namespace["select_local_application_runtime"]
     original_guide = f.guide
+    original_architect = original_guide.architect
     host = select(f.target, ordinary_meta_gateway=f.gateway, model_configuration=models)
     assert type(host) is LocalApplicationRegistry
     assert host._selected_model_configuration() == value
-    assert namespace["guide"] is original_guide and original_guide.architect is None
+    assert namespace["guide"] is original_guide and original_guide.architect is original_architect
     assert select(f.target, ordinary_meta_gateway=f.gateway, model_configuration=models) is host
     with pytest.raises(DraftConflict, match="original application model configuration"):
         select(f.target, ordinary_meta_gateway=f.gateway)

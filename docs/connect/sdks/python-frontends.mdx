@@ -165,10 +165,10 @@ The host supplies exact raw bytes/header pairs and an out-of-band signing secret
 
 ## Home-automation host live image input
 
-`meerkat_toolkit.frontend.homecore_live.HomeCoreLiveImageClient` submits an image to the home-automation host's existing Reachy route, using a selected literal loopback origin and a current host lease-header callback. `submit_image` takes an existing idempotency key, MIME type and base64 data.
+`meerkat_toolkit.frontend.paired_host_live.PairedHostLiveImageClient` submits an image to the home-automation host's existing device route, using a selected literal loopback origin and a current host lease-header callback. `submit_image` takes an existing idempotency key, MIME type and base64 data.
 
 This specialized client creates its own per-submission HTTPX client. It does not use the borrowed service-client preparation contract. An HTTP response is not a native image-acceptance receipt: the caller must observe the exact image job on its original live channel generation before follow-up text is queued.
 
-It is not a camera service, motion API or durable automatic replay mechanism. The [Reachy example](/connect/examples/reachy-extension) explains the complete intended composition.
+It is not a camera service, motion API or durable automatic replay mechanism. The [device example](/connect/examples/device-extension) explains the complete intended composition.
 
-Source contracts live in `sdk/python/FRONTEND.md`, `TELEGRAM.md`, `SLACK-FRONTEND.md` and `HOMECORE-LIVE.md`.
+Source contracts live in `sdk/python/FRONTEND.md`, `TELEGRAM.md`, `SLACK-FRONTEND.md` and `PAIRED-HOST-LIVE.md`.

@@ -1052,6 +1052,22 @@ def replace_in_arm(arm, old, new):
     assert body.count(old) == 1, f"expected one {old[:70]!r} in {arm}, found {body.count(old)}"
     open(path, "w").write(text[:found.start()] + body.replace(old, new) + text[found.end():])
 
+def replace_all_in_arm(arm, old, new, count=None):
+    """Every occurrence of `old` in the arm's definition becomes `new`: the
+    generated model inlines a variable's earlier update into its later
+    ones, so a condition an update reads can occur more than once. With
+    `count`, the arm must hold exactly that many: a regeneration that
+    inlines the condition another number of times fails here instead of
+    shifting the mutant."""
+    text = open(path).read()
+    found = _arm(text, arm)
+    body = found.group(0)
+    if count is None:
+        assert body.count(old) >= 1, f"expected {old[:70]!r} in {arm}, found none"
+    else:
+        assert body.count(old) == count, f"expected {count} of {old[:70]!r} in {arm}, found {body.count(old)}"
+    open(path, "w").write(text[:found.start()] + body.replace(old, new) + text[found.end():])
+
 def replace_text(old, new):
     """The one occurrence of `old` in the model becomes `new`."""
     text = open(path).read()
@@ -1354,18 +1370,25 @@ PY
 keep_var("RecoverRosterMemberRetiredCurrentAlreadyAbsent", "identity_entry_retiring")
 PY
 
-  # The replay records a session its row does not record archived.
+  # The replay records a session its row does not record archived. Since
+  # 0.9.9 the removal's end drops the record the replay recorded, so the
+  # generated update of the record inlines the archived check more than
+  # once: every copy becomes TRUE.
   mutate legacy replay_records_unarchived_session "Action property AuditReplayRecordsOnlyArchived" <<'PY'
-replace_in_arm("RecoverRosterMemberRetiredRunning", "(session_archived = TRUE)", "TRUE")
-replace_in_arm("RecoverRosterMemberRetiredCurrentAlreadyAbsent", "(session_archived = TRUE)", "TRUE")
+replace_all_in_arm("RecoverRosterMemberRetiredRunning", "(session_archived = TRUE)", "TRUE")
+replace_all_in_arm("RecoverRosterMemberRetiredCurrentAlreadyAbsent", "(session_archived = TRUE)", "TRUE")
 PY
 
   # The replay ignores the row's hosted incarnation: a hosted incarnation's
   # entry takes the local branch (owed its seat, its session recorded).
+  # Since 0.9.9 the removal's end drops the record the replay recorded, so
+  # the generated update of the record inlines the local condition three
+  # times: every copy takes the local branch, and each anchor's count is
+  # asserted, so a regeneration that inlines it otherwise fails loudly.
   mutate legacy hosted_replay_takes_local_branch "Action property AuditHostedReplayKeepsHosted" <<'PY'
 for arm in ("RecoverRosterMemberRetiredRunning", "RecoverRosterMemberRetiredCurrentAlreadyAbsent"):
-    replace_in_arm(arm, "(hosted_incarnation = TRUE)", "FALSE")
-    replace_in_arm(arm, "(hosted_incarnation = FALSE)", "TRUE")
+    replace_all_in_arm(arm, "(hosted_incarnation = TRUE)", "FALSE", count=1)
+    replace_all_in_arm(arm, "(hosted_incarnation = FALSE)", "TRUE", count=3)
 PY
 
   # The replay of a stale start row marks its identity.
@@ -1574,9 +1597,11 @@ keep_var("CommitSpawnMembershipFresh", "identity_entry_unseated")
 PY
 
   # The placed ladder holds the custody of an entry not hosted on its first
-  # use (or of no entry): its placed custody guard dropped.
+  # use (or of no entry): its placed custody guard dropped (the one guard
+  # that names neither custody; the name guard's created custody clause
+  # names hosted entries too).
   mutate placed placed_custody_relaxed "Invariant placed_entry_custody_is_hosted_on_first_use" <<'PY'
-drop_guard("BeginSpawnExecRemote", 'Some("HostedOnFirstUse")')
+drop_guard("BeginSpawnExecRemote", "((entry_custody = FALSE) /\\ (created_custody = FALSE))")
 PY
 
   # The placed ladder takes an entry's name without its custody.

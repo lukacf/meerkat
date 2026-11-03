@@ -105,6 +105,7 @@ service APIs. For agents that run in the browser itself, use the
 | `createMob(options?)` | Create a mob, return a `Mob` |
 | `createDeferredSession(prompt, options?)` | Create a session without running the first turn; returns a `DeferredSession` |
 | `listMobs()` | List mobs |
+| `listQuarantinedMobs()` / `mobRestoreRetry(mobId)` | List the persisted mobs whose stores did not restore; re-attempt one's restore after a repair |
 | `getConfig()` | Read runtime configuration |
 | `setConfig(config)` | Replace runtime configuration |
 | `patchConfig(patch)` | Merge-patch runtime configuration |

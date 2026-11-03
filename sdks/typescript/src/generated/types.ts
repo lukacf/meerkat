@@ -1,9 +1,9 @@
 // Generated wire types for Meerkat SDK
-// Contract version: 0.9.8
+// Contract version: 0.9.9
 
 import { MeerkatError } from "./errors.js";
 
-export const CONTRACT_VERSION = "0.9.8";
+export const CONTRACT_VERSION = "0.9.9";
 
 export type Value = unknown;
 
@@ -1919,8 +1919,20 @@ export interface MobCreateResult {
   mob_id: string;
 }
 
+export interface WireQuarantinedMob {
+  attempts?: number;
+  class: WireMobQuarantineClass;
+  code?: "SESSION_NOT_FOUND" | "SCHEDULE_NOT_FOUND" | "SESSION_BUSY" | "SESSION_NOT_RUNNING" | "REQUEST_CANCELLED" | "PROVIDER_ERROR" | "BUDGET_EXHAUSTED" | "HOOK_DENIED" | "AGENT_ERROR" | "CAPABILITY_UNAVAILABLE" | "SKILL_NOT_FOUND" | "SKILL_RESOLUTION_FAILED" | "INVALID_PARAMS" | "INTERNAL_ERROR" | "DUPLICATE_INPUT" | "SUPERVISOR_ROTATION_INCOMPLETE" | "SCOPE_DENIED" | "HOST_UNAVAILABLE" | "STALE_CURSOR" | "STALE_FENCE" | "MEMBER_RELOAD_REQUIRED" | "INPUT_REFUSED" | "INPUT_NOT_READY" | "SESSION_RUNTIME_UNAVAILABLE" | "APPROVAL_STORE_UNAVAILABLE" | "APPROVAL_CONFLICT" | "APPROVAL_COMMIT_UNKNOWN" | "STALE_DELIVERY_SCOPE" | "FORK_INSTRUCTION_REFUSED" | null;
+  message: string;
+  mob_id: string;
+  retryable: boolean;
+  retrying?: boolean;
+  structured_data?: unknown;
+}
+
 export interface MobListResult {
   mobs: Record<string, unknown>[];
+  quarantined?: WireQuarantinedMob[];
 }
 
 export interface WireMobLifecycleFailure {
@@ -2542,6 +2554,11 @@ export interface MobRotateSupervisorResult {
   mob_id: string;
   ok: boolean;
   report: SupervisorRotationReportWire;
+}
+
+export interface MobRestoreRetryResult {
+  mob_id: string;
+  outcome: WireMobRestoreRetryOutcome;
 }
 
 export interface MobClaimCallbackRouteParams {
@@ -4194,7 +4211,11 @@ export type WireContinuationStatus = WireContinuationStatusPending | WireContinu
 
 export type WireMemberCustodyRestore = "startup_binding" | "cleanup_delivery";
 
-export type WireMemberCustodyDeferralCause = "served_elsewhere" | "hosting_unavailable" | "durable_tail_unprovable";
+export type WireMemberCustodyDeferralCause = "served_elsewhere" | "hosting_unavailable" | "durable_tail_unprovable" | "store_unavailable" | "store_unreadable";
+
+export type WireMobQuarantineClass = "store_unavailable" | "store_unreadable" | "resume_refused";
+
+export type WireMobRestoreRetryOutcome = "restored" | "held" | "settled" | "not_quarantined";
 
 export type WireMobRunStatus = "pending" | "running" | "completed" | "failed" | "canceled";
 

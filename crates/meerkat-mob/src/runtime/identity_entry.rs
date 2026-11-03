@@ -26,9 +26,11 @@
 //! retirement the declared apply did not start: it stays unseated
 //! ([`EntryStanding::Unseated`]), and the next apply seats it again on its own
 //! archived session. Only the end of an unlisted retirement (the declared
-//! apply's seal), the mob's destroy and the mob's reset end an entry. An
-//! unseated entry is not journaled: after a restart, the next apply declares
-//! it again.
+//! apply's seal), the identity's removal
+//! ([`super::MobHandle::remove_identity`], which tombstones its name), the
+//! mob's destroy and the mob's reset end an entry. An unseated roster-owned
+//! entry is not journaled: after a restart, the next apply declares it
+//! again.
 //!
 //! A created entry ([`IdentityEntryOrigin::Created`]) has its desired record
 //! in the mob's identity store: its created entry row. Every start recovers
@@ -56,17 +58,23 @@
 //! and the name reservations (tombstones and unreadable names). It decides
 //! nothing about the entry's member: a created entry's member is a member
 //! like any other, built from its profile, with its own labels, tools, grants
-//! and wiring. A created entry is still local and created at once: nothing
-//! places one or holds its creation yet.
+//! and wiring. A created entry may be placed or externally bound (hosted on
+//! its first use) or held for its host's held protocol, as a declared one
+//! may: its host's spawn holding its created custody creates it.
 //!
 //! The reads ([`super::MobHandle::identity_entry`],
 //! [`super::MobHandle::identity_entries`], [`super::MobHandle::identity_census`],
+//! [`super::MobHandle::identity_tombstones`],
 //! [`super::MobHandle::member_lifecycle_events`],
-//! [`super::MobHandle::members_holding_run_starts`]) need no actor command and
-//! never wake a member. The first three read the machine state the actor last
+//! [`super::MobHandle::members_holding_run_starts`],
+//! [`super::MobHandle::identity_record`],
+//! [`super::MobHandle::identity_record_census`]) need no actor command and
+//! never wake a member. The first four read the machine state the actor last
 //! published, as [`super::MobHandle::member_unmaterialized`] does; the answer
 //! can be stale by the time the caller acts on it, and it never says whether a
-//! member is materialized.
+//! member is materialized. The record reads read the identity store: a
+//! store-owned identity's revision, spec, presence and provenance, and a
+//! removed name's tombstone with its removal's record.
 
 use std::ops::Bound;
 
@@ -91,8 +99,8 @@ pub(crate) const LEGACY_IDENTITY_LABEL: &str = "agent_identity";
 /// custody of its desired record (see the module docs). Custody decides only
 /// where that record lives, which recovery and writer use it, and the name
 /// guards and reservations that follow; never the member's profile, labels,
-/// tools, grants or wiring. A created entry is still local and created at
-/// once: nothing places one or holds its creation yet.
+/// tools, grants or wiring. A created entry may be hosted on its first use or
+/// held for its host's held protocol, as a declared one may.
 ///
 /// The handle's entry reads and the journal's rows answer with this type.
 /// MobMachine's own state holds the generated machine enum of the same name
@@ -168,10 +176,17 @@ pub enum UnseatedEntryCause {
     /// ([`super::MobHandle::spawn_held_until`] with entry custody), never a
     /// dormant seat.
     HeldCreation,
-    /// A created entry whose host preparation is pending: it has no member
-    /// until its host settles the preparation, and no seat takes its name
-    /// meanwhile.
+    /// An entry of either custody, never seated, awaiting its host's
+    /// preparation before its first seat: it has no member until its host
+    /// settles the preparation (a store-owned identity's settle, a
+    /// roster-owned one's next declaration, or the activation of its held
+    /// construction), and no other seat takes its name meanwhile.
     PreparationPending,
+    /// An archived store-owned identity
+    /// ([`super::MobHandle::archive_identity`]): it has no member until its
+    /// unarchive, which seats it again on its archived session, and keeps
+    /// its name and its record.
+    Archived,
 }
 
 impl UnseatedEntryCause {
@@ -181,6 +196,7 @@ impl UnseatedEntryCause {
             mob_dsl::UnseatedEntryCause::HostedOnFirstUse => Self::HostedOnFirstUse,
             mob_dsl::UnseatedEntryCause::HeldCreation => Self::HeldCreation,
             mob_dsl::UnseatedEntryCause::PreparationPending => Self::PreparationPending,
+            mob_dsl::UnseatedEntryCause::Archived => Self::Archived,
         }
     }
 }
@@ -226,9 +242,16 @@ impl HostPreparationCause {
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum MemberRetirementCause {
-    /// The declared apply's seal unlisted the member's identity entry: the
-    /// end of the retirement ends the entry.
+    /// The declared apply's seal, or the one-entry unlist, unlisted the
+    /// member's identity entry: the end of the retirement ends the entry.
     Unlisted,
+    /// The identity was removed ([`super::MobHandle::remove_identity`]):
+    /// the end of the retirement ends the entry and tombstones its name.
+    Removed,
+    /// The store-owned identity was archived
+    /// ([`super::MobHandle::archive_identity`]): the end of the retirement
+    /// leaves the entry unseated, archived, on its archived session.
+    Archived,
 }
 
 impl MemberRetirementCause {
@@ -236,6 +259,8 @@ impl MemberRetirementCause {
     pub(crate) fn as_stored(self) -> &'static str {
         match self {
             Self::Unlisted => "unlisted",
+            Self::Removed => "removed",
+            Self::Archived => "archived",
         }
     }
 
@@ -246,6 +271,8 @@ impl MemberRetirementCause {
     pub(crate) fn from_stored(token: &str) -> Option<Self> {
         match token {
             "unlisted" => Some(Self::Unlisted),
+            "removed" => Some(Self::Removed),
+            "archived" => Some(Self::Archived),
             _ => None,
         }
     }
@@ -352,6 +379,11 @@ pub struct IdentityEntryView {
     /// session (a reset, a deletion), or the member's own session (a
     /// same-session successor).
     pub rotation_in_flight: Option<super::RotationTarget>,
+    /// The session the identity's member was bound to when its retirement
+    /// archived it, while no member holds the identity: an archived
+    /// identity's unarchive, and a declared entry's next seat, revive it on
+    /// that session.
+    pub archived_session: Option<SessionId>,
 }
 
 /// A worker member: a member whose identity is not an entry.
@@ -380,8 +412,8 @@ pub enum IdentityEntryRead {
     /// declaration, worker reconcile, adoption or agent-lane command acts).
     /// `member` is where the member that holds the name stands, if one does.
     Unreadable { member: Option<EntryStanding> },
-    /// The identity was a created entry and was removed: its name is never
-    /// an entry or a member again.
+    /// The identity was removed, whatever its custody: its name is never an
+    /// entry or a member again.
     Removed,
 }
 
@@ -411,9 +443,60 @@ pub struct UnseatedEntryCounts {
     /// Entries awaiting their held creation
     /// ([`UnseatedEntryCause::HeldCreation`]).
     pub held_creation: usize,
-    /// Created entries awaiting their host's preparation
-    /// ([`UnseatedEntryCause::PreparationPending`]).
+    /// Entries of either custody awaiting their host's preparation before
+    /// their first seat ([`UnseatedEntryCause::PreparationPending`]). Their
+    /// deliveries are refused `host_preparation_pending`, as those of an
+    /// entry whose host preparation is owed
+    /// ([`IdentityCensus::host_preparations_owed`]): the two are disjoint.
     pub preparation_pending: usize,
+    /// Archived store-owned identities ([`UnseatedEntryCause::Archived`]).
+    pub archived: usize,
+}
+
+/// One page of [`super::MobHandle::identity_tombstones`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct IdentityTombstonePage {
+    /// The removed names after the page's start, of either custody, in
+    /// identity order: each is never an identity or a member again. Its
+    /// removal's record (who removed it, when, under which consent) is its
+    /// row's ([`super::MobHandle::identity_record`]).
+    pub removed: Vec<AgentIdentity>,
+    /// The name to start the next page after; `None` on the last page.
+    pub next: Option<AgentIdentity>,
+}
+
+/// The counts of [`super::MobHandle::identity_record_census`]: the mob's
+/// records in its identity store (its v2 rows) and what a downgrade cycle
+/// settles before it runs.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct IdentityRecordCensus {
+    /// Every v2 row of the mob: store-owned identities present, pending
+    /// their host's preparation or archived, removed names of either
+    /// custody (tombstones), and rows this build cannot read. This build has
+    /// no step that deletes one (a removal writes its name's tombstone, an
+    /// archive keeps its row): a mob that holds any has no supported
+    /// downgrade before the export and purge steps.
+    pub created_rows: usize,
+    /// Rows of archived store-owned identities.
+    pub archived: usize,
+    /// Tombstones: the rows of removed names, of either custody.
+    pub tombstones: usize,
+    /// Rows this build cannot read.
+    pub unreadable: usize,
+    /// Identities of either custody awaiting their host's preparation before
+    /// their first seat: a host with retained issuance settles or removes
+    /// them before a downgrade.
+    pub preparations_open: usize,
+    /// Held construction attempts open, held or activating.
+    pub constructions_held: usize,
+    /// Seated store-owned identities whose member's last seat row predates
+    /// their row's labels or profile: the seat keeps its labels until it is
+    /// seated again or respawned with the row's labels (Apply now,
+    /// [`super::MemberRespawn::with_labels`]), and its role until its
+    /// restamp. A downgrade rebuilds such a member from its seat row.
+    pub seats_stale: usize,
 }
 
 /// The counts of [`super::MobHandle::identity_census`].
@@ -433,11 +516,16 @@ pub struct IdentityCensus {
     pub unseated_by_cause: UnseatedEntryCounts,
     /// Entries whose member is Broken.
     pub broken: usize,
-    /// Entries whose host preparation is owed, whatever its cause.
-    pub host_preparation_pending: usize,
+    /// Entries whose member's host preparation is owed, whatever its cause
+    /// ([`IdentityEntryView::host_preparation`]: a first-boot request, an
+    /// undeclared role move, a build preparation to retry). Disjoint from
+    /// the entries awaiting their host's preparation before their first
+    /// seat ([`UnseatedEntryCounts::preparation_pending`]).
+    pub host_preparations_owed: usize,
     /// Entries with a rotation in flight.
     pub rotation_in_flight: usize,
-    /// Names of removed created entries ([`IdentityEntryRead::Removed`]).
+    /// Names of removed identities, of either custody
+    /// ([`IdentityEntryRead::Removed`]).
     pub tombstoned: usize,
     /// Names whose entry this build cannot read
     /// ([`IdentityEntryRead::Unreadable`]). They are counted here alone,
@@ -918,6 +1006,17 @@ fn entry_view(
             .get(identity)
             .copied()
             .map(super::RotationTarget::from_machine),
+        archived_session: state
+            .identity_entry_archived_sessions
+            .get(identity)
+            .map(|session| SessionId::parse(&session.0))
+            .transpose()
+            .map_err(|error| {
+                MobError::Internal(format!(
+                    "identity entry '{}' holds an invalid archived session record: {error}",
+                    identity.0
+                ))
+            })?,
     })
 }
 
@@ -1017,6 +1116,34 @@ pub(crate) fn identity_entry_page(
     Ok(page)
 }
 
+/// [`super::MobHandle::identity_tombstones`] over one published machine
+/// state.
+pub(crate) fn identity_tombstone_page(
+    state: &mob_dsl::MobMachineState,
+    after: Option<&AgentIdentity>,
+    limit: usize,
+) -> IdentityTombstonePage {
+    let limit = limit.clamp(1, IDENTITY_ENTRY_PAGE_MAX);
+    let start = match after {
+        Some(after) => Bound::Excluded(mob_dsl::AgentIdentity::from_domain(after)),
+        None => Bound::Unbounded,
+    };
+    let mut names = state
+        .identity_entry_tombstones
+        .range((start, Bound::Unbounded));
+    let removed: Vec<AgentIdentity> = names
+        .by_ref()
+        .take(limit)
+        .map(|name| AgentIdentity::from(name.0.as_str()))
+        .collect();
+    let next = if names.next().is_some() {
+        removed.last().cloned()
+    } else {
+        None
+    };
+    IdentityTombstonePage { removed, next }
+}
+
 /// [`super::MobHandle::identity_census`] over one published machine state.
 pub(crate) fn identity_census(
     state: &mob_dsl::MobMachineState,
@@ -1051,12 +1178,15 @@ pub(crate) fn identity_census(
             EntryStanding::Unseated(UnseatedEntryCause::PreparationPending) => {
                 census.unseated_by_cause.preparation_pending += 1;
             }
+            EntryStanding::Unseated(UnseatedEntryCause::Archived) => {
+                census.unseated_by_cause.archived += 1;
+            }
         }
         if view.broken.is_some() {
             census.broken += 1;
         }
         if view.host_preparation.is_some() {
-            census.host_preparation_pending += 1;
+            census.host_preparations_owed += 1;
         }
         if view.rotation_in_flight.is_some() {
             census.rotation_in_flight += 1;
@@ -1235,10 +1365,11 @@ pub(crate) fn machine_entry_origin(
 
 /// Why `identity`'s retirement started or ended, as its journal rows record
 /// it, read from `state`, MobMachine's state before the step that writes the
-/// row: [`MemberRetirementCause::Unlisted`] while the declared apply's seal
-/// marks the identity's entry (`identity_entry_retiring`). The seal marks
-/// only a member whose retirement has not started and whose spawn is not in
-/// flight, and never drops the mark of one whose retirement has, so the
+/// row: [`MemberRetirementCause::Unlisted`] while the declared apply's seal,
+/// or the one-entry unlist, marks the identity's entry
+/// (`identity_entry_retiring`). Either marks only a member whose retirement
+/// has not started and whose spawn is not in flight, and the seal never
+/// drops the mark of one whose retirement has, so the
 /// start row and the end's row read the same mark, and the end of a marked
 /// retirement ends the entry. The one reader of the mark for the journal:
 /// the start row and the plain terminal row read it here. A rotation's
@@ -1247,10 +1378,71 @@ pub(crate) fn stored_retirement_cause(
     state: &mob_dsl::MobMachineState,
     identity: &AgentIdentity,
 ) -> Option<MemberRetirementCause> {
+    let identity = mob_dsl::AgentIdentity::from_domain(identity);
+    if state.identity_entry_retiring.contains(&identity) {
+        Some(MemberRetirementCause::Unlisted)
+    } else if state.identity_entry_removing.contains(&identity) {
+        Some(MemberRetirementCause::Removed)
+    } else if state.identity_entry_archiving.contains(&identity) {
+        Some(MemberRetirementCause::Archived)
+    } else {
+        None
+    }
+}
+
+/// Whether `identity`'s ending is owed and its member's retirement has not
+/// started: a removal or an archive MobMachine marked (live, or recovered at
+/// a start from the identity's row) whose member is seated and not retiring.
+/// The shell then retires the member, with the mark's cause.
+pub(crate) fn entry_ending_owed(
+    state: &mob_dsl::MobMachineState,
+    identity: &AgentIdentity,
+) -> bool {
+    let dsl_identity = mob_dsl::AgentIdentity::from_domain(identity);
+    (state.identity_entry_removing.contains(&dsl_identity)
+        || state.identity_entry_archiving.contains(&dsl_identity))
+        && state
+            .identity_to_runtime
+            .get(&dsl_identity)
+            .is_some_and(|runtime| {
+                state.member_state_markers.get(runtime) != Some(&mob_dsl::MobMemberState::Retiring)
+            })
+}
+
+/// Every identity whose ending is owed ([`entry_ending_owed`]), in identity
+/// order.
+pub(crate) fn owed_entry_endings(state: &mob_dsl::MobMachineState) -> Vec<AgentIdentity> {
     state
-        .identity_entry_retiring
-        .contains(&mob_dsl::AgentIdentity::from_domain(identity))
-        .then_some(MemberRetirementCause::Unlisted)
+        .identity_entry_removing
+        .iter()
+        .chain(state.identity_entry_archiving.iter())
+        .map(|identity| AgentIdentity::from(identity.0.as_str()))
+        .filter(|identity| entry_ending_owed(state, identity))
+        .collect()
+}
+
+/// The refusal of a delivery to `identity` when no member holds it: an
+/// archived identity's ([`MobError::IdentityArchived`]), one awaiting its
+/// host's preparation (retryable,
+/// [`crate::MemberWakeRefusal::HostPreparationPending`]), and otherwise no
+/// such member.
+pub(crate) fn unseated_delivery_refusal(
+    state: &mob_dsl::MobMachineState,
+    identity: &AgentIdentity,
+) -> MobError {
+    match state
+        .identity_entry_unseated
+        .get(&mob_dsl::AgentIdentity::from_domain(identity))
+    {
+        Some(mob_dsl::UnseatedEntryCause::Archived) => MobError::IdentityArchived {
+            member_id: identity.clone(),
+        },
+        Some(mob_dsl::UnseatedEntryCause::PreparationPending) => MobError::MemberWakeRefused {
+            member_id: identity.clone(),
+            refusal: crate::MemberWakeRefusal::HostPreparationPending,
+        },
+        _ => MobError::MemberNotFound(identity.clone()),
+    }
 }
 
 /// The session a retirement's `MemberRetired` journal effect names, as its
@@ -1655,9 +1847,10 @@ mod tests {
                 hosted_on_first_use: 1,
                 held_creation: 1,
                 preparation_pending: 1,
+                archived: 0,
             }
         );
-        assert_eq!(census.host_preparation_pending, 1);
+        assert_eq!(census.host_preparations_owed, 1);
         assert!(census.is_complete());
     }
 

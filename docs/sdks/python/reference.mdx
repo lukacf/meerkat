@@ -8,7 +8,7 @@ icon: "book"
 
 ```python
 from meerkat import CONTRACT_VERSION
-print(CONTRACT_VERSION)  # "0.9.8"
+print(CONTRACT_VERSION)  # "0.9.9"
 ```
 
 ## Primary handles
@@ -685,4 +685,27 @@ except MeerkatError as error:
         raise
     for refused in report.member_reload_refusals or []:
         print(f"{refused.member}: {refused.refusal['kind']}")
+```
+
+A call that addresses a quarantined mob (a persisted mob whose store did not
+restore; see [Quarantined mobs and degraded members](/guides/mobs#quarantined-mobs-and-degraded-members))
+fails with `details` of kind `mob_quarantined`. `mob_quarantined(error)`
+returns a `MobQuarantinedRefusal` (`mob_id`, `quarantine_class`, `retryable`,
+`cause`, `code`), or `None` for any other error. A `store_unavailable` mob is
+re-attempted by the next call that addresses it; repair the store of any
+other class, then call `mob_restore_retry`. `list_quarantined_mobs()` lists
+the quarantined mobs (`list_mobs()` lists only the managed ones).
+
+```python
+from meerkat import MeerkatError, mob_quarantined
+
+try:
+    await client.mob_status(mob_id)
+except MeerkatError as error:
+    refusal = mob_quarantined(error)
+    if refusal is None:
+        raise
+    if not refusal.retryable:
+        # After repairing the store:
+        await client.mob_restore_retry(refusal.mob_id)
 ```

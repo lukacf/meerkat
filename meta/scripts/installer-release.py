@@ -49,6 +49,17 @@ connection setup helper.
 Selections are strict JSON objects:
   forge-accepted-candidate: schema_version=1, kind, repository, run_id,
     run_attempt, manifest_artifact={id, digest, manifest_sha256}.
+  The selection names only the candidate. Publication also takes Forge's
+  candidate review projection, forge-candidate-review-v1: its exact bytes
+  (base64) and their SHA-256, given separately. The projection is
+  candidate={run_id, run_attempt, manifest_sha256, packages={target: sha256}},
+  joins={a5_join, application_join, guide_join: sha256 of each original join
+  record}, outcomes={the same three: "accepted"} and verdict "accepted".
+  Before any tag or release write, publication hashes the decoded bytes
+  against their SHA-256, parses them strictly, and derives the accepted
+  candidate from them: its run, attempt and manifest must be the selection's,
+  and its package map the candidate manifest's. Only the projection's SHA-256
+  is printed; the projection is not published.
 """
 
 import argparse
@@ -230,7 +241,8 @@ def validate_pin(pin, name):
 
 def validate_target(target, entry):
     keys = "files gateway selection paths"
-    rc.exact_keys(entry, keys + (" ordinary_gateway" if isinstance(entry, dict) and "ordinary_gateway" in entry else ""),
+    rc.exact_keys(entry, keys + "".join(" " + key for key in ("ordinary_gateway", "native_programs")
+        if isinstance(entry, dict) and key in entry),
         f"{target} inputs")
     files = entry["files"]
     require(isinstance(files, dict) and 0 < len(files) <= MAX_INPUT_FILES, f"{target} needs pinned input files")
@@ -275,6 +287,20 @@ def validate_target(target, entry):
                 and pin["url"] in meta_release_urls(version, asset) and pin["member"] == "rpc_gateway",
                 f"{target} ordinary gateway must be the Meta {version} rpc_gateway release asset for {target}")
 
+    if "native_programs" in entry:
+        programs = entry["native_programs"]
+        require(target == "linux-x86_64" and isinstance(programs, dict) and bool(programs)
+                and programs.keys() <= {"collection", "provider"},
+                "supplemental native programs must name a Linux collection or provider")
+        used = {entry["gateway"], entry.get("ordinary_gateway")}
+        for role, pins in programs.items():
+            rc.exact_keys(pins, "executable evidence", f"{target} native {role}")
+            for kind, name in pins.items():
+                require(isinstance(name, str) and name in files and name not in used
+                        and not name.startswith(root + "/"),
+                        f"{target} native {role} {kind} must be a separate pinned input outside the product root")
+                used.add(name)
+
 
 def meta_release_urls(version, asset):
     """Where Meta's release of `version` publishes `asset`: the monorepo
@@ -308,6 +334,71 @@ def target_inputs(target):
     targets = load_inputs()["targets"]
     require(target in targets, f"no pinned inputs for {target}")
     return targets[target]
+
+
+REVIEW_SCHEMA = "forge-candidate-review-v1"
+REVIEW_JOINS = ("a5_join", "application_join", "guide_join")
+MAX_REVIEW_BYTES = 64 * 1024
+
+
+def candidate_review():
+    """Forge's candidate review projection for publication, from the two publish-only inputs:
+    the projection's exact bytes (base64) and their separately given SHA-256. This proves only
+    that the dispatch carried accepted projection bytes naming this candidate. The original join
+    records behind joins and outcomes are read and checked by the dispatcher
+    (meta/scripts/installer-publish-dispatch.py); a dispatch made by hand carries only what its caller
+    supplied."""
+    expected = rc.digest(os.environ.get("CANDIDATE_REVIEW_SHA256", ""), "candidate review SHA-256")
+    encoded = os.environ.get("CANDIDATE_REVIEW", "")
+    require(0 < len(encoded) <= 2 * MAX_REVIEW_BYTES, "publication needs the candidate review bytes")
+    try:
+        data = base64.b64decode(encoded, validate=True)
+    except ValueError:
+        raise ProtocolError("the candidate review is not base64") from None
+    return parse_candidate_review(data, expected), expected
+
+
+def parse_candidate_review(data, expected):
+    """The projection's bytes match their expected SHA-256 before they are parsed; the parsed
+    projection is strict at every level: exact keys, no duplicate keys, positive integer run
+    identities, lowercase hex digests, and every outcome and the verdict "accepted"."""
+    require(0 < len(data) <= MAX_REVIEW_BYTES, "the candidate review exceeds 64 KiB")
+    require(rc.hash_bytes(data) == expected, "the candidate review bytes differ from their SHA-256")
+    try:
+        review = rc.parse_json(data.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        raise ProtocolError("the candidate review is not strict JSON") from None
+    rc.exact_keys(review, "schema candidate joins outcomes verdict", "candidate review")
+    require(review["schema"] == REVIEW_SCHEMA, f"the candidate review is not {REVIEW_SCHEMA}")
+    candidate = review["candidate"]
+    rc.exact_keys(candidate, "run_id run_attempt manifest_sha256 packages", "candidate review candidate")
+    rc.integer(candidate["run_id"], "candidate review run ID")
+    rc.integer(candidate["run_attempt"], "candidate review run attempt")
+    rc.digest(candidate["manifest_sha256"], "candidate review manifest SHA-256")
+    packages = candidate["packages"]
+    require(isinstance(packages, dict) and packages and set(packages) <= set(TARGETS),
+            "the candidate review packages must name Forge targets")
+    for target, value in packages.items():
+        rc.digest(value, f"candidate review {target} package SHA-256")
+    rc.exact_keys(review["joins"], " ".join(REVIEW_JOINS), "candidate review joins")
+    rc.exact_keys(review["outcomes"], " ".join(REVIEW_JOINS), "candidate review outcomes")
+    for name in REVIEW_JOINS:
+        rc.digest(review["joins"][name], f"candidate review {name} SHA-256")
+        require(review["outcomes"][name] == "accepted", f"the candidate review's {name} outcome is not accepted")
+    require(review["verdict"] == "accepted", "the candidate review verdict is not accepted")
+    return review
+
+
+def manifest_packages(manifest):
+    """The candidate manifest's package map: target to package SHA-256."""
+    return {item["target"]: item["sha256"] for item in manifest["packages"]}
+
+
+def review_names_selection(review, selection):
+    candidate = review["candidate"]
+    require((candidate["run_id"], candidate["run_attempt"], candidate["manifest_sha256"])
+            == (selection["run_id"], selection["run_attempt"], selection["manifest_artifact"]["manifest_sha256"]),
+            "the candidate review accepts another candidate than the selection")
 
 
 def validate_selection(value):
@@ -399,6 +490,8 @@ def resolve():
     if mode == "candidate":
         require(ref.startswith("refs/heads/"), "a candidate is dispatched from a branch")
         require(not selected, "a selection is only valid for publish")
+        require(not os.environ.get("CANDIDATE_REVIEW") and not os.environ.get("CANDIDATE_REVIEW_SHA256"),
+                "a candidate review is only valid for publish")
         require(rc.digest(source, "SOURCE_SHA", 40) == head, "SOURCE_SHA must be the dispatched commit")
         targets = sorted(load_inputs()["targets"])
         require(targets, f"no Forge target has pinned inputs in {INPUTS}")
@@ -408,7 +501,8 @@ def resolve():
         # Publication reads only the accepted candidate, never main's current inputs.
         require(ref == MAIN, "publication is dispatched from main")
         require(not source, "SOURCE_SHA is only valid for candidate")
-        validate_selection(rc.parse_json(selected))
+        selection = validate_selection(rc.parse_json(selected))
+        review_names_selection(candidate_review()[0], selection)
         targets, version, tag = [], "", ""
     # build_package skips outside candidate mode before reading its matrix;
     # it still receives a valid one.
@@ -713,7 +807,9 @@ def fetch_inputs(args):
             else:
                 download(pin["url"], destination, pin["size"])
             check_bytes(destination, pin["size"], pin["sha256"], name)
-            destination.chmod(0o700 if name in {entry["gateway"], entry.get("ordinary_gateway")} else 0o600)
+            executables = {entry["gateway"], entry.get("ordinary_gateway")} | {
+                pins["executable"] for pins in entry.get("native_programs", {}).values()}
+            destination.chmod(0o700 if name in executables else 0o600)
     finally:
         shutil.rmtree(downloads)
     print(f"fetched {len(entry['files'])} pinned inputs for {args.target} into {output}")
@@ -744,8 +840,14 @@ def package(args):
             root.joinpath(*PurePosixPath(entry["ordinary_gateway"]).parts),
             entry["files"][entry["ordinary_gateway"]]["sha256"])
     require(args.output.name == package_name(forge_version(), args.target), "unexpected package name")
+    options = {"ordinary_gateway": ordinary} if ordinary is not None else {}
+    if "native_programs" in entry:
+        artifact_file = launchkit_module("runtime_candidates").ArtifactFile
+        options["native_programs"] = {role: {kind: artifact_file(
+            root.joinpath(*PurePosixPath(name).parts), entry["files"][name]["size"], entry["files"][name]["sha256"])
+            for kind, name in pins.items()} for role, pins in entry["native_programs"].items()}
     result = launchkit_module("product_distribution").package(ROOT / "installer", target, selected_guide, args.output,
-        **({"ordinary_gateway": ordinary} if ordinary is not None else {}))
+        **options)
     require(result["native_target"] == args.target, "the package was built for another target")
     print(json.dumps(result, sort_keys=True))
 
@@ -962,6 +1064,10 @@ def publish(_args):
             and os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch",
             "publication runs from main in publish mode")
     selected = validate_selection(rc.parse_json(os.environ.get("ARTIFACT_SELECTION", "")))
+    # The candidate acceptance gate: everything it derives comes from the verified review bytes,
+    # and it completes below before anything writes a tag or a release.
+    review, review_sha = candidate_review()
+    review_names_selection(review, selected)
     run_id, attempt = selected["run_id"], selected["run_attempt"]
     sha = rc.digest(rc.api(rc.repo_endpoint(f"actions/runs/{run_id}")).get("head_sha"), "candidate SHA", 40)
     run_info = rc.verify_run(run_id, attempt, sha)
@@ -976,6 +1082,9 @@ def publish(_args):
         manifest = validate_manifest(rc.read_json(manifest_path))
         require(manifest["source_sha"] == sha and manifest["run_id"] == run_id and manifest["run_attempt"] == attempt
                 and manifest["workflow"]["ref"] == MAIN, "only a main candidate can be published")
+        require(review["candidate"]["packages"] == manifest_packages(manifest),
+                "the candidate review accepts other package digests than the candidate manifest's")
+        print(f"candidate acceptance gate passed: review {review_sha}")
         rc.verify_provenance(manifest_path, folder / MANIFEST_PROVENANCE, sha, run_id, attempt)
         rc.verify_run(manifest["ci"]["run_id"], manifest["ci"]["run_attempt"], sha, ci=True)
         recheck_forge_ci(manifest)

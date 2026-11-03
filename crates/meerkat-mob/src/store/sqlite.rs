@@ -4257,6 +4257,101 @@ fn sqlite_identity_write_error(error: rusqlite::Error, context: &str) -> MobStor
     }
 }
 
+/// The receipt of an identity change kept under `receipt_key` in `mob_id`'s
+/// receipts table, if any. A stored receipt this build cannot read, or one
+/// that names another mob or operation than its key, fails closed: it is
+/// never read as absent.
+fn query_identity_change_receipt(
+    conn: &Connection,
+    mob_id: &MobId,
+    receipt_key: &str,
+) -> Result<Option<crate::identity::IdentityChangeReceipt>, MobStoreError> {
+    let stored: Option<Vec<u8>> = conn
+        .query_row(
+            "SELECT CAST(receipt_json AS BLOB)
+             FROM mob_identity_intent_mutation_receipts
+             WHERE mob_id = ?1 AND request_id = ?2",
+            params![mob_id.as_str(), receipt_key],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(se)?;
+    let Some(bytes) = stored else {
+        return Ok(None);
+    };
+    let receipt: crate::identity::IdentityChangeReceipt =
+        serde_json::from_slice(&bytes).map_err(|error| {
+            identity_authority_blocked(
+                Some(identity_raw_evidence_digest(&bytes)),
+                format!(
+                    "the identity change receipt under '{receipt_key}' cannot be read: {error}"
+                ),
+            )
+        })?;
+    receipt.validate().map_err(|error| {
+        identity_authority_blocked(
+            Some(identity_raw_evidence_digest(&bytes)),
+            error.to_string(),
+        )
+    })?;
+    if receipt.mob_id != *mob_id
+        || super::identity_change_receipt_request_key(&receipt.operation_id) != receipt_key
+    {
+        return Err(identity_authority_blocked(
+            Some(identity_raw_evidence_digest(&bytes)),
+            "an identity change receipt does not match its physical key",
+        ));
+    }
+    Ok(Some(receipt))
+}
+
+/// How the created identity scan reads `identity`'s row of `mob_id`'s
+/// intents table, and whether the identity has any row there at all (a
+/// host-adopted intent's row reads as no created row, yet holds the name).
+fn query_created_row_observation(
+    conn: &Connection,
+    mob_id: &MobId,
+    identity: &AgentIdentity,
+) -> Result<(bool, Option<crate::identity::CreatedIdentityObservation>), MobStoreError> {
+    let row: Option<(String, Vec<u8>)> = conn
+        .query_row(
+            "SELECT typeof(record_json), CAST(record_json AS BLOB)
+             FROM mob_identity_intents
+             WHERE mob_id = ?1 AND agent_identity = ?2",
+            params![mob_id.as_str(), identity.as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(se)?;
+    let Some((storage_type, bytes)) = row else {
+        return Ok((false, None));
+    };
+    if storage_type != "blob" {
+        return Ok((
+            true,
+            Some(crate::identity::CreatedIdentityObservation::Unreadable {
+                evidence_digest: identity_raw_evidence_digest(&bytes),
+                detail: format!(
+                    "identity row uses SQLite storage class '{storage_type}', expected blob"
+                ),
+            }),
+        ));
+    }
+    let observation = match crate::identity::classify_created_identity_row(&bytes) {
+        Some(crate::identity::CreatedIdentityObservation::Created(record))
+            if record.mob_id != *mob_id || record.agent_identity != *identity =>
+        {
+            Some(crate::identity::CreatedIdentityObservation::Unreadable {
+                evidence_digest: identity_raw_evidence_digest(&bytes),
+                detail: "created identity row does not match its physical mob/identity key"
+                    .to_string(),
+            })
+        }
+        other => other,
+    };
+    Ok((true, observation))
+}
+
 fn query_identity_intent_observation(
     conn: &Connection,
     mob_id: &MobId,
@@ -6489,6 +6584,214 @@ impl MobIdentityMemberStore for SqliteMobIdentityStore {
         run_sqlite_task(self.observer_owner(), move || {
             let conn = open_existing_identity_read_connection(&path, &store_instance_id)?;
             read_member_binding_journal_snapshot(&conn, &mob_id, from_cursor)
+        })
+        .await
+    }
+
+    async fn commit_identity_change(
+        &self,
+        write: &super::IdentityChangeWrite,
+    ) -> Result<super::IdentityChangeCommit, MobStoreError> {
+        let Some(event_bus) = self.event_bus.clone() else {
+            return Err(MobStoreError::IdentityMemberAtomicPersistenceUnavailable);
+        };
+        write.validate()?;
+        let path = self.path.clone();
+        let store_instance_id = self.store_instance_id.clone();
+        let write = write.clone();
+        let outcome = run_sqlite_task(self.observer_owner(), move || {
+            let mut conn = open_existing_identity_write_connection(&path, &store_instance_id)?;
+            let tx = begin_identity_immediate(&mut conn, &store_instance_id)?;
+            // Everything is read and checked inside the one IMMEDIATE
+            // transaction before anything is written: a refusal commits
+            // nothing.
+            let receipt_key =
+                super::identity_change_receipt_request_key(&write.receipt.operation_id);
+            if let Some(existing) =
+                query_identity_change_receipt(&tx, &write.receipt.mob_id, &receipt_key)?
+            {
+                return Ok(if existing.request_digest == write.receipt.request_digest {
+                    super::IdentityChangeCommit::Replayed { receipt: existing }
+                } else {
+                    super::IdentityChangeCommit::OperationReused { receipt: existing }
+                });
+            }
+            for row in &write.rows {
+                let (present, current) = query_created_row_observation(
+                    &tx,
+                    &row.record.mob_id,
+                    &row.record.agent_identity,
+                )?;
+                if !super::created_row_matches(&row.expected, present, current.as_ref()) {
+                    return Ok(super::IdentityChangeCommit::RowConflict {
+                        identity: row.record.agent_identity.clone(),
+                        current,
+                    });
+                }
+            }
+            validate_raw_mob_created_sqlite(&tx, &write.events)?;
+            for row in &write.rows {
+                let stored = serde_json::to_vec(&row.record)
+                    .map_err(|error| MobStoreError::Serialization(error.to_string()))?;
+                // A store-owned identity's row carries no declaration scope,
+                // session or lineage projection: those index host-adopted
+                // intents only.
+                tx.execute(
+                    "INSERT INTO mob_identity_intents
+                         (mob_id, agent_identity, declaration_scope, session_id, lineage_id,
+                          record_json)
+                     VALUES (?1, ?2, NULL, NULL, NULL, ?3)
+                     ON CONFLICT(mob_id, agent_identity) DO UPDATE SET
+                         declaration_scope = NULL,
+                         session_id = NULL,
+                         lineage_id = NULL,
+                         record_json = excluded.record_json",
+                    params![
+                        row.record.mob_id.as_str(),
+                        row.record.agent_identity.as_str(),
+                        stored
+                    ],
+                )
+                .map_err(se)?;
+            }
+            let receipt_json = serde_json::to_vec(&write.receipt)
+                .map_err(|error| MobStoreError::Serialization(error.to_string()))?;
+            tx.execute(
+                "INSERT INTO mob_identity_intent_mutation_receipts
+                     (mob_id, request_id, agent_identity, request_digest, receipt_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    write.receipt.mob_id.as_str(),
+                    receipt_key,
+                    write.receipt.key_identity().as_str(),
+                    write.receipt.request_digest.as_str(),
+                    receipt_json
+                ],
+            )
+            .map_err(se)?;
+            let mut cursor = next_event_cursor(&tx)?;
+            let mut stored_events = Vec::with_capacity(write.events.len());
+            for event in &write.events {
+                let stored = MobEvent {
+                    cursor,
+                    timestamp: event.timestamp.unwrap_or_else(Utc::now),
+                    mob_id: event.mob_id.clone(),
+                    kind: event.kind.clone(),
+                };
+                let encoded = encode_stored_mob_event(&stored)
+                    .map_err(|error| MobStoreError::Serialization(error.to_string()))?;
+                tx.execute(
+                    "INSERT INTO mob_events (cursor, mob_id, event_json) VALUES (?1, ?2, ?3)",
+                    params![cursor_to_i64(cursor)?, stored.mob_id.as_str(), encoded],
+                )
+                .map_err(se)?;
+                stored_events.push(stored);
+                cursor = checked_event_cursor_successor(cursor)?;
+            }
+            set_next_cursor(&tx, cursor)?;
+            tx.commit().map_err(se)?;
+            Ok(super::IdentityChangeCommit::Committed {
+                events: stored_events,
+            })
+        })
+        .await?;
+        // Publish only after the SQLite transaction committed: a change that
+        // did not land is never observable through the append bus.
+        if let super::IdentityChangeCommit::Committed { events } = &outcome {
+            event_bus.publish_committed_batch(events);
+        }
+        Ok(outcome)
+    }
+
+    async fn settle_created_identity_row(
+        &self,
+        row: &super::CreatedIdentityRowWrite,
+    ) -> Result<bool, MobStoreError> {
+        if self.event_bus.is_none() {
+            return Err(MobStoreError::IdentityMemberAtomicPersistenceUnavailable);
+        }
+        row.record
+            .validate()
+            .map_err(|error| MobStoreError::Serialization(error.to_string()))?;
+        let path = self.path.clone();
+        let store_instance_id = self.store_instance_id.clone();
+        let row = row.clone();
+        run_sqlite_task(self.observer_owner(), move || {
+            let mut conn = open_existing_identity_write_connection(&path, &store_instance_id)?;
+            let tx = begin_identity_immediate(&mut conn, &store_instance_id)?;
+            let (present, current) =
+                query_created_row_observation(&tx, &row.record.mob_id, &row.record.agent_identity)?;
+            if !super::created_row_matches(&row.expected, present, current.as_ref()) {
+                return Ok(false);
+            }
+            let stored = serde_json::to_vec(&row.record)
+                .map_err(|error| MobStoreError::Serialization(error.to_string()))?;
+            tx.execute(
+                "INSERT INTO mob_identity_intents
+                     (mob_id, agent_identity, declaration_scope, session_id, lineage_id,
+                      record_json)
+                 VALUES (?1, ?2, NULL, NULL, NULL, ?3)
+                 ON CONFLICT(mob_id, agent_identity) DO UPDATE SET
+                     declaration_scope = NULL,
+                     session_id = NULL,
+                     lineage_id = NULL,
+                     record_json = excluded.record_json",
+                params![
+                    row.record.mob_id.as_str(),
+                    row.record.agent_identity.as_str(),
+                    stored
+                ],
+            )
+            .map_err(se)?;
+            tx.commit().map_err(se)?;
+            Ok(true)
+        })
+        .await
+    }
+
+    async fn observe_identity_change_receipt(
+        &self,
+        mob_id: &MobId,
+        operation_id: &str,
+    ) -> Result<Option<crate::identity::IdentityChangeReceipt>, MobStoreError> {
+        if self.event_bus.is_none() {
+            return Err(MobStoreError::IdentityMemberAtomicPersistenceUnavailable);
+        }
+        let path = self.path.clone();
+        let store_instance_id = self.store_instance_id.clone();
+        let mob_id = mob_id.clone();
+        let receipt_key = super::identity_change_receipt_request_key(operation_id);
+        run_sqlite_task(self.observer_owner(), move || {
+            let conn = open_existing_identity_read_connection(&path, &store_instance_id)?;
+            query_identity_change_receipt(&conn, &mob_id, &receipt_key)
+        })
+        .await
+    }
+
+    async fn scan_created_identity_rows(
+        &self,
+        mob_id: &MobId,
+        after: Option<&super::IdentityIntentScanCursor>,
+        limit: usize,
+    ) -> Result<super::CreatedIdentityScanPage, MobStoreError> {
+        MobIdentityStore::scan_created_identities_page(self, mob_id, after, limit).await
+    }
+
+    async fn observe_created_identity(
+        &self,
+        mob_id: &MobId,
+        identity: &AgentIdentity,
+    ) -> Result<Option<crate::identity::CreatedIdentityObservation>, MobStoreError> {
+        if self.event_bus.is_none() {
+            return Err(MobStoreError::IdentityMemberAtomicPersistenceUnavailable);
+        }
+        let path = self.path.clone();
+        let store_instance_id = self.store_instance_id.clone();
+        let mob_id = mob_id.clone();
+        let identity = identity.clone();
+        run_sqlite_task(self.observer_owner(), move || {
+            let conn = open_existing_identity_read_connection(&path, &store_instance_id)?;
+            Ok(query_created_row_observation(&conn, &mob_id, &identity)?.1)
         })
         .await
     }

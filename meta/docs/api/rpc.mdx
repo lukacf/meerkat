@@ -2925,6 +2925,31 @@ JSON.
 | `error` | `string` | Core's reason |
 </Accordion>
 
+`quarantined_mobs` is present only when durable child mobs are on and the
+store of one or more of them did not restore at this start. Meerkat keeps
+such a store quarantined: kept exactly as found, with no actor, and every
+call that addresses the mob answers the `mob_quarantined` refusal. It does
+not fail the boot, and the mob stays in the hosted set but does not run. A
+`store_unavailable` mob is restored again by the next call that addresses it
+and by the next start; repair the store of any other class, then restart (see
+Meerkat's [mobs guide](https://github.com/lukacf/meerkat/blob/main/docs/guides/mobs.mdx)).
+`quarantined_mobs_error` replaces the list when the restore of the child mobs
+failed as a whole. A quarantine of the gateway's own mob fails the boot
+instead, with the typed `mob_quarantined` refusal as the reason.
+
+<Accordion title="quarantined_mobs entries">
+| Field | Type | Description |
+|-------|------|-------------|
+| `mob_id` | `string` | The mob's id |
+| `class` | `string` | Why it is quarantined: `store_unavailable`, `store_unreadable` or `resume_refused` (the vocabulary may grow) |
+| `retryable` | `boolean` | Whether a later attempt may restore it with no repair |
+| `retrying` | `boolean` | A re-attempt of its restore is in flight |
+| `attempts` | `integer` | Re-attempts of its restore that ended since this start |
+| `message` | `string` | The refusal a call that addresses the mob answers |
+| `code` | `string` | The error code of that refusal |
+| `structured_data` | `object` | The structured data of that refusal (`kind: "mob_quarantined"`) |
+</Accordion>
+
 `reserved_identity_members` is present only when a member of the mob holds an
 identity the console reserves for its own events (`_system` or
 `__console__`). No Meta creation path admits such a member; one created

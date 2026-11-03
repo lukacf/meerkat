@@ -117,6 +117,7 @@ jobs:
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: '22'
+          check-latest: true
       - name: Install the reviewed Guide client SDK
         run: python -m pip install --no-index --no-deps --require-hashes --find-links installer/vendor/guide -r installer/requirements-guide-sdk.txt
       - run: python -m pip install -e './installer[test]'

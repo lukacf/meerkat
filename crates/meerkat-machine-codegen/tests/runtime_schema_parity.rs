@@ -3,10 +3,11 @@
 use meerkat_machine_schema::catalog::dsl::{
     dsl_auth_machine_production_schema, dsl_forked_participant_lifecycle_machine,
     dsl_meerkat_machine, dsl_meerkat_machine_production_schema, dsl_mob_machine,
-    dsl_mob_machine_production_schema, dsl_occurrence_lifecycle_machine,
-    dsl_schedule_lifecycle_machine, dsl_temporary_council_lifecycle_machine,
-    dsl_tool_grant_lifecycle_machine_production_schema, dsl_work_attention_lifecycle_machine,
-    dsl_work_item_admission_machine, dsl_workgraph_lifecycle_machine,
+    dsl_mob_machine_production_schema, dsl_mob_store_restore_lifecycle_machine,
+    dsl_occurrence_lifecycle_machine, dsl_schedule_lifecycle_machine,
+    dsl_temporary_council_lifecycle_machine, dsl_tool_grant_lifecycle_machine_production_schema,
+    dsl_work_attention_lifecycle_machine, dsl_work_item_admission_machine,
+    dsl_workgraph_lifecycle_machine,
     meerkat_machine::{MeerkatMachineInput, MeerkatMachineInputVariant},
     meerkat_machine_runtime_internal_input_variants,
     mob_machine::{MobMachineInput, MobMachineInputVariant},
@@ -207,6 +208,12 @@ fn phase1_schema_parity_cases() -> Vec<SchemaParityCase> {
             machine: "ToolGrantLifecycleMachine",
             catalog_schema: dsl_tool_grant_lifecycle_machine_production_schema,
             production_schema: meerkat_runtime::machine_schema_exports::tool_grant_lifecycle_schema,
+        },
+        SchemaParityCase {
+            machine: "MobStoreRestoreLifecycleMachine",
+            catalog_schema: dsl_mob_store_restore_lifecycle_machine,
+            production_schema:
+                meerkat_mob::machine_schema_exports::mob_store_restore_lifecycle_schema,
         },
     ]
 }

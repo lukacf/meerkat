@@ -17,6 +17,7 @@ from pathlib import Path, PurePosixPath
 import re
 import selectors
 import signal
+import shlex
 import stat
 import subprocess
 import sys
@@ -942,11 +943,54 @@ async def supervise(operations):
             raise cancelled
 
 
+def remote_install_command(instance, deployment_id, configuration, root=ROOT):
+    """Quote the exact archive receiver for the existing GCP SSH operation."""
+    # Execute only the exact transferred helper, which verifies the archive
+    # and destination ownership before writing ordinary source files.
+    code = '''import gzip, hashlib, io, pathlib, sys, tarfile, zlib
+root = pathlib.Path.home() / 'src' / sys.argv[1]
+archive = pathlib.Path.home() / 'mobkit-package.tar.gz'
+MAX_SOURCE = 64 * 1024 * 1024
+MAX_ARCHIVE_BYTES = MAX_SOURCE + 1024 * 1024
+MAX_TAR_BYTES = MAX_SOURCE + 16 * 1024 * 1024
+with archive.open('rb') as stream:
+    data = stream.read(MAX_ARCHIVE_BYTES + 1)
+if len(data) > MAX_ARCHIVE_BYTES:
+    raise SystemExit('Uploaded installation archive exceeded its compressed size bound.')
+try:
+    with gzip.GzipFile(fileobj=io.BytesIO(data)) as compressed:
+        tar_bytes = compressed.read(MAX_TAR_BYTES + 1)
+except (EOFError, OSError, zlib.error):
+    raise SystemExit('Uploaded installation archive could not be decompressed.') from None
+if len(tar_bytes) > MAX_TAR_BYTES:
+    raise SystemExit('Uploaded installation archive exceeded its decompressed size bound.')
+with tarfile.open(fileobj=io.BytesIO(tar_bytes), mode='r:') as stream:
+    helper = stream.extractfile('remote_operations.py').read(16 * 1024 * 1024 + 1)
+if hashlib.sha256(helper).hexdigest() != sys.argv[4]:
+    raise SystemExit('Uploaded installation helper differs from accepted source.')
+namespace = {'__name__': 'mobkit_source_receiver', '__file__': str(root / 'remote_operations.py')}
+exec(compile(helper, 'accepted remote_operations.py', 'exec'), namespace)
+namespace['receive_archive'](archive, root, sys.argv[2], sys.argv[3])
+'''
+    arguments = ['python3', '-I', '-c', code, instance, deployment_id, configuration,
+                 hashlib.sha256((root / 'remote_operations.py').read_bytes()).hexdigest()]
+    return ' '.join(shlex.quote(value) for value in arguments)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=['archive', 'digest', 'setup', 'start', 'status', 'stop', 'restart', 'remove-service', 'supervise'])
+    parser.add_argument('action', choices=['install-command', 'archive', 'digest', 'setup', 'start', 'status', 'stop', 'restart', 'remove-service', 'supervise'])
     parser.add_argument('destination', nargs='?')
+    parser.add_argument('deployment_id', nargs='?')
+    parser.add_argument('configuration', nargs='?')
     args = parser.parse_args()
+    if args.action == 'install-command':
+        if not all((args.destination, args.deployment_id, args.configuration)):
+            parser.error('install-command requires instance, deployment ID and configuration digest')
+        print(remote_install_command(args.destination, args.deployment_id, args.configuration))
+        return
+    if args.deployment_id is not None or args.configuration is not None:
+        parser.error('unexpected destination operation arguments')
     if args.action == 'archive':
         if not args.destination:
             parser.error('archive requires its output file path')

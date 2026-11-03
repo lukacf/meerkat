@@ -95,7 +95,7 @@ pub use factory::{
     FnSessionStoreFactory, HostStoreFactory, SessionStoreFactory,
 };
 pub use failure::ConformanceFailure;
-pub use host_store_memory::InMemoryHostStore;
+pub use host_store_memory::{HostStoreReadFault, InMemoryHostStore};
 pub use long_run::{
     BeforeResume, DurableWorkerHarness, KillPoint, KilledRun, KilledWorker, LongRunHarness,
     LongRunPlan, OtherWriterOutcome, RestartReport, RestartedWorker, ResumeGate, ResumePointKind,

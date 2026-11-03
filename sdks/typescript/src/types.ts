@@ -879,6 +879,35 @@ export interface MobLifecycleFailure {
   readonly structuredData?: unknown;
 }
 
+/**
+ * A persisted mob whose store did not restore, kept quarantined: one
+ * `mob/list` `quarantined` row. Its store is kept exactly as found and no
+ * actor runs for it; every call that addresses its id fails with the
+ * `mob_quarantined` refusal (read it with `mobQuarantined`).
+ */
+export interface QuarantinedMobSummary {
+  readonly mobId: string;
+  /**
+   * Why it is quarantined (the wire `class`): `store_unavailable` (a store
+   * could not serve now; the next call that addresses the mob re-attempts
+   * its restore), `store_unreadable` or `resume_refused` (repair the store,
+   * then `mobRestoreRetry`). A class this SDK does not know is kept as sent.
+   */
+  readonly quarantineClass: string;
+  /** Whether a later attempt may restore it with no repair. */
+  readonly retryable: boolean;
+  /** A re-attempt of its restore is in flight. */
+  readonly retrying: boolean;
+  /** Re-attempts of its restore that ended since the server quarantined it. */
+  readonly attempts: number;
+  /** The refusal a lookup of the mob answers. */
+  readonly message: string;
+  /** The code a lookup of the mob answers. */
+  readonly code?: string;
+  /** The structured data a lookup of the mob answers. */
+  readonly structuredData?: unknown;
+}
+
 export interface MobStatus {
   readonly mobId: string;
   readonly status: string;

@@ -216,8 +216,9 @@ pub use boot_plan::{
 };
 mod declared_apply;
 pub use declared_apply::{
-    DECLARED_APPLY_CHUNK, DeclaredEntry, DeclaredEntryOutcome, DeclaredEntryRefusal,
-    DeclaredRoster, DeclaredRosterOutcome, FirstBootRequest, UnlistedEntryOutcome,
+    DECLARED_APPLY_CHUNK, DeclaredEntry, DeclaredEntryNote, DeclaredEntryOutcome,
+    DeclaredEntryRefusal, DeclaredRoster, DeclaredRosterOutcome, FirstBootRequest,
+    UnlistedEntryOutcome,
 };
 mod dormant_seat;
 pub use dormant_seat::DormantSeatOutcome;
@@ -245,7 +246,20 @@ mod fork_context;
 pub mod forked_participant_routing;
 mod handle;
 mod held_spawn;
+mod identity_change;
+pub use identity_change::{
+    CreatedIdentityRequest, IdentityArchiveChange, IdentityChangeConsentInput, IdentityChangeGrant,
+    IdentityChangeOutcome, IdentityChangeRefusal, IdentityChangeRequesterInput,
+    IdentityCreateOutcome, IdentityGrantEntry, IdentityGrantRequest, IdentityNameHolder,
+    IdentityOperation, IdentityRemoval, IdentityRosterChange, IdentityUpdateOutcome,
+    MemberGrantMint, MemberGrantMintRequest, StoreOwnedIdentityCreate, StoreOwnedIdentityUpdate,
+};
 mod identity_entry;
+mod identity_preparation;
+pub use identity_preparation::{
+    ConstructionEnd, ConstructionFailure, HeldPreparation, IdentityConstructionRequest,
+    IdentityPreparationSettle, IdentityPreparationSettled, PreparationSettlement,
+};
 mod identity_incarnation_custody;
 mod identity_local_services;
 #[cfg(any(test, feature = "test-support"))]
@@ -534,9 +548,10 @@ pub use host_schedule::HostObservationScheduleMobHost;
 pub use identity_entry::{
     EntryStanding, HistoryUnavailable, HostPreparationCause, IDENTITY_ENTRY_PAGE_MAX,
     IdentityCensus, IdentityEntryOrigin, IdentityEntryPage, IdentityEntryRead, IdentityEntryView,
-    LegacyIdentityEntryAdoption, MemberBrokenFact, MemberLifecycleEvent, MemberLifecyclePage,
-    MemberLifecycleRecord, MemberRetirementCause, MobJournalCursor, RetiredRotation, SeatRotation,
-    SeatedMember, UnseatedEntryCause, UnseatedEntryCounts, WorkerMember,
+    IdentityRecordCensus, IdentityTombstonePage, LegacyIdentityEntryAdoption, MemberBrokenFact,
+    MemberLifecycleEvent, MemberLifecyclePage, MemberLifecycleRecord, MemberRetirementCause,
+    MobJournalCursor, RetiredRotation, SeatRotation, SeatedMember, UnseatedEntryCause,
+    UnseatedEntryCounts, WorkerMember,
 };
 pub use identity_local_services::{
     IdentityLocalExternalToolsError, IdentityLocalExternalToolsProvider,

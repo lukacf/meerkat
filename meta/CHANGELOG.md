@@ -85,6 +85,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Upgrade
 
+- A host that matches the boot error of its root mob's resume reads a store
+  fault as `MobRuntimeError::Mob(MobError::MobQuarantined { class, cause, ..
+  })`: the store error it matched before is its `cause`. A refusal that is
+  not a store fault (a definition that changed under the boot, for example)
+  keeps its own variant.
 - A host's own `MobSessionService` wrapper (around the session service it
   passes to `MobBootstrapSpec::new`) must forward the four member
   operator-instruction methods Meerkat 0.9.9 adds,
@@ -159,8 +164,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   after a restart. Implement it keyed by `retired_at_ms` to queue it once, as
   `SqliteAgentMemoryStore` does.
 
+- Pre-release Forge dynamic-roster installations prepared without the installed
+  Console `authentication_domain` and `event_domain` pair must be installed
+  fresh before using member-class Add with a newer Connect release that
+  requires the pair. Fresh preparation now selects both fields, even with no
+  initial members. Restore preserves the original preparation and refuses Add
+  when the pair is absent; a source or SDK refresh does not migrate it.
+  Dynamic rosters cannot be updated in place. Static-roster installations do
+  not use member-class Add and are unaffected by this requirement.
+
 ### Added
 
+- `meta/status` lists the persisted child mobs whose stores did not restore
+  at this start under `quarantined_mobs` (each with its id, class, whether a
+  later attempt may restore it with no repair, the attempts so far and the
+  refusal a call that addresses it answers), or names the failure under
+  `quarantined_mobs_error` when the restore of the child mobs failed as a
+  whole. `UnifiedRuntime::quarantined_mobs` and
+  `MobRuntime::quarantined_mobs` read the same list.
 - The Console offers side chats. **Fork to side chat** in a conversation's
   header forks the agent's durable transcript into a new member that opens in
   a pane beside the agent (`meta/fork_member` on `/console/rpc`); the agent's
@@ -383,13 +404,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   answers it (`Unsupported` for a mob handle whose principal may not list the
   mob's members), and `PublicSessionBridge` forwards it.
 
-- `LifecycleEffectIntent` records the head of Core's journal its step read
-  before it asked Core (`asked_after`), and whether Core had retired the
-  incarnation before the step asked for the identity's fresh life
-  (`predecessor_retired`), which keys the record in the `FreshLifeAfter`
-  slot of its `LifecycleIntentKey` (`key()`). Both are serde-default, with
-  builders (`with_asked_after`, `with_predecessor_retired`); so is the key's
-  `slot`, which reads `End` when absent.
+- `LifecycleEffectIntent` records a head of Core's journal read before its
+  step asked Core (`asked_after`): the head the step read, or, when a
+  reset's, a delete's or a role move's record replaces an earlier one of
+  those under the same key in the same incarnation of the mob, the earlier
+  record's head if it is the smaller, since Core may finish the earlier
+  step's started rotation for the later step without journaling a new
+  start. It also records whether Core had retired the incarnation before
+  the step asked for the identity's fresh life (`predecessor_retired`),
+  which keys the record in the `FreshLifeAfter` slot of its
+  `LifecycleIntentKey` (`key()`). Both are serde-default, with builders
+  (`with_asked_after`, `with_predecessor_retired`); so is the key's `slot`,
+  which reads `End` when absent.
 
 - `SessionBridge::mob_incarnation` names the incarnation of the bridge's mob
   without a store read; it defaults to `None`, and `MobSessionBridge` (and
@@ -472,6 +498,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   constants `SYSTEM_ROW_PRUNE_REFUSED_KIND`,
   `SYSTEM_ROW_PRUNE_REFUSAL_CAUSES` (a closed vocabulary) and
   `TRANSCRIPT_REVISION_CONFLICT_KIND`.
+
+- A launch takes an identity policy: one change policy for every durable
+  identity, for an agent, the host or its console asking to create, update
+  or remove one, from `runtime_options.identity_creation` or, for a native
+  host, `GatewayHostComposition::identity_creation_policy` (build it with
+  `IdentityCreationPolicy::from_config`, which validates it). The option is
+  validated as it is parsed (a refusal names the policy path, and a reserved
+  `context` key is refused as unknown), and init refuses (`-32602`) a launch
+  that gives both forms, a policy that names a profile the mob definition
+  lacks, and a policy, a disabled one included, on a launch without
+  `persistent_state`. A launch that gives none starts as before. Nothing acts
+  on the policy yet: the executor, the decision ingresses, the host RPC
+  methods and the agent tools that carry identity requests are not in this
+  release. `GatewayHostComposition` also gains `validate_identity_request`
+  (the host's own check of a request; the default admits every request) and
+  `identity_consequences` (the host's warning lines for a request; the
+  default states none), both provided. The public module
+  `meerkat_meta::identity_creation` is the pure policy layer: parsing and
+  validation (`PolicyRefusal`), request normalization against the policy
+  (`IdentityRefusal`), the approval plan and the canonical rendering
+  (`render_v1`).
 
 ### Changed
 
@@ -637,18 +684,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
     later pass takes the unlisting back. A reset, a delete, a role move and a
     first-boot `Fresh` row's reset read the head of Core's journal before they
     ask Core, and are refused, retryable, with nothing asked of Core
-    (`IdentityHistoryUnavailable`), when that head does not read. When the
-    step fails, the fact it journals first past that head says whether it
-    reached Core: its retirement's start, naming its rotation, for the
-    incarnation it read live, or the fresh life Core seated after that
-    incarnation when a host's retirement of it ended first; else the fresh
-    life's seat. Another fact of the member (the end of a host's rotation that
-    started before the head, say) is no reach. Without it nothing reached
-    Core, so the step takes back what it recorded and puts back what an
-    earlier step recorded in the same slot, and the bridge's error picks the
-    answer. Otherwise (or when the journal does not read) it keeps its records
-    and answers that the rotation may have started and that the identity's
-    next roster compile drives it to its end, whatever the error;
+    (`IdentityHistoryUnavailable`), when that head does not read. A reset and
+    a delete then read Core's binding of the identity again, and are refused,
+    retryable, with nothing recorded and nothing asked of Core
+    (`IdentityWakeRetryable`), when its generation or liveness changed since
+    they first read it: another lifecycle operation of the member ended while
+    they prepared. When the step fails, the fact it journals first past that
+    head says whether it reached Core: its retirement's start, naming its
+    rotation, for the incarnation it read live, or the fresh life Core seated
+    after that incarnation when a host's retirement of it ended first; else
+    the fresh life's seat. Another fact of the member (the end of a host's
+    rotation that started before the head, say) is no reach. Without it
+    nothing reached Core, so the step takes back what it recorded and puts
+    back what an earlier step recorded in the same slot, and the bridge's
+    error picks the answer. Otherwise (or when the journal does not read) it
+    keeps its records and answers that the rotation may have started and that
+    the identity's next roster compile drives it to its end, whatever the
+    error;
   - a reset or a delete of an identity whose last incarnation Core had
     already retired owes the session that incarnation left the verb's
     memory side effects (the reset's distillation behind its boundary; the
@@ -716,8 +768,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `meta/workgraph/events` returns the events with `truncated`,
   `next_after_seq` and `event_high_water_mark`.
 
+- Forge's console accepts Meta 0.9.6's `outcome_unknown` send completion (a
+  send whose outcome a recovery could not confirm) instead of refusing it.
+- Runtime updates retain native files of up to 1 GiB each (512 MiB before), as
+  Meta 0.9.6's x86_64 Linux rpc_gateway is 520 MiB. A legacy ordinary
+  application's continuation verifies its ordinary Meta gateway by streaming
+  it, instead of reading the whole file under the 16 MiB input bound.
+- Every generated package README, like Forge's own README and the application
+  contract of its implementation agent, points at
+  `identity_resolved_tools_detail(identity)` and its `tools_source`: a member
+  that is not built yet can answer `no_build_recorded` with an empty tools
+  list, so warm or wake it first (`identity_warm` where the selected SDK
+  offers it).
+
 ### Fixed
 
+- Release notes: Forge 0.3.0's agent teams pin the Meta 0.9.6 runtime; the
+  0.9.5 notes said 0.9.4.
+- One durable child mob store that does not restore no longer fails the
+  boot: Meerkat 0.9.9 keeps it quarantined (kept as found, with no actor) and
+  restores the other child mobs. The quarantined mob stays in the hosted set
+  (a mob announcement still names it as a mob hosted here, not running, never
+  as gone) and `meta/status` lists it. A quarantine of the gateway's own mob
+  still fails the boot, now with the typed reason: a root mob whose store
+  could not serve a read now, whose stored state cannot be read or decoded,
+  or whose records disagree among themselves fails with
+  `MobRuntimeError::Mob(MobError::MobQuarantined)` and its class
+  (`store_unavailable`, retryable, or `store_unreadable` and `resume_refused`,
+  which need a repair) instead of the untyped store error. On a host store
+  realm, a root mob storage the host store could not open (its scopes
+  unavailable now, or holding data that does not decode) fails the build with
+  the same typed quarantine
+  (`UnifiedRuntimeBuilderError::Bootstrap(UnifiedRuntimeBootstrapError::Mob(..))`)
+  instead of `UnifiedRuntimeBuilderError::Io` text.
 - The durable resume gate checks every WorkGraph claim a resumed worker
   holds: it pages through every open item with the WorkGraph list cursor.
   It read one page of 1,000 open items and warned that a claim past it went
@@ -969,6 +1052,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   refuses `meta/compact_member`: the verb rewrites a member's session
   transcript, which is the authoritative launch's to change. Before, a
   candidate ran it.
+
+- A shell-started 0.8 application package runs `start.sh --smoke` again with
+  a MobKit SDK from 0.8.43 on (generated packages pin 0.8.47): its host's
+  `send` accepts and forwards the SDK's `track_turn` keyword instead of
+  raising a TypeError.
+- A retry or reinstall on a remote destination whose `python3` is CPython
+  3.14 no longer fails with "must be an ordinary path owned by the remote
+  user": the destination accepts the extra interpreter alias that CPython
+  3.14's venv adds.
+- A runtime update no longer refuses to retain the previous environment of an
+  application whose `.venv` was created by `python3` on a CPython 3.14 host,
+  as a package's install.sh does by default: retention accepts CPython 3.14's
+  extra interpreter alias whenever it resolves to the environment's own
+  Python, where it required a link to python3.14.
 
 ### Known limitations
 

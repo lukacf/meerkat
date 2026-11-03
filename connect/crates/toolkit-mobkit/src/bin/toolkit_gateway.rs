@@ -1,6 +1,6 @@
 //! Local Toolkit owner plus the ordinary MobKit persistent SDK gateway.
 
-#[cfg(unix)]
+#[cfg(all(unix, feature = "native-host"))]
 fn main() -> std::process::ExitCode {
     use meerkat_mobkit::{
         gateway_composition::gateway_tokio_runtime, rpc_gateway::run_persistent_with_host,
@@ -74,7 +74,7 @@ fn main() -> std::process::ExitCode {
     }
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, feature = "native-host"))]
 fn parse_args(
     args: &[String],
 ) -> Result<
@@ -133,13 +133,15 @@ fn parse_args(
     Ok((read_fd, write_fd, control))
 }
 
-#[cfg(not(unix))]
+#[cfg(not(all(unix, feature = "native-host")))]
 fn main() -> std::process::ExitCode {
-    eprintln!("toolkit_gateway: private inherited host control requires a POSIX host");
+    eprintln!(
+        "toolkit_gateway: private inherited host control requires a POSIX host and the native-host feature"
+    );
     std::process::ExitCode::FAILURE
 }
 
-#[cfg(all(test, unix))]
+#[cfg(all(test, unix, feature = "native-host"))]
 mod tests {
     use super::parse_args;
     fn args(items: &[&str]) -> Vec<String> {

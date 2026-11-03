@@ -47,7 +47,7 @@ impl MobActor {
             // re-attempted once. One that stays deferred is no resume failure:
             // the member keeps its deferral (and its state), and the resume
             // proceeds; any other failure is retained as for a binding below.
-            for identity in self.deferred_member_custody.identities() {
+            for identity in self.member_custody_unrestored_identities() {
                 match self
                     .reattempt_deferred_member_custody_unprompted(&identity)
                     .await
@@ -88,7 +88,10 @@ impl MobActor {
                 }
                 // Nothing acts on a member whose custody restore stays
                 // deferred.
-                if self.deferred_member_custody.contains(&entry.agent_identity) {
+                if self
+                    .member_custody_unrestored(&entry.agent_identity)
+                    .is_some()
+                {
                     continue;
                 }
                 match self.prepare_restored_member_operation_binding(entry) {

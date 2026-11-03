@@ -295,8 +295,22 @@ pub struct HeldSpawn {
     controller_route: ControllerRouteObservation,
     decision_tx: Option<oneshot::Sender<HeldSpawnDecision>>,
     completion_rx: Option<oneshot::Receiver<Result<MemberSpawnReceipt, MobError>>>,
-    /// The caller's presence, carried over from the start call.
-    _caller: HeldSetupCaller,
+    /// The caller's presence, carried over from the start call, until a
+    /// retained owner takes it ([`Self::into_parts`]).
+    caller: Option<HeldSetupCaller>,
+}
+
+/// The parts of a held spawn a retained owner keeps
+/// ([`HeldSpawn::into_parts`]): the witnesses its hold offered, the decision
+/// channel it activates or aborts the hold through, the spawn's completion,
+/// and the caller presence that keeps the hold while the owner holds it.
+#[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+pub(crate) struct HeldSpawnParts {
+    pub(crate) finished_surface: ToolSurfaceSelection,
+    pub(crate) controller_route: ControllerRouteObservation,
+    pub(crate) decision_tx: oneshot::Sender<HeldSpawnDecision>,
+    pub(crate) completion_rx: oneshot::Receiver<Result<MemberSpawnReceipt, MobError>>,
+    pub(crate) caller: HeldSetupCaller,
 }
 
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
@@ -324,8 +338,25 @@ impl HeldSpawn {
             controller_route: ready.controller_route,
             decision_tx: Some(ready.decision_tx),
             completion_rx: Some(completion_rx),
-            _caller: caller,
+            caller: Some(caller),
         }
+    }
+
+    /// Hand the hold to a retained owner: its witnesses, its decision
+    /// channel, its completion and the caller presence. From here dropping
+    /// the parts' decision channel or presence ends the hold, as dropping
+    /// this handle does. `None` once the hold was already decided.
+    pub(crate) fn into_parts(mut self) -> Option<HeldSpawnParts> {
+        let decision_tx = self.decision_tx.take()?;
+        let completion_rx = self.completion_rx.take()?;
+        let caller = self.caller.take()?;
+        Some(HeldSpawnParts {
+            finished_surface: self.finished_surface.clone(),
+            controller_route: self.controller_route.clone(),
+            decision_tx,
+            completion_rx,
+            caller,
+        })
     }
 
     /// The held member's identity.
@@ -640,6 +671,31 @@ pub(super) async fn provision_held(
     // keeps its actual outcome.
     let expired = match decision {
         Ok(Ok(HeldSpawnDecision::Activate { decided_at })) if decided_at < setup_deadline => {
+            #[cfg(test)]
+            {
+                let hook = HELD_PUBLICATION_TEST_HOOKS
+                    .lock()
+                    .expect("held publication hook")
+                    .remove(member);
+                if let Some((entered_tx, release_rx)) = hook {
+                    let _ = entered_tx.send(());
+                    let _ = release_rx.await;
+                }
+                if take_held_publication_failure_for_test(member) {
+                    return Err(match held_provision.abort().await {
+                        Ok(()) => MobError::MobMachineRejected {
+                            context: "held_publication_for_test",
+                            reason: HELD_PUBLICATION_FAILURE_FOR_TEST.to_string(),
+                        },
+                        Err(cleanup) => MobError::MobMachineRejected {
+                            context: "held_publication_for_test",
+                            reason: format!(
+                                "{HELD_PUBLICATION_FAILURE_FOR_TEST}; cleanup failed: {cleanup}"
+                            ),
+                        },
+                    });
+                }
+            }
             return held_provision.publish().await;
         }
         Ok(Ok(HeldSpawnDecision::Activate { .. })) | Err(_) => true,
@@ -672,6 +728,67 @@ pub(crate) fn arm_held_ready_delivery_for_test(
         HELD_READY_DELIVERY_TEST_HOOKS
             .lock()
             .expect("held ready delivery hook")
+            .insert(member.to_string(), (entered_tx, release_rx))
+            .is_none()
+    );
+    (entered_rx, release_tx)
+}
+
+/// The error the publication failure seam fails a held member's publication
+/// with ([`fail_next_held_publication_for_test`]).
+#[cfg(all(test, feature = "runtime-adapter", not(target_arch = "wasm32")))]
+pub(crate) const HELD_PUBLICATION_FAILURE_FOR_TEST: &str =
+    "the test seam failed the held publication";
+
+/// Test seam: the members whose next accepted activation fails its
+/// publication (the held member aborted), each consumed once.
+#[cfg(all(test, feature = "runtime-adapter", not(target_arch = "wasm32")))]
+static HELD_PUBLICATION_FAILURES_FOR_TEST: std::sync::Mutex<Vec<String>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// Fail `member`'s next publication of an accepted activation, consumed
+/// once.
+#[cfg(all(test, feature = "runtime-adapter", not(target_arch = "wasm32")))]
+pub(crate) fn fail_next_held_publication_for_test(member: &str) {
+    HELD_PUBLICATION_FAILURES_FOR_TEST
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .push(member.to_string());
+}
+
+/// Whether `member`'s publication fails now (consuming the armed failure).
+#[cfg(all(test, feature = "runtime-adapter", not(target_arch = "wasm32")))]
+fn take_held_publication_failure_for_test(member: &str) -> bool {
+    let mut failures = HELD_PUBLICATION_FAILURES_FOR_TEST
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    match failures.iter().position(|armed| armed == member) {
+        Some(index) => {
+            failures.remove(index);
+            true
+        }
+        None => false,
+    }
+}
+
+/// Test seam: parks a held setup whose activation was accepted, before its
+/// publication, so a test can pass the setup deadline and drop the
+/// observers in between. Inert unless armed for the member.
+#[cfg(all(test, feature = "runtime-adapter", not(target_arch = "wasm32")))]
+static HELD_PUBLICATION_TEST_HOOKS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, HeldReadyDeliveryTestHook>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+#[cfg(all(test, feature = "runtime-adapter", not(target_arch = "wasm32")))]
+pub(crate) fn arm_held_publication_for_test(
+    member: &str,
+) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+    let (entered_tx, entered_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
+    assert!(
+        HELD_PUBLICATION_TEST_HOOKS
+            .lock()
+            .expect("held publication hook")
             .insert(member.to_string(), (entered_tx, release_rx))
             .is_none()
     );

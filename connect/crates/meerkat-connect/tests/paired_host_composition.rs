@@ -517,6 +517,12 @@ async fn native_public_gate_refuses_narrower_policy_wrong_session_retirement_and
                 .is_err()
         );
     }
+    // observe the presenter while the owner is live; retirement closes it and next() then returns None
+    assert!(
+        timeout(Duration::from_millis(10), presenter.next())
+            .await
+            .is_err()
+    );
     approvals.retire();
     assert!(
         dispatcher
@@ -531,11 +537,6 @@ async fn native_public_gate_refuses_narrower_policy_wrong_session_retirement_and
             .is_err()
     );
     assert!(!approvals.has_uncertain_dispatch());
-    assert!(
-        timeout(Duration::from_millis(10), presenter.next())
-            .await
-            .is_err()
-    );
     let requests = host.finish().await;
     assert_eq!(requests.len(), 2, "no candidate HTTP after native refusal");
 }
@@ -743,6 +744,8 @@ async fn native_external_inventory_then_candidate_without_mcp_launch_preserves_e
                 (false, wait.await)
             }
         };
+        // observe the presenter while the owner is live; retirement closes it and next() then returns None
+        let item = timeout(Duration::from_millis(10), presenter.next()).await;
         approvals.retire();
         session.close().await.unwrap();
         let requests = host.finish().await;
@@ -756,9 +759,7 @@ async fn native_external_inventory_then_candidate_without_mcp_launch_preserves_e
         ));
         assert!(!approvals.has_uncertain_dispatch());
         assert!(
-            timeout(Duration::from_millis(10), presenter.next())
-                .await
-                .is_err(),
+            item.is_err(),
             "candidate operation must not request extra consent"
         );
         let results = probe.results.lock().unwrap();

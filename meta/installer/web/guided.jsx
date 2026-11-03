@@ -24,15 +24,20 @@ import {
 import { SetupPlan, ScopeDecisions, SetupRequirementGroups } from "./evolving-plan.jsx";
 import { guidePlan } from "./evolving-plan-state.mjs";
 import { NativeGuideChat, useGuideTimeline } from "./native-guide-chat.jsx";
+import { isSignInRequired } from "./sign-in-recovery.mjs";
+import { GuideAdvancedTools } from "./guide-advanced-tools.jsx";
+import { SignInRecovery } from "./sign-in-recovery.jsx";
 import { GuideWaitStatus } from "./guide-wait.jsx";
 import { guideWaitBinding } from "./guide-wait.mjs";
 import { guideStartupPresentation } from "./guide-startup.mjs";
 import { guideAdmissionMatches } from "./guide-admission.mjs";
+import { readGuideLink, replaceGuideLink } from "./guide-link.mjs";
 import { ImplementationPanel } from "./implementation-panel.jsx";
 import { DeploymentPanel } from "./deployment-panel.jsx";
+import { MyDeployments } from "./my-deployments.jsx";
 import { deploymentCanPrepare, nativeTeamCanInstall, deploymentSourceKey } from "./deployment-panel.mjs";
 import { gcpProjectFeedbackCurrent, gcpProjectBlueprint, gcpProjectBlueprintMatches } from "./gcp-preflight.mjs";
-import { nativeTeamPackagePlan, setupNeedsApplicationBuild, setupProgress, setupProgressHasLifecycle, setupGuideResume, admitSetupGuideResume } from "./setup-progress.mjs";
+import { nativeTeamPackagePlan, setupNeedsApplicationBuild, setupInstallationRelevant, setupProgress, setupProgressHasLifecycle, setupGuideResume, admitSetupGuideResume } from "./setup-progress.mjs";
 import { RehearsalPanel } from "./rehearsal-panel.jsx";
 import { ProviderSetup } from "./provider-setup.jsx";
 import { hasForgeOpeningContext, isForgeOpening, ForgeWelcomeIntro, ForgeWelcomeNext, ForgeWelcomeOrientation, ForgeIllustrationMotionProvider, useForgeProposalNotice } from "./first-experience.jsx";
@@ -72,6 +77,7 @@ import {
 } from "./wizard-state.mjs";
 import "./guided.css";
 import "./launch-design.css";
+import "./guide-journey.css";
 import "./first-experience.css";
 import "./first-turn.css";
 
@@ -222,7 +228,7 @@ export function SetupProgressCard({ progress, primary = false, resume, onResume,
 }
 
 /** Keep the current receipt projection visible above the retained conversation. */
-export function SetupCurrentStatusAnchor({ progress, statusText, onNavigate, disabled, Icon }) {
+export function SetupCurrentStatusAnchor({ progress, statusText, onNavigate, disabled, Icon, resume, onResume }) {
   if (!progress || statusText !== progress.title) return null;
   const action = progress.actions?.[0];
   return <>
@@ -230,6 +236,7 @@ export function SetupCurrentStatusAnchor({ progress, statusText, onNavigate, dis
       <div className="setup-current-status-copy">
         <span className="setup-eyebrow">CURRENT APPLICATION STATUS</span>
         <h2>{progress.title}</h2>
+        <p>{progress.detail}</p>
       </div>
       {action && (action.target === "console"
         ? <a href={action.url} target="_blank" rel="noreferrer" aria-disabled={disabled || undefined}
@@ -239,20 +246,23 @@ export function SetupCurrentStatusAnchor({ progress, statusText, onNavigate, dis
         : <button type="button" disabled={disabled} onClick={event => {
           if (!disabled && event.currentTarget.isConnected) onNavigate(action);
         }}>{action.label} <Icon name="arrow" size={14} /></button>)}
+    {(progress.actions.length > 1 || resume) && <details className="setup-status-options">
+      <summary>More options</summary>
+      {progress.actions.slice(1).map(item => item.target === "console"
+        ? <a key={item.target} href={item.url} target="_blank" rel="noreferrer">{item.label}</a>
+        : <button key={item.target} type="button" disabled={disabled} onClick={() => onNavigate(item)}>{item.label}</button>)}
+      {resume && <button type="button" disabled={disabled} onClick={() => onResume(resume)}>Ask the guide what is next</button>}
+    </details>}
     </section>
-    <div className="setup-conversation-history-boundary">
-      <span>Conversation history</span>
-      <small>Earlier messages are kept as written. Current status is above.</small>
-    </div>
   </>;
 }
 
 /** Keep the saved question actionable without treating it as runtime progress. */
-export function SetupGuideQuestionHeading({ question, lifecycle = false, waiting = false }) {
+export function SetupGuideQuestionHeading({ question, lifecycle = false, waiting = false, current = false }) {
   const Heading = lifecycle ? "h2" : "h1";
   return <>
     {waiting ? <span className="setup-eyebrow">SAVED QUESTION</span>
-      : lifecycle && <span className="setup-eyebrow">DESIGN CONVERSATION</span>}
+      : (lifecycle || current) && <span className="setup-eyebrow">{lifecycle ? "DESIGN CONVERSATION" : "YOUR TURN"}</span>}
     <Heading>{question.title}</Heading>
     {waiting && <p>Your guide is responding. Choices are paused; you can keep writing below.</p>}
     {question.description && <p>{question.description}</p>}
@@ -273,7 +283,8 @@ function savedGuideResponse(state) {
 }
 
 function primaryGuideTranscript(scroll) {
-  return scroll?.querySelector?.(':scope > [data-native-console-chat="true"]');
+  const transcript = scroll?.querySelector?.(':scope > [data-native-console-chat="true"]');
+  return transcript?.querySelector?.('[data-current-guide-transcript="true"]') || transcript;
 }
 
 function guideActivityScrollTop(scroll) {
@@ -581,7 +592,7 @@ export function GuidedSetup({
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [composerFocused, setComposerFocused] = useState(false);
   const [startingHelpEdit, setStartingHelpEdit] = useState(null);
-  const mobileMenuButton = useRef(null);
+  const mobileMenuButton = useRef(null), deploymentsButton = useRef(null);
   const [savedToolsGuide, setSavedToolsGuide] = useState(null);
   const [deploymentNavigation, setDeploymentNavigation] = useState(null);
   const [providerDismissed, setProviderDismissed] = useState(false);
@@ -610,6 +621,7 @@ export function GuidedSetup({
     setInput((previous) => ({ ...previous, mode }));
   const [setups, setSetups] = useState([]),
     [historyOpen, setHistoryOpen] = useState(false);
+  const [deploymentsOpen, setDeploymentsOpen] = useState(false);
   const [setupsRead, setSetupsRead] = useState("idle");
   const [setupsPage, setSetupsPage] = useState(0);
   const setupsReading = useRef(false), setupsRequest = useRef(0), setupsMounted = useRef(true);
@@ -661,6 +673,7 @@ export function GuidedSetup({
   const [remoteDeploymentSnapshot, setRemoteDeploymentSnapshot] = useState(null);
   const [rehearsal, setRehearsal] = useState(null);
   const [actionsExpansion, setActionsExpansion] = useState(null);
+  const [phaseSelection, setPhaseSelection] = useState(null);
   const [savedBuildReturn, setSavedBuildReturn] = useState(null);
   const savedBuildReturnRef = useRef(null);
   const [trialNavigation, setTrialNavigation] = useState(null);
@@ -727,6 +740,8 @@ export function GuidedSetup({
     remoteDeploymentSnapshot?.selectionToken === lifecycleToken && !loadGate.current.pending();
   const remoteDeployment = state?.id && remoteDeploymentSnapshot?.guideId === state.id ? remoteDeploymentSnapshot.receipt : null;
   const remoteObservation = remoteObservationCurrent ? remoteDeploymentSnapshot.observation : "loading";
+  const installationAttention = deploymentObservationCurrent && deploymentSnapshot.retainedOperation === true ||
+    remoteObservationCurrent && remoteDeploymentSnapshot.retainedOperation === true;
   const latestImplementation = useRef(implementation);
   latestImplementation.current = implementation;
   const publishLifecycle = useCallback((setter, value) => {
@@ -745,7 +760,8 @@ export function GuidedSetup({
   const acceptRemoteDeploymentReceipt = useCallback((receipt, snapshot) => {
     if (snapshot?.guideId === state?.id && snapshot.selectionToken === lifecycleToken)
       publishLifecycle(setRemoteDeploymentSnapshot, previous => previous?.guideId === snapshot.guideId &&
-        previous.selectionToken === snapshot.selectionToken && previous.observation === snapshot.observation && previous.receipt === receipt
+        previous.selectionToken === snapshot.selectionToken && previous.observation === snapshot.observation &&
+        previous.retainedOperation === snapshot.retainedOperation && previous.receipt === receipt
         ? previous : { ...snapshot, receipt });
   }, [publishLifecycle, state?.id, lifecycleToken]);
   const acceptRehearsalReceipt = useCallback(value => publishLifecycle(setRehearsal, value), [publishLifecycle]);
@@ -763,7 +779,7 @@ export function GuidedSetup({
     (!sendingMessage || sendingMessage.status === "unconfirmed");
   const sendUnconfirmed = sendingMessage?.status === "unconfirmed" || creationUnconfirmed;
   latestLifecycle.current = { receipts: { build: implementation, trial: rehearsal, deployment, remoteDeployment },
-    flags: { active, pendingChanges: !!manualNote, designBusy: busy || applyUnconfirmed || sendUnconfirmed, packageBusy, buildObservation, buildAdmissionPending, deploymentObservation, remoteObservation, agentTeamAvailable } };
+    flags: { active, pendingChanges: !!manualNote, designBusy: busy || applyUnconfirmed || sendUnconfirmed, packageBusy, buildObservation, buildAdmissionPending, deploymentObservation, remoteObservation, installationAttention, agentTeamAvailable } };
   const timeline = useGuideTimeline(active ? state : null);
 
   function savedManual(id) {
@@ -954,7 +970,7 @@ export function GuidedSetup({
     }
     return newlyCompleted;
   }
-  async function load(id, { refreshRuntimeStatus = true } = {}) {
+  async function load(id, { refreshRuntimeStatus = true, deepLink = null } = {}) {
     savedBuildReturnRef.current = null;
     setSavedBuildReturn(null);
     writeInput(guideStorage, latestInput.current);
@@ -970,17 +986,22 @@ export function GuidedSetup({
     setLoadingSetup(true);
     setLoadError("");
     setFailedSelection(null);
-    const requested = typeof id === "string" ? id : guideStorage.getItem(GUIDE_KEY);
+    const requested = deepLink ? deepLink.id : typeof id === "string" ? id : guideStorage.getItem(GUIDE_KEY);
     const unconfirmed = applyRequests.current.get(requested);
     if (unconfirmed) unconfirmed.checked = false;
     try {
+      if (deepLink?.error) throw new Error(deepLink.error);
       let next;
       const saved = requested;
       if (saved) {
         try {
           next = await request(`/api/guide/${encodeURIComponent(saved)}`, { timeoutMs: 30000 });
+          if (deepLink && next?.id !== saved)
+            throw new Error("The linked setup could not be verified. Your saved setups have not changed.");
         } catch (e) {
           if (e.status !== 404) throw e;
+          if (deepLink)
+            throw new Error("This linked setup was not found in this workspace. Your saved setups have not changed.");
           if (!recoverMissingGuideSelection(guideStorage, GUIDE_KEY, saved, loadGate.current, token)) return;
         }
       }
@@ -989,6 +1010,7 @@ export function GuidedSetup({
       if (!loadGate.current.current(token)) return;
       setError("");
       const newlyCompleted = acceptState(next);
+      replaceGuideLink(next.id);
       setInput(previous => guideInputForState(guideStorage, next, previous, { newlyCompleted }));
       if (refreshRuntimeStatus) void refreshRuntime(token, next.id);
       refreshSetups();
@@ -996,14 +1018,15 @@ export function GuidedSetup({
     } catch (e) {
       if (!loadGate.current.current(token)) return;
       setLoadError(e.message);
-      setFailedSelection({ id: requested, token });
+      setFailedSelection({ id: requested, token, deepLink });
+      if (isSignInRequired(e)) timeline.requireSignIn?.();
       if (latestState.current) setError(e.message);
     } finally {
       if (loadGate.current.finish(token)) setLoadingSetup(false);
     }
   }
   useEffect(() => {
-    load(undefined, { refreshRuntimeStatus: false });
+    load(undefined, { refreshRuntimeStatus: false, deepLink: readGuideLink(globalThis.window?.location?.search) });
   }, []);
   useEffect(() => {
     if (state?.id) guideStorage.setItem(GUIDE_KEY, state.id);
@@ -1411,6 +1434,7 @@ export function GuidedSetup({
     return started;
   }
   async function respond(action = "answer", extra = {}, options = {}) {
+    if (timeline.authenticationRequired) return;
     const navigationToken = loadGate.current.token();
     if (processing.current || sendRequests.current.has(latestState.current?.id || "new") ||
         !latestState.current?.id && creationStorage.getItem(GUIDE_CREATION_KEY) !== null ||
@@ -1557,8 +1581,10 @@ export function GuidedSetup({
       const refused = Number.isInteger(e.status) && e.status >= 400 && e.status < 500;
       const notEntered = !owner.postEntered;
       if (refused || notEntered) releaseSend(owner);
-      if (loadGate.current.current(navigationToken) && (!requestGuideId || latestState.current?.id === requestGuideId))
-        setError(refused || notEntered ? e.message : "");
+      if (loadGate.current.current(navigationToken) && (!requestGuideId || latestState.current?.id === requestGuideId)) {
+        if (isSignInRequired(e)) timeline.requireSignIn?.();
+        setError(isSignInRequired(e) ? "" : refused || notEntered ? e.message : "");
+      }
     } finally {
       if (sendRequests.current.get(owner.id || "new") === owner) {
         owner.status = "unconfirmed";
@@ -1921,6 +1947,7 @@ export function GuidedSetup({
     setTimeout(() => URL.revokeObjectURL(url), 10000);
   }
   function newSetup() {
+    replaceGuideLink(null);
     setMobileMenuOpen(false);
     setPendingMessage(null);
     writeInput(guideStorage, latestInput.current);
@@ -2101,6 +2128,7 @@ export function GuidedSetup({
     forceFollow.current = false;
     setMobilePanel("chat");
     setActionsExpansion({ guideId: intent.guideId, open: true });
+    setPhaseSelection({ guideId: intent.guideId, version: intent.selectedVersion, phase: "build" });
     const frame = requestAnimationFrame(() => {
       if (savedBuildReturnRef.current === intent && setupsMounted.current &&
           latestLifecycle.current?.flags.active && !loadGate.current.pending() &&
@@ -2123,11 +2151,14 @@ export function GuidedSetup({
     return (
       <div className="setup-loading">
         <GuideAvatar />
-        <h1>Meta Forge setup</h1>
+        <h1>Meerkat Forge</h1>
         <p role={loadError ? "alert" : undefined}>{loadError || "Opening your conversation..."}</p>
         {loadError && <div className="setup-loading-actions">
-          <button disabled={loadingSetup} onClick={load}>Try again</button>
-          {failedSelection?.id && <button disabled={loadingSetup}
+          <button disabled={loadingSetup} onClick={() => failedSelection?.deepLink
+            ? load(failedSelection.id, { deepLink: failedSelection.deepLink }) : load()}>Try again</button>
+          {failedSelection?.deepLink && <button disabled={loadingSetup}
+            onClick={() => { replaceGuideLink(null); load(); }}>Open Forge</button>}
+          {!failedSelection?.deepLink && failedSelection?.id && <button disabled={loadingSetup}
             onClick={() => startNewAfterReadFailure(failedSelection)}>Start a new setup</button>}
         </div>}
         {loadError && failedSelection?.id && <p>Your saved setup and its drafts stay saved.</p>}
@@ -2150,16 +2181,24 @@ export function GuidedSetup({
   const firstTurnWaiting = hasForgeOpeningContext(state, plan, { pending: !!manualNote }) && !loadingSetup &&
     !!(localSending || guideWaitBinding(state));
   const firstIdeaRunning = firstTurnWaiting && !!guideWaitBinding(state) && !guideStartupPresentation(state, timeline);
+  const journeyChat = !welcome && !opening && !firstTurnWaiting;
   const resumeSetup = welcome && !providerOpen && setupsRead === "ready"
     ? setups.find(setup => typeof setup?.id === "string" && setup.id.trim() && setup.id !== state.id) : null;
   const requirements = unresolvedRequirements(state, plan);
   const checkedApplication = implementationCanDownload(implementation, state);
   const progress = setupProgress(state, { build: implementation, trial: rehearsal, deployment, remoteDeployment },
-    { pendingChanges: !!manualNote, designBusy: busy || applyUnconfirmed || sendUnconfirmed || state.operation?.status === "running", buildObservation, buildAdmissionPending, deploymentObservation, remoteObservation, agentTeamAvailable });
+    { pendingChanges: !!manualNote, designBusy: busy || applyUnconfirmed || sendUnconfirmed || state.operation?.status === "running", buildObservation, buildAdmissionPending, deploymentObservation, remoteObservation, installationAttention, agentTeamAvailable });
   const hasLifecycle = setupProgressHasLifecycle(state, { build: implementation, trial: rehearsal, deployment, remoteDeployment });
   const applicationBuildRequired = setupNeedsApplicationBuild(state, implementation, { buildObservation });
   const optionalBuildProgress = applicationBuildRequired && !hasLifecycle && state.status !== "ready";
   const designConversationActive = !hasLifecycle && (!!question || optionalBuildProgress);
+  const installationRelevant = setupInstallationRelevant(state, { build: implementation, deployment, remoteDeployment },
+    { buildObservation, buildAdmissionPending, installationAttention, agentTeamAvailable });
+  const progressTarget = progress?.actions?.[0]?.target;
+  const defaultPhase = designConversationActive ? "conversation" : ["deployment", "remote"].includes(progressTarget)
+    ? "deployment" : progressTarget === "trial" ? "trial" : "build";
+  const currentPhase = phaseSelection?.guideId === state.id && phaseSelection.version === state.version
+    ? phaseSelection.phase : defaultPhase;
   const journeyPhase = !firstTurnWaiting && (plan || messages.some(message => message.role === "user") ||
     state.answers?.length || Object.values(state.brief?.facts || {}).some(fact => fact?.summary?.trim()))
     ? "shape" : "idea";
@@ -2184,6 +2223,8 @@ export function GuidedSetup({
     const guideId = state.id;
     releaseResponseFollow();
     setActionsExpansion({ guideId, open: true });
+    const phase = target?.closest?.("[data-setup-phase]")?.dataset.setupPhase;
+    if (phase) setPhaseSelection({ guideId, version: state.version, phase });
     requestAnimationFrame(() => {
       if (latestState.current?.id === guideId && target?.isConnected)
         target.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -2244,7 +2285,7 @@ export function GuidedSetup({
         : "Ask a question or tell your guide what to change...",
     disabled: packageBusy,
     submitDisabled:
-      blocked ||
+      blocked || timeline.authenticationRequired ||
       welcome && providerOpen ||
       attachmentPreparing || attachments.uploading || attachments.pending.length > 0 ||
       (!(welcome && available === false) && !(question && composeMode === "answer"
@@ -2261,7 +2302,7 @@ export function GuidedSetup({
   };
   return (
     <ForgeIllustrationMotionProvider><div
-      className={`setup-shell setup-mobile-${mobilePanel}${designConversationActive && !welcome && !firstTurnWaiting && !plan ? " setup-first-conversation" : ""}${welcome ? " setup-welcome" : ""}${firstTurnWaiting ? " setup-first-turn" : ""}${welcome && providerOpen ? " setup-welcome-provider" : ""}${composerFocused ? " setup-composer-focused" : ""}${draft ? " setup-has-draft" : ""}`}
+      className={`setup-shell setup-mobile-${mobilePanel}${journeyChat ? " setup-journey-active" : ""}${designConversationActive && !welcome && !firstTurnWaiting && !plan ? " setup-first-conversation" : ""}${welcome ? " setup-welcome" : ""}${firstTurnWaiting ? " setup-first-turn" : ""}${welcome && providerOpen ? " setup-welcome-provider" : ""}${composerFocused ? " setup-composer-focused" : ""}${draft ? " setup-has-draft" : ""}`}
       data-cc-theme="light"
     >
       <header className="setup-header" onKeyDown={(event) => {
@@ -2292,18 +2333,7 @@ export function GuidedSetup({
             <small className="setup-provider-model">{available === false ? "Provider setup needed"
               : runtime?.model || state.capabilities?.model || config?.architect?.model || "Meerkat + MobKit"}</small>
           </button>
-          <button aria-expanded={savedToolsOpen} disabled={!hasSavedToolsGuide || blocked}
-            onClick={() => { releaseResponseFollow();
-              setMobileMenuOpen(false);
-              const guideId = state.id;
-              setSavedToolsGuide(value => value === guideId ? null : guideId);
-              setMobilePanel("chat");
-              requestAnimationFrame(() => {
-                if (latestState.current?.id === guideId)
-                  chatScroll.current?.scrollTo?.({ top: 0, behavior: "smooth" });
-              }); }}>
-            Saved tools
-          </button>
+          <button type="button" ref={deploymentsButton} onClick={() => { setDeploymentsOpen(true); setHistoryOpen(false); setMobileMenuOpen(false); }}>My deployments</button>
           <div className="setup-history-control">
             <button
               aria-expanded={historyOpen}
@@ -2359,17 +2389,33 @@ export function GuidedSetup({
               </div>
             )}
           </div>
+          <GuideAdvancedTools guideId={state.id} active={active} disabled={blocked}
+            savedToolsOpen={savedToolsOpen} onSavedTools={() => {
+              releaseResponseFollow(); setMobileMenuOpen(false);
+              const guideId = state.id;
+              setSavedToolsGuide(value => value === guideId ? null : guideId);
+              setMobilePanel("chat");
+              requestAnimationFrame(() => { if (latestState.current?.id === guideId)
+                chatScroll.current?.scrollTo?.({ top: 0, behavior: "smooth" }); });
+            }}>
           <button
             className={configOpen ? "selected" : ""}
             onClick={() => { setMobileMenuOpen(false); openConfig(); }}
             disabled={!plan || busy || packageBusy}
           >
-            <Icon name="code" size={15} /> Configuration
+            <Icon name="code" size={15} /> Advanced configuration
           </button>
           {narrow && consoleUrl && <a href={consoleUrl} target="_blank" rel="noreferrer"
             aria-label="Open the Forge setup guide console in a new tab">Guide console <Icon name="arrow" size={12} /></a>}
+          </GuideAdvancedTools>
+          <div data-forge-workspace-slot="" />
         </div>
       </header>
+      {deploymentsOpen && <MyDeployments Icon={Icon} returnFocusRef={narrow ? mobileMenuButton : deploymentsButton}
+        signInRequired={timeline.authenticationRequired} onCheckSignIn={timeline.checkSignIn}
+        onSignInRequired={timeline.requireSignIn}
+        onClose={() => setDeploymentsOpen(false)}
+        onOpenSetup={id => { setDeploymentsOpen(false); switchSetup(id); }} />}
       {narrow && !welcome && (firstTurnWaiting || designConversationActive) && <div className="forge-mobile-journey">
         <ForgeWelcomeOrientation phase={journeyPhase} />
       </div>}
@@ -2415,14 +2461,15 @@ export function GuidedSetup({
             <span>
               <i /> Your setup guide
             </span>
-            <SetupGuideStatusCaption lifecycle={!!primaryProgress} statusText={statusText} ready={ready} review={review} />
+            {!journeyChat && <SetupGuideStatusCaption lifecycle={!!primaryProgress} statusText={statusText} ready={ready} review={review} />}
             {(state.proposal || state.blueprint) && (
-              <nav className="setup-stage-shortcuts" aria-label="Try, build and run this proposal">
+              <details className="setup-other-steps"><summary>Optional testing and tools</summary>
+              <nav className="setup-stage-shortcuts" aria-label="Optional testing and tools">
                 {designConversationActive ? <a href="#setup-trial" title="Optional ways to try, build and run this proposal"
                   onClick={(event) => {
                     event.preventDefault();
                     revealActionsTarget(trialRef.current);
-                  }}>Try, build and run</a> : <>
+                  }}>Try with sample data</a> : <>
                 <SetupTrialShortcut progress={progress} onNavigate={navigateProgressAction}
                   onDesign={() => {
                     navigateTrial("design");
@@ -2438,9 +2485,10 @@ export function GuidedSetup({
                     onClick={(event) => {
                       event.preventDefault();
                       revealActionsTarget(deploymentRef.current);
-                    }}>Run</a>}
+                    }}>Installation</a>}
                 </>}
               </nav>
+              </details>
             )}
             {consoleUrl && (
               <a
@@ -2454,10 +2502,49 @@ export function GuidedSetup({
               </a>
             )}
           </div>
-          {!busy && !error && !appError && !savedGuideFailure(state) &&
+          {timeline.authenticationRequired && !deploymentsOpen && <SignInRecovery key={state.id}
+            className="setup-sign-in-anchor" onCheck={timeline.checkSignIn} />}
+          {!journeyChat && !timeline.authenticationRequired && !busy && !error && !appError && !savedGuideFailure(state) &&
             <SetupCurrentStatusAnchor progress={primaryProgress} statusText={statusText}
-              disabled={blocked || loadingSetup || !active} onNavigate={navigateCurrentStatusAction} Icon={Icon} />}
-          {narrow && <div className="setup-mobile-response">
+              disabled={blocked || loadingSetup || !active} onNavigate={navigateCurrentStatusAction} Icon={Icon}
+              resume={guideResume} onResume={resumeGuide} />}
+          {journeyChat && !timeline.authenticationRequired && <section className="setup-journey-now" aria-label="Current step">
+            <span className="setup-journey-label">NOW</span>
+            <div className="setup-journey-content">
+              <GuideWaitStatus state={loadingSetup ? null : state} snapshot={timeline}
+                submitting={localSending && busyAction !== "apply"} following={following} onFollow={() => revealResponse(true)} />
+              {(loadingSetup || busy && !guideWaitBinding(state) && !(localSending && busyAction !== "apply")) &&
+                <div className="setup-journey-summary"><strong>{loadingSetup ? "Opening saved conversation"
+                  : busyAction === "apply" ? "Saving your plan" : statusText}</strong></div>}
+              {!busy && !loadingSetup && !error && !appError && !savedGuideFailure(state) && primaryProgress &&
+                <SetupCurrentStatusAnchor progress={primaryProgress} statusText={statusText}
+                  disabled={blocked || loadingSetup || !active} onNavigate={navigateCurrentStatusAction} Icon={Icon}
+                  resume={guideResume} onResume={resumeGuide} />}
+              {!busy && !loadingSetup && (!primaryProgress || error || appError || savedGuideFailure(state)) && (
+                question && !error && !appError && !savedGuideFailure(state)
+                  ? <div className="setup-journey-question">
+                    <span>Your turn</span>
+                    {questionInView?.id === state.id && questionInView.version === state.version && questionInView.visible
+                      ? <strong>{question.title}</strong>
+                      : <button type="button" className="setup-question-return" onClick={revealCurrentQuestion}
+                        aria-label={`Show current question: ${question.title}`}>
+                        <strong>{question.title}</strong><span>Go to question</span><Icon name="arrow" size={14} />
+                      </button>}
+                  </div>
+                  : <div className="setup-journey-summary"><strong>{statusText}</strong>
+                    {savedGuideFailure(state) && <button type="button" onClick={() => revealResponse(true)}>Review saved request <Icon name="arrow" size={14} /></button>}
+                    {review && !error && !appError && !savedGuideFailure(state) &&
+                      <button type="button" onClick={() => revealResponse(true)}>Review proposal <Icon name="arrow" size={14} /></button>}
+                  </div>
+              )}
+              {!busy && !loadingSetup && primaryProgress && question && !(questionInView?.id === state.id && questionInView.version === state.version && questionInView.visible) &&
+                <button type="button" className="setup-question-return setup-journey-design-question" onClick={revealCurrentQuestion}
+                  aria-label={`Show current question: ${question.title}`}><span>Design question</span><strong>{question.title}</strong><Icon name="arrow" size={14} /></button>}
+              <GuideResponseNotice state={state} publicationKey={unseenResponse} busy={busy}
+                onReveal={(key) => revealResponse(true, key)} Icon={Icon} />
+            </div>
+          </section>}
+          {!journeyChat && narrow && <div className="setup-mobile-response">
             <GuideResponseNotice state={state} publicationKey={unseenResponse} busy={busy}
               onReveal={(key) => revealResponse(true, key)} Icon={Icon} />
           </div>}
@@ -2481,7 +2568,7 @@ export function GuidedSetup({
               }
             }}
           >
-            <div className="setup-conversation-start">LET'S MAKE IT YOURS</div>
+            {!journeyChat && <div className="setup-conversation-start">LET'S MAKE IT YOURS</div>}
             {state.id && <ForgeOrganizationContext update={state.organization_update} disabled={blocked}
               onAdopt={organization_fingerprint => respond("organization", { organization_fingerprint },
                 { preserveInput: true, expectedGuide: { id: state.id, version: state.version } })} />}
@@ -2505,12 +2592,15 @@ export function GuidedSetup({
               state={state}
               snapshot={timeline}
               pendingMessage={pendingMessage}
+              activityStatusExternal={journeyChat}
+              signInNoticeExternal
               Icon={Icon}
             />
             {failedSelection && loadError && <div className="setup-error" role="alert">
               <strong>That setup did not open.</strong>
               <p>{plan?.project?.name || "Your previous setup"} is still selected. Its saved work and running operations are kept.</p>
-              <button disabled={loadingSetup} onClick={() => load(failedSelection.id)}>Retry selected setup</button>
+              <button disabled={loadingSetup} onClick={() => load(failedSelection.id,
+                { deepLink: failedSelection.deepLink })}>Retry selected setup</button>
             </div>}
             <div
               ref={responseRef}
@@ -2520,7 +2610,7 @@ export function GuidedSetup({
               tabIndex={-1}
               aria-label="Latest guide response"
             />
-            {(error || appError) && (
+            {(error || appError) && !timeline.authenticationRequired && (
               <div className="setup-error" role="alert">
                 <strong>Let's pick up from here.</strong>
                 <p>{error || appError}</p>
@@ -2579,14 +2669,14 @@ export function GuidedSetup({
             )}
             <SetupOperationFailure state={state} busy={busy} failureRef={operationFailureRef} onRetry={retryOperation}
               onReviewDraft={reviewCurrentDraft} reviewDraftDisabled={blocked || !active} />
-            {progress && !busy && !designConversationActive && <SetupProgressCard progress={progress} primary={!!primaryProgress} resume={guideResume}
+            {progress && !primaryProgress && !busy && !designConversationActive && <SetupProgressCard progress={progress} resume={guideResume}
               onResume={resumeGuide} onNavigate={navigateProgressAction} disabled={blocked || loadingSetup} Icon={Icon} />}
             {question && !firstTurnWaiting && (
               <div className={`setup-current-question ${opening ? "setup-opening" : ""}`} ref={questionRef}
                 data-guide-id={state.id} data-guide-version={state.version}>
                 <AgentMessage>
                   <div className="setup-bubble setup-question-bubble">
-                    {welcome ? <ForgeWelcomeIntro /> : <SetupGuideQuestionHeading question={question} lifecycle={!!primaryProgress} waiting={busy} />}
+                    {welcome ? <ForgeWelcomeIntro /> : <SetupGuideQuestionHeading question={question} lifecycle={!!primaryProgress} waiting={busy} current={journeyChat} />}
                     <div className="setup-interactive-answer">
                       {opening && !welcome && <SetupStartingPoints organization={state.organization} draft={draft} disabled={blocked}
                         onReturnToTyping={() => inputRef.current?.focus()} onChoose={(text) => {
@@ -2610,44 +2700,6 @@ export function GuidedSetup({
                 </AgentMessage>
               </div>
             )}
-            {agentTeamAvailable && (state.proposal || state.blueprint) && !busy && <NativeTeamPackage state={state} packageBusy={packageBusy} blocked={blocked}
-              deploymentObservation={deploymentObservation}
-              onInstall={(displayed) => navigateInstallation("native-team", displayed)}
-              onPackage={inspectPackage} Icon={Icon} targetRef={teamPackageRef} downloadedKey={nativeDownloadedKey} onRevise={revisePackagePlan} />}
-            {(state.proposal || state.blueprint) && <details className="setup-proposal-actions" open={actionsOpen}>
-              <summary onClick={(event) => {
-                event.preventDefault();
-                setActionsExpansion({ guideId: state.id, open: !actionsOpen });
-              }}>
-                <strong>Try, build and run</strong>
-                <span>Explore this proposal or prepare it to use.</span>
-              </summary>
-              {designConversationActive && progress && !busy && <SetupProgressCard progress={progress} resume={guideResume}
-                onResume={resumeGuide} onNavigate={navigateProgressAction} disabled={blocked || loadingSetup} Icon={Icon} />}
-              <div id="setup-trial" ref={trialRef}>
-              <RehearsalPanel state={state} plan={plan} build={implementation} busy={busy || applyUnconfirmed || sendUnconfirmed || state.operation?.status === "running"}
-                selectionScope={lifecycleSelection.current} pendingManual={!!manualNote} navigation={trialNavigation}
-                onActivity={acceptRehearsalActivity} onRepairReceipt={acceptImplementationAdmission} onReceipt={acceptRehearsalReceipt} />
-              </div>
-              <div ref={implementationRef} role="region" aria-label="Application build" tabIndex={-1}>
-              <p className="setup-custom-application-intro"><strong>Custom application</strong>
-                <span>{agentTeamAvailable ? "Use the builder when your requested outcomes need custom screens or application code. The agent team package does not implement remaining application work."
-                  : "Build application turns your proposal into an application and installs your agents with it."}</span></p>
-              <ImplementationPanel state={state} plan={plan} designBusy={busy || applyUnconfirmed || sendUnconfirmed || state.operation?.status === "running"}
-                selectionScope={lifecycleSelection.current} pendingManual={!!manualNote} Icon={Icon} admittedReceipt={implementationAdmission}
-                navigation={implementationNavigation} onNavigate={navigateProgressAction} onRevise={revisePackagePlan}
-                onReceipt={acceptImplementationReceipt} onDownloaded={acceptApplicationDownloaded} />
-              </div>
-              <div id="setup-deployment" ref={deploymentRef}>
-              <DeploymentPanel state={state} plan={plan} build={implementation}
-                initialSourceKind={!agentTeamAvailable || deploymentCanPrepare(implementation, state) ? "application" : "native-team"}
-                agentTeamAvailable={agentTeamAvailable}
-                sourceNavigation={deploymentNavigation}
-                selectionScope={lifecycleSelection.current} designBusy={busy || applyUnconfirmed || sendUnconfirmed || state.operation?.status === "running"} pendingManual={!!manualNote} Icon={Icon}
-                onReceipt={acceptDeploymentReceipt} onRemoteReceipt={acceptRemoteDeploymentReceipt} remoteTargetRef={remoteDeploymentRef}
-                onRepairReceipt={acceptImplementationAdmission} onChooseCloudProject={chooseCloudProject} />
-              </div>
-            </details>}
             {review && !busy && plan && (
               <AgentMessage>
                 <div className="setup-review-card">
@@ -2656,7 +2708,7 @@ export function GuidedSetup({
                   <p>{plan.project.description || state.summary}</p>
                   <div className="setup-package-tags">
                     <span>{identities(plan).length} agents</span>
-                    <span>{plan.connections.length} {plan.connections.length === 1 ? "connection" : "connections"}</span>
+                    {plan.connections.length > 0 && <span>{plan.connections.length} {plan.connections.length === 1 ? "planned connection" : "planned connections"}</span>}
                     <span>
                       {plan.target === "gcp"
                         ? "Google Cloud"
@@ -2665,17 +2717,10 @@ export function GuidedSetup({
                           : "Linux"}
                     </span>
                   </div>
-                  {requirements.length > 0 && (
-                    <div className="setup-readiness">
-                      <strong>Before this can run</strong>
-                      <SetupRequirementGroups state={state} />
-                    </div>
-                  )}
-                  <ScopeDecisions state={state} />
                   <p className="setup-review-expectation">
                     {packagePreparationReason(state, plan)
                       ? "Accepting saves this design and its choices. Package preparation is pending; you can keep refining the plan."
-                      : "Accepting prepares the native team and configuration. Use Build for custom application code. Enter declared private settings during installation, then verify the actual connections separately."}
+                      : "Accepting saves this plan. Before building, connect the required services and check access to the resources your application needs."}
                   </p>
                   {packagePreparationReason(state, plan) && <div className="setup-readiness" role="status">
                     <p>{packagePreparationReason(state, plan)}</p>
@@ -2692,9 +2737,66 @@ export function GuidedSetup({
                   <small className="setup-card-foot">
                     Or tell me what you would change below.
                   </small>
+                  {requirements.length > 0 && <details className="setup-readiness setup-requirement-details">
+                    <summary>Work and checks still needed ({requirements.length})</summary>
+                    <SetupRequirementGroups state={state} />
+                  </details>}
+                  <ScopeDecisions state={state} compact />
                 </div>
               </AgentMessage>
             )}
+            {agentTeamAvailable && (state.proposal || state.blueprint) && !busy && <NativeTeamPackage state={state} packageBusy={packageBusy} blocked={blocked}
+              deploymentObservation={deploymentObservation}
+              onInstall={(displayed) => navigateInstallation("native-team", displayed)}
+              onPackage={inspectPackage} Icon={Icon} targetRef={teamPackageRef} downloadedKey={nativeDownloadedKey} onRevise={revisePackagePlan} />}
+            {(state.proposal || state.blueprint) && <details className="setup-proposal-actions" open={actionsOpen}>
+              <summary onClick={(event) => {
+                event.preventDefault();
+                setActionsExpansion({ guideId: state.id, open: !actionsOpen });
+              }}>
+                <strong>Build, test and install</strong>
+                <span>Open a step to review its work. Your saved activity stays available.</span>
+              </summary>
+              {designConversationActive && progress && !busy && <SetupProgressCard progress={progress} resume={guideResume}
+                onResume={resumeGuide} onNavigate={navigateProgressAction} disabled={blocked || loadingSetup} Icon={Icon} />}
+              <details data-setup-phase="trial" className="setup-phase" open={currentPhase === "trial"}
+                hidden={!agentTeamAvailable && !checkedApplication && !rehearsal?.rehearsal_id && currentPhase !== "trial"}>
+              <summary onClick={event => { event.preventDefault(); setPhaseSelection({ guideId: state.id, version: state.version,
+                phase: currentPhase === "trial" ? "conversation" : "trial" }); }}>Try with sample data (optional)</summary>
+              <div id="setup-trial" ref={trialRef}>
+              <RehearsalPanel state={state} plan={plan} build={implementation} busy={busy || applyUnconfirmed || sendUnconfirmed || state.operation?.status === "running"}
+                selectionScope={lifecycleSelection.current} pendingManual={!!manualNote} navigation={trialNavigation}
+                onActivity={acceptRehearsalActivity} onRepairReceipt={acceptImplementationAdmission} onReceipt={acceptRehearsalReceipt} />
+              </div>
+              </details>
+              <details data-setup-phase="build" className="setup-phase" open={currentPhase === "build"}>
+              <summary onClick={event => { event.preventDefault(); setPhaseSelection({ guideId: state.id, version: state.version,
+                phase: currentPhase === "build" ? "conversation" : "build" }); }}>Build and checks</summary>
+              <div ref={implementationRef} role="region" aria-label="Application build" tabIndex={-1}>
+              <p className="setup-custom-application-intro"><strong>Custom application</strong>
+                <span>{agentTeamAvailable ? "Use the builder when your requested outcomes need custom screens or application code. The agent team package does not implement remaining application work."
+                  : "Build application turns your proposal into an application and installs your agents with it."}</span></p>
+              <ImplementationPanel state={state} plan={plan} designBusy={busy || applyUnconfirmed || sendUnconfirmed || state.operation?.status === "running"}
+                selectionScope={lifecycleSelection.current} pendingManual={!!manualNote} Icon={Icon} admittedReceipt={implementationAdmission}
+                navigation={implementationNavigation} onNavigate={navigateProgressAction} onRevise={revisePackagePlan}
+                onReceipt={acceptImplementationReceipt} onDownloaded={acceptApplicationDownloaded} />
+              </div>
+              </details>
+              <details data-setup-phase="deployment" className="setup-phase" open={currentPhase === "deployment"}
+                hidden={!installationRelevant}>
+              <summary onClick={event => { event.preventDefault(); setPhaseSelection({ guideId: state.id, version: state.version,
+                phase: currentPhase === "deployment" ? "conversation" : "deployment" }); }}>Installation</summary>
+              <div id="setup-deployment" ref={deploymentRef}>
+              <DeploymentPanel state={state} plan={plan} build={implementation}
+                initialSourceKind={!agentTeamAvailable || deploymentCanPrepare(implementation, state) ? "application" : "native-team"}
+                agentTeamAvailable={agentTeamAvailable}
+                sourceNavigation={deploymentNavigation}
+                selectionScope={lifecycleSelection.current} designBusy={busy || applyUnconfirmed || sendUnconfirmed || state.operation?.status === "running"} pendingManual={!!manualNote} Icon={Icon}
+                onReceipt={acceptDeploymentReceipt} onRemoteReceipt={acceptRemoteDeploymentReceipt} remoteTargetRef={remoteDeploymentRef}
+                onRepairReceipt={acceptImplementationAdmission} onChooseCloudProject={chooseCloudProject} />
+              </div>
+              </details>
+            </details>}
             {(ready || state.status === "handoff") && !busy && plan && <ManualSetupExports
               plan={plan} showPackage={ready && checkedApplication} checkedApplication={checkedApplication}
               packageBusy={packageBusy} blocked={blocked} briefBlocked={blocked || loadingSetup} downloaded={downloaded} saving={saving}
@@ -2763,12 +2865,12 @@ export function GuidedSetup({
                 disabled={busy || loadingSetup || packageBusy || !!manualNote}
                 onClick={() => applyPlan(state, applyingPlan)}>Try saving this plan again</button>}
             </div>}
-            <GuideWaitStatus state={loadingSetup ? null : state} snapshot={timeline}
+            {!journeyChat && <GuideWaitStatus state={loadingSetup ? null : state} snapshot={timeline}
               submitting={localSending && busyAction !== "apply"} firstIdea={firstTurnWaiting}
-              following={following} onFollow={() => revealResponse(true)} />
-            {!narrow && <GuideResponseNotice state={state} publicationKey={unseenResponse} busy={busy}
+              following={following} onFollow={() => revealResponse(true)} />}
+            {!journeyChat && !narrow && <GuideResponseNotice state={state} publicationKey={unseenResponse} busy={busy}
               onReveal={(key) => revealResponse(true, key)} Icon={Icon} />}
-            {question && !firstTurnWaiting && !opening && !(questionInView?.id === state.id && questionInView.version === state.version && questionInView.visible) &&
+            {!journeyChat && question && !firstTurnWaiting && !opening && !(questionInView?.id === state.id && questionInView.version === state.version && questionInView.visible) &&
               <button type="button" className="setup-question-return"
               onClick={revealCurrentQuestion} aria-label={`Show current question: ${question.title}`}>
               <span>Current question</span>
@@ -2988,6 +3090,8 @@ export function GuidedSetup({
           </div>
         </section>
         <aside className="setup-plan-pane" aria-label="Your evolving system">
+          <details className="setup-plan-details" open={welcome || mobilePanel === "plan"}>
+          <summary>Review or edit your plan</summary>
           <SetupPlan
             welcome={welcome}
             welcomeDraft={welcome ? draft : ""}
@@ -3017,6 +3121,7 @@ export function GuidedSetup({
             onExpand={() => setMobilePanel("plan")}
             onConfigure={openConfig}
           />
+          </details>
         </aside>
       </div>
       {configOpen && (
@@ -3034,7 +3139,7 @@ export function GuidedSetup({
             <header>
               <div>
                 <span className="setup-eyebrow">OPTIONAL MANUAL OVERRIDE</span>
-                <h2 id="setup-config-title">Your configuration</h2>
+                <h2 id="setup-config-title">Advanced configuration</h2>
               </div>
               <button
                 aria-label="Close configuration"

@@ -481,9 +481,9 @@ and its CI must be green before a release tag (`require_ci_green`):
   machine-authority change or a dogma document (`governance_gates` in the
   plan, `GOVERNANCE_DOC_PATTERNS` in `scripts/ci-cargo-lanes.mjs`); the `CI
   gate` requires both on such a change.
-- `tlc-audits`: on a machine-authority change, the sixteen hand-written TLC
+- `tlc-audits`: on a machine-authority change, the twenty-one hand-written TLC
   audit shards of the canonical TLC lane
-  (`machine_verify_all_tlc_test.sh --part audits-a` through `audits-o`, and `audits-q`) in parallel,
+  (`machine_verify_all_tlc_test.sh --part audits-a` through `audits-o`, and `audits-q` through `audits-v`) in parallel,
   needing only a JDK and the TLC jar (`.github/actions/setup-tlc-ci`, the one
   TLC install for every lane: an immutable repository mirror of the tlaplus
   v1.8.0 jar pinned by sha256); the `CI gate` requires them on such a change. The `machine-verify --all` sweep is not in PR CI.
@@ -586,7 +586,16 @@ and its CI must be green before a release tag (`require_ci_green`):
   group in `.config/nextest.toml`) has rows of its own, one
   `--partition count:K/N` per canary, so the canaries run on separate
   runners; the coverage check credits it only when every partition is
-  planned. The plan
+  planned. A test no hosted runner can run, in a binary whose other tests
+  do run (it needs an environment only its product's own lane provides), is
+  listed by exact name with its reason in `HOSTED_RUNNER_EXCLUDED_TESTS` and
+  named in `hosted_runner_excluded_tests`: the row that holds its binary
+  leaves it out with the row's `filter`, and
+  `scripts/ci-verify-row-binaries.mjs` fails the row when a listed test is
+  still selected or its binary no longer has it. The planner refuses an
+  unknown package or target, an empty or repeated list, and a binary listed
+  both whole and by test. Such an exclusion routes a test away from a hosted
+  runner; it does not pass it, and the test's acceptance stays owed. The plan
   fails when `scripts/ci-hook-coverage.mjs` finds a hook binary in scope
   without a row (other than a lib binary the plan leaves to those unit
   lanes, and a binary no hosted runner can judge,

@@ -7,6 +7,7 @@ mod boot_obligation_rows;
 mod created_identity_rows;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 mod declared_apply_rows;
+mod ensure_convergence_rows;
 #[cfg(feature = "openai-live")]
 mod existing_live_delegation;
 mod historical_metadata;
@@ -44,6 +45,8 @@ mod seat_comms_key;
 mod seat_declared_wiring;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 mod startup_binding_release;
+#[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+mod store_owned_identity_rows;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 mod unborn_seat_wake;
 use crate::definition::{
@@ -89084,11 +89087,21 @@ struct MobRuntimeParitySnapshotSummary {
     identity_entry_tombstones: BTreeSet<String>,
     identity_entry_unreadable: BTreeSet<String>,
     spawn_exec_created_custody: BTreeSet<String>,
+    // Identity changes: whether the host holds them, the entries whose
+    // removal or archive retires their member, and each identity's held or
+    // activating construction attempt, read from the runtime's formal state.
+    identity_changes_held: bool,
+    identity_entry_removing: BTreeSet<String>,
+    identity_entry_archiving: BTreeSet<String>,
+    identity_entry_constructions_held: BTreeMap<String, u64>,
+    identity_entry_constructions_activating: BTreeMap<String, u64>,
     member_peer_ids: BTreeMap<String, String>,
     member_peer_endpoints: BTreeMap<String, String>,
     member_prior_peer_endpoints: BTreeMap<String, BTreeSet<String>>,
     member_restore_failures: BTreeMap<String, String>,
     member_restore_failure_codes: BTreeMap<String, String>,
+    member_custody_unrestored: BTreeMap<String, String>,
+    member_custody_unrestored_causes: BTreeMap<String, String>,
     runtime_retire_refusal_codes: BTreeMap<String, String>,
     runtime_retire_refusal_reasons: BTreeMap<String, String>,
     runtime_retire_pending_sessions: BTreeMap<String, String>,
@@ -90105,6 +90118,46 @@ async fn mob_runtime_parity_snapshot_summary(
                         .collect::<BTreeMap<_, _>>(),
                 ),
             ),
+            (
+                "member_custody_unrestored",
+                serde_json::to_value(
+                    dsl.member_custody_unrestored
+                        .iter()
+                        .map(|(key, value)| (format!("{key:?}"), format!("{value:?}")))
+                        .collect::<BTreeMap<_, _>>(),
+                ),
+            ),
+            (
+                "member_custody_unrestored_causes",
+                serde_json::to_value(
+                    dsl.member_custody_unrestored_causes
+                        .iter()
+                        .map(|(key, value)| (format!("{key:?}"), format!("{value:?}")))
+                        .collect::<BTreeMap<_, _>>(),
+                ),
+            ),
+            // Identity changes, from the runtime's formal state (the machine
+            // state the actor publishes), keyed by the plain identity.
+            (
+                "identity_changes_held",
+                serde_json::to_value(resume.identity_changes_held),
+            ),
+            (
+                "identity_entry_removing",
+                serde_json::to_value(&resume.identity_entry_removing),
+            ),
+            (
+                "identity_entry_archiving",
+                serde_json::to_value(&resume.identity_entry_archiving),
+            ),
+            (
+                "identity_entry_constructions_held",
+                serde_json::to_value(&resume.identity_entry_constructions_held),
+            ),
+            (
+                "identity_entry_constructions_activating",
+                serde_json::to_value(&resume.identity_entry_constructions_activating),
+            ),
         ] {
             formal_available_fields.insert(
                 name.to_string(),
@@ -90131,6 +90184,24 @@ async fn mob_runtime_parity_snapshot_summary(
             snap.member_restore_failure_codes
                 .iter()
                 .map(|(key, value)| (format!("{key:?}"), value.clone()))
+                .collect()
+        })
+        .unwrap_or_default();
+    let member_custody_unrestored = dsl_t2
+        .as_ref()
+        .map(|snap| {
+            snap.member_custody_unrestored
+                .iter()
+                .map(|(key, value)| (format!("{key:?}"), format!("{value:?}")))
+                .collect()
+        })
+        .unwrap_or_default();
+    let member_custody_unrestored_causes = dsl_t2
+        .as_ref()
+        .map(|snap| {
+            snap.member_custody_unrestored_causes
+                .iter()
+                .map(|(key, value)| (format!("{key:?}"), format!("{value:?}")))
                 .collect()
         })
         .unwrap_or_default();
@@ -90330,6 +90401,41 @@ async fn mob_runtime_parity_snapshot_summary(
                 .iter()
                 .map(|identity| format!("{identity:?}"))
                 .collect::<BTreeSet<_>>(),
+        )
+    };
+    // Identity changes, read from the runtime's formal state as the created
+    // identity entries are: the hold, the removal and archive marks, and the
+    // held and activating construction attempts with their attempt numbers.
+    let (
+        identity_changes_held,
+        identity_entry_removing,
+        identity_entry_archiving,
+        identity_entry_constructions_held,
+        identity_entry_constructions_activating,
+    ) = {
+        let state = handle.machine_state_watch_rx.borrow();
+        (
+            state.identity_changes_held,
+            state
+                .identity_entry_removing
+                .iter()
+                .map(|identity| format!("{identity:?}"))
+                .collect::<BTreeSet<_>>(),
+            state
+                .identity_entry_archiving
+                .iter()
+                .map(|identity| format!("{identity:?}"))
+                .collect::<BTreeSet<_>>(),
+            state
+                .identity_entry_constructions_held
+                .iter()
+                .map(|(identity, attempt)| (format!("{identity:?}"), *attempt))
+                .collect::<BTreeMap<_, _>>(),
+            state
+                .identity_entry_constructions_activating
+                .iter()
+                .map(|(identity, attempt)| (format!("{identity:?}"), *attempt))
+                .collect::<BTreeMap<_, _>>(),
         )
     };
     let host_binding_generation_highwater = dsl_t2
@@ -90903,6 +91009,8 @@ async fn mob_runtime_parity_snapshot_summary(
         member_prior_peer_endpoints,
         member_restore_failures,
         member_restore_failure_codes,
+        member_custody_unrestored,
+        member_custody_unrestored_causes,
         runtime_retire_refusal_codes,
         runtime_retire_refusal_reasons,
         runtime_retire_pending_sessions,
@@ -90930,6 +91038,11 @@ async fn mob_runtime_parity_snapshot_summary(
         identity_entry_tombstones,
         identity_entry_unreadable,
         spawn_exec_created_custody,
+        identity_changes_held,
+        identity_entry_removing,
+        identity_entry_archiving,
+        identity_entry_constructions_held,
+        identity_entry_constructions_activating,
         confirmed_host_binding_revocations,
         replacement_host_bind_endpoints,
         replacement_host_binding_generations,
@@ -91130,6 +91243,20 @@ fn mob_runtime_parity_field_value(
                 .map(|k| (k.clone(), 0u64))
                 .collect(),
         )),
+        "member_custody_unrestored" => Some(MobRuntimeParityExprValue::Map(
+            snapshot
+                .member_custody_unrestored
+                .keys()
+                .map(|k| (k.clone(), 0u64))
+                .collect(),
+        )),
+        "member_custody_unrestored_causes" => Some(MobRuntimeParityExprValue::Map(
+            snapshot
+                .member_custody_unrestored_causes
+                .keys()
+                .map(|k| (k.clone(), 0u64))
+                .collect(),
+        )),
         "runtime_retire_refusal_codes" => Some(MobRuntimeParityExprValue::Map(
             snapshot
                 .runtime_retire_refusal_codes
@@ -91188,6 +91315,22 @@ fn mob_runtime_parity_field_value(
         )),
         "spawn_exec_created_custody" => Some(MobRuntimeParityExprValue::Set(
             snapshot.spawn_exec_created_custody.clone(),
+        )),
+        // Identity changes, from the runtime's formal state.
+        "identity_changes_held" => Some(MobRuntimeParityExprValue::Bool(
+            snapshot.identity_changes_held,
+        )),
+        "identity_entry_removing" => Some(MobRuntimeParityExprValue::Set(
+            snapshot.identity_entry_removing.clone(),
+        )),
+        "identity_entry_archiving" => Some(MobRuntimeParityExprValue::Set(
+            snapshot.identity_entry_archiving.clone(),
+        )),
+        "identity_entry_constructions_held" => Some(MobRuntimeParityExprValue::Map(
+            snapshot.identity_entry_constructions_held.clone(),
+        )),
+        "identity_entry_constructions_activating" => Some(MobRuntimeParityExprValue::Map(
+            snapshot.identity_entry_constructions_activating.clone(),
         )),
         "member_materialization_epoch"
         | "member_boot_obligation_owed"
@@ -91994,6 +92137,10 @@ fn summarize_mob_runtime_error(error: &MobError) -> String {
         }
         MobError::MemberAlreadyExists(_) => "meerkat_already_exists".to_string(),
         MobError::IdentityMember { .. } => "identity_member".to_string(),
+        MobError::IdentityChangeRefused { refusal } => {
+            format!("identity_change_refused:{}", refusal.kind())
+        }
+        MobError::IdentityArchived { .. } => "identity_archived".to_string(),
         MobError::SpawnCanceled { .. } => "spawn_canceled".to_string(),
         MobError::ResumeProviderParamsRequireResume { .. } => {
             "resume_provider_params_require_resume".to_string()
@@ -92096,6 +92243,7 @@ fn summarize_mob_runtime_error(error: &MobError) -> String {
             "member_durable_tail_unprovable".to_string()
         }
         MobError::MemberCustodyDeferred { .. } => "member_custody_deferred".to_string(),
+        MobError::MobQuarantined { class, .. } => format!("mob_quarantined:{class}"),
         MobError::SpawnMemberAdmissionDenied { .. } => "spawn_member_admission_denied".to_string(),
         MobError::BridgeRequestTimedOut { .. } => "bridge_request_timed_out".to_string(),
         MobError::ForkSourceUnavailable { .. } => "fork_source_unavailable".to_string(),

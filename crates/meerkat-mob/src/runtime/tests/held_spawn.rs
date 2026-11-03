@@ -33,7 +33,7 @@ const STILL_PENDING: Duration = Duration::from_millis(200);
 /// destination gate, each destination selection parks there until the gate
 /// is released.
 #[derive(Default)]
-struct SelectingHost {
+pub(super) struct SelectingHost {
     destination_gate: Option<Arc<TestRuntimeControlBarrier>>,
 }
 
@@ -101,7 +101,7 @@ impl crate::MemberRuntimeRegistrationHook for SelectingHost {
 
 /// The machine's governed work host: a scoped member destination needs one.
 /// It admits no governed input, which these tests never submit.
-struct AdmitsNothing;
+pub(super) struct AdmitsNothing;
 
 impl meerkat_runtime::input_authority::NativeWorkAuthorizationHost for AdmitsNothing {
     fn authenticate_association(

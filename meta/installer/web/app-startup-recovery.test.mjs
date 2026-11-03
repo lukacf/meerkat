@@ -145,6 +145,7 @@ function fixture({ raw = null, workbenchReplies = [], importReplies = [], storag
       proposal: null, blueprint: null, brief: { facts: {}, requirements: [] }, capabilities: { available: false }, question: null,
     };
     if (url === '/api/guide/list') return { setups: [{ id: guideId, name: 'Existing saved conversation', status: 'question' }] };
+    if (url === `/api/guide/${guideId}/toolkit-saved`) return { guide_id: guideId, available: false };
     if (url.startsWith(`/api/guide/${guideId}/timeline?`)) return { available: true, frames: [], bindings: [], exhausted: true };
     if (url === '/api/provider-settings') return {
       providers: ['openai', 'anthropic', 'gemini'].map(provider => ({ provider, configured: false, source: null, editable: true })),
@@ -260,6 +261,7 @@ test('failed initial workbench read preserves exact saved draft bytes and explic
   const raw = rawSaved(), state = fixture({ raw, workbenchReplies: [new Error('Synthetic workbench unavailable.')] });
   await mountedApp(t, state, async ({ document }) => {
     assert.match(document.querySelector('[role="alert"]').textContent, /Synthetic workbench unavailable/);
+    assert.equal(document.querySelector('.loading-page h1').textContent, 'Meerkat Forge');
     assert.equal(state.values.get(DRAFT_KEY), raw);
     assert.deepEqual(state.draftWrites(), []);
     assert.equal(state.importCalls().length, 0);

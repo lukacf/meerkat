@@ -71,7 +71,7 @@ export function ToolkitSavedSetup({ guideId, version, disabled, onDiscuss, onClo
   async function upload(file) {
     if (!file || blocked || state?.status === "preparing") return;
     if (file.size < 1 || file.size > MAX_MANIFEST_BYTES) {
-      setError("Choose a saved Toolkit recovery JSON file of at most 64 KiB.");
+      setError("Choose a saved saved tool JSON file of at most 64 KiB.");
       return;
     }
     await act("upload", async () => {
@@ -109,7 +109,7 @@ export function ToolkitSavedSetup({ guideId, version, disabled, onDiscuss, onClo
     <header><div><span className="setup-eyebrow">CONTINUE FROM YOUR OWN CONTEXT</span>
       <h2>Review saved tools</h2></div>
       <button type="button" aria-label="Close saved tools" onClick={onClose}>Close</button></header>
-    <p>Bring an earlier connection into this setup as a proposal. Choose one request from your Toolkit recovery file, then review it against the current tooling.</p>
+    <p>Bring an earlier connection into this setup as a proposal. Choose one request from your saved tool file, then review it against the current tooling.</p>
     {changed && <p role="status">Your setup changed while this panel was open. Close and reopen it before choosing another request.</p>}
     {!state && !error && <p role="status">Reading saved tools...</p>}
     {state?.available === false && <p role="status">{savedToolkitErrorMessage("saved_settings_host_unavailable")}</p>}
@@ -117,7 +117,7 @@ export function ToolkitSavedSetup({ guideId, version, disabled, onDiscuss, onClo
       {host && <p className="setup-saved-tools-host">Review on <strong>{host.target}</strong> with <strong>{host.families?.join(", ")}</strong>.</p>}
       <button type="button" className="setup-action" disabled={blocked || waiting}
         onClick={() => picker.current?.click()}>Choose recovery file</button>
-      <input ref={picker} type="file" accept=".json,application/json" aria-label="Toolkit recovery file" hidden
+      <input ref={picker} type="file" accept=".json,application/json" aria-label="saved tool file" hidden
         onChange={event => { const file = event.target.files?.[0]; event.target.value = ""; upload(file); }} />
       {!!state.requests?.length && <div className="setup-saved-tools-requests" role="group" aria-label="Saved connection requests">
         <p>Which connection do you want to review?</p>

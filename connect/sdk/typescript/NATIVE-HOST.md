@@ -154,12 +154,12 @@ that handle on every rejected composed stop and preserves unprintable original
 errors without formatting them.
 
 The source package pins its optional peers and development dependencies to
-published `@rkat/meta-sdk` 0.9.7 and `@rkat/sdk` 0.9.8. The npm lock contains
+published `@rkat/meta-sdk` 0.9.7 and `@rkat/sdk` 0.9.9. The npm lock contains
 their registry tarballs and integrity hashes; `npm ci --ignore-scripts` installs
 that exact selection before Toolkit's build and tests. The native-host control
 module imports Meta directly and does not skip when it is absent.
 
-Toolkit's own package version remains 0.9.4. This source update does not replace
+Toolkit's own package version is 0.9.9. This source update does not replace
 an existing release asset or qualify an installed application. Other native
 development compositions must record their matching SDK source and actual
 staged bytes as described in [BUILDING.md](../../BUILDING.md#sdks).

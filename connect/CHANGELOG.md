@@ -5,6 +5,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.9.9] - 2026-11-03
+
 ### Breaking
 
 - Connect's paired-host contract no longer names one host product. Every

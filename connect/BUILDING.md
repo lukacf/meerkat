@@ -372,11 +372,11 @@ for the selection above.
 See [follow-up scope](docs/releases/follow-up.md#current-integration-status)
 for exact results, the upstream correction's status and remaining installed qualification.
 
-Connect's [Python metadata](sdk/python/pyproject.toml) is 0.9.5, with the native-host
-extra requiring `meerkat-meta==0.9.7`. Connect's own
-[TypeScript package version](sdk/typescript/package.json) remains 0.9.4; its
+Connect's [Python metadata](sdk/python/pyproject.toml) is 0.9.9, with the native-host
+extra requiring `meerkat-meta==0.9.9`. Connect's own
+[TypeScript package version](sdk/typescript/package.json) is 0.9.9; its
 development and optional peer dependencies are `@rkat/meta-sdk` 0.9.7 and
-`@rkat/sdk` 0.9.8. The [TypeScript lock](sdk/typescript/package-lock.json) selects
+`@rkat/sdk` 0.9.9. The [TypeScript lock](sdk/typescript/package-lock.json) selects
 those published tarballs and their actual integrity hashes. The
 `10e5b80` validation
 records the earlier 0.9.5 dependency update; missing-distribution checks from

@@ -1277,6 +1277,20 @@ jobs:
           # its standard library only, and refuse to guess an interpreter.
           TOOLKIT_SHARED_TEST_PYTHON="$(command -v python3)"
           export TOOLKIT_SHARED_TEST_PYTHON
+          # Other Connect tests need more of the selected Python: the private
+          # host's Python participant imports this checkout's Connect and Meta
+          # SDKs, and the shared setup controls run the consumer-setup MCP
+          # adapter on MCP 2.2.0. A row of a package whose tests read the
+          # selection gets the interpreter scripts/connect-test-python
+          # prepares; it prints nothing for any other row. The shared setup
+          # native case selects that same interpreter as
+          # TOOLKIT_D5_TEST_PYTHON.
+          # shellcheck disable=SC2086
+          connect_python="$(scripts/connect-test-python --if-needed "${RUNNER_TEMP}/connect-test-python" ${PACKAGES})"
+          if [[ -n "${connect_python}" ]]; then
+            export TOOLKIT_SHARED_TEST_PYTHON="${connect_python}" TOOLKIT_D5_TEST_PYTHON="${connect_python}"
+            echo "Connect test Python: ${connect_python}"
+          fi
           # shellcheck disable=SC2086
           ./scripts/repo-cargo nextest run ${PACKAGES} ${TARGETS} --profile ci-pr "${partition_args[@]}" "${filter_args[@]}" \
             --no-tests=pass --no-fail-fast --status-level fail --final-status-level fail
@@ -1987,6 +2001,20 @@ jobs:
           # its standard library only, and refuse to guess an interpreter.
           TOOLKIT_SHARED_TEST_PYTHON="$(command -v python3)"
           export TOOLKIT_SHARED_TEST_PYTHON
+          # Other Connect tests need more of the selected Python: the private
+          # host's Python participant imports this checkout's Connect and Meta
+          # SDKs, and the shared setup controls run the consumer-setup MCP
+          # adapter on MCP 2.2.0. A row of a package whose tests read the
+          # selection gets the interpreter scripts/connect-test-python
+          # prepares; it prints nothing for any other row. The shared setup
+          # native case selects that same interpreter as
+          # TOOLKIT_D5_TEST_PYTHON.
+          # shellcheck disable=SC2086
+          connect_python="$(scripts/connect-test-python --if-needed "${RUNNER_TEMP}/connect-test-python" ${PACKAGES})"
+          if [[ -n "${connect_python}" ]]; then
+            export TOOLKIT_SHARED_TEST_PYTHON="${connect_python}" TOOLKIT_D5_TEST_PYTHON="${connect_python}"
+            echo "Connect test Python: ${connect_python}"
+          fi
           # shellcheck disable=SC2086
           ./scripts/repo-cargo nextest run ${PACKAGES} ${TARGETS} --profile ci-pr "${partition_args[@]}" "${filter_args[@]}" \
             --no-tests=pass --no-fail-fast --status-level fail --final-status-level fail
@@ -2103,6 +2131,20 @@ jobs:
           # its standard library only, and refuse to guess an interpreter.
           TOOLKIT_SHARED_TEST_PYTHON="$(command -v python3)"
           export TOOLKIT_SHARED_TEST_PYTHON
+          # Other Connect tests need more of the selected Python: the private
+          # host's Python participant imports this checkout's Connect and Meta
+          # SDKs, and the shared setup controls run the consumer-setup MCP
+          # adapter on MCP 2.2.0. A row of a package whose tests read the
+          # selection gets the interpreter scripts/connect-test-python
+          # prepares; it prints nothing for any other row. The shared setup
+          # native case selects that same interpreter as
+          # TOOLKIT_D5_TEST_PYTHON.
+          # shellcheck disable=SC2086
+          connect_python="$(scripts/connect-test-python --if-needed "${RUNNER_TEMP}/connect-test-python" ${PACKAGES})"
+          if [[ -n "${connect_python}" ]]; then
+            export TOOLKIT_SHARED_TEST_PYTHON="${connect_python}" TOOLKIT_D5_TEST_PYTHON="${connect_python}"
+            echo "Connect test Python: ${connect_python}"
+          fi
           # shellcheck disable=SC2086
           ./scripts/repo-cargo nextest run ${PACKAGES} ${TARGETS} --profile ci-pr "${partition_args[@]}" "${filter_args[@]}" \
             --no-tests=pass --no-fail-fast --status-level fail --final-status-level fail

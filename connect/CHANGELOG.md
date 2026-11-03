@@ -47,6 +47,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   proposal is no longer current. Before, the check was refused but the earlier
   selection stayed current.
 
+- Provider setup and first-target setup read a realm's model targets as
+  Meerkat resolves them, so a realm whose GitHub Copilot account is
+  configured once, by a `[realm.<realm>.copilot]` section, lists the
+  account's routes (`copilot_openai`, `copilot_anthropic` and
+  `copilot_gemini`) as configured targets, and first-target setup is refused
+  next to the section. The terminal's list of existing targets offers only
+  the targets a session for the requested model runs on, and the chosen
+  target's details show the route that session runs on. Before, such a realm
+  looked unconfigured there, and the list offered each Copilot route for a
+  model of one provider family: choosing `copilot_openai` for an Anthropic
+  model ran the session on `copilot_anthropic`.
+
 ### Upgrade notes
 
 - Build Connect with Rust 1.97.0 or newer, from the repository root. An
@@ -67,17 +79,3 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   `rkat storage doctor` and handle the sessions and mobs it lists under
   `operator-instruction-envelope` and `operator-instruction-mob-events` as
   Core's CHANGELOG describes.
-
-### Known limitations
-
-- Provider setup and first-target setup read a realm's explicit tables only,
-  so they do not yet list the routes a `[realm.<realm>.copilot]` section
-  declares (Meerkat's GitHub Copilot account configured once), and a realm
-  whose Copilot account is configured only by that section can look
-  unconfigured there. Use the explicit Copilot tables with Connect until a
-  later release. With the explicit tables, Connect can offer each of the three
-  Copilot routes as a target for a model of one provider family, and the
-  session runs on the account's route of the model's family whichever is
-  chosen, on the same credential: choosing `copilot_openai` for an Anthropic
-  model runs on `copilot_anthropic`, so the chosen target's name is not the
-  route the session runs on.

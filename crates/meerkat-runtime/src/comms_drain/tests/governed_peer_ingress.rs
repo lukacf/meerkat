@@ -241,6 +241,47 @@ impl Governed {
         selection: Option<meerkat_core::ControllerModelSelection>,
         custody: Arc<Custody>,
     ) -> Self {
+        Self::try_persistent(store, selection, custody).expect("governed persistent machine")
+    }
+
+    /// [`Self::persistent`] under the controller `selection`, restarted over
+    /// a `store` whose previous governed machine this test dropped. Dropping
+    /// that machine does not release its execution custody of `store` at
+    /// once: an admission hands its accepted-input boundary work to the
+    /// process's machine cleanup runtime and answers before that work ends,
+    /// and the work keeps a clone of the machine, so of its claim, until it
+    /// ends on a thread of that runtime. Until the last holder drops the
+    /// claim a second governed owner is refused `Busy`, so the restart waits,
+    /// bounded, for the release; any other refusal fails at once.
+    async fn restarted(
+        store: Arc<crate::store::InMemoryRuntimeStore>,
+        selection: meerkat_core::ControllerModelSelection,
+        custody: Arc<Custody>,
+    ) -> Self {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                match Self::try_persistent(
+                    Arc::clone(&store),
+                    Some(selection.clone()),
+                    Arc::clone(&custody),
+                ) {
+                    Err(crate::RuntimeDriverError::ControllerReadinessUnavailable {
+                        reason: meerkat_core::authorization::ControllerReadinessFailure::Busy,
+                    }) => tokio::time::sleep(Duration::from_millis(5)).await,
+                    built => return built,
+                }
+            }
+        })
+        .await
+        .expect("the dropped machine's execution custody of the store is released")
+        .expect("governed persistent machine")
+    }
+
+    fn try_persistent(
+        store: Arc<crate::store::InMemoryRuntimeStore>,
+        selection: Option<meerkat_core::ControllerModelSelection>,
+        custody: Arc<Custody>,
+    ) -> Result<Self, crate::RuntimeDriverError> {
         let mut chosen = None;
         let machine =
             MeerkatMachine::persistent_governed_with_host_for_test(store, None, |machine| {
@@ -253,8 +294,7 @@ impl Governed {
                 });
                 chosen = Some(host.selection().clone());
                 host as Arc<dyn crate::input_authority::NativeWorkAuthorizationHost>
-            })
-            .expect("governed persistent machine");
+            })?;
         let binder = Arc::new(TestBinder::new(
             chosen.expect("the host's selection"),
             custody,
@@ -262,10 +302,10 @@ impl Governed {
         machine
             .install_peer_ingress_binder(binder.clone())
             .expect("binder installs before any session");
-        Self {
+        Ok(Self {
             adapter: Arc::new(machine),
             binder,
-        }
+        })
     }
 
     async fn session(&self) -> SessionId {
@@ -768,7 +808,7 @@ async fn after_a_restart_an_ended_delivery_deduplicates_and_a_drifted_rebind_is_
             .expect("end the admitted input");
     }
 
-    let restarted = Governed::persistent(Arc::clone(&store), Some(selection), custody);
+    let restarted = Governed::restarted(Arc::clone(&store), selection, custody).await;
     restarted.register(&session_id).await;
     restarted.binder.answer(
         &session_id,
@@ -1236,7 +1276,7 @@ async fn a_governed_supervisor_delivery_is_read_by_its_payload_id() {
         (first.binder.selection.clone(), payload_input_id)
     };
 
-    let restarted = Governed::persistent(Arc::clone(&store), Some(selection), custody);
+    let restarted = Governed::restarted(Arc::clone(&store), selection, custody).await;
     let id = payload_input_id.to_string();
     let durable = restarted
         .adapter

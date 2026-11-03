@@ -16,6 +16,7 @@ use meerkat_core::{
     AgentToolDispatcher, ContentBlock, SessionId, ToolCallView, ToolDispatchContext, ToolError,
     ToolResult, ops::ToolDispatchOutcome, runtime_bootstrap::RealmLocator,
 };
+use meerkat_runtime::stack_relief::box_in_own_frame;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
@@ -1834,8 +1835,11 @@ impl CheckedInstalls {
         context: &ToolDispatchContext,
         plan: Option<&meerkat_core::ResolvedToolExecutionPlan>,
     ) -> Result<ToolDispatchOutcome, ToolError> {
+        // The operation future is passed by value through `delegate` and its
+        // observers; each layer would otherwise hold it again. Large futures
+        // here are built and boxed in their own frames.
         if call.name == "setup_state" && self.software_review.is_some() {
-            return self.observe_software_review(call, context, plan).await;
+            return box_in_own_frame(|| self.observe_software_review(call, context, plan)).await;
         }
         let Some(approvals) = self
             .software_review
@@ -1843,12 +1847,16 @@ impl CheckedInstalls {
             .filter(|_| INSTALL_TOOLS.contains(&call.name))
         else {
             return self
-                .delegate(call, context, plan, self.inner_call(call, context, plan))
+                .delegate(
+                    call,
+                    context,
+                    plan,
+                    box_in_own_frame(|| self.inner_call(call, context, plan)),
+                )
                 .await;
         };
         if matches!(
-            approvals
-                .await_service_dispatch(self, call, context, plan)
+            box_in_own_frame(|| approvals.await_service_dispatch(self, call, context, plan))
                 .await?,
             crate::approval::SoftwareReviewOutcome::RequiresHuman
         ) {
@@ -1911,7 +1919,7 @@ impl CheckedInstalls {
         let mut physical = None;
         let result = self
             .delegate(call, current, plan, async {
-                let result = self.inner_call(call, current, plan).await;
+                let result = box_in_own_frame(|| self.inner_call(call, current, plan)).await;
                 // The package owner's return is distinct from later local capture
                 // failures. A malformed software receipt does not undo entry.
                 physical = Some(if result.is_ok() {
@@ -1970,12 +1978,13 @@ impl CheckedInstalls {
             } else {
                 None
             };
-            let source = self
-                .software_review
-                .as_ref()
-                .ok_or_else(unavailable)?
-                .reserve_shared_entry(call, context, plan, member.as_deref())
-                .await?;
+            let review = self.software_review.as_ref().ok_or_else(unavailable)?;
+            // The shared-entry reservation is a large future; keep it out of
+            // this operation, which `delegate` holds by value.
+            let source = box_in_own_frame(|| {
+                review.reserve_shared_entry(call, context, plan, member.as_deref())
+            })
+            .await?;
             let preparation = member
                 .as_ref()
                 .map(|member| member.preparation_identity().to_owned());
@@ -2046,12 +2055,10 @@ impl CheckedInstalls {
                 }
                 selected.into_iter().next().unwrap()
             };
-            let observed = self
-                .software_review
-                .as_ref()
-                .ok_or_else(unavailable)?
-                .leave_shared_preparation(call, context, plan, &member)
-                .await?;
+            let review = self.software_review.as_ref().ok_or_else(unavailable)?;
+            let observed =
+                box_in_own_frame(|| review.leave_shared_preparation(call, context, plan, &member))
+                    .await?;
             return Ok(ToolResult::new(call.id.into(), observed.to_string(), false).into());
         }
         outcome
@@ -2094,8 +2101,7 @@ impl CheckedInstalls {
         let outcome = operation.await?;
         #[cfg(unix)]
         let outcome = if call.name == SELECTED_CHECK && self.shared_peer.is_some() {
-            self.release_shared_check(call, context, plan, outcome)
-                .await?
+            box_in_own_frame(|| self.release_shared_check(call, context, plan, outcome)).await?
         } else {
             outcome
         };

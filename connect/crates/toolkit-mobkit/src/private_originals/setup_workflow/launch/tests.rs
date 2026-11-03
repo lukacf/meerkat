@@ -929,6 +929,7 @@ async fn exercise(case: u8) {
             ));
             let fence = LaunchFence {
                 planning: c.planning.clone(),
+                attempt: Arc::new(LaunchAttempt::default()),
             };
             assert!(
                 matches!(fence.enter(), Err(GovernedEntryRefusal::Unavailable(_))),

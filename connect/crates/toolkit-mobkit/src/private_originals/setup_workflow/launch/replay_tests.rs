@@ -1,8 +1,9 @@
 //! The launch submission's one replay after a typed pre-admission answer, on
-//! the actual native owner. The answer comes from the real system: an owner
+//! the actual native owner. Each answer comes from the real system: an owner
 //! change of the source publication held in progress after the real bind
-//! (native input admission then answers PolicyChanged). No native outcome is
-//! synthesized here.
+//! (native input admission then answers PolicyChanged), or the real source
+//! writer held from another task (the launch fence then finds it busy). No
+//! native outcome is synthesized here.
 use super::*;
 use meerkat_core::lifecycle::InputId;
 use meerkat_runtime::SessionServiceRuntimeExt;
@@ -17,6 +18,8 @@ enum Inject {
     /// long, from another task after the bind: native input admission then
     /// refuses with PolicyChanged.
     PolicyChange(Duration),
+    /// Hold the source writer from another task, this long, after the bind.
+    HeldWriter(Duration),
 }
 
 /// What every injected binder of one launch shares across its attempts.
@@ -78,6 +81,20 @@ impl GovernedInputBinder for InjectAfterBind {
                     if !holding.await.map_err(|_| "fixture change hold failed")? {
                         return Err("fixture publication change unavailable".into());
                     }
+                }
+                Inject::HeldWriter(hold) => {
+                    let source = self.source.clone();
+                    let (held, holding) = tokio::sync::oneshot::channel();
+                    self.shared
+                        .holds
+                        .lock()
+                        .unwrap()
+                        .push(tokio::spawn(async move {
+                            let _writer = source.owner.source_writer().await;
+                            let _ = held.send(());
+                            tokio::time::sleep(hold).await;
+                        }));
+                    holding.await.map_err(|_| "fixture writer hold failed")?;
                 }
             }
         }
@@ -436,4 +453,116 @@ fn only_the_exact_policy_changed_answer_is_a_replay() {
     ] {
         assert_eq!(launch_replay(&error, &attempt), None);
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn busy_source_writer_launch_waits_for_the_writer_and_replays_once() {
+    control("held writer replay", async |f, c| {
+        let hold = Duration::from_millis(200);
+        let launch = claimed_launch(f, &c, Inject::HeldWriter(hold), 1).await;
+        let context = dispatch(&c);
+        let deadline = tokio::time::Instant::now() + GUARD;
+        let started = tokio::time::Instant::now();
+        let observation = launch.submit(f, Some((&context, deadline)), true).await;
+        assert!(
+            started.elapsed() >= hold,
+            "the replay waited for the actual writer"
+        );
+        launch.join_holds().await;
+        launch.assert_replayed_admission(f, &c, observation).await;
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn persistently_busy_source_writer_stops_after_one_replay() {
+    control("repeated held writer", async |f, c| {
+        let launch = claimed_launch(
+            f,
+            &c,
+            Inject::HeldWriter(Duration::from_millis(100)),
+            usize::MAX,
+        )
+        .await;
+        let context = dispatch(&c);
+        let deadline = tokio::time::Instant::now() + GUARD;
+        let observation = launch.submit(f, Some((&context, deadline)), true).await;
+        launch.join_holds().await;
+        launch.assert_not_admitted(f, &c, observation, 2).await;
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn deadline_and_cancellation_during_the_writer_wait_never_replay() {
+    control("deadline during the writer wait", async |f, c| {
+        let hold = Duration::from_secs(2);
+        let launch = claimed_launch(f, &c, Inject::HeldWriter(hold), 1).await;
+        let context = dispatch(&c);
+        let started = tokio::time::Instant::now();
+        let deadline = started + Duration::from_millis(300);
+        let observation = launch.submit(f, Some((&context, deadline)), true).await;
+        assert!(
+            started.elapsed() < hold,
+            "the wait ended at the dispatch deadline, not the writer"
+        );
+        launch.join_holds().await;
+        launch.assert_not_admitted(f, &c, observation, 1).await;
+    })
+    .await;
+    control("cancellation during the writer wait", async |f, c| {
+        let hold = Duration::from_secs(1);
+        let launch = claimed_launch(f, &c, Inject::HeldWriter(hold), 1).await;
+        let context = dispatch(&c);
+        let deadline = tokio::time::Instant::now() + GUARD;
+        let waiting = f.source.owner.observe_source_writer_wait_for_test();
+        let mut submit = Box::pin(launch.submit(f, Some((&context, deadline)), true));
+        // Drop the dispatch exactly while it waits for the held writer.
+        tokio::select! {
+            _ = &mut submit => panic!("the launch cannot finish while its writer is held"),
+            entered = waiting => entered.unwrap(),
+        }
+        drop(submit);
+        assert_eq!(
+            launch.workflows.lock().unwrap()[0].attempt.fence_refusal(),
+            Some(LaunchReplay::SourceWriterBusy)
+        );
+        launch.join_holds().await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(launch.calls(), 1, "a cancelled wait never replays");
+        assert_eq!(f.inputs().await.unwrap(), launch.inputs, "nothing admitted");
+        assert_eq!(launch.shared.unresolved.load(Ordering::Acquire), 0);
+    })
+    .await;
+}
+
+#[test]
+fn only_the_fence_recorded_busy_writer_is_a_replay() {
+    let busy = IdentityRuntimeError::GovernedInput(GovernedInputError::EntryRefused(
+        GovernedEntryRefusal::Unavailable("The waiter entry owner is unavailable".into()),
+    ));
+    let attempt = LaunchAttempt::default();
+    // The same refusal without the fence's typed cause is no replay.
+    assert_eq!(launch_replay(&busy, &attempt), None);
+    attempt.fence_refused(Some(LaunchReplay::SourceWriterBusy));
+    assert_eq!(
+        launch_replay(&busy, &attempt),
+        Some(LaunchReplay::SourceWriterBusy)
+    );
+    // Only the Unavailable refusal carries that cause.
+    for error in [
+        IdentityRuntimeError::GovernedInput(GovernedInputError::EntryRefused(
+            GovernedEntryRefusal::Retired,
+        )),
+        IdentityRuntimeError::GovernedInput(GovernedInputError::EntryRefused(
+            GovernedEntryRefusal::Expired,
+        )),
+        IdentityRuntimeError::GovernedInput(GovernedInputError::AdmissionUnresolved {
+            detail: "native admission settled None".into(),
+        }),
+    ] {
+        assert_eq!(launch_replay(&error, &attempt), None);
+    }
+    attempt.fence_refused(None);
+    assert_eq!(launch_replay(&busy, &attempt), None);
 }

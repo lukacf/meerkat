@@ -1,6 +1,8 @@
 //! Host-selected first G input through the existing Original binder and outbox.
 //! The launch receipt never acknowledges any waiter's context-delivery intent.
 use super::*;
+use crate::original_ingress::workflow_custody::WorkflowLaunchEntryError;
+// Test diagnostics only.
 #[cfg(any(test, feature = "test-support"))]
 use crate::original_ingress::workflow_custody::{WorkflowLaunchDiagnostics, WorkflowLaunchStage};
 use crate::review_custody::ReviewCustody;
@@ -163,12 +165,23 @@ enum LaunchReplay {
     /// for the session this input was bound for: Core's ReprepareRequired,
     /// which input admission reports as controller readiness PolicyChanged.
     PolicyChanged,
+    /// The launch fence refused entry because every waiter it tried found
+    /// the source writer held by another source mutation: it runs inside
+    /// native admission, so it only tries the writer and never waits there.
+    SourceWriterBusy,
 }
 
 /// The launch submission's typed error, classified before it is mapped to an
 /// observation. No other refusal, and no unresolved or unknown outcome, is
 /// ever a replay.
 fn launch_replay(error: &IdentityRuntimeError, attempt: &LaunchAttempt) -> Option<LaunchReplay> {
+    if let IdentityRuntimeError::GovernedInput(GovernedInputError::EntryRefused(
+        GovernedEntryRefusal::Unavailable(_),
+    )) = error
+    {
+        // The fence's own typed cause, recorded where it refused.
+        return attempt.fence_refusal();
+    }
     let IdentityRuntimeError::GovernedInput(GovernedInputError::Mob(error)) = error else {
         return None;
     };
@@ -188,12 +201,22 @@ fn launch_replay(error: &IdentityRuntimeError, attempt: &LaunchAttempt) -> Optio
 }
 
 /// What one launch binder's native calls recorded for its dispatch: the
-/// session its latest bind was for.
+/// session its latest bind was for, and the typed cause of its fence's latest
+/// refusal when that cause may be waited out.
 #[derive(Default)]
 pub(in crate::private_originals) struct LaunchAttempt {
     bound_session: std::sync::Mutex<Option<meerkat_core::SessionId>>,
+    fence_refusal: std::sync::Mutex<Option<LaunchReplay>>,
 }
 impl LaunchAttempt {
+    fn fence_refused(&self, cause: Option<LaunchReplay>) {
+        if let Ok(mut refusal) = self.fence_refusal.lock() {
+            *refusal = cause;
+        }
+    }
+    fn fence_refusal(&self) -> Option<LaunchReplay> {
+        self.fence_refusal.lock().ok().and_then(|refusal| *refusal)
+    }
     fn bind(&self, session: &meerkat_core::SessionId) {
         if let Ok(mut bound) = self.bound_session.lock() {
             *bound = Some(session.clone());
@@ -2032,6 +2055,14 @@ impl PreparedWorkflowLaunch {
                     .await
                     .settled()
             }
+            // The same awaitable acquisition every other source mutation
+            // uses; the guard drops with this statement, so the writer is
+            // released at once: the holder's mutation has finished.
+            LaunchReplay::SourceWriterBusy => {
+                tokio::time::timeout(budget, source.owner.source_writer())
+                    .await
+                    .is_ok()
+            }
         };
         if !settled || remaining().is_zero() {
             return Ok(false);
@@ -2164,6 +2195,7 @@ impl GovernedInputBinder for WorkflowBinder {
         self.attempt.bind(&context.session_id);
         let fence = LaunchFence {
             planning: self.planning.selection.clone(),
+            attempt: self.attempt.clone(),
         };
         #[cfg(any(test, feature = "test-support"))]
         let fence = ObservedLaunchFence {
@@ -2183,12 +2215,14 @@ impl GovernedInputBinder for WorkflowBinder {
 /// is sufficient; waiters never become G contributing-work conjuncts.
 struct LaunchFence {
     planning: Arc<InstalledWorkflowPlanning>,
+    attempt: Arc<LaunchAttempt>,
 }
 impl LaunchFence {
     fn enter_observed(
         &self,
         #[cfg(any(test, feature = "test-support"))] diagnostics: Option<&WorkflowLaunchDiagnostics>,
     ) -> Result<Box<dyn GovernedEntryPermit>, GovernedEntryRefusal> {
+        self.attempt.fence_refused(None);
         let source = self.planning.source.upgrade().ok_or_else(|| {
             #[cfg(any(test, feature = "test-support"))]
             if let Some(diagnostics) = diagnostics {
@@ -2223,6 +2257,8 @@ impl LaunchFence {
             return Err(GovernedEntryRefusal::Expired);
         }
         let mut unavailable = false;
+        let mut writer_busy = false;
+        let mut refused = false;
         for interest in interests.iter_mut() {
             if interest.closed || now >= interest.membership.deadline_ms() {
                 continue;
@@ -2235,22 +2271,35 @@ impl LaunchFence {
                 .owner
                 .enter_workflow_launch_observed(original, diagnostics);
             #[cfg(not(any(test, feature = "test-support")))]
-            let entry = source.owner.enter_workflow_launch(original);
+            let entry = source.owner.enter_workflow_launch_observed(original);
             match entry {
                 Ok(entry) => {
                     interest.entries.push(entry.clone());
                     return Ok(Box::new(LaunchPermit { entry }));
                 }
-                Err(crate::original_ingress::OriginalWriterError::OperationCancelled) => continue,
+                Err(WorkflowLaunchEntryError::Writer(
+                    crate::original_ingress::OriginalWriterError::OperationCancelled,
+                )) => continue,
                 // A pending/failed cancellation is not eligible interest,
                 // but it must not block another independently current waiter.
                 // Only that waiter's actual successful entry can admit G.
-                Err(_) => unavailable = true,
+                Err(WorkflowLaunchEntryError::SourceWriterBusy) => {
+                    unavailable = true;
+                    writer_busy = true;
+                }
+                Err(WorkflowLaunchEntryError::Writer(_)) => {
+                    unavailable = true;
+                    refused = true;
+                }
             }
         }
         // No source reservation was created and native has not admitted it.
         // Preserve uncertainty if none of the independent entries succeeded.
         if unavailable {
+            // Only a held writer, and nothing else, may be waited out by the
+            // dispatch after native admission returned.
+            self.attempt
+                .fence_refused((writer_busy && !refused).then_some(LaunchReplay::SourceWriterBusy));
             #[cfg(any(test, feature = "test-support"))]
             if let Some(diagnostics) = diagnostics {
                 diagnostics.record(WorkflowLaunchStage::WaiterEntry);

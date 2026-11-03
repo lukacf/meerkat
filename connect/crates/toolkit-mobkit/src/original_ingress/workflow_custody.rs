@@ -23,6 +23,21 @@ use toolkit_package::{ContentDigest, Id};
 
 const MAX_CALLS: usize = 128;
 
+/// Why the workflow launch fence could not enter one waiter's source.
+#[derive(Debug)]
+pub(crate) enum WorkflowLaunchEntryError {
+    /// Another source mutation held the source writer. The fence runs inside
+    /// native admission and only tries the writer; it never waits there.
+    SourceWriterBusy,
+    /// Every other refusal of the entry.
+    Writer(OriginalWriterError),
+}
+impl From<OriginalWriterError> for WorkflowLaunchEntryError {
+    fn from(error: OriginalWriterError) -> Self {
+        Self::Writer(error)
+    }
+}
+
 // Fixed coalesced diagnostic bits only. This per-binder value carries no
 // identity, authority, payload or unbounded history. Native fences only mark
 // a bit; the submit owner emits after the governed call has returned.
@@ -229,26 +244,27 @@ impl ToolkitOriginalOwner {
         original: &Arc<RetainedToolkitOriginal>,
     ) -> Result<Arc<shared_entry::SharedEntry>, OriginalWriterError> {
         #[cfg(any(test, feature = "test-support"))]
-        {
-            self.enter_workflow_launch_observed(original, None)
-        }
+        let entry = self.enter_workflow_launch_observed(original, None);
         #[cfg(not(any(test, feature = "test-support")))]
-        {
-            self.enter_workflow_launch_observed(original)
-        }
+        let entry = self.enter_workflow_launch_observed(original);
+        entry.map_err(|error| match error {
+            WorkflowLaunchEntryError::SourceWriterBusy => OriginalWriterError::Unavailable,
+            WorkflowLaunchEntryError::Writer(error) => error,
+        })
     }
 
+    /// [`Self::enter_workflow_launch`], telling a held source writer apart.
     pub(crate) fn enter_workflow_launch_observed(
         &self,
         original: &Arc<RetainedToolkitOriginal>,
         #[cfg(any(test, feature = "test-support"))] diagnostics: Option<&WorkflowLaunchDiagnostics>,
-    ) -> Result<Arc<shared_entry::SharedEntry>, OriginalWriterError> {
+    ) -> Result<Arc<shared_entry::SharedEntry>, WorkflowLaunchEntryError> {
         let _writer = self.mutation.try_lock().map_err(|_| {
             #[cfg(any(test, feature = "test-support"))]
             if let Some(diagnostics) = diagnostics {
                 diagnostics.record(WorkflowLaunchStage::SourceWriterBusy);
             }
-            OriginalWriterError::Unavailable
+            WorkflowLaunchEntryError::SourceWriterBusy
         })?;
         self.workflow_source_current(original).inspect_err(|_| {
             #[cfg(any(test, feature = "test-support"))]
@@ -277,7 +293,7 @@ impl ToolkitOriginalOwner {
                     diagnostics.record(WorkflowLaunchStage::EntrySettle);
                 }
             })?;
-            return Err(error);
+            return Err(error.into());
         }
         Ok(entry)
     }

@@ -189,6 +189,7 @@ async fn resumed_interest_reuses_native_sources_without_input_or_effect_delegati
         // submitting native work. Its finite unentered reservation is settled.
         LaunchFence {
             planning: plan.clone(),
+            attempt: Default::default(),
         }
         .enter()
         .unwrap()
@@ -332,7 +333,8 @@ async fn resumed_interest_rejects_changed_membership_and_departure_during_native
         );
         assert!(matches!(
             LaunchFence {
-                planning: plan.clone()
+                planning: plan.clone(),
+                attempt: Default::default(),
             }
             .enter(),
             Err(GovernedEntryRefusal::Retired)

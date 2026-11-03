@@ -36,6 +36,34 @@ pub(super) fn canonical_unavailable(result: &ToolResult) -> bool {
             )
             .result
 }
+// Core's certified pre-entry refusal of a staged call, met before the
+// guarded tool code ran: exactly the reprepare kind with `tool_invoked`
+// false, and nothing else (no other kind, no uncertified or entered call).
+// Another Original's concurrent Find can change the shared publication under
+// a staged Find; the settled audit must still name that change, see
+// `assert_find_feedback`.
+pub(super) fn certified_reprepare(result: &ToolResult) -> bool {
+    let uncertified = meerkat_core::ops::terminal_tool_outcome_for_error(
+        result.tool_use_id.clone(),
+        ToolError::AuthorizationRefused {
+            refusal: meerkat_core::OperationRefused::new(
+                meerkat_core::OperationRefusalKind::ReprepareRequired,
+            ),
+        },
+    )
+    .result;
+    let (Ok(mut expected), Ok(actual)) = (
+        serde_json::from_str::<Value>(&uncertified.text_content()),
+        serde_json::from_str::<Value>(&result.text_content()),
+    ) else {
+        return false;
+    };
+    expected["data"]["tool_invoked"] = Value::Bool(false);
+    result.is_error
+        && result.settlement_failures.is_empty()
+        && actual["data"]["kind"] == "reprepare_required"
+        && actual == expected
+}
 impl Script {
     pub(super) fn observe_result(&self, result: &ToolResult) -> bool {
         let mut seen = self.seen_results.lock().unwrap();
@@ -85,10 +113,15 @@ impl Script {
         if !result.is_error {
             return FindChoice::Accepted;
         }
-        assert!(
-            canonical_unavailable(result),
-            "only exact local pre-entry feedback permits a fresh proposal"
-        );
+        // Two distinct pre-entry signals permit the one fresh proposal: the
+        // local canonical unavailability, and Core's certified refusal of a
+        // staged call whose publication another Find changed under it.
+        if !certified_reprepare(result) {
+            assert!(
+                canonical_unavailable(result),
+                "only exact local pre-entry feedback permits a fresh proposal"
+            );
+        }
         if find.len() == 1 {
             FindChoice::Emit("find-fresh")
         } else {
@@ -284,7 +317,9 @@ impl Case {
     }
 
     pub(super) async fn assert_find_feedback(&self, tags: &[&str], accepted: bool) {
-        use meerkat_authorization_contracts::audit::{AuditObservation, AuditTarget};
+        use meerkat_authorization_contracts::audit::{
+            AuditObservation, AuditRefusalBasis, AuditTarget,
+        };
         for tag in tags {
             let prefix = format!("{tag}-original");
             let audit = self.find_audits(tag, self.script.find_only).await;
@@ -338,7 +373,35 @@ impl Case {
                 let result = seen
                     .get(&call_id)
                     .expect("actual model-visible result retained");
-                if result.is_error {
+                if result.is_error && certified_reprepare(result) {
+                    // Only a staged call refused because its publication
+                    // changed under it: the settled audit's last refusal is
+                    // ReprepareRequired on a completed change, and the Find's
+                    // tool effect was never entered.
+                    let last_refusal = history
+                        .iter()
+                        .filter_map(|r| match &r.observation.observation {
+                            AuditObservation::Refused { reason, read, .. } => Some((reason, read)),
+                            _ => None,
+                        })
+                        .next_back();
+                    assert!(
+                        matches!(last_refusal,
+                            Some((meerkat_core::OperationRefusalKind::ReprepareRequired, Some(read)))
+                            if read.basis == AuditRefusalBasis::PublicationChanged
+                                && read.live_sequence.is_some_and(|live| live > read.publication_sequence)),
+                        "a certified reprepare Find must be refused on a completed publication change"
+                    );
+                    assert!(
+                        !history.iter().any(|r| matches!(
+                            r.observation.observation,
+                            AuditObservation::Entry {
+                                boundary: Some(meerkat_core::OperationEntryBoundary::ToolEffect)
+                            }
+                        )),
+                        "a certified pre-entry refusal never entered the Find's tool effect"
+                    );
+                } else if result.is_error {
                     assert!(canonical_unavailable(result));
                     if self.script.find_refusals != RefusalMode::None {
                         assert_eq!(

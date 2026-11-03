@@ -2883,5 +2883,178 @@ class StripProducerTests(unittest.TestCase):
             self.assertFalse((args.output_dir / "DERIVED-BINARY.json").exists())
 
 
+
+def git(repo, *args):
+    import subprocess
+    return subprocess.check_output(["git", "-C", str(repo), *args], text=True).strip()
+
+
+@contextlib.contextmanager
+def monorepo_checkout():
+    """A real Git monorepo whose connect/ holds the in-tree source identity owner."""
+    import subprocess
+    with tempfile.TemporaryDirectory(prefix="connect-release-source-") as scratch:
+        repo = Path(scratch).resolve() / "meerkat"
+        files = {"Cargo.toml": "[workspace]\nmembers = [\"crates/*\", \"connect/crates/*\"]\n",
+                 "Cargo.lock": "version = 4\n", "rust-toolchain.toml": "[toolchain]\nchannel = \"1.97.0\"\n",
+                 ".cargo/config.toml": "[env]\n", "crates/meerkat-core/src/lib.rs": "pub fn core() {}\n",
+                 "connect/SOURCE-PROVENANCE.md": "# Source provenance\n",
+                 "connect/PUBLIC-SOURCE-COMMITS.json": "{}\n",
+                 "connect/crates/meerkat-connect/src/main.rs": "fn main() {}\n"}
+        for name, text in files.items():
+            (repo / name).parent.mkdir(parents=True, exist_ok=True)
+            (repo / name).write_text(text)
+        identity = repo / "connect/scripts/connect-source-identity.py"
+        identity.parent.mkdir(parents=True)
+        identity.write_bytes(ASSEMBLER.SOURCE_IDENTITY.read_bytes())
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        git(repo, "add", "-A")
+        git(repo, "-c", "user.name=Offline Control", "-c", "user.email=offline@example.invalid", "commit", "-qm", "c")
+        manifest = repo.parent / "source-manifest.json"
+        head = git(repo, "rev-parse", "HEAD")
+        subprocess.run([sys.executable, "-I", str(identity), "record", "--commit", head, "--export-commit", head,
+                        "--output", str(manifest)], check=True, capture_output=True)
+        with mock.patch.object(ASSEMBLER, "ROOT", repo / "connect"), \
+                mock.patch.object(ASSEMBLER, "SOURCE_IDENTITY", identity):
+            yield repo, manifest
+
+
+def release_record(repo, manifest, argv=None):
+    if argv is None:
+        argv = [str(repo / "scripts/repo-cargo"), "+1.97.0", "build", "--locked", "--release", "--manifest-path",
+                str(repo / "Cargo.toml"), "-p", "meerkat-connect", "--bin", "toolkit_gateway"]
+    return encoded({"schema_version": 1, "cargo": {"argv": argv, "exit_code": 0},
+                    "source_manifest": {"path": str(manifest), "sha256": ASSEMBLER.digest(manifest)}})
+
+
+class ReleaseSourceIdentityTests(unittest.TestCase):
+    """A versioned assembly binds the exact lukacf/meerkat checkout it runs in."""
+
+    def test_release_source_is_this_checkouts_commit_and_locked_root_workspace(self):
+        with monorepo_checkout() as (repo, manifest):
+            identity = ASSEMBLER.checked_release_source(release_record(repo, manifest))
+            self.assertEqual(identity, {"repository": "lukacf/meerkat", "revision": git(repo, "rev-parse", "HEAD"),
+                                        "tree": git(repo, "rev-parse", "HEAD^{tree}"),
+                                        "source_manifest_sha256": ASSEMBLER.digest(manifest)})
+
+    def test_release_build_from_another_workspace_or_unlocked_refuses(self):
+        with monorepo_checkout() as (repo, manifest):
+            base = ["repo-cargo", "build", "--locked", "--manifest-path", str(repo / "Cargo.toml")]
+            cases = {"unlocked": [item for item in base if item != "--locked"],
+                     "other_workspace": base[:-1] + [str(repo.parent / "other/Cargo.toml")],
+                     "connect_manifest": base[:-1] + [str(repo / "connect/crates/meerkat-connect/Cargo.toml")],
+                     "equals_form": base[:-2] + ["--manifest-path=" + str(repo / "Cargo.toml")],
+                     "two_manifests": base + ["--manifest-path", str(repo / "Cargo.toml")],
+                     "no_manifest": base[:-2]}
+            for name, argv in cases.items():
+                with self.subTest(name=name), self.assertRaisesRegex(ValueError, "locked root workspace"):
+                    ASSEMBLER.checked_release_source(release_record(repo, manifest, argv))
+
+    def test_release_source_from_another_state_refuses(self):
+        for change in ("dirty", "later_commit", "foreign_manifest"):
+            with self.subTest(change=change), monorepo_checkout() as (repo, manifest):
+                if change == "dirty":
+                    (repo / "crates/meerkat-core/src/lib.rs").write_text("pub fn changed() {}\n")
+                    pattern = "dirty"
+                elif change == "later_commit":
+                    (repo / "connect/crates/meerkat-connect/src/main.rs").write_text("fn main() { }\n")
+                    git(repo, "add", "-A")
+                    git(repo, "-c", "user.name=Offline Control", "-c", "user.email=offline@example.invalid",
+                        "commit", "-qm", "later")
+                    pattern = "another commit"
+                else:
+                    manifest.write_text(json.dumps({"files": []}) + "\n")
+                    pattern = "not a lukacf/meerkat Connect source manifest"
+                with self.assertRaisesRegex(ValueError, pattern):
+                    ASSEMBLER.checked_release_source(release_record(repo, manifest))
+
+    def test_versioned_stage_checks_the_validated_record_and_names_the_source(self):
+        identity = {"repository": "lukacf/meerkat", "revision": "a" * 40, "tree": "b" * 40,
+                    "source_manifest_sha256": "c" * 64}
+        with inputs() as fixture:
+            fixture.select_explicit("toolkit_gateway")
+            for field in ("test_executable", "installed_composition", "native_shutdown_review"):
+                del fixture.record_value[field]
+            fixture.update_record()
+            original = fixture.record.read_bytes()
+            with mock.patch.object(ASSEMBLER, "checked_release_source", return_value=identity) as checked:
+                result = fixture.assemble(stage_only=True, release_version="0.9.9")
+            checked.assert_called_once_with(original)
+            self.assertEqual((result["release_version"], result["source"]), ("0.9.9", identity))
+            staged = json.loads((fixture.destination / "staging.json").read_text())
+            self.assertEqual((staged["release_version"], staged["source"]), ("0.9.9", identity))
+
+    def test_versioned_assembly_refusal_stops_before_any_output(self):
+        with inputs() as fixture:
+            fixture.select_explicit("toolkit_gateway")
+            for field in ("test_executable", "installed_composition", "native_shutdown_review"):
+                del fixture.record_value[field]
+            fixture.update_record()
+            with mock.patch.object(ASSEMBLER, "checked_release_source",
+                                   side_effect=ValueError("source checkout is dirty")), \
+                    self.assertRaisesRegex(ValueError, "dirty"):
+                fixture.assemble(stage_only=True, release_version="0.9.9")
+            self.assertFalse(fixture.destination.exists())
+
+    def test_unversioned_staging_keeps_its_existing_contract(self):
+        with inputs() as fixture:
+            fixture.select_explicit("toolkit_gateway")
+            for field in ("test_executable", "installed_composition", "native_shutdown_review"):
+                del fixture.record_value[field]
+            fixture.update_record()
+            with mock.patch.object(ASSEMBLER, "checked_release_source") as checked:
+                result = fixture.assemble(stage_only=True)
+            checked.assert_not_called()
+            self.assertNotIn("release_version", result)
+            self.assertNotIn("source", result)
+
+
+class ReleaseVerifierSourceTests(unittest.TestCase):
+    """The installed verifier re-derives a release prefix's source from its own checkout."""
+    read_staged_gateway = InstalledVerifierBoundaryTests.read_staged_gateway
+
+    def staged_release(self, fixture, identity):
+        fixture.select_explicit("toolkit_gateway")
+        for field in ("test_executable", "installed_composition", "native_shutdown_review"):
+            del fixture.record_value[field]
+        fixture.record_value["cargo"]["argv"] = ["repo-cargo", "build", "--locked", "--manifest-path",
+                                                 "/checkout/Cargo.toml", "--bin", "toolkit_gateway"]
+        fixture.update_record()
+        with mock.patch.object(ASSEMBLER, "checked_release_source", return_value=identity):
+            fixture.assemble(stage_only=True, release_version="0.9.9")
+
+    def owner(self, identity, workspace="/checkout"):
+        checked = {"repository": identity["repository"], "revision": identity["revision"], "tree": identity["tree"]}
+        return {"checked_source": mock.Mock(return_value=checked), "WORKSPACE": Path(workspace)}
+
+    def test_release_prefix_verification_uses_the_in_tree_identity_owner(self):
+        with inputs() as fixture:
+            identity = {"repository": "lukacf/meerkat", "revision": "a" * 40, "tree": "b" * 40,
+                        "source_manifest_sha256": ASSEMBLER.digest(fixture.source)}
+            self.staged_release(fixture, identity)
+            owner = self.owner(identity)
+            with mock.patch.object(VERIFIER.runpy, "run_path", return_value=owner) as loaded:
+                candidate, _, _, _ = self.read_staged_gateway(fixture)
+            self.assertEqual(Path(loaded.call_args.args[0]).name, "connect-source-identity.py")
+            owner["checked_source"].assert_called_once_with(fixture.source, ASSEMBLER.digest(fixture.source))
+            self.assertEqual(candidate["source_manifest_sha256"], ASSEMBLER.digest(fixture.source))
+
+    def test_release_prefix_from_another_source_or_workspace_refuses(self):
+        for change in ("revision", "workspace", "owner_refusal"):
+            with self.subTest(change=change), inputs() as fixture:
+                identity = {"repository": "lukacf/meerkat", "revision": "a" * 40, "tree": "b" * 40,
+                            "source_manifest_sha256": ASSEMBLER.digest(fixture.source)}
+                self.staged_release(fixture, identity)
+                owner = self.owner(identity, "/other-checkout" if change == "workspace" else "/checkout")
+                if change == "revision":
+                    owner["checked_source"].return_value = {**owner["checked_source"].return_value,
+                                                            "revision": "c" * 40}
+                elif change == "owner_refusal":
+                    owner["checked_source"].side_effect = ValueError("source manifest names another commit")
+                with mock.patch.object(VERIFIER.runpy, "run_path", return_value=owner), \
+                        self.assertRaises((AssertionError, ValueError)):
+                    self.read_staged_gateway(fixture)
+
+
 if __name__ == "__main__":
     unittest.main()

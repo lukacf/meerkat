@@ -53,6 +53,19 @@ them.
   without storing it (`meerkat_copilot::verify_operator_token`). See Added,
   and Breaking for the new `GitHubCopilotToken` auth method variants.
 
+- GitHub Copilot configured once. A `[realm.<realm>.copilot]` section
+  states a Copilot account's token source once (an `env` or
+  `external_resolver` source) in place of nine backend, auth and binding
+  tables: the realm gets the account's `copilot_openai`,
+  `copilot_anthropic` and `copilot_gemini` routes in token mode, under the
+  names the explicit tables use. Account models: a request that names a
+  route of a Copilot account can run a model only the account lists (no
+  catalog row, no `[models.<id>]` entry), with the protocol and limits
+  from the account's model list; a model the account does not offer is
+  refused before any model request, and no other route or credential is
+  tried. See Added and Breaking, and Known limitations for Meerkat
+  Connect.
+
 - GitHub Copilot reliability. A temporary failure of the Copilot token
   exchange (a network failure or timeout, HTTP 408, 429 or 5xx, or a GitHub
   API rate limit) no longer fails turns as an authentication error: a

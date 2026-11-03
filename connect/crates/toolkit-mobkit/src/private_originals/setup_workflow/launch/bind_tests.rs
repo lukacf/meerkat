@@ -176,9 +176,12 @@ async fn actual_bind_refusal_withdraws_pending_source_and_replays_failed_launch(
         assert_eq!(failed.status, EffectStatus::Failed);
         assert_eq!(failed.attempt, 1);
         assert!(failed.lease.is_none());
-        // Definite nonadmission retains the durable association. This ordinary
-        // planning source does not acquire service/setup cold-recovery state;
-        // the actual input and pending guard were observed in the binder above.
+        // Definite nonadmission retains the durable association. A planned G
+        // carries Lead evidence (prepare_workflow_planning selects it), so the
+        // actual binder retained its exact first bound input as that
+        // evidence's input before native refused it: the input and association
+        // the binder observed above. The source acquires no service or setup
+        // state.
         let bound_source = f
             .store
             .get(&c.planning.terms.planning_source)
@@ -192,9 +195,20 @@ async fn actual_bind_refusal_withdraws_pending_source_and_replays_failed_launch(
                 && source_record.setup_request.is_none()
                 && source_record.configured_setup.is_none()
         );
+        assert!(matches!(
+            &source_record.planning_source_evidence,
+            Some(crate::private_originals::planning_source_evidence::PlanningSourceEvidence::Lead { .. })
+        ));
+        let retained = source_record
+            .bound_service_input
+            .as_ref()
+            .expect("the Lead source retains its exact first bound input")
+            .decode()
+            .unwrap();
+        assert_eq!(retained.id(), &observed.input);
         assert!(
-            source_record.bound_service_input.is_none(),
-            "ordinary planning source remains outside service/setup cold recovery"
+            retained.header().authority_association.as_ref() == Some(held.original.association()),
+            "the retained input is the refused first input with its exact association"
         );
         for _ in 0..2 {
             assert!(matches!(

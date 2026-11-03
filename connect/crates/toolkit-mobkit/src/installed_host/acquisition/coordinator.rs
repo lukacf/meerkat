@@ -236,7 +236,12 @@ impl InstalledAcquisition {
                 })?;
             progress.enter(AdmissionStage::RetainInterest);
             planning
-                .retain_launch_interest(&joined.snapshot, &membership, &original)
+                .retain_launch_interest(
+                    &joined.snapshot,
+                    &membership,
+                    &original,
+                    Some((context, source_deadline)),
+                )
                 .await
                 .map_err(|error| {
                     #[cfg(any(test, feature = "test-support"))]

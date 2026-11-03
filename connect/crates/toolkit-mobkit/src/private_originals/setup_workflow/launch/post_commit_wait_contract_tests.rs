@@ -237,7 +237,7 @@ async fn workflow_dispatch_wait_settles_before_one_launch_and_replay_only_observ
     let result = AssertUnwindSafe(tokio::time::timeout(GUARD, async {
         let c = prepare(&f).await;
         c.planning
-            .retain_launch_interest(&c.snapshot, &c.membership, &c.a)
+            .retain_launch_interest(&c.snapshot, &c.membership, &c.a, None)
             .await
             .unwrap();
         let inputs = f.inputs().await.unwrap();

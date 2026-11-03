@@ -1115,18 +1115,23 @@ impl InstalledWorkflowPlanning {
 
     /// Canonical join is complete. Retain only actual A launch interest here.
     /// No pending native reservation exists until the final synchronous entry
-    /// fence. P/G still supply the native input's independent authority.
+    /// fence. P/G still supply the native input's independent authority. On
+    /// the Find dispatch its binding read waits out a stale publication with
+    /// that dispatch's Core churn, as the join does.
     pub(crate) async fn retain_launch_interest(
         self: &Arc<Self>,
         snapshot: &SetupWorkflowSnapshot,
         membership: &SetupWorkflowWaiter,
         original: &super::super::acquisition::AcquisitionOriginal,
+        dispatch: Option<(&meerkat_core::ToolDispatchContext, tokio::time::Instant)>,
     ) -> Result<(), PrivateOriginalError> {
         let source = self
             .source
             .upgrade()
             .ok_or(PrivateOriginalError::Unavailable)?;
-        self.check_for_binding(&source, &self.submission.original)?;
+        self.check_binding_after_owner_change(&source, &self.submission.original, dispatch)
+            .await
+            .map_err(binding_refusal)?;
         if snapshot.terms() != &self.terms
             || membership.workflow() != snapshot.reference()
             || membership.source() != &original.source_record.key

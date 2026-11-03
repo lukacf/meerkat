@@ -497,7 +497,7 @@ async fn join_waiter_context_with_effects<S>(
         .await
         .unwrap();
     planning
-        .retain_launch_interest(&joined.snapshot, &membership, original)
+        .retain_launch_interest(&joined.snapshot, &membership, original, None)
         .await
         .unwrap();
     if prepare_effects && matches!(f.source.decode_record(&original.source_record, &original.reference).unwrap().planning_source_evidence,
@@ -579,7 +579,7 @@ async fn exercise(case: u8) {
                 .unwrap();
             assert!(c.snapshot.sealed());
             c.planning
-                .retain_launch_interest(&c.snapshot, &c.membership, &c.a)
+                .retain_launch_interest(&c.snapshot, &c.membership, &c.a, None)
                 .await
                 .unwrap();
             let admitted = native(c.planning.launch(&c.snapshot).await.unwrap());
@@ -1153,7 +1153,7 @@ async fn close_exercise(case: u8) {
             let close = f.store.get_effect(&c.snapshot.reference().close_effect()).await.unwrap().unwrap();
             assert_eq!(close.status, EffectStatus::Uncertain);
             assert_eq!(f.inputs().await.unwrap(), 2, "the cancellation caller never dispatches unknown G");
-            assert!(c.planning.retain_launch_interest(&c.snapshot, &c.membership, &c.a).await.is_err(),
+            assert!(c.planning.retain_launch_interest(&c.snapshot, &c.membership, &c.a, None).await.is_err(),
                 "an old join snapshot cannot republish interest after cancellation");
             {
                 let interests = c.planning.interests.lock().unwrap();
@@ -1566,7 +1566,7 @@ async fn planning_binding_refuses_distinct_issued_root_without_source_or_native_
         let unbound = f.source.decode_record(&unbound_row, reference).unwrap();
         assert!(unbound.final_association.is_none());
         c.planning
-            .retain_launch_interest(&c.snapshot, &c.membership, &c.a)
+            .retain_launch_interest(&c.snapshot, &c.membership, &c.a, None)
             .await
             .unwrap();
         let admitted = native(c.planning.launch(&c.snapshot).await.unwrap());

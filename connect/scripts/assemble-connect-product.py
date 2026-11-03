@@ -42,6 +42,8 @@ PREPARE = ROOT / "sdk/consumer-setup/product/prepare.py"
 PREPARE_SHA = "57a40022bc7a1297eda463896c16c5d3902948d2eb38ccaa8d412aee3b0f715f"
 RESOURCE_PACKAGER = ROOT / "scripts/package-connect-resources.py"
 GATEWAY_VERIFIER = ROOT / "scripts/verify_native_gateway_subprocess.py"
+# A release assembly binds its source to this exact lukacf/meerkat checkout (connect/ of one clean commit).
+SOURCE_IDENTITY = ROOT / "scripts/connect-source-identity.py"
 RESOURCE_PACKAGER_SHA = "d71167042acd664e37601915588d5ed9822c0f3ed465df1a9ee979cb14f4bffe"
 BINARY_KINDS = ("meerkat-connect", "toolkit_gateway")
 COMPONENT_LIMIT = 1024 * 1024 * 1024
@@ -1285,6 +1287,25 @@ def prefix_envelope(destination, package):
                 embedded.append({"name": name, "bytes": size, "members": inner})
     return package_envelope(members, None, None, embedded)
 
+def checked_release_source(record_raw):
+    """A versioned (release) assembly's build came from this exact checkout.
+
+    Its source manifest must be the one this clean checkout derives for its full
+    commit and tree (connect-source-identity.py), and its Cargo command must have
+    built this checkout's root workspace, locked. Returns the verified identity.
+    """
+    value = json.loads(record_raw, object_pairs_hook=unique_object)
+    source = value["source_manifest"]
+    identity = runpy.run_path(str(SOURCE_IDENTITY))["checked_source"](Path(source["path"]), source["sha256"])
+    argv = value["cargo"]["argv"]
+    manifests = [argv[index + 1] for index, argument in enumerate(argv[:-1]) if argument == "--manifest-path"]
+    require(manifests == [str(ROOT.parent / "Cargo.toml")] and "--locked" in argv
+            and not any(argument.startswith("--manifest-path=") for argument in argv),
+            "release build did not use this checkout's locked root workspace")
+    return {"repository": identity["repository"], "revision": identity["revision"], "tree": identity["tree"],
+            "source_manifest_sha256": source["sha256"]}
+
+
 def tooling():
     """Record the in-tree helpers used by this assembly."""
     return {"source_root": str(ROOT), "assembler_sha256": digest(Path(__file__).resolve()),
@@ -1365,6 +1386,8 @@ def assemble(binary, binary_sha, record_path, destination, *, target="macos-arm6
         resources_sha=resources_sha, binary_kind=binary_kind,
         resource_record_sha=resource_record_sha, stage_only=stage_only,
         gateway_reference=gateway_reference, gateway_raw=gateway_raw, derived=derived)
+    # A release binds the exact bytes build_record validated to this checkout's commit and workspace.
+    release_source = None if release_version is None else checked_release_source(record_raw)
     if target == "linux-x86_64":
         runpy.run_path(str(RESOURCE_PACKAGER))["require_case_sensitive"](destination.parent)
 
@@ -1419,6 +1442,8 @@ def assemble(binary, binary_sha, record_path, destination, *, target="macos-arm6
                   "package_envelope": sizes, "tooling": tooling()}
         if derived is not None:
             result["derived_binary"] = derived["summary"]
+        if release_source is not None:
+            result.update(release_version=release_version, source=release_source)
         write_new(destination / "staging.json", (json.dumps(result, indent=2) + "\n").encode())
         return result
 
@@ -1466,7 +1491,7 @@ def assemble(binary, binary_sha, record_path, destination, *, target="macos-arm6
     if resource_raw is not None:
         result.update(binary_kind=binary_kind, resource_build_record_sha256=resource_record_sha)
     if release_version is not None:
-        result["release_version"] = release_version
+        result.update(release_version=release_version, source=release_source)
     if derived is not None:
         result["derived_binary"] = derived["summary"]
     if binary_kind == "toolkit_gateway":

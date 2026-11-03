@@ -24,6 +24,7 @@ import os
 from pathlib import Path
 import platform
 import re
+import runpy
 import select
 import signal
 import socket
@@ -1504,6 +1505,17 @@ def installed_candidate(args):
             and resource_build["resources_sha256"] == candidate["resources_sha256"]
             and resource_build["archive_sha256"] == staging["resource_component_sha256"],
             "resource/source identity mismatch")
+    if staging.get("release_version") is not None:
+        # A release prefix is verified from the same clean checkout it was staged and is assembled in:
+        # the in-tree identity owner re-derives the source manifest from this checkout's full commit.
+        identity = runpy.run_path(str(Path(__file__).resolve().with_name("connect-source-identity.py")))
+        checked = identity["checked_source"](Path(source["path"]), source["sha256"])
+        manifests = [argv[index + 1] for index, argument in enumerate(argv[:-1]) if argument == "--manifest-path"]
+        require(staging.get("source") == {"repository": checked["repository"], "revision": checked["revision"],
+                                          "tree": checked["tree"], "source_manifest_sha256": source["sha256"]}
+                and manifests == [str(identity["WORKSPACE"] / "Cargo.toml")] and "--locked" in argv
+                and not any(argument.startswith("--manifest-path=") for argument in argv),
+                "release verification source differs from this checkout")
     resource_raw = exact_bytes(resources / "resources.json", candidate["resources_sha256"], limit=32 * 1024 * 1024)
     manifest = unique_json(resource_raw)
     require(manifest["kind"] == "meerkat_connect_resources" and manifest["target"] == target

@@ -222,6 +222,7 @@ impl InstalledAcquisition {
                         references: self.references.as_ref(),
                     },
                     &self.work_backend,
+                    (context, source_deadline),
                 )
                 .await
                 .map_err(|error| {

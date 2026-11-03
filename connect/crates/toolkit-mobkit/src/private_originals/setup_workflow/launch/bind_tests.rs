@@ -119,7 +119,7 @@ async fn actual_bind_refusal_withdraws_pending_source_and_replays_failed_launch(
         // Move the only strong binder handle to the actual native operation.
         // The test retains a Weak witness, not custody that could mask a leak.
         let refused = prepared
-            .submit_with_binder(&f.source, binder)
+            .submit_with_binder(&f.source, binder, None)
             .await
             .unwrap();
         let observed = observation

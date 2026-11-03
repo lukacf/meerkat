@@ -746,7 +746,7 @@ async fn exercise(case: u8) {
                 pending_seen: AtomicBool::new(false),
             });
             let refused = prepared
-                .submit_with_binder(&f.source, binder.clone())
+                .submit_with_binder(&f.source, binder.clone(), None)
                 .await
                 .unwrap();
             assert!(
@@ -1202,7 +1202,7 @@ async fn close_exercise(case: u8) {
                 planning: c.planning.clone(), membership: c.membership.clone(),
                 pending_seen: AtomicBool::new(false),
             });
-            let refused = prepared.submit_with_binder(&f.source, binder).await.unwrap();
+            let refused = prepared.submit_with_binder(&f.source, binder, None).await.unwrap();
             assert!(matches!(refused, WorkflowLaunchObservation::NotAdmitted));
             c.planning.record_launch_observation(&f.source, launch.lease.as_ref().unwrap(), &refused)
                 .await.unwrap();

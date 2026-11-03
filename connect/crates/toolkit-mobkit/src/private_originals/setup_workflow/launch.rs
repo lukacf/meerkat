@@ -144,6 +144,15 @@ fn child_observation_failure(
     crate::aa1_failure("plan.observe.refusal", terminal);
 }
 
+/// A binding read's answer to its caller: one still stale once its rebuild
+/// (and, on a dispatch, its waits) ended is unavailability, never a denial.
+fn binding_refusal(error: WorkflowChildPreparationError) -> PrivateOriginalError {
+    match error {
+        WorkflowChildPreparationError::ObservationChanged => PrivateOriginalError::Unavailable,
+        WorkflowChildPreparationError::Refused(error) => error,
+    }
+}
+
 fn observe_child_preparation(
     publication: &meerkat_authorization::publication::LocalAuthorizationPublication,
     mut read: impl FnMut(&mut Option<ChildCheckDiagnostic>) -> Result<(), WorkflowChildPreparationError>,
@@ -855,12 +864,7 @@ impl InstalledWorkflowPlanning {
         original: &PrivateOriginalRef,
     ) -> Result<(), PrivateOriginalError> {
         self.check_child_preparation(source, original)
-            .map_err(|error| match error {
-                WorkflowChildPreparationError::ObservationChanged => {
-                    PrivateOriginalError::Unavailable
-                }
-                WorkflowChildPreparationError::Refused(error) => error,
-            })
+            .map_err(binding_refusal)
     }
 
     // A dispatch decision gets fresh Core wait state. Only the pure owner
@@ -871,10 +875,22 @@ impl InstalledWorkflowPlanning {
         source: &Arc<PrivateOriginals>,
         dispatch: Option<(&meerkat_core::ToolDispatchContext, tokio::time::Instant)>,
     ) -> Result<(), WorkflowChildPreparationError> {
+        self.check_binding_after_owner_change(source, &self.submission.original, dispatch)
+            .await
+    }
+
+    /// [`Self::check_for_binding`] for `original`, waiting on a dispatch: a
+    /// binding read that stays stale after its one rebuild waits with the
+    /// dispatch's own Core churn and reads again, within the dispatch and
+    /// request deadlines. Without a dispatch it keeps the non-waiting form.
+    async fn check_binding_after_owner_change(
+        &self,
+        source: &Arc<PrivateOriginals>,
+        original: &PrivateOriginalRef,
+        dispatch: Option<(&meerkat_core::ToolDispatchContext, tokio::time::Instant)>,
+    ) -> Result<(), WorkflowChildPreparationError> {
         let Some((context, deadline)) = dispatch else {
-            return self
-                .check_for_binding(source, &self.submission.original)
-                .map_err(Into::into);
+            return self.check_for_binding(source, original).map_err(Into::into);
         };
         let work = context
             .work_authorization()
@@ -888,7 +904,7 @@ impl InstalledWorkflowPlanning {
                 .map_or(request, |tool| tool.min(request))
         };
         loop {
-            match self.check_child_preparation(source, &self.submission.original) {
+            match self.check_child_preparation(source, original) {
                 Err(WorkflowChildPreparationError::ObservationChanged) => {
                     let budget = remaining();
                     if budget.is_zero()
@@ -995,6 +1011,8 @@ impl InstalledWorkflowPlanning {
     /// adapter, which must be the same Arc retained by this source owner.
     /// Storage predicates fence a queued worker after caller loss; the source
     /// writer also orders the live currentness check against cancellation.
+    /// The join runs on the Find dispatch, so its binding read waits out a
+    /// stale publication with that dispatch's Core churn, as a launch does.
     pub(crate) async fn join_waiter_conditionally(
         &self,
         selected_store: &Arc<toolkit_store::SqliteStore>,
@@ -1002,6 +1020,7 @@ impl InstalledWorkflowPlanning {
         original: &super::super::acquisition::AcquisitionOriginal,
         access: SetupAccess<'_>,
         backend: &meerkat_toolkit::setup::SetupWorkBackend,
+        dispatch: (&meerkat_core::ToolDispatchContext, tokio::time::Instant),
     ) -> Result<
         Result<meerkat_toolkit::setup::SetupWorkflowJoin, meerkat_toolkit::setup::SetupError>,
         PrivateOriginalError,
@@ -1010,7 +1029,9 @@ impl InstalledWorkflowPlanning {
             .source
             .upgrade()
             .ok_or(PrivateOriginalError::Unavailable)?;
-        self.check_for_binding(&source, &self.submission.original)?;
+        self.check_binding_after_owner_change(&source, &self.submission.original, Some(dispatch))
+            .await
+            .map_err(binding_refusal)?;
         let erased: Arc<dyn ToolkitStore> = selected_store.clone();
         if !Arc::ptr_eq(&source.store, &erased)
             || membership.source() != &original.source_record.key
@@ -1398,7 +1419,7 @@ impl InstalledWorkflowPlanning {
                     .ok_or(PrivateOriginalError::Denied)?;
                 let result = tokio::time::timeout(
                     std::time::Duration::from_millis(remaining),
-                    prepared.submit_with_review(&source, review_custody.clone()),
+                    prepared.submit_with_review(&source, review_custody.clone(), dispatch),
                 )
                 .await
                 .unwrap_or(Err(PrivateOriginalError::Unavailable));
@@ -1667,7 +1688,7 @@ impl PreparedWorkflowLaunch {
         self: &Arc<Self>,
         source: &Arc<PrivateOriginals>,
     ) -> Result<WorkflowLaunchObservation, PrivateOriginalError> {
-        self.submit_with_review(source, ReviewCustody::default())
+        self.submit_with_review(source, ReviewCustody::default(), None)
             .await
     }
 
@@ -1675,11 +1696,18 @@ impl PreparedWorkflowLaunch {
         self: &Arc<Self>,
         source: &Arc<PrivateOriginals>,
         review_custody: ReviewCustody,
+        dispatch: Option<(&meerkat_core::ToolDispatchContext, tokio::time::Instant)>,
     ) -> Result<WorkflowLaunchObservation, PrivateOriginalError> {
         review_custody
             .retain_io(async {
                 self.selection
-                    .check_for_binding(source, &self.selection.submission.original)?;
+                    .check_binding_after_owner_change(
+                        source,
+                        &self.selection.submission.original,
+                        dispatch,
+                    )
+                    .await
+                    .map_err(binding_refusal)?;
                 let route = source.route(&self.selection.submission.original.route)?;
                 let binder = self
                     .binder_with_review(source, &route, review_custody.clone())
@@ -1687,7 +1715,7 @@ impl PreparedWorkflowLaunch {
                 #[cfg(any(test, feature = "test-support"))]
                 let diagnostics = binder.launch_diagnostics.clone();
                 let result = self
-                    .submit_with_binder(source, review_custody.bind(binder))
+                    .submit_with_binder(source, review_custody.bind(binder), dispatch)
                     .await;
                 #[cfg(any(test, feature = "test-support"))]
                 diagnostics.emit_after_submit();
@@ -1742,9 +1770,12 @@ impl PreparedWorkflowLaunch {
         self: &Arc<Self>,
         source: &Arc<PrivateOriginals>,
         binder: Arc<dyn GovernedInputBinder>,
+        dispatch: Option<(&meerkat_core::ToolDispatchContext, tokio::time::Instant)>,
     ) -> Result<WorkflowLaunchObservation, PrivateOriginalError> {
         self.selection
-            .check_for_binding(source, &self.selection.submission.original)?;
+            .check_binding_after_owner_change(source, &self.selection.submission.original, dispatch)
+            .await
+            .map_err(binding_refusal)?;
         let route = source.route(&self.selection.submission.original.route)?;
         let runtime = source.bound_identity_runtime()?;
         let alias = route.grant_target.as_str();

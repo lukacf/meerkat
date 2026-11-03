@@ -12,7 +12,8 @@
   "existing_products_unchanged": true,
   "static_validation": "pass",
   "mirror_adjustments": [
-    "Prose that named a downstream host product describes it neutrally, and package identifiers that named it take the neutral names of this repository's Connect source (connect/sdk/python). The device extension example is published as examples/device-extension.mdx. rendered_sha256 covers the adjusted pages."
+    "Prose that named a downstream host product describes it neutrally, and package identifiers that named it take the neutral names of this repository's Connect source (connect/sdk/python). The device extension example is published as examples/device-extension.mdx. rendered_sha256 covers the adjusted pages.",
+    "The architecture diagram (reference/architecture.mdx) names the composition layer Meta, the product's current name, where the source uses its former name."
   ],
   "files": [
     {
@@ -183,7 +184,7 @@
     {
       "path": "reference/architecture.mdx",
       "source_sha256": "1c4c5636a7edaa27907dd5b91c8f04511fa5bed3026995e4d4cde3b6a515fcb5",
-      "rendered_sha256": "9b59565da6cb0e8407701dfb5bbe35250b4a4ebaff45d0d9992d7cd8ba3de91a"
+      "rendered_sha256": "a1ed56e8f5c2b640105b91c7a5f96e45c8fa9c7408d25d6c80c860df1a2aa15c"
     },
     {
       "path": "reference/catalog.mdx",

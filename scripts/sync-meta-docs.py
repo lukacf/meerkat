@@ -1,0 +1,534 @@
+#!/usr/bin/env python3
+"""Publish Meta's canonical docs into the docs.rkat.ai source tree.
+
+Meerkat Meta authors its public documentation in meta/docs of this
+repository. The Mintlify project for docs.rkat.ai deploys from this
+repository's docs/, so this script creates the namespaced snapshot consumed by
+the Meta product navigation (docs/meta/** and docs/docs.json).
+
+The mirror tracks main. Documentation carries no version tag: every push to
+main that changes meta/docs regenerates this snapshot (see
+.github/workflows/publish-meta-docs.yml), and releases do not publish docs.
+The generated manifest records the exact source commit, the docs path and the
+Meta version at that commit (meta/crates/meerkat-meta/Cargo.toml) as
+information, not as an identity. A standalone meerkat-meta checkout (the
+repository Meta lived in before the monorepo) still renders, with that
+repository's links and its workspace version.
+
+Usage:
+    python3 scripts/sync-meta-docs.py meta
+    python3 scripts/sync-meta-docs.py meta --check
+"""
+
+from __future__ import annotations
+
+import argparse
+import copy
+import hashlib
+import importlib.util
+import json
+import re
+import shutil
+import subprocess
+import tempfile
+from collections import Counter
+from collections.abc import Callable, Iterator
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[1]
+# The mirror is the Meta product of docs/docs.json, served under /meta/ on
+# docs.rkat.ai. It was served under /mobkit/ before the product's rename;
+# docs/docs.json redirects those URLs to /meta/.
+PRODUCT = "Meta"
+NAMESPACE = "meta"
+DESTINATION = ROOT / "docs" / NAMESPACE
+SITE_CONFIG = ROOT / "docs" / "docs.json"
+# The repository the in-tree source (meta/) belongs to, and the one a
+# standalone checkout (a workspace Cargo.toml at its root) belongs to.
+SOURCE_REPOSITORY = "https://github.com/lukacf/meerkat"
+STANDALONE_REPOSITORY = "https://github.com/lukacf/meerkat-meta"
+META_CRATE_MANIFEST = Path("crates") / "meerkat-meta" / "Cargo.toml"
+ASSET_PATHS = ("images", "logo.png")
+ROOT_LINK_RE = re.compile(r'(?P<prefix>\]\(|(?:href|src)=["\'])/(?P<path>[^/])')
+REQUIRED_PAGE_ICONS = {
+    "introduction": "boxes-stacked",
+    "quickstart": "rocket",
+}
+# v0.8.33 shipped this punctuation-stripped fragment. The release stays
+# immutable; normalize only this known heading and its links when unambiguous.
+RELEASED_ANCHORS = (
+    (
+        "concepts/roster",
+        "profiles-are-templates-members-are-declared",
+        "Profiles are templates; members are declared",
+        "Profiles are templates and members are declared",
+    ),
+)
+SPEC = importlib.util.spec_from_file_location(
+    "validate_mintlify_docs", Path(__file__).with_name("validate-mintlify-docs.py")
+)
+if SPEC is None or SPEC.loader is None:
+    raise RuntimeError("could not load the canonical Mintlify validator")
+validate = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(validate)
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "source",
+        type=Path,
+        help="Meta's source: meta (in this repository) or a standalone meerkat-meta checkout",
+    )
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="verify that the committed snapshot matches the source",
+    )
+    parser.add_argument(
+        "--require-clean",
+        action="store_true",
+        help="reject a source checkout with uncommitted documentation changes",
+    )
+    parser.add_argument(
+        "--source-ref",
+        help="source branch to record in the generated manifest (default: the "
+        "checked-out branch, or main when detached)",
+    )
+    return parser.parse_args()
+
+
+def flatten_pages(value: object) -> list[str]:
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, list):
+        return [page for item in value for page in flatten_pages(item)]
+    if isinstance(value, dict):
+        return [
+            page
+            for key in ("pages", "groups", "tabs", "products")
+            if key in value
+            for page in flatten_pages(value[key])
+        ]
+    return []
+
+
+def namespace_navigation(value: object, prefix: str) -> object:
+    """Prefix page references while preserving navigation labels and metadata."""
+    if isinstance(value, str):
+        return f"{prefix}/{value}"
+    if isinstance(value, list):
+        return [namespace_navigation(item, prefix) for item in value]
+    if isinstance(value, dict):
+        return {
+            key: (
+                namespace_navigation(item, prefix)
+                if key in {"pages", "groups", "tabs", "products"}
+                else copy.deepcopy(item)
+            )
+            for key, item in value.items()
+        }
+    return copy.deepcopy(value)
+
+
+def site_config_for_source(
+    source_config: dict[str, object],
+    site_config: dict[str, object],
+) -> dict[str, object]:
+    """Replace the Meta product tabs from the release-owned navigation."""
+    source_navigation = source_config.get("navigation")
+    if not isinstance(source_navigation, dict):
+        raise SystemExit("Meta docs config has no navigation object")
+    source_tabs = source_navigation.get("tabs")
+    if not isinstance(source_tabs, list) or not source_tabs:
+        raise SystemExit("Meta docs navigation contains no tabs")
+
+    rendered = copy.deepcopy(site_config)
+    site_navigation = rendered.get("navigation")
+    if not isinstance(site_navigation, dict):
+        raise SystemExit("docs/docs.json has no navigation object")
+    products = site_navigation.get("products")
+    if not isinstance(products, list):
+        raise SystemExit("docs/docs.json navigation has no products")
+    meta_products = [
+        product
+        for product in products
+        if isinstance(product, dict) and product.get("product") == PRODUCT
+    ]
+    if len(meta_products) != 1:
+        raise SystemExit(f"docs/docs.json must contain exactly one {PRODUCT} product")
+    meta_products[0]["tabs"] = namespace_navigation(source_tabs, NAMESPACE)
+    return rendered
+
+
+def git_output(source: Path, *args: str) -> str:
+    return subprocess.run(
+        ["git", "-C", str(source), *args],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
+def prose_segments(text: str) -> Iterator[tuple[bool, str]]:
+    """Keep fenced examples byte-for-byte, including longer and tilde fences."""
+    fence = ""
+    lines: list[str] = []
+    for line in text.splitlines(keepends=True):
+        marker = re.match(r"^\s*(`{3,}|~{3,})(.*)$", line)
+        if not fence and marker:
+            yield True, "".join(lines)
+            lines = [line]
+            fence = marker.group(1)
+        elif fence:
+            lines.append(line)
+            if (
+                marker
+                and marker.group(1)[0] == fence[0]
+                and len(marker.group(1)) >= len(fence)
+                and not marker.group(2).strip()
+            ):
+                yield False, "".join(lines)
+                lines = []
+                fence = ""
+        else:
+            lines.append(line)
+    yield not fence, "".join(lines)
+
+
+def rewrite_prose(text: str, transform: Callable[[str], str]) -> str:
+    return "".join(
+        transform(segment) if is_prose else segment
+        for is_prose, segment in prose_segments(text)
+    )
+
+
+def rewrite_root_links(text: str) -> str:
+    return rewrite_prose(
+        text,
+        lambda segment: ROOT_LINK_RE.sub(
+            lambda match: f"{match.group('prefix')}/{NAMESPACE}/{match.group('path')}",
+            segment,
+        ),
+    )
+
+
+def released_anchor_corrections(source_docs: Path) -> dict[str, str]:
+    corrections: dict[str, str] = {}
+    for page_id, legacy, heading, rendered_heading in RELEASED_ANCHORS:
+        page = source_docs / f"{page_id}.mdx"
+        if not page.is_file():
+            continue
+        slugs = Counter(
+            validate.slugify(match.group(2))
+            for is_prose, segment in prose_segments(page.read_text(encoding="utf-8"))
+            if is_prose
+            for line in segment.splitlines()
+            if (match := re.match(r"^(#{2,6})\s+(.+?)\s*$", line))
+        )
+        canonical = validate.slugify(heading)
+        stable = validate.slugify(rendered_heading)
+        # Unknown, missing, duplicate, or colliding targets remain untouched.
+        # The normal site/link validators still decide whether they can publish.
+        if slugs[canonical] == 1 and slugs[legacy] == 0 and slugs[stable] == 0:
+            for old_anchor in (legacy, canonical):
+                corrections[f"/{page_id}#{old_anchor}"] = f"/{page_id}#{stable}"
+    return corrections
+
+
+def normalize_released_anchors(text: str, corrections: dict[str, str]) -> str:
+    def replace(match: re.Match[str]) -> str:
+        group = 1 if match.group(1) is not None else 2
+        target = match.group(group)
+        start, end = match.span(group)
+        return (
+            match.string[match.start():start]
+            + corrections.get(target, target)
+            + match.string[end:match.end()]
+        )
+
+    return rewrite_prose(
+        text,
+        lambda segment: validate.LINK_ATTR_RE.sub(
+            replace, validate.MARKDOWN_LINK_RE.sub(replace, segment)
+        ),
+    )
+
+
+def normalize_released_heading(
+    text: str, page_id: str, corrections: dict[str, str]
+) -> str:
+    headings = {
+        validate.slugify(heading): rendered_heading
+        for target_page, legacy, heading, rendered_heading in RELEASED_ANCHORS
+        if target_page == page_id and f"/{page_id}#{legacy}" in corrections
+    }
+    if not headings:
+        return text
+
+    def replace(segment: str) -> str:
+        lines: list[str] = []
+        for line in segment.splitlines(keepends=True):
+            match = re.match(r"^(#{2,6}\s+)(.+?)(\s*)$", line)
+            if match and (anchor := validate.slugify(match.group(2))) in headings:
+                # Hosted Mintlify strips the semicolon; the pinned CLI encodes it.
+                # Punctuation-free wording gives both renderers the same anchor.
+                line = f"{match.group(1)}{headings[anchor]}{match.group(3)}"
+            lines.append(line)
+        return "".join(lines)
+
+    return rewrite_prose(text, replace)
+
+
+def frontmatter_close(text: str, page_id: str) -> int:
+    """Return the offset of the newline that starts the closing frontmatter fence."""
+    if not text.startswith("---\n"):
+        raise SystemExit(f"Meta page lacks frontmatter: {page_id}")
+    end = text.find("\n---", 4)
+    if end == -1:
+        raise SystemExit(f"Meta page has unclosed frontmatter: {page_id}")
+    return end
+
+
+def ensure_page_icon(text: str, page_id: str) -> str:
+    icon = REQUIRED_PAGE_ICONS.get(page_id)
+    if icon is None or re.search(r"(?m)^icon\s*:", text):
+        return text
+    end = frontmatter_close(text, page_id)
+    return f'{text[:end]}\nicon: "{icon}"{text[end:]}'
+
+
+def version_stamp(
+    source_version: str,
+    source_ref: str,
+    source_commit: str,
+    source_date: str,
+    source_repository: str = SOURCE_REPOSITORY,
+) -> str:
+    """Return the one-line provenance stamp every mirrored page carries.
+
+    docs.rkat.ai serves this snapshot until the next publication succeeds. The
+    stamp names the exact commit the page was rendered from and the Meta
+    version at that commit, so a reader can tell how current the page is and
+    which version it was written against. The commit is the identity; the
+    version is information.
+    """
+    commit = f"[{source_commit[:12]}]({source_repository}/commit/{source_commit})"
+    return (
+        f"*Mirrored from Meerkat Meta {source_ref} at {commit} on {source_date}; "
+        f"Meta version {source_version} at that commit.*"
+    )
+
+
+def stamp_page(text: str, stamp: str, page_id: str) -> str:
+    """Insert the version stamp as the first body line under the frontmatter."""
+    end = frontmatter_close(text, page_id)
+    close = end + len("\n---")
+    newline = text.find("\n", close)
+    if newline == -1:
+        head, body = text + "\n", ""
+    else:
+        head, body = text[: newline + 1], text[newline + 1 :]
+    body = body.lstrip("\n")
+    return f"{head}\n{stamp}\n\n{body}"
+
+
+def tree_digest(root: Path) -> str:
+    digest = hashlib.sha256()
+    for path in sorted(item for item in root.rglob("*") if item.is_file()):
+        digest.update(path.relative_to(root).as_posix().encode())
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def package_version(cargo_toml: Path) -> str:
+    in_package = False
+    for raw_line in cargo_toml.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if line.startswith("[") and line.endswith("]"):
+            in_package = line == "[package]"
+            continue
+        if in_package:
+            match = re.fullmatch(r'version\s*=\s*"([^"]+)"', line)
+            if match:
+                return match.group(1)
+    raise SystemExit(f"package version not found: {cargo_toml}")
+
+
+def source_identity(source: Path) -> tuple[str, str, str]:
+    """Return the repository, Meta version and docs path of a source.
+
+    The in-tree source (meta/ in this repository) has no workspace manifest of
+    its own: Meta's crates carry explicit versions, and meerkat-meta's is the
+    product's. A standalone meerkat-meta checkout keeps its workspace version.
+    The docs path is relative to the source's repository root (meta/docs, or
+    docs for a standalone checkout), so the lag check knows which commits the
+    mirror must follow.
+    """
+    prefix = git_output(source, "rev-parse", "--show-prefix")
+    docs_path = f"{prefix}docs"
+    standalone_manifest = source / "Cargo.toml"
+    if standalone_manifest.is_file():
+        return STANDALONE_REPOSITORY, workspace_version(standalone_manifest), docs_path
+    crate_manifest = source / META_CRATE_MANIFEST
+    if crate_manifest.is_file():
+        return SOURCE_REPOSITORY, package_version(crate_manifest), docs_path
+    raise SystemExit(
+        f"{source} is neither meta/ ({META_CRATE_MANIFEST} missing) nor a standalone checkout (no Cargo.toml)"
+    )
+
+
+def workspace_version(cargo_toml: Path) -> str:
+    in_workspace_package = False
+    for raw_line in cargo_toml.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if line.startswith("[") and line.endswith("]"):
+            in_workspace_package = line == "[workspace.package]"
+            continue
+        if in_workspace_package:
+            match = re.fullmatch(r'version\s*=\s*"([^"]+)"', line)
+            if match:
+                return match.group(1)
+    raise SystemExit(f"workspace package version not found: {cargo_toml}")
+
+
+def build_snapshot(
+    source: Path,
+    destination: Path,
+    *,
+    source_ref: str | None,
+    require_clean: bool,
+) -> None:
+    source = source.resolve()
+    source_docs = source / "docs"
+    config_path = source_docs / "docs.json"
+    if not config_path.is_file():
+        raise SystemExit(f"Meta docs config not found: {config_path}")
+
+    source_dirty = bool(git_output(source, "status", "--short", "--", "docs"))
+    if require_clean and source_dirty:
+        raise SystemExit("Meta documentation source has uncommitted changes")
+
+    source_repository, source_version, source_docs_path = source_identity(source)
+    if source_ref is None:
+        branch = git_output(source, "rev-parse", "--abbrev-ref", "HEAD")
+        source_ref = "main" if branch == "HEAD" else branch
+
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    page_ids = flatten_pages(config.get("navigation", {}))
+    if not page_ids:
+        raise SystemExit("Meta docs navigation contains no pages")
+    if len(page_ids) != len(set(page_ids)):
+        raise SystemExit("Meta docs navigation contains duplicate pages")
+
+    source_commit = git_output(source, "rev-parse", "HEAD")
+    source_date = git_output(source, "show", "-s", "--format=%cs", "HEAD")
+    stamp = version_stamp(source_version, source_ref, source_commit, source_date, source_repository)
+    corrections = released_anchor_corrections(source_docs)
+
+    destination.mkdir(parents=True, exist_ok=True)
+    for page_id in page_ids:
+        source_page = source_docs / f"{page_id}.mdx"
+        if not source_page.is_file():
+            raise SystemExit(f"Meta navigation page not found: {source_page}")
+        destination_page = destination / f"{page_id}.mdx"
+        destination_page.parent.mkdir(parents=True, exist_ok=True)
+        rendered = source_page.read_text(encoding="utf-8")
+        rendered = ensure_page_icon(rendered, page_id)
+        rendered = stamp_page(rendered, stamp, page_id)
+        rendered = normalize_released_heading(rendered, page_id, corrections)
+        rendered = normalize_released_anchors(rendered, corrections)
+        rendered = rewrite_root_links(rendered)
+        destination_page.write_text(rendered, encoding="utf-8")
+
+    for relative in ASSET_PATHS:
+        source_asset = source_docs / relative
+        destination_asset = destination / relative
+        if source_asset.is_dir():
+            shutil.copytree(source_asset, destination_asset)
+        elif source_asset.is_file():
+            destination_asset.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source_asset, destination_asset)
+
+    manifest = {
+        "generated": True,
+        "source_repository": source_repository,
+        "source_path": source_docs_path,
+        "source_branch": source_ref,
+        "source_ref": source_ref,
+        "source_commit": source_commit,
+        "source_commit_date": source_date,
+        "source_version": source_version,
+        "source_docs_dirty": source_dirty,
+        "public_pages": len(page_ids),
+        "content_sha256": tree_digest(destination),
+    }
+    (destination / "_source.json").write_text(
+        json.dumps(manifest, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
+def main() -> int:
+    args = parse_args()
+    source = args.source.resolve()
+    source_config_path = source / "docs" / "docs.json"
+    if not source_config_path.is_file():
+        raise SystemExit(f"Meta docs config not found: {source_config_path}")
+    source_config = json.loads(source_config_path.read_text(encoding="utf-8"))
+    site_config = json.loads(SITE_CONFIG.read_text(encoding="utf-8"))
+    expected_site_config = site_config_for_source(source_config, site_config)
+
+    if args.check:
+        if not DESTINATION.is_dir():
+            raise SystemExit(f"Meta docs snapshot not found: {DESTINATION}")
+        with tempfile.TemporaryDirectory(prefix="meta-docs-") as temp:
+            expected = Path(temp) / NAMESPACE
+            build_snapshot(
+                source,
+                expected,
+                source_ref=args.source_ref,
+                require_clean=args.require_clean,
+            )
+            comparison = subprocess.run(
+                ["diff", "-ru", str(DESTINATION), str(expected)],
+                text=True,
+            )
+            if comparison.returncode:
+                raise SystemExit(
+                    "Meta docs snapshot is stale; run "
+                    f"python3 scripts/sync-meta-docs.py {source}"
+                )
+        if site_config != expected_site_config:
+            raise SystemExit(
+                "Meta docs navigation is stale; run "
+                f"python3 scripts/sync-meta-docs.py {source}"
+            )
+        print("meta-docs-sync: ok")
+        return 0
+
+    if DESTINATION.exists():
+        shutil.rmtree(DESTINATION)
+    build_snapshot(
+        source,
+        DESTINATION,
+        source_ref=args.source_ref,
+        require_clean=args.require_clean,
+    )
+    SITE_CONFIG.write_text(
+        json.dumps(expected_site_config, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    manifest = json.loads((DESTINATION / "_source.json").read_text())
+    print(
+        "meta-docs-sync: wrote "
+        f"{manifest['public_pages']} pages from {manifest['source_commit']}"
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

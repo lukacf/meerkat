@@ -19,7 +19,7 @@
 //     refreshed by scripts/example-locks.py): versions of source-less (path)
 //     packages only;
 //   - the documents the docs stamper owns (Markdown and MDX under docs/
-//     outside docs/mobkit and docs/internal, README.md, the platform skill):
+//     outside docs/meta and docs/internal, README.md, the platform skill):
 //     exactly the output of the base's scripts/stamp-docs-contract-version.sh
 //     for the new version, so only its marker lines change;
 //   - CHANGELOG.md: exactly the output of the base's
@@ -162,7 +162,7 @@ function isCargoLockPath(path) {
 }
 
 // The files scripts/stamp-docs-contract-version.sh rewrites (its own walk):
-// Markdown and MDX under docs/ outside the independently released MobKit
+// Markdown and MDX under docs/ outside the independently released Meta
 // mirror and the unpublished docs/internal notes, the README and the
 // platform skill. Some are compiled into binaries (the skill through the
 // facade's help corpus), so only the stamper's own output is accepted.
@@ -170,7 +170,7 @@ export function isStampedDocument(path) {
   if (path === "README.md" || path === ".claude/skills/meerkat-platform/SKILL.md") return true;
   return (
     path.startsWith("docs/") &&
-    !path.startsWith("docs/mobkit/") &&
+    !path.startsWith("docs/meta/") &&
     !path.startsWith("docs/internal/") &&
     /\.mdx?$/.test(path)
   );
@@ -207,7 +207,7 @@ export function isProjectedPath(path) {
     path.startsWith("sdks/python/meerkat/generated/") ||
     path.startsWith("sdks/typescript/src/generated/") ||
     path.startsWith("artifacts/schemas/") ||
-    (path.startsWith("docs/") && !path.startsWith("docs/mobkit/")) ||
+    (path.startsWith("docs/") && !path.startsWith("docs/meta/")) ||
     path.endsWith("/BUILD.bazel") ||
     path === "BUILD.bazel"
   );

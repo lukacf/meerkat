@@ -103,18 +103,6 @@ comes from decides the class before any fix.
 
 - `installed_host::operator_setup::tests::target_tests::explicit_correlated_targets_use_one_review_source_and_real_first_input`
 
-## Census wake timeout
-
-Status: open. Kind: not yet determined.
-
-The terminal census does not wake the existing completion after the
-native source restore: the test's wait ends in `Elapsed` on every run. The
-reopen fixture's attachment and settlement signals may race the delivery
-owner. First decide which answer a promoted row awaiting its restore
-owes, then let the signals drain before the owner arms.
-
-- `installed_host::acquisition::continuation::owner_tests::cold_source_tests::custody_recovery_wake_tests::terminal_census_wakes_existing_completion_after_native_source_restore`
-
 ## Intermittent races
 
 Status: open. Kind: test-side races. These pass on some runs, so the row
@@ -126,3 +114,11 @@ excludes them without requiring them to fail.
 - `private_originals::governed_submit::tests::first_input_tests::helper_entry_native::fresh_helper_reset_catalog_calls_require_explicit_successor_parent`:
   a single claim attempt right after the run settles; retry it within a
   deadline.
+- `installed_host::acquisition::continuation::owner_tests::cold_source_tests::custody_recovery_wake_tests::terminal_census_wakes_existing_completion_after_native_source_restore`:
+  the terminal census does not wake the existing completion after the
+  native source restore, and the test's wait ended in `Elapsed` on every
+  run until it passed in the row's known-red run on main push 41635572661.
+  Its class is not yet determined: the reopen fixture's attachment and
+  settlement signals may race the delivery owner. First decide which
+  answer a promoted row awaiting its restore owes, then let the signals
+  drain before the owner arms.

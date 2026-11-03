@@ -618,7 +618,7 @@ if [[ ! -x "${source_credential_publication_audit}" ]]; then
   echo "error: source-credential publication audit runner is missing from workspace runfiles: ${source_credential_publication_audit}" >&2
   exit 1
 fi
-if run_part audits-f; then
+if run_part audits-s; then
   echo "running bounded AuthMachine source-credential publication TLC audit"
   TLC_WORKERS="${tlc_workers}" "${source_credential_publication_audit}" "${SOURCE_CREDENTIAL_PUBLICATION_AUDIT_MAX_STEPS:-5}"
 fi
@@ -645,7 +645,7 @@ if [[ ! -x "${tool_grant_expiry_audit}" ]]; then
   echo "error: tool grant expiry audit runner is missing from workspace runfiles: ${tool_grant_expiry_audit}" >&2
   exit 1
 fi
-if run_part audits-f; then
+if run_part audits-u; then
   echo "running bounded tool grant expiry TLC audit"
   TLC_WORKERS="${tlc_workers}" "${tool_grant_expiry_audit}" "${TOOL_GRANT_EXPIRY_AUDIT_MAX_STEPS:-6}" --mutants
 fi
@@ -1275,10 +1275,16 @@ run_machine_verify() {
 # per run (not measured yet): about 407-608 s for the shard;
 # audits-f = live media health 147-171, requeue-across-stop 122-147,
 # live-context causal-tail batch with --mutants 98-122, generation high-water
-# with --mutants 56-71: 423-511 s, plus the AuthMachine source-credential
-# publication audit, added after these measurements, and the tool grant
-# expiry audit with --mutants (not yet measured; fourteen runs over a small
-# model that does not extend meerkat_machine);
+# with --mutants 56-71: 423-511 s. On the 0.9.9 release branch (2026-11-03)
+# the shard, which then also ran the AuthMachine source-credential
+# publication audit and the tool grant expiry audit, ran past its 20-minute
+# job timeout on a hosted runner (20m18s; another run was still unfinished
+# at 19m04s): its four audits took about 11m49s there, and the
+# source-credential publication audit alone 7m53s. Locally with 4 TLC
+# workers the four took 354 s (requeue-across-stop 144, live media health
+# 89, causal-tail batch 57, generation high-water 64), the
+# source-credential publication audit 168 s and the tool grant expiry
+# audit 7 s, so those two moved to audits-s and audits-u;
 # audits-g = member residency's whole-space runs (--part spaces), alone: on
 # the push, when the shard ran the whole audit, its eight whole-space runs
 # took 165 s and its first 23 of 32 witness runs 173 s before the job timeout
@@ -1374,7 +1380,9 @@ run_machine_verify() {
 # states); the commit run keeps its 7680 states with about 1.3e5 generated.
 # audits-s = its removal run (38976 states, 41 s locally; 9 witnesses, 6
 # mutants: 16 TLC runs, its deep witnesses each exploring much of the
-# space), alone.
+# space), which took 2m47s-3m03s hosted as the shard's only audit
+# (2026-11-03), and the AuthMachine source-credential publication audit
+# (7m53s hosted, 168 s locally), moved from audits-f.
 # audits-t = its archive (2016 states, 11 s locally), unlist, placement and
 # recovered runs (four whole-space runs, 18 witnesses, 17 mutants: 39 TLC
 # runs, each space in the thousands of states or fewer).
@@ -1382,14 +1390,15 @@ run_machine_verify() {
 # witnesses, 8 mutants: 24 TLC runs): the preparation run fires only the
 # attempts' arms that change state, in the initial authoritative
 # composition, and the verdict run every arm over the facts the verdicts
-# read.
+# read. The shard took 3m04s-4m17s hosted (2026-11-03) before the tool grant
+# expiry audit with --mutants (7 s locally) moved to it from audits-f.
 # A witness run, and a mutant that expects neither a totality invariant nor
 # an action property, leaves out its run's ENABLED totality invariants and
 # its action properties (the whole-space run checks them in every state and
 # step); a mutant that expects an action property leaves out the totality
 # invariants only.
-# None of audits-g through audits-o and audits-q through audits-v has been
-# measured on a hosted runner yet.
+# None of audits-g through audits-o, audits-q, audits-r, audits-t and
+# audits-v has been measured on a hosted runner yet.
 # Each job adds about 20 s of checkout and TLC setup: a shard within 348 s
 # locally takes at most about 14 minutes hosted (800 s of TLC at a 2.3x
 # runner factor, and its setup), inside the 1080 s execution budget. As

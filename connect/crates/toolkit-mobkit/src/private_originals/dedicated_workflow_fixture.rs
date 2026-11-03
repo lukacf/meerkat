@@ -12,6 +12,12 @@ use meerkat_workgraph::{
 };
 use toolkit_package::{ContentDigest, Revision};
 
+tokio::task_local! {
+    // Same-crate control only: a reopened fixture skips its pin step and
+    // leaves the lead Dormant, so a control can wake it at an exact point.
+    pub(in crate::private_originals) static LEAVE_LEAD_DORMANT: ();
+}
+
 pub(in crate::private_originals) struct DedicatedFixture<
     S = EphemeralSessionService<FactoryAgentBuilder>,
 > {
@@ -1094,6 +1100,9 @@ impl<
             &sessions[2..3]
         };
         for session in selected_sessions {
+            if LEAVE_LEAD_DORMANT.try_with(|_| ()).is_ok() {
+                continue;
+            }
             // A reopened host restores its members Dormant (Core's on-demand
             // member restore): an Active identity is not a live actor. This
             // pin needs the live actor, so it first goes through Core's

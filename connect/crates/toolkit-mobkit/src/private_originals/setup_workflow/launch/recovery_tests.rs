@@ -59,6 +59,17 @@ fn assert_no_restored_sources(
     assert!(c.member.session().is_err());
 }
 
+/// Neither A's nor P's member was woken: a stopped, refused or unselected
+/// recovery step reaches no wake. Every read here is a registry observation.
+async fn assert_unwoken(c: &PersistentDedicated) {
+    for session in [&c.f.session, &c.parent_session] {
+        assert!(
+            super::idle_restore_tests::dormant(c, session).await,
+            "no recovery step woke {session}"
+        );
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn canonical_interest_pages_restore_once_and_replays_keep_publication_current() {
     let saved = selected_then_close().await;
@@ -212,6 +223,7 @@ async fn canonical_interest_step_rereads_selection_and_cancelled_evidence_before
                 .check_current()
                 .expect("unselected or incomplete evidence cannot publish source custody");
             assert_no_restored_sources(&c, &saved.association, &p, &g);
+            assert_unwoken(&c).await;
         }
         let row = c.f.store.get(&observed.key).await.unwrap().unwrap();
         c.f.store
@@ -237,6 +249,7 @@ async fn canonical_interest_step_rereads_selection_and_cancelled_evidence_before
             Err(PrivateOriginalError::Denied)
         );
         assert_no_restored_sources(&c, &saved.association, &p, &g);
+        assert_unwoken(&c).await;
         assert_eq!(all_ids(&c).await, saved.ids);
         assert_eq!(histories(&c).await, saved.histories);
         assert_eq!(c.f.model_requests(), 0);
@@ -298,6 +311,7 @@ async fn canonical_interest_step_observes_stop_and_departure_after_page_read() {
             .check_current()
             .expect("stop admits no source restoration");
         assert_no_restored_sources(&c, &saved.association, &p, &g);
+        assert_unwoken(&c).await;
         // The page remains unchanged while its actual canonical membership
         // ceases to be live. A page snapshot cannot recreate that interest.
         source
@@ -317,9 +331,78 @@ async fn canonical_interest_step_observes_stop_and_departure_after_page_read() {
             .check_current()
             .expect("a departed canonical membership stays absent locally");
         assert_no_restored_sources(&c, &saved.association, &p, &g);
+        assert_unwoken(&c).await;
         assert_eq!(all_ids(&c).await, saved.ids);
         assert_eq!(histories(&c).await, saved.histories);
         assert_eq!(c.f.model_requests(), 0);
+    }))
+    .catch_unwind()
+    .await;
+    close(&c, body).await;
+}
+
+/// After a restart the acquisition sweep's step for a selected interest
+/// wakes the Dormant workflow lead on its own session before it reads G's
+/// capture. The lead's capture changes the publication, so the first step
+/// answers Unavailable (its retryable refusal); the next step restores the
+/// selected interest. G registers exactly once, with no input and no model
+/// request.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sweep_step_wakes_its_dormant_lead_before_reading_its_capture() {
+    use crate::private_originals::governed_submit::tests::first_input_tests::dedicated::LEAVE_LEAD_DORMANT;
+    use meerkat_mobkit::identity_first::ControllerPinSource;
+    let saved = selected_then_close().await;
+    let c = LEAVE_LEAD_DORMANT
+        .scope((), PersistentDedicated::reopen(saved.durable.clone()))
+        .await;
+    let body = AssertUnwindSafe(Box::pin(async {
+        join_recovery_for_idle_restore(&c).await;
+        assert!(
+            c.f.machine
+                .current_session_registration_witness(&c.lead_session)
+                .await
+                .is_none(),
+            "the reopen left G Dormant"
+        );
+        let first =
+            c.f.source
+                .recover_workflow_interest_source(&saved.row, || true)
+                .await;
+        assert_eq!(first, Err(PrivateOriginalError::Unavailable));
+        let registration =
+            c.f.machine
+                .current_session_registration_witness(&c.lead_session)
+                .await
+                .expect("the step woke G on its own session");
+        // The fixture's pin step for G, once the step woke it.
+        let actor = c.f.service.live_actor(&c.lead_session).await.unwrap();
+        let pin = c.f.service.pin_actor(&actor).await.unwrap();
+        meerkat_core::publish_token_lifecycle_acquired_for_identity_within(
+            &c.f.machine.generated_auth_lease_handle(),
+            pin.selection().credential(),
+            &meerkat_core::auth::PersistedTokens::api_key("synthetic-controller-only-fixture"),
+            tokio::time::Instant::now() + GUARD,
+        )
+        .await
+        .unwrap();
+        let restored =
+            c.f.source
+                .recover_workflow_interest_source(&saved.row, || true)
+                .await
+                .unwrap();
+        assert!(matches!(
+            restored,
+            WorkflowInterestRecovery::Restored { .. }
+        ));
+        assert_eq!(
+            c.f.machine
+                .current_session_registration_witness(&c.lead_session)
+                .await,
+            Some(registration),
+            "G registered exactly once"
+        );
+        assert_eq!(all_ids(&c).await, saved.ids, "no input");
+        assert_eq!(c.f.model_requests(), 0, "no model request");
     }))
     .catch_unwind()
     .await;

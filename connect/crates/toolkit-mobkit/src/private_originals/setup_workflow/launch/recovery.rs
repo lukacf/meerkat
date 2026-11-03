@@ -71,6 +71,7 @@ impl PrivateOriginals {
                 .final_association
                 .as_ref()
                 .ok_or(PrivateOriginalError::Unavailable)?;
+            self.wake_workflow_lead(association).await?;
             let member = self
                 .owner
                 .captured_workflow_member(&binding.workflow, association)
@@ -151,6 +152,7 @@ impl PrivateOriginals {
             .final_association
             .as_ref()
             .ok_or(PrivateOriginalError::Unavailable)?;
+        self.wake_workflow_lead(association).await?;
         let member = self
             .owner
             .captured_workflow_member(workflow, association)
@@ -192,6 +194,33 @@ impl PrivateOriginals {
         Ok(WorkflowInterestRecovery::Restored {
             memberships: memberships.len(),
         })
+    }
+
+    /// A restarted workflow lead stays Dormant, with no capture in this
+    /// process, until its first registration. Restoring a selected interest
+    /// is an operation on it, so wake exactly the lead's session first (no
+    /// input, no turn) before reading its capture. A refused wake leaves the
+    /// interest unavailable for a later round, as before; a cancelled,
+    /// departed or unselected source never reaches this point.
+    async fn wake_workflow_lead(
+        &self,
+        association: &InputAuthorityAssociation,
+    ) -> Result<(), PrivateOriginalError> {
+        let session =
+            meerkat_core::SessionId::parse(association.candidate().target.context.as_str())
+                .map_err(|_| PrivateOriginalError::Conflict)?;
+        let pins = self
+            .controller_pin_source
+            .get()
+            .and_then(Weak::upgrade)
+            .ok_or(PrivateOriginalError::Unavailable)?;
+        let machine = self.machine()?;
+        let (_, stamp) = self
+            .owner
+            .publication()
+            .observe(|| ())
+            .map_err(|_| PrivateOriginalError::Unavailable)?;
+        Self::wake_original_session_owner(&machine, &*pins, &session, &stamp).await
     }
 
     fn held_workflow_source(

@@ -231,6 +231,40 @@ pub(super) fn writer_error(error: OriginalWriterError) -> PrivateOriginalError {
     }
 }
 
+#[cfg(test)]
+tokio::task_local! {
+    // Same-crate control only: hold a cold operation inside its
+    // session-owner wake window at the stage the control selects.
+    pub(super) static WAKE_WINDOW: Arc<WakeWindow>;
+}
+
+/// Where a same-crate control holds an operation inside its wake window.
+#[cfg(test)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum WakeWindowStage {
+    /// After the pre-wake publication check, before the owner is asked.
+    BeforeWake,
+    /// After the owner answered Ready, before the post-wake check.
+    AfterReady,
+}
+
+#[cfg(test)]
+pub(super) struct WakeWindow {
+    pub(super) stage: WakeWindowStage,
+    pub(super) held: tokio::sync::Notify,
+    pub(super) release: tokio::sync::Notify,
+}
+
+#[cfg(test)]
+async fn hold_wake_window(stage: WakeWindowStage) {
+    if let Ok(window) = WAKE_WINDOW.try_with(Arc::clone)
+        && window.stage == stage
+    {
+        window.held.notify_one();
+        window.release.notified().await;
+    }
+}
+
 impl PrivateOriginals {
     pub(crate) fn bind_controller_pin_source(
         &self,
@@ -380,6 +414,79 @@ impl PrivateOriginals {
         Ok(())
     }
 
+    /// Before a live operation on an admitted original reads the live owners
+    /// of `session` (its runtime registration, executor attachment and live
+    /// actor), wake the session's owner when no live actor serves it. A
+    /// restarted host restores its members Dormant until a live operation
+    /// wakes them (Core's on-demand member restore), and a session-keyed live
+    /// operation that finds no actor asks Core's session-owner wake before it
+    /// fails (`meerkat_core::session_owner_wake`). The owner wakes exactly
+    /// the member bound to that session: no new session, actor or turn.
+    ///
+    /// Only operations call this, after their canonical reads and with no
+    /// source writer held. A read or a cancellation never wakes a member.
+    /// `stamp` is the operation's publication observation: a cancellation or
+    /// any other authority change that entered since those reads refuses
+    /// before the wake, and the check is repeated once the wake returns. The
+    /// caller then reads the registration, attachment and actor again, and
+    /// its native callback repeats every authority check.
+    ///
+    /// A session whose registration and attachment are present is left to the
+    /// caller's own reads, so a live member's actor is observed once, by the
+    /// caller, as before.
+    ///
+    /// Every refusal stays this source's `Unavailable`, as for a missing live
+    /// owner before: a session no owner serves in this process, an owner that
+    /// no longer binds the session (`NotOwned`), a busy member (retryable)
+    /// and any other typed wake refusal alike.
+    pub(super) async fn wake_original_session_owner(
+        machine: &Arc<MeerkatMachine>,
+        pins: &dyn ControllerPinSource,
+        session: &meerkat_core::SessionId,
+        stamp: &meerkat_authorization::publication::LocalPublicationStamp,
+    ) -> Result<(), PrivateOriginalError> {
+        if machine
+            .current_session_registration_witness(session)
+            .await
+            .is_some()
+            && machine
+                .current_executor_attachment_witness(session)
+                .await
+                .is_some()
+        {
+            return Ok(());
+        }
+        if pins.live_actor(session).await.is_some() {
+            return Ok(());
+        }
+        stamp
+            .check_current()
+            .map_err(|_| PrivateOriginalError::Unavailable)?;
+        #[cfg(test)]
+        hold_wake_window(WakeWindowStage::BeforeWake).await;
+        // The owner's wake can build the member (a deep construction chain).
+        // Run it on its own task, as every deep chain under an arbitrary
+        // caller is, so it never stacks beneath the operation's poll frames.
+        // A dropped caller aborts it; a late completion only wakes the member,
+        // which the owner's machine joins and fences.
+        let owned = session.clone();
+        let woke = meerkat_runtime::stack_relief::relieve_caller_stack(move || async move {
+            meerkat_core::session_owner_wake::SessionOwnerWakeRegistry::global()
+                .wake(&owned)
+                .await
+        })
+        .await;
+        match woke {
+            Some(Ok(meerkat_core::session_owner_wake::SessionOwnerWakeOutcome::Ready)) => {}
+            Some(Ok(_)) | Some(Err(_)) | None => return Err(PrivateOriginalError::Unavailable),
+        }
+        #[cfg(test)]
+        hold_wake_window(WakeWindowStage::AfterReady).await;
+        stamp
+            .check_current()
+            .map_err(|_| PrivateOriginalError::Unavailable)
+    }
+
     /// None is native NotAdmitted, never permission to submit again. Errors
     /// retain conflict/unavailable/cancellation distinctions. This method does
     /// not restore other original classes, a Console login or a live attachment.
@@ -484,6 +591,7 @@ impl PrivateOriginals {
             .ok_or(PrivateOriginalError::Unavailable)?;
         let machine = self.machine()?;
         let session = &task.original_task.origin_session_id;
+        Self::wake_original_session_owner(&machine, &*pins, session, &stamp).await?;
         let registration = machine
             .current_session_registration_witness(session)
             .await

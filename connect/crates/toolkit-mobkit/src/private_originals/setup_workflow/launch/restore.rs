@@ -192,6 +192,7 @@ impl PrivateOriginals {
             .get()
             .and_then(Weak::upgrade)
             .ok_or(PrivateOriginalError::Unavailable)?;
+        Self::wake_original_session_owner(&machine, &*pins, &session, &stamp).await?;
         let registration = machine
             .current_session_registration_witness(&session)
             .await
@@ -594,6 +595,7 @@ impl PrivateOriginals {
             .get()
             .and_then(Weak::upgrade)
             .ok_or(PrivateOriginalError::Unavailable)?;
+        Self::wake_original_session_owner(&machine, &*pins, &session, &stamp).await?;
         let registration = machine
             .current_session_registration_witness(&session)
             .await

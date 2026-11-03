@@ -59,6 +59,16 @@ async fn child() {
         .unwrap()
         .unwrap();
     let (config, roster) = saved.durable.gateway_configuration();
+    // One roster seat no workflow interest selects, through the gateway's
+    // ordinary roster path. The acquisition sweep restores only selected
+    // live interests, so it must leave this seat Dormant: its wakes are
+    // bounded by active workflows, not by roster size.
+    let unselected =
+        meerkat_mobkit::identity_first::AgentIdentity::parse("unselected_seat").unwrap();
+    let mut seated = roster.clone();
+    let mut seat = roster[0].clone();
+    seat.identity = unselected.clone();
+    seated.push(seat);
     let (model, requests) = DurableDedicated::gateway_model();
     let (mut host, _private_open) = recovery_host(&mut reopened, &saved.durable);
     host.model = Some(model.clone());
@@ -82,7 +92,7 @@ async fn child() {
     let host = Arc::new(host);
     println!(
         "{}",
-        json!({"fixture":"prepared", "state":directory.path(), "mob_config":config, "roster":roster})
+        json!({"fixture":"prepared", "state":directory.path(), "mob_config":config, "roster":seated})
     );
     let observed_host = host.clone();
     let observed_source = source.clone();
@@ -183,6 +193,12 @@ async fn child() {
             assert_eq!(work_census(observed_directory.path(), &observed_sessions).await, expected_before,
                 "no duplicate input or original model/tool history");
             assert_eq!(requests(), 0, "actual restoration and recovery make no model request");
+            // The sweep restored the selected interest and ran further rounds;
+            // the unselected seat stayed Dormant on its own session.
+            let seat = runtime.status(&unselected).await.unwrap();
+            let seat_session = seat.session_id.clone().expect("the roster pass seats the unselected member");
+            assert!(pins.live_actor(&seat_session).await.is_none(), "the acquisition sweep woke no unselected seat");
+            assert!(machine.current_session_registration_witness(&seat_session).await.is_none());
             println!("{}", json!({"fixture":"fairness", "writer_refusal_observed":true,
                 "acquisition_revisited":true, "custody_completed_rounds":observed_probe.custody_rounds.load(Ordering::SeqCst)}));
             until(|| observed_host.closing.load(Ordering::SeqCst)).await;

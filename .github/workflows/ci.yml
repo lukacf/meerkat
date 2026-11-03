@@ -2294,7 +2294,7 @@ jobs:
     # superset of this check), and the dependents compile here on the push.
     if: ${{ needs.changes.outputs.closure_check == 'true' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    timeout-minutes: ${{ github.event_name == 'pull_request' && 40 || 60 }}
     env:
       RUSTC_WRAPPER: sccache
     steps:

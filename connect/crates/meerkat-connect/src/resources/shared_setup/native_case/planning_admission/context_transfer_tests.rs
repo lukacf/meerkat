@@ -82,8 +82,20 @@ async fn committed(transfer: &Transfer) {
     ));
 }
 
+/// The actual host publishes this in-process runtime's one-use bootstrap
+/// completion. That starts the selected acquisition recovery owner whose
+/// control commits each Find-owned transfer; construction alone selects none.
+pub(super) fn complete_bootstrap(case: &Case) {
+    case.host
+        .as_ref()
+        .unwrap()
+        .publish_runtime_bootstrap_completed(case.native.as_ref().unwrap())
+        .unwrap();
+}
+
 /// Actual public host construction and two actual Find-owned commits. The
-/// caller retains Case and must join its actual SDK/native owners on every exit.
+/// caller retains Case and must join its actual SDK/native owners on every exit,
+/// with `construction::cleanup_completed_runtime` once the runtime completed.
 pub(super) async fn prepare(
     case: &mut Case,
     pipes: toolkit_mobkit::private_host::InheritedHostPipes,
@@ -94,6 +106,7 @@ pub(super) async fn prepare(
     PrivateOriginalRef,
 ) {
     let planning = construction::construct(case, pipes).await;
+    complete_bootstrap(case);
     let launch = case.launch.as_ref().unwrap().clone();
     planning
         .script
@@ -216,7 +229,7 @@ fn run(mutate: bool) {
         let checked = std::panic::AssertUnwindSafe(exercise(&mut case, pipes, mutate))
             .catch_unwind()
             .await;
-        let cleanup = case.cleanup().await;
+        let cleanup = construction::cleanup_completed_runtime(&mut case).await;
         assert!(
             cleanup.is_empty(),
             "actual SDK and native owners must be joined: {cleanup:?}"
@@ -314,6 +327,7 @@ fn sdk_completed_context_outlives_donor_deadline_but_not_last_live_interest() {
                 ..Default::default()
             };
             let planning = construction::construct_with_limits(&mut case, pipes, limits).await;
+            complete_bootstrap(&case);
             let launch = case.launch.as_ref().unwrap().clone();
             planning
                 .script
@@ -379,7 +393,7 @@ fn sdk_completed_context_outlives_donor_deadline_but_not_last_live_interest() {
         if let Some(mut hold) = write_hold.take() {
             hold.join();
         }
-        let cleanup = case.cleanup().await;
+        let cleanup = construction::cleanup_completed_runtime(&mut case).await;
         assert!(
             cleanup.is_empty(),
             "actual SDK/native and SQLite owners must join: {cleanup:?}"

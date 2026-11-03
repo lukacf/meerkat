@@ -186,7 +186,7 @@ fn run(close_before_replay: bool) {
         let checked = std::panic::AssertUnwindSafe(exercise(&mut case, pipes, close_before_replay))
             .catch_unwind()
             .await;
-        let cleanup = case.cleanup().await;
+        let cleanup = construction::cleanup_completed_runtime(&mut case).await;
         assert!(
             cleanup.is_empty(),
             "actual SDK/native owners must be joined: {cleanup:?}"

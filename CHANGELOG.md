@@ -2904,15 +2904,6 @@ them.
   replace a live mob's binding admits a later resume of the same store in
   the same process.
 
-- `meerkat-sandbox`: macOS confinement now explicitly denies process
-  information about processes outside the confined child's sandbox, so a
-  confined shell, command hook, stdio MCP server or stdio skill source
-  cannot read another process's arguments or environment on macOS versions
-  where the default deny does not cover that read. The Seatbelt profile
-  denies `process-info*` before it allows it for the child's own sandbox,
-  and the later matching rule wins, so the child's own processes stay
-  readable.
-
 - `meerkat-machine-schema`, `meerkat-mob`: the mob machine's forced destroy
   (`DestroyFromAny`) clears every member fact the mob destroy (`DestroyMob`)
   clears, so both leave the same state. It now drops every spawn ladder: a
@@ -3753,6 +3744,16 @@ them.
   headers are unchanged. The authorizer part is ported from #2007; thanks
   to @walter-chung.
 
+- `meerkat-sandbox`: on macOS, a confined child (shell, command hook, stdio
+  MCP server or stdio skill source) could read the arguments and environment
+  of other processes running as the same user, because the Seatbelt
+  profile's default deny does not cover that read on current macOS (observed
+  on macOS 26). The profile now denies process information explicitly and
+  allows it only for the child's own sandbox, so the child's own processes
+  stay readable. Affects v0.8.52 through 0.9.8 with macOS confinement
+  enabled (`[confinement]` workspace or custom, or `--confinement`); the
+  default trusted_host mode makes no confinement claim and is unchanged.
+
 ### Upgrade notes
 
 - Build with Rust 1.97.0 or newer: the crates declare
@@ -3949,6 +3950,9 @@ them.
   it records none, and the actor of a deferred or rebuilt session is then
   created on Core's serving runtime, as before. Stopping the runtime ends
   the turns that run on it, as a crash would (see Breaking).
+
+- macOS confinement users: upgrade to 0.9.9 to get the explicit
+  process-information deny. No configuration change is needed.
 
 ### Known limitations
 

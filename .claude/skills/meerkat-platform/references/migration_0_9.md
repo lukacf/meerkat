@@ -555,7 +555,11 @@ are in `docs/guides/upgrading.mdx` ("Upgrading to 0.9.9").
   `ForkInstructionRefusalCause` gains `HeadBodyRetired`; the Copilot auth
   methods gain `GitHubCopilotToken`; `SessionAgentBuilder` and
   `MobSessionService` require `session_comms_identity_root`; the machine
-  types gain appended variants.
+  types gain appended variants, except `generated::mob::TransitionId`
+  (`meerkat-machine-kernels`): its member custody transitions sit before
+  `RetireMemberArchiveOnly`, so the implicit discriminants of that variant
+  and of every released variant after it move, and code that casts them to
+  integers, or stores such integers, must re-read them.
 - Mobs: a persisted mob store that does not restore is quarantined instead of
   failing every mob of the realm. A call that addresses it fails with the new
   refusal kind `mob_quarantined`, `mob/list` names it under `quarantined`,

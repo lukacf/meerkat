@@ -32513,6 +32513,9 @@ macro_rules! mob_catalog_machine_dsl {
             guard "no_member" { self.identity_to_runtime.contains_key(agent_identity) == false }
             guard "name_readable" { self.identity_entry_unreadable.contains(agent_identity) == false }
             guard "name_not_tombstoned" { self.identity_entry_tombstones.contains(agent_identity) == false }
+            // A second row of the identity that recorded an archive in
+            // flight contradicts this one: the unreadable arm answers it.
+            guard "not_archiving" { self.identity_entry_archiving.contains(agent_identity) == false }
             guard "no_spawn_ladder" { self.spawn_exec_phase.contains_key(agent_identity) == false }
             update {
                 self.identity_entry_tombstones.insert(agent_identity);
@@ -32624,6 +32627,9 @@ macro_rules! mob_catalog_machine_dsl {
             guard "no_declared_entry" { self.identity_entry_origins.get_cloned(agent_identity) != Some(IdentityEntryOrigin::Declared) }
             guard "name_readable" { self.identity_entry_unreadable.contains(agent_identity) == false }
             guard "name_not_tombstoned" { self.identity_entry_tombstones.contains(agent_identity) == false }
+            // A second row of the identity that recorded a removal in
+            // flight contradicts this one: the unreadable arm answers it.
+            guard "not_removing" { self.identity_entry_removing.contains(agent_identity) == false }
             guard "no_spawn_ladder" { self.spawn_exec_phase.contains_key(agent_identity) == false }
             update {
                 self.identity_entry_origins.insert(agent_identity, IdentityEntryOrigin::Created);

@@ -18276,6 +18276,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `no_member`
   - `name_readable`
   - `name_not_tombstoned`
+  - `not_archiving`
   - `no_spawn_ladder`
 - To: `Running`
 
@@ -18288,6 +18289,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `no_member`
   - `name_readable`
   - `name_not_tombstoned`
+  - `not_archiving`
   - `no_spawn_ladder`
 - To: `Stopped`
 
@@ -18373,6 +18375,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `no_declared_entry`
   - `name_readable`
   - `name_not_tombstoned`
+  - `not_removing`
   - `no_spawn_ladder`
 - To: `Running`
 
@@ -18386,6 +18389,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `no_declared_entry`
   - `name_readable`
   - `name_not_tombstoned`
+  - `not_removing`
   - `no_spawn_ladder`
 - To: `Stopped`
 

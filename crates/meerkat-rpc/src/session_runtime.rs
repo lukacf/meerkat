@@ -9039,6 +9039,24 @@ impl SessionRuntime {
             self.continuation_bindings.source_custody_changed();
             return Ok(());
         }
+        // A runtime-loop apply (`AlreadyHeld`) runs on this session's own
+        // attached executor and holds the session's turn-finalization boundary
+        // for its whole lap. Its attachment failing the check above means the
+        // registration stopped serving it: an unregister began, draining the
+        // registration and taking the attachment. Nothing below can settle
+        // from inside that lap: it takes the boundary the lap holds, and a
+        // draining registration joins its unregister, which waits for this
+        // very loop to hand its executor off. Refuse it with the typed
+        // teardown-in-progress answer, the refusal `prepare_bindings` gives a
+        // captured unregister: the loop fails the apply, observes its stop and
+        // hands the executor off, and the unregister completes.
+        if matches!(boundary, LlmReconfigureBoundaryOwnership::AlreadyHeld) {
+            return Err(runtime_driver_error_to_rpc(
+                RuntimeDriverError::UnregisterInProgress {
+                    runtime_id: meerkat_runtime::LogicalRuntimeId::for_session(session_id),
+                },
+            ));
+        }
 
         // Existence is committed metadata: a session whose durable run is
         // open at a committed round exists, and the attach below, not this

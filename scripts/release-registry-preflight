@@ -1,0 +1,1213 @@
+#!/usr/bin/env python3
+"""Prove the publish tokens can publish every Core or Meta package, publishing nothing.
+
+Meta 0.9.9's promote published the GitHub release and PyPI, then npm refused
+`@rkat/meta-sdk` (404 on the PUT: the token's package list lacked it) and the
+release split. A token-scope, expiry or revocation problem must show before
+any publication instead. This script asks each registry the one question that
+proves a token's publish right without a write: it re-sends the already
+published artifact of an already published version, so the registry first
+authorizes the write and then refuses it as a duplicate.
+
+    release-registry-preflight --product core|meta
+        [--mode plan|probe]          default plan: read and print, write nothing
+        [--registry npm,pypi,crates] default: all three
+        [--crates family|all]        default family: the fixed crates.io sample
+        [--release-version X]        never probed (besides the manifests' versions)
+        [--report FILE]              JSON report
+
+Package names come from the repository, never from a hand list: Core's crates
+from the script ci/products.json names (scripts/release-rust-crates.sh), Meta's
+from its publish_order there; the PyPI and npm names from the SDK manifests.
+
+Safety rules, each enforced here and covered by scripts/test_release_registry_preflight.py:
+
+(a) Only an already published version is probed, never the version about to
+    be released: the probe version is the newest final version the registry
+    lists that is not the release version (--release-version and every
+    manifest version of the product). Before any probe the registry must list
+    it, its artifact is downloaded anonymously and must match the registry's
+    own digest (npm sha512 integrity, PyPI sha256, crates.io checksum), and
+    its own manifest must name the package and that version. A package with
+    nothing to probe fails; nothing is sent for it.
+(b) The default mode is `plan`: every anonymous read and check of (a), and the
+    request each probe would send, but no write and no token read.
+(c) crates.io takes one token of the account's publish-update rate limit
+    (burst 30, one more a minute) for each probe, even a refused one, before
+    its duplicate check. `family` (the default, and the release-time gate)
+    probes a fixed sample, FAMILY_SAMPLE, and checks every other crate of the
+    product anonymously: it exists, is not trusted-publishing-only, and its
+    owners include every owner of the probed crates. `all` probes every crate,
+    paced (--crates-burst at most 30 back to back, then one per
+    --crates-interval of at least 60 seconds), and is refused inside a
+    release workflow: it is the early registry-preflight.yml dispatch only.
+(d) Every package of the product gets a row: PASS, FAIL, INCONCLUSIVE or SKIP
+    (plan mode, or a crate outside the family sample), the registry's HTTP
+    status and its exact answer, in the log, the JSON report and the job
+    summary. No token or token-derived value is ever printed or written:
+    every captured answer is redacted before use.
+
+Each probe is preceded by a control: the same request without valid
+credentials. If the registry gives the control the duplicate answer as well,
+that answer does not depend on the token and proves nothing: INCONCLUSIVE.
+
+npm:    GET /-/whoami with the token (an invalid, expired or revoked token
+        fails here), then PUT the publish document `npm publish` would send
+        for the existing version, under the dist-tag `registry-preflight`.
+        403 "cannot publish over the previously published versions": PASS.
+        401, 403 (any other), 404 (npm's answer to a write the token may not
+        make, the 0.9.9 refusal): FAIL. 2xx: FAIL (incident). The PUT is sent
+        directly, not through the npm CLI: npm 11 refuses an existing version
+        before it sends anything, in the registry's own words.
+PyPI:   `twine upload` (no --skip-existing) of the exact published wheel.
+        Exit 0 (HTTP 200: Warehouse answers an exact duplicate with 200 and
+        writes nothing, after its upload-permission check): PASS. 401 or 403:
+        FAIL. 400 "File already exists" (the bytes differ, which (a)
+        excludes): INCONCLUSIVE.
+crates: PUT /api/v1/crates/new with the exact published .crate and its name
+        and version. 400 "crate version `V` is already uploaded" (the check
+        inside the publish transaction, after the token, scope, trusted
+        publishing and owner checks; the transaction rolls back): PASS. 401
+        or 403: FAIL. 429: wait for the advertised time and retry once. Any
+        other 400 (body validation runs before the token check): INCONCLUSIVE.
+        A crate missing from crates.io fails: a first publication needs the
+        publish-new scope, which no probe can prove without publishing.
+
+Every INCONCLUSIVE answer is retried once, then fails closed. Exit 0 only when
+no package is FAIL or INCONCLUSIVE, and in probe mode at least one passed.
+Exit 2 for a usage or repository error, before any request.
+
+Tokens: NPM_TOKEN, PYPI_API_TOKEN, CARGO_REGISTRY_TOKEN, read in probe mode
+only, for the selected registries only. They go only to the real registries
+over https, or to a loopback stub named by MEERKAT_REGISTRY_PREFLIGHT_STUB
+(the self-test), and never in a redirect.
+"""
+
+from __future__ import annotations
+
+import argparse
+import base64
+import dataclasses
+import email.parser
+import email.utils
+import hashlib
+import io
+import json
+import os
+import re
+import shutil
+import struct
+import subprocess
+import sys
+import tarfile
+import tempfile
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+import zipfile
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Callable
+
+if sys.version_info < (3, 11):
+    sys.exit("release-registry-preflight needs Python >= 3.11 (tomllib)")
+
+import tomllib  # noqa: E402
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+USER_AGENT = "meerkat-registry-preflight (release tooling)"
+PROBE_DIST_TAG = "registry-preflight"
+# Sent by the control upload instead of a token: not a token of any account.
+CONTROL_PASSWORD = "registry-preflight-control-not-a-token"
+REGISTRIES = ("npm", "pypi", "crates")
+TOKEN_ENV = {"npm": "NPM_TOKEN", "pypi": "PYPI_API_TOKEN", "crates": "CARGO_REGISTRY_TOKEN"}
+STUB_ENV = "MEERKAT_REGISTRY_PREFLIGHT_STUB"
+# Credentials twine must never see (it would try trusted publishing with an
+# OIDC request token).
+UNSHARED_ENV = (
+    "NODE_AUTH_TOKEN",
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+    "ACTIONS_ID_TOKEN_REQUEST_TOKEN",
+    "ACTIONS_ID_TOKEN_REQUEST_URL",
+)
+# A run inside these workflows is a release-time check: never the full probe.
+RELEASE_WORKFLOWS = re.compile(r"/\.github/workflows/(release|meta-release)\.ya?ml@")
+# crates.io publish-update bucket: burst 30, one token a minute
+# (crates.io src/rate_limiter.rs).
+CRATES_BURST_LIMIT = 30
+CRATES_MIN_INTERVAL = 60
+# Longest wait for an advertised Retry-After before the retry.
+MAX_RETRY_AFTER = 900
+FINAL_VERSION = re.compile(r"^\d+(?:\.\d+)+$")
+MAX_ANSWER = 600
+
+
+@dataclasses.dataclass(frozen=True)
+class ProductSpec:
+    npm_manifests: tuple[str, ...]
+    pypi_manifests: tuple[str, ...]
+    # One crate per crates.io crate-scope name family (a token's crate
+    # scope names a crate or a `prefix*` pattern).
+    family_sample: tuple[str, ...]
+
+
+PRODUCTS = {
+    "core": ProductSpec(
+        npm_manifests=("sdks/typescript/package.json", "sdks/web/package.json"),
+        pypi_manifests=("sdks/python/pyproject.toml",),
+        family_sample=("meerkat-core", "rkat"),
+    ),
+    "meta": ProductSpec(
+        npm_manifests=("meta/sdk/typescript/package.json",),
+        pypi_manifests=("meta/sdk/python/pyproject.toml",),
+        family_sample=("meta-extension-state", "meerkat-meta"),
+    ),
+}
+
+PASS, FAIL, INCONCLUSIVE, SKIP = "PASS", "FAIL", "INCONCLUSIVE", "SKIP"
+
+
+class UsageError(Exception):
+    """A usage or repository error: exit 2 before any request."""
+
+
+@dataclasses.dataclass
+class Product:
+    name: str
+    crates: list[str]
+    pypi: list[str]
+    npm: list[str]
+    excluded_versions: set[str]
+    family_sample: tuple[str, ...]
+
+
+@dataclasses.dataclass
+class Row:
+    registry: str
+    package: str
+    verdict: str
+    version: str | None = None
+    status: int | None = None
+    answer: str = ""
+    detail: str = ""
+    control: dict[str, Any] | None = None
+    artifact: dict[str, Any] | None = None
+
+
+@dataclasses.dataclass
+class Response:
+    status: int | None
+    headers: dict[str, str]
+    body: bytes
+    error: str | None = None
+
+
+@dataclasses.dataclass
+class Endpoints:
+    npm: str
+    pypi_index: str
+    pypi_upload: str
+    crates_api: str
+    crates_static: str
+    stub: bool
+
+
+class Secrets:
+    """Every secret value and token-derived form, for redaction."""
+
+    def __init__(self) -> None:
+        self.values: list[str] = []
+
+    def add(self, value: str) -> None:
+        if value and value not in self.values:
+            self.values.append(value)
+            self.values.sort(key=len, reverse=True)
+
+    def redact(self, text: str) -> str:
+        for value in self.values:
+            text = text.replace(value, "***")
+        return text
+
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    """A request carrying credentials never follows a redirect."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: D401
+        return None
+
+
+PLAIN_OPENER = urllib.request.build_opener()
+CREDENTIAL_OPENER = urllib.request.build_opener(NoRedirect())
+
+
+def http(
+    method: str,
+    url: str,
+    *,
+    headers: dict[str, str] | None = None,
+    body: bytes | None = None,
+    credentials: bool = False,
+    timeout: float = 120.0,
+) -> Response:
+    request = urllib.request.Request(
+        url, data=body, method=method, headers={"User-Agent": USER_AGENT, **(headers or {})}
+    )
+    opener = CREDENTIAL_OPENER if credentials else PLAIN_OPENER
+    try:
+        with opener.open(request, timeout=timeout) as response:
+            return Response(response.status, _lower(response.headers), response.read())
+    except urllib.error.HTTPError as error:
+        try:
+            payload = error.read()
+        except OSError:
+            payload = b""
+        return Response(error.code, _lower(error.headers), payload)
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError) as error:
+        return Response(None, {}, b"", error=f"{type(error).__name__}: {error}")
+
+
+def _lower(headers: Any) -> dict[str, str]:
+    return {key.lower(): value for key, value in (headers.items() if headers else [])}
+
+
+def _transient(response: Response) -> bool:
+    return response.status is None or response.status == 429 or response.status >= 500
+
+
+# --------------------------------------------------------------------------
+# Repository: package names and the versions never probed.
+
+
+def _toml(path: Path) -> dict[str, Any]:
+    try:
+        with path.open("rb") as handle:
+            return tomllib.load(handle)
+    except (OSError, tomllib.TOMLDecodeError) as error:
+        raise UsageError(f"cannot read {path}: {error}") from error
+
+
+def _json(path: Path) -> Any:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise UsageError(f"cannot read {path}: {error}") from error
+
+
+def _crate_list(repo: Path, product: str) -> list[str]:
+    products = _json(repo / "ci" / "products.json").get("products")
+    entry = next((item for item in products or [] if item.get("name") == product), None)
+    if entry is None:
+        raise UsageError(f"ci/products.json has no product {product!r}")
+    order = entry.get("publish_order")
+    if isinstance(order, str):
+        # The canonical list script (Core: scripts/release-rust-crates.sh).
+        script = (repo / order).resolve()
+        if not script.is_file() or repo.resolve() not in script.parents:
+            raise UsageError(f"{product}'s publish_order names {order!r}, not a script in the repository")
+        result = subprocess.run(
+            ["bash", str(script)],
+            cwd=repo,
+            env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "LC_ALL": "C"},
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=60,
+        )
+        if result.returncode != 0:
+            raise UsageError(f"{order} failed ({result.returncode}): {result.stderr.strip()}")
+        names = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    elif isinstance(order, list):
+        names = [str(name) for name in order]
+    else:
+        raise UsageError(f"ci/products.json: {product} has no publish_order")
+    bad = [name for name in names if not re.fullmatch(r"[A-Za-z0-9_-]+", name)]
+    if not names or bad or len(set(names)) != len(names):
+        raise UsageError(f"{product}'s crate list is empty, malformed or repeats a crate: {names}")
+    return names
+
+
+def _product_versions(repo: Path, product: str, crates: list[str]) -> set[str]:
+    versions: set[str] = set()
+    if product == "core":
+        version = _toml(repo / "Cargo.toml").get("workspace", {}).get("package", {}).get("version")
+        if isinstance(version, str):
+            versions.add(version)
+    else:
+        for crate in crates:
+            manifest = repo / "meta" / "crates" / crate / "Cargo.toml"
+            if manifest.is_file():
+                version = _toml(manifest).get("package", {}).get("version")
+                if isinstance(version, str):
+                    versions.add(version)
+    if not versions:
+        raise UsageError(f"cannot read {product}'s release version from the repository")
+    return versions
+
+
+def load_product(repo: Path, product: str, release_version: str | None) -> Product:
+    spec = PRODUCTS[product]
+    crates = _crate_list(repo, product)
+    excluded = _product_versions(repo, product, crates)
+    pypi: list[str] = []
+    for relative in spec.pypi_manifests:
+        project = _toml(repo / relative).get("project", {})
+        if not isinstance(project.get("name"), str):
+            raise UsageError(f"{relative} has no [project] name")
+        pypi.append(project["name"])
+        if isinstance(project.get("version"), str):
+            excluded.add(project["version"])
+    npm: list[str] = []
+    for relative in spec.npm_manifests:
+        manifest = _json(repo / relative)
+        if not isinstance(manifest, dict) or not isinstance(manifest.get("name"), str):
+            raise UsageError(f"{relative} has no package name")
+        if manifest.get("private"):
+            raise UsageError(f"{relative} is private: it publishes nothing")
+        npm.append(manifest["name"])
+        if isinstance(manifest.get("version"), str):
+            excluded.add(manifest["version"])
+    if release_version:
+        excluded.add(release_version.removeprefix("v"))
+    return Product(product, crates, pypi, npm, excluded, spec.family_sample)
+
+
+# --------------------------------------------------------------------------
+# Versions and artifacts.
+
+
+def version_key(version: str) -> tuple[int, ...] | None:
+    """Sort key of a final release version; None for anything else."""
+    if not FINAL_VERSION.match(version):
+        return None
+    return tuple(int(part) for part in version.split("."))
+
+
+def choose_version(published: list[str], excluded: set[str]) -> str | None:
+    """The newest published final version that is not about to be released."""
+    finals = [v for v in published if version_key(v) is not None and v not in excluded]
+    return max(finals, key=version_key) if finals else None
+
+
+def no_version_detail(published: list[str], excluded: set[str]) -> str:
+    if not published:
+        return "the registry lists no published version: a first publication cannot be probed"
+    return (
+        "no published final version other than the release version "
+        f"({', '.join(sorted(excluded))}) to probe; nothing was sent"
+    )
+
+
+def _sri_sha512(payload: bytes) -> str:
+    return "sha512-" + base64.b64encode(hashlib.sha512(payload).digest()).decode("ascii")
+
+
+def _tar_member(payload: bytes, name: str) -> bytes | None:
+    try:
+        with tarfile.open(fileobj=io.BytesIO(payload), mode="r:gz") as archive:
+            for member in archive.getmembers():
+                if member.name == name and member.isfile():
+                    handle = archive.extractfile(member)
+                    return handle.read() if handle else None
+    except (tarfile.TarError, OSError, EOFError):
+        return None
+    return None
+
+
+def _normalize_project(name: str) -> str:
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+# --------------------------------------------------------------------------
+# Answers and verdicts (pure, unit-tested row by row).
+
+
+def _text(body: bytes) -> str:
+    return body.decode("utf-8", errors="replace")
+
+
+def npm_answer(response: Response) -> str:
+    if response.status is None:
+        return response.error or "no response"
+    text = _text(response.body)
+    try:
+        document = json.loads(text)
+    except json.JSONDecodeError:
+        return text.strip()
+    if isinstance(document, dict):
+        for key in ("error", "message", "reason"):
+            if isinstance(document.get(key), str):
+                return document[key]
+    return text.strip()
+
+
+def crates_answer(response: Response) -> str:
+    if response.status is None:
+        return response.error or "no response"
+    text = _text(response.body)
+    try:
+        document = json.loads(text)
+    except json.JSONDecodeError:
+        return text.strip()
+    errors = document.get("errors") if isinstance(document, dict) else None
+    if isinstance(errors, list):
+        details = [str(item.get("detail")) for item in errors if isinstance(item, dict)]
+        if details:
+            return "; ".join(details)
+    return text.strip()
+
+
+NPM_DUPLICATE = re.compile(r"cannot publish over (?:the )?previously published version", re.IGNORECASE)
+
+
+def npm_is_duplicate(response: Response) -> bool:
+    return response.status == 403 and bool(NPM_DUPLICATE.search(npm_answer(response)))
+
+
+def classify_npm(response: Response) -> tuple[str, str]:
+    status = response.status
+    if status is None:
+        return INCONCLUSIVE, "no answer from the registry (network error)"
+    if npm_is_duplicate(response):
+        return PASS, "the registry authorized the token for this package, then refused the existing version"
+    if 200 <= status < 300:
+        return FAIL, "INCIDENT: the registry accepted a write of an already published version; stop and read the registry"
+    if status == 401:
+        if "otp" in response.headers.get("www-authenticate", "").lower() or re.search(
+            r"one-time pass", npm_answer(response), re.IGNORECASE
+        ):
+            return FAIL, "the registry asks for a one-time password: the token cannot publish without 2FA bypass"
+        return FAIL, "the registry refused the token: invalid, expired or revoked"
+    if status == 404:
+        return FAIL, (
+            "the token may not publish this package: npm answers 404 to a write the token may not make "
+            "(a granular token whose package list lacks it; the 0.9.9 refusal)"
+        )
+    if status == 403:
+        return FAIL, "the registry refused the token for this package (permission, or 2FA required)"
+    if status == 429 or status >= 500:
+        return INCONCLUSIVE, "transient registry answer"
+    return INCONCLUSIVE, "unexpected answer: it proves neither the publish right nor its absence"
+
+
+def crates_is_duplicate(response: Response, version: str) -> bool:
+    return response.status == 400 and bool(
+        re.search(rf"crate version `{re.escape(version)}` is already uploaded", crates_answer(response))
+    )
+
+
+def classify_crates(response: Response, version: str) -> tuple[str, str]:
+    status = response.status
+    if status is None:
+        return INCONCLUSIVE, "no answer from the registry (network error)"
+    if crates_is_duplicate(response, version):
+        return PASS, (
+            "crates.io accepted the token (endpoint scope, crate scope, trusted publishing, ownership), "
+            "then refused the existing version inside its publish transaction"
+        )
+    if 200 <= status < 300:
+        return FAIL, "INCIDENT: crates.io accepted a publish of an already published version; stop and read the registry"
+    if status in (401, 403):
+        return FAIL, "crates.io refused the token for this crate (token, scope, ownership or trusted-publishing-only)"
+    if status == 429:
+        return INCONCLUSIVE, "rate limited before the token was proven"
+    if status == 400:
+        return INCONCLUSIVE, "crates.io refused the probe body before the version check: it proves nothing; fix the probe body"
+    if status >= 500:
+        return INCONCLUSIVE, "transient registry answer"
+    return INCONCLUSIVE, "unexpected answer: it proves neither the publish right nor its absence"
+
+
+TWINE_HTTP_ERROR = re.compile(r"HTTPError:\s*(\d{3})\b[^\n]*?\bfrom\s+(\S+)\s*\n?\s*([^\n]*)")
+TWINE_RESPONSE = re.compile(r"Response from \S+\s+(\d{3})\b([^\n]*)")
+
+
+@dataclasses.dataclass
+class TwineResult:
+    returncode: int | None
+    output: str
+    error: str | None = None
+
+
+def twine_status(result: TwineResult) -> int | None:
+    match = TWINE_HTTP_ERROR.search(result.output)
+    if match:
+        return int(match.group(1))
+    match = TWINE_RESPONSE.search(result.output)
+    return int(match.group(1)) if match else None
+
+
+def twine_answer(result: TwineResult) -> str:
+    if result.error:
+        return result.error
+    match = TWINE_HTTP_ERROR.search(result.output)
+    if match:
+        return f"HTTPError: {match.group(1)} from {match.group(2)}: {match.group(3).strip()}".rstrip(": ")
+    match = TWINE_RESPONSE.search(result.output)
+    if match:
+        return f"{match.group(1)}{match.group(2)}".strip()
+    lines = [line.strip() for line in result.output.splitlines() if line.strip()]
+    return " | ".join(lines[-4:])
+
+
+def classify_twine(result: TwineResult) -> tuple[str, str]:
+    if result.returncode is None:
+        return INCONCLUSIVE, "twine did not finish"
+    if result.returncode == 0:
+        return PASS, "PyPI checked the token's upload permission, then answered the exact duplicate with 200 and wrote nothing"
+    status = twine_status(result)
+    if status in (401, 403):
+        return FAIL, "PyPI refused the token for this project"
+    if status == 400 and re.search(r"file already exists", result.output, re.IGNORECASE):
+        return INCONCLUSIVE, "PyPI holds a file of this name with other bytes; investigate before relying on the token"
+    if status is not None and (status == 429 or status >= 500):
+        return INCONCLUSIVE, "transient registry answer"
+    return INCONCLUSIVE, "unexpected answer: it proves neither the upload right nor its absence"
+
+
+def retry_after_seconds(response: Response, default: float) -> float:
+    value = response.headers.get("retry-after", "").strip()
+    if not value:
+        return default
+    if value.isdigit():
+        return min(float(value), MAX_RETRY_AFTER)
+    try:
+        when = email.utils.parsedate_to_datetime(value)
+    except (TypeError, ValueError):
+        return default
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    delta = (when - datetime.now(timezone.utc)).total_seconds() + 1.0
+    return min(max(delta, 0.0), MAX_RETRY_AFTER)
+
+
+def probe_delays(count: int, burst: int, interval: float) -> list[float]:
+    """Seconds to wait before each crates.io probe: `burst` back to back, then one per interval."""
+    return [0.0 if index < burst else float(interval) for index in range(count)]
+
+
+# --------------------------------------------------------------------------
+# The run.
+
+
+class Run:
+    def __init__(self, args: argparse.Namespace, endpoints: Endpoints, product: Product) -> None:
+        self.args = args
+        self.endpoints = endpoints
+        self.product = product
+        self.probe = args.mode == "probe"
+        self.secrets = Secrets()
+        self.tokens: dict[str, str] = {}
+        self.read_pace = 0.0 if endpoints.stub else 1.0
+        self._last_api_read = 0.0
+        if self.probe:
+            for registry in args.registries:
+                token = os.environ.get(TOKEN_ENV[registry], "").strip()
+                self.tokens[registry] = token
+                self.secrets.add(token)
+                if token and registry == "pypi":
+                    self.secrets.add(base64.b64encode(f"__token__:{token}".encode()).decode("ascii"))
+
+    # ---- helpers
+
+    def say(self, message: str) -> None:
+        print(self.secrets.redact(message), flush=True)
+
+    def clip(self, text: str) -> str:
+        text = self.secrets.redact(" ".join(text.split()))
+        return text if len(text) <= MAX_ANSWER else text[: MAX_ANSWER - 3] + "..."
+
+    def sleep(self, seconds: float) -> None:
+        if seconds > 0:
+            time.sleep(seconds)
+
+    def retried(self, send: Callable[[], Response]) -> Response:
+        """Send; on a transient answer wait and send once more."""
+        response = send()
+        if not _transient(response):
+            return response
+        self.sleep(retry_after_seconds(response, self.args.retry_delay) if response.status == 429 else self.args.retry_delay)
+        return send()
+
+    def read(self, url: str, *, accept: str = "application/json", paced: bool = False) -> Response:
+        """An anonymous read, retried once on a transient answer."""
+
+        def send() -> Response:
+            if paced and self.read_pace:
+                self.sleep(self._last_api_read + self.read_pace - time.monotonic())
+                self._last_api_read = time.monotonic()
+            return http("GET", url, headers={"Accept": accept})
+
+        return self.retried(send)
+
+    def read_failure(self, registry: str, package: str, what: str, response: Response, version: str | None = None) -> Row:
+        verdict = INCONCLUSIVE if _transient(response) else FAIL
+        answer = {"npm": npm_answer, "crates": crates_answer}.get(
+            registry, lambda read: _text(read.body) if read.status else (read.error or "")
+        )(response)
+        detail = f"cannot read {what}"
+        if response.status == 404:
+            detail = f"{what}: not found on the registry; a first publication cannot be probed"
+        return Row(
+            registry,
+            package,
+            verdict,
+            version=version,
+            status=response.status,
+            answer=self.clip(answer),
+            detail=detail,
+        )
+
+    def missing_token(self, registry: str, package: str) -> Row | None:
+        if self.probe and not self.tokens.get(registry):
+            return Row(registry, package, FAIL, detail=f"the {TOKEN_ENV[registry]} secret is empty or unset in this job")
+        return None
+
+    def attempt(self, send: Callable[[], Response], classify: Callable[[Response], tuple[str, str]]) -> tuple[Response, str, str]:
+        """Send once; on an INCONCLUSIVE answer wait and send once more."""
+        response = send()
+        verdict, detail = classify(response)
+        if verdict != INCONCLUSIVE:
+            return response, verdict, detail
+        wait = retry_after_seconds(response, 61.0) if response.status == 429 else self.args.retry_delay
+        self.say(f"  inconclusive answer (HTTP {response.status}); one retry in {wait:.0f}s")
+        self.sleep(wait)
+        response = send()
+        verdict, detail = classify(response)
+        return response, verdict, detail
+
+    def control_row(
+        self,
+        registry: str,
+        package: str,
+        version: str,
+        control: Response,
+        is_duplicate: bool,
+        answer: str,
+        artifact: dict[str, Any],
+    ) -> Row | None:
+        """A control answer that already looks like a pass makes any answer worthless."""
+        record = {"status": control.status, "answer": self.clip(answer)}
+        if is_duplicate:
+            return Row(
+                registry, package, INCONCLUSIVE, version=version, status=control.status, answer=self.clip(answer),
+                detail="the registry gives the duplicate answer without valid credentials too: the answer does not depend on the token and proves nothing; the token was not sent",
+                control=record, artifact=artifact,
+            )
+        if control.status is not None and 200 <= control.status < 300:
+            return Row(
+                registry, package, FAIL, version=version, status=control.status, answer=self.clip(answer),
+                detail="INCIDENT: the registry accepted a write without valid credentials; stop and read the registry",
+                control=record, artifact=artifact,
+            )
+        if control.status is None or control.status == 429 or control.status >= 500:
+            return Row(
+                registry, package, INCONCLUSIVE, version=version, status=control.status, answer=self.clip(answer),
+                detail="the control request got no usable answer, so a later answer could not be told apart from one that ignores credentials; the token was not sent",
+                control=record, artifact=artifact,
+            )
+        return None
+
+    # ---- npm
+
+    def npm_rows(self) -> list[Row]:
+        names = self.product.npm
+        missing = [row for row in (self.missing_token("npm", name) for name in names) if row]
+        if missing:
+            return missing
+        if self.probe:
+            token = self.tokens["npm"]
+            whoami = self.retried(lambda: http(
+                "GET", f"{self.endpoints.npm}/-/whoami",
+                headers={"Accept": "application/json", "Authorization": f"Bearer {token}"}, credentials=True,
+            ))
+            if whoami.status != 200:
+                refused = whoami.status in (401, 403)
+                detail = (
+                    "npm whoami refused the token (invalid, expired or revoked); no publish probe was sent"
+                    if refused
+                    else "npm whoami did not answer 200; no publish probe was sent"
+                )
+                return [
+                    Row("npm", name, FAIL if refused else INCONCLUSIVE, status=whoami.status,
+                        answer=self.clip(npm_answer(whoami)), detail=detail)
+                    for name in names
+                ]
+            self.say("npm: the token authenticates (whoami 200; the account name is not printed)")
+        return [self.npm_package(name) for name in names]
+
+    def npm_package(self, name: str) -> Row:
+        escaped = urllib.parse.quote(name, safe="@").replace("%2F", "%2f")
+        url = f"{self.endpoints.npm}/{escaped}"
+        packument = self.read(url, accept="application/vnd.npm.install-v1+json; q=1.0, application/json; q=0.8")
+        if packument.status != 200:
+            return self.read_failure("npm", name, f"the npm metadata of {name}", packument)
+        try:
+            document = json.loads(packument.body)
+            versions = document["versions"]
+            assert isinstance(versions, dict)
+        except (ValueError, KeyError, AssertionError, TypeError):
+            return Row("npm", name, FAIL, status=200, detail="the registry metadata has no versions object")
+        version = choose_version(list(versions), self.product.excluded_versions)
+        if version is None:
+            return Row("npm", name, FAIL, detail=no_version_detail(list(versions), self.product.excluded_versions))
+        dist = versions[version].get("dist") if isinstance(versions[version], dict) else None
+        integrity = dist.get("integrity") if isinstance(dist, dict) else None
+        tarball_url = dist.get("tarball") if isinstance(dist, dict) else None
+        if not isinstance(integrity, str) or not integrity.startswith("sha512-") or not isinstance(tarball_url, str):
+            return Row("npm", name, FAIL, version=version, detail="the registry records no sha512 integrity or tarball for this version")
+        download = self.read(tarball_url, accept="application/octet-stream")
+        if download.status != 200:
+            return self.read_failure("npm", name, f"the {name} {version} tarball", download, version)
+        tarball = download.body
+        artifact = {"url": tarball_url, "digest": integrity, "verified": False}
+        if _sri_sha512(tarball) not in integrity.split():
+            return Row("npm", name, FAIL, version=version, artifact=artifact,
+                       detail="the downloaded tarball does not match the registry's sha512 integrity; nothing was sent")
+        manifest_bytes = _tar_member(tarball, "package/package.json")
+        try:
+            manifest = json.loads(manifest_bytes or b"")
+        except ValueError:
+            manifest = None
+        if not isinstance(manifest, dict) or manifest.get("name") != name or manifest.get("version") != version:
+            return Row("npm", name, FAIL, version=version, artifact=artifact,
+                       detail="the tarball's package.json does not name this package and version; nothing was sent")
+        artifact["verified"] = True
+        body = json.dumps(self.npm_document(name, version, tarball, manifest)).encode()
+        request = f"PUT {url} (the existing version, dist-tag {PROBE_DIST_TAG})"
+        if not self.probe:
+            return Row("npm", name, SKIP, version=version, artifact=artifact,
+                       detail=f"plan: would send {request}; published, sha512 verified")
+        headers = {"Content-Type": "application/json", "Accept": "application/json", "npm-command": "publish"}
+        control = http("PUT", url, headers=headers, body=body, credentials=True)
+        blocked = self.control_row("npm", name, version, control, npm_is_duplicate(control), npm_answer(control), artifact)
+        if blocked:
+            return blocked
+        token = self.tokens["npm"]
+        response, verdict, detail = self.attempt(
+            lambda: http("PUT", url, headers={**headers, "Authorization": f"Bearer {token}"}, body=body, credentials=True),
+            classify_npm,
+        )
+        return Row("npm", name, verdict, version=version, status=response.status, answer=self.clip(npm_answer(response)),
+                   detail=detail, control={"status": control.status, "answer": self.clip(npm_answer(control))}, artifact=artifact)
+
+    def npm_document(self, name: str, version: str, tarball: bytes, manifest: dict[str, Any]) -> dict[str, Any]:
+        """The publish document libnpmpublish builds (npm 10, workspaces/libnpmpublish/lib/publish.js)."""
+        manifest = dict(manifest)
+        tarball_name = f"{name}-{version}.tgz"
+        manifest["_id"] = f"{name}@{version}"
+        dist = dict(manifest.get("dist") or {})
+        dist["integrity"] = _sri_sha512(tarball)
+        dist["shasum"] = hashlib.sha1(tarball).hexdigest()
+        registry = "https://registry.npmjs.org/" if not self.endpoints.stub else self.endpoints.npm + "/"
+        dist["tarball"] = urllib.parse.urljoin(registry, f"{name}/-/{tarball_name}").replace("https://", "http://", 1)
+        manifest["dist"] = dist
+        document: dict[str, Any] = {
+            "_id": name,
+            "name": name,
+            "dist-tags": {PROBE_DIST_TAG: version},
+            "versions": {version: manifest},
+            "access": "public",
+            "_attachments": {
+                tarball_name: {
+                    "content_type": "application/octet-stream",
+                    "data": base64.b64encode(tarball).decode("ascii"),
+                    "length": len(tarball),
+                }
+            },
+        }
+        if isinstance(manifest.get("description"), str):
+            document["description"] = manifest["description"]
+        return document
+
+    # ---- PyPI
+
+    def pypi_rows(self) -> list[Row]:
+        return [self.missing_token("pypi", name) or self.pypi_project(name) for name in self.product.pypi]
+
+    def pypi_project(self, name: str) -> Row:
+        index = self.read(f"{self.endpoints.pypi_index}/{_normalize_project(name)}/", accept="application/vnd.pypi.simple.v1+json")
+        if index.status != 200:
+            return self.read_failure("pypi", name, f"the PyPI index page of {name}", index)
+        try:
+            files = json.loads(index.body)["files"]
+            assert isinstance(files, list)
+        except (ValueError, KeyError, AssertionError, TypeError):
+            return Row("pypi", name, FAIL, status=200, detail="the PyPI index page lists no files")
+        wheels: dict[str, list[dict[str, Any]]] = {}
+        for item in files:
+            filename = item.get("filename") if isinstance(item, dict) else None
+            if not isinstance(filename, str) or not filename.endswith(".whl") or item.get("yanked"):
+                continue
+            parts = filename[: -len(".whl")].split("-")
+            if len(parts) >= 5 and _normalize_project(parts[0]) == _normalize_project(name):
+                wheels.setdefault(parts[1], []).append(item)
+        version = choose_version(list(wheels), self.product.excluded_versions)
+        if version is None:
+            return Row("pypi", name, FAIL, detail=no_version_detail(list(wheels), self.product.excluded_versions))
+        wheel = sorted(wheels[version], key=lambda item: item["filename"])[0]
+        digest = (wheel.get("hashes") or {}).get("sha256")
+        if not isinstance(digest, str) or not isinstance(wheel.get("url"), str):
+            return Row("pypi", name, FAIL, version=version, detail="the index records no sha256 or URL for the wheel")
+        download = self.read(wheel["url"], accept="application/octet-stream")
+        if download.status != 200:
+            return self.read_failure("pypi", name, f"the {wheel['filename']} wheel", download, version)
+        payload = download.body
+        artifact = {"url": wheel["url"], "file": wheel["filename"], "digest": f"sha256:{digest}", "verified": False}
+        if hashlib.sha256(payload).hexdigest() != digest.lower():
+            return Row("pypi", name, FAIL, version=version, artifact=artifact,
+                       detail="the downloaded wheel does not match PyPI's sha256; nothing was sent")
+        if not self.wheel_names(payload, name, version):
+            return Row("pypi", name, FAIL, version=version, artifact=artifact,
+                       detail="the wheel's METADATA does not name this project and version; nothing was sent")
+        artifact["verified"] = True
+        request = f"twine upload --repository-url {self.endpoints.pypi_upload} {wheel['filename']} (no --skip-existing)"
+        if not self.probe:
+            return Row("pypi", name, SKIP, version=version, artifact=artifact,
+                       detail=f"plan: would run {request}; published, sha256 verified")
+        twine = shutil.which("twine")
+        if twine is None:
+            return Row("pypi", name, FAIL, version=version, artifact=artifact, detail="twine is not installed")
+        workdir = Path(tempfile.mkdtemp(prefix="registry-preflight-pypi-"))
+        try:
+            path = workdir / wheel["filename"]
+            path.write_bytes(payload)
+            control = self.twine(twine, path, CONTROL_PASSWORD)
+            control_answer = twine_answer(control)
+            blocked = self.control_row("pypi", name, version, _twine_response(control), control.returncode == 0,
+                                       control_answer, artifact)
+            if blocked:
+                return blocked
+            token = self.tokens["pypi"]
+            result, verdict, detail = self.attempt_twine(lambda: self.twine(twine, path, token))
+        finally:
+            shutil.rmtree(workdir, ignore_errors=True)
+        return Row("pypi", name, verdict, version=version, status=twine_status(result) or (200 if result.returncode == 0 else None),
+                   answer=self.clip(twine_answer(result)), detail=detail,
+                   control={"status": twine_status(control), "answer": self.clip(control_answer)}, artifact=artifact)
+
+    def attempt_twine(self, send: Callable[[], TwineResult]) -> tuple[TwineResult, str, str]:
+        result = send()
+        verdict, detail = classify_twine(result)
+        if verdict == INCONCLUSIVE:
+            self.say(f"  inconclusive answer ({twine_answer(result)[:80]}); one retry in {self.args.retry_delay:.0f}s")
+            self.sleep(self.args.retry_delay)
+            result = send()
+            verdict, detail = classify_twine(result)
+        return result, verdict, detail
+
+    def twine(self, twine: str, wheel: Path, password: str) -> TwineResult:
+        environment = {
+            key: value
+            for key, value in os.environ.items()
+            if key not in TOKEN_ENV.values() and key not in UNSHARED_ENV and not key.startswith("TWINE_")
+        }
+        environment.update(
+            TWINE_USERNAME="__token__",
+            TWINE_PASSWORD=password,
+            TWINE_NON_INTERACTIVE="1",
+            PYTHON_KEYRING_BACKEND="keyring.backends.null.Keyring",
+            NO_COLOR="1",
+            COLUMNS="400",
+        )
+        command = [
+            twine, "--no-color", "upload", "--non-interactive", "--disable-progress-bar", "--verbose",
+            "--repository-url", self.endpoints.pypi_upload, str(wheel),
+        ]
+        try:
+            result = subprocess.run(command, cwd=wheel.parent, env=environment, capture_output=True, text=True,
+                                    timeout=600, check=False)
+        except (OSError, subprocess.TimeoutExpired) as error:
+            return TwineResult(None, "", error=self.secrets.redact(f"{type(error).__name__}: {error}"))
+        output = self.secrets.redact((result.stdout or "") + "\n" + (result.stderr or ""))
+        return TwineResult(result.returncode, output)
+
+    @staticmethod
+    def wheel_names(payload: bytes, name: str, version: str) -> bool:
+        try:
+            with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+                metadata = [item for item in archive.namelist() if re.fullmatch(r"[^/]+\.dist-info/METADATA", item)]
+                if len(metadata) != 1:
+                    return False
+                headers = email.parser.BytesHeaderParser().parsebytes(archive.read(metadata[0]))
+        except (zipfile.BadZipFile, OSError, KeyError):
+            return False
+        return _normalize_project(headers.get("Name", "")) == _normalize_project(name) and headers.get("Version") == version
+
+    # ---- crates.io
+
+    def crates_rows(self) -> list[Row]:
+        crates = self.product.crates
+        if self.args.crates == "all":
+            sample = list(crates)
+        else:
+            sample = [crate for crate in crates if crate in self.product.family_sample]
+        rows: dict[str, Row] = {}
+        info: dict[str, dict[str, Any]] = {}
+        owners: dict[str, set[tuple[str, int]]] = {}
+        for crate in crates:
+            missing = self.missing_token("crates", crate)
+            if missing:
+                rows[crate] = missing
+                continue
+            meta = self.read(f"{self.endpoints.crates_api}/api/v1/crates/{crate}", paced=True)
+            if meta.status == 404:
+                rows[crate] = Row("crates", crate, FAIL, status=404, answer=self.clip(crates_answer(meta)),
+                                  detail="not on crates.io: a first publication needs the publish-new scope (the owner must confirm); no probe can prove it without publishing")
+                continue
+            if meta.status != 200:
+                rows[crate] = self.read_failure("crates", crate, f"the crates.io metadata of {crate}", meta)
+                continue
+            listed = self.read(f"{self.endpoints.crates_api}/api/v1/crates/{crate}/owners", paced=True)
+            try:
+                info[crate] = json.loads(meta.body)
+                owners[crate] = {
+                    (str(user.get("kind")), int(user["id"])) for user in json.loads(listed.body)["users"]
+                } if listed.status == 200 else set()
+            except (ValueError, KeyError, TypeError):
+                rows[crate] = Row("crates", crate, FAIL, status=meta.status, detail="unreadable crates.io metadata or owners")
+                continue
+            if listed.status != 200:
+                rows[crate] = self.read_failure("crates", crate, f"the owners of {crate}", listed)
+                continue
+            if (info[crate].get("crate") or {}).get("trustpub_only") is True:
+                rows[crate] = Row("crates", crate, FAIL,
+                                  detail="trusted-publishing-only: crates.io refuses every token publish of it")
+        probed = [crate for crate in sample if crate not in rows]
+        baseline = set.intersection(*(owners[crate] for crate in probed)) if probed else set()
+        delays = probe_delays(len(probed), self.args.crates_burst if self.args.crates == "all" else len(probed),
+                              self.args.crates_interval)
+        for crate, delay in zip(probed, delays):
+            if self.probe and delay:
+                self.say(f"crates.io: pacing to the publish rate limit, next probe in {delay:.0f}s")
+                self.sleep(delay)
+            rows[crate] = self.crate_probe(crate, info[crate])
+        for crate in crates:
+            if crate in rows:
+                continue
+            if not baseline:
+                rows[crate] = Row("crates", crate, FAIL, detail=(
+                    "no family sample crate could be checked, so nothing vouches for it"))
+            elif not baseline <= owners[crate]:
+                rows[crate] = Row("crates", crate, FAIL, detail=(
+                    "its owners do not include every owner of the probed crates, so the family probe cannot vouch for it: "
+                    "run --crates all"))
+            else:
+                rows[crate] = Row("crates", crate, SKIP, detail=(
+                    "not probed (family sample); it exists, is not trusted-publishing-only and its owners include the probed crates' owners"))
+        return [rows[crate] for crate in crates]
+
+    def crate_probe(self, crate: str, info: dict[str, Any]) -> Row:
+        if not isinstance(info.get("versions"), list):
+            return Row("crates", crate, FAIL, detail="the crates.io metadata carries no version list")
+        versions = [item for item in info.get("versions") or [] if isinstance(item, dict) and not item.get("yanked")]
+        by_number = {str(item.get("num")): item for item in versions}
+        version = choose_version(list(by_number), self.product.excluded_versions)
+        if version is None:
+            return Row("crates", crate, FAIL, detail=no_version_detail(list(by_number), self.product.excluded_versions))
+        checksum = by_number[version].get("checksum")
+        if not isinstance(checksum, str) or not re.fullmatch(r"[0-9a-f]{64}", checksum):
+            return Row("crates", crate, FAIL, version=version, detail="crates.io records no checksum for this version")
+        url = f"{self.endpoints.crates_static}/crates/{crate}/{crate}-{version}.crate"
+        download = self.read(url, accept="application/octet-stream")
+        if download.status != 200:
+            return self.read_failure("crates", crate, f"{crate}-{version}.crate", download, version)
+        payload = download.body
+        artifact = {"url": url, "digest": f"sha256:{checksum}", "verified": False}
+        if hashlib.sha256(payload).hexdigest() != checksum:
+            return Row("crates", crate, FAIL, version=version, artifact=artifact,
+                       detail="the downloaded .crate does not match the crates.io checksum; nothing was sent")
+        try:
+            package = tomllib.loads(_text(_tar_member(payload, f"{crate}-{version}/Cargo.toml") or b"")).get("package", {})
+        except tomllib.TOMLDecodeError:
+            package = {}
+        if package.get("name") != crate or package.get("version") != version:
+            return Row("crates", crate, FAIL, version=version, artifact=artifact,
+                       detail="the .crate's Cargo.toml does not name this crate and version; nothing was sent")
+        artifact["verified"] = True
+        url = f"{self.endpoints.crates_api}/api/v1/crates/new"
+        if not self.probe:
+            return Row("crates", crate, SKIP, version=version, artifact=artifact,
+                       detail=f"plan: would send PUT {url} with the published {crate}-{version}.crate; published, checksum verified")
+        metadata = json.dumps({"name": crate, "vers": version}).encode()
+        body = struct.pack("<I", len(metadata)) + metadata + struct.pack("<I", len(payload)) + payload
+        headers = {"Content-Type": "application/octet-stream", "Accept": "application/json"}
+        control = http("PUT", url, headers=headers, body=body, credentials=True)
+        blocked = self.control_row("crates", crate, version, control, crates_is_duplicate(control, version),
+                                   crates_answer(control), artifact)
+        if blocked:
+            return blocked
+        token = self.tokens["crates"]
+        response, verdict, detail = self.attempt(
+            lambda: http("PUT", url, headers={**headers, "Authorization": token}, body=body, credentials=True),
+            lambda answer: classify_crates(answer, version),
+        )
+        return Row("crates", crate, verdict, version=version, status=response.status, answer=self.clip(crates_answer(response)),
+                   detail=detail, control={"status": control.status, "answer": self.clip(crates_answer(control))}, artifact=artifact)
+
+
+def _twine_response(result: TwineResult) -> Response:
+    """A twine run as a Response, for the control check."""
+    status = twine_status(result)
+    if result.returncode == 0:
+        status = status or 200
+    return Response(status, {}, b"", error=result.error)
+
+
+# --------------------------------------------------------------------------
+# Command line.
+
+
+def resolve_endpoints() -> Endpoints:
+    stub = os.environ.get(STUB_ENV, "").strip()
+    if not stub:
+        return Endpoints(
+            npm="https://registry.npmjs.org",
+            pypi_index="https://pypi.org/simple",
+            pypi_upload="https://upload.pypi.org/legacy/",
+            crates_api="https://crates.io",
+            crates_static="https://static.crates.io",
+            stub=False,
+        )
+    parsed = urllib.parse.urlsplit(stub)
+    if parsed.scheme not in ("http", "https") or parsed.hostname not in ("127.0.0.1", "localhost", "::1"):
+        raise UsageError(f"{STUB_ENV} must be a loopback URL (the self-test's stub); tokens never go elsewhere")
+    base = stub.rstrip("/")
+    return Endpoints(
+        npm=f"{base}/npm",
+        pypi_index=f"{base}/pypi/simple",
+        pypi_upload=f"{base}/pypi/legacy/",
+        crates_api=f"{base}/crates",
+        crates_static=f"{base}/static",
+        stub=True,
+    )
+
+
+def parse_args(argv: list[str] | None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--product", required=True, choices=sorted(PRODUCTS))
+    parser.add_argument("--mode", choices=("plan", "probe"), default="plan",
+                        help="plan (default): read, check and print, write nothing; probe: send the probes")
+    parser.add_argument("--registry", default=",".join(REGISTRIES),
+                        help="comma-separated subset of npm,pypi,crates (default: all three)")
+    parser.add_argument("--crates", choices=("family", "all"), default="family",
+                        help="family (default): the fixed crates.io sample; all: every crate, paced (early run only)")
+    parser.add_argument("--release-version", default=None, help="a version never probed (the release's)")
+    parser.add_argument("--report", type=Path, default=None, help="write the JSON report here")
+    parser.add_argument("--repo-root", type=Path, default=REPO_ROOT)
+    parser.add_argument("--crates-burst", type=int, default=20,
+                        help=f"--crates all: probes sent back to back before pacing (at most {CRATES_BURST_LIMIT})")
+    parser.add_argument("--crates-interval", type=float, default=61.0,
+                        help=f"--crates all: seconds between paced probes (at least {CRATES_MIN_INTERVAL})")
+    parser.add_argument("--retry-delay", type=float, default=10.0,
+                        help="seconds before the one retry of an inconclusive answer (429 waits its Retry-After)")
+    args = parser.parse_args(argv)
+    registries = [item.strip() for item in args.registry.split(",") if item.strip()]
+    unknown = sorted(set(registries) - set(REGISTRIES))
+    if unknown or not registries or len(set(registries)) != len(registries):
+        parser.error(f"--registry takes a subset of {','.join(REGISTRIES)}, got {args.registry!r}")
+    args.registries = [registry for registry in REGISTRIES if registry in registries]
+    if not 1 <= args.crates_burst <= CRATES_BURST_LIMIT:
+        parser.error(f"--crates-burst must be 1..{CRATES_BURST_LIMIT}: the crates.io publish burst is {CRATES_BURST_LIMIT}")
+    if args.crates_interval < CRATES_MIN_INTERVAL:
+        parser.error(f"--crates-interval must be at least {CRATES_MIN_INTERVAL}: crates.io refills one publish token a minute")
+    if args.retry_delay < 0:
+        parser.error("--retry-delay must not be negative")
+    return args
+
+
+def summary_markdown(product: Product, args: argparse.Namespace, rows: list[Row]) -> str:
+    def cell(text: str) -> str:
+        return text.replace("|", "\\|").replace("\n", " ")
+
+    lines = [
+        f"### Registry pre-flight: {product.name} ({args.mode}, crates {args.crates})",
+        "",
+        "| Verdict | Registry | Package | Version | HTTP | Registry answer | Conclusion |",
+        "| --- | --- | --- | --- | --- | --- | --- |",
+    ]
+    for row in rows:
+        lines.append(
+            f"| {row.verdict} | {row.registry} | {cell(row.package)} | {row.version or '-'} | "
+            f"{row.status if row.status is not None else '-'} | {cell(row.answer) or '-'} | {cell(row.detail)} |"
+        )
+    return "\n".join(lines) + "\n"
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    try:
+        endpoints = resolve_endpoints()
+        if args.crates == "all" and RELEASE_WORKFLOWS.search(os.environ.get("GITHUB_WORKFLOW_REF", "")):
+            raise UsageError(
+                "--crates all spends a crates.io publish token per crate; it runs only in the early "
+                "registry-preflight.yml dispatch, never inside a release workflow"
+            )
+        product = load_product(args.repo_root.resolve(), args.product, args.release_version)
+        if args.crates == "family" and "crates" in args.registries:
+            stale = [crate for crate in product.family_sample if crate not in product.crates]
+            if stale:
+                raise UsageError(
+                    f"the {product.name} family sample names {stale}, which its crate list does not: "
+                    "update PRODUCTS' family_sample"
+                )
+    except UsageError as error:
+        print(f"release-registry-preflight: {error}", file=sys.stderr)
+        return 2
+
+    run = Run(args, endpoints, product)
+    sample = list(product.crates) if args.crates == "all" else [c for c in product.crates if c in product.family_sample]
+    run.say(f"registry pre-flight: product {product.name}, mode {args.mode}, registries {','.join(args.registries)}")
+    run.say(f"  never probed (release versions): {', '.join(sorted(product.excluded_versions))}")
+    if "crates" in args.registries:
+        run.say(
+            f"  crates.io: {len(product.crates)} crates, {args.crates} probe of {len(sample)} "
+            f"({len(sample)} publish-rate tokens): {', '.join(sample)}"
+        )
+    if args.mode == "plan":
+        run.say("  plan mode: every read and check, no write, no token")
+
+    rows: list[Row] = []
+    for registry in args.registries:
+        rows.extend({"npm": run.npm_rows, "pypi": run.pypi_rows, "crates": run.crates_rows}[registry]())
+
+    counts = {verdict: sum(1 for row in rows if row.verdict == verdict) for verdict in (PASS, FAIL, INCONCLUSIVE, SKIP)}
+    for row in rows:
+        status = f"HTTP {row.status}" if row.status is not None else "-"
+        answer = f' "{row.answer}"' if row.answer else ""
+        run.say(f"{row.verdict:<12} {row.registry:<6} {row.package} {row.version or '-'}: {status}{answer} ({row.detail})")
+    ok = counts[FAIL] == 0 and counts[INCONCLUSIVE] == 0 and (args.mode == "plan" or counts[PASS] > 0)
+    run.say(
+        f"registry pre-flight {product.name}: {counts[PASS]} PASS, {counts[FAIL]} FAIL, "
+        f"{counts[INCONCLUSIVE]} INCONCLUSIVE, {counts[SKIP]} SKIP: {'ok' if ok else 'NOT OK'}"
+    )
+    if args.mode == "probe" and counts[PASS] == 0 and counts[FAIL] == 0 and counts[INCONCLUSIVE] == 0:
+        run.say("refusing a probe that proved no package")
+
+    report = {
+        "schema_version": 1,
+        "product": product.name,
+        "mode": args.mode,
+        "registries": args.registries,
+        "crates": args.crates,
+        "crates_sample": sample if "crates" in args.registries else [],
+        "never_probed_versions": sorted(product.excluded_versions),
+        "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "ok": ok,
+        "counts": counts,
+        "packages": [dataclasses.asdict(row) for row in rows],
+    }
+    text = run.secrets.redact(json.dumps(report, indent=2) + "\n")
+    if args.report:
+        args.report.parent.mkdir(parents=True, exist_ok=True)
+        args.report.write_text(text, encoding="utf-8")
+    step_summary = os.environ.get("GITHUB_STEP_SUMMARY")
+    if step_summary:
+        with open(step_summary, "a", encoding="utf-8") as handle:
+            handle.write(run.secrets.redact(summary_markdown(product, args, rows)))
+    return 0 if ok else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

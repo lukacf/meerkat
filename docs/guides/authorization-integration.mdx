@@ -272,15 +272,15 @@ remaining run budget if less, at most 3 free rebuilds), a governed tool dispatch
 at its prepared entry, its body entry and the call-level policy gate (inside the
 tool's timeout), the `web_search` helper's model request (within the call's
 remaining tool time) and a compaction summary. A free rebuild starts only once
-no change is in progress. A governed tool dispatch's prepared entry and its
-entry stagings (the root staging, the call-level policy gate's and a dispatch
-issuance's) also rebuild when the change that made their read stale had already
-completed: with no change in progress they pause 1 ms, as the wait after a
-stale read below does, and rebuild as one of the same free rebuilds. Past the
-bounds the refusal takes its ordinary path (one rebuild, then local feedback),
-as does any other refusal kind. A run whose budget runs out while waiting ends
-with the time-budget terminal, not a refusal. Waiting never weakens a check:
-the rebuild still needs a coherent observation and every current check.
+no change is in progress. Each of these sites, and a review's currentness
+check after its verdict, also rebuilds when the change that made its read stale
+had already completed: with no change in progress it pauses 1 ms, as the wait
+after a stale read below does, and rebuilds as one of the same free rebuilds.
+Past the bounds the refusal takes its ordinary path (one rebuild, then local
+feedback), as does any other refusal kind. A run whose budget runs out while
+waiting ends with the time-budget terminal, not a refusal. Waiting never
+weakens a check: the rebuild still needs a coherent observation and every
+current check.
 
 A governed step of a tool dispatch, a further step of an entered operation or
 a dispatch's own child issuance, takes its work owners' exclusion without

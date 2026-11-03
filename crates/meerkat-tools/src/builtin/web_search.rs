@@ -127,9 +127,10 @@ impl BuiltinTool for WebSearchTool {
 }
 
 impl WebSearchTool {
-    /// `context` is the call's dispatch context: a refused delegate request
-    /// waits out an owner change in progress on its admitted work, within
-    /// the call's remaining tool time.
+    /// `context` is the call's dispatch context: a delegate request refused
+    /// to rebuild waits after that stale read of its admitted work (for an
+    /// owner change in progress, or with none one backoff step) and asks
+    /// again, within the call's remaining tool time.
     async fn search(
         &self,
         args: Value,
@@ -153,11 +154,13 @@ impl WebSearchTool {
             provider_params: None,
             context: args.context.filter(|value| !value.trim().is_empty()),
         };
-        // A delegate request refused because an owner change is still in
-        // progress on the work's own publication waits for it (bounded, and
-        // never past the call's tool time, read at the wait) and asks again
-        // under the same operation. The call's context reports the waits as
-        // this call's to the host's operation refusal observer.
+        // A delegate request refused to rebuild is a stale read of the
+        // work's own publication: an owner change still in progress, or one
+        // that completed while the request was prepared. It waits after the
+        // stale read (bounded: for the change, or with none one backoff step,
+        // and never past the call's tool time, read at the wait) and asks
+        // again under the same operation. The call's context reports the
+        // waits as this call's to the host's operation refusal observer.
         let mut owner_change_churn = context
             .map(meerkat_core::ToolDispatchContext::owner_change_churn)
             .unwrap_or_default();
@@ -171,8 +174,8 @@ impl WebSearchTool {
                     == meerkat_core::authorization::OperationRefusalKind::ReprepareRequired
                 && let Some(context) = context
                 && let Some(work) = context.work_authorization()
-                && let Some(wait) = owner_change_churn
-                    .wait_for_settled_change(
+                && owner_change_churn
+                    .wait_after_stale_read(
                         work.authorization().as_ref(),
                         context.remaining_tool_time(),
                         "web_search_delegate",
@@ -181,7 +184,7 @@ impl WebSearchTool {
                             .map(meerkat_core::LlmRequestAuthorization::operation_id),
                     )
                     .await
-                && wait.settled()
+                    .settled()
             {
                 continue;
             }

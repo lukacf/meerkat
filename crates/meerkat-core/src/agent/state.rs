@@ -3929,14 +3929,19 @@ where
                     let reprepare = error.operation_refusal().is_some_and(|refusal| {
                         refusal.kind() == crate::OperationRefusalKind::ReprepareRequired
                     });
-                    // An owner change still in progress on this work's own
-                    // publication refuses every rebuild until it completes:
-                    // wait for it (bounded), then rebuild without spending
-                    // the one rebuild below. Nothing is decided meanwhile.
+                    // A refusal to rebuild is a stale read of this work's own
+                    // publication. An owner change still in progress refuses
+                    // every rebuild until it completes, and one that completed
+                    // while the request was prepared leaves it stale with none
+                    // in progress: wait after the stale read (bounded: for the
+                    // change, or with none one backoff step), then rebuild
+                    // without spending the one rebuild below. Nothing is
+                    // decided meanwhile.
                     if reprepare
                         && let Some(work) = self.tool_dispatch_context.work_authorization().cloned()
-                        && let Some(wait) = owner_change_churn
-                            .wait_for_settled_change(
+                    {
+                        let wait = owner_change_churn
+                            .wait_after_stale_read(
                                 work.authorization().as_ref(),
                                 self.budget.remaining_duration(),
                                 "model_request",
@@ -3944,8 +3949,7 @@ where
                                     .as_ref()
                                     .map(crate::LlmRequestAuthorization::operation_id),
                             )
-                            .await
-                    {
+                            .await;
                         if let Some(exceeded) = self.budget.observe().exceeded() {
                             return Err(exceeded.to_agent_error());
                         }

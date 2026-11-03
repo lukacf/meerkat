@@ -66,6 +66,25 @@ them.
   refused with that answer (`denied`). Shell synchronization only: no
   machine input, wire type or error variant changes.
 
+- `meerkat-core`, `meerkat-tools`: the rest of Core's governed operations
+  no longer settle a stale read as their outcome when the owner change that
+  made it stale had already completed. A model request, a compaction
+  summary, a review's currentness check after its verdict and the
+  `web_search` helper's model request waited only for a change still in
+  progress, so such a read took the ordinary path at once: a model request
+  rebuilt once and, when that read was stale too, sent the controller
+  feedback request with a refusal notice, a compaction summary skipped its
+  compaction, a review was retired as an authority change and the call
+  refused with `reprepare_required`, and the search answered
+  `reprepare_required`. They now take the wait after a stale read too, within
+  the same bounds, and rebuild: a model request keeps its operation and saves
+  its own rebuild for after its free rebuilds, and a review whose decision a
+  completed change superseded is reviewed once more for the current decision.
+  A host's operation refusal observer sees `WaitedForOwnerChange` where it
+  saw `Rebuilt` and `ControllerFeedback` for such a model request;
+  `WaitedForOwnerChange` now also names the pause after a stale read with no
+  change in progress.
+
 - `meerkat-authorization`, `meerkat-runtime`: native admission no longer
   refuses governed input as a changed policy because an owner change
   completed while it read the grant publication. Its reads (controller

@@ -144,20 +144,27 @@ denial. Since 0.9.4:
 - A model request, a governed tool dispatch (at its prepared entry, its body
   entry and the call-level policy gate), the `web_search` helper's model
   request and a compaction summary wait for a change in progress to complete,
-  then rebuild under the same operation. Each wait state allows at most 2 s
-  (less when the run's budget or the tool's remaining time is shorter) and 3
-  free rebuilds; a reviewed tool call has at most 3 wait states (6 s, 9
-  rebuilds), inside the tool's timeout. Past those bounds the refusal takes its
-  ordinary path: one rebuild, then `operation_refused` feedback to the model
-  (a compaction summary still fails its compaction). A run whose budget runs
-  out while waiting ends with the time-budget terminal. Owner changes while a
-  session runs therefore no longer turn ordinary calls into refusals.
+  then rebuild under the same operation. Since 0.9.10 they, and a review's
+  currentness check after its verdict, also rebuild when the change that made
+  their read stale had already completed: with no change in progress they
+  pause 1 ms and rebuild, as one of the free rebuilds. Each wait state allows
+  at most 2 s (less when the run's budget or the tool's remaining time is
+  shorter) and 3 free rebuilds; a reviewed tool call has at most 3 wait states
+  (6 s, 9 rebuilds), inside the tool's timeout. Past those bounds the refusal
+  takes its ordinary path: one rebuild, then `operation_refused` feedback to
+  the model (a compaction summary still fails its compaction). A run whose
+  budget runs out while waiting ends with the time-budget terminal. Owner
+  changes while a session runs therefore no longer turn ordinary calls into
+  refusals.
 - A grant resolution that meets an owner change is a stale read everywhere: a
   preparation rebuilds once; a prompt's controller admission, and the
   admission of a scoped original (its own mandate and each named
-  contributor's liveness), are refused as not ready
-  (`ControllerReadinessUnavailable`, reason `PolicyChanged`), so resubmit the
-  input; a retained resume answers the same and stays retryable, and
+  contributor's liveness), first read once more in place when the change they
+  met has completed (0.9.10), and are otherwise refused as not ready
+  (`ControllerReadinessUnavailable`, reason `PolicyChanged`). Admission never
+  waits, so under back-to-back changes wait outside your own locks with a
+  bounded `OwnerChangeChurn::wait_after_stale_read`, then resubmit the input
+  once; a retained resume answers the same and stays retryable, and
   `require_source_original_live` outside an exclusion of owner changes
   answers readiness `PolicyChanged`; a review read refuses as stale
   (`operation_refused`, `ReprepareRequired`) and a fresh attempt reads again;

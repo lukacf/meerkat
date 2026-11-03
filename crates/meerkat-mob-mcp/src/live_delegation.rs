@@ -7700,6 +7700,8 @@ mod tests {
     ))]
     mod parallel;
 
+    mod dormant_members;
+
     /// Restart reconciliation reports a retirement still running past its
     /// budget (or not yet admitted) as in flight, never as broken.
     #[test]

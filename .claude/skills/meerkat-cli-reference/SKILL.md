@@ -626,6 +626,11 @@ findings, the sessions written at session envelope 5
 (`operator-instruction-envelope`) and the mob databases that hold
 operator-instruction events (`operator-instruction-mob-events`), which a
 release before 0.9.9 refuses.
+Since 0.9.10 it also reports `identity-store-rows`, an informational finding
+with counts only (the total and the archived, tombstone and unreadable rows),
+for each mob database that holds identity-store rows of schema version 2 or
+later, which a release before 0.9.9 does not read: check it when planning a
+rollback.
 Exit 0 = no error-severity findings; exit 1 = errors found.
 
 `storage migrate` is the offline migration framework, dry-run by default;

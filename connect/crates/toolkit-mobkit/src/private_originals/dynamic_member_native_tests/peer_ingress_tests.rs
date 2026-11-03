@@ -413,6 +413,17 @@ async fn added_receiver_uses_own_delivery_grants_for_native_reply_and_recorder()
         ready(&fixture, &sender).await;
         let receiver_peer = peer(&fixture, ADDED).await;
         let sender_peer = peer(&fixture, SENDER).await;
+        // Fixture step only: the roster pass seats the coordinator Dormant,
+        // and its peer identity is projected once its first wake builds it.
+        // This step wakes it through the supported member wake (no input and
+        // no turn) so the test can read that identity. It is not evidence for
+        // the roster read projection of a Dormant seat, which Core owns.
+        fixture
+            .native
+            .mob_handle()
+            .ensure_member_live(&meerkat_mobkit::member_comms_id::mob_member_id(MEMBER))
+            .await
+            .unwrap();
         let coordinator_peer = peer(&fixture, MEMBER).await;
         let handle = fixture.native.mob_handle();
         for member in [ADDED, SENDER, MEMBER] {

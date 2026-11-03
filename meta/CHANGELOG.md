@@ -104,13 +104,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   (see Changed).
 
 - A rollback to Meta 0.9.7 (on Core 0.9.8) or Meta 0.9.6 (on Core 0.9.7)
-  does not resume a gateway whose own mob recorded an operator instruction:
-  the mob's journal holds rows at mob event schema 10, which Core 0.9.8 and
-  0.9.7 refuse, so the gateway's mob does not start, and neither does any
-  other mob of that realm. Before such a rollback, run `rkat storage doctor`
-  on the current release and destroy, or move out of the mob root, every mob
-  database it lists under `operator-instruction-mob-events`, as Core's
-  CHANGELOG describes in its Upgrade notes.
+  does not read what operator instructions wrote. A session written at
+  session envelope 5 (one that holds an operator-instruction fact, or an
+  instruction activation row that a rewrite moved or whose body a
+  compaction or prune retired) is refused until a roll-forward, so its
+  identity does not resume. A mob whose journal holds rows at mob event
+  schema 10 is refused too, and so is every other mob of that realm: a
+  gateway whose own mob recorded an operator instruction does not start its
+  mob. Take the census of both on the current release before such a
+  rollback. On a Meta state directory `rkat storage doctor` covers neither:
+  it does not read `runtime.sqlite`, where the sessions live, or
+  `event_log.sqlite3`, the gateway's own mob journal. Its
+  `schema-from-the-future` error for `sessions.sqlite3` (ledger domain
+  `session-store` at version 999999) is expected: that file is the retired
+  stamp `meta_gateway storage-migrate-native` leaves for 0.9.3 to refuse.
+  Meta's storage doctor (`meta/storage/doctor`) gains a supported census of
+  both in 0.9.10. Until then, run two read-only queries with the `sqlite3`
+  shell (`sqlite3 -readonly <file> "<query>"`) on a state directory in the
+  default disk layout:
+  - the sessions at envelope 5, on `runtime.sqlite` (`meta/status_identity`
+    names the `session_id` of each identity):
+
+    ```sql
+    SELECT session_id FROM session_heads WHERE version = 5
+    UNION
+    SELECT session_id FROM sessions
+     WHERE session_id NOT IN (SELECT session_id FROM session_heads)
+       AND json_extract(CAST(session_json AS TEXT), '$.version') = 5;
+    ```
+
+  - the mob events at schema 10, on `event_log.sqlite3` and on each child
+    mob database under `mobs/` that has a `mob_events` table:
+
+    ```sql
+    SELECT count(*) FROM mob_events
+     WHERE json_extract(CAST(event_json AS TEXT), '$.schema_version') = 10;
+    ```
+
+  Destroy, or move out of the mob root, each child mob database that counts
+  rows, as Core's CHANGELOG describes in its Upgrade notes. The gateway's
+  own journal is not a child mob database: a gateway whose own journal
+  counts rows does not start its mob on those releases.
 
 - The lifecycle side effects of identities (the customizer's `after_create`,
   the host's retirement hook, the distillation of a retired session, the exit

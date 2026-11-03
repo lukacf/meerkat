@@ -37,6 +37,27 @@ them.
 
 ### Fixed
 
+- `meerkat-rpc`: a session's runtime loop no longer waits forever on the
+  turn-finalization boundary that its own turn holds. A turn that
+  materializes a staged session (the first turn of an immediate
+  `session/create`, or the first `turn/start` of a deferred session) or
+  rebuilds a cold one checks that the session's executor still serves. When
+  an unregister of the session began during that turn, the check took a
+  path that asks for the boundary again, so the loop waited on itself, the
+  unregister waited for the loop, and every caller joined to the unregister
+  waited with them. An immediate `session/create` whose first agent build
+  failed (for example a scoped tool grant gate refused with
+  `tool_grant_gate_refused`) could stay unanswered, because its completion
+  cleanup unregisters the session while the loop retries the failed turn.
+  The check now answers the loop's own turn with the typed
+  teardown-in-progress refusal (`UnregisterInProgress`); the loop hands its
+  executor off, and the unregister and its callers complete. A stuck session
+  logged "unregister is still waiting for the runtime loop to hand off the
+  exact executor" every 5 s and "staged run has not begun executing" every
+  two minutes. Affects 0.8.22 through 0.9.9: `rkat-rpc`, the Python and
+  TypeScript SDKs that drive it, `rkat mob deploy --surface rpc`, and other
+  hosts of `meerkat_rpc::SessionRuntime`.
+
 - `meerkat-store`: `FileApprovalStore` now creates its files private (0600)
   on Unix regardless of the process umask, so consumers that verify private
   decision files no longer refuse stores created under the common 022/002

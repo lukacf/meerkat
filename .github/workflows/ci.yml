@@ -338,8 +338,8 @@ jobs:
       release_evidence_run_attempt: ${{ steps.plan.outputs.release_evidence_run_attempt }}
       package_count: ${{ steps.plan.outputs.package_count }}
       closure_count: ${{ steps.plan.outputs.closure_count }}
-      closure_flags: ${{ steps.plan.outputs.closure_flags }}
       closure_check: ${{ steps.plan.outputs.closure_check }}
+      closure_check_matrix: ${{ steps.plan.outputs.closure_check_matrix }}
       rustdoc: ${{ steps.plan.outputs.rustdoc }}
       governed_jsonl: ${{ steps.plan.outputs.governed_jsonl }}
       mcp_confinement_positive: ${{ steps.plan.outputs.mcp_confinement_positive }}
@@ -500,7 +500,7 @@ jobs:
           node scripts/ci-cargo-lanes.mjs --format github --event "${EVENT_NAME}" \
             --base "${plan_base}" --head HEAD "${plan_args[@]}" \
             | tee "${RUNNER_TEMP}/ci-cargo-lanes.txt" >> "${GITHUB_OUTPUT}"
-          grep -vE '^(closure_flags|shard_matrix|shard_rest_matrix|unit_shard_matrix|main_unit_shard_matrix|main_unit_rest_shard_matrix|closure_test_rest_matrix|feature_check_rest_matrix|main_archive_build_matrix|main_archive_run_matrix|integration_matrix|closure_test_matrix|feature_check_matrix)=' "${RUNNER_TEMP}/ci-cargo-lanes.txt"
+          grep -vE '^(closure_flags|closure_check_matrix|shard_matrix|shard_rest_matrix|unit_shard_matrix|main_unit_shard_matrix|main_unit_rest_shard_matrix|closure_test_rest_matrix|feature_check_rest_matrix|main_archive_build_matrix|main_archive_run_matrix|integration_matrix|closure_test_matrix|feature_check_matrix)=' "${RUNNER_TEMP}/ci-cargo-lanes.txt"
 
   stagger:
     name: Stagger the short rows
@@ -970,25 +970,15 @@ jobs:
   # in `ratchets` only proves the artifacts match the DSL). Each shard of
   # the canonical TLC lane needs only a JDK and the TLC jar
   # (setup-tlc-ci; the audit parts never run xtask), runs in parallel, and
-  # fits the PR budget: seven shards of 376-586 s of audits on a hosted
-  # runner (measured per audit in machine_verify_all_tlc_test.sh), where
-  # three shards ran 13-18 minutes or past the job timeout on runs
-  # 40721495692 and 40721504088, an eighth (audits-h) for the controller
-  # hold audit with its mutants (100 s on a 4-worker local run), a ninth
-  # (audits-i) for the member residency audit's witness runs, split from
-  # audits-g, whose whole-space runs stay there (179 s and 212 s locally
-  # with 4 workers), a tenth (audits-j) for the durable decision audit with
-  # its mutants (146 s on a 4-worker local run, about 235-340 s hosted at
-  # the 1.6-2.3x runner factor), an eleventh (audits-l) for the identity
-  # entry audit's entry part (281 s locally), and four (audits-k,
-  # audits-m, audits-n, audits-o) for its declared apply's apply, legacy,
-  # roles and hosted parts (180, 230, 196 and 212 s locally with 4
-  # workers), and six (audits-q through audits-v) for the created identity
-  # audit's runs, two for its recovery part and four for its changes part,
-  # each projected, not yet measured as a shard, to stay within 348 s
-  # locally (800 s hosted at a 2.3x runner factor) from its TLC runs'
-  # start-up and spaces (the lane test's notes); none of these fifteen is
-  # measured on a hosted runner yet.
+  # fits the PR budget: twenty-one shards, which took 146-751 s each on the
+  # hosted runners of the 0.9.9 release pushes and up to 776 s on its pull
+  # requests, audits-f aside (1020 s, then its 20-minute timeout, before
+  # two of its audits moved out). machine_verify_all_tlc_test.sh lists
+  # every audit's and shard's hosted seconds; its assignment keeps each
+  # shard within about 720 s, 60 percent of the job timeout, except the
+  # three shards that each run one part of the identity entry audit
+  # (audits-l, audits-m and audits-n, 741-776 s), which get shorter only
+  # when their parts split.
   # The `machine-verify --all` sweep stays on nightly, the release gate and
   # the release-tag graph.
   tlc-audits:
@@ -998,8 +988,9 @@ jobs:
     runs-on: ubuntu-24.04
     # On a pull request a shard past about 17.5 minutes fails the execution
     # budget anyway (CI_MAX_EXEC_SECONDS, 1080 s, less about 30 s of change
-    # classification); 20 leaves headroom over a shard's at most about 14
-    # minutes (800 s of TLC hosted at a 2.3x runner factor, and its setup).
+    # classification); 20 leaves headroom over a shard's at most about 13
+    # minutes (776 s, the longest shard of this assignment on the 0.9.9
+    # release runs).
     timeout-minutes: 20
     strategy:
       fail-fast: false
@@ -2295,14 +2286,21 @@ jobs:
             --no-tests=pass --no-fail-fast --status-level fail --final-status-level fail
 
   closure-check:
-    name: Closure check (${{ needs.changes.outputs.closure_count }} crates)
-    needs: [changes, stagger]
+    name: Closure check (${{ matrix.name }})
+    needs: changes
     # Push only: a pull request's Clippy lanes compile its changed packages
     # under every feature (a whole-workspace plan lints every package, a
     # superset of this check), and the dependents compile here on the push.
+    # One job per product's part of the closure (closure_check_rows in
+    # scripts/ci-cargo-lanes.mjs), in parallel, with the first wave: as one
+    # job that checked the parts in turn it was a workspace push's longest
+    # job (51m49s on main push 41608949055) and waited for the stagger job.
     if: ${{ needs.changes.outputs.closure_check == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: ${{ github.event_name == 'pull_request' && 40 || 60 }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.changes.outputs.closure_check_matrix) }}
     env:
       RUSTC_WRAPPER: sccache
     steps:
@@ -2342,22 +2340,20 @@ jobs:
       - name: Check the reverse-dependency closure
         shell: bash
         env:
-          CLOSURE: ${{ needs.changes.outputs.closure_flags }}
+          CLOSURE: ${{ matrix.packages }}
         run: |
           set -euo pipefail
           [[ -n "${CLOSURE}" ]] || { echo "::error::empty closure in the closure-check lane"; exit 1; }
+          # One product's part of the closure, in one invocation: Cargo
+          # unifies features across the packages of one invocation, and the
+          # products' requests must not reach Core's.
+          [[ "${CLOSURE}" != *";"* ]] || { echo "::error::a closure-check job holds more than one product's part"; exit 1; }
           targets=()
           if [[ "${CLOSURE_CHECK_TARGETS}" == "all" ]]; then
             targets+=(--all-targets)
           fi
-          # One invocation per product's part of the closure (` ; ` between
-          # them): Cargo unifies features across the packages of one
-          # invocation, and the products' requests must not reach Core's.
-          IFS=';' read -r -a groups <<<"${CLOSURE}"
-          for group in "${groups[@]}"; do
-            # shellcheck disable=SC2086
-            ./scripts/repo-cargo check ${group} "${targets[@]}" --all-features
-          done
+          # shellcheck disable=SC2086
+          ./scripts/repo-cargo check ${CLOSURE} "${targets[@]}" --all-features
 
       - name: Upload sccache server log
         if: ${{ always() }}
@@ -2365,7 +2361,7 @@ jobs:
         continue-on-error: true
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
-          name: sccache-log-closure-check-${{ github.run_id }}-${{ github.run_attempt }}
+          name: sccache-log-closure-check-${{ matrix.product }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: /home/runner/work/_temp/sccache.log
           if-no-files-found: ignore
           retention-days: 3

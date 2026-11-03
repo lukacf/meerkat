@@ -943,8 +943,10 @@ impl<
             None,
             Some(handle.definition().clone()),
         ));
-        if reviewed.is_some() {
-            // Runtime-owned bootstrap below mints the actual one-use completion.
+        if reviewed.is_some() || saved.is_some() {
+            // Runtime-owned bootstrap below: on a reopen it lifts the mob the
+            // clean shutdown left Stopped before the roster pass; the reviewed
+            // controls also mint the actual one-use completion.
             native.install_identity_first_context(context.clone());
         } else {
             native.attach_identity_first_context(context.clone());
@@ -967,7 +969,14 @@ impl<
             "normal gateway bind must retain the actual service pin owner"
         );
         if saved.is_some() {
-            let restored = context.bootstrap_roster(&roster).await.unwrap();
+            // The supported restore of a restarted composition: the runtime's
+            // identity bootstrap activates the mob a clean shutdown left
+            // Stopped, then restores the roster. The roster pass alone would
+            // leave the mob Stopped, and a Stopped mob wakes no member.
+            let restored = native
+                .bootstrap_installed_identity_first_context(&roster)
+                .await
+                .unwrap();
             for row in &roster {
                 assert!(
                     matches!(

@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
 
-use meerkat_core::Provider;
+use meerkat_core::config::CustomModelConfig;
+use meerkat_core::{AuthCredentialIdentity, Provider};
+use meerkat_llm_core::provider_runtime::{AccountModelLookup, AccountModelRefusal};
 use serde::{Deserialize, Serialize};
 use url::Url;
 
@@ -515,11 +517,7 @@ impl CopilotModelOffering {
     }
 
     pub fn route_for(&self, provider: Provider) -> Option<CopilotEndpoint> {
-        if self
-            .policy
-            .as_ref()
-            .is_some_and(|policy| policy.state != CopilotModelPolicyState::Enabled)
-        {
+        if !self.enabled() {
             return None;
         }
         let supports = |candidate| self.endpoints().any(|endpoint| endpoint == candidate);
@@ -534,6 +532,62 @@ impl CopilotModelOffering {
                 .then_some(CopilotEndpoint::ChatCompletions),
             Provider::SelfHosted | Provider::Other => None,
         }
+    }
+
+    /// Whether the account's policy leaves this model enabled. A model whose
+    /// policy states nothing is enabled.
+    pub fn enabled(&self) -> bool {
+        self.policy
+            .as_ref()
+            .is_none_or(|policy| policy.state == CopilotModelPolicyState::Enabled)
+    }
+
+    /// The provider family whose protocol serves this model on the account,
+    /// for a model the model registry does not define. It is read from the
+    /// endpoints the account advertises for the model alone, never from the
+    /// model's vendor, name or id: a model offered on the Messages endpoint
+    /// is the Anthropic family, which speaks Messages; otherwise a model
+    /// offered on the Responses or the Chat Completions endpoint is the
+    /// OpenAI family, whose route takes Responses first
+    /// ([`Self::route_for`]). `None` when the account's policy disables the
+    /// model or it advertises no endpoint Meerkat speaks.
+    pub fn protocol_provider(&self) -> Option<Provider> {
+        if !self.enabled() {
+            return None;
+        }
+        let supports = |candidate| self.endpoints().any(|endpoint| endpoint == candidate);
+        if supports(CopilotEndpoint::Messages) {
+            Some(Provider::Anthropic)
+        } else if supports(CopilotEndpoint::Responses) || supports(CopilotEndpoint::ChatCompletions)
+        {
+            Some(Provider::OpenAI)
+        } else {
+            None
+        }
+    }
+
+    /// This model's definition for the model registry, for a model the
+    /// registry does not define: the account's own statements and nothing
+    /// else. Its provider is [`Self::protocol_provider`]; its display name,
+    /// context window, prompt limit (the registry's input ceiling), output
+    /// limit and image input are what the account states. Every other
+    /// capability keeps the registry's conservative default for a model it
+    /// does not catalog, and the account capability gate enforces what else
+    /// the account states (tool calls, streaming, structured outputs,
+    /// thinking budgets) on every request. `None` when the model has no
+    /// protocol provider.
+    pub fn registry_definition(&self) -> Option<CustomModelConfig> {
+        let limits = &self.capabilities.limits;
+        Some(CustomModelConfig {
+            provider: self.protocol_provider()?,
+            display_name: self.name.clone(),
+            context_window: limits.max_context_window_tokens,
+            max_input_tokens: limits.max_prompt_tokens,
+            max_output_tokens: limits.max_output_tokens,
+            vision: self.capabilities.supports.vision,
+            web_search: None,
+            call_timeout_secs: None,
+        })
     }
 }
 
@@ -638,6 +692,43 @@ impl CopilotModelSnapshot {
         self.models.iter().filter_map(move |(id, model)| {
             model.route_for(provider).is_some().then_some(id.as_str())
         })
+    }
+
+    /// The ids of the models the account offers on a protocol Meerkat
+    /// speaks ([`CopilotModelOffering::protocol_provider`]).
+    pub fn offered_model_ids(&self) -> impl Iterator<Item = &str> {
+        self.models
+            .iter()
+            .filter_map(|(id, model)| model.protocol_provider().is_some().then_some(id.as_str()))
+    }
+
+    /// What this model list states about `model`, which the model registry
+    /// does not define: the model's registry definition when the account
+    /// offers it on a protocol Meerkat speaks
+    /// ([`CopilotModelOffering::registry_definition`]). A model the list does
+    /// not name, or whose policy disables it, is refused as not offered,
+    /// naming the ids the account offers; a model offered on no endpoint
+    /// Meerkat speaks is refused as such. `credential` names the account in
+    /// a refusal.
+    pub fn account_model(
+        &self,
+        credential: &AuthCredentialIdentity,
+        model: &str,
+    ) -> AccountModelLookup {
+        match self.model(model) {
+            Some(offering) if offering.enabled() => match offering.registry_definition() {
+                Some(definition) => AccountModelLookup::Offered(definition),
+                None => AccountModelLookup::Refused(AccountModelRefusal::UnsupportedEndpoints {
+                    credential: credential.clone(),
+                    model: model.to_string(),
+                }),
+            },
+            Some(_) | None => AccountModelLookup::Refused(AccountModelRefusal::NotOffered {
+                credential: credential.clone(),
+                model: model.to_string(),
+                available: self.offered_model_ids().map(str::to_string).collect(),
+            }),
+        }
     }
 }
 
@@ -939,6 +1030,217 @@ mod tests {
                 meerkat_core::OAuthProviderIdentity::GitHubCopilot
             )
             .client_id
+        );
+    }
+
+    /// A model of the account's list, as Copilot's model discovery states it.
+    fn discovered(
+        id: &str,
+        vendor: Option<&str>,
+        endpoints: Vec<CopilotEndpoint>,
+        policy: Option<CopilotModelPolicyState>,
+    ) -> CopilotModel {
+        CopilotModel {
+            id: id.to_string(),
+            vendor: vendor.map(str::to_string),
+            name: None,
+            version: None,
+            model_picker_enabled: Some(true),
+            capabilities: CopilotModelCapabilities::default(),
+            policy: policy.map(|state| CopilotModelPolicy { state }),
+            supported_endpoints: endpoints,
+        }
+    }
+
+    fn github_copilot_credential() -> meerkat_core::AuthCredentialIdentity {
+        meerkat_core::AuthCredentialIdentity::Account(meerkat_core::CredentialAccountRef {
+            realm: meerkat_core::RealmId::global(),
+            account: meerkat_core::CredentialAccountId::parse("github_copilot")
+                .expect("valid account id"),
+        })
+    }
+
+    /// The provider family Meerkat speaks to a model the registry does not
+    /// define is the protocol of the endpoints the account advertises for
+    /// it: the Messages endpoint is the Anthropic family, the Responses and
+    /// Chat Completions endpoints the OpenAI family. The vendor never
+    /// decides it, and a model the policy disables or that advertises no
+    /// endpoint Meerkat speaks has none.
+    #[test]
+    fn a_discovered_model_protocol_comes_from_its_endpoints_not_its_vendor() {
+        use super::CopilotEndpoint::{ChatCompletions, Messages, Responses, Unknown};
+        for (vendor, endpoints, expected) in [
+            (
+                Some("ExampleVendor"),
+                vec![Responses, ChatCompletions],
+                Some(Provider::OpenAI),
+            ),
+            (
+                Some("ExampleVendor"),
+                vec![ChatCompletions],
+                Some(Provider::OpenAI),
+            ),
+            (
+                Some("Anthropic"),
+                vec![ChatCompletions],
+                Some(Provider::OpenAI),
+            ),
+            (Some("OpenAI"), vec![Messages], Some(Provider::Anthropic)),
+            (
+                Some("Anthropic"),
+                vec![ChatCompletions, Messages],
+                Some(Provider::Anthropic),
+            ),
+            (None, vec![Responses], Some(Provider::OpenAI)),
+            (Some("ExampleVendor"), vec![Unknown], None),
+            (Some("ExampleVendor"), Vec::new(), None),
+        ] {
+            let snapshot = CopilotModelSnapshot::from_models(vec![discovered(
+                "account-model-1",
+                vendor,
+                endpoints.clone(),
+                None,
+            )])
+            .expect("unique model id");
+            let offering = snapshot.model("account-model-1").expect("discovered model");
+            assert!(offering.enabled());
+            assert_eq!(
+                offering.protocol_provider(),
+                expected,
+                "vendor {vendor:?}, endpoints {endpoints:?}"
+            );
+        }
+        let disabled = CopilotModelSnapshot::from_models(vec![discovered(
+            "account-model-1",
+            None,
+            vec![Responses],
+            Some(CopilotModelPolicyState::Disabled),
+        )])
+        .expect("unique model id");
+        let offering = disabled.model("account-model-1").expect("discovered model");
+        assert!(!offering.enabled());
+        assert_eq!(offering.protocol_provider(), None);
+    }
+
+    /// A model the registry does not define enters it with the account's own
+    /// statements and nothing else: its name, context window, prompt and
+    /// output limits and image input, under the provider family of its
+    /// protocol. A model that states no limits claims none.
+    #[test]
+    fn a_discovered_model_definition_carries_the_account_limits() {
+        let mut model = discovered(
+            "account-model-1",
+            Some("ExampleVendor"),
+            vec![CopilotEndpoint::Responses, CopilotEndpoint::ChatCompletions],
+            Some(CopilotModelPolicyState::Enabled),
+        );
+        model.name = Some("Example Model".to_string());
+        model.capabilities = CopilotModelCapabilities {
+            limits: CopilotModelLimits {
+                max_context_window_tokens: Some(256_000),
+                max_output_tokens: Some(64_000),
+                max_prompt_tokens: Some(192_000),
+                max_non_streaming_output_tokens: Some(16_000),
+            },
+            supports: CopilotModelSupports {
+                tool_calls: Some(true),
+                vision: Some(true),
+                streaming: Some(true),
+                ..Default::default()
+            },
+        };
+        let sparse = discovered(
+            "account-model-2",
+            None,
+            vec![CopilotEndpoint::Messages],
+            None,
+        );
+        let snapshot =
+            CopilotModelSnapshot::from_models(vec![model, sparse]).expect("unique model ids");
+        assert_eq!(
+            snapshot
+                .model("account-model-1")
+                .expect("discovered model")
+                .registry_definition(),
+            Some(meerkat_core::config::CustomModelConfig {
+                provider: Provider::OpenAI,
+                display_name: Some("Example Model".to_string()),
+                context_window: Some(256_000),
+                max_input_tokens: Some(192_000),
+                max_output_tokens: Some(64_000),
+                vision: Some(true),
+                web_search: None,
+                call_timeout_secs: None,
+            })
+        );
+        assert_eq!(
+            snapshot
+                .model("account-model-2")
+                .expect("discovered model")
+                .registry_definition(),
+            Some(meerkat_core::config::CustomModelConfig {
+                provider: Provider::Anthropic,
+                display_name: None,
+                context_window: None,
+                max_input_tokens: None,
+                max_output_tokens: None,
+                vision: None,
+                web_search: None,
+                call_timeout_secs: None,
+            })
+        );
+    }
+
+    /// The account's model list defines a model the registry does not, and
+    /// refuses one it cannot serve, typed: a model it does not list or its
+    /// policy disables (naming the ids it offers), and a model it offers on
+    /// no endpoint Meerkat speaks.
+    #[test]
+    fn an_account_model_lookup_refuses_unknown_disabled_and_unsupported_models() {
+        use meerkat_llm_core::provider_runtime::{AccountModelLookup, AccountModelRefusal};
+        let credential = github_copilot_credential();
+        let snapshot = CopilotModelSnapshot::from_models(vec![
+            discovered(
+                "account-model-1",
+                Some("ExampleVendor"),
+                vec![CopilotEndpoint::Responses],
+                None,
+            ),
+            discovered(
+                "account-model-2",
+                None,
+                vec![CopilotEndpoint::Messages],
+                Some(CopilotModelPolicyState::Disabled),
+            ),
+            discovered(
+                "account-model-3",
+                None,
+                vec![CopilotEndpoint::Unknown],
+                None,
+            ),
+        ])
+        .expect("unique model ids");
+        assert!(matches!(
+            snapshot.account_model(&credential, "account-model-1"),
+            AccountModelLookup::Offered(definition) if definition.provider == Provider::OpenAI
+        ));
+        for model in ["account-model-2", "absent-model"] {
+            assert_eq!(
+                snapshot.account_model(&credential, model),
+                AccountModelLookup::Refused(AccountModelRefusal::NotOffered {
+                    credential: credential.clone(),
+                    model: model.to_string(),
+                    available: vec!["account-model-1".to_string()],
+                }),
+                "{model}"
+            );
+        }
+        assert_eq!(
+            snapshot.account_model(&credential, "account-model-3"),
+            AccountModelLookup::Refused(AccountModelRefusal::UnsupportedEndpoints {
+                credential: credential.clone(),
+                model: "account-model-3".to_string(),
+            })
         );
     }
 }

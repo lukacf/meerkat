@@ -1390,6 +1390,7 @@ fn live_factory_failure_class(error: &meerkat_client::FactoryError) -> &'static 
         FactoryError::ClientCreationFailed(_) => "client_creation_failed",
         FactoryError::ExperimentalModelRequiresLiveChannel { .. } => "experimental_model",
         FactoryError::SelfHostedBinding(_) => "self_hosted_binding",
+        FactoryError::AccountModel(_) => "account_model_refused",
     }
 }
 

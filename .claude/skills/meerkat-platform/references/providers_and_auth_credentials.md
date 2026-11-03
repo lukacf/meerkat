@@ -314,6 +314,48 @@ the token store. It sets `[realm.global] default_binding` if none is set.
   `global:copilot_gemini` resolves it in token mode from the same variables
   without any config (no default model on the Gemini route); default
   selection never picks it, and any configured Copilot route turns it off.
+- Configured once: `[realm.<realm>.copilot]` states the account's token
+  `source` once (an `env` or `external_resolver` source only, such as
+  `{ kind = "env", env = "COPILOT_GITHUB_TOKEN" }`; optional `options`, the
+  client identity headers). The realm then has `copilot_openai`,
+  `copilot_anthropic` and `copilot_gemini` in token mode on its
+  `github_copilot` account, as if their nine tables were written out (no
+  default model; zero-config is this lowering of the default source). A
+  session on one carries the account as its credential identity
+  (`[realm.team.copilot]` is `team:account:github_copilot`) and runs with
+  provider-native tools off. Naming any route of the account serves a
+  catalog model on the account's route of its provider (also naming a
+  provider keeps the strict check); with no other binding of a provider in
+  the realm, a request naming no binding runs that provider's catalog
+  models on the account, before an API key variable. Refused when the
+  realm loads: the section next to a table that declares one of its routes
+  or another binding on its account, and any other source (a secret in
+  config, a stored token, a credential command; those and the device
+  sign-in use the explicit tables). Both `rkat auth login copilot` forms
+  refuse a `[realm.global]` that has the section. `rkat auth realms`,
+  `realm/list` and `GET /realms` count explicit tables only.
+- Account models: a model with no catalog row and no `[models.<id>]` entry
+  runs when the request names a route of a Copilot account:
+  `rkat run --auth-binding global:copilot_openai --model <id> "..."`. The
+  account's model list defines it: the endpoints it lists for the model
+  choose the protocol, never the vendor (`/v1/messages` is the Anthropic
+  Messages wire, otherwise `/responses`, first, or `/chat/completions` the
+  OpenAI wire), the session runs on the account's route of that protocol
+  whichever route it named, and the list gives its context window, prompt
+  and output limits and image input; nothing is stored, so a resume asks
+  again. A `[models.<id>]` entry keeps owning its model. Refused before any
+  model request (`account model refused`), no other route or credential
+  tried: a model the account does not offer or its policy disables (the
+  ids it offers follow), one offered on no endpoint Meerkat speaks, or one
+  whose model list is not available (discovery failed; retry once it
+  loads); explicit tables without the account's route of that protocol
+  refuse it too. A request naming no binding cannot reach such a model:
+  "cannot infer provider from model", or with a provider, after its
+  credential resolves,
+  `model '<provider>:<id>' is absent from the effective model registry`
+  (or the resolution's own error). A live model switch or fallback target
+  to such a model, and any live reconfigure of a session running one, need
+  a `[models.<id>]` entry.
 
 Scripted API-key storage (the binding must exist first):
 

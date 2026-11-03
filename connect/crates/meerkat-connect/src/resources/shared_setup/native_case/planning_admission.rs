@@ -705,11 +705,16 @@ impl PlanningCase {
             a_event,
             a_content.clone(),
         );
-        let b = launch.launch(
-            meerkat_workgraph::WorkOwnerKey::agent("sdk-original-b").unwrap(),
-            b_event,
-            b_content,
-        );
+        // launch() spawns the launch at once, so B is launched only where this
+        // driver means B to start: together with A, or after A's settled turn
+        // and the stagger.
+        let launch_b = || {
+            launch.launch(
+                meerkat_workgraph::WorkOwnerKey::agent("sdk-original-b").unwrap(),
+                b_event,
+                b_content,
+            )
+        };
         let (a, b) = tokio::time::timeout(BOUND, async {
             if let Some(delay) = stagger {
                 let a = a.await;
@@ -720,9 +725,9 @@ impl PlanningCase {
                     .unwrap();
                 await_turn(case, "original-a", row["ticket"].as_str().unwrap()).await;
                 tokio::time::sleep(delay).await;
-                (a, b.await)
+                (a, launch_b().await)
             } else {
-                tokio::join!(a, b)
+                tokio::join!(a, launch_b())
             }
         })
         .await

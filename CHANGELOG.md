@@ -35,6 +35,26 @@ them.
 
 ## [Unreleased]
 
+### Fixed
+
+- `meerkat-core`: a governed tool dispatch no longer refuses a call because
+  another actor's owner change completed while the dispatch read the work's
+  authorization publication. Its prepared entry and its entry stagings (the
+  root staging, the call-level execution policy gate's and a dispatch
+  issuance's) waited only for a change still in progress, so a read that
+  waited for an owner's lock while a change held it (for example during a
+  concurrent call's grant issuance on the same publication) ended stale with
+  none in progress, and the call answered `operation_refused` with
+  `{"kind": "reprepare_required", "tool_invoked": false}`. They now take the
+  wait after a stale read (`OwnerChangeChurn::wait_after_stale_read`): with
+  no change in progress they pause 1 ms and prepare again from the owners,
+  as one of the dispatch attempt's free rebuilds, within the existing bounds
+  (3 free rebuilds and 2 s per waiting state, inside the tool's timeout).
+  The rebuilt decision is current, or its refusal is the owners' current
+  answer, typed as before: a call whose authority the change revoked is
+  refused with that answer (`denied`). Shell synchronization only: no
+  machine input, wire type or error variant changes.
+
 ## [0.9.9] - 2026-11-03
 
 ### Highlights

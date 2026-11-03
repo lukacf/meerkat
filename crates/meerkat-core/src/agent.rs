@@ -2153,8 +2153,9 @@ impl ToolDispatchContext {
         self.spend_review_entry(entering)
     }
 
-    /// [`Self::enter_reviewed_effect_held`] whose staging waits out an owner
-    /// change in progress on the work's own publication within the dispatch
+    /// [`Self::enter_reviewed_effect_held`] whose staging waits after a
+    /// refusal to rebuild (an owner change in progress on the work's own
+    /// publication, or one that completed while it read) within the dispatch
     /// attempt's own bounds, as the root staging does
     /// ([`Self::stage_tool_entry_after_owner_change`]). Nothing is spent
     /// before or during a wait: the review is spent once, after the staging.
@@ -2318,8 +2319,8 @@ impl ToolDispatchContext {
     }
 
     /// [`Self::observe_tool_entry`] at the fenced dispatch's own root
-    /// staging, before any dispatcher code ran, waiting out an owner change
-    /// in progress as [`Self::stage_tool_entry_after_owner_change`] does. A
+    /// staging, before any dispatcher code ran, waiting after a refusal to
+    /// rebuild as [`Self::stage_tool_entry_after_owner_change`] does. A
     /// retained model review that a completed owner publication change
     /// superseded comes back typed, for the dispatch's one supersession
     /// decision, instead of settled; every other staging (adapters, the
@@ -2342,8 +2343,10 @@ impl ToolDispatchContext {
     /// [`Self::observe_tool_entry_at`] for a staging point on the fenced
     /// dispatch chain that stages again after awaits of its own (the
     /// call-level execution policy gate, after its dispatch admission and
-    /// consequence policy): an owner change in progress meanwhile is waited
-    /// out within the dispatch attempt's own bounds, as at the root staging.
+    /// consequence policy): a refusal to rebuild meanwhile (an owner change
+    /// in progress, or one that completed while the staging read) is waited
+    /// after within the dispatch attempt's own bounds, as at the root
+    /// staging.
     pub(crate) async fn observe_tool_entry_after_owner_change_at(
         &self,
         call: ToolCallView<'_>,
@@ -2356,13 +2359,16 @@ impl ToolDispatchContext {
     }
 
     /// The one waiting entry staging: stage at `boundary`
-    /// ([`Self::stage_tool_entry`]); while that refuses to rebuild because
-    /// an owner change is still in progress on the work's own publication,
-    /// wait for the change within the dispatch attempt's [`EntryStagingWait`]
-    /// and stage again. The review check point runs on the decision staged
-    /// after the wait, so no verdict is reused. A context outside a fenced
-    /// dispatch carries no waiting state, and its refusal takes the ordinary
-    /// path.
+    /// ([`Self::stage_tool_entry`]); while that refuses to rebuild, wait
+    /// within the dispatch attempt's [`EntryStagingWait`] and stage again.
+    /// Such a refusal is a stale read of the work's own publication that ran
+    /// nothing, so the wait is the one after a stale read: for an owner change
+    /// still in progress, or, with none (the change that made the read stale
+    /// may have completed during it), one backoff step. Each settled wait is
+    /// one of the attempt's free rebuilds. The review check point runs on the
+    /// decision staged after the wait, so no verdict is reused. A context
+    /// outside a fenced dispatch carries no waiting state, and its refusal
+    /// takes the ordinary path.
     async fn stage_tool_entry_after_owner_change(
         &self,
         call: ToolCallView<'_>,
@@ -2377,15 +2383,15 @@ impl ToolDispatchContext {
                 && refusal.kind() == crate::authorization::OperationRefusalKind::ReprepareRequired
                 && let Some(work) = self.work_authorization()
                 && let Some(staging) = self.staging_wait.as_ref()
-                && let Some(wait) = staging
-                    .wait_for_settled_change(
+                && staging
+                    .wait_after_stale_read(
                         work,
                         staging_wait_site(boundary),
                         self.prepared_authorization()
                             .map(|prepared| &prepared.binding().facts().operation_id),
                     )
                     .await
-                && wait.settled()
+                    .settled()
             {
                 continue;
             }
@@ -3268,19 +3274,21 @@ impl EntryStagingWait {
         })
     }
 
-    /// Wait out an owner change in progress on `work`'s own publication
-    /// within this attempt's bounds, before the tool deadline; see
-    /// [`crate::authorization::OwnerChangeChurn::wait_for_settled_change`].
-    async fn wait_for_settled_change(
+    /// The wait after a staging of this attempt refused to rebuild, within
+    /// this attempt's bounds and before the tool deadline: for an owner change
+    /// in progress on `work`'s own publication, or, with none, one backoff
+    /// step; see
+    /// [`crate::authorization::OwnerChangeChurn::wait_after_stale_read`].
+    async fn wait_after_stale_read(
         &self,
         work: &crate::WorkAuthorizationContext,
         site: &'static str,
         operation: Option<&crate::OperationId>,
-    ) -> Option<crate::authorization::OwnerChangeWait> {
+    ) -> crate::authorization::OwnerChangeWait {
         self.churn
             .lock()
             .await
-            .wait_for_settled_change(
+            .wait_after_stale_read(
                 work.authorization().as_ref(),
                 self.deadline.remaining(),
                 site,
@@ -3291,10 +3299,12 @@ impl EntryStagingWait {
 }
 
 /// The common prepared entry of a governed dispatch: prepare `binding` from
-/// the work's current owners and check it. An owner change still in
-/// progress on the work's own publication refuses every preparation until it
-/// completes, so it is waited out (bounded by `churn`) and the same operation
-/// prepared again.
+/// the work's current owners and check it. A refusal to rebuild is a stale
+/// read of the work's own publication that ran nothing: an owner change still
+/// in progress refuses every preparation until it completes, and one that
+/// completed while a preparation read leaves that read stale with none in
+/// progress. Either way the entry takes the wait after a stale read (bounded
+/// by `churn`) and prepares the same operation again.
 async fn prepare_current_after_owner_change(
     work: &crate::WorkAuthorizationContext,
     binding: &crate::authorization::PreparedAuthorizationBinding,
@@ -3307,15 +3317,15 @@ async fn prepare_current_after_owner_change(
                 .and_then(|prepared| prepared.current());
         if let Err(crate::OperationAuthorizationError::Refused(refusal)) = &result
             && refusal.kind() == crate::authorization::OperationRefusalKind::ReprepareRequired
-            && let Some(wait) = churn
-                .wait_for_settled_change(
+            && churn
+                .wait_after_stale_read(
                     work.authorization().as_ref(),
                     deadline.remaining(),
                     "tool_dispatch",
                     Some(&binding.facts().operation_id),
                 )
                 .await
-            && wait.settled()
+                .settled()
         {
             continue;
         }
@@ -3408,20 +3418,26 @@ impl<'a> StepOwnerChangeWait<'a> {
 /// memory plan without a target of its owner's kind is refused first (see
 /// [`ToolDispatchContext::require_authorized_operation_target`]).
 ///
-/// The prepared entry waits out an owner change in progress on the work's
-/// own publication with its own [`crate::authorization::OwnerChangeChurn`];
-/// each review attempt (one, or two when a superseded model review is
-/// reviewed once more) has another, shared through the dispatch context by
-/// its post-verdict check and every entry staging of the attempt (the root
+/// After a refusal to rebuild, a stale read of the work's own publication
+/// that ran nothing, the prepared entry and every entry staging wait
+/// ([`crate::authorization::OwnerChangeChurn::wait_after_stale_read`]) and
+/// rebuild: they wait for an owner change still in progress, or, with none
+/// named (the change that made the read stale may have completed during it),
+/// pause one backoff step. The
+/// prepared entry waits with its own churn; each review attempt (one, or two
+/// when a superseded model review is reviewed once more) has another, shared
+/// through the dispatch context by its post-verdict check (which waits only
+/// for a change in progress) and every entry staging of the attempt (the root
 /// staging, and the execution policy gate's staging after the gate's own
 /// awaits). All are inside the plan's tool timeout: per dispatch at most 3
 /// such values, 9 free rebuilds and 6 s of waits. Each asks the dispatch
-/// context's work authorization, the run's own, which reports such a change
-/// through every wrapper; an exact-control work reports none, so its refusal
-/// takes the ordinary path. A tool body's own waits (a delegate operation's,
-/// or a waiting governed step's: `run_if_current_within_after_owner_change`
-/// and its siblings) take a waiting state of their own from the dispatch
-/// context, each bounded by the call's remaining tool time.
+/// context's work authorization, the run's own, which reports a change in
+/// progress through every wrapper; an exact-control work names none, so it
+/// pauses one backoff step before each such rebuild. A tool body's own waits
+/// (a delegate operation's, or a waiting governed step's:
+/// `run_if_current_within_after_owner_change` and its siblings) take a
+/// waiting state of their own from the dispatch context, each bounded by the
+/// call's remaining tool time.
 ///
 /// An operation refusal met before the dispatcher is invoked is certified
 /// [`crate::authorization::RefusalDispatch::NotDispatched`] at this entry's

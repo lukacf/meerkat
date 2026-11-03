@@ -834,11 +834,16 @@ bounds.
   `ToolDispatchContext::remaining_tool_time`, the tool time a fenced dispatch
   has left) and at a compaction summary (past the bounds the refusal still
   fails its compaction). A free rebuild runs only once no change is in
-  progress. When the body entry or the gate's staging waits out a change after
-  recording its `Entry` record, it records another for the decision checked
-  after the wait. The gate's check point runs on the decision checked after
-  its wait, but the gate's own code already ran: a reviewed tool whose
-  decision changed while the gate waited settles as `review_unsatisfied`
+  progress. The prepared entry and the entry stagings of a governed tool
+  dispatch (the root staging, the policy gate's and a dispatch issuance's)
+  wait with `wait_after_stale_read`: their refusal to rebuild is a stale read
+  of the work's own publication that ran nothing, so when the change that made
+  it stale had already completed they pause 1 ms and rebuild, as one of the
+  same free rebuilds. When the body entry or the gate's staging waits out a
+  change after recording its `Entry` record, it records another for the
+  decision checked after the wait. The gate's check point runs on the decision
+  checked after its wait, but the gate's own code already ran: a reviewed tool
+  whose decision changed while the gate waited settles as `review_unsatisfied`
   (`context_changed`) and is not reviewed again.
 - A governed step takes the work owners' exclusion without waiting
   (`WorkAuthorization::run_if_current_within`, `run_entered_if_current_within`

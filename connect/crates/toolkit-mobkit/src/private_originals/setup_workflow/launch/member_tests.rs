@@ -59,6 +59,36 @@ async fn finish(f: &FirstFixture, member: &str, observation: &PrivateOriginalSub
     ));
 }
 
+/// Wait for the canonical row of the admitted source `reference` to record
+/// its custody attempt Promoted. Connect settles a fresh admission's custody
+/// after the native admission returns: its custody handoff writes the row's
+/// decision in the background under the source writer. A later step on the
+/// same source (a launch replay, a follow-up input, a snapshot of the row)
+/// starts once that settlement is observable, and once the writer that made
+/// it is released.
+async fn custody_promoted(
+    f: &FirstFixture,
+    reference: &crate::private_originals::PrivateOriginalRef,
+) {
+    let key = f.source.key(reference).unwrap();
+    tokio::time::timeout(GUARD, async {
+        loop {
+            let row = f.store.get(&key).await.unwrap().unwrap();
+            let record = f.source.decode_record(&row, reference).unwrap();
+            if record.custody_attempt.as_ref().is_some_and(|attempt| {
+                attempt.decision()
+                    == crate::original_ingress::custody_attempt::CustodyDecision::Promoted
+            }) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the admitted source's custody settles Promoted");
+    drop(f.source.owner.source_writer().await);
+}
+
 async fn uncaptured_workflow_refuses_foreign_input() {
     let c = DedicatedFixture::without_participant().await;
     let checked = AssertUnwindSafe(async {
@@ -174,6 +204,7 @@ async fn dedicated_held_member_admits_exact_g_and_refuses_foreign_history() {
             }
         ));
         finish(f, "planning_lead", &observed).await;
+        custody_promoted(f, &c.lead.original).await;
         assert_eq!(c.member.session().unwrap(), c.lead_session);
         assert_eq!(input_count(f, &c.lead_session).await, 1);
         let g_history = history(f, &c.lead_session).await;

@@ -23,12 +23,24 @@ use tokio::{
     io::{AsyncRead, AsyncWrite, AsyncWriteExt},
     sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot, watch},
 };
+#[path = "stdio_collection.rs"]
+mod collection;
+#[path = "stdio_diagnostic.rs"]
+mod diagnostic;
+#[cfg(unix)]
+#[path = "stdio_governed.rs"]
+mod governed;
+#[path = "stdio_plain.rs"]
+mod plain;
+#[path = "stdio_probe.rs"]
+mod probe;
 #[path = "service_stdio.rs"]
 mod services;
 #[path = "stdio_io.rs"]
 mod transport;
 #[path = "stdio_wire.rs"]
 pub(crate) mod wire;
+use diagnostic::{FenceOrigin, FirstFence};
 use wire::*;
 pub(crate) use wire::{
     Answer as PromptAnswer, Choice as RecoveryChoice, PairingMethod, ProviderAction,
@@ -38,6 +50,7 @@ fn ended() -> ConnectError {
     ConnectError::InvalidInput("The protected private-pipe interaction ended".into())
 }
 pub(crate) struct Exchange {
+    pub(crate) commissioning: bool,
     pub(crate) prompt: Value,
     pub(crate) response: oneshot::Sender<Result<PromptAnswer, ()>>,
     owner_close: Option<oneshot::Receiver<(SignInDisposition, oneshot::Sender<()>)>>,
@@ -97,6 +110,8 @@ impl ProviderNotice {
 }
 #[derive(Clone)]
 pub(crate) struct PromptBridge {
+    commissioning: bool,
+    probe_lifetime: Option<(Arc<crate::service_probe::ProbeLifetime>, u64)>,
     prompts: mpsc::Sender<Exchange>,
     retired: watch::Receiver<bool>,
 }
@@ -107,17 +122,37 @@ impl PromptBridge {
     pub(crate) fn channel() -> (Self, mpsc::Receiver<Exchange>, watch::Sender<bool>) {
         let (prompts, receive) = mpsc::channel(1);
         let (retire, retired) = watch::channel(false);
-        (Self { prompts, retired }, receive, retire)
+        (
+            Self {
+                prompts,
+                retired,
+                probe_lifetime: None,
+                commissioning: false,
+            },
+            receive,
+            retire,
+        )
     }
     pub(crate) fn retired(&self) -> bool {
         *self.retired.borrow()
+            || self
+                .probe_lifetime
+                .as_ref()
+                .is_some_and(|(owner, deadline)| !owner.current(*deadline))
     }
     pub(crate) async fn closed(&self) {
-        let mut retired = self.retired.clone();
-        while !*retired.borrow_and_update() {
-            if retired.changed().await.is_err() {
-                break;
+        let observed = async {
+            let mut retired = self.retired.clone();
+            while !*retired.borrow_and_update() {
+                if retired.changed().await.is_err() {
+                    break;
+                }
             }
+        };
+        if let Some((owner, deadline)) = &self.probe_lifetime {
+            tokio::select! { biased; _=owner.closed(*deadline)=>(), _=observed=>() }
+        } else {
+            observed.await;
         }
     }
     pub(crate) async fn ask(&self, prompt: Value) -> Result<PromptAnswer, ConnectError> {
@@ -125,7 +160,7 @@ impl PromptBridge {
             return Err(ended());
         }
         let (send, receive) = oneshot::channel();
-        tokio::select! {biased;_=self.closed()=>return Err(ended()),r=self.prompts.send(Exchange{prompt,response:send,owner_close:None})=>r.map_err(|_|ended())?}
+        tokio::select! {biased;_=self.closed()=>return Err(ended()),r=self.prompts.send(Exchange{commissioning:self.commissioning,prompt,response:send,owner_close:None})=>r.map_err(|_|ended())?}
         tokio::select! {biased;_=self.closed()=>Err(ended()),r=receive=>r.map_err(|_|ended())?.map_err(|_|ended())}
     }
     pub(crate) async fn provider_notice(
@@ -142,7 +177,7 @@ impl PromptBridge {
         }
         let (send, response) = oneshot::channel();
         let (owner_close, close) = oneshot::channel();
-        tokio::select! {biased;_=self.closed()=>return Err(ended()),r=self.prompts.send(Exchange{prompt,response:send,owner_close:Some(close)})=>r.map_err(|_|ended())?}
+        tokio::select! {biased;_=self.closed()=>return Err(ended()),r=self.prompts.send(Exchange{commissioning:self.commissioning,prompt,response:send,owner_close:Some(close)})=>r.map_err(|_|ended())?}
         Ok(ProviderNotice {
             cancel_requested: false,
             response,
@@ -165,6 +200,8 @@ struct Opened {
     )>,
     capabilities: Value,
     connector: Option<crate::connector_auth::Control>,
+    plain: Option<crate::terminal_connector::TerminalConnectors>,
+    probe_capture: Option<crate::session::service_probe::Captured>,
 }
 
 fn capabilities(
@@ -175,7 +212,7 @@ fn capabilities(
     service_presenter: Option<&crate::service_preparation::ServicePreparationPresenter>,
 ) -> Result<Value, &'static str> {
     let services = adapter.is_services();
-    if services && (version != 3 || paired_host || service_presenter.is_none())
+    if services && (!matches!(version, 3 | 5 | 6 | 7) || paired_host || service_presenter.is_none())
         || !services && service_presenter.is_some()
         || adapter == Adapter::ForgeApplication && (version != 4 || paired_host)
     {
@@ -196,6 +233,9 @@ fn capabilities(
             "provider_device",
         ]);
     }
+    if matches!(version, 5..=7) {
+        prompt_kinds.push("service_secret");
+    }
     if paired_host && forge_enabled {
         prompt_kinds.extend([
             "paired_host_target",
@@ -208,6 +248,19 @@ fn capabilities(
     }
     let mut value = json!({"prompt_kinds":prompt_kinds,"forge_configuration":forge_enabled,
         "service_preparation":services,"paired_host":paired_host});
+    if version == 6 {
+        value["service_probes"] = json!({"selection":"trusted_process_profiles",
+            "requires":"successful_finalization_and_governed_reopen",
+            "result":"native_tool_completion_or_profile_verified_resource",
+            "slack_inbound":"unsupported"});
+    }
+    if version == 7 {
+        value["service_collections"] = json!({"selection":"trusted_process_sources",
+            "requires":"successful_finalization_and_governed_reopen",
+            "result":"historical_required_operation_observations",
+            "reusable_source_coverage":"unqualified_credential_continuity",
+            "slack_inbound":"unsupported"});
+    }
     if version >= 2 {
         value["tools"] = if services {
             json!(tools.iter().collect::<BTreeSet<_>>())
@@ -218,13 +271,39 @@ fn capabilities(
     Ok(value)
 }
 
-async fn open(mut binding: Initialize, bridge: PromptBridge) -> Result<Opened, &'static str> {
+struct OpenFailure {
+    code: &'static str,
+    retained: Option<ConnectError>,
+}
+impl From<&'static str> for OpenFailure {
+    fn from(code: &'static str) -> Self {
+        Self {
+            code,
+            retained: None,
+        }
+    }
+}
+impl OpenFailure {
+    fn native(code: &'static str, error: ConnectError) -> Self {
+        Self {
+            code,
+            retained: Some(error),
+        }
+    }
+}
+
+async fn open(
+    mut binding: Initialize,
+    bridge: PromptBridge,
+    provider_store_root: Option<std::path::PathBuf>,
+    next_selection: Option<crate::service_probe::ServiceSelection>,
+) -> Result<Opened, OpenFailure> {
     // Validate and construct the selected generic frontend before native auth,
     // filesystem setup or any private prompt. The actual driver validated the
     // same closed trusted initialization before scheduling this future.
     let application_forge = if binding.adapter == Adapter::ForgeApplication {
         if !binding.valid() {
-            return Err("invalid_binding");
+            return Err("invalid_binding".into());
         }
         let selected = binding.forge.take().ok_or("invalid_binding")?;
         Some(
@@ -234,17 +313,15 @@ async fn open(mut binding: Initialize, bridge: PromptBridge) -> Result<Opened, &
     } else {
         None
     };
-    // The selected .51 MCP close does not establish active setup-worker
-    // settlement. Refuse this new composition before credentials, artifacts or
-    // native startup until the actual owner path and qualification are present.
-    if binding.adapter.is_services() {
-        if binding.services.as_ref().is_none_or(|services| {
+    // The supplied immutable resource selection is checked before startup.
+    // Actual entered helpers remain under this Session's retained native guards.
+    if binding.adapter.is_services()
+        && binding.services.as_ref().is_none_or(|services| {
             option_env!("MEERKAT_CONNECT_RESOURCES_SHA256")
                 != Some(services.resource_manifest_sha256.as_str())
-        }) {
-            return Err("invalid_binding");
-        }
-        return Err("unavailable");
+        })
+    {
+        return Err("invalid_binding".into());
     }
     let include_paired_host = binding.paired_host.is_some();
     let include_forge = matches!(
@@ -267,14 +344,33 @@ async fn open(mut binding: Initialize, bridge: PromptBridge) -> Result<Opened, &
     }
     .resolve(&binding.realm.realm_id)
     .map_err(|_| "invalid_binding")?;
-    let mut startup = SessionStartup::open(storage.clone())
-        .await
-        .map_err(|_| "native_auth_required")?;
+    let mut startup = match provider_store_root {
+        Some(root) => SessionStartup::open_with_provider_store(storage.clone(), root).await,
+        None => SessionStartup::open(storage.clone()).await,
+    }
+    .map_err(|_| "native_auth_required")?;
     let model = meerkat::CreateSessionModelResolutionRequest {
         model: binding.model,
         auth_binding,
         ..Default::default()
     };
+    if let Some(selection) = next_selection {
+        #[cfg(unix)]
+        return Box::pin(governed::open(
+            startup,
+            model,
+            bridge,
+            selection,
+            binding.protocol_version,
+            binding.adapter,
+        ))
+        .await;
+        #[cfg(not(unix))]
+        {
+            let _ = selection;
+            return Err("unavailable".into());
+        }
+    }
     let model = if binding.adapter.is_services() {
         crate::provider_setup::private::present(&mut startup, model, bridge)
             .await
@@ -285,22 +381,33 @@ async fn open(mut binding: Initialize, bridge: PromptBridge) -> Result<Opened, &
             .await
             .map_err(|_| "native_auth_required")?
         {
-            return Err("native_auth_required");
+            return Err("native_auth_required".into());
         }
         model
     };
-    let connector = if binding.adapter.is_services() {
+    let mut plain = None;
+    let connector = if matches!(binding.protocol_version, 5..=7) && binding.adapter.is_services() {
+        let owner = crate::terminal_connector::TerminalConnectors::open(&mut startup)
+            .await
+            .map_err(|error| OpenFailure::native("connector_unavailable", error))?;
+        let control = owner.private_control();
+        plain = Some(owner);
+        Some(control)
+    } else if binding.adapter.is_services() {
         let profiles = binding
             .connector_auth
             .take()
             .map(ConnectorProfiles::into_native)
             .unwrap_or_default();
-        Some(crate::connector_auth::Control::new(
-            startup
-                .configure_connectors(profiles)
-                .await
-                .map_err(|_| "connector_unavailable")?,
-        ))
+        let auth = startup
+            .configure_connectors(profiles)
+            .await
+            .map_err(|error| OpenFailure::native("connector_unavailable", error))?;
+        plain = Some(
+            crate::terminal_connector::TerminalConnectors::private_plain(&startup, auth.clone())
+                .map_err(|error| OpenFailure::native("connector_unavailable", error))?,
+        );
+        Some(crate::connector_auth::Control::new(auth))
     } else {
         None
     };
@@ -315,9 +422,25 @@ async fn open(mut binding: Initialize, bridge: PromptBridge) -> Result<Opened, &
     )
     .map_err(|_| "unavailable")?;
     let mut service_presenter = None;
+    let service_session = binding.adapter.is_services().then(meerkat::Session::new);
     let (lazy, paired_host_presenter, secret_presenter) = if binding.adapter.is_services() {
         let router = connector.as_ref().ok_or("connector_unavailable")?.router();
-        let (lazy, presenter) = LazySetup::private_services_with_router(router);
+        let (lazy, presenter) = LazySetup::private_services_owned(
+            router,
+            service_session.as_ref().ok_or("unavailable")?.id(),
+            Some(if matches!(binding.protocol_version, 5..=7) {
+                plain
+                    .as_ref()
+                    .ok_or("unavailable")?
+                    .private_services_dispatcher_factory()
+            } else {
+                plain
+                    .as_ref()
+                    .ok_or("unavailable")?
+                    .plain_dispatcher_factory()
+            }),
+        )
+        .map_err(|_| "unavailable")?;
         service_presenter = Some((presenter, storage.clone()));
         (lazy, None, None)
     } else if let Some(lazy) = application_forge {
@@ -388,13 +511,26 @@ async fn open(mut binding: Initialize, bridge: PromptBridge) -> Result<Opened, &
         &tools,
         service_presenter.as_ref().map(|(presenter, _)| presenter),
     )?;
-    let session = startup
-        .open_lazy_setup(options, &lazy)
-        .await
-        .map_err(|_| "native_auth_required")?;
+    let (session, probe_capture) = match service_session {
+        Some(session) if matches!(binding.protocol_version, 6 | 7) => startup
+            .open_private_services_with_probe_capture(options, &lazy, session)
+            .await
+            .map(|(session, capture)| (session, Some(capture))),
+        Some(session) => startup
+            .open_private_services_setup(options, &lazy, session)
+            .await
+            .map(|session| (session, None)),
+        None => startup
+            .open_lazy_setup(options, &lazy)
+            .await
+            .map(|session| (session, None)),
+    }
+    .map_err(|error| OpenFailure::native("native_auth_required", error))?;
     if approvals.bind_session(session.id()).is_err() {
-        let _ = session.close().await;
-        return Err("invalid_binding");
+        return Err(match session.close().await {
+            Ok(()) => "invalid_binding".into(),
+            Err(error) => OpenFailure::native("invalid_binding", error),
+        });
     }
     Ok(Opened {
         session: Arc::new(session),
@@ -409,6 +545,8 @@ async fn open(mut binding: Initialize, bridge: PromptBridge) -> Result<Opened, &
         service_presenter,
         capabilities,
         connector,
+        plain,
+        probe_capture,
     })
 }
 struct ActiveSend {
@@ -419,12 +557,26 @@ struct ActiveSend {
     cancel_result: Option<Result<bool, ()>>,
     cancel_requests: Vec<String>,
 }
+#[allow(
+    clippy::large_enum_variant,
+    reason = "one value per finished task, consumed at once; the task futures are already boxed"
+)]
 enum Work {
-    Opened(Box<Result<Opened, &'static str>>),
+    Opened(Box<Result<Opened, OpenFailure>>),
     History(String, Result<Value, ConnectError>),
     Sent(String, TurnCompletion, Option<Result<bool, ()>>),
-    Presenter(bool),
-    Service(Result<(), ConnectError>),
+    Presenter(Option<FenceOrigin>),
+    Service(Result<(), services::Failure>),
+    PrivateClosed(Result<(), ConnectError>, Option<Value>),
+    PlainReviewed(
+        crate::terminal_connector::TerminalConnectors,
+        Result<Option<crate::terminal_connector::plain::PlainHandoff>, ConnectError>,
+    ),
+    PlainNativeClosed(crate::session::FinalizationClose),
+    PlainFinalized(Result<Option<crate::terminal_connector::FinalizedAction>, ConnectError>),
+    ProbeFinalized(Result<Option<probe::Finalized>, ConnectError>),
+    Probed(String, crate::session::service_probe::Execution),
+    Collected(String, crate::session::service_probe::CollectionExecution),
     Connector(
         String,
         crate::connector_auth::Control,
@@ -485,7 +637,7 @@ impl TurnCompletion {
         ) || crate::terminal::failed_turn_allows_new_input(outcome, terminal, false);
         Self {
             outcome: Ok(completion(outcome)),
-            uncertain: false,
+            uncertain: matches!(outcome, CompletionOutcome::OutcomeUnknown { .. }),
             settled,
         }
     }
@@ -496,12 +648,12 @@ impl TurnCompletion {
         }
     }
 }
-async fn before_entry<T>(
+async fn before_entry<T, E: From<&'static str>>(
     retired: watch::Receiver<bool>,
-    operation: impl std::future::Future<Output = Result<T, &'static str>>,
-) -> Result<T, &'static str> {
+    operation: impl std::future::Future<Output = Result<T, E>>,
+) -> Result<T, E> {
     if *retired.borrow() {
-        return Err("binding_retired");
+        return Err("binding_retired".into());
     }
     // Once the exact operation is first-polled, the caller retains it through
     // settlement. Retirement cannot replace it with an unentered retry.
@@ -535,6 +687,24 @@ async fn pending_prompt_closed(pending: &mut Option<PendingPrompt>) -> PromptClo
     }
 }
 struct Driver {
+    collection_selection: Option<Arc<crate::service_collection::ServiceCollectionSelection>>,
+    collection_service_index: usize,
+    collection_open_id: Option<String>,
+    next_service_receivers: Option<(mpsc::Receiver<Notice>, mpsc::Receiver<Exchange>)>,
+    retained_collection_services: Vec<Arc<crate::session::service_probe::Ready>>,
+    collection_active: Option<String>,
+    last_collection_id: Option<String>,
+    collected: BTreeSet<String>,
+    collection_reports: Vec<crate::service_collection::ServiceCollectionReport>,
+    probe_selection: Option<Arc<crate::service_probe::ServiceProbeSelection>>,
+    probe_capture: Option<crate::session::service_probe::Captured>,
+    probe_commissioning: bool,
+    probe_commissions: Vec<crate::session::service_probe::CommissionObservation>,
+    probe_ready: Option<Arc<crate::session::service_probe::Ready>>,
+    probe_active: Option<String>,
+    last_probe_id: Option<String>,
+    probed: BTreeSet<String>,
+    provider_store_root: Option<std::path::PathBuf>,
     binding: Option<Initialize>,
     initialize_id: Option<String>,
     scope: Option<String>,
@@ -542,11 +712,24 @@ struct Driver {
     session: Option<Arc<ConnectSession>>,
     approvals: Option<Arc<LocalApprovals>>,
     lazy: Option<Arc<LazySetup>>,
+    private_close_started: bool,
+    plain_owner: Option<crate::terminal_connector::TerminalConnectors>,
+    plain_pending: bool,
+    plain_close_started: bool,
+    plain_closed: Option<crate::session::ClosedSetup>,
+    plain_close_observations:
+        Vec<Result<meerkat_runtime::RuntimeSessionQuiescentClose, ConnectError>>,
+    plain_cancel: watch::Sender<bool>,
+    plain_outcomes: Vec<crate::terminal_connector::FinalizedAction>,
+    close_failure: Option<ConnectError>,
     secret_presenter: Option<crate::secret_presenter::SecretEntryPresenter>,
     private_notices: VecDeque<(String, crate::secret_presenter::SecretEntryNotice)>,
     active: Option<ActiveSend>,
+    // Transport correlation only, never native completion or admission proof.
+    last_send_id: Option<String>,
     last: Option<Value>,
     uncertain: bool,
+    first_fence: Option<FirstFence>,
     retired: bool,
     failed: bool,
     closing: bool,
@@ -579,7 +762,7 @@ impl Driver {
     }
     fn state(&self) -> Value {
         let mut state = json!({"available":self.session.is_some()&&!self.retired&&!self.closed,
-        "can_send":self.session.is_some()&&!self.retired&&!self.closed&&!self.uncertain&&self.active.is_none()&&!self.notices_pending(),
+        "can_send":self.session.is_some()&&!self.retired&&!self.closed&&!self.uncertain&&!self.plain_pending&&self.active.is_none()&&!self.notices_pending(),
         "can_stop":self.active.as_ref().is_some_and(|a|a.receipt&&!a.cancel.borrow().to_owned())&&!self.retired,
         "outcome_uncertain":self.uncertain,
         "active_send":self.active.as_ref().map(|a|json!({"send_request_id":a.id,"cancellation_requested":*a.cancel.borrow()})),
@@ -591,6 +774,23 @@ impl Driver {
         {
             state["private_notice_pending"] = json!(self.notices_pending());
         }
+        if self
+            .binding
+            .as_ref()
+            .is_some_and(|b| b.protocol_version == 6)
+        {
+            state["commissioning"] = json!(self.probe_commissioning);
+            state["can_probe"] = json!(self.probe_available());
+            state["active_probe"] = json!(self.probe_active);
+            state["probe_profiles"] = json!(self.probe_selection.as_ref().map(|selection| {
+                selection
+                    .profiles
+                    .iter()
+                    .map(|profile| profile.id.as_str())
+                    .collect::<Vec<_>>()
+            }));
+        }
+        self.collection_state(&mut state);
         state
     }
     fn output(&mut self, value: Value) {
@@ -638,7 +838,7 @@ impl Driver {
         if self
             .binding
             .as_ref()
-            .is_some_and(|b| b.protocol_version == 3)
+            .is_some_and(|b| matches!(b.protocol_version, 3 | 5 | 6 | 7))
         {
             if let Some(target) = self.event_target() {
                 value["target"] = target;
@@ -652,7 +852,72 @@ impl Driver {
     fn state_event(&mut self) {
         self.event(json!({"kind":"state","state":self.state()}));
     }
+    fn watches_expiry(&self) -> bool {
+        self.binding.is_some()
+            && (!self.retired || self.plain_close_started && !*self.plain_cancel.borrow())
+    }
+    fn watches_host_retirement(&self, close_on_host_retirement: bool) -> bool {
+        !*self.plain_cancel.borrow() || (close_on_host_retirement && !self.closing)
+    }
+    fn host_retired(&mut self, close_on_host_retirement: bool) {
+        // Public embeddings retain their existing retire-only behavior. The
+        // private protected mode closes on this same selected owner's lifetime,
+        // including after a prior cancellation or internal finalizing fence.
+        let reason = if close_on_host_retirement
+            && self
+                .selected_host()
+                .is_some_and(|host| now() < host.binding.expires_at_ms)
+        {
+            "retired"
+        } else {
+            "expired"
+        };
+        self.fence(reason);
+        if close_on_host_retirement {
+            self.closing = true;
+        }
+        // Do not synthesize EOF or replace the original work/close owners.
+    }
     fn fence(&mut self, reason: &str) {
+        let origin = if reason == "failed" {
+            FenceOrigin::OtherNativeFailure
+        } else {
+            FenceOrigin::OtherNativeTransition
+        };
+        self.fence_observed(reason, origin, None);
+    }
+    fn fence_observed(&mut self, reason: &str, origin: FenceOrigin, send: Option<(String, bool)>) {
+        // Observe before this same transition changes lifetime or cancellation.
+        // A later cleanup fence cannot replace the first original observation.
+        if self.first_fence.is_none()
+            && !self.retired
+            && self
+                .binding
+                .as_ref()
+                .is_some_and(|b| b.protocol_version == 7)
+        {
+            let send = send.or_else(|| {
+                self.active
+                    .as_ref()
+                    .map(|active| (active.id.clone(), *active.cancel.borrow()))
+            });
+            self.first_fence = Some(FirstFence {
+                origin,
+                scope: self.scope.clone(),
+                send_request_id: send.as_ref().map(|(id, _)| id.clone()),
+                cancellation_requested_before: send.map(|(_, cancelled)| cancelled),
+            });
+        }
+        if reason != "finalizing"
+            && let Some(host) = self.selected_host()
+        {
+            host.lifetime.retire();
+        }
+        // External stops remain effective after the internal finalizing fence.
+        // An already-entered effect is joined by its existing finalizer.
+        if reason != "finalizing" {
+            self.plain_cancel.send_replace(true);
+        }
         if self.retired {
             return;
         }
@@ -667,6 +932,11 @@ impl Driver {
             self.failed = true;
         }
         self.secret_presenter.take();
+        if let Some(owner) = &mut self.plain_owner
+            && owner.retire().is_err()
+        {
+            self.failed = true;
+        }
         if let Some(control) = &mut self.connector
             && control.retire().is_err()
         {
@@ -689,7 +959,7 @@ impl Driver {
                 && self
                     .binding
                     .as_ref()
-                    .is_some_and(|binding| binding.protocol_version == 3)
+                    .is_some_and(|binding| matches!(binding.protocol_version, 3 | 5 | 6 | 7))
             {
                 "expired"
             } else {
@@ -699,7 +969,13 @@ impl Driver {
                 json!({"kind":"prompt_closed","prompt_id":prompt.id,"disposition":disposition}),
             );
         }
-        self.event(json!({"kind":"unavailable","reason":reason}));
+        let mut unavailable = json!({"kind":"unavailable","reason":reason});
+        if let Some(first) = &self.first_fence
+            && let Ok(value) = serde_json::to_value(first)
+        {
+            unavailable["first_fence"] = value;
+        }
+        self.event(unavailable);
         self.state_event();
     }
     fn valid_scope(&self, scope: &str) -> Result<(), &'static str> {
@@ -718,7 +994,7 @@ impl Driver {
         if !self
             .binding
             .as_ref()
-            .is_some_and(|b| b.protocol_version == 3 && b.adapter.is_services())
+            .is_some_and(|b| matches!(b.protocol_version, 3 | 5 | 6 | 7) && b.adapter.is_services())
         {
             return Err("unavailable");
         }
@@ -798,6 +1074,12 @@ impl Driver {
         }
     }
     fn frame(&mut self, bytes: &[u8]) {
+        if self
+            .selected_host()
+            .is_some_and(|host| !host.lifetime.current(host.binding.expires_at_ms))
+        {
+            self.fence("expired");
+        }
         if serde_json::from_slice::<crate::forge::UniqueJson>(bytes).is_err() {
             self.output(error(Value::Null, -32700, "Parse error", None));
             return;
@@ -830,6 +1112,17 @@ impl Driver {
             self.fence("expired");
         }
         match request.method.as_str() {
+            "connect/collection/open_next"
+                if self
+                    .binding
+                    .as_ref()
+                    .is_some_and(|b| b.protocol_version == 7) =>
+            {
+                let Some(params) = self.params::<OpenCollectionService>(&id, request.params) else {
+                    return;
+                };
+                self.open_next_collection_service(id, params);
+            }
             "connect/initialize" => {
                 if self.initialize_id.is_some() {
                     self.bad(&id, "invalid_binding");
@@ -838,7 +1131,7 @@ impl Driver {
                 let Some(binding) = self.params::<Initialize>(&id, request.params) else {
                     return;
                 };
-                if !binding.valid() {
+                if !binding.valid() || !self.probe_initialization_matches(&binding) {
                     self.bad(&id, "invalid_binding");
                     return;
                 }
@@ -853,15 +1146,19 @@ impl Driver {
                 if self
                     .binding
                     .as_ref()
-                    .is_some_and(|b| b.protocol_version == 3)
+                    .is_some_and(|b| matches!(b.protocol_version, 3 | 5 | 6 | 7))
                 {
                     self.state_event();
                 }
                 let retired = self.stop.subscribe();
                 let bridge = self.bridge.clone();
+                let provider_store_root = self.provider_store_root.clone();
                 self.tasks.push(
                     async move {
-                        Work::Opened(Box::new(before_entry(retired, open(binding, bridge)).await))
+                        Work::Opened(Box::new(
+                            before_entry(retired, open(binding, bridge, provider_store_root, None))
+                                .await,
+                        ))
                     }
                     .boxed(),
                 );
@@ -1039,10 +1336,26 @@ impl Driver {
                     self.bad(&id, "turn_uncertain");
                     return;
                 }
-                if self.active.is_some() || self.notices_pending() {
+                if self.active.is_some() || self.notices_pending() || self.plain_pending {
                     self.bad(&id, "busy");
                     return;
                 }
+                if self
+                    .binding
+                    .as_ref()
+                    .is_none_or(|b| !matches!(b.protocol_version, 5..=7))
+                {
+                    self.plain_cancel.send_replace(false);
+                }
+                let caller = if self.collection_service_index > 0 {
+                    let Some(host) = self.selected_host() else {
+                        self.bad(&id, "invalid_binding");
+                        return;
+                    };
+                    Some(host.binding.caller.clone())
+                } else {
+                    None
+                };
                 let (cancel, receive) = watch::channel(false);
                 self.active = Some(ActiveSend {
                     provisional_closed: false,
@@ -1052,16 +1365,57 @@ impl Driver {
                     cancel_result: None,
                     cancel_requests: Vec::new(),
                 });
+                self.last_send_id = Some(id.clone());
                 let session = self.session.as_ref().unwrap().clone();
                 let notices = self.notices.clone();
                 self.tasks
-                    .push(send(session, id, params.text, receive, notices).boxed());
+                    .push(send(session, id, params.text, receive, notices, caller).boxed());
                 self.state_event();
+            }
+            "connect/probe" => {
+                let Some(params) = self.params::<Probe>(&id, request.params) else {
+                    return;
+                };
+                self.begin_probe(id, params);
+            }
+            "connect/collect"
+                if self
+                    .binding
+                    .as_ref()
+                    .is_some_and(|b| b.protocol_version == 7) =>
+            {
+                let Some(params) = self.params::<Collect>(&id, request.params) else {
+                    return;
+                };
+                self.begin_collection(id, params);
             }
             "connect/cancel" => {
                 let Some(params) = self.params::<Cancel>(&id, request.params) else {
                     return;
                 };
+                if self.cancel_probe(&id, &params) || self.cancel_collection(&id, &params) {
+                    return;
+                }
+                // The host may still own this pending send while its completed
+                // response is buffered. Retire only the latest accepted send in
+                // this exact binding, including after internal finalization.
+                // This does not reopen admission or claim native cancellation.
+                if self
+                    .binding
+                    .as_ref()
+                    .is_some_and(|b| matches!(b.protocol_version, 5..=7))
+                    && self.scope.as_deref() == Some(params.scope.as_str())
+                    && self.active.is_none()
+                    && self.binding.as_ref().is_some_and(|binding| {
+                        (binding.protocol_version != 6 || self.last_probe_id.is_none())
+                            && (binding.protocol_version != 7 || self.last_collection_id.is_none())
+                    })
+                    && self.last_send_id.as_deref() == Some(params.send_request_id.as_str())
+                {
+                    self.fence("cancelled");
+                    self.output(result(&id,json!({"scope":params.scope,"send_request_id":params.send_request_id,"status":"not_current"})));
+                    return;
+                }
                 if let Err(code) = self.valid_scope(&params.scope) {
                     self.bad(&id, code);
                     return;
@@ -1074,12 +1428,28 @@ impl Driver {
                     self.output(result(&id,json!({"scope":params.scope,"send_request_id":params.send_request_id,"status":"not_current"})));
                     return;
                 };
+                // A valid explicit stop prevents new administration even if
+                // native input cancellation finds that this turn just settled.
+                if self
+                    .binding
+                    .as_ref()
+                    .is_some_and(|binding| binding.adapter.is_services())
+                {
+                    self.plain_cancel.send_replace(true);
+                }
                 if let Some(outcome) = active.cancel_result {
                     self.cancel_reply(id, params.send_request_id, outcome);
                 } else {
                     active.cancel_requests.push(id);
                     active.cancel.send_replace(true);
                     self.state_event();
+                }
+                if self
+                    .binding
+                    .as_ref()
+                    .is_some_and(|b| matches!(b.protocol_version, 5..=7))
+                {
+                    self.fence("cancelled");
                 }
             }
             "connect/retire" => {
@@ -1148,7 +1518,7 @@ impl Driver {
             self.output(error(Value::Null, -32600, "Invalid Request", None));
             return;
         }
-        if self.retired {
+        if self.retired && !self.commissioning_current() {
             self.bad(&id, "binding_retired");
             return;
         }
@@ -1217,11 +1587,20 @@ impl Driver {
         }
     }
     fn cancel_current(&mut self) {
+        if self
+            .binding
+            .as_ref()
+            .is_some_and(|b| matches!(b.protocol_version, 5..=7))
+        {
+            self.fence("cancelled");
+            self.state_event();
+            return;
+        }
         if self.opening
             && self
                 .binding
                 .as_ref()
-                .is_some_and(|b| b.protocol_version == 3)
+                .is_some_and(|b| matches!(b.protocol_version, 3 | 5 | 6 | 7))
         {
             self.fence("retired");
             return;
@@ -1275,6 +1654,17 @@ impl Driver {
         }
     }
     fn prompt(&mut self, exchange: Exchange) {
+        if exchange.prompt["kind"] == "service_secret"
+            && !self
+                .binding
+                .as_ref()
+                .is_some_and(|b| matches!(b.protocol_version, 5..=7) && b.adapter.is_services())
+        {
+            drop(exchange);
+            self.fence("failed");
+            self.failed = true;
+            return;
+        }
         if self
             .binding
             .as_ref()
@@ -1286,7 +1676,7 @@ impl Driver {
             && self
                 .binding
                 .as_ref()
-                .is_some_and(|b| b.protocol_version == 3);
+                .is_some_and(|b| matches!(b.protocol_version, 3 | 5 | 6 | 7));
         let provider_prompt = matches!(
             exchange.prompt["kind"].as_str(),
             Some(
@@ -1307,7 +1697,13 @@ impl Driver {
             self.cancel_current();
             return;
         }
-        if self.retired || (!initializing && self.active.is_none()) || self.pending.is_some() {
+        let commissioning = exchange.commissioning
+            && self.commissioning_current()
+            && exchange.prompt["kind"] == "approval";
+        if exchange.commissioning && !commissioning
+            || !commissioning && (self.retired || (!initializing && self.active.is_none()))
+            || self.pending.is_some()
+        {
             drop(exchange.response);
             self.cancel_current();
             return;
@@ -1317,14 +1713,14 @@ impl Driver {
         let params = if self
             .binding
             .as_ref()
-            .is_some_and(|b| b.protocol_version == 3)
+            .is_some_and(|b| matches!(b.protocol_version, 3 | 5 | 6 | 7))
         {
             json!({"target":self.event_target(),"prompt":exchange.prompt})
         } else {
             json!({"scope":self.scope,"prompt":exchange.prompt})
         };
         self.output(json!({"jsonrpc":"2.0","id":id,"method":"connect/prompt","params":params}));
-        if self.retired {
+        if self.retired && !commissioning {
             return;
         }
         self.pending = Some(PendingPrompt {
@@ -1386,14 +1782,19 @@ impl Driver {
         match work {
             Work::Opened(result_open) => {
                 self.opening = false;
-                let id = self.initialize_id.clone().unwrap();
+                let next_service = self.collection_open_id.take();
+                let id = next_service
+                    .clone()
+                    .unwrap_or_else(|| self.initialize_id.clone().unwrap());
                 match *result_open {
-                    Ok(opened) => {
-                        if !self.retired
-                            || self
-                                .binding
-                                .as_ref()
-                                .is_none_or(|b| b.protocol_version != 3)
+                    Ok(mut opened) => {
+                        self.probe_capture = opened.probe_capture.take();
+                        if next_service.is_none()
+                            && (!self.retired
+                                || self
+                                    .binding
+                                    .as_ref()
+                                    .is_none_or(|b| !matches!(b.protocol_version, 3 | 5 | 6 | 7)))
                         {
                             self.scope =
                                 Some(format!("connect:{}", meerkat_core::SessionId::new()));
@@ -1412,12 +1813,41 @@ impl Driver {
                             drop(opened.paired_host_presenter);
                             drop(opened.service_presenter);
                             self.secret_presenter.take();
+                            if let Some(mut owner) = opened.plain {
+                                if owner.retire().is_err() {
+                                    self.failed = true;
+                                }
+                                self.plain_owner = Some(owner);
+                            }
                             self.bad(&id, "binding_retired");
                         } else {
                             self.workers = 1;
                             self.tasks.push(
                                 approvals(opened.approval_presenter, self.bridge.clone()).boxed(),
                             );
+                            if let Some(owner) = opened.plain {
+                                self.workers += 1;
+                                let admission = self
+                                    .binding
+                                    .as_ref()
+                                    .filter(|b| matches!(b.protocol_version, 5..=7))
+                                    .map(|b| {
+                                        crate::terminal_connector::private_service::Admission::new(
+                                            b.viewer.expires_at_ms,
+                                            self.plain_cancel.subscribe(),
+                                        )
+                                        .with_host(self.selected_host().as_ref())
+                                    });
+                                self.tasks.push(
+                                    plain::review(
+                                        owner,
+                                        self.approvals.as_ref().unwrap().clone(),
+                                        self.bridge.clone(),
+                                        admission,
+                                    )
+                                    .boxed(),
+                                );
+                            }
                             let binding = self.binding.as_ref().unwrap();
                             if let Some(presenter) = opened.forge_presenter {
                                 self.workers += 1;
@@ -1445,24 +1875,46 @@ impl Driver {
                             if let Some((presenter, storage)) = opened.service_presenter {
                                 self.workers += 1;
                                 let bridge = self.bridge.clone();
+                                #[cfg(target_os = "linux")]
+                                let selected_input =
+                                    self.selected_services().and_then(|s| s.selected_input());
                                 self.tasks.push(
                                     async move {
-                                        Work::Service(
-                                            services::run(presenter, storage, bridge).await,
+                                        #[cfg(target_os = "linux")]
+                                        let result = services::run_selected(
+                                            presenter,
+                                            storage,
+                                            bridge,
+                                            selected_input,
                                         )
+                                        .await;
+                                        #[cfg(not(target_os = "linux"))]
+                                        let result =
+                                            services::run(presenter, storage, bridge).await;
+                                        Work::Service(result)
                                     }
                                     .boxed(),
                                 );
                             }
-                            self.output(result(&id,json!({"protocol_version":binding.protocol_version,"scope":self.scope,"session_id":self.session.as_ref().unwrap().id().to_string(),"capabilities":opened.capabilities,"state":self.state()})));
+                            let reply = if next_service.is_some() {
+                                json!({"scope":self.scope,"service_id":self.current_collection_service_id(),
+                                    "session_id":self.session.as_ref().unwrap().id().to_string(),"state":self.state()})
+                            } else {
+                                json!({"protocol_version":binding.protocol_version,"scope":self.scope,
+                                "session_id":self.session.as_ref().unwrap().id().to_string(),"capabilities":opened.capabilities,"state":self.state()})
+                            };
+                            self.output(result(&id, reply));
                         }
                     }
-                    Err(code) => {
+                    Err(OpenFailure { code, retained }) => {
+                        if retained.is_some() {
+                            self.close_failure = retained;
+                        }
                         self.failed |= code != "binding_retired";
                         if self
                             .binding
                             .as_ref()
-                            .is_some_and(|b| b.protocol_version == 3)
+                            .is_some_and(|b| matches!(b.protocol_version, 3 | 5 | 6 | 7))
                         {
                             let code = if self.retired {
                                 "binding_retired"
@@ -1492,6 +1944,10 @@ impl Driver {
                 }
             }
             Work::Sent(id, observed, cancelled) => {
+                let send_fence_context = self
+                    .active
+                    .as_ref()
+                    .map(|active| (active.id.clone(), *active.cancel.borrow()));
                 // All queue writes occur synchronously before native tools
                 // return. Capture both slots for this joined send, with no
                 // await and before publishing any can_send state.
@@ -1516,16 +1972,39 @@ impl Driver {
                     }
                 }
                 self.uncertain |= observed.uncertain;
+                if self.plain_pending
+                    && (!observed.settled
+                        || !matches!(
+                            observed.outcome,
+                            Ok("completed" | "completed_without_result")
+                        )
+                        || *self.plain_cancel.borrow()
+                        || cancelled.is_some_and(|result| result != Ok(false)))
+                {
+                    self.fence("stopped");
+                    self.closing = true;
+                }
                 // A known attempt result is retained even when the exact input is
                 // requeued or finalization failed. It cannot attest joined work.
-                if !observed.settled
-                    || self
-                        .lazy
+                // Preserve the original short-circuit and single state-lock query.
+                let shutdown = if observed.settled {
+                    self.lazy
                         .as_ref()
-                        .is_some_and(|lazy| lazy.owner().requires_shutdown())
-                {
+                        .and_then(|lazy| lazy.owner().shutdown_reason())
+                } else {
+                    None
+                };
+                if !observed.settled || shutdown.is_some() {
+                    use crate::service_preparation::ServicePreparationShutdown;
+                    let origin = match shutdown {
+                        Some(ServicePreparationShutdown::Retired) => FenceOrigin::SendOwnerRetired,
+                        Some(ServicePreparationShutdown::StatePoisoned) => {
+                            FenceOrigin::SendOwnerStatePoisoned
+                        }
+                        None => FenceOrigin::SendUnsettled,
+                    };
                     self.failed = true;
-                    self.fence("failed");
+                    self.fence_observed("failed", origin, send_fence_context);
                     self.closing = true;
                 }
                 match observed.outcome {
@@ -1537,22 +2016,38 @@ impl Driver {
                 }
                 self.state_event();
             }
-            Work::Presenter(failed) => {
+            Work::Presenter(failure) => {
                 self.workers -= 1;
-                if failed && !self.retired {
+                if let Some(origin) = failure.filter(|_| !self.retired) {
                     self.failed = true;
-                    self.fence("failed");
+                    self.fence_observed("failed", origin, None);
                     self.closing = true;
                 }
             }
             Work::Service(result) => {
                 self.workers -= 1;
-                if result.is_err() {
+                if let Err(failure) = result {
                     // An entered preparation cleanup failure cannot disappear
                     // merely because retirement was requested while it ran.
                     self.failed = true;
-                    self.fence("failed");
+                    self.fence_observed("failed", failure.origin, None);
                     self.closing = true;
+                }
+            }
+            Work::PlainReviewed(owner, result) => self.plain_reviewed(owner, result),
+            Work::PlainNativeClosed(result) => self.plain_native_closed(result),
+            Work::PlainFinalized(result) => self.plain_finalized(result),
+            Work::ProbeFinalized(result) => self.probe_finalized(result),
+            Work::Probed(id, execution) => self.probed(id, execution),
+            Work::Collected(id, execution) => self.collection_finished(id, execution),
+            Work::PrivateClosed(result, diagnostic) => {
+                self.workers -= 1;
+                if let (Some(host), Some(diagnostic)) = (self.selected_host(), diagnostic) {
+                    host.lifetime.retain_private_setup_diagnostic(diagnostic);
+                }
+                if let Err(error) = result {
+                    self.failed = true;
+                    self.close_failure = Some(error);
                 }
             }
             Work::Connector(id, mut control, reply, cancellation, cleanup_failed) => {
@@ -1605,8 +2100,15 @@ impl Driver {
             }
             Work::Closed(outcome) => {
                 self.closed = true;
-                if outcome.is_err() {
+                if let Err(error) = outcome {
                     self.failed = true;
+                    self.close_failure = Some(match self.close_failure.take() {
+                        Some(primary) => ConnectError::Cleanup {
+                            primary: Box::new(primary),
+                            cleanup: Box::new(error),
+                        },
+                        None => error,
+                    });
                 }
                 let replies = std::mem::take(&mut self.close_replies);
                 for (id, target) in replies {
@@ -1624,12 +2126,36 @@ impl Driver {
     }
     fn settle(&mut self) {
         self.present_notice();
+        if self.settle_plain() {
+            return;
+        }
         if self.retired
             && !self.opening
             && self.active.is_none()
             && self.workers == 0
             && self.histories == 0
         {
+            if !self.private_close_started
+                && let Some(owner) = self
+                    .lazy
+                    .as_ref()
+                    .map(|lazy| lazy.owner())
+                    .filter(|owner| owner.has_private_custody())
+            {
+                // Retirement is an admission fence, but it cannot claim that
+                // entered Python work settled before the same native helper
+                // and guard owner have actually joined. Retain this task.
+                self.private_close_started = true;
+                self.workers += 1;
+                self.tasks.push(
+                    async move {
+                        let (result, diagnostic) = owner.shutdown_observed().await;
+                        Work::PrivateClosed(result, diagnostic)
+                    }
+                    .boxed(),
+                );
+                return;
+            }
             let replies = std::mem::take(&mut self.retire_replies);
             for (id, retirement_id, target) in replies {
                 if self.failed {
@@ -1661,18 +2187,24 @@ impl Driver {
 }
 
 async fn approvals(presenter: ApprovalPresenter, bridge: PromptBridge) -> Work {
-    Work::Presenter(present_approvals(presenter, bridge).await)
+    Work::Presenter(present_approvals_observed(presenter, bridge).await)
 }
 
-pub(crate) async fn present_approvals(
+#[cfg(feature = "console")]
+pub(crate) async fn present_approvals(presenter: ApprovalPresenter, bridge: PromptBridge) -> bool {
+    present_approvals_observed(presenter, bridge)
+        .await
+        .is_some()
+}
+async fn present_approvals_observed(
     mut presenter: ApprovalPresenter,
     bridge: PromptBridge,
-) -> bool {
+) -> Option<FenceOrigin> {
     loop {
         let prompt =
-            tokio::select! {biased;_=bridge.closed()=>return false,prompt=presenter.next()=>prompt};
+            tokio::select! {biased;_=bridge.closed()=>return None,prompt=presenter.next()=>prompt};
         let Some(mut prompt) = prompt else {
-            return !bridge.retired();
+            return (!bridge.retired()).then_some(FenceOrigin::ApprovalPresenterClosed);
         };
         let record = prompt.record();
         let projection = json!({"kind":"approval","approval_id":record.approval_id,"summary":record.proposed_action.summary,"body":record.proposed_action.body,"allowed_decisions":["approve","deny"],"expires_at":record.expires_at});
@@ -1689,11 +2221,11 @@ pub(crate) async fn present_approvals(
                     // Expired/stale eligibility is local refusal. A failed native
                     // decision write or poisoned custody is infrastructure failure.
                     if !matches!(error, ConnectError::InvalidInput(_)) {
-                        return true;
+                        return Some(FenceOrigin::ApprovalNativeDecisionFailed);
                     }
                 }
             }
-            _ if bridge.retired() => return false,
+            _ if bridge.retired() => return None,
             _ => {}
         }
     }
@@ -1705,9 +2237,11 @@ async fn forge(
     origin: String,
 ) -> Work {
     loop {
-        let prompt = tokio::select! {biased;_=bridge.closed()=>return Work::Presenter(false),prompt=presenter.next()=>prompt};
+        let prompt = tokio::select! {biased;_=bridge.closed()=>return Work::Presenter(None),prompt=presenter.next()=>prompt};
         let Some(prompt) = prompt else {
-            return Work::Presenter(!bridge.retired());
+            return Work::Presenter(
+                (!bridge.retired()).then_some(FenceOrigin::ForgePresenterClosed),
+            );
         };
         // Presenter failure retires the exact native tool waiter. It does not
         // retry login or manufacture a denial. Native completion stays decisive.
@@ -1720,9 +2254,11 @@ async fn paired_host(
     targets: Vec<crate::paired_host_stdio::Target>,
 ) -> Work {
     loop {
-        let prompt = tokio::select! {biased;_=bridge.closed()=>return Work::Presenter(false),prompt=presenter.next()=>prompt};
+        let prompt = tokio::select! {biased;_=bridge.closed()=>return Work::Presenter(None),prompt=presenter.next()=>prompt};
         let Some(prompt) = prompt else {
-            return Work::Presenter(!bridge.retired());
+            return Work::Presenter(
+                (!bridge.retired()).then_some(FenceOrigin::PairedHostPresenterClosed),
+            );
         };
         let _ = crate::paired_host_stdio::present(prompt, &bridge, &targets).await;
     }
@@ -1749,6 +2285,7 @@ async fn send(
     text: String,
     mut cancel: watch::Receiver<bool>,
     notices: mpsc::Sender<Notice>,
+    caller: Option<meerkat::governed_realm::stock::caller::StockAuthenticatedCaller>,
 ) -> Work {
     if *cancel.borrow() {
         return Work::Sent(id, TurnCompletion::unentered(), None);
@@ -1761,7 +2298,11 @@ async fn send(
         return Work::Sent(id, TurnCompletion::unentered(), None);
     }
     // Once entered, neither admission nor completion is dropped by a control.
-    let (admission, handle) = match session.submit(text).await {
+    let submitted = match caller.as_ref() {
+        Some(caller) => session.submit_private_caller(text, caller).await,
+        None => session.submit(text).await,
+    };
+    let (admission, handle) = match submitted {
         Ok(value) => value,
         Err(error) => {
             if let ConnectError::MissingCompletion { admission } = error {
@@ -1818,9 +2359,32 @@ fn new_driver(
 ) -> (Driver, mpsc::Receiver<Notice>, mpsc::Receiver<Exchange>) {
     let (stop, retired) = watch::channel(false);
     let (prompts, prompt_rx) = mpsc::channel(1);
-    let bridge = PromptBridge { prompts, retired };
+    let bridge = PromptBridge {
+        prompts,
+        retired,
+        probe_lifetime: None,
+        commissioning: false,
+    };
     let (notices, notice_rx) = mpsc::channel(32);
     let driver = Driver {
+        collection_selection: None,
+        collection_service_index: 0,
+        collection_open_id: None,
+        next_service_receivers: None,
+        retained_collection_services: Vec::new(),
+        collection_active: None,
+        last_collection_id: None,
+        collected: BTreeSet::new(),
+        collection_reports: Vec::new(),
+        probe_selection: None,
+        probe_capture: None,
+        probe_commissioning: false,
+        probe_commissions: Vec::new(),
+        probe_ready: None,
+        probe_active: None,
+        last_probe_id: None,
+        probed: BTreeSet::new(),
+        provider_store_root: None,
         binding: None,
         initialize_id: None,
         scope: None,
@@ -1828,11 +2392,22 @@ fn new_driver(
         session: None,
         approvals: None,
         lazy: None,
+        private_close_started: false,
+        plain_owner: None,
+        plain_pending: false,
+        plain_close_started: false,
+        plain_closed: None,
+        plain_close_observations: Vec::new(),
+        plain_cancel: watch::channel(false).0,
+        plain_outcomes: Vec::new(),
+        close_failure: None,
         secret_presenter: None,
         private_notices: VecDeque::new(),
         active: None,
+        last_send_id: None,
         last: None,
         uncertain: false,
+        first_fence: None,
         retired: false,
         failed: false,
         closing: false,
@@ -1868,10 +2443,65 @@ pub async fn run() -> Result<(), ConnectError> {
     let output = transport::Pipe::inherited(std::io::stdout()).map_err(|_| ended())?;
     run_io(input, output).await
 }
+/// Trusted process composition only. The browser wire has no store-root field.
+pub async fn run_with_provider_store(root: std::path::PathBuf) -> Result<(), ConnectError> {
+    if !root.is_absolute() {
+        return Err(ended());
+    }
+    let input = transport::Pipe::inherited(std::io::stdin()).map_err(|_| ended())?;
+    let output = transport::Pipe::inherited(std::io::stdout()).map_err(|_| ended())?;
+    run_io_selected(input, output, Some(root)).await
+}
 async fn run_io<R: AsyncRead + Unpin, W: AsyncWrite + Unpin + std::marker::Send + 'static>(
     input: R,
-    mut output: W,
+    output: W,
 ) -> Result<(), ConnectError> {
+    run_io_selected(input, output, None).await
+}
+async fn run_io_selected<
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin + std::marker::Send + 'static,
+>(
+    input: R,
+    output: W,
+    provider_store_root: Option<std::path::PathBuf>,
+) -> Result<(), ConnectError> {
+    run_io_composed(input, output, provider_store_root, None).await
+}
+async fn run_io_composed<
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin + std::marker::Send + 'static,
+>(
+    input: R,
+    output: W,
+    provider_store_root: Option<std::path::PathBuf>,
+    selection: Option<crate::service_probe::ServiceSelection>,
+) -> Result<(), ConnectError> {
+    run_io_composed_with_host_close(input, output, provider_store_root, selection, false).await
+}
+
+// The protected parent entry must finish its separate activation contract
+// before driving this invocation and retain this future through real closure.
+// Selecting this mode alone authenticates nobody. Public wrappers remain false.
+async fn run_io_composed_with_host_close<
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin + std::marker::Send + 'static,
+>(
+    input: R,
+    mut output: W,
+    provider_store_root: Option<std::path::PathBuf>,
+    selection: Option<crate::service_probe::ServiceSelection>,
+    close_on_host_retirement: bool,
+) -> Result<(), ConnectError> {
+    if close_on_host_retirement && selection.is_none() {
+        return Err(ended());
+    }
+    let host_invocation = selection
+        .as_ref()
+        .map(|selected| {
+            crate::service_probe::native_host::NativeHostInvocation::enter(selected.host().clone())
+        })
+        .transpose()?;
     let (write_tx, mut write_rx) = mpsc::channel::<OutputFrame>(OUTPUT_FRAMES);
     let output_budget = Arc::new(Semaphore::new(MAX_FRAME * 2));
     let (writer_stop, mut writer_cancel) = watch::channel(false);
@@ -1882,9 +2512,27 @@ async fn run_io<R: AsyncRead + Unpin, W: AsyncWrite + Unpin + std::marker::Send 
         output.flush().await.map_err(|_| ())
     });
     let (mut driver, mut notice_rx, mut prompt_rx) = new_driver(write_tx, output_budget);
+    driver.provider_store_root = provider_store_root;
+    match selection {
+        Some(crate::service_probe::ServiceSelection::Probes(s)) => driver.probe_selection = Some(s),
+        Some(crate::service_probe::ServiceSelection::Collections(s)) => {
+            driver.collection_selection = Some(s)
+        }
+        None => (),
+    }
+    driver.bridge.probe_lifetime = driver
+        .selected_host()
+        .map(|host| (host.lifetime.clone(), host.binding.expires_at_ms));
     let mut frames = transport::Frames::new(input);
     let mut writer_done = false;
+    let mut writer_joined = false;
     loop {
+        if let Some((notices, prompts)) = driver.next_service_receivers.take() {
+            // Old setup workers have all returned before this transfer. Drop
+            // only their drained phase's queued presentation observations.
+            notice_rx = notices;
+            prompt_rx = prompts;
+        }
         driver.settle();
         if driver.closed && driver.tasks.is_empty() {
             break;
@@ -1895,10 +2543,25 @@ async fn run_io<R: AsyncRead + Unpin, W: AsyncWrite + Unpin + std::marker::Send 
             .map(|b| b.viewer.expires_at_ms)
             .unwrap_or(u64::MAX);
         let delay = Duration::from_millis(expiry.saturating_sub(now()));
+        let selected_lifetime = driver.selected_host();
+        let host_retired = async {
+            match &selected_lifetime {
+                Some(selection) => {
+                    selection
+                        .lifetime
+                        .closed(selection.binding.expires_at_ms)
+                        .await
+                }
+                None => std::future::pending::<()>().await,
+            }
+        };
         tokio::select! {biased;
-            result=&mut writer,if !writer_done=>{writer_done=true;driver.output_failed=true;driver.failed|=!matches!(result,Ok(Ok(())));driver.fence("failed");driver.closing=true;},
-            _=tokio::time::sleep(delay),if !driver.retired&&driver.binding.is_some()=>driver.fence("expired"),
-            frame=frames.next(),if !driver.eof=>match frame {
+            _=host_retired,if driver.watches_host_retirement(close_on_host_retirement)=>driver.host_retired(close_on_host_retirement),
+            result=&mut writer,if !writer_done=>{writer_done=true;writer_joined=matches!(result,Ok(Ok(())));driver.output_failed=true;driver.failed|=!writer_joined;driver.fence("failed");driver.closing=true;},
+            _=tokio::time::sleep(delay),if driver.watches_expiry()=>driver.fence("expired"),
+            // Protected close stops accepting frames, without pretending the
+            // still-open input reached EOF. Existing work keeps being polled.
+            frame=frames.next(),if !driver.eof && !(close_on_host_retirement && driver.closing)=>match frame {
                 Ok(Some(bytes))=>driver.frame(&bytes),
                 Ok(None)|Err(_)=>{driver.eof=true;driver.fence("closing");driver.closing=true;},
             },
@@ -1920,13 +2583,170 @@ async fn run_io<R: AsyncRead + Unpin, W: AsyncWrite + Unpin + std::marker::Send 
         }
     }
     let failed = driver.failed;
+    let work_drained = driver.closed
+        && driver.tasks.is_empty()
+        && driver.workers == 0
+        && !driver.opening
+        && driver.active.is_none()
+        && driver.histories == 0
+        && !driver.connector_busy
+        && driver.probe_active.is_none()
+        && driver.collection_active.is_none();
+    let close_failure = driver.close_failure.take();
+    let v7 = driver.collection_selection.is_some();
+    let reports = std::mem::take(&mut driver.collection_reports);
+    let finalization_result = crate::terminal_connector::FinalizedAction::finish_invocation(
+        &driver.plain_outcomes,
+        Ok(()),
+    );
     drop(driver);
-    if !writer_done && writer.await.map_err(|_| ended())?.is_err() {
-        return Err(ended());
+    drop(frames);
+    let writer_failed = if writer_done {
+        false
+    } else {
+        writer_joined = matches!(writer.await, Ok(Ok(())));
+        !writer_joined
+    };
+    let outcome = if writer_failed {
+        Err(close_failure.unwrap_or_else(ended))
+    } else if let Some(error) = close_failure {
+        Err(error)
+    } else if failed {
+        Err(ended())
+    } else {
+        finalization_result
+    };
+    let outcome = collection::retain_failure(v7, reports, outcome);
+    if let Some(invocation) = host_invocation {
+        invocation.finish(work_drained, writer_joined, &outcome);
     }
-    if failed { Err(ended()) } else { Ok(()) }
+    outcome
 }
+
+#[cfg(test)]
+#[path = "service_probe/native_host/stdio_tests.rs"]
+mod native_host_tests;
+
+#[cfg(test)]
+#[path = "stdio_protected_close_tests.rs"]
+mod protected_close_tests;
 
 #[cfg(test)]
 #[path = "stdio_tests.rs"]
 pub(crate) mod tests;
+
+/// Trusted host entrypoint for explicit protocol6. Dynamic workspace requirements
+/// are selected in Rust before the private pipe accepts initialization. Native
+/// default or explicit paired credential persistence matches the host's scope.
+pub async fn run_with_service_probes(
+    selection: crate::service_probe::ServiceProbeSelection,
+    provider_store_root: Option<std::path::PathBuf>,
+) -> Result<(), ConnectError> {
+    if provider_store_root
+        .as_ref()
+        .is_some_and(|root| !root.is_absolute())
+    {
+        return Err(ended());
+    }
+    let input = transport::Pipe::inherited(std::io::stdin()).map_err(|_| ended())?;
+    let output = transport::Pipe::inherited(std::io::stdout()).map_err(|_| ended())?;
+    run_io_composed(
+        input,
+        output,
+        provider_store_root,
+        Some(crate::service_probe::ServiceSelection::Probes(Arc::new(
+            selection,
+        ))),
+    )
+    .await
+}
+
+/// Trusted protocol7 entrypoint. The host chooses exact source IDs, resource
+/// programs and ceilings before startup. The pipe accepts no such authority.
+/// Historical per-operation checks do not qualify reusable source coverage.
+pub async fn run_with_service_collections(
+    selection: crate::service_collection::ServiceCollectionSelection,
+    provider_store_root: Option<std::path::PathBuf>,
+) -> Result<(), ConnectError> {
+    if provider_store_root
+        .as_ref()
+        .is_some_and(|root| !root.is_absolute())
+    {
+        return Err(ended());
+    }
+    let input = transport::Pipe::inherited(std::io::stdin()).map_err(|_| ended())?;
+    let output = transport::Pipe::inherited(std::io::stdout()).map_err(|_| ended())?;
+    run_io_composed(
+        input,
+        output,
+        provider_store_root,
+        Some(crate::service_probe::ServiceSelection::Collections(
+            Arc::new(selection),
+        )),
+    )
+    .await
+}
+
+/// Trusted protocol7 composition over the original host-created pipe endpoints.
+/// This consumes both descriptors, requires a read-only input FIFO and a
+/// write-only output FIFO, and adopts them into the existing invocation owners.
+/// A successful native close observation follows actual endpoint disposal.
+/// Parent authentication, original reservation and process reaping remain the
+/// embedding host's responsibilities; this transport creates none of them.
+pub async fn run_with_service_collections_on_owned_pipes(
+    selection: crate::service_collection::ServiceCollectionSelection,
+    input: std::os::fd::OwnedFd,
+    output: std::os::fd::OwnedFd,
+    provider_store_root: Option<std::path::PathBuf>,
+) -> Result<(), ConnectError> {
+    if provider_store_root
+        .as_ref()
+        .is_some_and(|root| !root.is_absolute())
+    {
+        return Err(ended());
+    }
+    let (input, output) = transport::Pipe::owned_pair(input, output).map_err(|_| ended())?;
+    run_io_composed(
+        input,
+        output,
+        provider_store_root,
+        Some(crate::service_probe::ServiceSelection::Collections(
+            Arc::new(selection),
+        )),
+    )
+    .await
+}
+
+/// Original ordinary endpoints, registered before the protected handshake.
+/// Construction neither enters an invocation nor creates native authority.
+#[cfg(target_os = "linux")]
+pub(crate) struct ProtectedCollectionPipes {
+    input: transport::Pipe,
+    output: transport::Pipe,
+}
+#[cfg(target_os = "linux")]
+impl ProtectedCollectionPipes {
+    pub(crate) fn adopt(
+        input: std::os::fd::OwnedFd,
+        output: std::os::fd::OwnedFd,
+    ) -> Result<Self, ConnectError> {
+        let (input, output) = transport::Pipe::owned_pair(input, output).map_err(|_| ended())?;
+        Ok(Self { input, output })
+    }
+    pub(crate) async fn run(
+        self,
+        selection: crate::service_collection::ServiceCollectionSelection,
+        provider_store_root: Option<std::path::PathBuf>,
+    ) -> Result<(), ConnectError> {
+        run_io_composed_with_host_close(
+            self.input,
+            self.output,
+            provider_store_root,
+            Some(crate::service_probe::ServiceSelection::Collections(
+                Arc::new(selection),
+            )),
+            true,
+        )
+        .await
+    }
+}

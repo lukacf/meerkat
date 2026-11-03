@@ -17,10 +17,11 @@ use meerkat_toolkit::host_lifetime::{
 impl PrivateOriginals {
     pub(crate) async fn issue_or_reconcile_setup_helper_grants(
         self: &Arc<Self>,
-        call: ToolCallView<'_>,
         context: &ToolDispatchContext,
+        entered: &meerkat_core::EnteredDispatchOperation,
         preparation: &meerkat_toolkit::setup::NativeWorkPreparation,
         prepared: &PreparedHelperController,
+        review: crate::review_custody::ReviewCustody,
     ) -> Result<(Vec<GrantLineageRef>, WorkAuthorityBasis), PrivateOriginalError> {
         if !prepared
             .source
@@ -69,62 +70,44 @@ impl PrivateOriginals {
             .map_err(helper_error)?;
         self.require_helper_selection(prepared.admitted.selection())?;
         let logins = self.helper_controller_logins(&prepared.admitted)?;
-        let issuance = GovernedHelperChildIssuance::from_dispatch(
-            call,
-            context,
+        let issuance = GovernedHelperChildIssuance::from_entered(
+            entered,
             self.owner.clone(),
             prepared.admitted.qualified_contributors(),
             intent,
-        )
-        .map_err(child_error)?;
-        let report_issuance = report_intent
-            .map(|intent| {
-                GovernedHelperChildIssuance::from_dispatch(
-                    call,
-                    context,
-                    self.owner.clone(),
-                    prepared.admitted.qualified_contributors(),
-                    intent,
-                )
-            })
-            .transpose()
-            .map_err(child_error)?;
-        let account_issuance = account_intent
-            .map(|intent| {
-                GovernedHelperChildIssuance::from_dispatch(
-                    call,
-                    context,
-                    self.owner.clone(),
-                    prepared.admitted.qualified_contributors(),
-                    intent,
-                )
-            })
-            .transpose()
-            .map_err(child_error)?;
-        let public_issuance = public_intent
-            .map(|intent| {
-                GovernedHelperChildIssuance::from_dispatch(
-                    call,
-                    context,
-                    self.owner.clone(),
-                    prepared.admitted.qualified_contributors(),
-                    intent,
-                )
-            })
-            .transpose()
-            .map_err(child_error)?;
-        let catalog_issuance = catalog_intent
-            .map(|intent| {
-                GovernedHelperChildIssuance::from_dispatch(
-                    call,
-                    context,
-                    self.owner.clone(),
-                    prepared.admitted.qualified_contributors(),
-                    intent,
-                )
-            })
-            .transpose()
-            .map_err(child_error)?;
+        );
+        let report_issuance = report_intent.map(|intent| {
+            GovernedHelperChildIssuance::from_entered(
+                entered,
+                self.owner.clone(),
+                prepared.admitted.qualified_contributors(),
+                intent,
+            )
+        });
+        let account_issuance = account_intent.map(|intent| {
+            GovernedHelperChildIssuance::from_entered(
+                entered,
+                self.owner.clone(),
+                prepared.admitted.qualified_contributors(),
+                intent,
+            )
+        });
+        let public_issuance = public_intent.map(|intent| {
+            GovernedHelperChildIssuance::from_entered(
+                entered,
+                self.owner.clone(),
+                prepared.admitted.qualified_contributors(),
+                intent,
+            )
+        });
+        let catalog_issuance = catalog_intent.map(|intent| {
+            GovernedHelperChildIssuance::from_entered(
+                entered,
+                self.owner.clone(),
+                prepared.admitted.qualified_contributors(),
+                intent,
+            )
+        });
         let report_capability = selected.helper.report_capability.clone();
         let catalog_capability = selected.helper.catalog_capability.clone();
         let configured_basis = selected.helper.operation_basis.clone();
@@ -139,7 +122,10 @@ impl PrivateOriginals {
         // Native owns the synchronous append/reconciliation. Retain the exact
         // client, source and same logins in that writer if the caller is lost.
         // No source-store mutation guard crosses this native reservation.
+        let entered = entered.clone();
         let result = tokio::task::spawn_blocking(move || {
+            let _entered = entered;
+            let _review = review;
             let _controller = controller;
             source
                 .owner
@@ -158,6 +144,10 @@ impl PrivateOriginals {
             // append. Activation/component close uses this same publication.
             with_helper_logins(&logins, || {
                 let controller = issuance.issue_or_recover()?;
+                #[cfg(test)]
+                if let Some(observe) = source.helper_controller_appended.get() {
+                    observe(controller.lineage());
+                }
                 // Each append uses the actual operation's own current native
                 // publication reservation. A known controller result never
                 // implies that the separate report append settled.
@@ -273,7 +263,7 @@ impl PrivateOriginals {
                 }
                 continue;
             }
-            let route = self.route(&held.reference.route)?;
+            let route = &self.route(&held.reference.route)?;
             let compiled = native
                 .routes
                 .iter()

@@ -1,12 +1,14 @@
 """Real retained setup requests and local leases; no native admission claims."""
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import json
 import os
 import select
 import threading
 from pathlib import Path
+from types import SimpleNamespace
 import subprocess
 import sys
 import unittest
@@ -37,14 +39,172 @@ class LocalSessionTests(fixtures.FixtureMixin, unittest.TestCase):
         self.state_root = self.root / "product-session"
         self.binding = {"configuration_sha256": "a" * 64, "helper_sha256": "b" * 64}
 
-    def create(self, root, record, reopened, runner=fixtures.FakeRunner):
-        result = local.controller_factory(backend, root, record, reopened)(
+    def create(self, root, record, reopened, runner=fixtures.FakeRunner, shared_restore=None):
+        result = local.controller_factory(backend, root, record, reopened, _shared_restore=shared_restore)(
             self.bundle, self.sha, self.root / "unused", backend.FAMILIES,
             sys.executable, sys.executable, sys.executable,
             runner_factory=runner, verifier=self.bundle / "install-library-consumer.py",
             verifier_sha256=self.manifest["files"]["install-library-consumer.py"]["sha256"])
         self.controllers.append(result)
         return result
+
+    def test_abandoned_physical_snapshot_requires_selected_lifetime_and_actual_owner_join(self):
+        from test_selected_setup import adapter
+        artifact = self.root / "abandoned-physical"
+        (artifact / "prepared").mkdir(parents=True)
+        state_root = artifact / "prepared/local-session"
+        identity = "e" * 64
+        lifetime_path = artifact / ("shared-lifetime-" + identity + ".json")
+        # Passive pre-spawn selection bytes, not a simulated cleanup receipt.
+        preparer = {}
+        for name in ("prepare.stdout",):
+            selected_path = artifact / name
+            local.write_new(selected_path, name.encode())
+            preparer[name] = local.digest(local.read(selected_path))
+        lifetime = {"schema_version": 1, "owner": identity, "realm": "test-selected",
+            "state_root": str(self.root), "artifact_directory": str(artifact),
+            "resources_sha256": "f" * 64, "command": "/usr/bin/env", "arguments": [],
+            "peers": 1, "restored": None, "preparer": preparer}
+        raw = local.encoded(lifetime)
+        local.write_new(lifetime_path, raw)
+        args = SimpleNamespace(shared_lifetime=lifetime_path, shared_lifetime_sha256=local.digest(raw),
+            shared_close_id=identity, shared_peers=1, shared_restore_sha256=None, state_root=state_root)
+        selected = local.selected_shared_lifetime(args)
+        self.assertEqual(selected, (lifetime_path, raw))
+        args.shared_lifetime_sha256 = "0" * 64
+        with self.assertRaises(local.LocalSetupError):
+            local.selected_shared_lifetime(args)
+        args.shared_lifetime_sha256 = local.digest(raw)
+        args.shared_close_id = "b" * 64
+        with self.assertRaises(local.LocalSetupError):
+            local.selected_shared_lifetime(args)
+        args.shared_close_id = identity
+
+        async def exercise():
+            with local.session_owner(state_root, self.binding) as session:
+                root, record, _ = session
+                controller = self.create(*session)
+                census = adapter.SharedEntryCensus(artifact / ("shared-entries-" + identity), local.digest(raw))
+                owner = adapter.ControllerConnections(controller, _entry_census=census)
+                owner.open()
+                path = root / ("shared-abandoned-" + identity + ".json")
+                try:
+                    local.observe_shared_abandonment(root, owner, selected)
+                    self.assertFalse(path.exists(), "an open owner has no joined disposition")
+                finally:
+                    await owner.aclose()
+                local.observe_shared_abandonment(root, owner, selected)
+                before = local.read(path)
+                self.assertEqual(local.decode(before), owner.abandoned_snapshot())
+                self.assertEqual(local.decode(before)["entries"], [])
+                lifetime_path.write_bytes(b"changed")
+                local.observe_shared_abandonment(root, owner, selected)
+                self.assertEqual(local.read(path), before, "no changed selection rewrites historical proof")
+                lifetime_path.write_bytes(raw)
+                self.assertFalse(controller.runner.calls)
+                self.assertFalse(controller.jobs)
+                self.assertFalse(any(thread.is_alive() for thread in controller.threads))
+        asyncio.run(exercise())
+
+    def test_shared_close_reopens_only_exact_claim_and_keeps_old_work_readback_only(self):
+        from test_selected_setup import adapter
+        from test_shared_preparation import transport_call
+
+        async def exercise():
+            with local.session_owner(self.state_root, self.binding) as selected:
+                root, record, _ = selected
+                controller = self.create(*selected)
+                owner = adapter.ControllerConnections(controller)
+                peer = owner.open()
+                try:
+                    await transport_call(peer, "/api/prepare", {"family": "agno"})
+                    await asyncio.to_thread(controller.join)
+                    checked = await transport_call(peer, "/api/check", self.request())
+                    request = {**self.request(), "validation_id": checked["validation_id"],
+                               "configuration_sha256": checked["configuration_sha256"]}
+                    await transport_call(peer, "/api/install", request)
+                    await asyncio.to_thread(controller.join)
+                finally:
+                    await owner.aclose()
+                local.observe_shared_close(adapter, root, self.binding, owner, "a" * 64)
+                raw = local.read(root / "shared-close.json")
+                old_requests = {path: path.read_bytes() for path in (controller.workspace / "requests").iterdir()}
+                with self.assertRaisesRegex(local.LocalSetupError, "already_open"):
+                    with local.session_owner(root, self.binding):
+                        self.fail("competing physical owner acquired the lease")
+            with local.session_owner(self.state_root, self.binding) as selected:
+                root, record, _ = selected
+                before = local.read(root / "session.json")
+                with self.assertRaisesRegex(local.LocalSetupError, "selection_changed"):
+                    local.claim_shared_close(adapter, root, self.binding, "0" * 64)
+                self.assertEqual(local.read(root / "session.json"), before)
+                self.assertFalse((root / "shared-restore-claim.json").exists())
+                closed, claimed = local.claim_shared_close(adapter, root, self.binding, local.digest(raw))
+                with self.assertRaises((FileNotFoundError, FileExistsError)):
+                    local.claim_shared_close(adapter, root, self.binding, local.digest(raw))
+                current = self.create(*selected, shared_restore=closed)
+                self.assertNotEqual(current.workspace, controller.workspace)
+                self.assertFalse(current.recovery_only)
+                self.assertTrue(all(job["status"] == "unconfirmed" and job["recovered"]
+                                    for job in current.jobs.values()))
+                successor = adapter.ControllerConnections(current, _closed_readback=closed["controller"]["rounds"])
+                new_peer = successor.open()
+                try:
+                    with self.assertRaisesRegex(adapter.backend.SetupError, "validation_required"):
+                        await transport_call(new_peer, "/api/install", request)
+                    self.assertFalse(current.runner.calls, "old work did not dispatch")
+                    await transport_call(new_peer, "/api/prepare", {"family": "agno"})
+                    await asyncio.to_thread(current.join)
+                    checked = await transport_call(new_peer, "/api/check", self.request())
+                    await transport_call(new_peer, "/api/install", {**self.request(),
+                        "validation_id": checked["validation_id"],
+                        "configuration_sha256": checked["configuration_sha256"]})
+                    await asyncio.to_thread(current.join)
+                finally:
+                    await successor.aclose()
+                local.observe_shared_close(adapter, root, self.binding, successor, "b" * 64, claimed)
+                self.assertFalse((root / "shared-restore-claim.json").exists())
+                next_raw = local.read(root / "shared-close.json")
+                next_close, _ = local.select_shared_close(adapter, root, self.binding, local.digest(next_raw))
+                self.assertEqual(len(next_close["controller"]["rounds"]), 2)
+                self.assertEqual({path: path.read_bytes() for path in old_requests}, old_requests)
+        asyncio.run(exercise())
+
+    def test_shared_empty_close_and_changed_round_refuse_without_replacing_evidence(self):
+        from test_selected_setup import adapter
+
+        async def exercise():
+            with local.session_owner(self.state_root, self.binding) as selected:
+                root, record, _ = selected
+                controller = self.create(*selected)
+                owner = adapter.ControllerConnections(controller)
+                owner.open()
+                await owner.aclose()
+                local.observe_shared_close(adapter, root, self.binding, owner, "a" * 64)
+                raw = local.read(root / "shared-close.json")
+                self.assertEqual(local.decode(raw)["controller"]["rounds"][0]["requests"], [])
+                session = local.read(root / "session.json")
+                local.replace(root / "session.json", session + b"\n")
+                with self.assertRaisesRegex(local.LocalSetupError, "round_changed"):
+                    local.claim_shared_close(adapter, root, self.binding, local.digest(raw))
+                self.assertEqual(local.read(root / "shared-close.json"), raw)
+                self.assertFalse((root / "shared-restore-claim.json").exists())
+                local.replace(root / "session.json", session)
+                # A failed current close cannot turn an earlier observation
+                # into a new owner-produced record or a reusable round.
+                controller.request_retention_failed = True
+                local.observe_shared_close(adapter, root, self.binding, owner, "b" * 64)
+                self.assertEqual(local.read(root / "shared-close.json"), raw)
+                controller.request_retention_failed = False
+                closed, claimed = local.claim_shared_close(adapter, root, self.binding, local.digest(raw))
+                fresh = self.create(root, record, True, shared_restore=closed)
+                successor = adapter.ControllerConnections(fresh)
+                successor.open()
+                await successor.aclose()
+                local.observe_shared_close(adapter, root, self.binding, successor, "c" * 64, claimed)
+                self.assertFalse((root / "shared-restore-claim.json").exists())
+                self.assertFalse(fresh.jobs)
+        asyncio.run(exercise())
 
     def test_remote_recipe_selection_preserves_exact_pinned_arguments(self):
         helper = self.root / "local_session.py"
@@ -347,8 +507,9 @@ except m.LocalSetupError as error:
 
 class LiveRoundOffer:
     """Actual private pipe/socket rendezvous; no native actor or provider call."""
-    def __init__(self, test, root, binding):
+    def __init__(self, test, root, binding, *, expected_round=None):
         self.test, self.root, self.binding = test, root, binding
+        self.expected_round = expected_round
         self.errors = []
         self.input_read, input_write = os.pipe()
         output_read, self.output_write = os.pipe()
@@ -360,7 +521,8 @@ class LiveRoundOffer:
     def run(self):
         try:
             with os.fdopen(self.input_read, "rb", buffering=0) as source, os.fdopen(self.output_write, "wb", buffering=0) as sink:
-                local.offer_next_round(backend, self.root, self.binding, source, sink, self.cancel_read)
+                local.offer_next_round(backend, self.root, self.binding, source, sink, self.cancel_read,
+                                       expected_round=self.expected_round)
         except BaseException as error:
             self.errors.append(error)
 
@@ -435,6 +597,71 @@ class LocalRoundTests(fixtures.FixtureMixin, unittest.TestCase):
         with local.session_owner(self.state_root, self.binding) as selected:
             with self.assertRaisesRegex(local.LocalSetupError, "previous_session_needs_review"):
                 self.create(*selected)
+
+    def test_empty_close_observation_uses_snapshot_and_changed_offer_has_no_effect(self):
+        with local.session_owner(self.state_root, self.binding) as selected:
+            owner = self.create(*selected)
+            owner.close_admission(); owner.join()
+            local.observe_empty_close(backend, self.state_root, self.binding)
+            observation = local.decode(local.read(self.state_root / "empty-close.json"))
+            self.assertEqual(observation, {"schema_version": 1,
+                "round": local.round_fingerprint(self.state_root, self.binding, ())})
+            with self.assertRaises(FileExistsError):
+                local.observe_empty_close(backend, self.state_root, self.binding)
+        before = {p: p.read_bytes() for p in self.state_root.rglob("*") if p.is_file()}
+        changed = dict(observation["round"], session_sha256="0" * 64)
+        offer = LiveRoundOffer(self, self.state_root, self.binding, expected_round=changed)
+        try:
+            offer.thread.start(); offer.thread.join(5)
+            self.assertFalse(offer.thread.is_alive())
+            self.assertEqual([str(error) for error in offer.errors], ["local_setup_round_changed"])
+            self.assertEqual({p: p.read_bytes() for p in self.state_root.rglob("*") if p.is_file()}, before)
+            self.assertFalse((self.state_root / "round-handoff.json").exists())
+        finally:
+            offer.__exit__()
+
+    def test_request_bearing_or_incomplete_round_emits_no_empty_close_observation(self):
+        owner, _, _ = self.first_install()
+        with local.session_owner(self.state_root, self.binding):
+            local.observe_empty_close(backend, self.state_root, self.binding)
+            self.assertFalse((self.state_root / "empty-close.json").exists())
+            (self.state_root / "recovery.json").unlink()
+            local.observe_empty_close(backend, self.state_root, self.binding)
+            self.assertFalse((self.state_root / "empty-close.json").exists())
+        self.assertTrue(any((owner.workspace / "requests").iterdir()))
+
+    def test_failed_or_cancelled_later_main_clears_prior_observation(self):
+        # Exercise the production main ordering, keeping transport and selection
+        # inert. Successful Controller join alone cannot turn cancellation into
+        # a native-compatible empty-close observation.
+        for failure in (RuntimeError("adapter failed"), asyncio.CancelledError()):
+            with self.subTest(failure=type(failure).__name__):
+                root = self.root / type(failure).__name__
+                binding = dict(self.binding, adapter_sha256="c" * 64, backend_sha256="d" * 64)
+                with local.session_owner(root, binding):
+                    local.write_new(root / "empty-close.json", local.encoded({"old": True}))
+                async def stdio(_):
+                    raise failure
+                def adapter_main(_, *, controller_factory, run_controller):
+                    try:
+                        asyncio.run(run_controller(object()))
+                    except asyncio.CancelledError:
+                        return 0  # Existing adapter.main cancellation contract.
+                    except RuntimeError:
+                        return 2
+                adapter = SimpleNamespace(backend=backend, main=adapter_main,
+                    stdio=stdio, SetupAdapter=lambda controller: controller)
+                args = ["--configuration", str(self.root / "mcp.json"),
+                    "--configuration-sha256", self.binding["configuration_sha256"],
+                    "--helper-sha256", self.binding["helper_sha256"],
+                    "--adapter-sha256", "c" * 64, "--backend-sha256", "d" * 64,
+                    "--state-root", str(root)]
+                with patch.object(local, "prepare_server"), patch.object(local, "prepared_configuration",
+                        return_value={"args": ["unused"] * 7}), patch.object(local, "retained_adapter", return_value=adapter), \
+                        patch.object(local, "controller_factory"), patch.object(local, "observe_empty_close") as observe:
+                    self.assertEqual(local.main(args), 0 if isinstance(failure, asyncio.CancelledError) else 2)
+                observe.assert_not_called()
+                self.assertFalse((root / "empty-close.json").exists())
 
     def test_first_install_after_empty_round_survives_next_round_and_saved_readback(self):
         with local.session_owner(self.state_root, self.binding) as selected:

@@ -135,6 +135,15 @@ impl ToolkitOriginalOwner {
                 .ok_or(RetainedResumeError::Readiness(
                     ControllerReadinessFailure::UnsupportedScope,
                 ))?;
+            self.check_workflow_member(runtime, association, Some(controller))
+                .map_err(|error| match error {
+                    meerkat_runtime::input_authority::NativeAdmissionError::Refused(refusal) => {
+                        RetainedResumeError::Refused(refusal)
+                    }
+                    meerkat_runtime::input_authority::NativeAdmissionError::Readiness(reason) => {
+                        RetainedResumeError::Readiness(reason)
+                    }
+                })?;
             if controller.selection() != selection {
                 return Err(malformed());
             }

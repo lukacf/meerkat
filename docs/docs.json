@@ -387,6 +387,8 @@
                   "connect/library/local-install",
                   "connect/acquisition/local-install",
                   "connect/guides/native-mcp",
+                  "connect/guides/service-collections",
+                  "connect/guides/protected-service-host",
                   "connect/guides/host-composition",
                   "connect/guides/setup-a-frontend"
                 ]

@@ -82,6 +82,16 @@ impl ContextProbe {
             .clone()
             .expect("native plan resolver captured the staged context")
     }
+    /// The owning test has joined the prior turn and retained its actual
+    /// context before explicitly requesting a probe for one additional input.
+    pub(crate) fn arm_next_input(&self) {
+        self.captured
+            .lock()
+            .unwrap()
+            .take()
+            .expect("prior input was captured");
+        self.next_input.store(true, Ordering::SeqCst);
+    }
 }
 #[async_trait]
 impl AgentToolDispatcher for ContextProbe {
@@ -168,20 +178,23 @@ impl LlmClient for ProbeProvider {
     }
     fn stream_prepared<'a>(&'a self, request: &'a PreparedLlmRequest) -> LlmStream<'a> {
         let stream = self.inner.stream_prepared(request);
-        if !self.first.swap(false, Ordering::SeqCst) {
-            return stream;
-        }
-        Box::pin(stream.map(|event| {
+        let mut emitted_probe = false;
+        Box::pin(stream.map(move |event| {
             event.map(|event| match event {
-                LlmEvent::TextDelta { .. } => LlmEvent::ToolCallComplete {
-                    id: "continuation-probe-call".into(),
-                    name: PROBE.into(),
-                    args: serde_json::json!({}),
-                    meta: None,
-                },
+                // A refused or unpolled attempt has not produced the response
+                // selected for probing. Preserve the one-shot until actual text.
+                LlmEvent::TextDelta { .. } if self.first.swap(false, Ordering::SeqCst) => {
+                    emitted_probe = true;
+                    LlmEvent::ToolCallComplete {
+                        id: "continuation-probe-call".into(),
+                        name: PROBE.into(),
+                        args: serde_json::json!({}),
+                        meta: None,
+                    }
+                }
                 LlmEvent::Done {
                     outcome: LlmDoneOutcome::Success { .. },
-                } => LlmEvent::Done {
+                } if emitted_probe => LlmEvent::Done {
                     outcome: LlmDoneOutcome::success(StopReason::ToolUse),
                 },
                 other => other,
@@ -194,6 +207,77 @@ impl LlmClient for ProbeProvider {
     async fn health_check(&self) -> Result<(), LlmError> {
         self.inner.health_check().await
     }
+}
+
+#[tokio::test]
+async fn probe_provider_preserves_one_shot_after_error_and_only_changes_its_own_done() {
+    // Exercise the actual provider wrapper with a deterministic transport
+    // refusal, then successful requests. This control creates no native work.
+    struct ErrorThenSuccess(AtomicBool);
+    #[async_trait]
+    impl LlmClient for ErrorThenSuccess {
+        fn stream<'a>(&'a self, _: &'a LlmRequest) -> LlmStream<'a> {
+            if self.0.swap(false, Ordering::SeqCst) {
+                return Box::pin(futures::stream::iter([Err(
+                    LlmError::OperationAuthorizationUnavailable,
+                )]));
+            }
+            Box::pin(futures::stream::iter([
+                Ok(LlmEvent::TextDelta {
+                    delta: "fixture answer".into(),
+                    meta: None,
+                }),
+                Ok(LlmEvent::Done {
+                    outcome: LlmDoneOutcome::success(StopReason::EndTurn),
+                }),
+            ]))
+        }
+        fn provider(&self) -> Provider {
+            Provider::Anthropic
+        }
+        async fn health_check(&self) -> Result<(), LlmError> {
+            Ok(())
+        }
+    }
+    let probe = ContextProbe::default();
+    let provider =
+        ProbeProvider::with_probe(Arc::new(ErrorThenSuccess(AtomicBool::new(true))), &probe);
+    let request = PreparedLlmRequest::from_projection(
+        LlmRequest::new("probe-control", vec![]),
+        meerkat_llm_core::LlmReplayProjection::new(vec![]),
+    );
+    let refused: Vec<_> = provider.stream_prepared(&request).collect().await;
+    assert!(matches!(
+        refused.as_slice(),
+        [Err(LlmError::OperationAuthorizationUnavailable)]
+    ));
+    assert!(
+        probe.next_input.load(Ordering::SeqCst),
+        "no response consumed the probe"
+    );
+
+    let probed: Vec<_> = provider.stream_prepared(&request).collect().await;
+    assert!(
+        matches!(probed.as_slice(), [
+        Ok(LlmEvent::ToolCallComplete { name, .. }),
+        Ok(LlmEvent::Done { outcome: LlmDoneOutcome::Success { stop_reason: StopReason::ToolUse, .. } }),
+    ] if name == PROBE),
+        "{probed:?}"
+    );
+    assert!(!probe.next_input.load(Ordering::SeqCst));
+
+    let unchanged: Vec<_> = provider.stream_prepared(&request).collect().await;
+    assert!(
+        matches!(unchanged.as_slice(), [
+        Ok(LlmEvent::TextDelta { delta, .. }),
+        Ok(LlmEvent::Done { outcome: LlmDoneOutcome::Success { stop_reason: StopReason::EndTurn, .. } }),
+    ] if delta == "fixture answer"),
+        "{unchanged:?}"
+    );
+    assert!(
+        probe.captured.lock().unwrap().is_none(),
+        "transport output does not fabricate native resolver capture"
+    );
 }
 
 struct References(ContextReference);
@@ -226,6 +310,16 @@ async fn terminal_result_with_work<S>(
     fixture: &ContinuationFixture<S>,
     dispatch: &ToolDispatchContext,
     selected: Option<meerkat_core::retained_work::RetainedWorkIdentity>,
+) -> ContinuationObligation {
+    terminal_result_with_continuation(adapter, fixture, dispatch, selected, None).await
+}
+
+async fn terminal_result_with_continuation<S>(
+    adapter: &InstalledNativeContinuation,
+    fixture: &ContinuationFixture<S>,
+    dispatch: &ToolDispatchContext,
+    selected: Option<meerkat_core::retained_work::RetainedWorkIdentity>,
+    owner_continuation: Option<(Id, TaskContinuation)>,
 ) -> ContinuationObligation {
     let tenant = id(&adapter.source_scope.realm);
     let deployment = id(&adapter.source_scope.owner);
@@ -286,18 +380,10 @@ async fn terminal_result_with_work<S>(
         revision: revision("1"),
         content_digest: ContentDigest::of_bytes(b"cancelled"),
     });
-    let request = validate_request(
-        FindAndInstallRequest {
-            request: "Find a service for this original task".into(),
-            user_context: vec![],
-            caller_observations: vec![],
-        },
-        HostSetupRequest {
-            setup_helper: None,
-            target: receiver,
-            correlation: id("original-call"),
-            parent_operation: None,
-            continuation: TaskContinuation {
+    let (correlation, continuation) = owner_continuation.unwrap_or_else(|| {
+        (
+            id("original-call"),
+            TaskContinuation {
                 owner: adapter.namespace.clone(),
                 task: id(&retained.run_id().to_string()),
                 revision: revision(&canonical_input_id.to_string()),
@@ -309,6 +395,21 @@ async fn terminal_result_with_work<S>(
                     member: None,
                 }),
             },
+        )
+    });
+    let request = validate_request(
+        FindAndInstallRequest {
+            request: "Find a service for this original task".into(),
+            user_context: vec![],
+            caller_observations: vec![],
+        },
+        HostSetupRequest {
+            setup_helper: None,
+            work_context: None,
+            target: receiver,
+            correlation,
+            parent_operation: None,
+            continuation,
             environment_revision: revision("test-environment"),
             limits: SetupLimits {
                 deadline_ms: now + 60_000,

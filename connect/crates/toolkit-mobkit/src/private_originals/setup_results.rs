@@ -174,6 +174,7 @@ impl PrivateOriginals {
         for original in &originals {
             self.require_result_source(original.original.association(), false)?;
             self.installed_setup_facts(&original.reference)
+                .await
                 .map_err(|error| match error {
                     crate::ToolAdmissionError::Denied => PrivateOriginalError::Denied,
                     crate::ToolAdmissionError::Unavailable => PrivateOriginalError::Unavailable,
@@ -277,7 +278,7 @@ impl PrivateOriginals {
         Ok(())
     }
 }
-fn hex(bytes: &[u8]) -> String {
+pub(super) fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 

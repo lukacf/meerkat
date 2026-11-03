@@ -51,6 +51,43 @@ flowchart LR
 
 Validation constructs `ValidatedManifest`, including a canonical payload digest and dependency order. Deserialization alone cannot create that validated value. Host compatibility checks report required gaps and explicit optional degradation before code is imported.
 
+The source-built inspector accepts an activation input containing `package` and
+`manifest`:
+
+```sh
+toolkit-package-inspect activation < selected-activation.json
+```
+
+Its `summary.declared_frontends` lists selected frontend IDs, components,
+modalities and admission, conversation, delivery, control and live contract
+requirements. Optional contracts remain `null` when absent; service-only
+selections return an empty list. The same projection appears inside
+`activation-host` and `activation-update` reports.
+
+These are package declarations, not observed host support, permission or
+readiness. A declared text modality does not establish streaming, edits,
+interactive controls or their fallback behavior. Those need the selected
+frontend and host's own contracts and runtime verification. This source
+inspection improvement does not establish distribution in a Connect archive or
+an installed frontend experience.
+
+## Bind declarations to runtime owners
+
+Owner IDs identify obligations; the selected backend must bind them to actual
+implementations. `ValidatedManifest::check_host` checks the host's advertised
+contract and service vocabulary. It does not resolve arbitrary owner names,
+register callbacks or issue grants.
+
+For [selected Python installation](/connect/acquisition/local-install), authentication,
+policy, readiness, shutdown, rollback and export enforcement remain declarations.
+There is no automatic Connect owner-name lookup on that portable MCP path.
+The host must retain its real configuration/policy selections and use its
+implemented credential, operation and cleanup owners. Readiness check names do
+not run checks, and `maximum_wait_ms` does not set the runtime's timeout.
+Use owner references only where that composition actually supplies the binding;
+leave missing bindings unresolved. Backend-specific checks such as the
+[Compose profile](/connect/reference/deployment#local-compose-backend) are separate.
+
 ## Components
 
 A `Component` names its ID/version, source, runtime, placement, lifetime, activation scope, dependencies, host contracts, state, readiness, shutdown and rollback.

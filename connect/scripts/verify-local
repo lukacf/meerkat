@@ -67,9 +67,14 @@ def source_identity(metadata, manifest, cargo_home):
     target = pathlib.Path(metadata["target_directory"]).resolve()
     required = {
         manifest, workspace / "Cargo.toml", workspace / "Cargo.lock",
-        ROOT / "AGENTS.md", ROOT / "scripts/verify-local", ROOT / "scripts/repo-cargo",
-        ROOT / "docs/spec/meerkat-toolkit-capability-acquisition.md",
+        ROOT / "scripts/verify-local", ROOT / "scripts/repo-cargo",
     }
+    # Retired guidance is not a build prerequisite. When present, include it
+    # in each snapshot so additions, removals and edits still invalidate a run.
+    for relative in ("AGENTS.md", "docs/spec/meerkat-toolkit-capability-acquisition.md"):
+        path = ROOT / relative
+        if path.exists() or path.is_symlink():
+            required.add(path)
     ancestors = {ROOT, *ROOT.parents, workspace, *workspace.parents}
     for package in metadata["packages"]:
         if package["source"] is not None:

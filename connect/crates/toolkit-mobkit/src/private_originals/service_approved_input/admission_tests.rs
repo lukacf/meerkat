@@ -69,6 +69,29 @@ async fn acquisition_for_association<S>(
     dispatch: &ToolDispatchContext,
     association: meerkat_authorization_contracts::work_association::InputAuthorityAssociation,
 ) -> SetupSnapshot {
+    acquisition_with_work(fixture, dispatch, association, None).await
+}
+
+pub(super) async fn shared_acquisition<S>(
+    fixture: &ContinuationFixture<S>,
+    dispatch: &ToolDispatchContext,
+    work: meerkat_toolkit::setup::SetupWorkContext,
+) -> SetupSnapshot {
+    acquisition_with_work(
+        fixture,
+        dispatch,
+        fixture.binding().await.unwrap().unwrap(),
+        Some(work),
+    )
+    .await
+}
+
+async fn acquisition_with_work<S>(
+    fixture: &ContinuationFixture<S>,
+    dispatch: &ToolDispatchContext,
+    association: meerkat_authorization_contracts::work_association::InputAuthorityAssociation,
+    work: Option<meerkat_toolkit::setup::SetupWorkContext>,
+) -> SetupSnapshot {
     let tenant = id(&fixture.scope.realm);
     let deployment = id(&fixture.scope.owner);
     let policy = revision("test-policy");
@@ -122,7 +145,18 @@ async fn acquisition_for_association<S>(
             caller_observations: vec![],
         },
         HostSetupRequest {
-            setup_helper: None,
+            setup_helper: work.as_ref().map(|_| {
+                fixture
+                    .lifetime()
+                    .selected_policy()
+                    .native_host
+                    .as_ref()
+                    .unwrap()
+                    .members[0]
+                    .member
+                    .clone()
+            }),
+            work_context: work,
             target: id("agent"),
             correlation: id("service-admission-ack"),
             parent_operation: None,
@@ -199,8 +233,8 @@ pub(super) fn reviewed_config(realm: &str) -> meerkat_core::mcp_config::McpServe
     config
 }
 
-pub(super) async fn approve_b(
-    fixture: &ContinuationFixture,
+pub(in crate::private_originals) async fn approve_b<S>(
+    fixture: &ContinuationFixture<S>,
     snapshot: SetupSnapshot,
 ) -> PrivateOriginalRef {
     approve_b_operations(fixture, snapshot, [id("read")].into()).await
@@ -1032,7 +1066,7 @@ async fn public_mcp_review_uses_the_actual_waiting_task_and_separate_no_connecto
             .unwrap();
         let record = source.decode_record(&stored, &b).unwrap();
         let approved = record.approved_task.as_ref().unwrap();
-        let route = source.route(&b.route).unwrap();
+        let route = &source.route(&b.route).unwrap();
         let original = meerkat_authorization_contracts::work_association::OriginalWorkRef {
             authority: route.source_authority.clone(),
             work: b.original.clone(),
@@ -1179,6 +1213,61 @@ async fn persistence_effect_snapshot(
     );
     let grants = std::fs::read(fixture.source_path.with_file_name("grants.jsonl")).unwrap();
     (records, grants)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shared_entry_reservation_waits_for_source_writer_without_reusing_authority() {
+    let fixture = ContinuationFixture::for_service_input().await;
+    let result = AssertUnwindSafe(Box::pin(async {
+        let task = persistence_task(&fixture).await;
+        let dispatch = fixture.probe.as_ref().unwrap().captured();
+        tokio::time::timeout(
+            WAIT,
+            fixture
+                .machine
+                .wait_run_settled(&fixture.session, dispatch.retained_work().unwrap().run_id()),
+        )
+        .await
+        .unwrap();
+        let before = persistence_effect_snapshot(&fixture).await;
+        let input_count = fixture.inputs().await.unwrap();
+        let model_requests = fixture.model_requests();
+        let writer = fixture.source.owner.source_writer().await;
+        let queued = fixture.source.owner.observe_source_writer_wait_for_test();
+        let mut reservation = Box::pin(task.reserve_shared_entry(None));
+        assert!(reservation.as_mut().now_or_never().is_none());
+        tokio::time::timeout(WAIT, queued).await.unwrap().unwrap();
+        // This is the actual service task over native A and its canonical
+        // acquisition. The queued reservation has entered no Controller/tool.
+        assert_eq!(persistence_effect_snapshot(&fixture).await, before);
+        drop(writer);
+        let entry = tokio::time::timeout(WAIT, reservation)
+            .await
+            .unwrap()
+            .unwrap();
+        entry.enter().unwrap();
+        assert!(matches!(entry.enter(), Err(PrivateOriginalError::Denied)));
+        entry.settle().unwrap();
+        assert_eq!(persistence_effect_snapshot(&fixture).await, before);
+        assert_eq!(fixture.inputs().await.unwrap(), input_count);
+        assert_eq!(fixture.model_requests(), model_requests);
+        fixture
+            .source
+            .record_task_group_cancelled(&task.parent)
+            .await
+            .unwrap();
+        assert!(matches!(
+            task.reserve_shared_entry(None).await,
+            Err(PrivateOriginalError::Denied)
+        ));
+    }))
+    .catch_unwind()
+    .await;
+    let cleanup = fixture.shutdown().await;
+    assert!(cleanup.is_ok(), "{cleanup:?}");
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1376,7 +1465,7 @@ async fn combined_persistence_review_binds_scope_before_grants_and_retains_exact
         assert!(record.final_association.is_none());
         assert!(record.service_admission.is_none());
         let approved = record.approved_task.as_ref().unwrap();
-        let route = fixture.source.route(&record.event.route).unwrap();
+        let route = &fixture.source.route(&record.event.route).unwrap();
         let original = meerkat_authorization_contracts::work_association::OriginalWorkRef {
             authority: route.source_authority.clone(), work: fresh,
         };
@@ -1478,5 +1567,83 @@ async fn combined_persistence_review_refuses_unchecked_definition_shapes() {
     assert!(cleanup.is_ok(), "{cleanup:?}");
     if let Err(payload) = result {
         std::panic::resume_unwind(payload);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn captured_shared_entry_diagnostic_keeps_cancelled_parent_denied() {
+    use crate::original_ingress::shared_entry_diagnostics;
+    let fixture = ContinuationFixture::for_service_input().await;
+    let result = AssertUnwindSafe(Box::pin(async {
+        let task = persistence_task(&fixture).await;
+        let dispatch = fixture.probe.as_ref().unwrap().captured();
+        tokio::time::timeout(
+            WAIT,
+            fixture
+                .machine
+                .wait_run_settled(&fixture.session, dispatch.retained_work().unwrap().run_id()),
+        )
+        .await
+        .unwrap();
+        fixture
+            .source
+            .record_task_group_cancelled(&task.parent)
+            .await
+            .unwrap();
+        let before = persistence_effect_snapshot(&fixture).await;
+        let inputs = fixture.inputs().await.unwrap();
+        let model_requests = fixture.model_requests();
+        // The task is captured from the real fixture admission. This synthetic
+        // call tests the diagnostic association and mapping, not a new dispatch.
+        let args = serde_json::value::RawValue::from_string("{}".into()).unwrap();
+        let call = meerkat_core::ToolCallView {
+            id: "diagnostic-poll",
+            name: "setup_job",
+            args: &args,
+        };
+        let correlation = task.shared_entry_diagnostic_context(call).unwrap();
+        let (entry, events) = tokio::time::timeout(
+            WAIT,
+            shared_entry_diagnostics::capture(correlation, task.reserve_shared_entry(None)),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(entry, Err(PrivateOriginalError::Denied)));
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0]["stage"], "followup.parent_current");
+        assert_eq!(events[0]["parent_cause"], "cancelled");
+        assert_eq!(events[0]["raw_error"], "operation_cancelled");
+        assert_eq!(events[1]["stage"], "reserve.writer_error");
+        assert_eq!(events[1]["raw_error"], "operation_cancelled");
+        assert_eq!(events[1]["mapped_error"], "denied");
+        for field in [
+            "call",
+            "acquisition",
+            "parent",
+            "parent_binding",
+            "observed_parent_binding",
+        ] {
+            assert_eq!(events[0][field], events[1][field]);
+            assert_eq!(events[0][field].as_str().unwrap().len(), 64);
+        }
+        assert_eq!(
+            events[0]["parent_binding"],
+            events[0]["observed_parent_binding"]
+        );
+        assert!(
+            events
+                .iter()
+                .all(|event| event["publish_callback_entered"] == false)
+        );
+        assert_eq!(persistence_effect_snapshot(&fixture).await, before);
+        assert_eq!(fixture.inputs().await.unwrap(), inputs);
+        assert_eq!(fixture.model_requests(), model_requests);
+    }))
+    .catch_unwind()
+    .await;
+    let cleanup = fixture.shutdown().await;
+    assert!(cleanup.is_ok(), "{cleanup:?}");
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
     }
 }

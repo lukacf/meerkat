@@ -50,7 +50,8 @@ mod exit_tests;
 mod installed;
 mod login;
 mod oauth_management;
-mod plain;
+pub(crate) mod plain;
+pub(crate) mod private_service;
 mod profiles;
 mod secrets;
 
@@ -97,6 +98,7 @@ struct Proposal {
 /// The factory retains credential persistence, not the setup runtime custody.
 /// Native administration must re-read config, account and authority after close.
 pub struct ReviewedConnector {
+    admission: Option<private_service::Admission>,
     storage: ResolvedStorage,
     factory: meerkat::AgentFactory,
     installed: InstalledSelection,
@@ -170,6 +172,19 @@ impl ReviewedConnector {
         // Reuse the setup factory's exact credential persistence. Native code
         // takes administrative custody before constructing its auth service;
         // no setup runtime or prebuilt auth service is reopened here.
+        if let Some(admission) = &self.admission {
+            return Ok(
+                match private_service::accepted_effect(interrupt, stopped, admission, || {
+                    finalize_reviewed_connector(&self.storage, &principals, &self.factory, &review)
+                })
+                .await
+                {
+                    Some(Ok(outcome)) => FinalizationOutcome::Connector(outcome),
+                    Some(Err(error)) => FinalizationOutcome::BeforeAdministrationRefused(error),
+                    None => FinalizationOutcome::BeforeAdministrationStopped,
+                },
+            );
+        }
         Ok(settle_connector_effect(interrupt, stopped, || {
             finalize_reviewed_connector(&self.storage, &principals, &self.factory, &review)
         })
@@ -409,6 +424,24 @@ impl From<ReviewedInstallation> for ReviewedAction {
     }
 }
 impl ReviewedAction {
+    // Capture the exact checked review before it is consumed by administration.
+    // This carries no credential value, stage, grant, runtime or native claim.
+    pub(crate) fn probe_selection(&self) -> Option<ProbeReviewedSelection> {
+        match self {
+            Self::Installation(installation) => match &**installation {
+                ReviewedInstallation::Account(value) => Some(ProbeReviewedSelection {
+                    installed: value.installed.clone(),
+                    document: value.document.clone(),
+                    inputs: None,
+                    config: value.config.clone(),
+                    request: value.request.clone(),
+                }),
+                ReviewedInstallation::Plain(value) => value.probe_selection(),
+                ReviewedInstallation::Secret(value) => Some(value.probe_selection()),
+            },
+            Self::Access(_) => None,
+        }
+    }
     pub async fn finalize_outcome_unless_cancelled<I: Future<Output = io::Result<()>>>(
         self,
         mut interrupt: Pin<&mut I>,
@@ -476,6 +509,10 @@ impl FinalizedAction {
             ActionOutcome::Installation(value) => value.has_unconfirmed_effect(),
             ActionOutcome::Access(value) => value.has_unconfirmed_effect(),
         }
+    }
+    pub(crate) fn private_observation(&self) -> Option<Value> {
+        self.installation()
+            .map(|installation| installation.notice())
     }
     pub fn take_continuation_notice(&mut self) -> Option<FinalizationNotice> {
         self.continuation.take()
@@ -636,6 +673,7 @@ fn public_persistence_may_have_changed(
             | Persist::ServerNotFound(_)
             | Persist::EnvReference(_)
             | Persist::Access(_)
+            | Persist::Cwd(_)
             | Persist::NotAdmitted(_)
             | Persist::Config(Config::GenerationConflict { .. })
     )
@@ -679,9 +717,9 @@ fn public_persistence_details(error: &meerkat_core::mcp_config::McpRealmPersistE
         Persist::ServerNotFound(_) => json!({"kind":"ServerNotFound"}),
         Persist::EnvReference(_) => json!({"kind":"EnvReference"}),
         Persist::Access(_) => json!({"kind":"Access"}),
+        Persist::Cwd(_) => json!({"kind":"Cwd"}),
         Persist::NotAdmitted(_) => json!({"kind":"NotAdmitted"}),
         Persist::OutcomeUnknown(_) => json!({"kind":"OutcomeUnknown"}),
-        Persist::Cwd(_) => json!({"kind":"Cwd"}),
         Persist::Config(error) => json!({"kind":"Config", "config":match error {
             Config::GenerationConflict { expected, current } => json!({"kind":"GenerationConflict","expected":expected,"current":current}),
             Config::LockTimeout => json!({"kind":"LockTimeout"}),
@@ -1122,6 +1160,61 @@ impl TerminalConnectors {
             prior_finalizations,
         })
     }
+    /// Reuse the already configured private startup authority and its router.
+    /// This owner exposes only public-service review, never an account ceremony.
+    pub(crate) fn private_plain(
+        startup: &SessionStartup,
+        auth: Arc<crate::connector_auth::ConnectorAuth>,
+    ) -> Result<Self, ConnectError> {
+        let storage = startup.storage.clone();
+        let profiles = Arc::new(meerkat::RealmConnectorClients::from_realm_source(
+            crate::realm::config_source(&storage)?,
+            storage.locator.realm.clone(),
+        ));
+        let (send, requests) = mpsc::channel(1);
+        Ok(Self {
+            storage,
+            factory: startup.factory.clone(),
+            control: Control::new(auth.clone()),
+            auth,
+            profiles,
+            requests,
+            send,
+            reviewed: None,
+            prior_finalizations: Arc::from([]),
+        })
+    }
+    pub(crate) fn plain_dispatcher_factory(
+        &self,
+    ) -> crate::service_preparation::TerminalToolFactory {
+        let storage = self.storage.clone();
+        let requests = self.send.clone();
+        Arc::new(move |installs| {
+            Arc::new(PlainRequestTool(RequestTool {
+                installs,
+                storage: storage.clone(),
+                requests: requests.clone(),
+            }))
+        })
+    }
+    pub(crate) async fn present_private_plain(
+        &mut self,
+        request: ConnectorRequest,
+        approvals: &LocalApprovals,
+        interrupt: impl Future<Output = io::Result<()>> + Send,
+    ) -> Result<Option<plain::PlainHandoff>, ConnectError> {
+        let ConnectorRequest::Plain(request) = request else {
+            return Err(unavailable("Only public-service review is supplied"));
+        };
+        let mut handoff = None;
+        plain::present_private(self, *request, approvals, interrupt, &mut handoff).await?;
+        if handoff.is_some() {
+            // A second proposal in this closing conversation must refuse, not
+            // wait on an owner that is now retained for native finalization.
+            self.requests.close();
+        }
+        Ok(handoff)
+    }
     fn target_unresolved(&self, server: &str) -> bool {
         self.prior_finalizations
             .iter()
@@ -1446,13 +1539,37 @@ impl TerminalConnectors {
 
     async fn review_account<W: Write>(
         &mut self,
-        mut request: AccountReview,
+        request: AccountReview,
         approvals: &LocalApprovals,
         presenter: &mut ApprovalPresenter,
         input: &mut TerminalInput,
         output: &mut W,
         check_selected: impl Fn() -> Result<(), &'static str>,
+        interrupt: Pin<&mut impl Future<Output = io::Result<()>>>,
+    ) -> Result<bool, ConnectError> {
+        self.review_account_common(
+            request,
+            approvals,
+            Some((presenter, input)),
+            output,
+            check_selected,
+            interrupt,
+            None,
+            None,
+        )
+        .await
+    }
+
+    async fn review_account_common<W: Write>(
+        &mut self,
+        mut request: AccountReview,
+        approvals: &LocalApprovals,
+        terminal: Option<(&mut ApprovalPresenter, &mut TerminalInput)>,
+        output: &mut W,
+        check_selected: impl Fn() -> Result<(), &'static str>,
         mut interrupt: Pin<&mut impl Future<Output = io::Result<()>>>,
+        admission: Option<private_service::Admission>,
+        handoff: Option<&mut Option<plain::PlainHandoff>>,
     ) -> Result<bool, ConnectError> {
         if let Err(reason) = check_selected() {
             return selection_refused(reason, request.response, output);
@@ -1503,10 +1620,9 @@ impl TerminalConnectors {
             "expected_configuration_generation":expected_generation,
             "client_profile":profiles::display(request.client_profile.as_ref()),
             "notice":"After setup closes, Connect rechecks retained installation documents and native finalization rechecks this account and configuration generation, saves this exact server, and issues and selects only this access. This review does not itself make the service ready."});
-        let decision = match review(
+        let reviewed = private_service::review_transport(
             approvals,
-            presenter,
-            input,
+            terminal,
             output,
             review_request(
                 &request.installed.session,
@@ -1516,8 +1632,8 @@ impl TerminalConnectors {
             &mut request.response,
             interrupt.as_mut(),
         )
-        .await?
-        {
+        .await?;
+        let decision = match reviewed {
             ReviewOutcome::Decided(decision) => decision,
             ReviewOutcome::CallerGone => return Ok(true),
             ReviewOutcome::Stopped => return Ok(false),
@@ -1583,8 +1699,12 @@ impl TerminalConnectors {
         if request.response.is_closed() {
             return Ok(true);
         }
+        if let Some(admission) = &admission {
+            admission.check()?;
+        }
         self.reviewed = Some(
             ReviewedInstallation::Account(ReviewedConnector {
+                admission,
                 storage: self.storage.clone(),
                 factory: self.factory.clone(),
                 installed: request.installed,
@@ -1599,9 +1719,14 @@ impl TerminalConnectors {
             })
             .into(),
         );
-        let _ = request.response.send(json!({"state":"pending", "reason":"reviewed_finalization_waiting_for_setup_close",
+        let value = json!({"state":"pending", "reason":"reviewed_finalization_waiting_for_setup_close",
             "login_completed":request.login_completed, "access_reviewed":true, "grant_issued":false,
-            "instruction":"The exact review is retained. Finish this turn so native finalization can run after the setup session closes. The host will report its actual outcome before the conversation continues. Do not invoke the integration or claim the service is ready before the terminal reports the native finalization result."}));
+            "instruction":"The exact review is retained. Finish this turn so native finalization can run after the setup session closes. The host will report its actual outcome before the conversation continues. Do not invoke the integration or claim the service is ready before the terminal reports the native finalization result."});
+        if let Some(handoff) = handoff {
+            *handoff = Some(plain::PlainHandoff::new(request.response, value));
+        } else {
+            let _ = request.response.send(value);
+        }
         Ok(true)
     }
 }
@@ -1856,6 +1981,38 @@ impl AgentToolDispatcher for RequestTool {
     }
 }
 
+/// Deliberate capability selection around the existing exact request owner.
+struct PlainRequestTool(RequestTool);
+#[async_trait]
+impl AgentToolDispatcher for PlainRequestTool {
+    fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+        vec![plain::tool()].into()
+    }
+    fn tool_catalog_capabilities(&self) -> meerkat_core::ToolCatalogCapabilities {
+        self.0.tool_catalog_capabilities()
+    }
+    fn tool_mutation_class(&self, name: &str) -> ToolMutationClass {
+        if name == PLAIN_TOOL {
+            ToolMutationClass::Mutating
+        } else {
+            ToolMutationClass::Unknown
+        }
+    }
+    async fn dispatch(&self, _: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
+        Err(refused())
+    }
+    async fn dispatch_with_context(
+        &self,
+        call: ToolCallView<'_>,
+        context: &ToolDispatchContext,
+    ) -> Result<ToolDispatchOutcome, ToolError> {
+        if call.name != PLAIN_TOOL {
+            return Err(refused());
+        }
+        plain::dispatch(&self.0, call, context).await
+    }
+}
+
 /// The terminal has consumed its one callback, so a failed completion ends
 /// that attempt. The shared private-pipe control still permits callback retries.
 /// Run this after joining completion and before returning for a stopped caller.
@@ -1933,6 +2090,50 @@ fn proposal(mut raw: Value) -> Result<Proposal, ToolError> {
         return Err(refused());
     }
     Ok(proposal)
+}
+
+/// Historical selection from the actual protected review, never from a probe
+/// request. Current native configuration and grants are checked again on reopen.
+pub(crate) struct ProbeReviewedSelection {
+    pub(crate) installed: InstalledSelection,
+    document: Arc<Value>,
+    inputs: Option<crate::service_install::SelectedServiceInputs>,
+    pub(crate) config: McpServerConfig,
+    pub(crate) request: StockGrantRequest,
+}
+impl ProbeReviewedSelection {
+    pub(crate) fn selected_inputs(&self) -> Option<&crate::service_install::SelectedServiceInputs> {
+        self.inputs.as_ref()
+    }
+    pub(crate) async fn recheck(&self) -> Result<(), ConnectError> {
+        plain::recheck_retained(&self.installed, &self.document, self.inputs.as_ref()).await
+    }
+}
+impl FinalizedInstallation {
+    // Gate only use of this finalized constituent, not actual capability.
+    // Failed/uncertain/stopped administration cannot become a probe grant.
+    pub(crate) fn probe_selected(&self, selected: &ProbeReviewedSelection) -> bool {
+        if self.stopped_during_finalization()
+            || self.has_unconfirmed_effect()
+            || self.target.realm != selected.installed.realm
+            || self.target.session != selected.installed.session
+            || self.target.job_id != selected.installed.job_id
+            || self.target.server != selected.config.name
+            || self.target.agent != selected.request.agent
+        {
+            return false;
+        }
+        match &self.outcome {
+            FinalizationOutcome::Connector(ReviewedConnectorFinalization::Persisted {
+                grant: Ok(_),
+                ..
+            })
+            | FinalizationOutcome::PublicPersisted { grant: Ok(_), .. }
+            | FinalizationOutcome::PublicReused { grant: Ok(_), .. } => true,
+            FinalizationOutcome::Secret(outcome) => outcome.probe_selected(),
+            _ => false,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -2141,6 +2342,7 @@ mod tests {
                     )),
                 ));
             let reviewed = ReviewedConnector {
+                admission: None,
                 storage: storage.clone(),
                 factory,
                 installed,
@@ -2517,6 +2719,42 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "console")]
+    #[test]
+    fn private_driver_refuses_settled_ack_for_uncertain_native_finalization() {
+        let root = tempfile::tempdir().unwrap();
+        let storage = finalizer_storage(root.path(), "work");
+        let cases = [
+            FinalizationOutcome::PublicPersisted {
+                generation: 1,
+                grant: Err(StockGrantError::CommandUncertain),
+            },
+            FinalizationOutcome::PublicPersistenceError(
+                meerkat_core::mcp_config::McpRealmPersistError::OutcomeUnknown(
+                    meerkat_core::config_runtime::ConfigRuntimeError::LockTimeout,
+                ),
+            ),
+        ];
+        for outcome in cases {
+            let installation = FinalizedInstallation::new(
+                FinalizationTarget {
+                    realm: storage.locator.clone(),
+                    server: "reviewed-public".into(),
+                    agent: "reader".into(),
+                    job_id: "exact-job".into(),
+                    session: SessionId::new(),
+                },
+                outcome,
+            );
+            crate::stdio::tests::assert_uncertain_plain_finalization_refuses_settled(
+                FinalizedAction {
+                    outcome: ActionOutcome::Installation(Arc::new(installation)),
+                    continuation: None,
+                },
+            );
+        }
+    }
+
     #[test]
     fn plain_native_failures_preserve_uncertainty_and_generation_facts_without_error_text() {
         use meerkat_core::{
@@ -2533,6 +2771,15 @@ mod tests {
                 Persist::ServerExists(private.into()),
                 "refused",
                 "ServerExists",
+                false,
+            ),
+            (
+                Persist::Cwd(meerkat_core::McpStdioCwdError {
+                    server: private.into(),
+                    reason: meerkat_core::McpStdioCwdRefusal::NotAbsolute,
+                }),
+                "refused",
+                "Cwd",
                 false,
             ),
             (
@@ -2604,7 +2851,10 @@ mod tests {
             assert_eq!(notice["facts"]["grant"]["state"], "not_requested");
             assert_eq!(notice["automatic_reentry_blocked"], blocked);
             let detail = &notice["facts"]["error"];
-            if matches!(kind, "ServerExists" | "NotAdmitted" | "OutcomeUnknown") {
+            if matches!(
+                kind,
+                "ServerExists" | "Cwd" | "NotAdmitted" | "OutcomeUnknown"
+            ) {
                 assert_eq!(detail["kind"], kind);
             } else {
                 assert_eq!(detail["kind"], "Config");

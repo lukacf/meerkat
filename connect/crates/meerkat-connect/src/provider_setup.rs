@@ -47,6 +47,9 @@ pub(crate) mod private;
 
 mod first_target;
 
+/// Standalone protected provider presentation without session creation.
+pub mod provider_only;
+
 // Native operations create these values. Presenters must not recover them from
 // terminal output or infer provider completion from a displayed URL.
 enum SignInNotice {
@@ -614,9 +617,11 @@ mod api_key_tests {
             E::TokenStore("private-credential-canary".into()),
             E::AuthLifecycle("private-credential-canary".into()),
             E::LockFailed("private-credential-canary".into()),
+            E::RollbackFailed("private-credential-canary".into()),
         ] {
             let expected = std::mem::discriminant(&error);
             let mapped = credential_save_error(error);
+            assert!(!mapped.to_string().contains("private-credential-canary"));
             assert!(!format!("{mapped:?}").contains("private-credential-canary"));
             let ConnectError::ProviderSetup { source, .. } = mapped else {
                 panic!("native credential failure lost its typed source");
@@ -887,6 +892,7 @@ parent = "owner"
         let factory = meerkat::AgentFactory::new(root.join("state/owner"))
             .with_provider_auth_persistence(persistence);
         let mut startup = SessionStartup {
+            provider_store_root: None,
             storage,
             config,
             factory,
@@ -977,6 +983,7 @@ parent = "owner"
             .resolve("owner")
             .unwrap();
             let mut startup = SessionStartup {
+                provider_store_root: None,
                 storage,
                 config,
                 factory: meerkat::AgentFactory::new(root.join("state/owner"))
@@ -1608,12 +1615,12 @@ fn credential_save_error(
         E::AuthLifecycle(_) => E::AuthLifecycle("details withheld".into()),
         E::Cancelled => E::Cancelled,
         E::LockFailed(_) => E::LockFailed("details withheld".into()),
+        E::RollbackFailed(_) => E::RollbackFailed("details withheld".into()),
         E::SlotRefused(reason) => E::SlotRefused(reason),
         E::CredentialAccess { refusal, .. } => E::CredentialAccess {
             refusal,
             detail: "details withheld".into(),
         },
-        E::RollbackFailed(_) => E::RollbackFailed("details withheld".into()),
     };
     ConnectError::provider_setup("Store native API-key credential", error)
 }

@@ -2076,8 +2076,9 @@ def selected_inputs(root: Path, target: str, path: Path | None, expected: str | 
     if len(raw) > 1024 * 1024 or digest(raw) != expected:
         raise PackageError("input_selection_digest_mismatch")
     declared = json.loads(raw, object_pairs_hook=unique_object)
-    if (not isinstance(declared, dict) or set(declared) != {
-            "schema_version", "target", "edition", "consumer", "sources", "tools"}
+    if (not isinstance(declared, dict) or set(declared) not in ({
+            "schema_version", "target", "edition", "consumer", "sources", "tools"}, {
+            "schema_version", "target", "edition", "consumer", "sources", "tools", "official"})
             or type(declared["schema_version"]) is not int or declared["schema_version"] != 1
             or declared["target"] != target or not isinstance(declared["edition"], str)
             or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,95}", declared["edition"])):
@@ -2111,6 +2112,19 @@ def selected_inputs(root: Path, target: str, path: Path | None, expected: str | 
             sources[name] = value
         if name in python_sources or name in package_contracts:
             python_sources[name] = value
+    if "official" in declared:
+        # A distinct offline input, never a reinterpretation of the frozen
+        # GitHub.com bundle or its catalog identity. Its installer must also be
+        # explicitly selected; the installer owns executable/config admission.
+        official = declared["official"]
+        if (target != "linux-x86_64" or not isinstance(official, dict)
+                or set(official) != {"bundle", "contents", "profile"}
+                or official["profile"] != "enterprise-selected-reads"
+                or not isinstance(official["contents"], str) or not HEX.fullmatch(official["contents"])
+                or not {"setup/backend.py", "setup/install-library-consumer.py"} <= overrides.keys()):
+            raise PackageError("invalid_official_selection")
+        relative_path(official["bundle"])
+        selection["official"] = {**official, "components": ("github",)}
     tools = declared["tools"]
     known = donor["tools"].keys() | donor.get("tool_additions", {}).keys()
     if not isinstance(tools, dict) or not set(tools) <= known:
@@ -2208,8 +2222,9 @@ def parent_directories(names: set[str]) -> set[str]:
 def collect_bundle(inputs: Inputs, selection: dict, *, official: bool = False) -> dict[str, tuple[bytes, int]]:
     path = selection["bundle"]
     contents = inputs.read(path + "/CONTENTS.json")
-    sums = inputs.read(path + "/SHA256SUMS")
-    if digest(contents) != selection["contents"] or digest(sums) != selection["sums"]:
+    offline_official = official and selection.get("profile") == "enterprise-selected-reads"
+    sums = None if offline_official else inputs.read(path + "/SHA256SUMS")
+    if digest(contents) != selection["contents"] or sums is not None and digest(sums) != selection["sums"]:
         raise PackageError("selected_manifest_digest_mismatch")
     document = json.loads(contents, object_pairs_hook=unique_object)
     rows = document.get("files") if isinstance(document, dict) else None
@@ -2221,25 +2236,28 @@ def collect_bundle(inputs: Inputs, selection: dict, *, official: bool = False) -
         if name in {"CONTENTS.json", "SHA256SUMS"} or not isinstance(row, dict) or not isinstance(row.get("sha256"), str) or not HEX.fullmatch(row["sha256"]):
             raise PackageError("invalid_contents")
         expected[name] = row["sha256"]
-    actual_sums = {}
-    if not sums.endswith(b"\n"):
-        raise PackageError("invalid_checksums")
-    for line in sums.decode("ascii").splitlines():
-        checksum, separator, name = line.partition("  ")
-        relative_path(name)
-        if separator != "  " or not HEX.fullmatch(checksum) or name in actual_sums:
+    if sums is not None:
+        actual_sums = {}
+        if not sums.endswith(b"\n"):
             raise PackageError("invalid_checksums")
-        actual_sums[name] = checksum
-    if actual_sums != expected:
-        raise PackageError("checksums_disagree")
-    names = set(expected) | {"SHA256SUMS"}
+        for line in sums.decode("ascii").splitlines():
+            checksum, separator, name = line.partition("  ")
+            relative_path(name)
+            if separator != "  " or not HEX.fullmatch(checksum) or name in actual_sums:
+                raise PackageError("invalid_checksums")
+            actual_sums[name] = checksum
+        if actual_sums != expected:
+            raise PackageError("checksums_disagree")
+    names = set(expected) | ({"SHA256SUMS"} if sums is not None else set())
     files, directories = inputs.file_set(path)
     if files != names or directories != parent_directories(names):
         raise PackageError("bundle_file_set_mismatch")
-    result = {"CONTENTS.json": (contents, 0o644), "SHA256SUMS": (sums, 0o644)}
+    result = {"CONTENTS.json": (contents, 0o644)}
+    if sums is not None:
+        result["SHA256SUMS"] = (sums, 0o644)
     for name, row in rows.items():
         executable = official and name == OFFICIAL_EXECUTABLE
-        data = inputs.read(path + "/" + name, executable=executable)
+        data = inputs.read(path + "/" + name, executable=executable and not offline_official)
         if digest(data) != row["sha256"] or ("bytes" in row and (type(row["bytes"]) is not int or row["bytes"] != len(data))):
             raise PackageError("selected_payload_digest_mismatch")
         result[name] = (data, 0o755 if executable else 0o644)
@@ -2261,11 +2279,17 @@ def collect_official(inputs: Inputs, selection: dict, target: str) -> dict[str, 
     if not isinstance(delivery, dict) or delivery.get("format") != "meerkat-toolkit.official-consumers.v1":
         raise PackageError("invalid_official_delivery")
     expected = list(selection["components"])
+    offline_official = selection.get("profile") == "enterprise-selected-reads"
     components = delivery.get("components")
     if (not isinstance(components, list) or not all(isinstance(row, dict) for row in components)
-            or delivery.get("catalog_ids") != expected
+            or delivery.get("catalog_ids", expected if offline_official else None) != expected
             or [row.get("catalog_id") for row in components] != expected):
         raise PackageError("official_components_mismatch")
+    if offline_official and (target != "linux-x86_64" or expected != ["github"]
+            or components[0].get("profile") != selection["profile"]
+            or components[0].get("artifact") != OFFICIAL_EXECUTABLE
+            or components[0].get("artifact_sha256") != digest(files[OFFICIAL_EXECUTABLE][0])):
+        raise PackageError("official_profile_mismatch")
     # Omitted machine targets are the historical macOS contract only. Never
     # infer a Linux target from runtime-profile prose or the packaging host.
     if any(row.get("target", "macos-arm64") != target for row in components):
@@ -2344,6 +2368,19 @@ def compose_official_routes(files: dict[str, tuple[bytes, int]], bindings: list[
         raise PackageError("invalid_official_route_binding") from None
     files.update({"consumers/routes.json": (raw, 0o644), "consumers/CONTENTS.json": (contents, 0o644),
                   "consumers/SHA256SUMS": (sums, 0o644)})
+
+
+def require_explicit_official_family(files: dict[str, tuple[bytes, int]]) -> None:
+    """A separately selected official bundle cannot inherit old catalog routes."""
+    if "consumers/routes.json" not in files:
+        return
+    index = json.loads(files["consumers/routes.json"][0], object_pairs_hook=unique_object)
+    if (not isinstance(index, dict) or not isinstance(index.get("components"), dict)
+            or not isinstance(index.get("routes"), list)
+            or any(name.startswith("official-") for name in index["components"])
+            or any(not isinstance(row, dict) or not isinstance(row.get("family"), str)
+                   or row["family"].startswith("official-") for row in index["routes"])):
+        raise PackageError("explicit_official_family_requires_uncomposed_routes")
 
 
 def collect_python(inputs: Inputs, target: str, *, settings: dict | None = None) -> dict[str, tuple[bytes, int]]:
@@ -2566,7 +2603,10 @@ def collect(root: Path, target: str, *, settings: dict | None = None) -> dict[st
     static_files, static_dirs = inputs.file_set("sdk/consumer-setup/static")
     if static_files != {"index.html", "app.js", "form.js", "style.css"} or static_dirs:
         raise PackageError("setup_file_set_mismatch")
-    compose_official_routes(result, OFFICIAL_ROUTE_BINDINGS[target])
+    if (selection.get("official") or {}).get("profile") == "enterprise-selected-reads":
+        require_explicit_official_family(result)
+    else:
+        compose_official_routes(result, OFFICIAL_ROUTE_BINDINGS[target])
     # Raw reads, donor expansion and final payload have separate bounded totals.
     if (any(len(data) > MAX_FILE_BYTES for data, _ in result.values())
             or sum(len(data) for data, _ in result.values()) > MAX_TOTAL_BYTES):
@@ -2601,6 +2641,8 @@ def package(root: Path, target: str, output: Path, *, input_selection: Path | No
     protected.extend(selection["official"]["bundle"] for selection in TARGETS.values()
                      if selection.get("official") is not None)
     protected.extend((settings["selection"]["bundle"], "sdk/consumer-setup/static"))
+    if settings["selection"].get("official") is not None:
+        protected.append(settings["selection"]["official"]["bundle"])
     if any(output.is_relative_to(root / path) for path in protected):
         raise PackageError("output_inside_input")
     files = collect(root, target, settings=settings if input_selection is not None else None)

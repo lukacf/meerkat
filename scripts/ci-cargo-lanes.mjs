@@ -3139,12 +3139,13 @@ function plan(args) {
 
 // Non-Rust lanes of the products (ported from their own workflows): a
 // changed path under one of `paths` selects the lane. Connect's checks are
-// its packaging unit tests, its docs check and the embedded Console panel's
-// Node test (connect/.github/workflows/checks.yml before the import); every
-// Connect path selects them, since the docs check reads the whole tree.
+// its script, SDK and docs checks (connect/.github/workflows/checks.yml, run
+// by ci.yml's connect-checks job); every Connect path selects them, since
+// the docs check reads the whole tree, and so does a change to Meta's
+// Python SDK, which Connect's installed acceptance controls import.
 // Meta's console, Flow Editor and SDK lanes keep Meta's own classifier
 // (meta/scripts/ci-changes.py) in the transition workflow meta-ci.yml.
-export const PRODUCT_LANES = [{ product: "connect", lane: "connect_checks", paths: ["connect/"] }];
+export const PRODUCT_LANES = [{ product: "connect", lane: "connect_checks", paths: ["connect/", "meta/sdk/python/"] }];
 
 // The plan's product section (see the header of ci-products.mjs):
 //   changed       the products whose roots hold a changed path (every

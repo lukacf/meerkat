@@ -141,7 +141,7 @@ impl Fixture {
             user_context: vec![RequestContext::Reference(reference("original-context"))],
             caller_observations: vec!["There are no matching tools yet.".into()],
         }, HostSetupRequest {
-            setup_helper: None,
+            setup_helper: None, work_context: None,
             target: receiver.clone(), correlation: id("original-call-1"), parent_operation: Some(id("original-task")), continuation: TaskContinuation { native_original: None, owner: id("runtime"), task: id("original-task"), revision: rev("2"), delivery_key: id("delivery-1"), audience: [id("person-a")].into() }, environment_revision: rev("environment-1"), limits: SetupLimits { deadline_ms: 900, max_workers: 3, max_effect_attempts: 5 },
         }, &authority, &context, &references).unwrap();
         Self {
@@ -1327,7 +1327,10 @@ mod continuation_executor;
 
 mod work_preparation;
 
+mod shared_preparation;
+mod shared_preparation_missing;
 mod work_executor;
+mod workflow;
 
 #[tokio::test]
 async fn native_evidence_is_historical_and_changed_terms_conflict() {

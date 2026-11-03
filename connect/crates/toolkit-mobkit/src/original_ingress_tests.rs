@@ -1265,7 +1265,7 @@ async fn standing_rebuild_cannot_reclassify_an_original_specific_task_child() {
                 &principal("user"),
                 &principal("frontend"),
                 None,
-                |_| async { Ok(None) }
+                |_| async { Ok(CanonicalBindingObservation::Unretained) }
             )
             .await,
         Err(OriginalWriterError::Conflict)
@@ -1280,7 +1280,7 @@ async fn standing_rebuild_cannot_reclassify_an_original_specific_task_child() {
             &principal("user"),
             &principal("frontend"),
             None,
-            |_| async { Ok(None) },
+            |_| async { Ok(CanonicalBindingObservation::Unretained) },
         )
         .await
         .unwrap();
@@ -3234,5 +3234,206 @@ mod canonical_adapter {
         assert_eq!(usize::from(left.is_ok()) + usize::from(right.is_ok()), 1);
         let refused = if left.is_err() { left } else { right };
         assert!(matches!(refused, Err(PrivateOriginalError::Denied)));
+    }
+}
+
+#[tokio::test]
+async fn workflow_target_binding_preserves_task_isolation_and_native_revocation() {
+    use crate::installed_host::operator_setup::{workflow_mcp, workflow_public};
+    use meerkat_authorization_contracts::constraints::{
+        ActionRef, DelegationDepth, DomainRestriction, ExactRestriction, LifetimeRestriction,
+        ProcessorRef,
+    };
+    for with_public in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("grants");
+        let owner = initialized(&path);
+        let grants = owner.grants();
+        let application = principal("admin");
+        let mut server = meerkat_core::McpServerConfig::stdio(
+            "toolkit-setup",
+            "unused",
+            vec![],
+            Default::default(),
+        );
+        server.access = Some(meerkat_core::mcp_config::McpServerAccess::allowing([
+            "setup_state",
+        ]));
+        let now = owner.clock().now().unwrap().unix_ms;
+        let envelope = ExecutionRestrictions {
+            actions: ExactRestriction::exact([
+                ActionRef {
+                    feature: "mcp".into(),
+                    action: "setup_state".into(),
+                },
+                meerkat_authorization::mcp_installation::mcp_connector_action(
+                    "toolkit-setup",
+                    &meerkat_core::McpConnectorApproval::NoConnector,
+                ),
+                ActionRef {
+                    feature: "toolkit".into(),
+                    action: "catalog-read".into(),
+                },
+                ActionRef {
+                    feature: "toolkit".into(),
+                    action: "setup-public-service-request".into(),
+                },
+            ]),
+            resource_domains: DomainRestriction::owned_by([application.clone()]),
+            processors: ExactRestriction::exact([ProcessorRef::Principal {
+                principal: principal("agent"),
+            }]),
+            audiences: ExactRestriction::exact([AudienceRef::Principal {
+                principal: principal("user"),
+            }]),
+            lifetime: LifetimeRestriction::window(now, now + 60_000),
+            delegation_depth: DelegationDepth::remaining(0),
+        };
+        let mut root_bounds = envelope.clone();
+        root_bounds.delegation_depth = DelegationDepth::remaining(1);
+        let root = grants
+            .issue_root(
+                &application,
+                id("workflow-base"),
+                application.clone(),
+                None,
+                root_bounds,
+            )
+            .unwrap();
+        let leaf = grants
+            .issue_child(
+                &application,
+                &root,
+                id("workflow-leaf"),
+                principal("agent"),
+                envelope.clone(),
+            )
+            .unwrap();
+        let base = vec![root, leaf];
+        let ids = workflow_mcp::target_ids(&base).unwrap();
+        let target_bounds = workflow_mcp::target_bounds(&application, &envelope, &server).unwrap();
+        let mut target_root = target_bounds.clone();
+        target_root.delegation_depth = DelegationDepth::remaining(1);
+        let root = grants
+            .issue_root(
+                &application,
+                ids[0].clone(),
+                application.clone(),
+                None,
+                target_root,
+            )
+            .unwrap();
+        let leaf = grants
+            .issue_child(
+                &application,
+                &root,
+                ids[1].clone(),
+                principal("agent"),
+                target_bounds,
+            )
+            .unwrap();
+        let target = vec![root, leaf];
+        let public = if with_public {
+            Some(
+                workflow_public::issue(
+                    &grants,
+                    &application,
+                    &principal("agent"),
+                    None,
+                    &base,
+                    &envelope,
+                )
+                .unwrap(),
+            )
+        } else {
+            None
+        };
+        let mut candidate = claims("workflow-target", &base[0]).candidate().clone();
+        candidate.authority_basis =
+            workflow_mcp::basis_with_public(base, target.clone(), public.clone());
+        let association = InputAuthorityAssociation::new(candidate).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let bind = || {
+            owner.bind_workflow_access_async(
+                association.clone(),
+                source(&association),
+                &association.candidate().requester,
+                &association.candidate().ingress_actor,
+                &application,
+                |observed| {
+                    assert_eq!(observed, association);
+                    async { Ok(CanonicalBindingObservation::Unretained) }
+                },
+            )
+        };
+        let retained = bind().await.unwrap();
+        assert_eq!(retained.association(), &association);
+        assert!(Arc::ptr_eq(&retained, &bind().await.unwrap()));
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        let mut other = claims("different-workflow", &target[0]).candidate().clone();
+        other.authority_basis = association.candidate().authority_basis.clone();
+        let other = InputAuthorityAssociation::new(other).unwrap();
+        assert!(matches!(
+            owner
+                .bind_workflow_access_async(
+                    other.clone(),
+                    source(&other),
+                    &other.candidate().requester,
+                    &other.candidate().ingress_actor,
+                    &application,
+                    |_| async {
+                        panic!("a second original must not acquire the existing task leaves")
+                    }
+                )
+                .await,
+            Err(OriginalWriterError::Conflict)
+        ));
+        let machine = machine(&owner);
+        if let Some(public) = &public {
+            {
+                let mut custody = machine.try_controller_grant_mutation().unwrap();
+                grants
+                    .revoke(&application, &public[1], &mut custody)
+                    .unwrap();
+            }
+            // Historical task shape/isolation and base/MCP restoration remain
+            // intact. This is not a new native input admission after revocation.
+            owner.check_historical_task_child(&association).unwrap();
+            for lineage in
+                workflow_mcp::planning_lineages(&association.candidate().authority_basis).unwrap()
+            {
+                grants
+                    .resolve_lineage(lineage, &principal("agent"), None)
+                    .unwrap()
+                    .check_current()
+                    .unwrap();
+            }
+            assert!(
+                matches!(bind().await, Err(OriginalWriterError::Grant(_))),
+                "fresh native binding still resolves every selected target"
+            );
+        }
+        {
+            let mut custody = machine.try_controller_grant_mutation().unwrap();
+            grants
+                .revoke(&application, &target[0], &mut custody)
+                .unwrap();
+        }
+        let after_revoke = std::fs::read(&path).unwrap();
+        assert!(matches!(
+            owner
+                .bind_workflow_access_async(
+                    association.clone(),
+                    source(&association),
+                    &association.candidate().requester,
+                    &association.candidate().ingress_actor,
+                    &application,
+                    |_| async { panic!("revoked target must refuse before source publication") }
+                )
+                .await,
+            Err(OriginalWriterError::Grant(_))
+        ));
+        assert_eq!(std::fs::read(&path).unwrap(), after_revoke);
+        assert_eq!(retained.association(), &association);
     }
 }

@@ -23,6 +23,7 @@ pub(super) struct Script {
     dispatch: Arc<ObservedLeaf>,
     owner: Mutex<Option<Arc<InstalledAcquisition>>>,
     setup_timeout_ms: Option<u64>,
+    admission_timeout_ms: Option<u64>,
     results: Mutex<Vec<ToolResult>>,
     hold_first_response: bool,
     first_response_entered: tokio::sync::Notify,
@@ -31,6 +32,12 @@ pub(super) struct Script {
 impl Script {
     pub(super) fn for_approved() -> Arc<Self> {
         Self::new()
+    }
+    pub(super) fn for_entered_workflow(observer: Arc<dyn DispatchObserver>) -> Arc<Self> {
+        let mut script = Self::new_with_timeout(false, Duration::from_secs(60));
+        Arc::get_mut(&mut script).unwrap().admission_timeout_ms = Some(60_000);
+        *script.dispatch.observer.lock().unwrap() = Some(observer);
+        script
     }
     pub(super) fn for_expiring_setup(timeout_ms: u64) -> Arc<Self> {
         let mut script = Self::new();
@@ -41,6 +48,9 @@ impl Script {
         let mut limits = crate::installed_host::acquisition::InstalledSetupLimits::default();
         if let Some(timeout) = self.setup_timeout_ms {
             limits.setup_timeout_ms = timeout;
+        }
+        if let Some(timeout) = self.admission_timeout_ms {
+            limits.admission_timeout_ms = timeout;
         }
         limits
     }
@@ -74,18 +84,23 @@ impl Script {
         Self::new_with_hold(false)
     }
     fn new_with_hold(hold_first_response: bool) -> Arc<Self> {
-        let tools = InstalledAcquisitionTools::new(Duration::from_secs(10)).unwrap();
+        Self::new_with_timeout(hold_first_response, Duration::from_secs(10))
+    }
+    fn new_with_timeout(hold_first_response: bool, timeout: Duration) -> Arc<Self> {
+        let tools = InstalledAcquisitionTools::new(timeout).unwrap();
         let dispatch = Arc::new(ObservedLeaf {
             inner: tools.acquisition_tool(),
             resolved: AtomicUsize::new(0),
             entered: AtomicUsize::new(0),
             probe: Mutex::new(None),
+            observer: Mutex::new(None),
         });
         Arc::new(Self {
             tools,
             dispatch,
             owner: Mutex::new(None),
             setup_timeout_ms: None,
+            admission_timeout_ms: None,
             results: Mutex::new(vec![]),
             hold_first_response,
             first_response_entered: tokio::sync::Notify::new(),
@@ -128,6 +143,7 @@ struct ObservedLeaf {
     resolved: AtomicUsize,
     entered: AtomicUsize,
     probe: Mutex<Option<Arc<dyn FindDispatchProbe>>>,
+    observer: Mutex<Option<Arc<dyn DispatchObserver>>>,
 }
 #[async_trait]
 impl AgentToolDispatcher for ObservedLeaf {
@@ -206,7 +222,13 @@ impl AgentToolDispatcher for ObservedLeaf {
         if let Some(probe) = probe {
             probe.inspect(call, context).await;
         }
-        self.inner.dispatch_with_context(call, context).await
+        let observer = self.observer.lock().unwrap().clone();
+        observe_dispatch(
+            self.inner.dispatch_with_context(call, context),
+            observer,
+            call.id,
+        )
+        .await
     }
     async fn dispatch_resolved_with_context(
         &self,
@@ -219,9 +241,14 @@ impl AgentToolDispatcher for ObservedLeaf {
         if let Some(probe) = probe {
             probe.inspect(call, context).await;
         }
-        self.inner
-            .dispatch_resolved_with_context(call, context, plan)
-            .await
+        let observer = self.observer.lock().unwrap().clone();
+        observe_dispatch(
+            self.inner
+                .dispatch_resolved_with_context(call, context, plan),
+            observer,
+            call.id,
+        )
+        .await
     }
     async fn poll_external_updates(&self) -> meerkat_core::agent::ExternalToolUpdate {
         self.inner.poll_external_updates().await
@@ -258,6 +285,62 @@ impl AgentToolDispatcher for ObservedLeaf {
         handle: Arc<dyn meerkat_core::handles::ExternalToolSurfaceHandle>,
     ) {
         self.inner.bind_external_tool_surface_handle(handle);
+    }
+}
+
+// Observation only. The wrapper owns the exact inner future and drops it
+// before reporting cancellation; no witness, result or authority is supplied.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum DispatchEnd {
+    Dropped,
+    Returned,
+}
+pub(super) trait DispatchObserver: Send + Sync {
+    fn ended(&self, call: &str, end: DispatchEnd);
+}
+struct ObservedDispatch<'a, T> {
+    inner: Option<std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>>,
+    observer: Option<Arc<dyn DispatchObserver>>,
+    call: String,
+    returned: bool,
+}
+impl<T> std::future::Future for ObservedDispatch<'_, T> {
+    type Output = T;
+    fn poll(self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<T> {
+        let this = self.get_mut();
+        match this.inner.as_mut().unwrap().as_mut().poll(cx) {
+            std::task::Poll::Pending => std::task::Poll::Pending,
+            std::task::Poll::Ready(value) => {
+                this.returned = true;
+                drop(this.inner.take());
+                if let Some(observer) = &this.observer {
+                    observer.ended(&this.call, DispatchEnd::Returned);
+                }
+                std::task::Poll::Ready(value)
+            }
+        }
+    }
+}
+impl<T> Drop for ObservedDispatch<'_, T> {
+    fn drop(&mut self) {
+        drop(self.inner.take());
+        if !self.returned
+            && let Some(observer) = &self.observer
+        {
+            observer.ended(&self.call, DispatchEnd::Dropped);
+        }
+    }
+}
+fn observe_dispatch<'a, T>(
+    future: impl std::future::Future<Output = T> + Send + 'a,
+    observer: Option<Arc<dyn DispatchObserver>>,
+    call: &str,
+) -> ObservedDispatch<'a, T> {
+    ObservedDispatch {
+        inner: Some(Box::pin(future)),
+        observer,
+        call: call.into(),
+        returned: false,
     }
 }
 
@@ -510,3 +593,6 @@ async fn controller_only_original_denies_enrolled_acquisition_in_its_real_turn()
         Err(payload) => std::panic::resume_unwind(payload),
     }
 }
+
+#[path = "controller_only_acquisition_tests/context_transfer_tests.rs"]
+mod context_transfer_tests;

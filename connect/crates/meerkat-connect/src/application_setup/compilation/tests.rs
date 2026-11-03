@@ -27,9 +27,10 @@ fn selected(root: &Path) -> ApplicationSetupCompilationInput {
         definition: legacy.definition,
         roster: legacy.roster,
         members,
-        helper: legacy.helper,
-        helper_tools: legacy.helper_tools,
-        helper_profile: legacy.helper_profile,
+        member_classes: vec![],
+        helper: Some(legacy.helper),
+        helper_tools: Some(legacy.helper_tools),
+        helper_profile: Some(legacy.helper_profile),
         tool_policy: legacy.tool_policy,
     }
 }
@@ -84,7 +85,10 @@ fn owner_selection(
         components: vec![],
         channels: vec![],
         native_host: meerkat_toolkit::host_lifetime::policy::PreparedNativeHost {
-            realm: meerkat_core::mob_realm_id(&phase.input.helper.member.mob_id).unwrap(),
+            authentication_domain: None,
+            event_domain: None,
+            realm: meerkat_core::mob_realm_id(&phase.input.helper.as_ref().unwrap().member.mob_id)
+                .unwrap(),
             grant_administrator: authority.clone(),
             remote_operator: operator,
             service_parent_administration: None,
@@ -94,8 +98,133 @@ fn owner_selection(
             },
             members: phase.input.members.clone(),
             routes: vec![],
+            member_classes: phase.input.member_classes.clone(),
         },
     }
+}
+
+fn with_uninstantiated_class(root: &Path) -> ApplicationSetupCompilationInput {
+    let mut input = selected(root);
+    let definition = input.definition.resolve().unwrap();
+    let mut value = serde_json::to_value(definition).unwrap();
+    value["profiles"]["project-owner"] = value["profiles"]["research"].clone();
+    input.definition = ApplicationSetupDefinition::Native {
+        definition: serde_json::from_value(value).unwrap(),
+    };
+    input.member_classes = vec![CompiledMemberClass {
+        purpose: Default::default(),
+        id: toolkit_package::Id::new("project-owner").unwrap(),
+        profile: "project-owner".into(),
+        factory: toolkit_package::Id::new("host:project-owner").unwrap(),
+        callback_account: None,
+        callbacks: vec![],
+        grants: vec![],
+    }];
+    input
+}
+
+#[test]
+fn shared_workflow_class_keeps_bootstrap_inventory_and_rejects_permanent_or_saved_helper() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let shared = || {
+        let mut input = with_uninstantiated_class(&root);
+        input.member_classes[0].purpose = CompiledMemberClassPurpose::SharedWorkflow;
+        input
+    };
+    let input = shared();
+    let roster = toolkit_package::canonical_json(&input.roster).unwrap();
+    let members = input.members.clone();
+    let policy = input.tool_policy.clone().compile().unwrap();
+    let validated = input.validate().unwrap();
+    assert_eq!(
+        toolkit_package::canonical_json(&validated.input.roster).unwrap(),
+        roster
+    );
+    assert_eq!(validated.input.members, members);
+    assert_eq!(validated.policy_bytes, policy);
+
+    let mut input = shared();
+    input.roster[0].profile = ProfileName::from("project-owner");
+    assert!(input.validate().is_err());
+    let mut input = shared();
+    input.members[0].member.role = "project-owner".into();
+    assert!(input.validate().is_err());
+    let mut input = shared();
+    let mut definition = serde_json::to_value(input.definition.resolve().unwrap()).unwrap();
+    definition["profiles"]["project-owner"]["tools"]["mcp"] = json!(["toolkit-setup"]);
+    input.definition = ApplicationSetupDefinition::Native {
+        definition: serde_json::from_value(definition).unwrap(),
+    };
+    assert!(input.validate().is_err());
+    let mut input = shared();
+    input.member_classes[0].grants = vec![meerkat_core::CompiledMemberToolGrant {
+        tool_name: meerkat_toolkit::setup::SETUP_REPORT.into(),
+        action: meerkat_core::CompiledMemberToolAction::Invoke,
+        consequence: meerkat_core::CompiledToolConsequence::R2,
+    }];
+    assert!(input.validate().is_err());
+}
+
+#[test]
+fn uninstantiated_class_preserves_actual_roster_and_policy_inventory() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let input = with_uninstantiated_class(&root);
+    let expected_members = input.members.clone();
+    let expected_roster = toolkit_package::canonical_json(&input.roster).unwrap();
+    let expected_policy = input.tool_policy.clone().compile().unwrap();
+    assert!(
+        !input
+            .members
+            .iter()
+            .any(|row| row.member.role == "project-owner")
+    );
+    let validated = input.validate().unwrap();
+    assert_eq!(validated.input.members, expected_members);
+    assert_eq!(
+        toolkit_package::canonical_json(&validated.input.roster).unwrap(),
+        expected_roster
+    );
+    assert_eq!(validated.policy_bytes, expected_policy);
+}
+
+#[test]
+fn absent_class_preserves_schema4_wire_bytes_and_owner_cannot_replace_class() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let value = serde_json::to_value(selected(&root)).unwrap();
+    assert!(value.get("member_classes").is_none());
+    let decoded: ApplicationSetupCompilationInput = serde_json::from_value(value.clone()).unwrap();
+    assert!(decoded.member_classes.is_empty());
+    assert_eq!(serde_json::to_value(decoded).unwrap(), value);
+
+    let phase = with_uninstantiated_class(&root)
+        .validate()
+        .unwrap()
+        .prepare(super::super::tests::prepared(&root))
+        .unwrap();
+    let mut changed = owner_selection(&phase, None);
+    changed.native_host.member_classes[0].factory =
+        toolkit_package::Id::new("other-factory").unwrap();
+    assert!(phase.retain_owner(changed).is_err());
+    phase.retain_owner(owner_selection(&phase, None)).unwrap();
+}
+
+#[test]
+fn class_unknown_profile_and_reused_helper_profile_are_refused_before_preparation() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let mut input = with_uninstantiated_class(&root);
+    input.member_classes[0].profile = "missing".into();
+    assert!(input.validate().is_err());
+    let mut input = with_uninstantiated_class(&root);
+    input.helper_profile = Some(ApplicationSetupProfile::ExclusiveApplicationRole);
+    input.member_classes[0].profile = input.helper.as_ref().unwrap().member.role.clone();
+    assert!(input.validate().is_err());
+    let mut input = with_uninstantiated_class(&root);
+    input.member_classes.push(input.member_classes[0].clone());
+    assert!(input.validate().is_err());
 }
 
 #[test]
@@ -117,13 +246,15 @@ fn held_controller_target_uses_selected_member_and_exact_roster_identity() {
         assert!(phase.held_member_identity(&wrong_mob).is_err());
     }
     assert_eq!(
-        phase.held_member_identity(&phase.helper().member).unwrap(),
-        &phase.source_helper_roster.identity
+        phase
+            .held_member_identity(&phase.helper().unwrap().member)
+            .unwrap(),
+        &phase.source_helper_roster.as_ref().unwrap().identity
     );
-    if phase.source_helper_member != phase.helper().member {
+    if phase.source_helper_member.as_ref().unwrap() != &phase.helper().unwrap().member {
         assert!(
             phase
-                .held_member_identity(&phase.source_helper_member)
+                .held_member_identity(phase.source_helper_member.as_ref().unwrap())
                 .is_err(),
             "the original role cannot replace the compiler's projected helper binding"
         );
@@ -142,7 +273,9 @@ fn held_finished_inventory_refuses_missing_repeated_and_cross_member_surfaces() 
     let ordinary_identity = phase
         .held_member_identity(&phase.input.members[0].member)
         .unwrap();
-    let helper_identity = phase.held_member_identity(&phase.helper().member).unwrap();
+    let helper_identity = phase
+        .held_member_identity(&phase.helper().unwrap().member)
+        .unwrap();
     assert_ne!(ordinary_identity, helper_identity);
     assert!(
         phase
@@ -177,8 +310,8 @@ fn captured_surfaces_require_final_owner_and_project_late_helper_and_member_auth
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().canonicalize().unwrap();
     let mut input = selected(&root);
-    let parent = input.helper.controller_parent.clone();
-    input.helper.controller_parent.clear();
+    let parent = input.helper.as_ref().unwrap().controller_parent.clone();
+    input.helper.as_mut().unwrap().controller_parent.clear();
     let phase = input
         .validate()
         .unwrap()
@@ -211,18 +344,19 @@ fn captured_surfaces_require_final_owner_and_project_late_helper_and_member_auth
         event_domain: domain,
     });
     selected.native_host.members[0].setup_capability = Some(CompiledAgentSetupCapability {
+        workflow_targets: vec![],
         helper: None,
         route,
         parent: parent[0].clone(),
         helper_targets: vec![],
     });
-    let mut helper = phase.helper().clone();
+    let mut helper = phase.helper().unwrap().clone();
     helper.controller_parent = parent;
     phase
         .retain_authorities(selected.clone(), helper.clone())
         .unwrap();
     let (setup, _) = phase.complete_bundle(&output).unwrap();
-    assert!(setup.helper == helper);
+    assert!(setup.helper.as_ref() == Some(&helper));
     assert_eq!(setup.native_owner.as_ref().unwrap(), &selected);
     assert_eq!(
         setup.native_members[0].setup_capability,
@@ -250,7 +384,8 @@ fn task_parent_admin_rule_survives_exact_owner_projection_without_implicit_opera
         .unwrap()
         .prepare(super::super::tests::prepared(&root))
         .unwrap();
-    let realm = meerkat_core::mob_realm_id(&phase.input.helper.member.mob_id).unwrap();
+    let realm =
+        meerkat_core::mob_realm_id(&phase.input.helper.as_ref().unwrap().member.mob_id).unwrap();
     let operator = meerkat::governed_realm::stock::StockPrincipals::for_local_operator(&realm)
         .unwrap()
         .operator;
@@ -259,16 +394,16 @@ fn task_parent_admin_rule_survives_exact_owner_projection_without_implicit_opera
         .native_host
         .members
         .iter_mut()
-        .find(|row| row.member == phase.input.helper.member)
+        .find(|row| row.member == phase.input.helper.as_ref().unwrap().member)
         .unwrap();
-    helper.member = phase.source_helper_member.clone();
+    helper.member = phase.source_helper_member.clone().unwrap();
     let principal = helper.logical_owner.clone();
     let route = toolkit_package::Id::new("administrative-service-route").unwrap();
     let domain = early.native_host.ingress_domain.clone();
     early.native_host.routes.push(CompiledNativeSourceRoute {
         id: route.clone(),
         origin: CompiledNativeSourceOrigin::LocalConsole {
-            member: phase.source_helper_member.clone(),
+            member: phase.source_helper_member.clone().unwrap(),
             requester: principal.clone(),
             ingress_actor: principal.clone(),
         },
@@ -307,7 +442,7 @@ fn task_parent_admin_rule_survives_exact_owner_projection_without_implicit_opera
     else {
         panic!("exact source kind");
     };
-    assert_eq!(member, &phase.input.helper.member);
+    assert_eq!(member, &phase.input.helper.as_ref().unwrap().member);
     assert!(projected.native_host.routes[0].application_parent.is_none());
     phase.retain_owner(projected.clone()).unwrap();
     phase.capture(0, &surface(false)).unwrap();
@@ -334,20 +469,20 @@ fn final_authority_cannot_replace_destinations_or_explicit_helper_selection() {
     changed.native_host.members[0].context_generation += 1;
     assert!(
         phase
-            .retain_authorities(changed, phase.helper().clone())
+            .retain_authorities(changed, phase.helper().unwrap().clone())
             .is_err()
     );
-    let mut helper = phase.helper().clone();
+    let mut helper = phase.helper().unwrap().clone();
     helper.operation_basis = meerkat_authorization_contracts::work_association::WorkAuthorityBasis::TargetedGrantLineages {
         base: None, targets: vec![],
     };
     assert!(phase.retain_authorities(selected.clone(), helper).is_err());
-    let mut helper = phase.helper().clone();
+    let mut helper = phase.helper().unwrap().clone();
     helper.controller_parent.clear();
     assert!(phase.retain_authorities(selected.clone(), helper).is_err());
     assert!(phase.final_authorities.get().is_none());
     phase
-        .retain_authorities(selected, phase.helper().clone())
+        .retain_authorities(selected, phase.helper().unwrap().clone())
         .unwrap();
 }
 
@@ -364,11 +499,20 @@ fn early_phase_needs_no_original_surface_and_preserves_explicit_policy() {
         .unwrap();
     assert_eq!(phase.policy_bytes, original.tool_policy.compile().unwrap());
     assert!(Arc::ptr_eq(&phase.registry(), &phase.registry()));
-    assert_eq!(phase.helper().member.member, original.helper.member.member);
-    assert_ne!(phase.helper().member.role, original.helper.member.role);
+    assert_eq!(
+        phase.helper().unwrap().member.member,
+        original.helper.as_ref().unwrap().member.member
+    );
+    assert_ne!(
+        phase.helper().unwrap().member.role,
+        original.helper.as_ref().unwrap().member.role
+    );
     let projected = phase.project_roster(&original.roster).unwrap();
     assert_eq!(projected[0], original.roster[0]);
-    assert_eq!(projected[1].profile.as_str(), phase.helper().member.role);
+    assert_eq!(
+        projected[1].profile.as_str(),
+        phase.helper().unwrap().member.role
+    );
     assert!(phase.captured.lock().unwrap().is_empty());
 }
 #[test]
@@ -381,15 +525,20 @@ fn dedicated_public_research_compilation_matches_driver_and_retained_resource() 
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().canonicalize().unwrap();
         let mut input = selected(&root);
-        input.helper_tools = ApplicationSetupTools::CheckedInstallation;
-        assert_eq!(input.helper_profile, ApplicationSetupProfile::Dedicated);
+        input.helper_tools = Some(ApplicationSetupTools::CheckedInstallation);
+        assert_eq!(
+            input.helper_profile,
+            Some(ApplicationSetupProfile::Dedicated)
+        );
         let names = ["setup_read_github", "setup_search_github"];
         if enabled {
             let member = input
                 .tool_policy
                 .members
                 .iter_mut()
-                .find(|member| member.member_identity == input.helper.member.member)
+                .find(|member| {
+                    member.member_identity == input.helper.as_ref().unwrap().member.member
+                })
                 .unwrap();
             member
                 .grants
@@ -421,12 +570,24 @@ fn dedicated_public_research_compilation_matches_driver_and_retained_resource() 
         assert_eq!(&spec.definition, phase.definition());
         assert_eq!(phase.policy_bytes, expected_policy);
         assert_eq!(
-            phase.resource.helper_projection().unwrap().server(),
-            phase.server()
+            phase
+                .resource
+                .as_ref()
+                .unwrap()
+                .helper_projection()
+                .unwrap()
+                .server(),
+            phase.server().unwrap()
         );
         for name in names {
             assert_eq!(
-                phase.server().access.as_ref().unwrap().permits(name),
+                phase
+                    .server()
+                    .unwrap()
+                    .access
+                    .as_ref()
+                    .unwrap()
+                    .permits(name),
                 enabled
             );
         }
@@ -441,19 +602,19 @@ fn dedicated_public_research_compilation_matches_driver_and_retained_resource() 
         phase.capture(1, &helper_surface).unwrap();
         let (setup, _) = phase.complete_bundle(&root.join("complete")).unwrap();
         let retained = setup.helper_projection().unwrap();
-        assert_eq!(retained.server(), phase.server());
+        assert_eq!(retained.server(), phase.server().unwrap());
         assert_eq!(
             setup
                 .helper_projection_for_policy(phase.policy.compiled())
                 .unwrap()
                 .server(),
-            &setup.server
+            setup.server.as_ref().unwrap()
         );
         let mut opposite_policy = phase.policy.compiled().clone();
         let selected_member = opposite_policy
             .members
             .iter_mut()
-            .find(|member| member.member_identity == setup.helper.member.member)
+            .find(|member| member.member_identity == setup.helper.as_ref().unwrap().member.member)
             .unwrap();
         if enabled {
             selected_member
@@ -477,15 +638,20 @@ fn dedicated_public_research_compilation_matches_driver_and_retained_resource() 
                 .is_err(),
             "both missing and extra policy-selected research entries refuse"
         );
-        let completed =
-            super::super::resource::SetupResourceSelection::from_completed(&setup).unwrap();
+        let completed = super::super::resource::SetupResourceSelection::from_completed(
+            &setup,
+            phase.prepared_tool_policy(),
+        )
+        .unwrap();
         assert_eq!(
             completed.helper_projection().unwrap().server(),
-            phase.server()
+            phase.server().unwrap()
         );
         let mut unexpected = setup.clone();
         unexpected
             .server
+            .as_mut()
+            .unwrap()
             .access
             .as_mut()
             .unwrap()
@@ -547,8 +713,10 @@ fn missing_report_and_changed_artifacts_refuse_without_fabricating_identity() {
     assert!(
         !phase
             .resources
+            .as_ref()
+            .unwrap()
             .artifact_directory
-            .join(member_surface_name(&phase.helper().member).unwrap())
+            .join(member_surface_name(&phase.helper().unwrap().member).unwrap())
             .exists()
     );
     phase.capture(0, &surface(false)).unwrap();
@@ -560,6 +728,8 @@ fn missing_report_and_changed_artifacts_refuse_without_fabricating_identity() {
     let captured = phase.captured.lock().unwrap();
     let path = phase
         .resources
+        .as_ref()
+        .unwrap()
         .artifact_directory
         .join(&captured[&0].member.initial_surface.name);
     std::fs::write(path, b"[]").unwrap();
@@ -753,7 +923,7 @@ async fn registration_fixture_from_phase(
     let mut configuration = prepared.take_configuration().unwrap();
     configuration.configured_mcp_attachment = Some(Arc::new(
         crate::application_setup::resource::SetupResourceProvider::new(
-            phase.resource_selection(),
+            phase.resource_selection().unwrap(),
             configuration.configured_mcp_attachment.take(),
         ),
     ));
@@ -779,11 +949,13 @@ async fn selected_live_unbound_slot_authorizes_and_native_retirement_refuses() {
     // Provider construction happens before native destination selection. It
     // must retain the exact slot while refusing physical use at this stage.
     assert_eq!(
-        authority.authorize_configured(phase.server()),
+        authority.authorize_configured(phase.server().unwrap()),
         Err(McpAttachmentRefusal::NotCurrent)
     );
     let participant = phase
         .resource
+        .as_ref()
+        .unwrap()
         .registration_slots
         .lock()
         .unwrap()
@@ -793,6 +965,8 @@ async fn selected_live_unbound_slot_authorizes_and_native_retirement_refuses() {
         .unwrap();
     phase
         .resource
+        .as_ref()
+        .unwrap()
         .select_registration(
             &meerkat_authorization_contracts::evidence::EvidenceId::new(session.to_string())
                 .unwrap(),
@@ -800,21 +974,30 @@ async fn selected_live_unbound_slot_authorizes_and_native_retirement_refuses() {
         )
         .unwrap();
     assert!(
-        phase.resource.registration_slots.lock().unwrap().is_empty(),
+        phase
+            .resource
+            .as_ref()
+            .unwrap()
+            .registration_slots
+            .lock()
+            .unwrap()
+            .is_empty(),
         "temporary correlation is removed on helper selection"
     );
     assert!(matches!(
         participant.agent.current(),
         Err(AgentBindingUnavailable::Unbound)
     ));
-    authority.authorize_configured(phase.server()).unwrap();
+    authority
+        .authorize_configured(phase.server().unwrap())
+        .unwrap();
     machine.unregister_session(&session).await.unwrap();
     assert!(matches!(
         participant.agent.current(),
         Err(AgentBindingUnavailable::Retired)
     ));
     assert_eq!(
-        authority.authorize_configured(phase.server()),
+        authority.authorize_configured(phase.server().unwrap()),
         Err(McpAttachmentRefusal::NotCurrent)
     );
 }
@@ -831,6 +1014,8 @@ async fn same_session_replacement_before_first_physical_use_cannot_inherit_prepa
     let original_authority = original.configured_mcp_attachment().cloned().unwrap();
     phase
         .resource
+        .as_ref()
+        .unwrap()
         .select_registration(
             &meerkat_authorization_contracts::evidence::EvidenceId::new(session.to_string())
                 .unwrap(),
@@ -844,22 +1029,31 @@ async fn same_session_replacement_before_first_physical_use_cannot_inherit_prepa
     let replacement = machine.prepare_bindings(session.clone()).await.unwrap();
     let replacement_authority = replacement.configured_mcp_attachment().cloned().unwrap();
     assert_eq!(
-        phase.resource.registration_slots.lock().unwrap().len(),
+        phase
+            .resource
+            .as_ref()
+            .unwrap()
+            .registration_slots
+            .lock()
+            .unwrap()
+            .len(),
         1,
         "replacement waits for its own actual destination hook"
     );
     assert_eq!(
-        original_authority.authorize_configured(phase.server()),
+        original_authority.authorize_configured(phase.server().unwrap()),
         Err(McpAttachmentRefusal::NotCurrent)
     );
     assert_eq!(
-        replacement_authority.authorize_configured(phase.server()),
+        replacement_authority.authorize_configured(phase.server().unwrap()),
         Err(McpAttachmentRefusal::NotCurrent)
     );
     // A later actual reconstruction may select its own participant. This does
     // not change the old authority's original, now-retired registration.
     phase
         .resource
+        .as_ref()
+        .unwrap()
         .select_registration(
             &meerkat_authorization_contracts::evidence::EvidenceId::new(session.to_string())
                 .unwrap(),
@@ -867,13 +1061,22 @@ async fn same_session_replacement_before_first_physical_use_cannot_inherit_prepa
         )
         .unwrap();
     replacement_authority
-        .authorize_configured(phase.server())
+        .authorize_configured(phase.server().unwrap())
         .unwrap();
     assert_eq!(
-        original_authority.authorize_configured(phase.server()),
+        original_authority.authorize_configured(phase.server().unwrap()),
         Err(McpAttachmentRefusal::NotCurrent)
     );
-    assert!(phase.resource.registration_slots.lock().unwrap().is_empty());
+    assert!(
+        phase
+            .resource
+            .as_ref()
+            .unwrap()
+            .registration_slots
+            .lock()
+            .unwrap()
+            .is_empty()
+    );
     machine.unregister_session(&session).await.unwrap();
 }
 
@@ -896,18 +1099,22 @@ async fn resource_authority_rechecks_full_descriptor_origin_and_exact_registrati
     let other_authority = other_bindings.configured_mcp_attachment().cloned().unwrap();
     phase
         .resource
+        .as_ref()
+        .unwrap()
         .select_registration(
             &meerkat_authorization_contracts::evidence::EvidenceId::new(selected.to_string())
                 .unwrap(),
             true,
         )
         .unwrap();
-    authority.authorize_configured(phase.server()).unwrap();
+    authority
+        .authorize_configured(phase.server().unwrap())
+        .unwrap();
     assert_eq!(
-        other_authority.authorize_configured(phase.server()),
+        other_authority.authorize_configured(phase.server().unwrap()),
         Err(McpAttachmentRefusal::NotCurrent)
     );
-    let mut changed = phase.server().clone();
+    let mut changed = phase.server().unwrap().clone();
     match &mut changed.transport {
         meerkat_core::mcp_config::McpTransportConfig::Stdio(config) => {
             config.args.push("unreviewed-argument".into())
@@ -918,15 +1125,19 @@ async fn resource_authority_rechecks_full_descriptor_origin_and_exact_registrati
         authority.authorize_configured(&changed),
         Err(McpAttachmentRefusal::Mismatch)
     );
-    changed = phase.server().clone();
+    changed = phase.server().unwrap().clone();
     changed.name = "another-server".into();
     assert!(
         authority.authorize_configured(&changed).is_err(),
         "another server requires its actual installation owner"
     );
-    std::fs::write(&phase.resources.handoff.path, b"changed retained output").unwrap();
+    std::fs::write(
+        &phase.resources.as_ref().unwrap().handoff.path,
+        b"changed retained output",
+    )
+    .unwrap();
     assert_eq!(
-        authority.authorize_configured(phase.server()),
+        authority.authorize_configured(phase.server().unwrap()),
         Err(McpAttachmentRefusal::Unavailable)
     );
     machine.unregister_session(&selected).await.unwrap();
@@ -935,6 +1146,7 @@ async fn resource_authority_rechecks_full_descriptor_origin_and_exact_registrati
 
 #[tokio::test]
 async fn completed_nonhelper_capture_is_released_and_live_helper_allows_repeated_entry() {
+    use meerkat_core::mcp_attachment::McpAttachmentRefusal;
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().canonicalize().unwrap();
     let (phase, machine, _owner) = registration_fixture(&root).await;
@@ -943,16 +1155,33 @@ async fn completed_nonhelper_capture_is_released_and_live_helper_allows_repeated
     for _ in 0..phase.input.members.len() + 1 {
         let session = meerkat_core::SessionId::new();
         machine.register_session(session.clone()).await.unwrap();
-        let _bindings = machine.prepare_bindings(session.clone()).await.unwrap();
+        let bindings = machine.prepare_bindings(session.clone()).await.unwrap();
+        let authority = bindings.configured_mcp_attachment().cloned().unwrap();
         phase
             .resource
+            .as_ref()
+            .unwrap()
             .select_registration(
                 &meerkat_authorization_contracts::evidence::EvidenceId::new(session.to_string())
                     .unwrap(),
                 false,
             )
             .unwrap();
-        assert!(phase.resource.registration_slots.lock().unwrap().is_empty());
+        assert!(
+            phase
+                .resource
+                .as_ref()
+                .unwrap()
+                .registration_slots
+                .lock()
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            authority.authorize_configured(phase.server().unwrap()),
+            Err(McpAttachmentRefusal::NotCurrent),
+            "accepted non-helper destinations never receive the setup resource"
+        );
         machine.unregister_session(&session).await.unwrap();
     }
     let helper = meerkat_core::SessionId::new();
@@ -961,16 +1190,66 @@ async fn completed_nonhelper_capture_is_released_and_live_helper_allows_repeated
     let authority = bindings.configured_mcp_attachment().cloned().unwrap();
     phase
         .resource
+        .as_ref()
+        .unwrap()
         .select_registration(
             &meerkat_authorization_contracts::evidence::EvidenceId::new(helper.to_string())
                 .unwrap(),
             true,
         )
         .unwrap();
-    authority.authorize_configured(phase.server()).unwrap();
-    authority.authorize_configured(phase.server()).unwrap();
-    assert!(phase.resource.registration_slots.lock().unwrap().is_empty());
+    authority
+        .authorize_configured(phase.server().unwrap())
+        .unwrap();
+    authority
+        .authorize_configured(phase.server().unwrap())
+        .unwrap();
+    assert!(
+        phase
+            .resource
+            .as_ref()
+            .unwrap()
+            .registration_slots
+            .lock()
+            .unwrap()
+            .is_empty()
+    );
     machine.unregister_session(&helper).await.unwrap();
+}
+
+#[test]
+fn completed_resource_requires_the_exact_authenticated_policy_handle() {
+    use toolkit_mobkit::installed_host::tool_policy::PreparedInstalledToolPolicy;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let phase = phase(&root);
+    phase.capture(0, &surface(false)).unwrap();
+    phase.capture(1, &surface(true)).unwrap();
+    let (setup, _) = phase.complete_bundle(&root.join("complete")).unwrap();
+    let original = phase.policy.compiled();
+    let mut source = original.source.clone();
+    source.source_id.push_str("-other-owner");
+    let changed = meerkat_core::CompiledApplicationToolPolicy::new(
+        original.provider_id.clone(),
+        original.policy_id.clone(),
+        original.revision,
+        source,
+        original.members.clone(),
+    )
+    .unwrap()
+    .canonical_json()
+    .unwrap();
+    let changed = PreparedInstalledToolPolicy::from_canonical(&changed).unwrap();
+    assert!(
+        super::super::resource::SetupResourceSelection::from_completed(&setup, changed).is_err()
+    );
+    assert!(
+        super::super::resource::SetupResourceSelection::from_completed(
+            &setup,
+            phase.prepared_tool_policy()
+        )
+        .is_ok()
+    );
 }
 
 #[tokio::test]
@@ -990,6 +1269,8 @@ async fn replacement_before_destination_cannot_steal_the_pending_original_slot()
     assert!(
         phase
             .resource
+            .as_ref()
+            .unwrap()
             .select_registration(
                 &meerkat_authorization_contracts::evidence::EvidenceId::new(session.to_string())
                     .unwrap(),
@@ -998,11 +1279,11 @@ async fn replacement_before_destination_cannot_steal_the_pending_original_slot()
             .is_err()
     );
     assert_eq!(
-        original_authority.authorize_configured(phase.server()),
+        original_authority.authorize_configured(phase.server().unwrap()),
         Err(McpAttachmentRefusal::NotCurrent)
     );
     assert_eq!(
-        replacement_authority.authorize_configured(phase.server()),
+        replacement_authority.authorize_configured(phase.server().unwrap()),
         Err(McpAttachmentRefusal::NotCurrent)
     );
     machine.unregister_session(&session).await.unwrap();
@@ -1025,14 +1306,27 @@ async fn settled_abandoned_construction_does_not_pin_the_next_registration() {
     let authority = next.configured_mcp_attachment().cloned().unwrap();
     phase
         .resource
+        .as_ref()
+        .unwrap()
         .select_registration(
             &meerkat_authorization_contracts::evidence::EvidenceId::new(session.to_string())
                 .unwrap(),
             true,
         )
         .unwrap();
-    authority.authorize_configured(phase.server()).unwrap();
-    assert!(phase.resource.registration_slots.lock().unwrap().is_empty());
+    authority
+        .authorize_configured(phase.server().unwrap())
+        .unwrap();
+    assert!(
+        phase
+            .resource
+            .as_ref()
+            .unwrap()
+            .registration_slots
+            .lock()
+            .unwrap()
+            .is_empty()
+    );
     machine.unregister_session(&session).await.unwrap();
 }
 
@@ -1109,13 +1403,14 @@ async fn completed_registration_fixture(
         OperatorOwnerStartup::Restore,
     )
     .unwrap()
-    .complete(policy)
+    .complete(policy.clone())
     .await
     .unwrap();
     // A fresh resource participant is derived from this exact completed output;
     // no compiler-phase Arc or historical registration is carried over.
-    let resource =
-        Arc::new(super::super::resource::SetupResourceSelection::from_completed(&setup).unwrap());
+    let resource = Arc::new(
+        super::super::resource::SetupResourceSelection::from_completed(&setup, policy).unwrap(),
+    );
     let mut configuration = owner.take_configuration().unwrap();
     configuration.configured_mcp_attachment = Some(Arc::new(
         super::super::resource::SetupResourceProvider::new(
@@ -1177,7 +1472,11 @@ async fn completed_bundle_restore_uses_fresh_native_registration_and_rechecks_ar
         authority.authorize_configured(&changed),
         Err(McpAttachmentRefusal::Mismatch)
     );
-    std::fs::write(&setup.resources.handoff.path, b"changed completed handoff").unwrap();
+    std::fs::write(
+        &setup.resources.as_ref().unwrap().handoff.path,
+        b"changed completed handoff",
+    )
+    .unwrap();
     assert_eq!(
         authority.authorize_configured(resource.server()),
         Err(McpAttachmentRefusal::Unavailable)
@@ -1242,8 +1541,8 @@ fn final_helper_mcp_projection_allows_only_the_requested_bundled_target_insertio
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().canonicalize().unwrap();
     let mut input = selected(&root);
-    let retained_base = input.helper.controller_parent.clone();
-    input.helper.operation_basis = WorkAuthorityBasis::TargetedGrantLineages {
+    let retained_base = input.helper.as_ref().unwrap().controller_parent.clone();
+    input.helper.as_mut().unwrap().operation_basis = WorkAuthorityBasis::TargetedGrantLineages {
         base: Some(retained_base.clone()),
         targets: vec![],
     };
@@ -1252,7 +1551,8 @@ fn final_helper_mcp_projection_allows_only_the_requested_bundled_target_insertio
         .unwrap()
         .prepare(super::super::tests::prepared(&root))
         .unwrap();
-    let realm = meerkat_core::mob_realm_id(&phase.input.helper.member.mob_id).unwrap();
+    let realm =
+        meerkat_core::mob_realm_id(&phase.input.helper.as_ref().unwrap().member.mob_id).unwrap();
     let operator = meerkat::governed_realm::stock::StockPrincipals::for_local_operator(&realm)
         .unwrap()
         .operator;
@@ -1267,11 +1567,11 @@ fn final_helper_mcp_projection_allows_only_the_requested_bundled_target_insertio
     reference.grant_id = request.issuance_id.clone();
     let added = TargetGrantLineage {
         target: GrantTarget::McpServer {
-            server: phase.server().name.clone(),
+            server: phase.server().unwrap().name.clone(),
         },
         lineage: vec![reference],
     };
-    let mut helper = phase.helper().clone();
+    let mut helper = phase.helper().unwrap().clone();
     helper.operation_basis = WorkAuthorityBasis::TargetedGrantLineages {
         base: Some(retained_base.clone()),
         targets: vec![added.clone()],
@@ -1317,9 +1617,9 @@ fn final_helper_mcp_projection_allows_only_the_requested_bundled_target_insertio
     phase
         .retain_authorities_with_helper_mcp(selected, helper.clone(), Some(&request))
         .unwrap();
-    assert!(phase.final_authorities.get().unwrap().helper == helper);
+    assert!(phase.final_authorities.get().unwrap().helper.as_ref() == Some(&helper));
     assert!(
-        phase.input.helper.operation_basis
+        phase.input.helper.as_ref().unwrap().operation_basis
             == WorkAuthorityBasis::TargetedGrantLineages {
                 base: Some(retained_base),
                 targets: vec![],
@@ -1338,15 +1638,15 @@ fn final_helper_mcp_projection_cannot_replace_an_existing_target() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().canonicalize().unwrap();
     let mut input = selected(&root);
-    let realm = meerkat_core::mob_realm_id(&input.helper.member.mob_id).unwrap();
+    let realm = meerkat_core::mob_realm_id(&input.helper.as_ref().unwrap().member.mob_id).unwrap();
     let operator = meerkat::governed_realm::stock::StockPrincipals::for_local_operator(&realm)
         .unwrap()
         .operator;
     // Inert projection values with a valid selected operator. Only the occupied
     // target's issuance identity changes below; missing ownership cannot mask it.
-    let mut prior = input.helper.controller_parent.clone();
+    let mut prior = input.helper.as_ref().unwrap().controller_parent.clone();
     prior[0].root_authority = operator.clone();
-    input.helper.operation_basis = WorkAuthorityBasis::TargetedGrantLineages {
+    input.helper.as_mut().unwrap().operation_basis = WorkAuthorityBasis::TargetedGrantLineages {
         base: None,
         targets: vec![TargetGrantLineage {
             target: GrantTarget::McpServer {
@@ -1364,7 +1664,7 @@ fn final_helper_mcp_projection_cannot_replace_an_existing_target() {
     let request = PreparedHelperMcpRequest {
         issuance_id: EvidenceId::new("replacement-parent").unwrap(),
     };
-    let mut helper = phase.helper().clone();
+    let mut helper = phase.helper().unwrap().clone();
     let WorkAuthorityBasis::TargetedGrantLineages { targets, .. } = &mut helper.operation_basis
     else {
         unreachable!()
@@ -1376,7 +1676,7 @@ fn final_helper_mcp_projection_cannot_replace_an_existing_target() {
             .is_err()
     );
     phase
-        .retain_authorities(selected, phase.helper().clone())
+        .retain_authorities(selected, phase.helper().unwrap().clone())
         .unwrap();
 }
 
@@ -1392,7 +1692,9 @@ fn held_helper_session_requires_capture_and_the_complete_matching_inventory() {
     let ordinary_identity = inert
         .held_member_identity(&inert.input.members[0].member)
         .unwrap();
-    let helper_identity = inert.held_member_identity(&inert.helper().member).unwrap();
+    let helper_identity = inert
+        .held_member_identity(&inert.helper().unwrap().member)
+        .unwrap();
     assert!(
         inert
             .held_helper_session([(ordinary_identity, &ordinary), (helper_identity, &helper)])
@@ -1415,7 +1717,7 @@ fn held_helper_session_requires_capture_and_the_complete_matching_inventory() {
         .held_member_identity(&captured.input.members[0].member)
         .unwrap();
     let helper_identity = captured
-        .held_member_identity(&captured.helper().member)
+        .held_member_identity(&captured.helper().unwrap().member)
         .unwrap();
     assert!(
         captured
@@ -1459,11 +1761,11 @@ fn final_helper_catalog_projection_adds_only_requested_base_and_keeps_targets() 
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().canonicalize().unwrap();
     let mut input = selected(&root);
-    let realm = meerkat_core::mob_realm_id(&input.helper.member.mob_id).unwrap();
+    let realm = meerkat_core::mob_realm_id(&input.helper.as_ref().unwrap().member.mob_id).unwrap();
     let operator = meerkat::governed_realm::stock::StockPrincipals::for_local_operator(&realm)
         .unwrap()
         .operator;
-    let mut reference = input.helper.controller_parent[0].clone();
+    let mut reference = input.helper.as_ref().unwrap().controller_parent[0].clone();
     reference.root_authority = operator.clone();
     let target = TargetGrantLineage {
         target: GrantTarget::McpServer {
@@ -1471,7 +1773,7 @@ fn final_helper_catalog_projection_adds_only_requested_base_and_keeps_targets() 
         },
         lineage: vec![reference.clone()],
     };
-    input.helper.operation_basis = WorkAuthorityBasis::TargetedGrantLineages {
+    input.helper.as_mut().unwrap().operation_basis = WorkAuthorityBasis::TargetedGrantLineages {
         base: None,
         targets: vec![target.clone()],
     };
@@ -1487,7 +1789,7 @@ fn final_helper_catalog_projection_adds_only_requested_base_and_keeps_targets() 
     };
     // Inert output reference, not native issuance/currentness evidence.
     reference.grant_id = request.issuance_id.clone();
-    let mut helper = phase.helper().clone();
+    let mut helper = phase.helper().unwrap().clone();
     helper.operation_basis = WorkAuthorityBasis::TargetedGrantLineages {
         base: Some(vec![reference.clone()]),
         targets: vec![target],
@@ -1533,11 +1835,13 @@ fn final_helper_catalog_projection_adds_only_requested_base_and_keeps_targets() 
     phase
         .retain_authorities_with_helper_access(selected, helper.clone(), None, Some(&request))
         .unwrap();
-    assert!(phase.final_authorities.get().unwrap().helper == helper);
+    assert!(phase.final_authorities.get().unwrap().helper.as_ref() == Some(&helper));
     assert!(
         phase
             .input
             .helper
+            .as_ref()
+            .unwrap()
             .operation_basis
             .lineage_for(None)
             .is_none(),
@@ -1554,13 +1858,13 @@ fn final_helper_catalog_projection_cannot_replace_an_occupied_base() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().canonicalize().unwrap();
     let mut input = selected(&root);
-    let realm = meerkat_core::mob_realm_id(&input.helper.member.mob_id).unwrap();
+    let realm = meerkat_core::mob_realm_id(&input.helper.as_ref().unwrap().member.mob_id).unwrap();
     let operator = meerkat::governed_realm::stock::StockPrincipals::for_local_operator(&realm)
         .unwrap()
         .operator;
-    let mut prior = input.helper.controller_parent.clone();
+    let mut prior = input.helper.as_ref().unwrap().controller_parent.clone();
     prior[0].root_authority = operator.clone();
-    input.helper.operation_basis = WorkAuthorityBasis::TargetedGrantLineages {
+    input.helper.as_mut().unwrap().operation_basis = WorkAuthorityBasis::TargetedGrantLineages {
         base: Some(prior),
         targets: vec![],
     };
@@ -1574,7 +1878,7 @@ fn final_helper_catalog_projection_cannot_replace_an_occupied_base() {
         scope: Default::default(),
         issuance_id: EvidenceId::new("replacement-catalog-parent").unwrap(),
     };
-    let mut helper = phase.helper().clone();
+    let mut helper = phase.helper().unwrap().clone();
     let WorkAuthorityBasis::TargetedGrantLineages { base, .. } = &mut helper.operation_basis else {
         unreachable!()
     };
@@ -1586,7 +1890,7 @@ fn final_helper_catalog_projection_cannot_replace_an_occupied_base() {
     );
     assert!(phase.final_authorities.get().is_none());
     phase
-        .retain_authorities(selected, phase.helper().clone())
+        .retain_authorities(selected, phase.helper().unwrap().clone())
         .unwrap();
 }
 
@@ -1602,13 +1906,13 @@ fn final_helper_catalog_successor_parent_requires_explicit_scope_and_preserves_o
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().canonicalize().unwrap();
     let mut input = selected(&root);
-    let realm = meerkat_core::mob_realm_id(&input.helper.member.mob_id).unwrap();
+    let realm = meerkat_core::mob_realm_id(&input.helper.as_ref().unwrap().member.mob_id).unwrap();
     let operator = meerkat::governed_realm::stock::StockPrincipals::for_local_operator(&realm)
         .unwrap()
         .operator;
-    let mut reference = input.helper.controller_parent[0].clone();
+    let mut reference = input.helper.as_ref().unwrap().controller_parent[0].clone();
     reference.root_authority = operator.clone();
-    input.helper.operation_basis = WorkAuthorityBasis::TargetedGrantLineages {
+    input.helper.as_mut().unwrap().operation_basis = WorkAuthorityBasis::TargetedGrantLineages {
         base: None,
         targets: vec![],
     };
@@ -1623,7 +1927,7 @@ fn final_helper_catalog_successor_parent_requires_explicit_scope_and_preserves_o
         issuance_id: EvidenceId::new("explicit-successor-catalog-parent").unwrap(),
     };
     reference.grant_id = request.issuance_id.clone();
-    let mut helper = phase.helper().clone();
+    let mut helper = phase.helper().unwrap().clone();
     helper.catalog_capability = Some(ConfiguredHelperCatalogCapability {
         parent: vec![reference.clone()],
     });
@@ -1676,8 +1980,11 @@ fn final_helper_catalog_successor_parent_requires_explicit_scope_and_preserves_o
     phase
         .retain_authorities_with_helper_access(selected, helper.clone(), None, Some(&request))
         .unwrap();
-    assert!(phase.final_authorities.get().unwrap().helper == helper);
-    assert_eq!(helper.operation_basis, phase.input.helper.operation_basis);
+    assert!(phase.final_authorities.get().unwrap().helper.as_ref() == Some(&helper));
+    assert_eq!(
+        helper.operation_basis,
+        phase.input.helper.as_ref().unwrap().operation_basis
+    );
 }
 
 // Read the real Core bundle composition at its public session-builder boundary.
@@ -1719,7 +2026,7 @@ async fn prepared_helper_report_identity_matches_native_bundle_mount() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().canonicalize().unwrap();
     let phase = phase(&root);
-    let helper = phase.helper().member.clone();
+    let helper = phase.helper().unwrap().member.clone();
     let observed = Arc::new(Mutex::new(None));
     let service = Arc::new(meerkat_session::EphemeralSessionService::new(
         ReportBundleSurfaceProbe(observed.clone()),
@@ -1793,6 +2100,88 @@ async fn prepared_helper_report_identity_matches_native_bundle_mount() {
 }
 
 mod resource_aggregate;
+mod resource_classes;
+
+/// Actual native registration fixture for the attempt consumer controls.
+/// Selection is the same mechanical hook port as the resource tests above;
+/// only the SDK case exercises the real selected-destination callback.
+pub(crate) struct AttemptRegistrationFixture {
+    pub source_member: meerkat_core::MobMemberBinding,
+    pub member: meerkat_core::MobMemberBinding,
+    pub session: meerkat_core::SessionId,
+    pub participant: Arc<crate::application_setup::resource::SetupResourceRegistration>,
+    pub machine: Arc<meerkat_runtime::MeerkatMachine>,
+    _owner: toolkit_mobkit::installed_host::PreparedInstalledHost,
+    _authority: Arc<dyn meerkat_core::mcp_attachment::ConfiguredMcpAttachmentAuthority>,
+}
+pub(crate) async fn attempt_registration_fixture(
+    root: &Path,
+    helper_identity: Option<&str>,
+) -> AttemptRegistrationFixture {
+    let (phase, machine, owner) = if let Some(identity) = helper_identity {
+        // Select the member in compiler input before validation, helper-role
+        // projection, authority preparation or native session registration.
+        // A new SessionId alone reconstructs the same native member.
+        let mut input = selected(root);
+        let member_id = roster_member_id_for_identity(identity).to_string();
+        input.roster[1].identity =
+            meerkat_mobkit::identity_first::AgentIdentity::parse(identity).unwrap();
+        input.members[1].member.member = member_id.clone();
+        input.helper.as_mut().unwrap().member.member = member_id.clone();
+        input.tool_policy.members[1].member_identity = member_id;
+        input
+            .tool_policy
+            .members
+            .sort_by(|a, b| a.member_identity.cmp(&b.member_identity));
+        let phase = input
+            .validate()
+            .unwrap()
+            .prepare(super::super::tests::prepared(root))
+            .unwrap();
+        phase.retain_owner(owner_selection(&phase, None)).unwrap();
+        registration_fixture_from_phase(root, phase).await
+    } else {
+        // Keep the already-qualified storage/failure fixture selection exact.
+        registration_fixture(root).await
+    };
+    let session = meerkat_core::SessionId::new();
+    machine.register_session(session.clone()).await.unwrap();
+    let bindings = machine.prepare_bindings(session.clone()).await.unwrap();
+    let authority = bindings.configured_mcp_attachment().cloned().unwrap();
+    let participant = phase
+        .resource
+        .as_ref()
+        .unwrap()
+        .registration_slots
+        .lock()
+        .unwrap()
+        .get(&session.to_string())
+        .unwrap()
+        .upgrade()
+        .unwrap();
+    phase
+        .resource
+        .as_ref()
+        .unwrap()
+        .select_registration(
+            &meerkat_authorization_contracts::evidence::EvidenceId::new(session.to_string())
+                .unwrap(),
+            true,
+        )
+        .unwrap();
+    authority
+        .authorize_configured(phase.server().unwrap())
+        .unwrap();
+    AttemptRegistrationFixture {
+        source_member: phase.source_helper_member.clone().unwrap(),
+        member: phase.helper().unwrap().member.clone(),
+        session,
+        participant,
+        machine,
+        _owner: owner,
+        _authority: authority,
+    }
+}
 
 /// Direct-router LocalRound controls retain the ordinary compiler resource and
 /// use this existing mechanical destination hook after actual native binding.
@@ -1808,10 +2197,10 @@ pub(crate) struct LocalRoundRegistrationFixture {
 #[cfg(all(unix, feature = "console"))]
 impl LocalRoundRegistrationFixture {
     pub(crate) fn server(&self) -> &meerkat_core::McpServerConfig {
-        self.phase.server()
+        self.phase.server().unwrap()
     }
     pub(crate) fn member(&self) -> &meerkat_core::MobMemberBinding {
-        &self.phase.helper().member
+        &self.phase.helper().unwrap().member
     }
     pub(crate) async fn register(&mut self) -> meerkat_core::SessionId {
         let session = meerkat_core::SessionId::new();
@@ -1829,6 +2218,8 @@ impl LocalRoundRegistrationFixture {
         self.authorities.push(authority.clone());
         self.phase
             .resource
+            .as_ref()
+            .unwrap()
             .select_registration(
                 &meerkat_authorization_contracts::evidence::EvidenceId::new(session.to_string())
                     .unwrap(),
@@ -1883,4 +2274,173 @@ pub(crate) async fn local_round_registration_fixture(
         },
         attempts,
     )
+}
+
+pub(crate) fn helperless_input(
+    root: &Path,
+    empty: bool,
+) -> (
+    ApplicationSetupCompilationInput,
+    meerkat_toolkit::host_lifetime::policy::PreparedLocalPolicy,
+) {
+    let mut input = with_uninstantiated_class(root);
+    let principal = input.members[0].logical_owner.clone();
+    let helper = input.helper.take().unwrap();
+    input.helper_profile = None;
+    input.helper_tools = None;
+    input.members.retain(|row| row.member != helper.member);
+    input
+        .roster
+        .retain(|row| row.identity.as_str() != "helper:setup");
+    input
+        .tool_policy
+        .members
+        .retain(|row| row.member_identity != helper.member.member);
+    if empty {
+        input.members.clear();
+        input.roster.clear();
+        input.tool_policy.members.clear();
+    }
+    std::fs::remove_file(root.join("helper-surface.json")).unwrap();
+    let owner = meerkat_toolkit::host_lifetime::policy::PreparedLocalPolicy {
+        deployment: toolkit_package::Id::new("helperless-application").unwrap(),
+        components: vec![],
+        channels: vec![],
+        native_host: meerkat_toolkit::host_lifetime::policy::PreparedNativeHost {
+            authentication_domain: None,
+            event_domain: None,
+            realm: meerkat_core::mob_realm_id(input.definition.resolve().unwrap().id.as_str())
+                .unwrap(),
+            grant_administrator: principal.clone(),
+            remote_operator: None,
+            service_parent_administration: None,
+            ingress_domain: meerkat_authorization_contracts::constraints::ResourceDomain {
+                authority: principal,
+                namespace: "helperless-application".into(),
+            },
+            members: input.members.clone(),
+            member_classes: input.member_classes.clone(),
+            routes: vec![],
+        },
+    };
+    (input, owner)
+}
+
+#[test]
+fn helperless_compiler_keeps_explicit_policy_and_writes_only_final_artifacts() {
+    for empty in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let (input, mut owner) = helperless_input(&root, empty);
+        let native = &mut owner.native_host;
+        native.authentication_domain = Some(
+            meerkat_authorization_contracts::constraints::ResourceDomain {
+                authority: native.ingress_domain.authority.clone(),
+                namespace: "application-login".into(),
+            },
+        );
+        native.event_domain = Some(
+            meerkat_authorization_contracts::constraints::ResourceDomain {
+                authority: native.ingress_domain.authority.clone(),
+                namespace: "application-events".into(),
+            },
+        );
+        let expected_owner = owner.clone();
+        let encoded = toolkit_package::canonical_json(&input).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+        for name in ["helper", "helper_tools", "helper_profile"] {
+            assert!(value.get(name).is_none());
+        }
+        let roster = input.roster.clone();
+        let policy = input.tool_policy.clone().compile().unwrap();
+        let phase = input.validate().unwrap().prepare_without_helper().unwrap();
+        assert!(
+            phase.helper().is_none()
+                && phase.server().is_none()
+                && phase.resource_selection().is_none()
+        );
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0);
+        assert!(phase.complete_bundle(&root.join("too-early")).is_err());
+        phase.retain_owner(owner).unwrap();
+        if !empty {
+            assert!(phase.validate_finished(std::iter::empty()).is_err());
+            let capture = phase.capture(0, &surface(false)).unwrap();
+            phase
+                .validate_finished([(&roster[0].identity, &capture)])
+                .unwrap();
+        } else {
+            phase.validate_finished(std::iter::empty()).unwrap();
+        }
+        // Captured bytes remain with the compiler until it writes the complete
+        // output. This inert control does not claim actual native held finish.
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0);
+        let (setup, manifest) = phase.complete_bundle(&root.join("complete")).unwrap();
+        assert_eq!(setup.native_owner.as_ref(), Some(&expected_owner));
+        let reread: PreparedApplicationSetup = serde_json::from_slice(
+            &std::fs::read(root.join("complete/application-setup.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(reread.native_owner.as_ref(), Some(&expected_owner));
+        assert_eq!(
+            setup.artifact_directory.as_deref(),
+            Some(root.join("complete").as_path())
+        );
+        assert!(setup.resources.is_none() && setup.helper.is_none() && setup.server.is_none());
+        assert_eq!(
+            std::fs::read(root.join("complete/application-tool-policy.json")).unwrap(),
+            policy
+        );
+        assert_eq!(
+            std::fs::read_dir(root.join("complete")).unwrap().count(),
+            3 + usize::from(!empty)
+        );
+        assert_eq!(
+            hash(&std::fs::read(manifest.path).unwrap()),
+            manifest.sha256
+        );
+        assert_eq!(setup.project_roster(&roster).unwrap(), roster);
+        let mut partial = setup.clone();
+        partial.helper_tools = Some(ApplicationSetupTools::Preparation);
+        assert!(partial.validate_helperless().is_err());
+        assert!(phase.complete_bundle(&root.join("complete")).is_err());
+        assert!(!root.join("retained-preparer").exists());
+    }
+}
+
+#[test]
+fn helperless_selection_refuses_partial_helper_groups_and_unselected_empty_inventory() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().canonicalize().unwrap();
+    let input = selected(&root);
+    let before = serde_json::to_value(&input).unwrap();
+    assert_eq!(
+        serde_json::to_value(
+            serde_json::from_value::<ApplicationSetupCompilationInput>(before.clone()).unwrap()
+        )
+        .unwrap(),
+        before
+    );
+    for field in ["helper", "helper_tools", "helper_profile"] {
+        let mut partial = before.clone();
+        partial.as_object_mut().unwrap().remove(field);
+        assert!(
+            serde_json::from_value::<ApplicationSetupCompilationInput>(partial)
+                .unwrap()
+                .validate()
+                .is_err()
+        );
+    }
+    let (mut empty, _) = helperless_input(&root, true);
+    let valid = empty.clone();
+    empty.member_classes.clear();
+    assert!(empty.validate().is_err());
+    let mut no_policy = serde_json::to_value(valid.clone()).unwrap();
+    no_policy["tool_policy"]
+        .as_object_mut()
+        .unwrap()
+        .remove("members");
+    assert!(serde_json::from_value::<ApplicationSetupCompilationInput>(no_policy).is_err());
+    let mut extra_policy = valid;
+    extra_policy.tool_policy.members = input.tool_policy.members;
+    assert!(extra_policy.validate().is_err());
 }

@@ -3,27 +3,30 @@
   "host": "Existing docs.rkat.ai Mintlify project",
   "destination_repository": "lukacf/meerkat",
   "destination_docs_path": "docs/connect",
-  "connect_source_commit": "540c3d1845b4338ac11260661fba540c83229f9c",
-  "connect_source_state": "clean_commit",
-  "connect_source_version": "0.9.0",
-  "pages": 50,
-  "fenced_blocks_preserved": 55,
-  "namespaced_links": 161,
+  "source_repository": "lukacf/meerkat",
+  "source_docs_path": "connect/docs/site",
+  "source_docs_tree": "9b9ed54b656285522da2960a1a6b0b1a379baca2",
+  "connect_source_commit": "c5b339a8d78f1a214a6fa7e5a995b750b0fbf857",
+  "connect_source_state": "monorepo_sync",
+  "connect_source_version": "0.9.4",
   "existing_products_unchanged": true,
   "static_validation": "pass",
   "mirror_adjustments": [
-    "Prose that named a downstream host product describes it neutrally, and package identifiers that named it take the neutral names of this repository's Connect source (connect/sdk/python). The device extension example is published as examples/device-extension.mdx. rendered_sha256 covers the adjusted pages."
+    "None. The source pages already use neutral names (the connect/ sync); rendering only adds the /connect prefix to root-relative links outside fenced code blocks."
   ],
+  "pages": 52,
+  "fenced_blocks_preserved": 72,
+  "namespaced_links": 203,
   "files": [
     {
       "path": "acquisition/local-install.mdx",
-      "source_sha256": "849c33d9ec87808049ad3ce293b44ce24ac21f8f27cb9598c29615cc26643612",
-      "rendered_sha256": "4056583b904b02e3fefdcc6e4240a6234d5b4b8079ecd0a726a5c2c6963bada3"
+      "source_sha256": "aa47338dcc7aec679a6b989f8822967409aa701f1a3635acb58d2f91a8e41ce1",
+      "rendered_sha256": "8e26699cb5aac51b3b3124e081357068ba34c6abc0e9b4da3f5064c94ae5ff66"
     },
     {
       "path": "api/acquisition.mdx",
-      "source_sha256": "ce40b8e02fa1e4efede03839bcf79bdc0e9ca3094f46040e74f028b7c6c5c943",
-      "rendered_sha256": "f172bb4e3e9c0076d3d700af0027da87cf9de4834734e61ecd9b31315d2c6826"
+      "source_sha256": "081fa003f05a3daff2eebe27f7a65296722c9aeaecaf2d1b9d816c8a296c49b7",
+      "rendered_sha256": "b503dbb64edd6c30211f3821d41e6804eefae61da80552ce27cb2205fdd52cfd"
     },
     {
       "path": "api/discovery.mdx",
@@ -32,8 +35,8 @@
     },
     {
       "path": "availability.mdx",
-      "source_sha256": "54903bb8eb8d68de2cfc425bc18d88db8d97424b621b3717620d9f4d7d3598c9",
-      "rendered_sha256": "c6743462143ecd9750b31e957b0689a1c2317c9400b21c5765ba5adb4895c378"
+      "source_sha256": "b7a7519ead9e9632e7ba184c94111432f5976d25347173b1f5113c24f5d9ced6",
+      "rendered_sha256": "91d0a12ae66755b7da22248bedb716e4753d211b771e9ca4da4fa7a00823fb02"
     },
     {
       "path": "concepts/acquisition.mdx",
@@ -47,7 +50,7 @@
     },
     {
       "path": "concepts/ownership.mdx",
-      "source_sha256": "4a52e1d9db8cb1894d9d6c1c55ac37c5783c7b8f5bc323305bbcf34ced57a6e4",
+      "source_sha256": "f312ca768d4abec89fbe4a28e402d721fed436c23cf70a049d93b2ed8de54cd6",
       "rendered_sha256": "fea711177f79ddc03820fccb0447ff2f38ba7fbfff4d07a714d2007cc8700996"
     },
     {
@@ -57,18 +60,18 @@
     },
     {
       "path": "concepts/roles.mdx",
-      "source_sha256": "bf9b6b25fbad2e4bde4d97fc480cb07e33e20526e93d4f503df6b79013bbcf42",
-      "rendered_sha256": "c001a99560548ab701e2301e0307f5b9fb08b529588986d7060d095523920eea"
+      "source_sha256": "93f5db8ef697abe691f7072cb03bc4bd1748950409d2a37cf5fd4110079da682",
+      "rendered_sha256": "3b5cf1152ed6bc6cae771d34700f561bb91e6137311c6ad73467a87bc6ab8545"
     },
     {
       "path": "contributing/validation.mdx",
-      "source_sha256": "21770824d3d6c4c7fc006b9f57dff9d6834ab2f02aeaed36126eb10e370c865e",
-      "rendered_sha256": "b81eab7e171577099f5178a057c99eb0a4473068d31f1d086871a6a87ce9fdf5"
+      "source_sha256": "317c0cf6f616d85aa46255802a118e2767f608967cca7b7f52b77877d6d9c642",
+      "rendered_sha256": "131c9364b9cabf54c9c3a9da3aa29c726ab8dfff821218909cd09d4d7466d1b4"
     },
     {
       "path": "examples/device-extension.mdx",
-      "source_sha256": "39317ce44e5a7029303bde23ac082449561d8430fe1f4fd68eabb550ebaa6491",
-      "rendered_sha256": "a0ba4c29dc0c96a02ad7d4c403277b67b0d3f76eccf8c6f085df48a4db6eccbd"
+      "source_sha256": "8f15b186197215a963c1f8b96a4f5c9c1118b490ecd46e6afe1b31d43b38c61b",
+      "rendered_sha256": "8f15b186197215a963c1f8b96a4f5c9c1118b490ecd46e6afe1b31d43b38c61b"
     },
     {
       "path": "examples/organizational-host.mdx",
@@ -87,23 +90,23 @@
     },
     {
       "path": "guides/agent-frontends.mdx",
-      "source_sha256": "eafa675dbfe9fdfcccee019adf90657c81dcec4fc788e87490088162f031d517",
+      "source_sha256": "8a6dbcb02124e0361b3a3e00dd639a6f4fb4b66cee389c968be0d6e184a48133",
       "rendered_sha256": "be34adb117da1a21c338ef1360fbd780337f43246b8b2cf2f719734a5a779445"
     },
     {
       "path": "guides/host-composition.mdx",
-      "source_sha256": "614fe5df7298361b5f203ea87720330222776e893c2e1d32e70ffe349f640d24",
-      "rendered_sha256": "c8191cad748a7acce91245db95bcfddbd8841d0aaa8da0bf84ef56d0221e3e92"
+      "source_sha256": "2f7ae3f6016577ce2fc560db15be921a818d5c33f5779b66073e970d9bd7ea7d",
+      "rendered_sha256": "cb16d25a1d7ac12d97348c0176f7555adc3185975f4c1b68784b060d0a649061"
     },
     {
       "path": "guides/manage-connections.mdx",
-      "source_sha256": "f52a4521acfbca43d2eb27e989da836f386c68d662953a4b648a9535bed99481",
-      "rendered_sha256": "02b74d0fe3a23ec07b301e6cd686666987f2c79fb0f3b40560825d3fde1354e3"
+      "source_sha256": "38626e5f5f583f21fe887c462df41a5619feda3658ab250ac939c034f60c884b",
+      "rendered_sha256": "b8b60bdae3c0e22f5be8a8dfa80d59d07ead5534426aa3965a087045ba2fa5db"
     },
     {
       "path": "guides/native-mcp.mdx",
-      "source_sha256": "6bb95923d37941a835abd72aadd9519199daeae41b3b5a3e993c4b23469f48d0",
-      "rendered_sha256": "cac7b01d1f4459d500962d988513c3ffbf10010fa35c0c80f50db48b3d68b27a"
+      "source_sha256": "bebc5a0c6ce26fa96d49b99c0b2837cb9fe13331806e31bd3df0d8caf0efe601",
+      "rendered_sha256": "4233f7e063de2dcf493ddfdecaef50e853e4430c9f19e24e14f46197ffc614f3"
     },
     {
       "path": "guides/port-an-integration.mdx",
@@ -111,9 +114,19 @@
       "rendered_sha256": "b8d923c5d12a374a0bf478641f6e9bbc65f2d73ec7dc5260657a85f2e1a7d166"
     },
     {
+      "path": "guides/protected-service-host.mdx",
+      "source_sha256": "ec2d28704ce5a57bf6e8f6900a63472e862eef33407da2270b4f6ca6f6e327da",
+      "rendered_sha256": "bd72c44bc299f57641a16eabeb7850a50bf8efebba2ed0f1af9ed6f44cd1c8ad"
+    },
+    {
       "path": "guides/request-an-integration.mdx",
-      "source_sha256": "0b63a35ef1eb9f51402fc84b546fb3a22a6e890ffa6be6b9db1112e82e70ad0e",
-      "rendered_sha256": "878c55d322f9f629595c6e130e1a78b1b584dd60d167ae94fa3030c0bbefc20a"
+      "source_sha256": "ea8db8eca1479652efa8e41b874aee53731ab1385569de556f7bc79e93e97452",
+      "rendered_sha256": "c4ae04a04fda45cec90d26b7fff5058a4157436c2138d70a2ccb6d7d68629336"
+    },
+    {
+      "path": "guides/service-collections.mdx",
+      "source_sha256": "00e5eb10ce5f0d9944bbd91026dfbb8c326ad0e7673e8b0f05c45b6f28748b6f",
+      "rendered_sha256": "2bf989b13dc6c8ad2ae9d9307431659f92403cdb0e551e8c2c207f2ab0321291"
     },
     {
       "path": "guides/service-connectors.mdx",
@@ -122,8 +135,8 @@
     },
     {
       "path": "guides/setup-a-frontend.mdx",
-      "source_sha256": "753020342a81a6cbbbfe816b4d9582fe024ce45f6e0066ae08964e5b6316cc51",
-      "rendered_sha256": "87f06f0d32249bccb936026f47cb45179f85741bd7a1944a65f92c22d1cdc4bd"
+      "source_sha256": "076dd36c1f2a989dafdeb7dfd1853156568c2fdbdde4cf3d0d1a60235612f03a",
+      "rendered_sha256": "ce409e34677b92b41ffb611bb34473ecd1dbd8f494fa6e8373223267f740ab99"
     },
     {
       "path": "introduction.mdx",
@@ -142,8 +155,8 @@
     },
     {
       "path": "library/github.mdx",
-      "source_sha256": "89ff290162d11f4186dde402974364172e8b238a091d613a6a48c8391e75f51c",
-      "rendered_sha256": "cb8324e15c543e8846b36c12862595945847ca06cc7344c42a5d0d7c5eb578ed"
+      "source_sha256": "dc869caf0cf3e622d4536508e20ee22503f44b3063e5de3eb679c924c0bef57e",
+      "rendered_sha256": "0fc8aa484e6833c6e8a9f2dd23089bf9d0c34e4587434058f80b75c551be0a9d"
     },
     {
       "path": "library/local-install.mdx",
@@ -167,18 +180,18 @@
     },
     {
       "path": "operations/troubleshooting.mdx",
-      "source_sha256": "d544297ee9f61f8caa5a19a8cccbc27ca56f98cc4285c91b9c8c453904cbffdd",
-      "rendered_sha256": "f954ea4e922780ceeada9ab5851917a9f353517f12ede5f03a826c5597b54b12"
+      "source_sha256": "5f8901f38e459c148f4b3010fbb5afcf781202a63c7ac52a9b2aad73fc17e8a6",
+      "rendered_sha256": "a3b6a92ac55b2c096b33ed99789b55088c208ad07a10fbe53f6aed786a614c9b"
     },
     {
       "path": "quickstart.mdx",
-      "source_sha256": "39eb81c5ea89bea71b8dad07b52f2b05bbc261446da182cac6b674c8e00cc986",
-      "rendered_sha256": "d37b8020538552399c737de56916a9a67797cde60d456a6a71f666d035f920cb"
+      "source_sha256": "7a5bcfb98deb8b4e8249466363569147bfb6e2113c8fe3033b0ce360d743d5d2",
+      "rendered_sha256": "5a7ef5afd80df133527fda35a3cd43040d863280cbc0c4f78cf834123de159ed"
     },
     {
       "path": "reference/access-control.mdx",
-      "source_sha256": "b7ef7238d85a3ddda71905ae3da4340d4cde056934716d09b3821ab2a37c8be6",
-      "rendered_sha256": "b7ef7238d85a3ddda71905ae3da4340d4cde056934716d09b3821ab2a37c8be6"
+      "source_sha256": "358f131572b0fc533e7b8165bb841327c00613feb1f3f77b7b2d880c57524df0",
+      "rendered_sha256": "358f131572b0fc533e7b8165bb841327c00613feb1f3f77b7b2d880c57524df0"
     },
     {
       "path": "reference/architecture.mdx",
@@ -197,23 +210,23 @@
     },
     {
       "path": "reference/continuation.mdx",
-      "source_sha256": "eb572deebb8c68d9a65e9cf18f34a151a7111d1ec1dd9cb506fee2b7da893eaf",
-      "rendered_sha256": "4feaa627a3314e02935142e044f7a663adb896792f3aca11e11baaa33e635317"
+      "source_sha256": "7134c9e4731b1384f995302e368caec4856495affb238d4ca957e43c6e9a63fb",
+      "rendered_sha256": "52a74d655dac55eda0dc5868414fc117b1a89c17e007a69589280beeb0083e54"
     },
     {
       "path": "reference/deployment.mdx",
-      "source_sha256": "caa371b73b430c7dfec762d1705b8070e4937413bdc18c105fed697eb54cc81f",
-      "rendered_sha256": "4fabc2775d070737fb7511b16c67cf582f21a462e89de8d41aba5bc3b30f5ea7"
+      "source_sha256": "cb4ab4dccf199f1658b83bf00455e760da94425d920783f011090093443e12be",
+      "rendered_sha256": "2fb414de199fe2cfe1078e7b458f7bcde85bce34185065d4a41fd027df2fb832"
     },
     {
       "path": "reference/packages.mdx",
-      "source_sha256": "444bf087cfbe57697b92501ac2cb71c9d3723295ccc853389510cdc713f6a36e",
-      "rendered_sha256": "a813fe762c75c4ee6b2acf5e9f002cb9203afc65c2b9146cd592b7e1b45f1b23"
+      "source_sha256": "6243286c83bb185c0cfc837709b855f29567d15860c767dcb5e27d076ecfda4d",
+      "rendered_sha256": "82c4c1a518e5f3b5ae4a935beb5135ce0a9b71684170d4a228d7902dc78254c0"
     },
     {
       "path": "reference/portability.mdx",
-      "source_sha256": "3407ed5e640fd4910a80d824f9a53a74f1a2680e3c1502f74abcc4c3a21e7906",
-      "rendered_sha256": "3407ed5e640fd4910a80d824f9a53a74f1a2680e3c1502f74abcc4c3a21e7906"
+      "source_sha256": "1cca1127ba97499e062467c04182f38c96837a8236004fd695e8a9c3909d065b",
+      "rendered_sha256": "1cca1127ba97499e062467c04182f38c96837a8236004fd695e8a9c3909d065b"
     },
     {
       "path": "reference/stores.mdx",
@@ -232,18 +245,18 @@
     },
     {
       "path": "sdks/python-frontends.mdx",
-      "source_sha256": "10641beb93a7fae407771a495b878a43c12cb06d6d9345932893d452a939696f",
-      "rendered_sha256": "04b649233485067ca5a89680ae846153790e071940c843ec3177c61c49c55e71"
+      "source_sha256": "054945393eaecc9f6643f762d5662a07d786058ffc01bb8a416b45483f5e68ec",
+      "rendered_sha256": "ea68b27d386e0f33e883eb8e7085e19d4d59013e22461352a7480c123ecb3d47"
     },
     {
       "path": "sdks/python.mdx",
-      "source_sha256": "f6e808d7b39c79a14937373e0f2173f8f80be9ddf5f63748b2348ad8c20b5c0f",
-      "rendered_sha256": "dccdefd9d89aa5a96eea465b8951568247e7db23e244e601a14e842ae848bfb3"
+      "source_sha256": "e00b2043ae9596ce88de259e97666a1e9715d42d2a2fe1cb1a8d1aad48f59152",
+      "rendered_sha256": "d5231111cca0b53cd4ade1938aa39cf43dc9ab97b66912e9bf426642eb9eb1f2"
     },
     {
       "path": "sdks/rust.mdx",
-      "source_sha256": "5391ba8f06ca8268bf3002a624689c3c67c0c1d3149289d55dc0ccc983f03159",
-      "rendered_sha256": "7126068761990bd2f26aa0ef6ba5cbea4e6682203345f9c6af4c9e254648c871"
+      "source_sha256": "1ffadba4bda019f975d4d84838a0530d2633d9edcfcbdf3413c7538d1d6b547b",
+      "rendered_sha256": "0cb26254621c594772d372701d31c5088204b444ad2c42b35943583cb658526f"
     },
     {
       "path": "sdks/service-profiles.mdx",
@@ -257,8 +270,8 @@
     },
     {
       "path": "sdks/typescript.mdx",
-      "source_sha256": "edcc04bb75295043bedb1173d088e8994240af892ac60bd05031d3baf39f7d3c",
-      "rendered_sha256": "6f3f33078bf0cd1a4b245c6787563461bfc72b621af10810ace976d81a4a11d7"
+      "source_sha256": "2a33d868d62d360e2f1d9aa070e47600f76d3f0020ea12fae6649afc3dde80b6",
+      "rendered_sha256": "337d1066bd28e5098e3df70927e37386d5c9bbf1c94cbb596fe43f86454c7e5b"
     },
     {
       "path": "sdks/ui.mdx",

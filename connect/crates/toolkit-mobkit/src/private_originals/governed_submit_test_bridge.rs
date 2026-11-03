@@ -46,7 +46,9 @@ impl ObservedBridge {
         }
         let helper_control = matches!(
             self.fault.mode,
-            DeliveryMode::HoldHelperBeforeLookup | DeliveryMode::HoldHelperAcceptedReply
+            DeliveryMode::HoldHelperBeforeBind
+                | DeliveryMode::HoldHelperBeforeLookup
+                | DeliveryMode::HoldHelperAcceptedReply
         );
         if helper_control {
             if self.fault.helper_session.get() != Some(session_id) {
@@ -86,6 +88,7 @@ impl ObservedBridge {
         let accepted = self.fault.accepted.fetch_add(1, Ordering::SeqCst) + 1;
         match self.fault.mode {
             DeliveryMode::Normal
+            | DeliveryMode::HoldHelperBeforeBind
             | DeliveryMode::HoldHelperBeforeLookup
             | DeliveryMode::RefuseSecondBeforeLookup
             | DeliveryMode::HelperPolicyChangesOnce
@@ -444,6 +447,13 @@ impl SessionBridge for ObservedBridge {
         self.inner.member_durability(session_id).await
     }
 
+    async fn member_registration(
+        &self,
+        session_id: &meerkat_core::types::SessionId,
+    ) -> Option<meerkat_runtime::RuntimeSessionRegistrationWitness> {
+        self.inner.member_registration(session_id).await
+    }
+
     async fn raw_member_alias_exists(&self, alias: &str) -> Result<bool, BridgeError> {
         self.inner.raw_member_alias_exists(alias).await
     }
@@ -489,12 +499,18 @@ impl SessionBridge for ObservedBridge {
         identity: &AgentIdentity,
         spec: &DurableAgentSpec,
         draft: &AgentBuildDraft,
-    ) -> Result<SessionId, BridgeError> {
+    ) -> Result<meerkat_core::types::SessionId, BridgeError> {
         self.inner.rotate_member(identity, spec, draft).await
     }
 
     async fn release_member(&self, identity: &AgentIdentity) -> Result<(), BridgeError> {
         self.inner.release_member(identity).await
+    }
+
+    async fn broken_members(
+        &self,
+    ) -> Result<std::collections::BTreeMap<meerkat_mob::AgentIdentity, String>, BridgeError> {
+        self.inner.broken_members().await
     }
 
     async fn capture_queued_member_inputs(
@@ -698,7 +714,27 @@ impl SessionBridge for ObservedBridge {
         runtime_id: &AgentRuntimeId,
         session_id: &meerkat_core::types::SessionId,
     ) -> Result<meerkat_core::ControllerModelClient, BridgeAdmissionError> {
-        self.inner.governed_controller(runtime_id, session_id).await
+        let controller = self
+            .inner
+            .governed_controller(runtime_id, session_id)
+            .await?;
+        if matches!(self.fault.mode, DeliveryMode::HoldHelperBeforeBind)
+            && self.fault.helper_session.get() == Some(session_id)
+        {
+            let lookup = self
+                .fault
+                .helper_controller_lookups
+                .fetch_add(1, Ordering::SeqCst)
+                + 1;
+            // complete() and advance() each prepare the real helper controller.
+            // The third lookup belongs to the already retained SubmitHelperBinder;
+            // Meta calls bind only after this unchanged controller is returned.
+            if lookup == 3 {
+                self.fault.entered.notify_one();
+                self.fault.release.acquire().await.unwrap().forget();
+            }
+        }
+        Ok(controller)
     }
 
     async fn begin_delivery_with_output(

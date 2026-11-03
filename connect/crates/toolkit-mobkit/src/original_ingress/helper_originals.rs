@@ -17,7 +17,7 @@ use meerkat_authorization_contracts::{
     resource::ResourceRef,
     work_association::{InputAuthorityAssociationCandidate, NativeWorkTarget},
 };
-use meerkat_core::{ToolDispatchContext, types::ToolCallView};
+use meerkat_core::EnteredDispatchOperation;
 use meerkat_workgraph::{
     CreateWorkItemRequest, ExternalWorkRef, WorkAdmission, WorkAdmissionKey, WorkAdmissionOutcome,
     WorkGraphAdmissionFence, WorkGraphError, WorkGraphService, WorkItemId, WorkNamespace,
@@ -631,6 +631,7 @@ impl ToolkitOriginalOwner {
         saved: &StoredRecord,
     ) -> Result<RetainedHelperSource, OriginalWriterError> {
         self.check_canonical_source(store, scope)?;
+        let _writer = self.try_source_writer()?;
         let record = cold_helper_record(scope, saved)?;
         let (_, association) = record.bound()?;
         let contributors = {
@@ -667,11 +668,15 @@ impl ToolkitOriginalOwner {
             target: c.target.clone(),
             authority_basis: c.authority_basis.clone(),
         };
+        let observation = super::CanonicalBindingObservation::historical(
+            association,
+            record.custody_attempt.as_ref(),
+        )?;
         let original = self.publish_binding(
             association.clone(),
             custody,
             OriginalGrantBinding::Helper,
-            None,
+            observation,
         )?;
         Ok(RetainedHelperSource {
             original,
@@ -710,8 +715,7 @@ impl ToolkitOriginalOwner {
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn admit_fenced_helper(
         self: &Arc<Self>,
-        call: ToolCallView<'_>,
-        context: &ToolDispatchContext,
+        entered: &EnteredDispatchOperation,
         store: &dyn ToolkitStore,
         source_scope: &StoreScope,
         service: &WorkGraphService,
@@ -723,10 +727,10 @@ impl ToolkitOriginalOwner {
         contributors: &[Arc<RetainedToolkitOriginal>],
         own_originals: &[Arc<RetainedToolkitOriginal>],
         selection: HelperAdmissionSelection,
+        review: crate::review_custody::ReviewCustody,
     ) -> Result<AdmittedHelperWork, OriginalWriterError> {
         self.access_fenced_helper(
-            call,
-            context,
+            entered,
             store,
             source_scope,
             service,
@@ -739,6 +743,7 @@ impl ToolkitOriginalOwner {
             own_originals,
             selection,
             HelperAdmissionUse::Create,
+            review,
         )
         .await?
         .ok_or(OriginalWriterError::Unavailable)
@@ -751,8 +756,7 @@ impl ToolkitOriginalOwner {
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn observe_fenced_helper(
         self: &Arc<Self>,
-        call: ToolCallView<'_>,
-        context: &ToolDispatchContext,
+        entered: &EnteredDispatchOperation,
         store: &dyn ToolkitStore,
         source_scope: &StoreScope,
         service: &WorkGraphService,
@@ -764,10 +768,10 @@ impl ToolkitOriginalOwner {
         contributors: &[Arc<RetainedToolkitOriginal>],
         own_originals: &[Arc<RetainedToolkitOriginal>],
         selection: HelperAdmissionSelection,
+        review: crate::review_custody::ReviewCustody,
     ) -> Result<Option<AdmittedHelperWork>, OriginalWriterError> {
         self.access_fenced_helper(
-            call,
-            context,
+            entered,
             store,
             source_scope,
             service,
@@ -780,6 +784,7 @@ impl ToolkitOriginalOwner {
             own_originals,
             selection,
             HelperAdmissionUse::Observe,
+            review,
         )
         .await
     }
@@ -787,8 +792,7 @@ impl ToolkitOriginalOwner {
     #[allow(clippy::too_many_arguments)]
     async fn access_fenced_helper(
         self: &Arc<Self>,
-        call: ToolCallView<'_>,
-        context: &ToolDispatchContext,
+        entered: &EnteredDispatchOperation,
         store: &dyn ToolkitStore,
         source_scope: &StoreScope,
         service: &WorkGraphService,
@@ -801,6 +805,7 @@ impl ToolkitOriginalOwner {
         own_originals: &[Arc<RetainedToolkitOriginal>],
         selection: HelperAdmissionSelection,
         usage: HelperAdmissionUse,
+        review: crate::review_custody::ReviewCustody,
     ) -> Result<Option<AdmittedHelperWork>, OriginalWriterError> {
         self.check_canonical_source(store, source_scope)?;
         store
@@ -850,20 +855,18 @@ impl ToolkitOriginalOwner {
         // the source's retained basis alone is not recursive custody.
         let complete_contributors =
             qualified_helper_originals(contributors.iter().map(|original| original.association()));
-        // Native extracts its own exact operation and policy from this live
-        // borrowed call/context. Only its owned fence enters the blocking task;
-        // neither a reconstructed call nor a caller-supplied policy is used.
-        let fence = GovernedHelperAdmissionFence::from_dispatch(
-            call,
-            context,
+        // The leaf supplied the typed witness of this exact entered operation.
+        // Native redecides each Create or live Observe step without spending
+        // again; no reconstructed call or caller-supplied policy is used.
+        let fence = GovernedHelperAdmissionFence::from_entered(
+            entered,
             self.clone(),
             complete_contributors,
             grant.realm_id.clone(),
             WorkNamespace::new(grant.namespace.clone())
                 .map_err(|_| OriginalWriterError::Conflict)?,
             admission.clone(),
-        )
-        .map_err(helper_admission_refusal)?;
+        );
         let service = service.clone();
         let runtime = tokio::runtime::Handle::current();
         let exact_admission = admission.clone();
@@ -878,28 +881,35 @@ impl ToolkitOriginalOwner {
         // This fresh fence belongs only to this one operation. Retain its
         // report handle locally; never share/reuse it for another attempt.
         let report = fence.clone();
-        let result = tokio::task::spawn_blocking(move || match usage {
-            HelperAdmissionUse::Create => runtime
-                .block_on(service.create_idempotent_with_fence(admission_key, request, fence))
-                .map(Some),
-            HelperAdmissionUse::Observe => {
-                // The entire read result stays private until current native
-                // disclosure, including absence, conflict and backend errors.
-                let mut pending =
-                    Some(runtime.block_on(service.observe_admission(admission_key, request)));
-                let mut observed = None;
-                fence.execute_if_current(
-                    &realm,
-                    &namespace,
-                    &exact_admission,
-                    Box::new(|| {
-                        observed = pending.take();
-                        Ok(())
-                    }),
-                )?;
-                observed.ok_or_else(|| {
-                    WorkGraphError::Conflict("native helper observation was not executed".into())
-                })?
+        let entered = entered.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            let _entered = entered;
+            let _review = review;
+            match usage {
+                HelperAdmissionUse::Create => runtime
+                    .block_on(service.create_idempotent_with_fence(admission_key, request, fence))
+                    .map(Some),
+                HelperAdmissionUse::Observe => {
+                    // The entire read result stays private until current native
+                    // disclosure, including absence, conflict and backend errors.
+                    let mut pending =
+                        Some(runtime.block_on(service.observe_admission(admission_key, request)));
+                    let mut observed = None;
+                    fence.execute_if_current(
+                        &realm,
+                        &namespace,
+                        &exact_admission,
+                        Box::new(|| {
+                            observed = pending.take();
+                            Ok(())
+                        }),
+                    )?;
+                    observed.ok_or_else(|| {
+                        WorkGraphError::Conflict(
+                            "native helper observation was not executed".into(),
+                        )
+                    })?
+                }
             }
         })
         .await
@@ -1126,8 +1136,16 @@ impl ToolkitOriginalOwner {
             target: c.target.clone(),
             authority_basis: c.authority_basis.clone(),
         };
-        let original =
-            self.publish_binding(association, custody, OriginalGrantBinding::Helper, None)?;
+        let observation = super::CanonicalBindingObservation::historical(
+            &association,
+            settled.custody_attempt.as_ref(),
+        )?;
+        let original = self.publish_binding(
+            association,
+            custody,
+            OriginalGrantBinding::Helper,
+            observation,
+        )?;
         Ok(RetainedHelperSource {
             original,
             source_record: Arc::new(saved),
@@ -1434,8 +1452,8 @@ impl ToolkitOriginalOwner {
     }
 
     /// Source integrity only. Live callers supply the exact staged subset from
-    /// canonical lookup and still enter native from_dispatch with the unchanged
-    /// borrowed call/context. Native checks all accepted associations, ceilings
+    /// canonical lookup and still enter native with the same operation witness.
+    /// Native checks all accepted associations, ceilings
     /// and current permission; this source check never substitutes for that.
     fn check_helper_sources(
         &self,
@@ -1527,6 +1545,9 @@ impl ToolkitOriginalOwner {
                     Some(SourceCustody::Candidate) => {
                         candidate = true;
                     }
+                    Some(SourceCustody::RestorationUnknown) => {
+                        return Err(OriginalWriterError::Unavailable);
+                    }
                     None => return Err(OriginalWriterError::WrongOwner),
                 }
             }
@@ -1583,7 +1604,9 @@ fn helper_admission_result<T>(
     refusal: Option<HelperAdmissionRefusal>,
 ) -> Result<T, OriginalWriterError> {
     match (result, refusal) {
-        (Err(_), Some(HelperAdmissionRefusal::Denied)) => Err(OriginalWriterError::OperationDenied),
+        (Err(_), Some(HelperAdmissionRefusal::Denied)) => {
+            Err(helper_admission_refusal(HelperAdmissionRefusal::Denied))
+        }
         (Err(_), Some(HelperAdmissionRefusal::Unavailable) | None) | (Ok(_), Some(_)) => {
             Err(OriginalWriterError::Unavailable)
         }
@@ -1840,7 +1863,7 @@ mod tests {
                 association.clone(),
                 source(&association),
                 OriginalGrantBinding::Helper,
-                None,
+                super::CanonicalBindingObservation::Unretained,
             )
             .unwrap();
         let pending = owner.record_candidate(&original).unwrap();

@@ -92,8 +92,17 @@ async fn cancellation_case(
                 },
             );
             let record = SourceRecord {
+                console_child_input: None,
+                peer_ingress: None,
+                native_operations: None,
+                late_workflow_helper: None,
+                workflow_child: None,
+                class_input: None,
                 custody_attempt: None,
+                custody_input: None,
+                shared_preparations: Vec::new(),
                 bound_service_input: None,
+                planning_source_evidence: None,
                 setup_request: None,
                 configured_setup: None,
                 service_setup_children: vec![],

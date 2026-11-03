@@ -412,7 +412,7 @@ fn assert_reviewed_catalog_scope(
         .authority_basis
         .lineage_for(None)
         .unwrap();
-    let route = fixture.source.route(&reference.route).unwrap();
+    let route = &fixture.source.route(&reference.route).unwrap();
     let grants = fixture.source.owner.grants();
     let resolved = grants
         .resolve_lineage(
@@ -500,7 +500,7 @@ fn revoke(
     reference: &PrivateOriginalRef,
     selected: impl IntoIterator<Item = GrantLineageRef>,
 ) {
-    let route = fixture.source.route(&reference.route).unwrap();
+    let route = &fixture.source.route(&reference.route).unwrap();
     let mut custody = fixture.machine.try_controller_grant_mutation().unwrap();
     for leaf in selected {
         fixture
@@ -1121,7 +1121,7 @@ async fn warm_case(setup_refusal: bool) {
             // Native revocation, not parent source cancellation: cancelling A
             // would correctly cancel the business-linked descendants too.
             revoke(&fixture, fixture.original_reference(), leaves(&a));
-            let route = fixture.source.route(&b.route).unwrap();
+            let route = &fixture.source.route(&b.route).unwrap();
             for lineage in a.candidate().authority_basis.grant_lineages() {
                 assert!(
                     fixture

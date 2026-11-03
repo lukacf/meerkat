@@ -3078,12 +3078,19 @@ jobs:
           retention-days: 7
 
   connect-checks:
-    name: Connect packaging, Console panel and docs
+    name: Connect packaging, host adapters, SDK, Console panel and docs
     needs: [changes, stagger]
-    # Meerkat Connect's non-Rust checks (its former checks.yml): the
-    # packaging scripts' unit tests, the docs check and the embedded Console
-    # panel's Node test. Every change under connect/ selects them (the
-    # plan's product lane connect_checks).
+    # Meerkat Connect's non-Rust checks (its former checks.yml): the build
+    # receipt, packaging, library release, candidate and installed-acceptance
+    # script tests, the product and starter preparation tests, the immutable
+    # preparation and product readback tests, the hosted MCP callback
+    # tests, the docs check and the TypeScript SDK suite with the embedded
+    # Console panel test. None of them builds native code or needs an
+    # account. Every change under connect/ selects them (the plan's product
+    # lane connect_checks). Connect's standalone repo-cargo wrapper test is
+    # not run here: the monorepo builds with the root scripts/repo-cargo.
+    # Meta's Python SDK comes from this tree (../meta/sdk/python), not from
+    # a meerkat-meta release on PyPI.
     if: ${{ needs.changes.outputs.connect_checks == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -3103,26 +3110,88 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Check inert package construction and validation
+      - name: Check build receipts and qualification cleanup without native builds
         run: >-
-          python3 -m unittest -v
-          scripts.test_package_connect_resources
-          scripts.test_assemble_connect_product
+          python3 -B -m unittest -v
+          scripts.test_verify_local
+          scripts.test_qualify_connect_cli
+
+      - name: Check historical artifact bindings without native builds
+        run: >-
+          python3 -B -m unittest discover -s scripts/fixtures
+          -p 'test_historical_g_current_binding.py' -v
+
+      - name: Check inert package construction and validation
+        run: |
+          python3 -B -m unittest discover -s scripts -p 'test_package_connect_resource*.py' -v
+          python3 -B -m unittest -v scripts.test_assemble_connect_product
+          python3 -B -m unittest -v scripts.test_package_library_release.ReleaseTests scripts.test_package_github_enterprise
+
+      - name: Install candidate and preparation test dependencies
+        run: python3 -m pip install --disable-pip-version-check pytest==9.0.2 mcp==2.2.0
+
+      - name: Check candidate producer and publication contracts without native builds
+        run: >-
+          python3 -B -m pytest -q -p no:cacheprovider
+          scripts/test_connect_candidate_cli.py
+          scripts/test_connect_candidate_publication.py
 
       - name: Check documentation
         run: python3 scripts/check-docs.py
+
+      - name: Check installed acceptance contracts without accounts or native builds
+        # The shared workflow controls import Connect's Python SDK
+        # (meerkat_toolkit) and Meta's (meerkat_meta), both from this tree.
+        env:
+          PYTHONPATH: scripts:sdk/python/src:../meta/sdk/python
+        run: >-
+          python3 -B -m unittest -v
+          scripts.test_verify_installed_github
+          scripts.test_native_fixture_stack
+          scripts.test_console_reopen_status
+          scripts.test_verify_supplied_shared_workflow.HelperlessRestoreControls
+          scripts.test_verify_supplied_shared_workflow.ColdSharedRestoreControls
+          scripts.test_verify_supplied_shared_workflow.BothSelectedSuccessControls
+
+      - name: Check product and starter preparation
+        run: |
+          python3 -B -m unittest discover -s sdk/consumer-setup/tests -p 'test_start.py'
+          python3 -B -m unittest discover -s scripts/tests -p 'test_export_setup_starter.py'
+
+      - name: Check immutable preparation and product readback
+        # The official GitHub readback of the selected-reads profile is left
+        # out by name: its fixture bundle is the macOS arm64 build, which the
+        # official installer refuses on this Linux runner ("official setup
+        # supports macOS arm64 only"). The two Enterprise readbacks (Linux
+        # x86_64 bundles) run.
+        env:
+          PYTHONPATH: sdk/consumer-setup/tests
+        run: >-
+          python3 -B -m unittest -v
+          test_product_local_session test_immutable_release
+          test_product_official_readback.OfficialProductTests.test_enterprise_readback_preserves_selected_host_profile_and_operation_subset
+          test_product_official_readback.OfficialProductTests.test_enterprise_identity_readback_preserves_protected_account_selection
+
+      - name: Check hosted MCP callback transport and lifecycle
+        env:
+          PYTHONPATH: sdk/python/src:sdk/python/tests
+        run: >-
+          python3 -m unittest -v
+          test_mcp_auth_https test_mcp_auth_custody
+          test_mcp_auth_host test_hosted_mcp_endpoint_adversarial
 
       - name: Setup Node
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: "22"
 
-      - name: Install locked panel test dependencies
+      - name: Install locked SDK and panel test dependencies
         working-directory: connect/sdk/typescript
         run: npm ci --ignore-scripts --no-audit --no-fund
 
-      - name: Test the embedded Console panel
-        run: node --test sdk/typescript/tests/console-setup-panel.test.mjs
+      - name: Test the TypeScript SDK and embedded Console panel
+        working-directory: connect/sdk/typescript
+        run: npm test
 
   gate:
     name: CI gate

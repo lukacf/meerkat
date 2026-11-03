@@ -9,25 +9,34 @@ mod enrollment;
 pub(crate) use enrollment::AcquisitionToolBinding;
 pub use enrollment::InstalledAcquisitionTools;
 mod task_approval;
+mod workflow_calls;
 pub use task_approval::InstalledServiceTaskSource;
 pub(crate) mod recovery;
 mod results;
+#[cfg(feature = "test-support")]
+pub use recovery::{AcquisitionRecoveryObservation, AcquisitionRecoveryTaskObservation};
 pub use results::setup_report_definition;
+pub(crate) mod context_recovery;
+pub use context_recovery::{
+    InstalledWorkflowContextRead, InstalledWorkflowContextSelector,
+    installed_workflow_context_selector,
+};
 mod bootstrap;
 pub(crate) use bootstrap::AcquisitionBootstrap;
 pub use bootstrap::{
     AcquisitionBootstrapStatus, AcquisitionDisabledReason, InstalledSetupBootstrap,
 };
 mod admission;
+pub(crate) use admission::installed_invocation_correlation;
 mod continuation;
 pub use admission::{
-    InstalledOriginalInvocation, InstalledOriginalTaskOwner, InstalledSetupDefaults,
-    InstalledSetupLimits, InstalledSetupPreparer,
+    InstalledOriginalInvocation, InstalledOriginalTaskBinding, InstalledOriginalTaskOwner,
+    InstalledSetupDefaults, InstalledSetupLimits, InstalledSetupPreparer,
 };
 pub use continuation::InstalledNativeContinuation;
 #[cfg(test)]
 pub(crate) use continuation::owner_tests::{ContextProbe, ProbeProvider};
-pub(crate) use coordinator::SetupWorkerObservation;
+pub(crate) use coordinator::{SetupAdvanceError, SetupWorkerObservation};
 
 use crate::{
     FindAndInstallTool, HostToolAdmission, SetupToolHost, ToolAdmissionError,
@@ -178,6 +187,10 @@ pub(crate) struct InstalledAcquisition {
     continuation: Arc<dyn SetupContinuationDelivery>,
     work_step: WorkAdmissionStepOptions,
     tools: InstalledAcquisitionTools,
+    // Same stop boundary as the existing joined worker. No worker means no
+    // context-transfer attempt can enter through this acquisition.
+    transfer_recovery: std::sync::Mutex<Option<std::sync::Weak<recovery::RecoveryControl>>>,
+    context_recovery: std::sync::OnceLock<InstalledWorkflowContextSelector>,
 }
 
 impl InstalledAcquisition {
@@ -247,6 +260,8 @@ impl InstalledAcquisition {
             continuation: owners.continuation,
             work_step: owners.work_step,
             tools,
+            transfer_recovery: std::sync::Mutex::new(None),
+            context_recovery: std::sync::OnceLock::new(),
         })
     }
 
@@ -399,8 +414,15 @@ impl SetupToolHost for CanonicalSetupHost {
             .originals
             .acquisition_original(context)
             .await
-            .map_err(source_admission_error)?;
-        let admission = self.inner.admit_invocation(call_id, context).await?;
+            .map_err(source_admission_error)
+            .inspect_err(|error| crate::aa1_admission_failure("canonical.original", error))?;
+        let admission = self
+            .inner
+            .admit_invocation(call_id, context)
+            .await
+            .inspect_err(|error| {
+                crate::aa1_admission_failure("canonical.inner_admission", error)
+            })?;
         #[cfg(test)]
         let pause = self.recheck_pause.lock().unwrap().take();
         #[cfg(test)]
@@ -408,7 +430,10 @@ impl SetupToolHost for CanonicalSetupHost {
             pause.entered.notify_one();
             pause.release.acquire().await.unwrap().forget();
         }
-        let result = self.recheck_admission(context, &original, admission).await;
+        let result = self
+            .recheck_admission(context, &original, admission)
+            .await
+            .inspect_err(|error| crate::aa1_admission_failure("canonical.recheck", error));
         #[cfg(test)]
         if let Some(pause) = pause {
             *pause.result.lock().unwrap() = Some(match &result {

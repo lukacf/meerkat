@@ -55,18 +55,24 @@ impl PrivateOriginals {
             .native_host
             .as_ref()
             .ok_or(PrivateOriginalError::Unavailable)?;
-        let selected = native
+        let Some(selected) = native
             .routes
             .iter()
             .find(|route| route.id == reference.route)
-            .ok_or(PrivateOriginalError::Conflict)?;
+        else {
+            // A current dynamic caller may bind its reviewed original without
+            // opting into static stock continuation recovery. Unknown or
+            // retired routes still refuse through the actual member owner.
+            self.selected_source_route(&reference.route)?;
+            return Ok(false);
+        };
         if !matches!(
             selected.origin,
             meerkat_toolkit::host_lifetime::policy::CompiledNativeSourceOrigin::LocalConsole { .. }
         ) {
             return Ok(false);
         }
-        let route = self.route(&reference.route)?;
+        let route = &self.route(&reference.route)?;
         let operator =
             meerkat::governed_realm::stock::StockPrincipals::for_local_operator(&native.realm)
                 .map_err(|_| PrivateOriginalError::Unavailable)?
@@ -240,6 +246,101 @@ impl PrivateOriginals {
         drop(writer);
         #[cfg(test)]
         Self::synthetic_admission_diagnostic("cold.source_record.checked", ());
+        if let Some(member) = &binding.member {
+            // A seat-only restore has no executor yet. Resolve the historical
+            // session through the bound runtime's canonical owner history;
+            // the saved member name is not necessarily a durable identity.
+            let runtime = self.bound_identity_runtime()?;
+            #[cfg(test)]
+            Self::synthetic_admission_diagnostic("cold.member_runtime.returned", ());
+            let (_, selected, context) = self.selected_source_route(&reference.route)?;
+            #[cfg(test)]
+            Self::synthetic_admission_diagnostic("cold.member_route.returned", ());
+            if selected.member != *member
+                || runtime.owner().handle().definition().id.as_str() != member.mob_id
+                || context.as_ref().is_some_and(|context| {
+                    context.as_str() != binding.origin_session_id.to_string()
+                })
+            {
+                return Err(PrivateOriginalError::Unavailable);
+            }
+            #[cfg(test)]
+            Self::synthetic_admission_diagnostic("cold.member_route.checked", ());
+            let identity = runtime
+                .core_session_owner(&binding.origin_session_id)
+                .await
+                .map_err(|_| PrivateOriginalError::Unavailable)?
+                .ok_or(PrivateOriginalError::Unavailable)?;
+            #[cfg(test)]
+            Self::synthetic_admission_diagnostic("cold.member_owner.returned", ());
+            let status = runtime
+                .status(&identity)
+                .await
+                .map_err(|_| PrivateOriginalError::Unavailable)?;
+            #[cfg(test)]
+            Self::synthetic_admission_diagnostic("cold.member_status.returned", ());
+            if status.session_id.as_ref() != Some(&binding.origin_session_id)
+                || status.member_id.as_deref() != Some(member.member.as_str())
+            {
+                return Err(PrivateOriginalError::Unavailable);
+            }
+            #[cfg(test)]
+            Self::synthetic_admission_diagnostic("cold.member_status.checked", ());
+            let current = runtime
+                .owner()
+                .handle()
+                .get_member(&meerkat_mob::AgentIdentity::from(member.member.as_str()))
+                .await
+                .map_err(|_| PrivateOriginalError::Unavailable)?
+                .ok_or(PrivateOriginalError::Unavailable)?;
+            #[cfg(test)]
+            Self::synthetic_admission_diagnostic("cold.member_roster.returned", ());
+            if current.role.as_str() != member.role
+                || current.bridge_session_id() != Some(&binding.origin_session_id)
+            {
+                return Err(PrivateOriginalError::Unavailable);
+            }
+            #[cfg(test)]
+            Self::synthetic_admission_diagnostic("cold.member_roster.checked", ());
+            // The public wake has no expected-session parameter. Reject known
+            // replacement before it and check the returned scope afterward;
+            // native historical custody/currentness below still decides entry.
+            #[cfg(test)]
+            Self::synthetic_admission_diagnostic("cold.member_materialize.entered", ());
+            let materialized = runtime.materialize_tracked(&identity).await;
+            #[cfg(test)]
+            match &materialized {
+                Err(error) => {
+                    Self::synthetic_admission_diagnostic("cold.member_materialize.err", ());
+                    Self::synthetic_admission_diagnostic(
+                        Self::synthetic_identity_runtime_error_kind(error),
+                        (),
+                    );
+                }
+                Ok(None) => {
+                    Self::synthetic_admission_diagnostic("cold.member_materialize.none", ())
+                }
+                Ok(Some(_)) => {
+                    Self::synthetic_admission_diagnostic("cold.member_materialize.some", ())
+                }
+            }
+            let scope = materialized
+                .map_err(|_| PrivateOriginalError::Unavailable)?
+                .ok_or(PrivateOriginalError::Unavailable)?;
+            if scope.session_id() != &binding.origin_session_id
+                || scope.agent_identity().as_str() != member.member
+                || runtime
+                    .core_session_owner(&binding.origin_session_id)
+                    .await
+                    .map_err(|_| PrivateOriginalError::Unavailable)?
+                    .as_ref()
+                    != Some(&identity)
+            {
+                return Err(PrivateOriginalError::Unavailable);
+            }
+            #[cfg(test)]
+            Self::synthetic_admission_diagnostic("cold.member_scope.checked", ());
+        }
         #[cfg(test)]
         Self::synthetic_admission_diagnostic("cold.controller_source.entered", ());
         let pins = self
@@ -289,6 +390,10 @@ impl PrivateOriginals {
         let contributor = &binding.retained_work.contributors()[0];
         #[cfg(test)]
         Self::synthetic_admission_diagnostic("cold.native_observation.started", ());
+        // Observe only fixed callback checkpoints in synthetic tests. The native
+        // callback performs no diagnostic I/O; emit after its custody returns.
+        #[cfg(test)]
+        let callback_stage = std::sync::atomic::AtomicU8::new(0);
         let observed = machine
             .with_admitted_original(
                 &registration,
@@ -297,20 +402,44 @@ impl PrivateOriginals {
                 &input,
                 |admitted| {
                     #[cfg(test)]
-                    Self::synthetic_admission_diagnostic("cold.native_callback.entered", ());
+                    callback_stage.store(1, std::sync::atomic::Ordering::Relaxed);
                     let _writer = self.owner.try_source_writer().map_err(writer_error)?;
+                    #[cfg(test)]
+                    callback_stage.store(2, std::sync::atomic::Ordering::Relaxed);
                     stamp
                         .check_current()
                         .map_err(|_| PrivateOriginalError::Unavailable)?;
+                    #[cfg(test)]
+                    callback_stage.store(3, std::sync::atomic::Ordering::Relaxed);
                     if admitted.input_id() != &contributor.input_id {
                         return Err(PrivateOriginalError::Conflict);
                     }
+                    #[cfg(test)]
+                    callback_stage.store(4, std::sync::atomic::Ordering::Relaxed);
                     self.owner
                         .promote_historical_task(association, custody, &sources, admitted)
                         .map_err(writer_error)
                 },
             )
             .await;
+        #[cfg(test)]
+        {
+            let stage = callback_stage.load(std::sync::atomic::Ordering::Relaxed);
+            if stage != 0 {
+                Self::synthetic_admission_diagnostic("cold.native_callback.entered", ());
+            }
+            Self::synthetic_admission_diagnostic(
+                "cold.native_callback.last_started",
+                match stage {
+                    0 => "callback_not_entered",
+                    1 => "source_writer",
+                    2 => "publication_stamp",
+                    3 => "input_identity",
+                    4 => "historical_promotion",
+                    _ => "unexpected_checkpoint",
+                },
+            );
+        }
         let retained = match observed {
             Ok(result) => {
                 #[cfg(test)]

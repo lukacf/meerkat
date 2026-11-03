@@ -30,6 +30,8 @@ pub(crate) mod public;
 pub(crate) use application::compose_application_policy_requests;
 #[cfg(all(unix, feature = "console"))]
 pub(crate) use application::compose_selected_policy_requests;
+#[cfg(all(unix, feature = "console"))]
+pub(crate) use application::{ServicePolicySource, compose_shared_public_requests};
 #[cfg(test)]
 mod tests;
 

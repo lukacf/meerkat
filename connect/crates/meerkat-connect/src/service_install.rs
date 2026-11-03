@@ -19,6 +19,7 @@ use meerkat_core::{
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
+pub(crate) mod read_only;
 mod remote;
 mod retained;
 pub(crate) use remote::{PublicServiceSelection, RemoteSelection};
@@ -43,6 +44,17 @@ const READBACK_SCOPE: &str = "retained_payload_and_launch_binding_only";
 
 fn refused(name: &str) -> ToolError {
     ToolError::access_denied(name)
+}
+fn setup_dispatch_refusal(stage: &'static str, error: &ToolError) {
+    let kind = match error.primary_error() {
+        ToolError::AccessDenied { .. } => "access_denied",
+        ToolError::OperationAuthorizationUnavailable => "authorization_unavailable",
+        ToolError::OperationObservationUnavailable => "observation_unavailable",
+        _ => "other",
+    };
+    eprintln!(
+        "{{\"event\":\"toolkit_shared_dispatch_refused\",\"stage\":\"{stage}\",\"kind\":\"{kind}\"}}"
+    );
 }
 fn unavailable() -> ToolError {
     ToolError::execution_failed(
@@ -349,6 +361,7 @@ pub(crate) struct InstalledConnectorSelection {
     pub(crate) raw_operations: std::collections::BTreeSet<String>,
     pub(crate) native_connector: Option<NativeConnectorEntry>,
     owner: Arc<CheckedInstalls>,
+    acquisition: Option<toolkit_package::Id>,
     metadata: OperationEvidence,
     pub(crate) no_credential_references: bool,
     pub(crate) credential_references: Option<Vec<ServiceCredentialReference>>,
@@ -622,10 +635,11 @@ impl InstalledConnectorSelection {
     pub(crate) fn check_current(&self) -> Result<(), ToolError> {
         let selected = self
             .owner
-            .connector_selection(
+            .connector_selection_for(
                 &self.installed.realm,
                 &self.installed.session,
                 &self.installed.job_id,
+                self.acquisition.as_ref(),
             )
             .map_err(|_| unconfirmed())?;
         if selected.installed != self.installed
@@ -683,6 +697,11 @@ pub(crate) fn public_launch_configuration(
         launch.args,
         launch.env,
     );
+    if let Some(cwd) = launch.cwd {
+        config = config
+            .with_cwd(cwd)
+            .map_err(|_| "unsupported_public_launch")?;
+    }
     config.access = Some(meerkat_core::McpServerAccess::allowing(
         operations.iter().cloned(),
     ));
@@ -736,8 +755,35 @@ impl Readback {
     }
 }
 
+type ProposalKey = (Option<toolkit_package::Id>, String);
+
+// This key selects an existing source-owned acquisition; it grants no authority.
+fn acquisition(arguments: &Value) -> Result<Option<toolkit_package::Id>, ToolError> {
+    let object = arguments.as_object().ok_or_else(unconfirmed)?;
+    object
+        .get("setup_acquisition")
+        .map(|value| {
+            toolkit_package::Id::new(value.as_str().ok_or_else(unconfirmed)?)
+                .map_err(|_| unconfirmed())
+        })
+        .transpose()
+}
+
+fn physical_arguments(mut arguments: Value) -> Result<Value, ToolError> {
+    acquisition(&arguments)?;
+    arguments
+        .as_object_mut()
+        .ok_or_else(unconfirmed)?
+        .remove("setup_acquisition");
+    Ok(arguments)
+}
+
+fn proposal_key(arguments: &Value, validation: &str) -> Result<ProposalKey, ToolError> {
+    Ok((acquisition(arguments)?, validation.to_owned()))
+}
+
 pub(crate) struct HeldInstall {
-    key: String,
+    key: ProposalKey,
     call_id: String,
     name: String,
     arguments: String,
@@ -758,7 +804,7 @@ impl HeldInstall {
 
 #[derive(Default)]
 struct State {
-    proposals: BTreeMap<String, Proposal>,
+    proposals: BTreeMap<ProposalKey, Proposal>,
     remote: BTreeMap<String, remote::RemoteCapture>,
     remote_bytes: usize,
     returning: retained::Returning,
@@ -766,7 +812,25 @@ struct State {
     armed: Option<HeldInstall>,
     retired: bool,
     realm: Option<RealmLocator>,
+    #[cfg(unix)]
+    shared_members:
+        BTreeMap<ProposalKey, Arc<toolkit_mobkit::private_originals::InstalledSharedPreparation>>,
+    #[cfg(unix)]
+    shared_resources: Arc<SharedPreparationResources>,
 }
+
+/// Retain only the actual canonical preparation resources across native
+/// composition. Proposals, dispatch bindings and armed reviews remain local
+/// to each new CheckedInstalls owner.
+#[cfg(unix)]
+#[derive(Default)]
+pub(crate) struct SharedPreparationResources {
+    peers: Mutex<BTreeMap<SharedPeerKey, Arc<crate::resources::SharedSetupPeer>>>,
+}
+
+/// The optional acquisition id and the selected validation id.
+#[cfg(unix)]
+type SharedPeerKey = (Option<toolkit_package::Id>, String);
 
 pub(crate) struct CheckedInstalls {
     // Production constructs this only from its exact retained McpRouterAdapter.
@@ -778,6 +842,8 @@ pub(crate) struct CheckedInstalls {
     // Only the standalone composition owns a checked native route. The route
     // never escapes this wrapper into the session's dispatch surface.
     checked_route: Option<Arc<meerkat::CheckedMcpRoute>>,
+    #[cfg(unix)]
+    shared_peer: Option<Arc<crate::resources::SharedSetupCallContext>>,
 }
 impl CheckedInstalls {
     pub(crate) fn new(inner: Arc<meerkat::McpRouterAdapter>) -> Arc<Self> {
@@ -786,6 +852,8 @@ impl CheckedInstalls {
             state: Mutex::new(State::default()),
             software_review: None,
             checked_route: None,
+            #[cfg(unix)]
+            shared_peer: None,
         })
     }
 
@@ -810,6 +878,8 @@ impl CheckedInstalls {
             state: Mutex::new(State::default()),
             software_review: None,
             checked_route: Some(route),
+            #[cfg(unix)]
+            shared_peer: None,
         }))
     }
 
@@ -822,7 +892,120 @@ impl CheckedInstalls {
             state: Mutex::new(State::default()),
             software_review: Some(approvals),
             checked_route: None,
+            #[cfg(unix)]
+            shared_peer: None,
         })
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn with_shared_software_review(
+        inner: Arc<meerkat::McpRouterAdapter>,
+        approvals: Arc<crate::approval::LocalApprovals>,
+        peer: Arc<crate::resources::SharedSetupCallContext>,
+    ) -> Arc<Self> {
+        Self::with_retained_shared_software_review(inner, approvals, peer, Arc::default())
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn with_retained_shared_software_review(
+        inner: Arc<meerkat::McpRouterAdapter>,
+        approvals: Arc<crate::approval::LocalApprovals>,
+        peer: Arc<crate::resources::SharedSetupCallContext>,
+        resources: Arc<SharedPreparationResources>,
+    ) -> Arc<Self> {
+        let mut checked = Self::with_software_review(inner, approvals);
+        let owner = Arc::get_mut(&mut checked).expect("new checked owner");
+        owner.shared_peer = Some(peer);
+        owner
+            .state
+            .get_mut()
+            .expect("new checked state")
+            .shared_resources = resources;
+        checked
+    }
+
+    #[cfg(unix)]
+    async fn release_shared_check(
+        &self,
+        call: ToolCallView<'_>,
+        context: &ToolDispatchContext,
+        plan: Option<&meerkat_core::ResolvedToolExecutionPlan>,
+        outcome: ToolDispatchOutcome,
+    ) -> Result<ToolDispatchOutcome, ToolError> {
+        if outcome.result.is_error {
+            return Ok(outcome);
+        }
+        let pending = result_document(call, &outcome)?;
+        if pending.get("error").is_some() {
+            return Ok(outcome);
+        }
+        if pending.as_object().is_none_or(|value| value.len() != 2)
+            || pending["scope"] != "host_shared_selection_pending"
+        {
+            return Err(unconfirmed());
+        }
+        let ticket = hex(&pending, "ticket", 32).ok_or_else(unconfirmed)?;
+        let peer = self.shared_peer.as_ref().ok_or_else(unavailable)?;
+        let inspected = peer.peer.inspect(ticket).await.map_err(|_| unavailable())?;
+        let selected = meerkat_toolkit::setup::SharedPreparationSelection::from_controller(
+            inspected.selection.clone(),
+        )
+        .map_err(|_| unconfirmed())?;
+        let arguments = document(call.args.get())?;
+        if selected.arguments() != &physical_arguments(arguments.clone())? {
+            return Err(refused(call.name));
+        }
+        let resource = {
+            let resources = self
+                .state
+                .lock()
+                .map_err(|_| unavailable())?
+                .shared_resources
+                .clone();
+            let mut peers = resources.peers.lock().map_err(|_| unavailable())?;
+            let acquisition = acquisition(&arguments)?;
+            let key = (
+                acquisition.clone(),
+                selected
+                    .validation_id()
+                    .map_err(|_| unconfirmed())?
+                    .to_owned(),
+            );
+            if !peers.contains_key(&key) && peers.len() >= MAX_PROPOSALS {
+                return Err(unavailable());
+            }
+            peers
+                .entry(key)
+                .or_insert_with(|| match acquisition {
+                    None => peer.peer.clone(),
+                    Some(acquisition) => peer.peer.for_acquisition(acquisition),
+                })
+                .clone()
+        };
+        let approvals = self.software_review.as_ref().ok_or_else(unavailable)?;
+        let member = approvals
+            .join_shared_preparation(call, context, plan, &selected, resource)
+            .await?;
+        context.check_tool_authorization(call, plan)?;
+        member
+            .check_current()
+            .await
+            .map_err(|_| refused(call.name))?;
+        let value = peer
+            .peer
+            .release(&inspected, member.preparation_identity())
+            .await
+            .map_err(|_| unconfirmed())?;
+        context.check_tool_authorization(call, plan)?;
+        let validation = hex(&value, "validation_id", 32)
+            .ok_or_else(unconfirmed)?
+            .to_owned();
+        self.state
+            .lock()
+            .map_err(|_| unavailable())?
+            .shared_members
+            .insert(proposal_key(&arguments, &validation)?, Arc::new(member));
+        Ok(ToolResult::new(call.id.into(), value.to_string(), false).into())
     }
 
     #[cfg(test)]
@@ -835,6 +1018,8 @@ impl CheckedInstalls {
             state: Mutex::new(State::default()),
             software_review: Some(approvals),
             checked_route: None,
+            #[cfg(unix)]
+            shared_peer: None,
         })
     }
 
@@ -845,6 +1030,8 @@ impl CheckedInstalls {
             state: Mutex::new(State::default()),
             software_review: None,
             checked_route: None,
+            #[cfg(unix)]
+            shared_peer: None,
         })
     }
 
@@ -916,7 +1103,9 @@ impl CheckedInstalls {
             .values()
             .filter_map(|p| p.readback.as_ref())
             .find(|r| {
-                r.session == *session && r.job.lock().is_ok_and(|j| j.as_deref() == Some(job_id))
+                r.session == *session
+                    && acquisition(&r.proposal["selection"]).ok() == Some(None)
+                    && r.job.lock().is_ok_and(|j| j.as_deref() == Some(job_id))
             })
             .ok_or_else(|| refused("setup_job"))?;
         let mut receipt = target.receipt.lock().map_err(|_| unavailable())?.clone();
@@ -934,6 +1123,16 @@ impl CheckedInstalls {
         session: &SessionId,
         job_id: &str,
     ) -> Result<InstalledConnectorSelection, ConnectorSelectionError> {
+        self.connector_selection_for(realm, session, job_id, None)
+    }
+
+    pub(crate) fn connector_selection_for(
+        self: &Arc<Self>,
+        realm: &RealmLocator,
+        session: &SessionId,
+        job_id: &str,
+        selected_acquisition: Option<&toolkit_package::Id>,
+    ) -> Result<InstalledConnectorSelection, ConnectorSelectionError> {
         use ConnectorSelectionError::Unconfirmed;
         let state = self.state.lock().map_err(|_| Unconfirmed)?;
         if state.retired || state.realm.as_ref() != Some(realm) {
@@ -944,9 +1143,18 @@ impl CheckedInstalls {
             .values()
             .filter_map(|p| p.readback.as_ref())
             .find(|r| {
-                r.session == *session && r.job.lock().is_ok_and(|j| j.as_deref() == Some(job_id))
+                r.session == *session
+                    && acquisition(&r.proposal["selection"])
+                        .ok()
+                        .flatten()
+                        .as_ref()
+                        == selected_acquisition
+                    && r.job.lock().is_ok_and(|j| j.as_deref() == Some(job_id))
             });
         let Some(readback) = readback else {
+            if selected_acquisition.is_some() {
+                return Err(Unconfirmed);
+            }
             return state
                 .returning
                 .selection(self, session, job_id)
@@ -1023,6 +1231,7 @@ impl CheckedInstalls {
             no_credential_references,
             credential_references,
             metadata,
+            acquisition: selected_acquisition.cloned(),
         })
     }
 
@@ -1034,7 +1243,10 @@ impl CheckedInstalls {
         let arguments = document(call.args.get())?;
         let key = hex(&arguments, "validation_id", 32).ok_or_else(|| refused(call.name))?;
         let state = self.state.lock().map_err(|_| unavailable())?;
-        let proposal = state.proposals.get(key).ok_or_else(|| refused(call.name))?;
+        let proposal = state
+            .proposals
+            .get(&proposal_key(&arguments, key)?)
+            .ok_or_else(|| refused(call.name))?;
         let realm = state.realm.clone().ok_or_else(|| refused(call.name))?;
         if state.retired
             || state.armed.is_some()
@@ -1059,7 +1271,7 @@ impl CheckedInstalls {
             ),
         };
         Ok(HeldInstall {
-            key: key.into(),
+            key: proposal_key(&arguments, key)?,
             call_id: call.id.into(),
             name: call.name.into(),
             arguments: call.args.get().into(),
@@ -1122,7 +1334,7 @@ impl CheckedInstalls {
         let state = self.state.lock().map_err(|_| unavailable())?;
         let proposal = state
             .proposals
-            .get(&target.validation_id)
+            .get(&proposal_key(&arguments, &target.validation_id)?)
             .ok_or_else(|| refused("setup_state"))?;
         let mut reviewed = proposal.review.clone();
         reviewed["tool"] = call.name.into();
@@ -1162,7 +1374,7 @@ impl CheckedInstalls {
             .software_review
             .as_ref()
             .ok_or_else(|| refused(call.name))?;
-        if document(call.args.get())? != json!({}) {
+        if physical_arguments(document(call.args.get())?)? != json!({}) {
             return Err(refused(call.name));
         }
         let refreshed = context.check_tool_authorization(call, plan)?;
@@ -1173,8 +1385,18 @@ impl CheckedInstalls {
                     .origin_session_id()
                     .ok_or_else(|| refused(call.name))?,
             )
-            .map_err(|_| refused(call.name))?;
-        let mut outcome = self.inner_call(call, current, plan).await?;
+            .map_err(|_| {
+                let error = refused(call.name);
+                setup_dispatch_refusal("state.session", &error);
+                error
+            })?;
+        if self.state.lock().map_err(|_| unavailable())?.retired {
+            return Err(refused(call.name));
+        }
+        let mut outcome = self
+            .inner_call(call, current, plan)
+            .await
+            .inspect_err(|error| setup_dispatch_refusal("state.inner", error))?;
         let refreshed = current.check_tool_authorization(call, plan)?;
         let current = refreshed.as_ref().unwrap_or(current);
         let mut value = response_document(call, &outcome)?;
@@ -1189,6 +1411,9 @@ impl CheckedInstalls {
             .software_review_observation(self, call, current, plan)
             .await?;
         current.check_tool_authorization(call, plan)?;
+        if self.state.lock().map_err(|_| unavailable())?.retired {
+            return Err(refused(call.name));
+        }
         let text = value.to_string();
         if text.len() > MAX_DOCUMENT {
             return Err(unconfirmed());
@@ -1207,7 +1432,13 @@ impl CheckedInstalls {
             return false;
         };
         job.as_ref().is_some_and(|id| {
-            document(call.args.get()).is_ok_and(|mut args| {
+            document(call.args.get()).is_ok_and(|args| {
+                if acquisition(&args).ok() != acquisition(&target.proposal["selection"]).ok() {
+                    return false;
+                }
+                let Ok(mut args) = physical_arguments(args) else {
+                    return false;
+                };
                 if call.name == "setup_job"
                     && let Some(object) = args.as_object_mut()
                     && let Some(wait) = object.remove("wait_ms")
@@ -1241,22 +1472,47 @@ impl CheckedInstalls {
         let key = hex(&response, "validation_id", 32)
             .ok_or_else(unconfirmed)?
             .to_owned();
-        let (install, metadata) = match Self::proposal_candidate(kind, &request, &response, &key) {
-            Ok(candidate) => candidate,
-            Err(error) => {
-                // An answer for a retained validation id that is not a valid
-                // proposal differs from it like any changed answer: it
-                // invalidates that proposal before it is refused.
-                let state = self.state.lock().map_err(|_| unconfirmed())?;
-                if !state.retired
-                    && epoch == self.inner.execution_binding_epoch(call.name)
-                    && let Some(old) = state.proposals.get(&key)
-                {
-                    Self::invalidate_proposal(old)?;
+        let selected_acquisition = acquisition(&request)?;
+        let physical_request = physical_arguments(request.clone())?;
+        // Retain envelope rejection until the known proposal can be invalidated.
+        let install: Result<Value, ToolError> = (|| {
+            let mut install = match kind {
+                Kind::Library => {
+                    if !exact_keys(
+                        &physical_request,
+                        &["family", "profile", "operations", "values"],
+                    ) || request["family"].as_str().is_none()
+                        || request["profile"].as_str().is_none()
+                        || response["scope"] != "configuration_only"
+                        || response["family"] != request["family"]
+                        || response["profile"] != request["profile"]
+                    {
+                        return Err(unconfirmed());
+                    }
+                    let digest =
+                        hex(&response, "configuration_sha256", 64).ok_or_else(unconfirmed)?;
+                    let mut install = request.clone();
+                    install["validation_id"] = key.clone().into();
+                    install["configuration_sha256"] = digest.into();
+                    install
                 }
-                return Err(error);
+                Kind::Selected => {
+                    if response["scope"] != "selected_software_inputs_only"
+                        || request["profile"].as_str().is_none()
+                        || response["profile"] != request["profile"]
+                    {
+                        return Err(unconfirmed());
+                    }
+                    let digest = hex(&response, "effect_sha256", 64).ok_or_else(unconfirmed)?;
+                    json!({"validation_id":key,"effect_sha256":digest})
+                }
+            };
+            if let Some(acquisition) = selected_acquisition {
+                install["setup_acquisition"] = acquisition.as_str().into();
             }
-        };
+            Ok(install)
+        })();
+        let map_key = proposal_key(&request, &key)?;
         // This is the actual owner's response, not a local reconstruction of
         // its package plan, validation, expected account, or install receipt.
         let review = json!({"kind":"service_software_install","check_tool":call.name,
@@ -1268,11 +1524,11 @@ impl CheckedInstalls {
         if state.retired || epoch != self.inner.execution_binding_epoch(call.name) {
             return Err(unconfirmed());
         }
-        if let Some(old) = state.proposals.get(&key) {
+        if let Some(old) = state.proposals.get(&map_key) {
             return if old.session == *session
                 && old.epoch == epoch
                 && old.kind == kind
-                && old.install == install
+                && install.as_ref().is_ok_and(|value| value == &old.install)
                 && old.review == review
             {
                 Ok(())
@@ -1281,6 +1537,14 @@ impl CheckedInstalls {
                 Err(unconfirmed())
             };
         }
+        let install = install?;
+        // A changed reply for a retained proposal invalidates its receipt even
+        // when the replacement selected metadata is malformed.
+        let metadata = if kind == Kind::Selected {
+            selected_service_metadata(&response)?
+        } else {
+            None
+        };
         if state.proposals.len() >= MAX_PROPOSALS
             || state.retained_bytes.saturating_add(charge) > MAX_RETAINED
         {
@@ -1288,7 +1552,7 @@ impl CheckedInstalls {
         }
         state.retained_bytes += charge;
         state.proposals.insert(
-            key,
+            map_key,
             Proposal {
                 session: session.clone(),
                 epoch,
@@ -1304,51 +1568,6 @@ impl CheckedInstalls {
             },
         );
         Ok(())
-    }
-
-    /// The proposal an owner's check answer describes: the exact install
-    /// request and, for a selected package, its operation metadata. A refusal
-    /// means the answer is not a valid proposal.
-    fn proposal_candidate(
-        kind: Kind,
-        request: &Value,
-        response: &Value,
-        key: &str,
-    ) -> Result<(Value, Option<OperationEvidence>), ToolError> {
-        let install = match kind {
-            Kind::Library => {
-                if !exact_keys(request, &["family", "profile", "operations", "values"])
-                    || request["family"].as_str().is_none()
-                    || request["profile"].as_str().is_none()
-                    || response["scope"] != "configuration_only"
-                    || response["family"] != request["family"]
-                    || response["profile"] != request["profile"]
-                {
-                    return Err(unconfirmed());
-                }
-                let digest = hex(response, "configuration_sha256", 64).ok_or_else(unconfirmed)?;
-                let mut install = request.clone();
-                install["validation_id"] = key.into();
-                install["configuration_sha256"] = digest.into();
-                install
-            }
-            Kind::Selected => {
-                if response["scope"] != "selected_software_inputs_only"
-                    || request["profile"].as_str().is_none()
-                    || response["profile"] != request["profile"]
-                {
-                    return Err(unconfirmed());
-                }
-                let digest = hex(response, "effect_sha256", 64).ok_or_else(unconfirmed)?;
-                json!({"validation_id":key,"effect_sha256":digest})
-            }
-        };
-        let metadata = if kind == Kind::Selected {
-            selected_service_metadata(response)?
-        } else {
-            None
-        };
-        Ok((install, metadata))
     }
 
     /// A retained proposal whose validation id answered differently selects
@@ -1402,9 +1621,10 @@ impl CheckedInstalls {
                 .values()
                 .filter_map(|p| p.readback.as_ref())
                 .find(|r| {
-                    r.job
-                        .lock()
-                        .is_ok_and(|j| j.as_deref().is_some_and(|id| args["job_id"] == id))
+                    acquisition(&r.proposal["selection"]).ok() == acquisition(&args).ok()
+                        && r.job
+                            .lock()
+                            .is_ok_and(|j| j.as_deref().is_some_and(|id| args["job_id"] == id))
                 })
                 .cloned()
         };
@@ -1719,14 +1939,122 @@ impl CheckedInstalls {
         context: &ToolDispatchContext,
         plan: Option<&meerkat_core::ResolvedToolExecutionPlan>,
     ) -> Result<ToolDispatchOutcome, ToolError> {
-        match plan {
+        #[cfg(unix)]
+        let shared_peer = if let Some(peer) = self.shared_peer.as_ref() {
+            // Use the native operation owner's unique typed target from the
+            // original plan. Ambiguity refuses instead of selecting by name,
+            // witness order or a fabricated adapter key. The native adapter
+            // still revalidates the complete target and binding at dispatch.
+            let plan = plan.ok_or_else(|| refused(call.name))?;
+            let target = meerkat_authorization::grant_policy::single_tool_operation_target(plan)
+                .map_err(|_| refused(call.name))?;
+            peer.selects_operation(target, call.name).then_some(peer)
+        } else {
+            None
+        };
+        #[cfg(unix)]
+        let _shared_dispatch = if let Some(peer) = shared_peer {
+            let member = if call.name == "setup_selected_install" {
+                let arguments = document(call.args.get())?;
+                let validation =
+                    hex(&arguments, "validation_id", 32).ok_or_else(|| refused(call.name))?;
+                Some(
+                    self.state
+                        .lock()
+                        .map_err(|_| unavailable())?
+                        .shared_members
+                        .get(&proposal_key(&arguments, validation)?)
+                        .cloned()
+                        .ok_or_else(|| refused(call.name))?,
+                )
+            } else {
+                None
+            };
+            let source = self
+                .software_review
+                .as_ref()
+                .ok_or_else(unavailable)?
+                .reserve_shared_entry(call, context, plan, member.as_deref())
+                .await?;
+            let preparation = member
+                .as_ref()
+                .map(|member| member.preparation_identity().to_owned());
+            Some(
+                peer.arm(call, context, source, preparation)
+                    .inspect_err(|error| setup_dispatch_refusal("shared.arm", error))?,
+            )
+        } else {
+            None
+        };
+        let outcome = match plan {
             Some(plan) => {
                 self.inner
                     .dispatch_resolved_with_context(call, context, plan)
                     .await
             }
             None => self.inner.dispatch_with_context(call, context).await,
+        };
+        #[cfg(unix)]
+        drop(_shared_dispatch);
+        // Selected installation returns only the physical owner's result.
+        // `delegate` still validates and captures it before native settlement.
+        // The existing acquisition recovery owner separately observes joined
+        // completion and publishes P. A failed metadata write must not turn a
+        // delivered installation result into an unknown native dispatch.
+        #[cfg(unix)]
+        if call.name == "setup_stop" && self.shared_peer.is_some() {
+            let outcome = outcome?;
+            if outcome.result.is_error {
+                return Ok(outcome);
+            }
+            let value = result_document(call, &outcome)?;
+            if value["scope"] != "host_shared_stop_pending" {
+                return Ok(outcome);
+            }
+            let arguments = document(call.args.get())?;
+            if value.as_object().is_none_or(|value| value.len() != 2)
+                || physical_arguments(arguments.clone())? != json!({"job_id":value["job_id"]})
+            {
+                return Err(unconfirmed());
+            }
+            context.check_tool_authorization(call, plan)?;
+            let session = context
+                .origin_session_id()
+                .ok_or_else(|| refused(call.name))?;
+            let member = {
+                let state = self.state.lock().map_err(|_| unavailable())?;
+                let scope = acquisition(&arguments)?;
+                let selected = state
+                    .proposals
+                    .iter()
+                    .filter(|((acquisition, _), proposal)| {
+                        acquisition == &scope
+                            && &proposal.session == session
+                            && proposal.epoch == self.inner.execution_binding_epoch(call.name)
+                            && proposal.readback.as_ref().is_some_and(|readback| {
+                                readback.job.lock().is_ok_and(|job| {
+                                    job.as_ref().is_some_and(|job| {
+                                        value["job_id"].as_str() == Some(job.as_str())
+                                    })
+                                })
+                            })
+                    })
+                    .filter_map(|(key, _)| state.shared_members.get(key).cloned())
+                    .collect::<Vec<_>>();
+                if selected.len() != 1 {
+                    return Err(refused(call.name));
+                }
+                selected.into_iter().next().unwrap()
+            };
+            let observed = self
+                .software_review
+                .as_ref()
+                .ok_or_else(unavailable)?
+                .leave_shared_preparation(call, context, plan, &member)
+                .await?;
+            return Ok(ToolResult::new(call.id.into(), observed.to_string(), false).into());
         }
+        outcome
     }
 
     async fn delegate(
@@ -1764,6 +2092,14 @@ impl CheckedInstalls {
             None
         };
         let outcome = operation.await?;
+        #[cfg(unix)]
+        let outcome = if call.name == SELECTED_CHECK && self.shared_peer.is_some() {
+            self.release_shared_check(call, context, plan, outcome)
+                .await?
+        } else {
+            outcome
+        };
+        #[cfg(not(unix))]
         let _ = plan;
         if let Some(kind) = check {
             self.capture(call, session, epoch, kind, &outcome)?;
@@ -1787,6 +2123,12 @@ impl CheckedInstalls {
                     .filter_map(|p| p.readback.as_ref())
                     .any(|other| {
                         !Arc::ptr_eq(&other.receipt, &readback.receipt)
+                            && !(other.validation_id == readback.validation_id
+                                && other.proposal["owner_proposal"]
+                                    == readback.proposal["owner_proposal"]
+                                && physical_arguments(other.proposal["selection"].clone()).ok()
+                                    == physical_arguments(readback.proposal["selection"].clone())
+                                        .ok())
                             && other
                                 .job
                                 .lock()
@@ -2254,10 +2596,14 @@ impl AgentToolDispatcher for CheckedInstalls {
         &self,
         name: &str,
     ) -> meerkat_core::approval::review::ReviewEntrySupport {
-        if self.checked_route.is_some() {
+        if self.checked_route.is_some() || (self.software_review.is_some() && name == "setup_state")
+        {
+            // The state observer calls the actual inner MCP dispatcher before
+            // appending its local observation. That native leaf consumes review
+            // at transport entry; this wrapper does not invent or spend review.
             self.inner.review_entry_support(name)
         } else {
-            // Keep the existing installed composition's declaration unchanged.
+            // Other legacy installed operations retain their existing refusal.
             meerkat_core::approval::review::ReviewEntrySupport::Unsupported
         }
     }

@@ -345,7 +345,7 @@ fn checked_secret_selection_keeps_normal_launch_with_optional_native_capability(
         operation_names: operation_names.clone(),
     };
     owner.state.lock().unwrap().proposals.insert(
-        validation_id,
+        (None, validation_id),
         Proposal {
             session: session.clone(),
             epoch: 7,

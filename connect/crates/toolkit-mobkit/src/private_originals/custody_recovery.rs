@@ -4,6 +4,8 @@
 use super::*;
 use meerkat_runtime::SessionServiceRuntimeExt;
 mod cold;
+#[cfg(any(test, feature = "test-support"))]
+pub(super) mod promotion_probe;
 use crate::original_ingress::custody_attempt::{CustodyAttempt, CustodyChange, CustodyDecision};
 use meerkat_mobkit::mob_handle_runtime::ContinuationSourceAnnouncer;
 use meerkat_runtime::input_state::verify_exact_replay;
@@ -27,7 +29,11 @@ struct HandoffState {
     native_box_live: bool,
     foreground_live: bool,
     definite_refusal: bool,
+    native_admitted: bool,
     canonical_readable: bool,
+    // Only the enrolled source-recovery span. Native binders and workers
+    // independently retain the same entered review through their actual I/O.
+    review: Option<crate::review_custody::ReviewCustody>,
 }
 pub(crate) struct CustodyHandoff {
     enrolled: bool,
@@ -49,7 +55,11 @@ enum NativeObservation {
     Unavailable,
 }
 impl CustodyHandoff {
-    pub(super) fn new(enrolled: bool, source: &Arc<PrivateOriginals>) -> Arc<Self> {
+    pub(super) fn new(
+        enrolled: bool,
+        source: &Arc<PrivateOriginals>,
+        review: &crate::review_custody::ReviewCustody,
+    ) -> Arc<Self> {
         Arc::new(Self {
             enrolled,
             state: Mutex::new(HandoffState {
@@ -57,7 +67,9 @@ impl CustodyHandoff {
                 native_box_live: true,
                 foreground_live: true,
                 definite_refusal: false,
+                native_admitted: false,
                 canonical_readable: true,
+                review: enrolled.then(|| review.clone()),
             }),
             observation: Mutex::new(None),
             closed_failure: std::sync::atomic::AtomicBool::new(false),
@@ -71,6 +83,74 @@ impl CustodyHandoff {
     }
     pub(crate) fn enrolled(&self) -> bool {
         self.enrolled
+    }
+    // Transfer a real local-probe review into an already enrolled invocation
+    // while the actual task is held before its first recovery round. This
+    // tests recovery lifetime, not the Find authorization/entry composition.
+    #[cfg(test)]
+    pub(super) fn retain_review_for_test(&self, review: crate::review_custody::ReviewCustody) {
+        let previous = {
+            let mut state = self.state.lock().unwrap();
+            assert!(self.enrolled && state.phase != HandoffPhase::Done);
+            assert!(state.review.is_some());
+            state.review.replace(review)
+        };
+        drop(previous);
+    }
+    #[cfg(test)]
+    pub(super) fn review_for_test(&self) -> crate::review_custody::ReviewCustody {
+        self.review()
+    }
+    #[cfg(test)]
+    pub(super) fn review_release_locks_available_for_test(
+        &self,
+        check_task: bool,
+        check_publication: bool,
+    ) -> bool {
+        let Some(source) = self.source.upgrade() else {
+            return false;
+        };
+        if self.state.try_lock().is_err()
+            || source.custody_recovery.control.state.try_lock().is_err()
+            || source.owner.try_source_writer().is_err()
+        {
+            return false;
+        }
+        let Ok(originals) = source.retained.try_lock().map(|held| held.clone()) else {
+            return false;
+        };
+        let Ok(helpers) = source.helper_sources.try_lock().map(|held| held.clone()) else {
+            return false;
+        };
+        if originals
+            .iter()
+            .any(|held| held.first_custody.try_lock().is_err())
+            || helpers
+                .iter()
+                .any(|held| held.first_custody.try_lock().is_err())
+        {
+            return false;
+        }
+        if check_publication && source.owner.publication().observe(|| ()).is_err() {
+            return false;
+        }
+        // Normal recovery may be concurrently observed by join(), which owns
+        // this mutex until the task completes. Panic finalization runs after
+        // that join and must release it before dropping the recovery holds.
+        if check_task {
+            let Ok(task) = source
+                .custody_recovery
+                .task
+                .try_lock()
+                .map(|task| task.clone())
+            else {
+                return false;
+            };
+            if task.as_ref().is_some_and(|task| task.try_lock().is_err()) {
+                return false;
+            }
+        }
+        true
     }
     /// Foreground is bounded by the actual tracked submission and native
     /// owner close. Transfer wakes the existing eight-step, five-second
@@ -138,6 +218,25 @@ impl CustodyHandoff {
     fn retain_closed_failure(&self) {
         self.closed_failure
             .store(true, std::sync::atomic::Ordering::SeqCst);
+        // The failed call and its final readback returned; this entry will
+        // never run another recovery step. Preserve its row/phase/error, but
+        // do not keep a review hold merely because failure evidence is kept.
+        drop(self.take_review());
+    }
+    fn take_review(&self) -> Option<crate::review_custody::ReviewCustody> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .review
+            .take()
+    }
+    fn review(&self) -> crate::review_custody::ReviewCustody {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .review
+            .clone()
+            .unwrap_or_default()
     }
     pub(super) fn phase(&self) -> HandoffPhase {
         self.state
@@ -172,6 +271,23 @@ impl CustodyHandoff {
         }
         drop(state);
         self.changed();
+    }
+    // Core supplies this fact for this bound Input before releasing its native
+    // box. It requires exact native readback, never live source publication.
+    pub(super) fn record_native_admitted(&self) {
+        if !self.enrolled {
+            return;
+        }
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .native_admitted = true;
+    }
+    pub(super) fn native_admitted(&self) -> bool {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .native_admitted
     }
     // Only the exact returned native error permits this. Neither Drop, an
     // empty row, nor an unavailable native observation sets this fact.
@@ -215,7 +331,11 @@ impl CustodyHandoff {
                 native_box_live: true,
                 foreground_live: true,
                 definite_refusal: false,
+                native_admitted: false,
                 canonical_readable: true,
+                // This is the same attempt. Move its recovery hold without
+                // dropping or reacquiring review while source locks are held.
+                review: state.review.take(),
             }),
             observation: Mutex::new(None),
             closed_failure: std::sync::atomic::AtomicBool::new(false),
@@ -352,10 +472,18 @@ impl CustodyHandoff {
         }
     }
     fn done(&self) {
-        self.state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .phase = HandoffPhase::Done;
+        let review = {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.phase = HandoffPhase::Done;
+            state.review.take()
+        };
+        // Callers have finished the exact terminal writer/readback and source
+        // callbacks. The last review drop may report Used synchronously, so
+        // it must happen outside those locks as well as our own state lock.
+        drop(review);
         if let Some(source) = self.source.upgrade() {
             source.custody_recovery.announce();
         }
@@ -381,6 +509,7 @@ const ROUND_PAUSE: Duration = Duration::from_secs(5);
 #[derive(Default)]
 struct ControlState {
     selected: bool,
+    admission_stopped: bool,
     stopped: bool,
 }
 #[derive(Default)]
@@ -402,6 +531,8 @@ pub(super) struct CustodyRecovery {
     task: Mutex<Option<Arc<tokio::sync::Mutex<Task>>>>,
     #[cfg(test)]
     first_round: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+    #[cfg(any(test, feature = "test-support"))]
+    promotion_probe: Mutex<promotion_probe::Slot>,
 }
 // Failed close retains cold observations as well as its stable join result.
 // None is used only when the actual task panicked before returning its state.
@@ -432,7 +563,7 @@ impl CustodyRecovery {
             .state
             .lock()
             .map_err(|_| PrivateOriginalError::Unavailable)?;
-        if control.stopped {
+        if control.admission_stopped || control.stopped {
             return Err(PrivateOriginalError::Unavailable);
         }
         register(control.selected)
@@ -465,6 +596,26 @@ impl CustodyRecovery {
     }
 }
 impl Control {
+    fn stop_admitting(&self) -> Result<(), PrivateOriginalError> {
+        let mut control = self
+            .state
+            .lock()
+            .map_err(|_| PrivateOriginalError::Unavailable)?;
+        control.admission_stopped = true;
+        self.wake.notify_waiters();
+        Ok(())
+    }
+    // A whole round owns its entered reads. During drain, retain that owner
+    // but admit no next round. Full close still runs the existing settlement.
+    fn admit_round(&self) -> Option<bool> {
+        self.state.lock().map_or(Some(true), |control| {
+            if control.admission_stopped && !control.stopped {
+                None
+            } else {
+                Some(control.stopped)
+            }
+        })
+    }
     fn stop(&self) {
         let mut control = self
             .state
@@ -485,6 +636,13 @@ impl Control {
         let notified = self.wake.notified();
         tokio::pin!(notified);
         notified.as_mut().enable();
+        // Register before observing the fence: close cannot lose its wake
+        // between a parked round's check and await. No new task or timer owns
+        // the parked work; the existing retained task is joined at full close.
+        if self.admit_round().is_none() {
+            notified.await;
+            return;
+        }
         tokio::select! {
             _ = &mut notified => {},
             _ = tokio::time::sleep(ROUND_PAUSE) => {},
@@ -493,6 +651,19 @@ impl Control {
 }
 
 impl PrivateOriginals {
+    pub(crate) fn stop_admitting_work(&self) -> Result<(), PrivateOriginalError> {
+        self.custody_recovery.control.stop_admitting()
+    }
+
+    // Only synchronous registration belongs under this source-control lock.
+    // It must not await, enter native policy, or call the source owner again.
+    pub(crate) fn with_new_work_admission<T>(
+        &self,
+        register: impl FnOnce() -> T,
+    ) -> Result<T, PrivateOriginalError> {
+        self.custody_recovery.enroll(|_| Ok(register()))
+    }
+
     // The stopped-window control must collect real admissions before allowing
     // this actual task to begin recovery. The permit owns no source/store lock;
     // dropping its sender releases the task for all-exit cleanup too.
@@ -563,6 +734,11 @@ impl PrivateOriginals {
         if control.stopped || control.selected || task.is_some() {
             return Err(PrivateOriginalError::Unavailable);
         }
+        // An entered bootstrap may finish after admission was fenced. Keep
+        // its native completion live without starting a new recovery worker.
+        if control.admission_stopped {
+            return Ok(());
+        }
         self.custody_recovery
             .control
             .publication
@@ -600,9 +776,25 @@ impl PrivateOriginals {
                     };
                     // A stop that races this snapshot requires another round:
                     // enrollment may have completed while the cold read awaited.
-                    let stopped_before_snapshot = source.custody_recovery.stopped();
+                    let stopped_before_snapshot = match task_control.admit_round() {
+                        Some(stopped) => stopped,
+                        None => {
+                            drop(source);
+                            task_control.pause().await;
+                            continue;
+                        }
+                    };
                     let live = source.recover_custody_round(ROUND_LIMIT, &mut cursor).await;
                     let cold_progress = source.recover_cold_round(&mut cold).await;
+                    #[cfg(test)]
+                    if let Some(probe) = source.metadata_probe.get() {
+                        probe.custody_round(
+                            !live.pending
+                                && !live.unavailable
+                                && !cold_progress.pending
+                                && !cold_progress.unavailable,
+                        );
+                    }
                     if stopped_before_snapshot && !live.pending && !cold_progress.pending {
                         // Every selected call returned. Closed failed entries stay
                         // retained, but cannot cause another write/read on rejoin.
@@ -655,9 +847,59 @@ impl PrivateOriginals {
         // Keep the actual ColdScan in this task for every later join. The
         // retained observations do not imply canonical or native settlement.
         let _retained_cold = &outcome.cold;
-        outcome
+        let failed_task = outcome.result.is_err() && outcome.cold.is_none();
+        let result = outcome
             .result
-            .map_err(|_| PrivateOriginalError::Unavailable)
+            .map_err(|_| PrivateOriginalError::Unavailable);
+        drop(task);
+        if failed_task {
+            // Only a completed JoinError has no returned scan. TaskExit has
+            // closed enrollment; this task can run no further recovery step.
+            // Independent native/worker custody is not released here.
+            // Keep the cached failure and every canonical row unchanged.
+            self.release_failed_recovery_reviews();
+        }
+        result
+    }
+
+    fn release_failed_recovery_reviews(&self) {
+        // Snapshot only the existing owners, after the real task was joined.
+        // A rebind already moved its hold into the currently retained first
+        // custody. No source terminality or native admission is inferred.
+        let originals = self
+            .retained
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let helpers = self
+            .helper_sources
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let mut reviews = Vec::new();
+        for held in originals {
+            let pending = held
+                .first_custody
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            if let Some(pending) = pending {
+                reviews.extend(pending.handoff.take_review());
+            }
+        }
+        for held in helpers {
+            let pending = held
+                .first_custody
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            if let Some(pending) = pending {
+                reviews.extend(pending.handoff.take_review());
+            }
+        }
+        // Dropping the final Arc can invoke Core's review observers. All task,
+        // owner-collection, first-custody and handoff-state locks are gone.
+        drop(reviews);
     }
 }
 
@@ -695,12 +937,19 @@ impl Entry {
     }
     fn key(&self, source: &PrivateOriginals) -> Result<StoreKey, PrivateOriginalError> {
         match self {
-            Self::Original(p) => source.key(
-                &p.held
-                    .upgrade()
-                    .ok_or(PrivateOriginalError::Unavailable)?
-                    .reference,
-            ),
+            Self::Original(p) => {
+                let held = p.held.upgrade().ok_or(PrivateOriginalError::Unavailable)?;
+                source
+                    .owner
+                    .check_canonical_source(source.store.as_ref(), &source.scope)
+                    .map_err(cold_service_admission::writer_error)?;
+                let first = held
+                    .original
+                    .first_binding_record()
+                    .ok_or(PrivateOriginalError::Unavailable)?;
+                source.decode_stored(first)?;
+                Ok(first.key.clone())
+            }
             Self::Helper(p) => Ok(p
                 .held
                 .upgrade()
@@ -723,7 +972,7 @@ impl Entry {
                     .owner
                     .check_canonical_source(source.store.as_ref(), &source.scope)
                     .map_err(cold_service_admission::writer_error)?;
-                let record = source.decode_record(row, &held.reference)?;
+                let record = source.retained_custody_record(row, &held)?;
                 if record.final_association.as_ref() != Some(held.original.association()) {
                     return Err(PrivateOriginalError::Conflict);
                 }
@@ -755,14 +1004,14 @@ impl Entry {
         next: CustodyAttempt,
     ) -> Result<Transition, PrivateOriginalError> {
         match self {
-            Self::Original(p) => source.prepare_custody_transition(
-                row,
-                &p.held
-                    .upgrade()
-                    .ok_or(PrivateOriginalError::Unavailable)?
-                    .reference,
-                next,
-            ),
+            Self::Original(p) => {
+                let held = p.held.upgrade().ok_or(PrivateOriginalError::Unavailable)?;
+                PrivateOriginals::custody_transition(
+                    row,
+                    source.retained_custody_record(row, &held)?,
+                    next,
+                )
+            }
             Self::Helper(p) => {
                 let held = p.held.upgrade().ok_or(PrivateOriginalError::Unavailable)?;
                 source
@@ -947,6 +1196,42 @@ impl Entry {
 }
 
 impl PrivateOriginals {
+    // Recovery already owns this enrolled first attempt. Its terminal source
+    // write must remain joinable after Open is fenced, using the exact retained
+    // first-write evidence rather than reselecting an authorizing live route.
+    // This helper never stages, admits or publishes work.
+    pub(super) fn retained_custody_record(
+        &self,
+        row: &StoredRecord,
+        held: &HeldPrivateOriginal,
+    ) -> Result<SourceRecord, PrivateOriginalError> {
+        self.owner
+            .check_canonical_source(self.store.as_ref(), &self.scope)
+            .map_err(cold_service_admission::writer_error)?;
+        let first = held
+            .original
+            .first_binding_record()
+            .ok_or(PrivateOriginalError::Unavailable)?;
+        let baseline = self.decode_stored(first)?;
+        let record = self.decode_stored(row)?;
+        let mut event = record.event.clone();
+        event.route = held.reference.route.clone();
+        if row.key != first.key
+            || record.source != baseline.source
+            || record.event != baseline.event
+            || event.original != held.reference.original
+            || digest(&canonical_json(&event).map_err(|_| PrivateOriginalError::Conflict)?)
+                != held.reference.event_sha256
+            || record.final_association.as_ref() != Some(held.original.association())
+            || record.custody_attempt.is_none()
+        {
+            return Err(PrivateOriginalError::Conflict);
+        }
+        self.check_source_binding(&record, held.original.association())
+            .map_err(cold_service_admission::writer_error)?;
+        Ok(record)
+    }
+
     async fn custody_row(
         &self,
         entry: &Entry,
@@ -972,6 +1257,8 @@ impl PrivateOriginals {
         entry: &Entry,
         change: CustodyChange,
     ) -> Result<CustodyAttempt, PrivateOriginalError> {
+        #[cfg(any(test, feature = "test-support"))]
+        let probe = promotion_probe::take_completion(self, entry, change);
         let _writer = self.owner.source_writer().await;
         let (row, current) = self.custody_row(entry).await?;
         let already = matches!(
@@ -998,6 +1285,12 @@ impl PrivateOriginals {
             .map_err(store_error)?;
         if entry.attempt(self, &saved)? != next {
             return Err(PrivateOriginalError::Conflict);
+        }
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(probe) = probe {
+            // No signal or test wait occurs inside the writer/publication.
+            drop(_writer);
+            probe.complete(row, saved);
         }
         Ok(next)
     }
@@ -1120,6 +1413,8 @@ impl PrivateOriginals {
             return Ok(true);
         }
         if phase == HandoffPhase::Accepted {
+            #[cfg(any(test, feature = "test-support"))]
+            promotion_probe::pause(self, entry).await;
             self.custody_change(entry, CustodyChange::Promote).await?;
             // Normal callback acknowledgement wins over a subsequent workflow
             // failure. Neither error permits withdrawal of admitted custody.
@@ -1130,6 +1425,9 @@ impl PrivateOriginals {
             return Ok(false);
         }
         if phase == HandoffPhase::Withdrawing {
+            if entry.handoff().native_admitted() {
+                return Err(PrivateOriginalError::Conflict);
+            }
             self.custody_change(entry, CustodyChange::Withdraw).await?;
             entry.withdraw();
             entry.handoff().done();
@@ -1141,6 +1439,9 @@ impl PrivateOriginals {
         let (_, current) = self.custody_row(entry).await?;
         match current.decision() {
             CustodyDecision::Withdrawn => {
+                if entry.handoff().native_admitted() {
+                    return Err(PrivateOriginalError::Conflict);
+                }
                 if !entry.handoff().withdraw() {
                     return Ok(true);
                 }
@@ -1163,7 +1464,11 @@ impl PrivateOriginals {
                 .observation
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
-            if self.custody_recovery.stopped() || !current.can_observe() {
+            let admitted = entry.handoff().native_admitted();
+            if admitted && !current.can_observe() {
+                return Err(PrivateOriginalError::Unavailable);
+            }
+            if (self.custody_recovery.stopped() && !admitted) || !current.can_observe() {
                 if entry.handoff().withdraw() {
                     self.custody_change(entry, CustodyChange::Withdraw).await?;
                     entry.withdraw();
@@ -1217,6 +1522,9 @@ impl PrivateOriginals {
             if stored.state.input_id != *entry.input().id()
                 || verify_exact_replay(&stored.state, entry.input()).is_err()
             {
+                if entry.handoff().native_admitted() {
+                    return Err(PrivateOriginalError::Conflict);
+                }
                 // An observation of another input cannot settle this one as
                 // admitted. End source custody without inventing a native
                 // cancellation, nonadmission or replacement submission.
@@ -1235,6 +1543,12 @@ impl PrivateOriginals {
             entry.handoff().done();
             return Ok(false);
         }
+        if self.custody_recovery.stopped() && entry.handoff().native_admitted() {
+            // The completed read could not verify Core's retained Admitted
+            // fact. Keep the entered step and observation unresolved on close;
+            // neither absence nor an unavailable read can withdraw that fact.
+            return Err(PrivateOriginalError::Unavailable);
+        }
         self.custody_change(entry, CustodyChange::ResolutionSettled)
             .await?;
         Ok(true)
@@ -1250,7 +1564,9 @@ impl PrivateOriginals {
         match current.decision() {
             CustodyDecision::Promoted => entry.close_promoted(),
             CustodyDecision::Withdrawn
-                if entry.handoff().phase() != HandoffPhase::Accepted && !entry.acknowledged() =>
+                if entry.handoff().phase() != HandoffPhase::Accepted
+                    && !entry.handoff().native_admitted()
+                    && !entry.acknowledged() =>
             {
                 entry.withdraw()
             }
@@ -1327,22 +1643,58 @@ impl PrivateOriginals {
         // failures leave this work window, so more than one window can finish
         // without repeating failed I/O or discarding the held evidence.
         for entry in entries.into_iter().take(limit) {
-            match self.recover_entry(&entry).await {
-                Ok(value) => progress.pending |= value,
-                Err(_) => {
-                    entry.handoff().canonical_readable(false);
-                    if self.custody_recovery.stopped() {
-                        if !self.finish_closed_error(&entry).await {
-                            entry.handoff().retain_closed_failure();
-                            progress.unavailable = true;
+            let review = entry.handoff().review();
+            review
+                .retain_io(async {
+                    match self.recover_entry(&entry).await {
+                        Ok(value) => progress.pending |= value,
+                        Err(_) => {
+                            entry.handoff().canonical_readable(false);
+                            if self.custody_recovery.stopped() {
+                                if !self.finish_closed_error(&entry).await {
+                                    entry.handoff().retain_closed_failure();
+                                    progress.unavailable = true;
+                                }
+                            } else {
+                                progress.unavailable = true;
+                                progress.pending = true;
+                            }
                         }
-                    } else {
-                        progress.unavailable = true;
-                        progress.pending = true;
                     }
-                }
-            }
+                })
+                .await;
         }
         progress
+    }
+}
+
+#[cfg(test)]
+mod admission_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn parked_custody_round_wakes_for_full_close_without_reopening_admission() {
+        let recovery = CustodyRecovery::default();
+        assert!(!recovery.enroll(Ok).unwrap());
+        recovery.control.state.lock().unwrap().selected = true;
+        assert!(recovery.enroll(Ok).unwrap());
+        recovery.control.stop_admitting().unwrap();
+        assert!(matches!(
+            recovery.enroll::<()>(|_| panic!("new binding entered")),
+            Err(PrivateOriginalError::Unavailable)
+        ));
+        assert_eq!(recovery.control.admit_round(), None);
+        let pause = recovery.control.pause();
+        tokio::pin!(pause);
+        assert!(futures::poll!(&mut pause).is_pending());
+        recovery.stop();
+        tokio::time::timeout(Duration::from_secs(1), &mut pause)
+            .await
+            .unwrap();
+        assert_eq!(recovery.control.admit_round(), Some(true));
+        assert!(matches!(
+            recovery.enroll::<()>(|_| panic!("close reopened binding")),
+            Err(PrivateOriginalError::Unavailable)
+        ));
     }
 }

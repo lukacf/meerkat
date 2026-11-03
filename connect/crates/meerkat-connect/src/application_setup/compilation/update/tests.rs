@@ -51,6 +51,7 @@ impl Fixture {
             .unwrap()
             .to_string();
         let mut input = ApplicationSetupCompilationInput {
+            member_classes: vec![],
             schema: 4,
             realm,
             definition: legacy.definition,
@@ -66,31 +67,33 @@ impl Fixture {
                     setup_capability: row.setup_capability,
                 })
                 .collect(),
-            helper: legacy.helper,
-            helper_tools: legacy.helper_tools,
-            helper_profile: legacy.helper_profile,
+            helper: Some(legacy.helper),
+            helper_tools: Some(legacy.helper_tools),
+            helper_profile: Some(legacy.helper_profile),
             tool_policy: legacy.tool_policy,
         };
-        let parent = input.helper.controller_parent[0].clone();
+        let parent = input.helper.as_ref().unwrap().controller_parent[0].clone();
         input.members[0].setup_capability = Some(CompiledAgentSetupCapability {
+            workflow_targets: vec![],
             helper: None,
             route: Id::new("original-route").unwrap(),
             parent,
             helper_targets: vec![],
         });
         let resources = crate::application_setup::tests::prepared(root);
-        let source_helper_member = input.helper.member.clone();
+        let source_helper_member = input.helper.as_ref().unwrap().member.clone();
         let projection = input
             .helper_profile
+            .unwrap()
             .project(
                 resources.connection,
                 source_helper_member.clone(),
-                input.helper_tools,
+                input.helper_tools.unwrap(),
             )
             .unwrap();
         let mut definition = input.definition.resolve().unwrap();
         projection.compose_definition(&mut definition).unwrap();
-        let mut helper = input.helper.clone();
+        let mut helper = input.helper.as_ref().unwrap().clone();
         helper.member = projection.member().clone();
         let mut members = input.members.clone();
         members[1].member = helper.member.clone();
@@ -119,6 +122,9 @@ impl Fixture {
             components: vec![],
             channels: vec![],
             native_host: PreparedNativeHost {
+                authentication_domain: None,
+                event_domain: None,
+                member_classes: vec![],
                 realm: meerkat_core::mob_realm_id(&helper.member.mob_id).unwrap(),
                 grant_administrator: principal,
                 remote_operator: None,
@@ -159,21 +165,22 @@ impl Fixture {
             realm: input.realm.clone(),
             definition_source: input.definition.clone(),
             definition,
-            source_helper_roster: input.roster[1].clone(),
+            source_helper_roster: Some(input.roster[1].clone()),
             native_members: native_members.clone(),
-            source_helper_member,
-            helper,
+            source_helper_member: Some(source_helper_member),
+            helper: Some(helper),
             helper_source_surface: None,
             helper_tools: input.helper_tools,
             helper_profile: input.helper_profile,
-            server: projection.server().clone(),
-            resources: crate::application_setup::PreparedApplicationResources {
+            server: Some(projection.server().clone()),
+            artifact_directory: None,
+            resources: Some(crate::application_setup::PreparedApplicationResources {
                 artifact_directory: resources.artifact_directory,
                 handoff: SelectedHostArtifact {
                     path: handoff.clone(),
                     sha256: hash(&std::fs::read(handoff).unwrap()),
                 },
-            },
+            }),
             application_tool_policy: reference(
                 "application-tool-policy.json",
                 &original_policy_bytes,
@@ -206,6 +213,9 @@ impl Fixture {
             components: owner.components,
             channels: owner.channels,
             native_host: Some(CompiledNativeHost {
+                authentication_domain: owner.native_host.authentication_domain.clone(),
+                event_domain: owner.native_host.event_domain.clone(),
+                member_classes: owner.native_host.member_classes,
                 realm: owner.native_host.realm,
                 grant_administrator: owner.native_host.grant_administrator,
                 remote_operator: owner.native_host.remote_operator,
@@ -271,6 +281,8 @@ impl Fixture {
                 std::fs::read(
                     self.prepared
                         .resources
+                        .as_ref()
+                        .unwrap()
                         .artifact_directory
                         .join(&row.initial_surface.name),
                 )
@@ -373,8 +385,8 @@ fn changed_input_is_valid_before_replacement_surfaces_and_does_not_publish_or_op
     );
     assert!(result.original_setup().helper == fixture.prepared.helper);
     assert_eq!(
-        result.original_setup().resources.handoff,
-        fixture.prepared.resources.handoff
+        result.original_setup().resources.as_ref().unwrap().handoff,
+        fixture.prepared.resources.as_ref().unwrap().handoff
     );
     assert_eq!(
         result.original_acquisition().backend_generation,
@@ -382,7 +394,7 @@ fn changed_input_is_valid_before_replacement_surfaces_and_does_not_publish_or_op
     );
     assert_eq!(
         result.roster()[0].profile.as_str(),
-        fixture.prepared.helper.member.role
+        fixture.prepared.helper.as_ref().unwrap().member.role
     );
     assert_ne!(result.definition(), &fixture.prepared.definition);
     assert_eq!(file_bytes(&root), before);
@@ -519,10 +531,10 @@ fn exact_original_authority_and_helper_resource_cannot_be_reselected_by_candidat
         match case {
             "destination" => fixture.input.members[0].context_generation += 1,
             "member_grant" => fixture.input.members[0].setup_capability = None,
-            "helper_parent" => fixture.input.helper.controller_parent.clear(),
-            "helper_basis" => fixture.input.helper.operation_basis = meerkat_authorization_contracts::work_association::WorkAuthorityBasis::TargetedGrantLineages { base: None, targets: vec![] },
+            "helper_parent" => fixture.input.helper.as_mut().unwrap().controller_parent.clear(),
+            "helper_basis" => fixture.input.helper.as_mut().unwrap().operation_basis = meerkat_authorization_contracts::work_association::WorkAuthorityBasis::TargetedGrantLineages { base: None, targets: vec![] },
             "realm" => fixture.input.realm.state_root = root.join("other-state"),
-            "helper_tools" => fixture.input.helper_tools = ApplicationSetupTools::Preparation,
+            "helper_tools" => fixture.input.helper_tools = Some(ApplicationSetupTools::Preparation),
             "helper_roster" => fixture.input.roster[1].additional_instructions.push("Changed helper".into()),
             _ => unreachable!(),
         }
@@ -548,8 +560,15 @@ fn predecessor_owner_routes_and_retained_setup_bytes_are_checked_without_an_alte
         let mut fixture = Fixture::new(&root);
         match case {
             "source_route" => {
-                fixture.policy.native_host.as_mut().unwrap().routes[0].controller_parent =
-                    Some(fixture.input.helper.controller_parent.clone());
+                fixture.policy.native_host.as_mut().unwrap().routes[0].controller_parent = Some(
+                    fixture
+                        .input
+                        .helper
+                        .as_ref()
+                        .unwrap()
+                        .controller_parent
+                        .clone(),
+                );
                 fixture.write_predecessor();
             }
             "owner" => {
@@ -564,10 +583,20 @@ fn predecessor_owner_routes_and_retained_setup_bytes_are_checked_without_an_alte
                 fixture.write_predecessor();
             }
             "resource" => {
-                std::fs::write(&fixture.prepared.resources.handoff.path, b"{}").unwrap();
+                std::fs::write(
+                    &fixture.prepared.resources.as_ref().unwrap().handoff.path,
+                    b"{}",
+                )
+                .unwrap();
             }
             "helper_authority" => {
-                fixture.prepared.helper.controller_parent.clear();
+                fixture
+                    .prepared
+                    .helper
+                    .as_mut()
+                    .unwrap()
+                    .controller_parent
+                    .clear();
                 fixture.write_predecessor();
             }
             "foreign_predecessor" => {
@@ -821,8 +850,14 @@ fn replacement_startup_pins_actual_prior_policy_and_output_custody_before_owner_
             let validated = result.unwrap();
             assert_eq!(validated.predecessor(), &fixture.selection.predecessor);
             assert_eq!(
-                validated.update.original_setup().resources.handoff,
-                fixture.prepared.resources.handoff
+                validated
+                    .update
+                    .original_setup()
+                    .resources
+                    .as_ref()
+                    .unwrap()
+                    .handoff,
+                fixture.prepared.resources.as_ref().unwrap().handoff
             );
             assert_eq!(
                 validated.update.original_owner(),
@@ -877,7 +912,16 @@ fn actual_replacement_roster_projection_keeps_live_changes_and_original_helper_c
     );
     let helper = actual
         .iter_mut()
-        .find(|row| row.profile.as_str() == selected.original_setup().helper.member.role)
+        .find(|row| {
+            row.profile.as_str()
+                == selected
+                    .original_setup()
+                    .helper
+                    .as_ref()
+                    .unwrap()
+                    .member
+                    .role
+        })
         .unwrap();
     helper
         .additional_instructions

@@ -45,10 +45,11 @@ futures-util = "0.3"
 serde.workspace = true
 serde_json = { workspace = true, features = ["raw_value"] }
 sha2.workspace = true
+uuid.workspace = true
 tempfile.workspace = true
 toolkit-package = { path = "../toolkit-package", default-features = false }
 meerkat-toolkit = { path = "../meerkat-toolkit" }
-nix = { version = "=0.31.3", features = ["signal", "process", "term", "poll", "fs", "user"] }
+nix = { version = "=0.31.3", features = ["signal", "process", "term", "poll", "fs", "dir", "user"] }
 thiserror.workspace = true
 tokio = { workspace = true, features = ["signal"] }
 async-trait.workspace = true
@@ -59,10 +60,15 @@ cookie = "=0.18.2"
 keyring = { version = "=3.6.3", default-features = false, features = ["apple-native"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
+rustix = { version = "=1.1.5", features = ["net", "fs"] }
 dbus-secret-service = { version = "=4.1.0", default-features = false, features = ["crypto-rust", "vendored"] }
 
 [target.'cfg(unix)'.dependencies]
 toolkit-mobkit = { path = "../toolkit-mobkit", features = ["native-host"] }
+
+[target.'cfg(unix)'.dev-dependencies]
+# Read-only recovery observation for the real Driver late-adoption child control.
+toolkit-mobkit = { path = "../toolkit-mobkit", features = ["test-support"] }
 
 [dev-dependencies]
 # Canonical definitions for mandatory mob comms in the fresh SDK fixture.
@@ -94,3 +100,15 @@ unimplemented = "deny"
 [[test]]
 name = "mobkit_setup_member"
 required-features = ["console"]
+
+# Explicit acceptance-only trusted host. Never installed as the product CLI.
+[[example]]
+name = "private_service_probe_host"
+path = "tests/support/private_service_probe_host.rs"
+test = false
+
+# Acceptance-only result-dependent native collection host. Never product-installed.
+[[example]]
+name = "private_service_collection_host"
+path = "tests/support/private_service_collection_host.rs"
+test = false

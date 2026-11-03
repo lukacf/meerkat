@@ -219,6 +219,23 @@ impl Fixture {
         frontend_source: bool,
         targeted_setup: bool,
     ) -> Self {
+        Self::with_review_policy(
+            bounds,
+            setup_request_review,
+            frontend_source,
+            targeted_setup,
+            None,
+        )
+        .await
+    }
+
+    async fn with_review_policy(
+        bounds: impl FnOnce(&CompiledNativeHost, &SessionId) -> ExecutionRestrictions,
+        setup_request_review: bool,
+        frontend_source: bool,
+        targeted_setup: bool,
+        operation_review_policy: Option<Arc<dyn InstalledOperationReviewPolicy>>,
+    ) -> Self {
         let (directory, mut selection) = super::tests::fixture();
         let mut local: CompiledLocalPolicy =
             serde_json::from_slice(&fs::read(&selection.local_policy.path).unwrap()).unwrap();
@@ -529,6 +546,7 @@ impl Fixture {
                     persist_originals
                         .persist_binding(persist_reference, &association)
                         .await
+                        .map(Into::into)
                 },
             )
             .await
@@ -537,7 +555,14 @@ impl Fixture {
             .hold_binding(reference.clone(), retained.clone())
             .await
             .unwrap();
+        // This component fixture persists independently reviewed native
+        // parents through the trusted source writer before host adoption.
+        // Binding earlier would require a configured first-bind selection,
+        // which this fixture does not construct. Every installed policy read
+        // below still uses the same actual live host owner.
+        originals.bind_host_lifetime(&lifetime).unwrap();
         let application = Arc::new(InstalledApplicationPolicy {
+            operation_review_policy,
             originals,
             lifetime: lifetime.clone(),
             native,
@@ -693,6 +718,7 @@ async fn controller_grant_rejects_changed_endpoint_wire_model_identity_and_resou
     let mut changed = f.application.native.clone();
     changed.grant_administrator = super::tests::principal("different-application");
     let changed = Arc::new(InstalledApplicationPolicy {
+        operation_review_policy: None,
         originals: f.application.originals.clone(),
         lifetime: f.lifetime.clone(),
         native: changed,
@@ -1278,6 +1304,39 @@ async fn retained_targeted_setup_preserves_native_target_and_controller_authorit
             .check_current(binding)
             .unwrap();
     }
+    // A concurrent read of the shared workflow map is not policy unavailability.
+    // Hold that exact map while real targeted setup preparation runs;
+    // preparation must wait, then observe current authority without running a tool.
+    let (completed_tx, completed_rx) = std::sync::mpsc::channel();
+    std::thread::scope(|threads| {
+        let context = &f.context;
+        let binding = &find;
+        f.source.with_workflow_policy_capture_locked_for_test(|| {
+            let (started_tx, started_rx) = std::sync::mpsc::channel();
+            threads.spawn(move || {
+                started_tx.send(()).unwrap();
+                let result = context
+                    .authorization()
+                    .prepare(binding)
+                    .and_then(|prepared| prepared.check_current(binding));
+                completed_tx.send(result).unwrap();
+            });
+            started_rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap();
+            assert!(
+                matches!(
+                    completed_rx.recv_timeout(std::time::Duration::from_millis(100)),
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+                ),
+                "a concurrent workflow-map reader must not turn setup preparation into Unavailable"
+            );
+        });
+        completed_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap()
+            .unwrap();
+    });
     // Neither a valid base nor the selected find target permits this sibling.
     let report = SetupBundleCall::new(
         meerkat_toolkit::setup::SETUP_RESULTS_BUNDLE,
@@ -1870,14 +1929,66 @@ async fn internal_helper_policy_stops_when_its_flattened_frontend_ancestor_close
             fixture.association.candidate().original_work.clone(),
         ]
     );
-    private.retain_helper_policy_fixture(retained);
+    let now: u64 = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis()
+        .try_into()
+        .unwrap();
+    let helper_deadline = now.checked_add(30_000).unwrap();
+    private.retain_helper_policy_deadline_fixture(retained, Some(helper_deadline));
     // The helper is an internal source with no external route of its own.
     assert!(private.route_for_binding(&helper).is_err());
     fixture.application.current_invocation(&helper).unwrap();
+    let memory = fixture.memory(fixture.session.clone(), SourceAuthorizationUse::Read);
+    let mandate = fixture
+        .application
+        .review_mandate(&helper, &memory, now)
+        .unwrap()
+        .unwrap();
+    assert!(mandate.contains("selected this setup helper independently"));
+    assert!(mandate.contains(&private.review_grant_bounds(&helper, &memory, now).unwrap()));
+    let WorkAuthorityBasis::GrantLineage { lineage } = &helper.candidate().authority_basis else {
+        panic!("helper native lineage required")
+    };
+    let grant = fixture
+        .source
+        .grants()
+        .resolve_lineage(
+            lineage,
+            &helper.candidate().logical_executor,
+            helper.candidate().represented_subject.as_ref(),
+        )
+        .unwrap();
+    assert!(grant.expires_at_ms() > helper_deadline);
+    // At the finite helper limit the native grant itself is still valid.
+    meerkat_runtime::meerkat_machine::review_bounds_text(
+        &grant
+            .restrictions()
+            .conjoin(&helper.candidate().admitted_ceiling),
+        grant.expires_at_ms(),
+        helper_deadline,
+    )
+    .unwrap();
+    let expected = meerkat_runtime::meerkat_machine::review_bounds_text(
+        &grant
+            .restrictions()
+            .conjoin(&helper.candidate().admitted_ceiling),
+        helper_deadline,
+        now,
+    )
+    .unwrap();
+    assert!(mandate.contains(&expected));
+    denied(
+        fixture
+            .application
+            .review_mandate(&helper, &memory, helper_deadline),
+    );
     fixture
         .lifetime
         .begin_close_component(&component, HostCloseReason::OperatorDisable)
         .unwrap();
+    denied(fixture.application.review_mandate(&helper, &memory, now));
     fixture.lifetime.validate_native_entry(None).unwrap();
     denied(fixture.application.current_invocation(&helper));
     denied(fixture.application.current_invocation(&child));
@@ -1889,3 +2000,13 @@ mod service_instruction;
 
 #[path = "application_operations_tests/helper_origin.rs"]
 mod helper_origin;
+
+#[path = "application_operations_tests/review_floor.rs"]
+mod review_floor;
+
+#[path = "application_operations_tests/review_material.rs"]
+mod review_material;
+
+#[cfg(test)]
+#[path = "application_operations_tests/native_review_diagnostics.rs"]
+mod native_review_diagnostics;

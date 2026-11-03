@@ -165,8 +165,17 @@ impl PrivateOriginals {
         reference: &PrivateOriginalRef,
         selected: &ServiceSetupSelection,
     ) -> Result<ConfiguredSetup, PrivateOriginalError> {
-        selected.validate()?;
         let facts = self.configured_setup(reference)?;
+        self.check_service_setup_facts(reference, selected, facts)
+    }
+
+    fn check_service_setup_facts(
+        &self,
+        reference: &PrivateOriginalRef,
+        selected: &ServiceSetupSelection,
+        facts: ConfiguredSetup,
+    ) -> Result<ConfiguredSetup, PrivateOriginalError> {
+        selected.validate()?;
         let native = facts
             .lifetime
             .selected_policy()
@@ -199,6 +208,15 @@ impl PrivateOriginals {
         selected: &ServiceSetupSelection,
     ) -> Result<(ConfiguredSetup, Vec<ServiceSetupChild>), PrivateOriginalError> {
         let facts = self.service_setup_facts(reference, selected)?;
+        self.service_setup_children_from_facts(reference, selected, facts)
+    }
+
+    fn service_setup_children_from_facts(
+        &self,
+        reference: &PrivateOriginalRef,
+        selected: &ServiceSetupSelection,
+        facts: ConfiguredSetup,
+    ) -> Result<(ConfiguredSetup, Vec<ServiceSetupChild>), PrivateOriginalError> {
         let id = self.configured_child_id(reference)?;
         let origin = self.setup_origin_for(reference)?;
         let mut requested = facts.child_bounds(&selected.configured.session_id);
@@ -444,7 +462,15 @@ impl PrivateOriginals {
         {
             return Err(PrivateOriginalError::Unavailable);
         }
-        let (facts, children) = self.service_setup_children(reference, selected)?;
+        let lifetime = self
+            .host_lifetime
+            .get()
+            .and_then(Weak::upgrade)
+            .ok_or(PrivateOriginalError::Unavailable)?;
+        let facts = self.retained_configured_setup(reference, lifetime)?;
+        let facts = self.check_service_setup_facts(reference, selected, facts)?;
+        let (facts, children) =
+            self.service_setup_children_from_facts(reference, selected, facts)?;
         self.check_service_setup_observations(&record, &children)?;
         let mut cleanup = ServiceSetupCleanup {
             issuer: Some(facts.application.clone()),

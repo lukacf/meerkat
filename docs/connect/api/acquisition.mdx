@@ -10,13 +10,18 @@ Use `find_and_install` through an enrolled native setup owner. The owner authent
 
 The current [library edition](/connect/library/local-install) can expose
 `setup_inspect_acquired` when the host selects `--enable-acquired-inspection`.
-It reads only the primary archive of a successful Python or Node acquisition
+By default it reads the primary archive of a successful Python or Node acquisition
 in that live setup session. Bind the exact `job_id` and `receipt_sha256`; use
 `after: null` to list members, then an exact `member` with `offset: 0` to read
 text. Follow returned cursors for additional pages. Listing returns at most 64
 members; text reads return at most 32 KiB from eligible UTF-8 members up to 1 MiB.
 
-Archive inspection reads the primary package from the active acquisition session. The agent uses that content to choose its entrypoint and prepare metadata. Recovery mode provides retained request readback.
+**Unreleased dependency inspection:** Where the advertised tool schema includes
+`archive_sha256`, select a retained dependency by its exact digest in that job's
+`artifacts` array. Omitting it preserves primary inspection. This reads source
+without executing package code or proving runtime compatibility.
+
+The agent uses the inspected content to choose its entrypoint and prepare metadata. Recovery mode provides retained request readback.
 
 ## Input
 
@@ -51,6 +56,11 @@ The enrolled path returns the operation identity, revision, acquisition phase an
 The setup helper interprets the request and proposes an integration. The host binds that work to the original request, account and continuation. Service operations and frontend interactions retain separate outcomes.
 
 The [package installers](/connect/acquisition/local-install) consume the selected `IntegrationPackage` and `ActivationManifest`. The host supplies trusted executables and approves the installation, credentials and runtime attachment.
+
+A bare configuration exposes the whole MCP endpoint. Native protected attachment
+can separately enforce the host-approved subset of exact tool names; a package's
+read declaration does not grant that access. Query semantics, startup effects
+and filesystem confinement require their own assessment and controls.
 
 The intended setup workflow delegates interpretation to setup agents and returns separately verified role outcomes or a durable pending operation. Its owners must authenticate the real invocation, preserve request custody, commit setup work, activate at the supported runtime boundary and resume the original task.
 

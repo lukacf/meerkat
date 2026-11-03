@@ -34,10 +34,9 @@ use meerkat_connect::{
     },
 };
 use meerkat_core::{
-    AgentError, AgentEvent, AgentToolDispatcher, Message, Provider, ToolCategoryOverride,
-    ToolError, ToolResult,
+    AgentEvent, AgentToolDispatcher, Message, Provider, ToolCategoryOverride, ToolError,
+    ToolResult,
     comms::EventStream,
-    event::AgentErrorReport,
     service::{CreateSessionRequest, SessionError, SessionHistoryQuery},
     types::ToolCallView,
 };
@@ -76,6 +75,8 @@ const FOLLOWUP: &str = "Have you installed it, or only prepared the candidate?";
 const OTHER_PROMPT: &str = "Check whether this other member can borrow the setup member's tools.";
 const BOOTSTRAP: &str = "Acknowledge this fixture member's startup without calling any tools.";
 const BOOTSTRAP_ANSWER: &str = "Fixture member startup acknowledged.";
+const UNKNOWN_TOOL_ANSWER: &str = "This member cannot use the requested tool.";
+const POLICY_DENIED_ANSWER: &str = "The requested built-in tool is denied by policy.";
 const PREPARED: &str = "The candidate is prepared. Nothing has been installed or activated.";
 const FOLLOWUP_ANSWER: &str = "Only preparation is available in this console conversation.";
 const RECIPE_FIRST: &str = "Investigate Gmail in the bundled recipes. Read its exact adopted entry; do not install or authenticate anything.";
@@ -306,7 +307,7 @@ async fn public_console_research_hook_preserves_identity_and_host_policy_intent(
     assert_eq!(
         build.initial_tool_filter,
         Some(ToolFilter::Allow(
-            RESEARCH_VISIBLE_TOOLS.into_iter().collect()
+            RESEARCH_INITIAL_FILTER.into_iter().collect()
         ))
     );
     let policy = ToolExecutionPolicy::resolve(build.tool_access_policy.unwrap()).unwrap();
@@ -605,10 +606,14 @@ impl LlmClient for Probe {
             for name in PAIRED_HOST_PREPARATION_TOOLS {
                 assert!(!offered.contains(name));
             }
-            assert!(
-                !results.contains_key("wrong-member"),
-                "unadvertised tool call must terminate natively"
-            );
+            if let Some(result) = results.get("wrong-member") {
+                assert_tool_refusal(
+                    result,
+                    "wrong-member",
+                    ToolError::not_found(PAIRED_HOST_FRONTEND_INVENTORY),
+                );
+                return response_events(request, None, UNKNOWN_TOOL_ANSWER);
+            }
             return response_events(
                 request,
                 Some(("wrong-member", PAIRED_HOST_FRONTEND_INVENTORY, json!({}))),
@@ -770,10 +775,14 @@ impl LlmClient for RecipeProbe {
         }
         if literal.contains(OTHER_PROMPT) {
             assert!(RECIPE_TOOLS.iter().all(|name| !offered.contains(name)));
-            assert!(
-                !results.contains_key("wrong-member"),
-                "native unknown tool must terminate the turn"
-            );
+            if let Some(result) = results.get("wrong-member") {
+                assert_tool_refusal(
+                    result,
+                    "wrong-member",
+                    ToolError::not_found(RECIPE_TOOLS[0]),
+                );
+                return response_events(request, None, UNKNOWN_TOOL_ANSWER);
+            }
             return response_events(
                 request,
                 Some(("wrong-member", RECIPE_TOOLS[0], json!({"limit":1}))),
@@ -1024,36 +1033,65 @@ async fn completed(events: &mut EventStream, expected: &str) {
     .unwrap();
 }
 
-async fn unknown_tool_failure(events: &mut EventStream, name: &str) {
-    tool_failure(events, ToolError::not_found(name)).await;
+fn assert_tool_refusal(result: &ToolResult, id: &str, error: ToolError) {
+    let expected = meerkat_core::ops::terminal_tool_outcome_for_error(id, error).result;
+    assert_eq!(result.tool_use_id, expected.tool_use_id);
+    assert!(result.is_error);
+    assert_eq!(result.content, expected.content);
 }
 
-async fn tool_failure(events: &mut EventStream, expected: ToolError) {
+async fn tool_refusal_completed(
+    events: &mut EventStream,
+    call_id: &str,
+    name: &str,
+    error: ToolError,
+    answer: &str,
+) {
+    let expected = meerkat_core::ops::terminal_tool_outcome_for_error(call_id, error).result;
     timeout(BOUND, async {
         let mut run = None;
+        let mut received = false;
         while let Some(event) = events.next().await {
             match event.payload {
                 AgentEvent::RunStarted { identity, .. } => run = identity.run_id,
-                AgentEvent::RunFailed {
+                AgentEvent::ToolExecutionStarted { id, .. } if id == call_id => {
+                    panic!("refused tool must not enter dispatch");
+                }
+                AgentEvent::ToolResultReceived {
+                    id,
+                    name: actual_name,
+                    content,
+                    is_error,
+                } if id == call_id => {
+                    assert!(!received, "refused call must return exactly one result");
+                    assert_eq!(actual_name, name);
+                    assert!(is_error);
+                    assert_eq!(content, expected.content);
+                    received = true;
+                }
+                AgentEvent::RunCompleted {
                     identity,
-                    error_report,
+                    result,
+                    extraction_required,
                     ..
                 } => {
                     assert!(run.is_some());
                     assert_eq!(identity.run_id, run);
-                    assert_eq!(
-                        error_report,
-                        AgentErrorReport::from_agent_error(&AgentError::tool(expected))
+                    assert!(
+                        received,
+                        "completion must follow the exact native tool refusal"
                     );
+                    assert!(!extraction_required);
+                    assert_eq!(result, answer);
                     return;
                 }
-                AgentEvent::RunCompleted { .. } => {
-                    panic!("refused tool call unexpectedly completed")
+                AgentEvent::RunFailed { .. } => {
+                    panic!("ordinary tool refusal must not fail the run");
                 }
                 _ => {}
             }
         }
-        panic!("native stream ended before its exact tool refusal");
+        panic!("native stream ended before refusal and completion");
     })
     .await
     .unwrap();
@@ -1172,8 +1210,8 @@ deny=["send_message","reply_to_peer","send_request","send_response"]
     let access = AccessController::new(AccessControlConfig {
         enabled: true,
         admins: vec!["fixture-admin@example.test".into()],
-        groups: BTreeMap::new(),
         approvers: BTreeMap::new(),
+        groups: BTreeMap::new(),
         rules: vec![AccessRule {
             id: "selected-host-operator".into(),
             subjects: vec![OPERATOR.into()],
@@ -1264,7 +1302,7 @@ async fn stock_console_prepares_for_one_admitted_member_without_effect_authority
     let (status, _) = rpc(
         &app,
         None,
-        "mobkit/console/send",
+        "meta/console/send",
         send(SETUP, FIRST, "unauthenticated"),
     )
     .await;
@@ -1272,7 +1310,7 @@ async fn stock_console_prepares_for_one_admitted_member_without_effect_authority
     let (_, denied) = rpc(
         &app,
         Some(&outsider),
-        "mobkit/console/send",
+        "meta/console/send",
         send(SETUP, FIRST, "wrong-viewer"),
     )
     .await;
@@ -1284,7 +1322,7 @@ async fn stock_console_prepares_for_one_admitted_member_without_effect_authority
     let (_, accepted) = rpc(
         &app,
         Some(&operator),
-        "mobkit/console/send",
+        "meta/console/send",
         send(SETUP, FIRST, "prepare-once"),
     )
     .await;
@@ -1299,7 +1337,7 @@ async fn stock_console_prepares_for_one_admitted_member_without_effect_authority
     let (_, accepted) = rpc(
         &app,
         Some(&operator),
-        "mobkit/console/send",
+        "meta/console/send",
         send(SETUP, FOLLOWUP, "followup-once"),
     )
     .await;
@@ -1310,12 +1348,19 @@ async fn stock_console_prepares_for_one_admitted_member_without_effect_authority
     let (_, accepted) = rpc(
         &app,
         Some(&operator),
-        "mobkit/console/send",
+        "meta/console/send",
         send(OTHER, OTHER_PROMPT, "other-once"),
     )
     .await;
     assert!(accepted.get("error").is_none(), "{accepted}");
-    unknown_tool_failure(&mut other_events, PAIRED_HOST_FRONTEND_INVENTORY).await;
+    tool_refusal_completed(
+        &mut other_events,
+        "wrong-member",
+        PAIRED_HOST_FRONTEND_INVENTORY,
+        ToolError::not_found(PAIRED_HOST_FRONTEND_INVENTORY),
+        UNKNOWN_TOOL_ANSWER,
+    )
+    .await;
     assert_eq!(
         host.count(),
         4,
@@ -1350,7 +1395,7 @@ async fn stock_console_prepares_for_one_admitted_member_without_effect_authority
             let (_, timeline) = rpc(
                 &app,
                 Some(&operator),
-                "mobkit/console/query_timeline",
+                "meta/console/query_timeline",
                 json!({"identity":SETUP,"limit":200}),
             )
             .await;
@@ -1372,7 +1417,7 @@ async fn stock_console_prepares_for_one_admitted_member_without_effect_authority
     let (_, denied_history) = rpc(
         &app,
         Some(&outsider),
-        "mobkit/console/query_timeline",
+        "meta/console/query_timeline",
         json!({"identity":SETUP,"limit":200}),
     )
     .await;
@@ -1516,7 +1561,7 @@ async fn stock_console_discovers_bundled_recipes_without_host_or_resources() {
     let (status, _) = rpc(
         &app,
         None,
-        "mobkit/console/send",
+        "meta/console/send",
         send(SETUP, RECIPE_FIRST, "unauthenticated"),
     )
     .await;
@@ -1524,7 +1569,7 @@ async fn stock_console_discovers_bundled_recipes_without_host_or_resources() {
     let (_, denied) = rpc(
         &app,
         Some(&outsider),
-        "mobkit/console/send",
+        "meta/console/send",
         send(SETUP, RECIPE_FIRST, "wrong-viewer"),
     )
     .await;
@@ -1543,7 +1588,7 @@ async fn stock_console_discovers_bundled_recipes_without_host_or_resources() {
         let (_, accepted) = rpc(
             &app,
             Some(&operator),
-            "mobkit/console/send",
+            "meta/console/send",
             send(SETUP, prompt, key),
         )
         .await;
@@ -1565,12 +1610,19 @@ async fn stock_console_discovers_bundled_recipes_without_host_or_resources() {
     let (_, accepted) = rpc(
         &app,
         Some(&operator),
-        "mobkit/console/send",
+        "meta/console/send",
         send(OTHER, OTHER_PROMPT, "other-once"),
     )
     .await;
     assert!(accepted.get("error").is_none(), "{accepted}");
-    unknown_tool_failure(&mut other_events, RECIPE_TOOLS[0]).await;
+    tool_refusal_completed(
+        &mut other_events,
+        "wrong-member",
+        RECIPE_TOOLS[0],
+        ToolError::not_found(RECIPE_TOOLS[0]),
+        UNKNOWN_TOOL_ANSWER,
+    )
+    .await;
     let history = service
         .read_history(&setup_id, SessionHistoryQuery::default())
         .await
@@ -1610,7 +1662,7 @@ async fn stock_console_discovers_bundled_recipes_without_host_or_resources() {
             let (_, timeline) = rpc(
                 &app,
                 Some(&operator),
-                "mobkit/console/query_timeline",
+                "meta/console/query_timeline",
                 json!({"identity":SETUP,"limit":200}),
             )
             .await;
@@ -1635,7 +1687,7 @@ async fn stock_console_discovers_bundled_recipes_without_host_or_resources() {
     let (_, denied) = rpc(
         &app,
         Some(&outsider),
-        "mobkit/console/query_timeline",
+        "meta/console/query_timeline",
         json!({"identity":SETUP,"limit":200}),
     )
     .await;
@@ -1668,7 +1720,9 @@ const RESEARCH_CANCEL: &str = "Begin one more public wiki search, which I will c
 const CANCEL_QUERY: &str = "held public wiki research";
 const SEARCH_TEXT: &str = "BookStack organizes documentation into shelves, books and chapters.";
 const SEARCH_URL: &str = "https://www.bookstackapp.com/";
-const RESEARCH_VISIBLE_TOOLS: [&str; 7] = [
+// The hook allows native comms names, while the profile can further restrict visibility.
+const RESEARCH_VISIBLE_TOOLS: [&str; 3] = [RECIPE_TOOLS[0], RECIPE_TOOLS[1], "web_search"];
+const RESEARCH_INITIAL_FILTER: [&str; 7] = [
     RECIPE_TOOLS[0],
     RECIPE_TOOLS[1],
     "web_search",
@@ -1870,17 +1924,35 @@ async fn research_provider(
         response_text(BOOTSTRAP_ANSWER)
     } else if literal.contains(OTHER_PROMPT) {
         assert!(!offered.contains("web_search"));
-        response_call(
-            "wrong-search-member",
-            "web_search",
-            json!({"query":RESEARCH_QUERY}),
-        )
+        if let Some(result) = results.get("wrong-search-member") {
+            let expected = meerkat_core::ops::terminal_tool_outcome_for_error(
+                "wrong-search-member",
+                ToolError::not_found("web_search"),
+            );
+            assert_eq!(*result, expected.result.text_content());
+            response_text(UNKNOWN_TOOL_ANSWER)
+        } else {
+            response_call(
+                "wrong-search-member",
+                "web_search",
+                json!({"query":RESEARCH_QUERY}),
+            )
+        }
     } else if literal.contains(RESEARCH_FOLLOWUP) {
         assert!(encoded.contains(RESEARCH_FIRST) && encoded.contains(RESEARCH_ANSWER));
         response_text(RESEARCH_FOLLOWUP_ANSWER)
     } else if literal.contains(RESEARCH_BUILTIN) {
         assert_eq!(offered, RESEARCH_VISIBLE_TOOLS.into_iter().collect());
-        response_call("forged-task-list", "task_list", json!({}))
+        if let Some(result) = results.get("forged-task-list") {
+            let expected = meerkat_core::ops::terminal_tool_outcome_for_error(
+                "forged-task-list",
+                ToolError::access_denied("task_list"),
+            );
+            assert_eq!(*result, expected.result.text_content());
+            response_text(POLICY_DENIED_ANSWER)
+        } else {
+            response_call("forged-task-list", "task_list", json!({}))
+        }
     } else if literal.contains(RESEARCH_CANCEL) {
         assert!(offered.contains("web_search"));
         assert!(
@@ -2141,7 +2213,7 @@ async fn stock_console_research_uses_explicit_native_helper_and_exact_member() {
     let (status, _) = rpc(
         &app,
         None,
-        "mobkit/console/send",
+        "meta/console/send",
         send(SETUP, RESEARCH_FIRST, "research-no-auth"),
     )
     .await;
@@ -2149,7 +2221,7 @@ async fn stock_console_research_uses_explicit_native_helper_and_exact_member() {
     let (_, denied) = rpc(
         &app,
         Some(&outsider),
-        "mobkit/console/send",
+        "meta/console/send",
         send(SETUP, RESEARCH_FIRST, "research-outsider"),
     )
     .await;
@@ -2167,7 +2239,7 @@ async fn stock_console_research_uses_explicit_native_helper_and_exact_member() {
         let (_, accepted) = rpc(
             &app,
             Some(&operator),
-            "mobkit/console/send",
+            "meta/console/send",
             send(SETUP, prompt, key),
         )
         .await;
@@ -2193,12 +2265,19 @@ async fn stock_console_research_uses_explicit_native_helper_and_exact_member() {
     let (_, accepted) = rpc(
         &app,
         Some(&operator),
-        "mobkit/console/send",
+        "meta/console/send",
         send(OTHER, OTHER_PROMPT, "research-other"),
     )
     .await;
     assert!(accepted.get("error").is_none(), "{accepted}");
-    unknown_tool_failure(&mut other_events, "web_search").await;
+    tool_refusal_completed(
+        &mut other_events,
+        "wrong-search-member",
+        "web_search",
+        ToolError::not_found("web_search"),
+        UNKNOWN_TOOL_ANSWER,
+    )
+    .await;
     assert_eq!(provider.count("/search/v1/responses"), 1);
     let history = serde_json::to_string(
         &service
@@ -2226,7 +2305,7 @@ async fn stock_console_research_uses_explicit_native_helper_and_exact_member() {
             let (_, timeline) = rpc(
                 &app,
                 Some(&operator),
-                "mobkit/console/query_timeline",
+                "meta/console/query_timeline",
                 json!({"identity":SETUP,"limit":200}),
             )
             .await;
@@ -2252,7 +2331,7 @@ async fn stock_console_research_uses_explicit_native_helper_and_exact_member() {
     let (_, denied) = rpc(
         &app,
         Some(&outsider),
-        "mobkit/console/query_timeline",
+        "meta/console/query_timeline",
         json!({"identity":SETUP,"limit":200}),
     )
     .await;
@@ -2262,19 +2341,26 @@ async fn stock_console_research_uses_explicit_native_helper_and_exact_member() {
     let (_, accepted) = rpc(
         &app,
         Some(&operator),
-        "mobkit/console/send",
+        "meta/console/send",
         send(SETUP, RESEARCH_BUILTIN, "research-denied-builtin"),
     )
     .await;
     assert!(accepted.get("error").is_none(), "{accepted}");
-    tool_failure(&mut events, ToolError::access_denied("task_list")).await;
+    tool_refusal_completed(
+        &mut events,
+        "forged-task-list",
+        "task_list",
+        ToolError::access_denied("task_list"),
+        POLICY_DENIED_ANSWER,
+    )
+    .await;
     assert_eq!(provider.count("/search/v1/responses"), 1);
-    assert_eq!(provider.count("/member/v1/responses"), member_calls + 1);
+    assert_eq!(provider.count("/member/v1/responses"), member_calls + 2);
 
     let (_, accepted) = rpc(
         &app,
         Some(&operator),
-        "mobkit/console/send",
+        "meta/console/send",
         send(SETUP, RESEARCH_CANCEL, "research-cancel"),
     )
     .await;

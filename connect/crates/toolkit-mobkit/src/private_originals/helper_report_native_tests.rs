@@ -467,3 +467,6 @@ mod warm_service_issuance;
 
 #[path = "warm_reacquisition_native_tests.rs"]
 mod warm_reacquisition;
+
+#[path = "helper_reviewed_roles_tests.rs"]
+mod reviewed_roles;

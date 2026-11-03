@@ -4,20 +4,28 @@ description: "Use Node service operations, native application composition and a 
 icon: "js"
 ---
 
-`@rkat/toolkit` version `0.9.0` is an ESM package supporting Node 22 or newer. The service libraries run without Meerkat, Meta or a model. The browser UI has a separate entrypoint.
+`@rkat/toolkit` version `0.9.4` is an ESM package supporting Node 22.12.0 or newer. The service libraries run without Meerkat, Meta or a model. The browser UI has a separate entrypoint.
 
 ## Install
 
 ```sh
-npm install https://github.com/lukacf/meerkat-connect/releases/download/v0.9.0/rkat-toolkit-0.9.0.tgz
+npm install https://github.com/lukacf/meerkat-connect/releases/download/v0.9.4/rkat-toolkit-0.9.4.tgz
 ```
 
 ## Build from source
 
-From `sdk/typescript/` in the source checkout:
+From `sdk/typescript/` in the source checkout, install the locked tooling:
 
 ```sh
 npm ci --ignore-scripts
+```
+
+Current source locks published `@rkat/sdk` 0.9.8 and `@rkat/meta-sdk` 0.9.7.
+Native development compositions also require a matching gateway and explicit
+SDK provenance; see [BUILDING.md](https://github.com/lukacf/meerkat-connect/blob/main/BUILDING.md#sdks).
+Then build and pack:
+
+```sh
 npm run build
 npm pack --ignore-scripts
 ```
@@ -35,7 +43,11 @@ connector imports remain independent of this entrypoint.
 | --- | --- |
 | Original-owner Restore | `new ToolkitHost(selection).configure(builder)` |
 | Fresh application | `new ToolkitApplicationPreparation(preparation, finalize).build(builder, { signal })` |
-| Admitted replacement | `new ToolkitApplicationUpdate(startup).configure(builder)` |
+| Admitted replacement (development only) | `new ToolkitApplicationUpdate(startup).configure(builder)` |
+
+The released 0.9.4 installation does not support in-place application updates.
+Replacement requires a matching development SDK and gateway; see the
+[release limits](/connect/availability).
 
 For Restore and replacement, configure one dedicated `MetaBuilder`, then await
 its normal `build()`. For fresh preparation, await the Connect binding's

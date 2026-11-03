@@ -86,6 +86,13 @@ impl PrivateOriginals {
         }
     }
 
+    #[cfg(test)]
+    pub(super) fn synthetic_identity_runtime_error_kind(
+        error: &IdentityRuntimeError,
+    ) -> &'static str {
+        Self::native_submission_error_kind(error)
+    }
+
     // The existing synthetic classifier also supplies production diagnostics.
     // Static categories say nothing by themselves about admission or effects.
     fn native_submission_error_kind(error: &IdentityRuntimeError) -> &'static str {
@@ -123,6 +130,11 @@ impl PrivateOriginals {
             IdentityRuntimeError::InvalidState { .. } => "InvalidState",
             IdentityRuntimeError::InvalidDeliveryIdentity { .. } => "InvalidDeliveryIdentity",
             IdentityRuntimeError::DuplicateIdentity(..) => "DuplicateIdentity",
+            IdentityRuntimeError::IdentityNameHeldByRawMember { .. } => {
+                "IdentityNameHeldByRawMember"
+            }
+            IdentityRuntimeError::KeyedSendRefused { .. } => "KeyedSendRefused",
+            IdentityRuntimeError::SessionNotHeldByIdentity { .. } => "SessionNotHeldByIdentity",
             IdentityRuntimeError::StaleRuntimeAlias { .. } => "StaleRuntimeAlias",
             IdentityRuntimeError::CompletionIncarnationChanged { .. } => {
                 "CompletionIncarnationChanged"
@@ -145,11 +157,6 @@ impl PrivateOriginals {
             IdentityRuntimeError::WakeHeld { .. } => "WakeHeld",
             IdentityRuntimeError::PeerWiringTimedOut { .. } => "PeerWiringTimedOut",
             IdentityRuntimeError::PeerTopologySuperseded { .. } => "PeerTopologySuperseded",
-            IdentityRuntimeError::IdentityNameHeldByRawMember { .. } => {
-                "IdentityNameHeldByRawMember"
-            }
-            IdentityRuntimeError::KeyedSendRefused { .. } => "KeyedSendRefused",
-            IdentityRuntimeError::SessionNotHeldByIdentity { .. } => "SessionNotHeldByIdentity",
             IdentityRuntimeError::Internal(..) => "Internal",
         }
     }
@@ -190,6 +197,12 @@ impl PrivateOriginals {
 
     #[cfg(test)]
     fn synthetic_native_submission_refusal(error: &IdentityRuntimeError) {
+        if let IdentityRuntimeError::AdmissionFailed { detail, .. } = error {
+            Self::synthetic_admission_diagnostic(
+                "original.native_submission.admission_failed.detail",
+                detail,
+            );
+        }
         if let IdentityRuntimeError::GovernedInput(GovernedInputError::Mob(error)) = error {
             Self::synthetic_admission_diagnostic(
                 "original.native_mob.class",
@@ -428,7 +441,10 @@ impl PrivateOriginals {
             return Err(PrivateOriginalError::Conflict);
         }
         let publication = pending.admit();
-        if publication.is_ok() && pending.service_grant.is_none() && pending.service_batch.is_none()
+        if publication.is_ok()
+            && pending.service_grant.is_none()
+            && pending.service_batch.is_none()
+            && pending.workflow.is_none()
         {
             held.unresolved
                 .lock()
@@ -525,8 +541,26 @@ impl PrivateOriginals {
         batch: Option<service_approved_input::ApprovedTaskLink>,
         injected_context: Vec<meerkat_core::ContentInput>,
     ) -> Result<PrivateOriginalSubmission, PrivateOriginalError> {
-        let route = self.route(&submission.original.route)?;
-        let event = self.event(&submission.original).await?;
+        self.with_new_work_admission(|| ())?;
+        // Only a normal authenticated ordinary input may select inert cold
+        // coordinates. Service/batch paths retain the original strict route.
+        let coordinates = if grant.is_none() && batch.is_none() {
+            self.cold_ordinary_source_coordinates(&submission.original.route)?
+        } else {
+            None
+        };
+        let route = if coordinates.is_none() {
+            Some(self.route(&submission.original.route)?)
+        } else {
+            None
+        };
+        let event = match &coordinates {
+            Some(selected) => {
+                self.event_for_source_coordinates(&submission.original, selected)
+                    .await?
+            }
+            None => self.event(&submission.original).await?,
+        };
         if digest(submission.content.as_bytes()) != event.content_sha256 {
             return Err(PrivateOriginalError::Conflict);
         }
@@ -541,16 +575,32 @@ impl PrivateOriginals {
             .get()
             .and_then(|runtime| runtime.upgrade())
             .ok_or(PrivateOriginalError::Unavailable)?;
-        let alias = route.grant_target.as_str();
+        let alias = match &coordinates {
+            Some(selected) => self.target_for_source_coordinates(selected),
+            None => route
+                .as_ref()
+                .ok_or(PrivateOriginalError::Unavailable)?
+                .grant_target
+                .as_str(),
+        };
         let identity = runtime
             .owned_identity_for_member_alias(alias)
             .await
             .ok_or(PrivateOriginalError::Unavailable)?;
         let authentication = evidence(
-            &route.authentication_domain,
+            match &coordinates {
+                Some(selected) => self.authentication_domain_for_source_coordinates(selected),
+                None => {
+                    &route
+                        .as_ref()
+                        .ok_or(PrivateOriginalError::Unavailable)?
+                        .authentication_domain
+                }
+            },
             &submission.transport_authentication,
         )?;
         let binder = Arc::new(OriginalBinder {
+            review_custody: crate::review_custody::ReviewCustody::default(),
             source: self.clone(),
             grant: grant.clone(),
             batch: batch.clone(),
@@ -558,7 +608,13 @@ impl PrivateOriginals {
             held: OnceLock::new(),
             pending: OnceLock::new(),
             authentication,
-            event_key: self.original_event_key(&submission.original).await?,
+            event_key: match &coordinates {
+                Some(selected) => {
+                    self.event_key_for_source_coordinates(&submission.original, selected)
+                        .await?
+                }
+                None => self.original_event_key(&submission.original).await?,
+            },
             console: None,
             approved_login: match grant.is_some() || batch.is_some() {
                 true => {
@@ -573,6 +629,13 @@ impl PrivateOriginals {
         let input = Input::Prompt(
             PromptInput::new(submission.content, None).with_injected_context(injected_context),
         );
+        // The final pre-wake read refuses an observed cancellation, close,
+        // changed canonical selection or newly attached non-ordinary path.
+        // A later race is still refused by the unchanged strict native binder.
+        if let Some(selected) = &coordinates {
+            self.event_for_source_coordinates(&submission.original, selected)
+                .await?;
+        }
         // The alias is the installed target, resolved and rechecked by the
         // same identity owner under its native lease. There is no fallback.
         let result = runtime
@@ -657,6 +720,7 @@ pub(super) struct OriginalBinder {
     pub(super) event_key: IdempotencyKey,
     pub(super) console: Option<super::console_ingress::ConsoleEntry>,
     pub(super) approved_login: Option<crate::private_host::ConsoleLoginHandle>,
+    pub(super) review_custody: crate::review_custody::ReviewCustody,
 }
 
 impl Drop for OriginalBinder {
@@ -688,6 +752,9 @@ impl GovernedInputBinder for OriginalBinder {
         context: &GovernedBindContext,
         input: Input,
     ) -> Result<BoundGovernedInput, String> {
+        self.source
+            .with_new_work_admission(|| ())
+            .map_err(|_| "Toolkit source admission is stopped".to_owned())?;
         // Reservation is synchronous and precedes child issuance and source
         // binding. No login mutex survives into the native or store awaits.
         let reservation = match (&self.console, &self.approved_login) {
@@ -725,6 +792,20 @@ impl OriginalBinder {
         context: &GovernedBindContext,
         input: Input,
     ) -> Result<BoundGovernedInput, String> {
+        self.bind_retained_with_workflow(context, input, None).await
+    }
+
+    pub(super) async fn bind_retained_with_workflow(
+        &self,
+        context: &GovernedBindContext,
+        input: Input,
+        planning: Option<&setup_workflow::PreparedWorkflowLaunch>,
+    ) -> Result<BoundGovernedInput, String> {
+        // Console/workflow binders also enter here, including already-bound
+        // sources. Enrollment rechecks after the asynchronous preparation.
+        self.source
+            .with_new_work_admission(|| ())
+            .map_err(|_| "Toolkit source admission is stopped".to_owned())?;
         if let Some(entry) = &self.console {
             entry.check()?;
         }
@@ -733,35 +814,48 @@ impl OriginalBinder {
                 .check()
                 .map_err(|_| "The approved Console login is unavailable")?;
         }
-        let held = match &self.grant {
-            None if self.batch.is_some() => {
-                self.source
-                    .binding_for_batch_input(
-                        &self.original,
-                        context,
-                        self.batch.as_ref().unwrap(),
-                        self.approved_login.clone(),
-                    )
-                    .await
+        let held = if let Some(planning) = planning {
+            if self.grant.is_some()
+                || self.batch.is_some()
+                || self.console.is_some()
+                || self.approved_login.is_some()
+            {
+                return Err("The workflow launch has conflicting source custody".into());
             }
-            Some(grant) => {
-                self.source
-                    .binding_for_access_input(
-                        &self.original,
-                        context,
-                        grant,
-                        self.approved_login.clone(),
-                    )
-                    .await
-            }
-            None => match &self.console {
-                Some(entry) => {
+            self.source
+                .binding_for_workflow_input(&self.original, context, planning.selection())
+                .await
+        } else {
+            match &self.grant {
+                None if self.batch.is_some() => {
                     self.source
-                        .binding_for_console_input(&self.original, context, entry.clone())
+                        .binding_for_batch_input(
+                            &self.original,
+                            context,
+                            self.batch.as_ref().unwrap(),
+                            self.approved_login.clone(),
+                        )
                         .await
                 }
-                None => self.source.binding_for_input(&self.original, context).await,
-            },
+                Some(grant) => {
+                    self.source
+                        .binding_for_access_input(
+                            &self.original,
+                            context,
+                            grant,
+                            self.approved_login.clone(),
+                        )
+                        .await
+                }
+                None => match &self.console {
+                    Some(entry) => {
+                        self.source
+                            .binding_for_console_input(&self.original, context, entry.clone())
+                            .await
+                    }
+                    None => self.source.binding_for_input(&self.original, context).await,
+                },
+            }
         }
         .map_err(|_error| {
             #[cfg(test)]
@@ -834,15 +928,16 @@ impl OriginalBinder {
                 );
                 "Toolkit could not bind this authenticated original".to_owned()
             })?;
-        let admitted = prepared
-            .admitted()
-            .map_err(|_| "Toolkit admitted original is unavailable".to_owned())?;
-        if admitted.is_none()
-            && let Some(exact) = cold_service_admission::RetainedBoundInput::retain_for_attempt(
+        // Peer projections refresh only their observation time on retry.
+        // Select the source's first exact bytes before observing admitted
+        // custody too, so replay never replaces its input or attempt record.
+        if let Some(peer) = &held.peer_ingress
+            && let Some(exact) = cold_service_admission::RetainedBoundInput::retain_peer_attempt(
                 &held.first_input,
                 prepared.input(),
+                peer,
             )
-            .map_err(|_| "Toolkit first original input changed")?
+            .map_err(|_| "Toolkit first peer input changed")?
         {
             prepared = self
                 .source
@@ -855,11 +950,58 @@ impl OriginalBinder {
                     self.authentication.clone(),
                     context.controller.clone(),
                 )
-                .map_err(|_| "Toolkit could not rebind the exact first original input")?;
+                .map_err(|_| "Toolkit could not rebind the exact first peer input")?;
         }
-        if self.grant.is_some() || self.batch.is_some() || held.retain_bound_input {
+        let admitted = prepared
+            .admitted()
+            .map_err(|_| "Toolkit admitted original is unavailable".to_owned())?;
+        if admitted.is_none() && held.peer_ingress.is_none() {
+            let retained = if held.console_child_input {
+                cold_service_admission::RetainedBoundInput::retain_exact_for_attempt(
+                    &held.first_input,
+                    prepared.input(),
+                )
+            } else {
+                cold_service_admission::RetainedBoundInput::retain_for_attempt(
+                    &held.first_input,
+                    prepared.input(),
+                )
+            };
+            if let Some(exact) = retained.map_err(|_| "Toolkit first original input changed")? {
+                prepared = self
+                    .source
+                    .owner
+                    .prepare_authenticated_input(
+                        &held.original,
+                        &context.session_id,
+                        exact,
+                        self.event_key.clone(),
+                        self.authentication.clone(),
+                        context.controller.clone(),
+                    )
+                    .map_err(|_| "Toolkit could not rebind the exact first original input")?;
+            }
+        }
+        // Native's tracked foreground retains this prepared Input and every
+        // entered write. The planning holder is not Candidate publication.
+        let workflow = planning
+            .map(|planning| planning.stage(&held, context))
+            .transpose()
+            .map_err(|_| {
+                "The planning workflow could not retain pending source custody".to_owned()
+            })?;
+        if self.grant.is_some()
+            || self.batch.is_some()
+            || held.retain_bound_input
+            || workflow.is_some()
+        {
             self.source
-                .retain_bound_service_input(&self.original, &held.original, prepared.input())
+                .retain_bound_service_input_from_console(
+                    &self.original,
+                    &held.original,
+                    prepared.input(),
+                    self.console.as_ref().zip(console_input.as_ref()),
+                )
                 .await
                 .map_err(|_error| {
                     #[cfg(test)]
@@ -901,7 +1043,11 @@ impl OriginalBinder {
                     Some((input, pending)) => (
                         input,
                         pending,
-                        custody_recovery::CustodyHandoff::new(false, &self.source),
+                        custody_recovery::CustodyHandoff::new(
+                            false,
+                            &self.source,
+                            &self.review_custody,
+                        ),
                     ),
                     None => match retained.as_ref().filter(|_| selected) {
                         Some(prior) => {
@@ -924,6 +1070,7 @@ impl OriginalBinder {
                             let handoff = custody_recovery::CustodyHandoff::new(
                                 selected && pending.is_first_candidate(),
                                 &self.source,
+                                &self.review_custody,
                             );
                             (input, pending, handoff)
                         }
@@ -946,6 +1093,7 @@ impl OriginalBinder {
                     native_admission: Mutex::new(None),
                     pending: Mutex::new(SourcePublication::Pending(pending)),
                     held: Arc::downgrade(&held),
+                    workflow,
                 });
                 if enrolled {
                     *retained = Some(pending.clone());
@@ -960,6 +1108,20 @@ impl OriginalBinder {
         if self.pending.set(pending.clone()).is_err() {
             pending.handoff.foreground_finished();
             return Err("Toolkit original was bound more than once".to_owned());
+        }
+        // First-attempt persistence already happened. Keep its actual recovery
+        // owner before any effect-stage refusal; a local guard drop alone would
+        // leave the canonical Pending attempt without an enrolled custodian.
+        if let Some((planning, workflow)) = planning.zip(pending.workflow.as_ref())
+            && planning.stage_effects(&self.source, workflow).is_err()
+        {
+            // This box never escaped to native admission. Release that
+            // custody before recording the known binder refusal. The binder
+            // releases foreground custody, and existing recovery persists
+            // withdrawal before dropping the retained candidate guard.
+            drop(settlement);
+            pending.handoff.record_definite_refusal();
+            return Err("The planning workflow could not stage effect custody".to_owned());
         }
         let entry_fence = if let Some(batch) = &self.batch {
             let login = self
@@ -1007,14 +1169,15 @@ pub(super) struct PendingOriginalAdmission {
     pub(super) native_admission: Mutex<Option<GovernedAdmission>>,
     pub(super) pending: Mutex<SourcePublication>,
     pub(super) held: Weak<HeldPrivateOriginal>,
+    workflow: Option<Arc<setup_workflow::HeldSetupWorkflow>>,
 }
 
 /// The result of consuming this one guard stays with that guard's custody.
 /// It is process-local settlement, not a native admission or permission cache.
 pub(super) enum SourcePublication {
     Pending(PendingToolkitOriginal),
-    // This is the actual guard's acknowledgement. It is not a native receipt
-    // or a durable CAS.
+    // This is the actual guard's acknowledgement, separate from a later
+    // workflow publication error. It is not a native receipt or durable CAS.
     Settled {
         source_acknowledged: bool,
         result: Result<(), String>,
@@ -1094,6 +1257,29 @@ impl SourcePublication {
 }
 
 impl PendingOriginalAdmission {
+    /// Read-only identity for this retained workflow input. This does not
+    /// promote source custody, rebind an input, or authorize another dispatch.
+    pub(super) fn workflow_input(
+        &self,
+        workflow: &Arc<setup_workflow::HeldSetupWorkflow>,
+    ) -> Result<(SessionId, Input), PrivateOriginalError> {
+        if self.service_grant.is_some()
+            || self.service_batch.is_some()
+            || !self
+                .workflow
+                .as_ref()
+                .is_some_and(|held| Arc::ptr_eq(held, workflow))
+            || !self.held.upgrade().is_some_and(|held| {
+                held.setup_workflow
+                    .get()
+                    .is_some_and(|actual| Arc::ptr_eq(actual, workflow))
+            })
+        {
+            return Err(PrivateOriginalError::Conflict);
+        }
+        Ok((self.session.clone(), self.input.clone()))
+    }
+
     /// Inspect this same source guard without replaying native acceptance or
     /// consuming pending custody. The caller has already checked disclosure.
     pub(super) fn publication_status(
@@ -1142,7 +1328,16 @@ impl PendingOriginalAdmission {
             .pending
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        publication.admit_then(|| Ok(()))
+        // The source guard releases its publication reservation before this
+        // callback takes the same owner's writer. Neither step awaits.
+        publication.admit_then(|| {
+            if let Some(workflow) = &self.workflow {
+                workflow.accepted().map_err(|_| {
+                    "Native work was admitted but Toolkit source publication failed".to_owned()
+                })?;
+            }
+            Ok(())
+        })
     }
 }
 
@@ -1168,7 +1363,11 @@ impl GovernedSettlement for OriginalSettlement {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(admission.clone());
         let result = self.0.handoff.accepted(|| self.0.admit());
-        if result.is_err() || self.0.service_grant.is_some() || self.0.service_batch.is_some() {
+        if result.is_err()
+            || self.0.service_grant.is_some()
+            || self.0.service_batch.is_some()
+            || self.0.workflow.is_some()
+        {
             self.0.retain_unresolved();
         }
         result

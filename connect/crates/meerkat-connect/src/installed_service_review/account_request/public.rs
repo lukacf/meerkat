@@ -39,6 +39,9 @@ struct PublicSelection {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PublicProposal {
+    // Exact routing selection only; native staged custody supplies authority.
+    #[serde(default, deserialize_with = "acquisition")]
+    setup_acquisition: Option<toolkit_package::Id>,
     job_id: String,
     operations: Vec<String>,
     agent: String,
@@ -109,6 +112,16 @@ impl InstalledPublicSingleRequest {
 }
 
 #[cfg(feature = "console")]
+fn acquisition<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<toolkit_package::Id>, D::Error> {
+    let value = String::deserialize(deserializer)?;
+    toolkit_package::Id::new(value)
+        .map(Some)
+        .map_err(serde::de::Error::custom)
+}
+
+#[cfg(feature = "console")]
 fn unavailable() -> ToolError {
     ToolError::unavailable(
         SETUP_PUBLIC_SERVICE_REQUEST,
@@ -125,7 +138,17 @@ pub(crate) fn select_public_job(
     session: &SessionId,
     job_id: &str,
 ) -> Result<PublicServiceSelection, ToolError> {
-    checked.public_selection(realm, session, job_id).map_err(|error| {
+    select_public_job_for(checked, realm, session, job_id, None)
+}
+#[cfg(feature = "console")]
+fn select_public_job_for(
+    checked: &Arc<CheckedInstalls>,
+    realm: &RealmLocator,
+    session: &SessionId,
+    job_id: &str,
+    acquisition: Option<&toolkit_package::Id>,
+) -> Result<PublicServiceSelection, ToolError> {
+    checked.public_selection_for(realm, session, job_id, acquisition).map_err(|error| {
         let job = json!(job_id);
         let reason = match error {
             ConnectorSelectionError::Unconfirmed => format!(
@@ -194,17 +217,24 @@ pub(super) async fn dispatch(
         || context.work_authorization().is_none()
         || context.retained_work().is_none()
     {
+        eprintln!(r#"{{"event":"toolkit_shared_dispatch_refused","stage":"public.context"}}"#);
         return Err(ToolError::access_denied(call.name));
     }
     let mut current = context
-        .check_tool_authorization(call, plan)?
+        .check_tool_authorization(call, plan)
+        .inspect_err(|_| {
+            eprintln!(
+                r#"{{"event":"toolkit_shared_dispatch_refused","stage":"public.authorization"}}"#
+            )
+        })?
         .unwrap_or_else(|| context.clone());
     let proposal = parse(call.args.get())?;
-    let selected = select_public_job(
+    let selected = select_public_job_for(
         &owner.checked,
         &owner.realm,
         &owner.session,
         &proposal.job_id,
+        proposal.setup_acquisition.as_ref(),
     )?;
     let selection = PublicSelection {
         operations: proposal.operations.into_iter().collect(),
@@ -229,10 +259,14 @@ pub(super) async fn dispatch(
         Some(tasks) => tasks.prepare_public_service(call, &current, plan).await,
         None => Ok(None),
     };
-    if let Some(refreshed) = current.check_tool_authorization(call, plan)? {
-        current = refreshed;
-    }
+    if let Some(refreshed) = current.check_tool_authorization(call, plan)
+        .inspect_err(|_| eprintln!(r#"{{"event":"toolkit_shared_dispatch_refused","stage":"public.task_authorization"}}"#))? { current = refreshed; }
     let task = prepared
+        .inspect_err(|_| {
+            eprintln!(
+                r#"{{"event":"toolkit_shared_dispatch_refused","stage":"public.task_preparation"}}"#
+            )
+        })
         .map_err(|error| match error {
             toolkit_mobkit::private_originals::PrivateOriginalError::Unavailable => {
                 ToolError::unavailable(
@@ -245,17 +279,21 @@ pub(super) async fn dispatch(
                 ToolError::access_denied(call.name)
             }
         })?
-        .ok_or_else(|| ToolError::access_denied(call.name))?;
-    require_captured_consumer(call.name, &selection.agent, &task)?;
+        .ok_or_else(|| {
+            eprintln!(
+                r#"{{"event":"toolkit_shared_dispatch_refused","stage":"public.task_absent"}}"#
+            );
+            ToolError::access_denied(call.name)
+        })?;
+    require_captured_consumer(call.name, &selection.agent, &task).inspect_err(|_| {
+        eprintln!(r#"{{"event":"toolkit_shared_dispatch_refused","stage":"public.consumer"}}"#)
+    })?;
     if let Some(application) = &owner.application {
         // Bind the already-checked product selection, independently of the
         // application policy decision. No human ApprovalRecord is fabricated.
-        let application_task = task
-            .clone()
-            .with_installation_readback_source(
-                &config,
-                public_review_body(&selected, &config, &selection).map_err(|_| unavailable())?,
-            )
+        let application_task = task.clone().with_installation_readback_source(&config,
+            public_review_body(&selected, &config, &selection).map_err(|_| unavailable())?)
+            .inspect_err(|_| eprintln!(r#"{{"event":"toolkit_shared_dispatch_refused","stage":"public.application_readback"}}"#))
             .map_err(|_| unavailable())?;
         if let Some(result) = super::application::public(
             owner,
@@ -270,13 +308,16 @@ pub(super) async fn dispatch(
             selection.expires_in_ms,
             selection.tool_policy.clone(),
         )
-        .await?
-        {
+        .await
+        .inspect_err(|_| {
+            eprintln!(
+                r#"{{"event":"toolkit_shared_dispatch_refused","stage":"public.application"}}"#
+            )
+        })? {
             return Ok(result);
         }
-        if let Some(refreshed) = current.check_tool_authorization(call, plan)? {
-            current = refreshed;
-        }
+        if let Some(refreshed) = current.check_tool_authorization(call, plan)
+            .inspect_err(|_| eprintln!(r#"{{"event":"toolkit_shared_dispatch_refused","stage":"public.application_authorization"}}"#))? { current = refreshed; }
     }
     // This public entry serves the integrated Console. A local installed host
     // without that retained human uses its standalone Connect setup surface.
@@ -287,6 +328,9 @@ pub(super) async fn dispatch(
             .as_ref()
             != Some(&config)
     {
+        eprintln!(
+            r#"{{"event":"toolkit_shared_dispatch_refused","stage":"public.console_source"}}"#
+        );
         return Err(ToolError::access_denied(call.name));
     }
     require_console_tool_policy(
@@ -294,8 +338,17 @@ pub(super) async fn dispatch(
         &config,
         &selection.operations,
         selection.tool_policy.as_ref(),
-    )?;
-    let entry = current.reviewed_entry_ticket(call, plan)?;
+    )
+    .inspect_err(|_| {
+        eprintln!(
+            r#"{{"event":"toolkit_shared_dispatch_refused","stage":"public.console_tool_policy"}}"#
+        )
+    })?;
+    let entry = current.reviewed_entry_ticket(call, plan).inspect_err(|_| {
+        eprintln!(
+            r#"{{"event":"toolkit_shared_dispatch_refused","stage":"public.console_entry_ticket"}}"#
+        )
+    })?;
     let (checks, mut requests) = mpsc::channel::<oneshot::Sender<bool>>(1);
     let (response, receive) = oneshot::channel();
     owner
@@ -321,13 +374,17 @@ pub(super) async fn dispatch(
                 let Some(request) = request else { break receive.await; };
                 match current.check_tool_authorization(call, plan) {
                     Ok(refreshed) => { if let Some(refreshed) = refreshed { current = refreshed; } let _ = request.send(true); }
-                    Err(error) => { let _ = request.send(false); return Err(error); }
+                    Err(error) => {
+                        eprintln!(r#"{{"event":"toolkit_shared_dispatch_refused","stage":"public.console_review_authorization"}}"#);
+                        let _ = request.send(false); return Err(error);
+                    }
                 }
             }
             response = receive.as_mut() => break response,
         }
     };
-    current.check_tool_authorization(call, plan)?;
+    current.check_tool_authorization(call, plan)
+        .inspect_err(|_| eprintln!(r#"{{"event":"toolkit_shared_dispatch_refused","stage":"public.console_final_authorization"}}"#))?;
     let reply = response.map_err(|_| unavailable())?;
     serde_json::to_string(&reply)
         .map(|body| ToolResult::new(call.id.into(), body, false).into())
@@ -341,6 +398,7 @@ pub fn installed_public_service_request_definition() -> ToolDef {
         {
             let mut singleton = json!({"type":"object","additionalProperties":false,"required":["agent","expires_in_ms"],
             "properties":{"job_id":{"type":"string"},"agent":consumer_agent_schema(),
+                "setup_acquisition":{"type":"string","minLength":1,"maxLength":192},
                 "expires_in_ms":{"type":["integer","null"],"minimum":1},
                 "tool_policy":tool_policy_schema(),
                 "operations":{"type":"array","description":"Exact raw MCP tool names: operation_tools values, not declaration-ID keys. Select only the needed subset.","minItems":1,"maxItems":128,"uniqueItems":true,

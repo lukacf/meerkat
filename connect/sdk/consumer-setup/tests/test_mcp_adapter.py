@@ -483,6 +483,64 @@ class AdapterTests(fixtures.FixtureMixin, unittest.IsolatedAsyncioTestCase):
             self.assertEqual(observed["job"]["status"], "succeeded")
         self.assertEqual(json.loads(output.read_text()), {"closing": True, "status": "succeeded", "workers_joined": True})
 
+    async def test_local_empty_restore_offer_runs_real_helper_tools_and_repeats(self):
+        # Real selected helper, MCP SDK, Controller and lease/offer protocol.
+        # Native close/current registration authority is covered by Rust controls.
+        import test_local_session as rounds
+        local = rounds.local
+        configuration = self.root / "configuration" / "mcp.json"
+        configuration.parent.mkdir()
+        state_root = self.root / "local-session"
+        python = str(Path(sys.executable).absolute())
+        configuration.write_bytes(local.encoded({"mcpServers": {"toolkit-setup": {
+            "command": "/usr/bin/env", "args": ["-i", "PATH=/usr/bin:/bin", "PYTHONDONTWRITEBYTECODE=1",
+                python, "-I", "-B", str(ROOT / "mcp_adapter.py"), "--workspace", str(self.root / "unused"),
+                "--bundle", str(self.bundle), "--contents-sha256", self.sha,
+                "--families", "agno", "--python", python]}}}))
+        binding = {"configuration_sha256": local.digest(configuration.read_bytes()),
+            "helper_sha256": local.digest((ROOT / "local_session.py").read_bytes()),
+            "adapter_sha256": local.digest((ROOT / "mcp_adapter.py").read_bytes()),
+            "backend_sha256": local.digest((ROOT / "backend.py").read_bytes())}
+        server = local.prepare_server(configuration=configuration, helper=ROOT / "local_session.py",
+                                      state_root=state_root, **binding)
+        params = StdioServerParameters(command=server["command"], args=server["args"])
+        async def use_helper():
+            async with Client(params) as client:
+                tools = {tool.name for tool in (await client.list_tools()).tools}
+                self.assertIn("setup_prepare", tools)
+                state = await self.call(client, "setup_state")
+                self.assertNotEqual(state.get("mode"), "recovery")
+                self.assertEqual(state["families"][0]["id"], "agno")
+                self.assertEqual(state["families"][0]["status"], "unprepared")
+        await use_helper()
+        observation_path = state_root / "empty-close.json"
+        await eventually(observation_path.exists)
+        first = local.decode(local.read(observation_path))
+        workspaces = {local.decode(local.read(state_root / "session.json"))["workspace"]}
+        for _ in range(2):
+            # The previous owner selected this exact fingerprint; Python checks
+            # it again under the same lease before publishing a successor offer.
+            offer = rounds.LiveRoundOffer(self, state_root, binding, expected_round=first["round"])
+            try:
+                offer.__enter__()
+                async with Client(params) as client:
+                    offer.finish()
+                    state = await self.call(client, "setup_state")
+                    self.assertNotEqual(state.get("mode"), "recovery")
+                    self.assertEqual(state["families"][0]["status"], "unprepared")
+                    self.assertIn("setup_prepare", {tool.name for tool in (await client.list_tools()).tools})
+                await eventually(observation_path.exists)
+                successor = local.decode(local.read(observation_path))
+                self.assertNotEqual(successor["round"], first["round"])
+                record = local.decode(local.read(state_root / "session.json"))
+                self.assertEqual(record["schema_version"], 1)
+                self.assertNotIn(record["workspace"], workspaces)
+                workspaces.add(record["workspace"])
+                first = successor
+            finally:
+                offer.__exit__()
+        self.assertEqual(len(workspaces), 3)
+
     async def test_stdio_eof_and_signals_wait_for_admitted_install(self):
         for stop in ("eof", "signals"):
             with self.subTest(stop=stop):

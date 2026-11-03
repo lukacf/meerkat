@@ -13,9 +13,14 @@ mod batch;
 mod compensation;
 mod continuation;
 mod selection;
+pub(super) mod shared_preparation;
 pub use batch::{PreparedPublicInstruction, PreparedPublicServiceBatch, PublicServiceBatchEntry};
 pub(super) use selection::ApprovedTaskLink;
 use selection::{ApprovedServiceMember, ApprovedTaskHeader, ApprovedTaskMember};
+pub use shared_preparation::{
+    InstalledSharedEntry, InstalledSharedPreparation, SettledSharedPreparationResolver,
+    SharedPreparationLeave, SharedPreparationResource,
+};
 
 impl PrivateOriginals {
     /// Reopen the original source chain after a crash. Parent cancellation is
@@ -237,8 +242,8 @@ impl PrivateOriginals {
     }
 
     /// The existing cancellation owner returns its actual completed census.
-    /// Only the outer private-channel cancellation uses it for workflow leave;
-    /// internal admission/compensation callers keep their existing behavior.
+    /// Private-channel cancellation and the existing recovery worker use it
+    /// for workflow leave; admission/compensation callers retain their behavior.
     pub(super) async fn record_cancelled_source_set(
         &self,
         reference: &PrivateOriginalRef,
@@ -314,6 +319,46 @@ impl PrivateOriginals {
             OriginalWriterError::Conflict => PrivateOriginalError::Conflict,
             _ => PrivateOriginalError::Unavailable,
         })?;
+        // The native-send/Controller-decision gates are closed and drained.
+        // Leave the single P record only after durable source cancellation.
+        // Any lost CAS remains closed/pending; no acknowledgement claims a
+        // fully removed member until this same owner can reconcile it.
+        let decoded = cancelled
+            .iter()
+            .map(|stored| Ok((stored.clone(), self.decode_stored(stored)?)))
+            .collect::<Result<Vec<_>, PrivateOriginalError>>()?;
+        if decoded
+            .iter()
+            .all(|(_, record)| record.shared_preparations.is_empty())
+        {
+            return Ok(cancelled);
+        }
+        let scope = SetupScope::new(
+            Id::new(self.scope.realm.clone()).map_err(|_| PrivateOriginalError::Conflict)?,
+            Id::new(self.scope.owner.clone()).map_err(|_| PrivateOriginalError::Conflict)?,
+        );
+        let setup = SetupStore::new(self.store.as_ref(), scope)
+            .map_err(|_| PrivateOriginalError::Unavailable)?;
+        for (stored, record) in decoded {
+            for member in &record.shared_preparations {
+                if member.source() != &stored.key {
+                    return Err(PrivateOriginalError::Conflict);
+                }
+                setup
+                    .begin_shared_preparation_leave(member)
+                    .await
+                    .map_err(|_| PrivateOriginalError::Unavailable)?;
+                let last = setup
+                    .leave_shared_preparation(member)
+                    .await
+                    .map_err(|_| PrivateOriginalError::Unavailable)?;
+                // Durable cancellation/leave is not physical stop completion.
+                // The same source's live resource must detach this member and
+                // join a last-member stop before cancellation is acknowledged.
+                self.leave_cancelled_shared_resource(&stored, member, last)
+                    .await?;
+            }
+        }
         Ok(cancelled)
     }
 }
@@ -350,6 +395,7 @@ pub struct InstalledServiceTask {
     console_login: Option<crate::private_host::ConsoleLoginHandle>,
     installation_readback: Option<RetainedApplicationInstallation>,
     pub(super) setup: Option<super::configured_setup::service::ServiceSetupSelection>,
+    workflow: Option<super::setup_workflow::execution::WorkflowTaskCustody>,
 }
 
 /// Nonsecret requested effects for the defining realm's native owner. The
@@ -399,6 +445,7 @@ impl PreparedServiceInstruction {
         // even if an exceptional caller drops this future instead of joining it.
         let retained_login = Arc::new(std::sync::Mutex::new(reservation));
         let worker_login = retained_login.clone();
+        let workflow_task = self.task.clone();
         let cleanup = self
             .operator
             .service_mcp_parent_compensation(&self.review, &record)
@@ -413,7 +460,7 @@ impl PreparedServiceInstruction {
                 record,
                 Arc::new(move || {
                     let _retained_login = &worker_login;
-                    presented()
+                    workflow_task.workflow_effect_current().is_ok() && presented()
                 }),
             )
             .await;
@@ -570,15 +617,13 @@ impl PrivateOriginals {
             .validate_current_selection()
             .map_err(|_| PrivateOriginalError::Unavailable)?;
         let selected = lifetime.selected_policy();
-        let native = selected
-            .native_host
+        let (compiled, _, admitted_context) = self.selected_source_route(&parent.route)?;
+        if admitted_context
             .as_ref()
-            .ok_or(PrivateOriginalError::Unavailable)?;
-        let compiled = native
-            .routes
-            .iter()
-            .find(|entry| entry.id == parent.route)
-            .ok_or(PrivateOriginalError::Denied)?;
+            .is_some_and(|context| context.as_str() != task.origin_session_id.to_string())
+        {
+            return Err(PrivateOriginalError::Denied);
+        }
         // The live caller is the helper; the proposal's agent must be the
         // waiting task's selected target. Source authentication was checked
         // above without requiring either installation or service permission.
@@ -614,6 +659,7 @@ impl PrivateOriginals {
             console_login,
             installation_readback: None,
             setup: None,
+            workflow: None,
         };
         proposed.current().await?;
         Ok(Some(proposed))
@@ -621,6 +667,26 @@ impl PrivateOriginals {
 }
 
 impl InstalledServiceTask {
+    pub(crate) fn with_workflow(
+        mut self,
+        workflow: Option<super::setup_workflow::execution::WorkflowTaskCustody>,
+    ) -> Result<Self, PrivateOriginalError> {
+        if workflow
+            .as_ref()
+            .is_some_and(|held| !held.matches_task(&self.parent_association, &self.acquisition))
+        {
+            return Err(PrivateOriginalError::Denied);
+        }
+        self.workflow = workflow;
+        Ok(self)
+    }
+    fn workflow_effect_current(&self) -> Result<(), PrivateOriginalError> {
+        self.workflow
+            .as_ref()
+            .map(|held| held.effect_current())
+            .transpose()?;
+        Ok(())
+    }
     pub(crate) fn select_configured_setup(
         mut self,
         helper: &crate::installed_host::acquisition::InstalledSetupSelection,
@@ -703,7 +769,7 @@ impl InstalledServiceTask {
         {
             return Err(PrivateOriginalError::Denied);
         }
-        let route = self.source.route(&self.parent.route)?;
+        let route = &self.source.route(&self.parent.route)?;
         let runtime = self.source.bound_identity_runtime()?;
         let identity = runtime
             .owned_identity_for_member_alias(route.grant_target.as_str())
@@ -808,33 +874,44 @@ impl InstalledServiceTask {
         ))
     }
     async fn current(&self) -> Result<(StoredRecord, SetupSnapshot), PrivateOriginalError> {
-        self.check_console_login()?;
-        let lifetime = self
-            .source
-            .host_lifetime
-            .get()
-            .and_then(Weak::upgrade)
-            .ok_or(PrivateOriginalError::Unavailable)?;
+        if let Some(workflow) = &self.workflow {
+            workflow.conditions(&self.source).await
+                .inspect_err(|_| eprintln!(r#"{{"event":"toolkit_shared_dispatch_refused","stage":"service.current.workflow_conditions"}}"#))?;
+        }
+
+        self.check_console_login().inspect_err(|_| {
+            eprintln!(
+                r#"{{"event":"toolkit_shared_dispatch_refused","stage":"service.current.login"}}"#
+            )
+        })?;
+        let lifetime = self.source.host_lifetime.get().and_then(Weak::upgrade)
+            .ok_or(PrivateOriginalError::Unavailable)
+            .inspect_err(|_| eprintln!(r#"{{"event":"toolkit_shared_dispatch_refused","stage":"service.current.lifetime"}}"#))?;
         // This read retains no effect entry across the following awaits.
-        lifetime
-            .validate_current_selection()
+        lifetime.validate_current_selection()
+            .inspect_err(|_| eprintln!(r#"{{"event":"toolkit_shared_dispatch_refused","stage":"service.current.selection"}}"#))
             .map_err(|_| PrivateOriginalError::Denied)?;
-        let parent = self
-            .source
-            .store
-            .get(&self.source.key(&self.parent)?)
-            .await
-            .map_err(store_error)?
+        let parent = self.source.store.get(&self.source.key(&self.parent)
+            .inspect_err(|_| eprintln!(r#"{{"event":"toolkit_shared_dispatch_refused","stage":"service.current.source_key"}}"#))?).await.map_err(store_error)?
             .ok_or(PrivateOriginalError::Unavailable)?;
-        let record = self.source.decode_record(&parent, &self.parent)?;
-        let route = self.source.route(&self.parent.route)?;
+        let record = self.source.decode_record(&parent, &self.parent)
+            .inspect_err(|_| eprintln!(r#"{{"event":"toolkit_shared_dispatch_refused","stage":"service.current.source_record"}}"#))?;
+        let route = &self.source.route(&self.parent.route).inspect_err(|_| {
+            eprintln!(
+                r#"{{"event":"toolkit_shared_dispatch_refused","stage":"service.current.route"}}"#
+            )
+        })?;
         if record.source != SourceFacts::from_route(route, &record.source.ingress) {
+            eprintln!(
+                r#"{{"event":"toolkit_shared_dispatch_refused","stage":"service.current.source_facts"}}"#
+            );
             return Err(PrivateOriginalError::Conflict);
         }
-        if record.operation_cancelled
-            || self.source.approved_task_is_cancelled(&record).await?
+        if record.operation_cancelled || self.source.approved_task_is_cancelled(&record).await
+            .inspect_err(|_| eprintln!(r#"{{"event":"toolkit_shared_dispatch_refused","stage":"service.current.cancellation_read"}}"#))?
             || record.final_association.as_ref() != Some(&self.parent_association)
         {
+            eprintln!(r#"{{"event":"toolkit_shared_dispatch_refused","stage":"service.current.source_binding"}}"#);
             return Err(PrivateOriginalError::Denied);
         }
         if !matches!(
@@ -844,15 +921,17 @@ impl InstalledServiceTask {
             ),
             Ok(OriginalDisposition::Active)
         ) {
+            eprintln!(
+                r#"{{"event":"toolkit_shared_dispatch_refused","stage":"service.current.disposition"}}"#
+            );
             return Err(PrivateOriginalError::Unavailable);
         }
         let operation =
             Id::new(self.acquisition.id.clone()).map_err(|_| PrivateOriginalError::Conflict)?;
         let store = SetupStore::new_conditional(self.store.as_ref(), self.scope()?)
             .map_err(|_| PrivateOriginalError::Unavailable)?;
-        let snapshot = store
-            .service_task_snapshot(&operation, &self.task)
-            .await
+        let snapshot = store.service_task_snapshot(&operation, &self.task).await
+            .inspect_err(|_| eprintln!(r#"{{"event":"toolkit_shared_dispatch_refused","stage":"service.current.snapshot"}}"#))
             .map_err(|_| PrivateOriginalError::Unavailable)?;
         let now = u64::try_from(self.store.now_ms().await.map_err(store_error)?)
             .map_err(|_| PrivateOriginalError::Unavailable)?;
@@ -866,12 +945,20 @@ impl InstalledServiceTask {
                     | toolkit_catalog::AcquisitionPhase::Failed
             )
         {
+            eprintln!(
+                r#"{{"event":"toolkit_shared_dispatch_refused","stage":"service.current.snapshot_binding"}}"#
+            );
             return Err(PrivateOriginalError::Denied);
         }
-        lifetime
-            .validate_current_selection()
+        lifetime.validate_current_selection()
+            .inspect_err(|_| eprintln!(r#"{{"event":"toolkit_shared_dispatch_refused","stage":"service.current.final_selection"}}"#))
             .map_err(|_| PrivateOriginalError::Denied)?;
-        self.check_console_login()?;
+        self.check_console_login()
+            .inspect_err(|_| eprintln!(r#"{{"event":"toolkit_shared_dispatch_refused","stage":"service.current.final_login"}}"#))?;
+        if let Some(workflow) = &self.workflow {
+            workflow.current()
+                .inspect_err(|_| eprintln!(r#"{{"event":"toolkit_shared_dispatch_refused","stage":"service.current.final_workflow"}}"#))?;
+        }
         Ok((parent, snapshot))
     }
 
@@ -885,7 +972,7 @@ impl InstalledServiceTask {
         let Some(selection) = selection else {
             return Ok(None);
         };
-        let route = self.source.route(&self.parent.route)?;
+        let route = &self.source.route(&self.parent.route)?;
         let owner = self
             .source
             .service_tool_policy
@@ -1073,7 +1160,7 @@ impl InstalledServiceTask {
             }
         };
         let tool_policy = self.prepare_tool_policy(tool_policy).await?;
-        let route = self.source.route(&self.parent.route)?;
+        let route = &self.source.route(&self.parent.route)?;
         let config_bytes = canonical_json(config).map_err(|_| PrivateOriginalError::Conflict)?;
         let now = u64::try_from(self.store.now_ms().await.map_err(store_error)?)
             .map_err(|_| PrivateOriginalError::Unavailable)?;
@@ -1278,7 +1365,15 @@ impl InstalledServiceTask {
                         .key(&reference)
                         .map_err(|_| E::from(PrivateOriginalError::Denied))?;
                     let data = encode(SourceRecord {
+                        console_child_input: None,
+                        peer_ingress: None,
+                        native_operations: None,
+                        late_workflow_helper: None,
+                        workflow_child: None,
+                        class_input: None,
                         custody_attempt: None,
+                        custody_input: None,
+                        shared_preparations: Vec::new(),
                         setup_request: None,
                         configured_setup: None,
                         service_setup_children: vec![],
@@ -1292,6 +1387,7 @@ impl InstalledServiceTask {
                         approved_task: Some(link.clone()),
                         service_admission: None,
                         bound_service_input: None,
+                        planning_source_evidence: None,
                     })
                     .map_err(|_| E::from(PrivateOriginalError::Conflict))?;
                     let mut conditions = vec![
@@ -1304,6 +1400,10 @@ impl InstalledServiceTask {
                         },
                         snapshot.condition(),
                     ];
+                    if let Some(workflow) = &self.workflow {
+                        conditions.extend(workflow.conditions(&source).await.map_err(E::from)?);
+                        self.workflow_effect_current().map_err(E::from)?;
+                    }
                     conditions.extend(policy);
                     let saved = self
                         .store
@@ -1389,7 +1489,7 @@ impl PrivateOriginals {
             .approved_task
             .as_ref()
             .ok_or(PrivateOriginalError::Denied)?;
-        let route = self.route(&task.parent.route)?;
+        let route = &self.route(&task.parent.route)?;
         if record.source != SourceFacts::from_route(route, &record.source.ingress) {
             return Err(PrivateOriginalError::Conflict);
         }
@@ -1762,7 +1862,7 @@ impl PrivateOriginals {
     // member attachment. Their ephemeral native fixture owns no live MCP
     // surface. Production always calls step_service_input_with_attachment.
     #[cfg(test)]
-    async fn step_service_input(
+    pub(in crate::private_originals) async fn step_service_input(
         self: &Arc<Self>,
         stored: &StoredRecord,
     ) -> Result<(), PrivateOriginalError> {
@@ -1914,3 +2014,5 @@ mod selection_tests;
 #[cfg(test)]
 #[path = "service_approved_input/admission_tests.rs"]
 mod admission_tests;
+#[cfg(test)]
+pub(in crate::private_originals) use admission_tests::approve_b as approve_workflow_service_for_test;

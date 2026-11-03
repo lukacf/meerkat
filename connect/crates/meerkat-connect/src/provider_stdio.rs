@@ -22,7 +22,27 @@ struct Choice {
     target: ResolvedConnectionTarget,
     shown: ShownTarget,
     observation: Observation,
+    resolution: meerkat::CreateSessionModelResolution,
 }
+// Refresh the reviewed native snapshot after human input. This does not fence
+// concurrent config changes against an entered native credential operation.
+// Native operations keep their original custody; a later mismatch refuses
+// continuation without retrying or rolling back a completed credential write.
+async fn refresh_choice(startup: &mut SessionStartup, choice: &Choice) -> Result<(), ConnectError> {
+    let config = crate::realm::read_config(&startup.storage).await?;
+    let target = resolve_explicit_auth_binding_target(&config, &choice.target.auth_binding)
+        .map_err(|error| ConnectError::native("Refresh reviewed credential owner", error))?;
+    let resolution = resolve_create_session_model(&config, choice.request.clone())
+        .map_err(|error| ConnectError::native("Refresh reviewed provider model", error))?;
+    if target != choice.target || resolution != choice.resolution {
+        return Err(ConnectError::InvalidInput(
+            "The reviewed native provider target or model changed. Review provider setup again; any completed credential operation remains saved.".into(),
+        ));
+    }
+    startup.config = config;
+    Ok(())
+}
+
 fn stopped() -> ConnectError {
     ConnectError::InvalidInput("The protected provider interaction ended".into())
 }
@@ -65,7 +85,7 @@ pub(crate) async fn present(
             id: format!("target:{}", choices.len() + 1),
             request,
             shown: ShownTarget {
-                model: selected.model,
+                model: selected.model.clone(),
                 provider: selected.provider.as_str().into(),
                 realm: target.auth_binding.realm.as_str().into(),
                 binding: target.auth_binding.binding.as_str().into(),
@@ -77,6 +97,7 @@ pub(crate) async fn present(
             },
             target,
             observation,
+            resolution: selected,
         });
     }
     if choices.is_empty() {
@@ -102,15 +123,8 @@ pub(crate) async fn present(
             .iter()
             .find(|choice| choice.id == id)
             .ok_or_else(stopped)?;
-        // Recheck the full native target against what was actually presented.
-        let target =
-            resolve_explicit_auth_binding_target(&startup.config, &choice.target.auth_binding)
-                .map_err(|error| {
-                    ConnectError::native("Validate selected credential owner", error)
-                })?;
-        if target != choice.target {
-            return Err(stopped());
-        }
+        refresh_choice(startup, choice).await?;
+        let target = choice.target.clone();
         let observation = observe(startup, &target).await?;
         let mut actions = vec![ProviderAction::Back];
         if observation.admits_open() {
@@ -136,9 +150,12 @@ pub(crate) async fn present(
             Err(_) if bridge.retired() => return Ok(None),
             _ => return Err(stopped()),
         };
+        if action != ProviderAction::Back {
+            refresh_choice(startup, choice).await?;
+        }
         match action {
             ProviderAction::Back => continue,
-            ProviderAction::Use => return Ok(Some(choice.request.clone())),
+            ProviderAction::Use => return Ok((!bridge.retired()).then(|| choice.request.clone())),
             ProviderAction::EnterKey => {
                 validate_api_key_target(&startup.config, &target)?;
                 let persistence = credential_store(startup)?;
@@ -154,6 +171,7 @@ pub(crate) async fn present(
                 if key.trim().is_empty() || key.len() > 8192 || key.chars().any(char::is_control) {
                     return Err(stopped());
                 }
+                refresh_choice(startup, choice).await?;
                 let interrupt = async {
                     bridge.closed().await;
                     Ok(())
@@ -168,7 +186,10 @@ pub(crate) async fn present(
                     interrupt.as_mut(),
                 )
                 .await?;
-                return Ok(stored.then(|| choice.request.clone()));
+                if stored {
+                    refresh_choice(startup, choice).await?;
+                }
+                return Ok((stored && !bridge.retired()).then(|| choice.request.clone()));
             }
             ProviderAction::SignIn => {
                 let identity = oauth_identity(&target).ok_or_else(stopped)?;
@@ -180,7 +201,10 @@ pub(crate) async fn present(
                     &bridge,
                 )
                 .await?;
-                return Ok(complete.then(|| choice.request.clone()));
+                if complete {
+                    refresh_choice(startup, choice).await?;
+                }
+                return Ok((complete && !bridge.retired()).then(|| choice.request.clone()));
             }
         }
     }
@@ -294,3 +318,7 @@ async fn sign_in(
         },
     }
 }
+
+#[cfg(test)]
+#[path = "provider_stdio_tests.rs"]
+mod tests;

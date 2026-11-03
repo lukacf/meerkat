@@ -263,7 +263,7 @@ async fn revoke_alpha(
     b: &PrivateOriginalRef,
     task: &ApprovedTaskLink,
 ) {
-    let route = fixture.source.route(&b.route).unwrap();
+    let route = &fixture.source.route(&b.route).unwrap();
     let original = meerkat_authorization_contracts::work_association::OriginalWorkRef {
         authority: route.source_authority.clone(),
         work: b.original.clone(),

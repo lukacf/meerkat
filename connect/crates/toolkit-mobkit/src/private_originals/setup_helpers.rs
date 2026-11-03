@@ -12,7 +12,7 @@ use meerkat_authorization_contracts::{
     grant::GrantLineageRef,
     work_association::{NativeWorkTarget, WorkAuthorityBasis},
 };
-use meerkat_core::{ControllerModelClient, SessionId, ToolDispatchContext, types::ToolCallView};
+use meerkat_core::{ControllerModelClient, SessionId, ToolDispatchContext};
 use meerkat_mobkit::identity_first::{
     BoundGovernedInput, GovernedAdmission, GovernedBindContext, GovernedInputBinder,
     GovernedInputError, GovernedSettlement, IdentityRuntimeError, TurnTracking,
@@ -322,20 +322,20 @@ impl PrivateOriginals {
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn admit_setup_helper(
         self: &Arc<Self>,
-        call: ToolCallView<'_>,
         context: &ToolDispatchContext,
+        entered: &meerkat_core::EnteredDispatchOperation,
         service: &WorkGraphService,
         key: WorkAdmissionKey,
         request: CreateWorkItemRequest,
         operation: HelperOperation,
         selection: HelperAdmissionSelection,
+        review: crate::review_custody::ReviewCustody,
     ) -> Result<Arc<AdmittedHelperWork>, PrivateOriginalError> {
         let original = self.acquisition_original(context).await?;
         self.require_helper_selection(&selection)?;
         self.owner
             .admit_fenced_helper(
-                call,
-                context,
+                entered,
                 self.store.as_ref(),
                 &self.scope,
                 service,
@@ -347,6 +347,7 @@ impl PrivateOriginals {
                 &original.contributors,
                 &original.own_originals,
                 selection,
+                review,
             )
             .await
             .map(Arc::new)
@@ -358,20 +359,20 @@ impl PrivateOriginals {
     /// independent host-private recovery after originating work is cancelled.
     pub(crate) async fn observe_setup_helper_for_live_replay(
         self: &Arc<Self>,
-        call: ToolCallView<'_>,
         context: &ToolDispatchContext,
+        entered: &meerkat_core::EnteredDispatchOperation,
         service: &WorkGraphService,
         key: WorkAdmissionKey,
         request: CreateWorkItemRequest,
         operation: HelperOperation,
         selection: HelperAdmissionSelection,
+        review: crate::review_custody::ReviewCustody,
     ) -> Result<Option<Arc<AdmittedHelperWork>>, PrivateOriginalError> {
         let original = self.acquisition_original(context).await?;
         self.require_helper_selection(&selection)?;
         self.owner
             .observe_fenced_helper(
-                call,
-                context,
+                entered,
                 self.store.as_ref(),
                 &self.scope,
                 service,
@@ -383,6 +384,7 @@ impl PrivateOriginals {
                 &original.contributors,
                 &original.own_originals,
                 selection,
+                review,
             )
             .await
             .map(|observed| observed.map(Arc::new))
@@ -430,6 +432,7 @@ impl PrivateOriginals {
         admitted: Arc<AdmittedHelperWork>,
         content: String,
         source_deadline: tokio::time::Instant,
+        review: crate::review_custody::ReviewCustody,
     ) -> Result<PreparedHelperController, PrivateOriginalError> {
         // The native acceptance callback is independent of this tool's turn.
         // Wait before any Meta identity call, with no mutation/publication
@@ -463,7 +466,7 @@ impl PrivateOriginals {
                 &identity,
                 Some(&alias),
                 Input::Prompt(PromptInput::new(content, None)),
-                binder.clone(),
+                review.bind(binder.clone()),
             )
             .await;
         if !matches!(
@@ -705,7 +708,9 @@ impl PrivateOriginals {
         snapshot: &meerkat_toolkit::setup::SetupSnapshot,
         content: String,
         source_deadline: tokio::time::Instant,
+        review: crate::review_custody::ReviewCustody,
     ) -> Result<SetupHelperSubmission, PrivateOriginalError> {
+        self.with_new_work_admission(|| ())?;
         if tokio::time::Instant::now() >= source_deadline {
             return Err(PrivateOriginalError::Denied);
         }
@@ -753,6 +758,7 @@ impl PrivateOriginals {
             entry_fence,
             source_deadline,
             pending: Mutex::new(Weak::new()),
+            review_custody: review.clone(),
         });
         // Keep one raw input identity and event content. A definite policy
         // change may rebuild its current binding once, never its source/key.
@@ -769,7 +775,7 @@ impl PrivateOriginals {
                     &identity,
                     Some(alias),
                     input.clone(),
-                    binder.clone(),
+                    review.bind(binder.clone()),
                 )
                 .await;
             if result.as_ref().err().is_some_and(|error| {
@@ -980,6 +986,7 @@ struct SubmitHelperBinder {
     // bounded definite-refusal retry can bind a new invocation afterwards.
     // Shared source-owner locks separately exclude competing Candidates.
     pending: Mutex<Weak<PendingHelperAdmission>>,
+    review_custody: crate::review_custody::ReviewCustody,
 }
 
 impl Drop for SubmitHelperBinder {
@@ -1002,6 +1009,9 @@ impl GovernedInputBinder for SubmitHelperBinder {
         context: &GovernedBindContext,
         input: Input,
     ) -> Result<BoundGovernedInput, String> {
+        self.source
+            .with_new_work_admission(|| ())
+            .map_err(|_| "Toolkit helper admission is stopped".to_owned())?;
         if tokio::time::Instant::now() >= self.source_deadline {
             return Err("Toolkit helper submission deadline elapsed".into());
         }
@@ -1124,7 +1134,11 @@ impl GovernedInputBinder for SubmitHelperBinder {
                         (
                             input,
                             pending,
-                            custody_recovery::CustodyHandoff::new(false, &self.source),
+                            custody_recovery::CustodyHandoff::new(
+                                false,
+                                &self.source,
+                                &self.review_custody,
+                            ),
                         )
                     }
                     None => match prior {
@@ -1149,6 +1163,7 @@ impl GovernedInputBinder for SubmitHelperBinder {
                             let handoff = custody_recovery::CustodyHandoff::new(
                                 selected && pending.is_first_candidate(),
                                 &self.source,
+                                &self.review_custody,
                             );
                             (input, pending, handoff)
                         }

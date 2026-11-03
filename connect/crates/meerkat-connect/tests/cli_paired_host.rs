@@ -4,6 +4,11 @@
 //! integration. No OS store, user terminal or provider account. PTY cases require the
 //! assembled, pin-built synthetic resource prefix. Explicit supplied-library cases
 //! use their selected real prefix; stdio has its separate fixture contract.
+//! Create test resources with `scripts/build-cli-test-resources.py PREFIX`.
+//! Build this test and the CLI with `MEERKAT_CONNECT_RESOURCES_SHA256` set to the
+//! emitted manifest digest, then copy that CLI to `PREFIX/bin/meerkat-connect`.
+//! Run with `CONNECT_LAZY_SERVICES_FIXTURE_PREFIX=PREFIX`. These resources are
+//! synthetic test inputs, not a packaged integration library.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -69,6 +74,7 @@ const SECRET_ANSWER: &str = "The paired host reports generation 1 committed but 
 const REVIEW_REQUEST: &str = "Show that prepared frontend draft's private review link again. Do not prepare or submit it again.";
 const REVIEW_ANSWER: &str = "The paired host still retains the draft. Its review link was queued for the terminal; no preparation or submission was repeated.";
 const RECOVERY_REQUEST: &str = "Prepare and submit my frontend review request once.";
+const RECOVERY_PROVIDER_FAILURE: &str = "fixture rejected recovery model request";
 const STATUS_REQUEST: &str = "Check only that exact request's status. Do not submit it again.";
 const STATUS_ANSWER: &str = "The paired host reports the review request submitted. The lost POST remains uncertain; it was not sent again.";
 const RECIPE_REQUEST: &str = "Show the first supplied integration recipe and its exact service capabilities, then look at the next entry. Investigate only.";
@@ -675,7 +681,13 @@ fn deferred_model_response(request: &Request, phase: usize, mode: DeferredMode) 
     );
     let names: Vec<_> = request.body["tools"]
         .as_array()
-        .unwrap()
+        .unwrap_or_else(|| {
+            panic!(
+                "deferred model request must advertise tools: phase={phase}, message_count={}, compaction_prompt={}",
+                request.body["messages"].as_array().map_or(0, Vec::len),
+                serialized.contains("You are performing a CONTEXT COMPACTION."),
+            )
+        })
         .iter()
         .filter_map(|tool| tool["function"]["name"].as_str())
         .collect();
@@ -716,10 +728,10 @@ fn deferred_model_response(request: &Request, phase: usize, mode: DeferredMode) 
             .unwrap();
         let observed: Value =
             serde_json::from_str(activation["content"].as_str().unwrap()).unwrap();
-        assert_eq!(observed["state"], "requested");
-        assert_eq!(observed["changed"], true);
-        assert_eq!(observed["native_pending_sources"], 1);
-        assert_eq!(observed.as_object().unwrap().len(), 3);
+        // NativeSetup already configured this reviewed server before the
+        // conversation. This call must not stage a second source; readiness
+        // still comes from the actual catalog/load and tool observations below.
+        assert_eq!(observed, json!({"state":"requested", "changed":false}));
     } else {
         assert!(!names.contains(&"setup_help"));
         assert!(
@@ -1220,9 +1232,20 @@ fn recovery_model_response(request: &Request, phase: usize) -> String {
             assert_eq!(observed["error"], "execution_failed");
             assert!(observed.to_string().contains("unconfirmed"));
             assert!(!visible.contains(STATUS_REQUEST));
-            // A stale/unavailable tool name causes an actual native fatal
-            // precheck after the uncertain effect, not a synthetic completion.
-            Some(("stale-tool", "fixture_unavailable_tool", json!({})))
+            assert!(
+                request.body["tools"].as_array().is_some_and(|tools| tools
+                    .iter()
+                    .any(|tool| tool["function"]["name"] == "paired_host_frontend_status")),
+                "recovery failure must follow ordinary tool feedback: phase={phase}, message_count={}, compaction_prompt={}",
+                request.body["messages"].as_array().map_or(0, Vec::len),
+                visible.contains("You are performing a CONTEXT COMPACTION.")
+            );
+            // The HTTP fixture sends this as a nonretryable 400 after the
+            // uncertain effect. A missing tool is ordinary native feedback,
+            // so it cannot serve as the failed-turn injection.
+            return json!({"error":{"type":"invalid_request_error",
+                "message":RECOVERY_PROVIDER_FAILURE}})
+            .to_string();
         }
         4 => {
             assert!(visible.contains(STATUS_REQUEST), "no automatic status turn");
@@ -1316,11 +1339,7 @@ fn recovery_model_response(request: &Request, phase: usize) -> String {
             .unwrap()
             .iter()
             .any(|tool| tool["function"]["name"] == name);
-        assert_eq!(
-            offered,
-            phase != 3,
-            "only the deliberate fatal name is absent"
-        );
+        assert!(offered, "the requested recovery tool must be advertised");
         json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":id,"type":"function",
             "function":{"name":name,"arguments":arguments.to_string()}}]},"finish_reason":"tool_calls"}]})
     } else {
@@ -1455,6 +1474,13 @@ impl Server {
                         String::new(),
                         "application/json",
                         json!({"error":{"type":"invalid_request_error","message":RECIPE_PROVIDER_FAILURE}}).to_string(),
+                    )
+                } else if provider && recovery && phase == 3 {
+                    (
+                        400,
+                        String::new(),
+                        "application/json",
+                        recovery_model_response(&received, phase),
                     )
                 } else if provider {
                     (
@@ -2337,7 +2363,11 @@ default_model = "cli-fixture"
                 max_turns = if supplied || origin.is_none() { 28 } else { 8 },
                 // This finite composition case checks unabridged catalog/history.
                 // It does not emulate a separate native compaction model request.
-                context_window = if supplied { 131072 } else { 32768 },
+                context_window = if supplied || origin.is_none() {
+                    131072
+                } else {
+                    32768
+                },
             )
         };
         let config = if oauth.is_some_and(|fixture| fixture.managed_api_key) {
@@ -2662,6 +2692,7 @@ default_model = "cli-fixture"
             "setup_export_recipe",
         ];
         server.access = Some(meerkat_core::McpServerAccess::allowing(operations));
+        server.account = Some(meerkat_core::McpAccountDeclaration::NoAccount);
         let prior: Vec<_> = expected
             .tools
             .mcp_servers
@@ -3167,7 +3198,7 @@ async fn actual_cli_failed_uncertain_submission_allows_only_explicit_exact_statu
     assert!(
         first["terminal_completion"]["outcome"]
             .to_string()
-            .contains("fixture_unavailable_tool")
+            .contains(RECOVERY_PROVIDER_FAILURE)
     );
     let second = serde_json::to_value(&inputs[1]).unwrap();
     let outcome: CompletionOutcome =
@@ -6732,22 +6763,132 @@ async fn actual_cli_forge_configuration_recovers_after_process_restart_without_r
     );
 }
 
+#[path = "cli_paired_host/private_services.rs"]
+mod private_services;
+
 /// Private JSONL peer for the actual copied executable. No terminal simulation,
 /// browser auth, native override, injected dispatcher or second runtime.
+#[derive(Clone, Copy)]
+enum PrivateAcceptanceHost {
+    Probe,
+    Collection,
+    MultipleServices,
+    ExpiringCollection(Duration),
+}
+
 struct StdioCli {
     root: tempfile::TempDir,
     child: Option<Child>,
-    stdout: std::process::ChildStdout,
+    stdout: Option<std::process::ChildStdout>,
     rows: Vec<Value>,
     binary: PathBuf,
     state: PathBuf,
     context: PathBuf,
     home: PathBuf,
+    frame_bound: Duration,
 }
 impl StdioCli {
-    fn start(provider: &str) -> Self {
-        const PIN: &str = "61cf296a93b5bda5ab723ef1e7c7b81e0767d074a43690ab534b8a371ac41ca8";
-        assert_eq!(option_env!("MEERKAT_CONNECT_RESOURCES_SHA256"), Some(PIN));
+    fn start_supplied(provider: &str) -> Self {
+        let prefix = PathBuf::from(
+            std::env::var_os("CONNECT_REAL_LIBRARY_PREFIX")
+                .expect("exact supplied private Services product"),
+        );
+        let binary = prefix.join("bin/meerkat-connect");
+        let expected =
+            std::env::var("CONNECT_SUPPLIED_CLI_SHA256").expect("reviewed supplied CLI hash");
+        assert!(prefix.is_absolute() && fs::symlink_metadata(&binary).unwrap().is_file());
+        assert_eq!(expected.len(), 64);
+        assert!(
+            expected
+                .bytes()
+                .all(|value| value.is_ascii_digit() || (b'a'..=b'f').contains(&value))
+        );
+        assert_eq!(file_digest(&binary), expected);
+        let Some(pin) = option_env!("MEERKAT_CONNECT_RESOURCES_SHA256") else {
+            panic!("pin-built test library");
+        };
+        assert_eq!(
+            file_digest(&prefix.join("libexec/meerkat-connect/resources.json")),
+            pin
+        );
+        Self::start_selected(provider, binary, 40, Duration::from_secs(300))
+    }
+    fn start_selected(
+        provider: &str,
+        binary: PathBuf,
+        max_turns: usize,
+        frame_bound: Duration,
+    ) -> Self {
+        Self::start_selected_with_probe_host(provider, binary, max_turns, frame_bound, false)
+    }
+    fn start_selected_with_probe_host(
+        provider: &str,
+        binary: PathBuf,
+        max_turns: usize,
+        frame_bound: Duration,
+        probe_host: bool,
+    ) -> Self {
+        Self::start_selected_with_host(
+            provider,
+            binary,
+            max_turns,
+            frame_bound,
+            probe_host.then_some(PrivateAcceptanceHost::Probe),
+        )
+    }
+    fn start_selected_with_collection_host(
+        provider: &str,
+        binary: PathBuf,
+        max_turns: usize,
+        frame_bound: Duration,
+    ) -> Self {
+        Self::start_selected_with_host(
+            provider,
+            binary,
+            max_turns,
+            frame_bound,
+            Some(PrivateAcceptanceHost::Collection),
+        )
+    }
+    fn start_selected_with_multi_collection_host(
+        provider: &str,
+        binary: PathBuf,
+        max_turns: usize,
+        frame_bound: Duration,
+    ) -> Self {
+        Self::start_selected_with_host(
+            provider,
+            binary,
+            max_turns,
+            frame_bound,
+            Some(PrivateAcceptanceHost::MultipleServices),
+        )
+    }
+    fn start_selected_with_expiring_collection_host(
+        provider: &str,
+        binary: PathBuf,
+        max_turns: usize,
+        frame_bound: Duration,
+        lifetime: Duration,
+    ) -> Self {
+        assert!(!lifetime.is_zero() && lifetime <= Duration::from_secs(300));
+        Self::start_selected_with_host(
+            provider,
+            binary,
+            max_turns,
+            frame_bound,
+            Some(PrivateAcceptanceHost::ExpiringCollection(lifetime)),
+        )
+    }
+    // The test chooses the exact native host mode before spawning its one child.
+    // No product wire selects or changes that composition.
+    fn start_selected_with_host(
+        provider: &str,
+        binary: PathBuf,
+        max_turns: usize,
+        frame_bound: Duration,
+        collection_host: Option<PrivateAcceptanceHost>,
+    ) -> Self {
         let root = tempfile::tempdir().unwrap();
         let state = root.path().join("state");
         let context = root.path().join("outside-checkout");
@@ -6755,23 +6896,39 @@ impl StdioCli {
         for path in [&state.join(REALM), &context, &home] {
             fs::create_dir_all(path).unwrap();
         }
-        let prefix = PathBuf::from(
-            std::env::var("CONNECT_STDIO_CANDIDATE_PREFIX")
-                .expect("explicit fresh candidate output"),
+        // The expiry case keeps fixture transport timeouts beyond the original
+        // login deadline; transport timeout must not masquerade as expiry.
+        let call_timeout_secs = match collection_host {
+            Some(PrivateAcceptanceHost::ExpiringCollection(lifetime)) => lifetime.as_secs() + 20,
+            _ => 10,
+        };
+        // These finite scripted cases assert original prompts and exact catalog
+        // results. They do not implement a separate compaction-summary model.
+        // Raise only their test profile's context and explicit token trigger;
+        // keep all request, phase, deadline and cleanup bounds in force.
+        let retain_collection_history = matches!(
+            collection_host,
+            Some(
+                PrivateAcceptanceHost::MultipleServices
+                    | PrivateAcceptanceHost::ExpiringCollection(_)
+            )
         );
-        assert!(prefix.is_absolute() && !prefix.exists());
-        fs::create_dir_all(prefix.join("bin")).unwrap();
-        let binary = prefix.join("bin/meerkat-connect");
-        fs::copy(env!("CARGO_BIN_EXE_meerkat-connect"), &binary).unwrap();
-        assert_eq!(
-            file_digest(&binary),
-            file_digest(Path::new(env!("CARGO_BIN_EXE_meerkat-connect")))
-        );
+        let context_window = if retain_collection_history {
+            1_048_576
+        } else {
+            32768
+        };
+        let compaction = if retain_collection_history {
+            "[compaction]\nauto_compact_threshold = 838860\n"
+        } else {
+            ""
+        };
         let config = format!(
             r#"
+{compaction}
 [agent]
 model = "cli-fixture"
-max_turns = 12
+max_turns = {max_turns}
 [self_hosted.servers.cli]
 transport = "openai_compatible"
 api_style = "chat_completions"
@@ -6781,9 +6938,9 @@ server = "cli"
 remote_model = "cli-fixture-remote"
 display_name = "CLI loopback fixture"
 family = "cli-fixture"
-context_window = 32768
+context_window = {context_window}
 max_output_tokens = 1024
-call_timeout_secs = 10
+call_timeout_secs = {call_timeout_secs}
 [realm.cli-frontend]
 default_binding = "fixture"
 [realm.cli-frontend.backend.fixture]
@@ -6807,8 +6964,47 @@ default_model = "cli-fixture"
             .validate(meerkat_models::canonical())
             .unwrap();
         fs::write(state.join(REALM).join("config.toml"), config).unwrap();
-        let mut child = Command::new(&binary)
-            .arg("--stdio")
+        let mut command = Command::new(&binary);
+        if let Some(collection) = collection_host {
+            let path = root
+                .path()
+                .join(if matches!(collection, PrivateAcceptanceHost::Probe) {
+                    "trusted-probe-host.json"
+                } else {
+                    "trusted-collection-host.json"
+                });
+            match collection {
+                PrivateAcceptanceHost::Probe => {
+                    private_service_probes::host_contract::Launch::new(root.path())
+                        .write(&path)
+                        .unwrap()
+                }
+                PrivateAcceptanceHost::Collection => {
+                    private_service_collections::host_contract::Launch::new(root.path())
+                        .write(&path)
+                        .unwrap()
+                }
+                PrivateAcceptanceHost::MultipleServices => {
+                    private_service_collections::host_contract::Launch::for_services(root.path())
+                        .write(&path)
+                        .unwrap()
+                }
+                PrivateAcceptanceHost::ExpiringCollection(lifetime) => {
+                    let mut binding =
+                        private_service_collections::host_contract::Launch::new(root.path());
+                    binding.expires_at_ms = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_millis() as u64
+                        + u64::try_from(lifetime.as_millis()).unwrap();
+                    binding.write(&path).unwrap();
+                }
+            }
+            command.arg("--acceptance-binding").arg(path);
+        } else {
+            command.arg("--stdio");
+        }
+        let mut child = command
             .current_dir(&context)
             .env_clear()
             .env("HOME", &home)
@@ -6821,18 +7017,28 @@ default_model = "cli-fixture"
             .spawn()
             .unwrap();
         let stdout = child.stdout.take().unwrap();
-        let flags = OFlag::from_bits_retain(fcntl(&stdout, FcntlArg::F_GETFL).unwrap());
-        fcntl(&stdout, FcntlArg::F_SETFL(flags | OFlag::O_NONBLOCK)).unwrap();
-        Self {
+        // Retain the actual child before any fallible parent pipe setup. A
+        // setup refusal invokes this harness owner's existing group/reap Drop.
+        let owned = Self {
             root,
             child: Some(child),
-            stdout,
+            stdout: Some(stdout),
             rows: vec![],
             binary,
             state,
             context,
             home,
-        }
+            frame_bound,
+        };
+        let flags = OFlag::from_bits_retain(
+            fcntl(owned.stdout.as_ref().unwrap(), FcntlArg::F_GETFL).unwrap(),
+        );
+        fcntl(
+            owned.stdout.as_ref().unwrap(),
+            FcntlArg::F_SETFL(flags | OFlag::O_NONBLOCK),
+        )
+        .unwrap();
+        owned
     }
     fn send(&mut self, value: Value) {
         use std::io::Write;
@@ -6855,11 +7061,16 @@ default_model = "cli-fixture"
     }
     async fn next(&mut self) -> Value {
         use std::io::Read;
-        let bytes = timeout(BOUND, async {
+        let bytes = timeout(self.frame_bound, async {
             let mut bytes = vec![];
             loop {
                 let mut byte = [0];
-                match self.stdout.read(&mut byte) {
+                match self
+                    .stdout
+                    .as_mut()
+                    .expect("retained private output reader")
+                    .read(&mut byte)
+                {
                     Ok(0) => panic!("copied stdio ended before expected frame"),
                     Ok(_) => {
                         if byte[0] == b'\n' {
@@ -6906,7 +7117,15 @@ default_model = "cli-fixture"
         }
     }
     async fn finish(&mut self) -> ExitStatus {
-        timeout(BOUND, async {
+        let result = self.finish_output().await;
+        assert!(
+            result.stderr.is_empty(),
+            "stdio must keep private diagnostics out of stderr"
+        );
+        result.status
+    }
+    async fn finish_output(&mut self) -> std::process::Output {
+        timeout(self.frame_bound, async {
             while self.child.as_mut().unwrap().try_wait().unwrap().is_none() {
                 sleep(Duration::from_millis(2)).await;
             }
@@ -6917,11 +7136,7 @@ default_model = "cli-fixture"
         let pid = Pid::from_raw(child.id() as i32);
         let result = child.wait_with_output().unwrap();
         assert_eq!(killpg(pid, None), Err(Errno::ESRCH));
-        assert!(
-            result.stderr.is_empty(),
-            "stdio must keep private diagnostics out of stderr"
-        );
-        result.status
+        result
     }
 }
 impl Drop for StdioCli {
@@ -6934,8 +7149,9 @@ impl Drop for StdioCli {
 }
 
 #[tokio::test]
-#[ignore = "requires CONNECT_FORGE_TEST_PYTHON and explicit fresh pin-built candidate output"]
+#[ignore = "requires corrective Core/Meta pair, supplied exact CLI/resources and CONNECT_FORGE_TEST_PYTHON"]
 async fn actual_stdio_forge_configuration_remount_cancel_and_retire() {
+    use futures_util::FutureExt;
     use meerkat_core::{ApprovalRecord, ApprovalStatus, types::Message};
     use meerkat_runtime::{
         completion::CompletionOutcome, identifiers::LogicalRuntimeId,
@@ -6946,7 +7162,39 @@ async fn actual_stdio_forge_configuration_remount_cancel_and_retire() {
     const QUESTION: &str = "The owner offers its participant and lead DM route. Supply your Telegram human ID and acknowledge exclusive polling.";
     const CHOICE: &str = "Use the advertised participant and route, Telegram human ID 123456789 and exclusive polling. Prepare for my private approval.";
     const ANSWER: &str = "The configuration is committed at revision 1. This does not provision a token or prove activation and delivery.";
-    const HOLD: &str = "Wait while I review this conversation; do not change any configuration.";
+    const HOLD: &str = "Inspect the current frontend configuration, then wait while I review it. Do not change any configuration.";
+    const CONTINUE: &str = "Inspect the current frontend configuration again and report its revision. Do not prepare or submit another change.";
+    const CONTINUED: &str = "The same host still reports revision 1 after cancellation. No configuration change was repeated.";
+    fn observation(body: &Value, id: &str) -> Value {
+        serde_json::from_str(
+            tool_result(body, id)["observation_json"]
+                .as_str()
+                .expect("actual Forge application observation was not returned"),
+        )
+        .unwrap()
+    }
+    fn configuration(source: &Value) -> Value {
+        assert_eq!(source["participants"].as_array().unwrap().len(), 1);
+        assert_eq!(source["routes"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            source["routes"][0]["participant_id"],
+            source["participants"][0]["id"]
+        );
+        assert_eq!(
+            source["routes"][0]["destination_rule"],
+            "same-authorized-human-private-dm"
+        );
+        json!({"component_id":source["component"]["id"],"profile":source["component"]["profile"],
+            "participant_id":source["participants"][0]["id"],"route_id":source["routes"][0]["id"],
+            "telegram_user_id":123456789,"telegram_dm_chat_id":123456789,
+            "native_identity":source["routes"][0]["native_identity"],
+            "bot_token":source["component"]["private_reference"],"exclusive_polling_acknowledged":true})
+    }
+    // Exact trusted selection of fixtures/forge-reading/owner.py. The current
+    // application owns its extended proposal; the legacy Reading recipe stays closed.
+    let selected_host = json!({"protocol":1,"host_id":format!("forge:{}", "a".repeat(64)),
+        "application_id":"reading-fixture","source_digest":"b".repeat(64)});
+    let expected_host = selected_host.clone();
     let mut owner = forge_reading_owner::Owner::start().await;
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let origin = format!("http://{}", listener.local_addr().unwrap());
@@ -6988,37 +7236,65 @@ async fn actual_stdio_forge_configuration_remount_cancel_and_retire() {
                         tool_result(&received.body, "host")["frontend_management"],
                         "declared"
                     );
+                    assert_eq!(tool_result(&received.body, "host")["host"], expected_host);
                     Some(("inventory", "forge_frontend_inspect", json!({})))
                 }
                 2 => {
-                    assert_eq!(
-                        tool_result(&received.body, "inventory")["observation"]["revision"],
-                        0
-                    );
+                    assert_eq!(observation(&received.body, "inventory")["revision"], 0);
                     None
                 }
                 3 => {
-                    let inventory = tool_result(&received.body, "inventory");
-                    let source = &inventory["observation"];
+                    let source = observation(&received.body, "inventory");
                     Some((
                         "prepare",
                         "forge_frontend_prepare",
-                        json!({"participant_id":source["participants"][0]["id"],"route_id":source["routes"][0]["id"],"telegram_user_id":123456789,"exclusive_polling_acknowledged":true,"expected_revision":source["revision"]}),
+                        json!({"configuration":configuration(&source),"expected_revision":source["revision"]}),
                     ))
                 }
                 4 => {
                     let prepared = tool_result(&received.body, "prepare");
                     assert_eq!(prepared["approval_required"], true);
+                    let proposal: Value = serde_json::from_str(
+                        prepared["proposal_json"]
+                            .as_str()
+                            .expect("actual Forge application proposal was not returned"),
+                    )
+                    .unwrap();
+                    let source = observation(&received.body, "inventory");
+                    assert_eq!(proposal["configuration"], configuration(&source));
+                    assert_eq!(proposal["expected_revision"], source["revision"]);
+                    assert_eq!(proposal["host"], expected_host);
+                    assert_eq!(proposal["principal"], "fixture-human");
+                    assert!(source["management"]["pending_work_policy"].is_object());
+                    assert_eq!(
+                        proposal["pending_work_policy"],
+                        source["management"]["pending_work_policy"]
+                    );
                     Some((
                         "submit",
                         "forge_frontend_submit",
-                        json!({"change_id":prepared["proposal"]["change_id"]}),
+                        json!({"change_id":proposal["change_id"]}),
                     ))
                 }
                 5 => {
+                    let submitted = tool_result(&received.body, "submit");
+                    let proposal: Value = serde_json::from_str(
+                        tool_result(&received.body, "prepare")["proposal_json"]
+                            .as_str()
+                            .unwrap(),
+                    )
+                    .unwrap();
                     assert_eq!(
-                        tool_result(&received.body, "submit")["observation"]["status"],
-                        "committed"
+                        submitted["submission_outcome"],
+                        json!({"change_id":proposal["change_id"],"disposition":"known"})
+                    );
+                    assert_eq!(submitted["recovery_only"], false);
+                    let result = observation(&received.body, "submit");
+                    assert_eq!(result["status"], "committed");
+                    assert_eq!(result["revision"], 1);
+                    assert_eq!(
+                        result["pending_work_policy"],
+                        proposal["pending_work_policy"]
                     );
                     None
                 }
@@ -7034,22 +7310,52 @@ async fn actual_stdio_forge_configuration_remount_cancel_and_retire() {
                             .collect::<Vec<_>>(),
                         vec![FIRST, CHOICE, HOLD]
                     );
+                    Some(("before-cancel-inspect", "forge_frontend_inspect", json!({})))
+                }
+                7 => {
+                    assert_eq!(
+                        observation(&received.body, "before-cancel-inspect")["revision"],
+                        1
+                    );
+                    None
+                }
+                8 => {
+                    let users = received.body["messages"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .filter(|message| message["role"] == "user")
+                        .filter_map(|message| message["content"].as_str())
+                        .collect::<Vec<_>>();
+                    assert_eq!(users.last(), Some(&CONTINUE));
+                    assert_eq!(users.iter().filter(|text| **text == CONTINUE).count(), 1);
+                    Some(("after-cancel-inspect", "forge_frontend_inspect", json!({})))
+                }
+                9 => {
+                    assert_eq!(
+                        observation(&received.body, "after-cancel-inspect")["revision"],
+                        1
+                    );
                     None
                 }
                 _ => panic!("unexpected replay/model call"),
             };
             observed.lock().unwrap().push(received);
-            if phase == 6 {
+            if phase == 7 {
                 stream.write_all(b"HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Type: text/event-stream\r\n\r\ndata: {\"choices\":[{\"delta\":{\"content\":\"Waiting\"}}]}\n\n").await.unwrap();
                 stream_started.take().unwrap().send(()).unwrap();
                 let mut byte = [0];
-                tokio::select! {_=&mut stopped=>{},result=stream.read(&mut byte)=>{assert_eq!(result.unwrap(),0);}}
-                break;
+                tokio::select! {_=&mut stopped=>break,result=stream.read(&mut byte)=>{assert_eq!(result.unwrap(),0);}}
+                continue;
             }
             let body = if let Some((id, name, args)) = call {
                 deferred_call_response(id, name, args)
             } else {
-                let answer = if phase == 2 { QUESTION } else { ANSWER };
+                let answer = match phase {
+                    2 => QUESTION,
+                    9 => CONTINUED,
+                    _ => ANSWER,
+                };
                 format!(
                     "data: {}\n\ndata: [DONE]\n\n",
                     json!({"choices":[{"delta":{"content":answer},"finish_reason":"stop"}]})
@@ -7069,9 +7375,21 @@ async fn actual_stdio_forge_configuration_remount_cancel_and_retire() {
         stop: Some(stop),
         task: Some(task),
     };
-    let mut cli = StdioCli::start(&provider.origin);
+    let mut cli = StdioCli::start_supplied(&provider.origin);
+    cli.frame_bound = BOUND;
+    // A failed hard-interrupt attempt may leave an owner-repairable store.
+    // Retain its exact bytes, even if an assertion unwinds before cleanup.
+    cli.root.disable_cleanup(true);
+    eprintln!(
+        "Same-session cancellation evidence: {}",
+        cli.root.path().display()
+    );
     let config = fs::read(cli.state.join(REALM).join("config.toml")).unwrap();
-    cli.request("h:init","connect/initialize",json!({"protocol_version":1,"application":{"application_id":"reading-fixture","instance_id":"actual-instance","origin":owner.origin},"viewer":{"principal_id":"fixture-human","login_scope_id":"actual-login-one","expires_at_ms":std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64+120_000},"realm":{"realm_id":REALM,"state_root":cli.state,"context_root":cli.context,"user_config_root":cli.home},"model":"cli-fixture"}));
+    cli.request("h:init","connect/initialize",json!({"protocol_version":4,"adapter":"forge_application",
+        "forge":{"host":selected_host,"private_fields":["READING_TELEGRAM_BOT_TOKEN"]},
+        "application":{"application_id":"reading-fixture","instance_id":"actual-instance","origin":owner.origin},
+        "viewer":{"principal_id":"fixture-human","login_scope_id":"actual-login-one","expires_at_ms":std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64+120_000},
+        "realm":{"realm_id":REALM,"state_root":cli.state,"context_root":cli.context,"user_config_root":cli.home},"model":"cli-fixture"}));
     let initialized = cli.response("h:init").await;
     assert!(initialized.get("error").is_none(), "{initialized}");
     let scope = initialized["result"]["scope"].as_str().unwrap().to_owned();
@@ -7083,214 +7401,329 @@ async fn actual_stdio_forge_configuration_remount_cancel_and_retire() {
         initialized["result"]["capabilities"]["service_preparation"],
         false
     );
-    cli.request(
-        "h:first",
-        "connect/send",
-        json!({"scope":scope,"text":FIRST}),
-    );
-    let origin_prompt = cli.prompt("forge_origin").await;
-    let pid = origin_prompt["id"].as_str().unwrap().to_owned();
-    cli.request(
-        "h:wrong-scope",
-        "connect/history",
-        json!({"scope":"other-child"}),
-    );
-    assert_eq!(
-        cli.response("h:wrong-scope").await["error"]["data"]["code"],
-        "invalid_binding"
-    );
-    cli.answer(
-        &pid,
-        json!({"kind":"forge_origin","origin":"http://127.0.0.1:9"}),
-    );
-    assert_eq!(
-        cli.response(&pid).await["error"]["data"]["code"],
-        "invalid_answer"
-    );
-    cli.answer(&pid, json!({"kind":"forge_origin","origin":owner.origin}));
-    let password = cli.prompt("forge_password").await;
-    cli.answer(
-        password["id"].as_str().unwrap(),
-        json!({"kind":"forge_password","password":forge_reading_owner::PASSWORD}),
-    );
-    assert_eq!(
-        cli.response("h:first").await["result"]["completion"],
-        "completed"
-    );
-    cli.request(
-        "h:choice",
-        "connect/send",
-        json!({"scope":scope,"text":CHOICE}),
-    );
-    let approval = cli.prompt("approval").await;
-    let approval_id = approval["params"]["prompt"]["approval_id"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-    let approval_request = approval["id"].as_str().unwrap().to_owned();
-    assert!(
-        approval["params"]["prompt"]["summary"]
+    // Initial configuration failures use the same natural cleanup and evidence
+    // path as cancellation failures; neither can skip retirement by unwinding.
+    let exercised = std::panic::AssertUnwindSafe(async {
+        cli.request(
+            "h:first",
+            "connect/send",
+            json!({"scope":scope,"text":FIRST}),
+        );
+        let origin_prompt = cli.prompt("forge_origin").await;
+        let pid = origin_prompt["id"].as_str().unwrap().to_owned();
+        cli.request(
+            "h:wrong-scope",
+            "connect/history",
+            json!({"scope":"other-child"}),
+        );
+        assert_eq!(
+            cli.response("h:wrong-scope").await["error"]["data"]["code"],
+            "invalid_binding"
+        );
+        cli.answer(
+            &pid,
+            json!({"kind":"forge_origin","origin":"http://127.0.0.1:9"}),
+        );
+        assert_eq!(
+            cli.response(&pid).await["error"]["data"]["code"],
+            "invalid_answer"
+        );
+        cli.answer(&pid, json!({"kind":"forge_origin","origin":owner.origin}));
+        let password = cli.prompt("forge_password").await;
+        cli.answer(
+            password["id"].as_str().unwrap(),
+            json!({"kind":"forge_password","password":forge_reading_owner::PASSWORD}),
+        );
+        assert_eq!(
+            cli.response("h:first").await["result"]["completion"],
+            "completed"
+        );
+        cli.request(
+            "h:choice",
+            "connect/send",
+            json!({"scope":scope,"text":CHOICE}),
+        );
+        let approval = cli.prompt("approval").await;
+        let approval_id = approval["params"]["prompt"]["approval_id"]
             .as_str()
             .unwrap()
-            .contains("messages already queued")
-    );
-    cli.answer("p:wrong", json!({"kind":"approval","decision":"approve"}));
-    assert_eq!(
-        cli.response("p:wrong").await["error"]["data"]["code"],
-        "stale_prompt"
-    );
-    cli.request("h:remount", "connect/history", json!({"scope":scope}));
-    let remount = cli.response("h:remount").await;
-    assert_eq!(
-        remount["result"]["state"]["active_send"]["send_request_id"],
-        "h:choice"
-    );
-    assert_eq!(
-        remount["result"]["state"]["last_completion"]["send_request_id"],
-        "h:first"
-    );
-    assert_eq!(remount["result"]["state"]["can_send"], false);
-    assert_eq!(
-        cli.rows
-            .iter()
-            .filter(
-                |r| r["method"] == "connect/prompt" && r["params"]["prompt"]["kind"] == "approval"
-            )
-            .count(),
-        1
-    );
-    assert_eq!(
-        owner.control("observe").await["requests"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter(|r| r["method"] == "POST" && r["path"] == "/console/forge/frontends/submit")
-            .count(),
-        0
-    );
-    cli.answer(
-        &approval_request,
-        json!({"kind":"approval","decision":"approve","actor":"forged"}),
-    );
-    assert_eq!(
-        cli.response(&approval_request).await["error"]["data"]["code"],
-        "invalid_answer"
-    );
-    cli.answer(
-        &approval_request,
-        json!({"kind":"approval","decision":"approve"}),
-    );
-    assert_eq!(
-        cli.response("h:choice").await["result"]["completion"],
-        "completed"
-    );
-    let duplicate_after = cli.rows.len();
-    cli.answer(
-        &approval_request,
-        json!({"kind":"approval","decision":"approve"}),
-    );
-    assert_eq!(
-        cli.response_since(&approval_request, duplicate_after).await["error"]["data"]["code"],
-        "stale_prompt"
-    );
-    cli.request("h:history", "connect/history", json!({"scope":scope}));
-    let history = cli.response("h:history").await;
-    assert_eq!(
-        history["result"]["state"]["last_completion"],
-        json!({"send_request_id":"h:choice","completion":"completed"})
-    );
-    let projected = history["result"]["history"]["messages"].as_array().unwrap();
-    assert_eq!(
-        projected
-            .iter()
-            .filter(|m| m["role"] == "user")
-            .map(|m| m["text"].as_str().unwrap())
-            .collect::<Vec<_>>(),
-        vec![FIRST, CHOICE]
-    );
-    assert!(
-        projected
-            .iter()
-            .any(|m| m["role"] == "assistant" && m["text"] == ANSWER)
-    );
-    cli.request("h:hold", "connect/send", json!({"scope":scope,"text":HOLD}));
-    timeout(BOUND, stream_observed).await.unwrap().unwrap();
-    cli.request("h:hold-history", "connect/history", json!({"scope":scope}));
-    let held = cli.response("h:hold-history").await;
-    assert_eq!(
-        held["result"]["state"]["active_send"]["send_request_id"],
-        "h:hold"
-    );
-    assert_eq!(held["result"]["state"]["can_stop"], true);
-    cli.request(
-        "h:old-cancel",
-        "connect/cancel",
-        json!({"scope":scope,"send_request_id":"h:first"}),
-    );
-    assert_eq!(
-        cli.response("h:old-cancel").await["result"]["status"],
-        "not_current"
-    );
-    for id in ["h:cancel-one", "h:cancel-two"] {
-        cli.request(
-            id,
-            "connect/cancel",
-            json!({"scope":scope,"send_request_id":"h:hold"}),
+            .to_owned();
+        let approval_request = approval["id"].as_str().unwrap().to_owned();
+        assert!(
+            approval["params"]["prompt"]["summary"]
+                .as_str()
+                .unwrap()
+                .contains("messages already queued")
         );
+        let review = &approval["params"]["prompt"]["body"];
+        assert_eq!(review["kind"], "forge_configuration");
+        assert_eq!(review["selected_host"], selected_host);
+        assert_eq!(review["tool"], "forge_frontend_submit");
+        assert_eq!(review["call_id"], "submit");
+        {
+            let calls = provider.requests.lock().unwrap();
+            let prepared = tool_result(&calls.last().unwrap().body, "prepare");
+            assert_eq!(review["proposal_json"], prepared["proposal_json"]);
+        }
+        cli.answer("p:wrong", json!({"kind":"approval","decision":"approve"}));
+        assert_eq!(
+            cli.response("p:wrong").await["error"]["data"]["code"],
+            "stale_prompt"
+        );
+        cli.request("h:remount", "connect/history", json!({"scope":scope}));
+        let remount = cli.response("h:remount").await;
+        assert_eq!(
+            remount["result"]["state"]["active_send"]["send_request_id"],
+            "h:choice"
+        );
+        assert_eq!(
+            remount["result"]["state"]["last_completion"]["send_request_id"],
+            "h:first"
+        );
+        assert_eq!(remount["result"]["state"]["can_send"], false);
+        assert_eq!(
+            cli.rows
+                .iter()
+                .filter(|r| r["method"] == "connect/prompt"
+                    && r["params"]["prompt"]["kind"] == "approval")
+                .count(),
+            1
+        );
+        assert_eq!(
+            owner.control("observe").await["requests"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|r| r["method"] == "POST" && r["path"] == "/console/forge/frontends/submit")
+                .count(),
+            0
+        );
+        cli.answer(
+            &approval_request,
+            json!({"kind":"approval","decision":"approve","actor":"forged"}),
+        );
+        assert_eq!(
+            cli.response(&approval_request).await["error"]["data"]["code"],
+            "invalid_answer"
+        );
+        cli.answer(
+            &approval_request,
+            json!({"kind":"approval","decision":"approve"}),
+        );
+        assert_eq!(
+            cli.response("h:choice").await["result"]["completion"],
+            "completed"
+        );
+        let duplicate_after = cli.rows.len();
+        cli.answer(
+            &approval_request,
+            json!({"kind":"approval","decision":"approve"}),
+        );
+        assert_eq!(
+            cli.response_since(&approval_request, duplicate_after).await["error"]["data"]["code"],
+            "stale_prompt"
+        );
+        cli.request("h:history", "connect/history", json!({"scope":scope}));
+        let history = cli.response("h:history").await;
+        assert_eq!(
+            history["result"]["state"]["last_completion"],
+            json!({"send_request_id":"h:choice","completion":"completed"})
+        );
+        let projected = history["result"]["history"]["messages"].as_array().unwrap();
+        assert_eq!(
+            projected
+                .iter()
+                .filter(|m| m["role"] == "user")
+                .map(|m| m["text"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec![FIRST, CHOICE]
+        );
+        assert!(
+            projected
+                .iter()
+                .any(|m| m["role"] == "assistant" && m["text"] == ANSWER)
+        );
+        cli.request("h:hold", "connect/send", json!({"scope":scope,"text":HOLD}));
+        timeout(BOUND, stream_observed).await.unwrap().unwrap();
+        cli.request("h:hold-history", "connect/history", json!({"scope":scope}));
+        let held = cli.response("h:hold-history").await;
+        assert_eq!(
+            held["result"]["state"]["active_send"]["send_request_id"],
+            "h:hold"
+        );
+        assert_eq!(held["result"]["state"]["can_stop"], true);
+        cli.request(
+            "h:old-cancel",
+            "connect/cancel",
+            json!({"scope":scope,"send_request_id":"h:first"}),
+        );
+        assert_eq!(
+            cli.response("h:old-cancel").await["result"]["status"],
+            "not_current"
+        );
+        for id in ["h:cancel-one", "h:cancel-two"] {
+            cli.request(
+                id,
+                "connect/cancel",
+                json!({"scope":scope,"send_request_id":"h:hold"}),
+            );
+        }
+        let cancel_one = cli.response("h:cancel-one").await;
+        let cancel_two = cli.response("h:cancel-two").await;
+        // Native exact cancellation may archive the terminal input before its
+        // final lookup, returning false. Preserve that disposition independently
+        // from the actual joined completion below.
+        assert!(matches!(
+            cancel_one["result"]["status"].as_str(),
+            Some("cancellation_requested" | "not_current")
+        ));
+        assert_eq!(cancel_one["result"]["scope"], scope);
+        assert_eq!(cancel_one["result"]["send_request_id"], "h:hold");
+        assert_eq!(cancel_one["result"], cancel_two["result"]);
+        let held_completion = cli.response("h:hold").await;
+        assert!(held_completion.get("error").is_none());
+        assert_eq!(held_completion["result"]["completion"], "cancelled");
+        cli.request(
+            "h:after-cancel",
+            "connect/send",
+            json!({"scope":scope,"text":CONTINUE}),
+        );
+        let continued = cli.response("h:after-cancel").await;
+        assert_eq!(continued["result"]["scope"], scope, "{continued}");
+        assert_eq!(
+            continued["result"]["completion"], "completed",
+            "{continued}"
+        );
+        assert_eq!(continued["result"]["state"]["can_send"], true);
+        cli.request(
+            "h:continued-history",
+            "connect/history",
+            json!({"scope":scope}),
+        );
+        let continued_history = cli.response("h:continued-history").await;
+        assert_eq!(
+            continued_history["result"]["state"]["last_completion"],
+            json!({"send_request_id":"h:after-cancel","completion":"completed"})
+        );
+        assert!(
+            continued_history["result"]["history"]["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|message| message["role"] == "assistant" && message["text"] == CONTINUED)
+        );
+        (cancel_one, approval_id)
+    })
+    .catch_unwind()
+    .await;
+    let cleanup = std::panic::AssertUnwindSafe(async {
+        cli.request(
+            "h:retire",
+            "connect/retire",
+            json!({"target":{"scope":scope},"retirement_id":"logout","reason":"logout"}),
+        );
+        cli.request(
+            "h:late-send",
+            "connect/send",
+            json!({"scope":scope,"text":"must never enter"}),
+        );
+        cli.request(
+            "h:close",
+            "connect/close",
+            json!({"target":{"scope":scope}}),
+        );
+        assert_eq!(
+            cli.response("h:close").await["result"]["resources_closed"],
+            true
+        );
+        assert_eq!(
+            cli.response("h:retire").await["result"]["entered_work"],
+            "settled"
+        );
+        assert_eq!(
+            cli.response("h:late-send").await["error"]["data"]["code"],
+            "binding_retired"
+        );
+        let output = cli.finish_output().await;
+        fs::write(cli.root.path().join("native-stderr.log"), &output.stderr).unwrap();
+        assert!(
+            output.status.success() && output.stderr.is_empty(),
+            "natural native close failed: {:?}",
+            output.status
+        );
+    })
+    .catch_unwind()
+    .await;
+    // Preserve the original failure before any cleanup assertion can replace it.
+    // Natural retirement/close was attempted first; forced disposal is failure only.
+    let forced = cli.child.is_some();
+    if let Some(child) = cli.child.take() {
+        let pid = Pid::from_raw(child.id() as i32);
+        let _ = killpg(pid, Signal::SIGKILL);
+        let output = child.wait_with_output().unwrap();
+        fs::write(cli.root.path().join("native-stderr.log"), &output.stderr).unwrap();
     }
-    cli.request(
-        "h:retire",
-        "connect/retire",
-        json!({"target":{"scope":scope},"retirement_id":"logout","reason":"logout"}),
-    );
-    cli.request(
-        "h:late-send",
-        "connect/send",
-        json!({"scope":scope,"text":"must never enter"}),
-    );
-    cli.request(
-        "h:close",
-        "connect/close",
-        json!({"target":{"scope":scope}}),
-    );
-    assert_eq!(
-        cli.response("h:close").await["result"]["resources_closed"],
-        true
-    );
-    assert_eq!(
-        cli.response("h:retire").await["result"]["entered_work"],
-        "settled"
-    );
-    assert_eq!(
-        cli.response("h:late-send").await["error"]["data"]["code"],
-        "binding_retired"
-    );
-    let cancel_one = cli.response("h:cancel-one").await;
-    let cancel_two = cli.response("h:cancel-two").await;
-    // Native exact cancellation may archive the terminal input before its
-    // final lookup, returning false. Preserve that disposition independently
-    // from the actual joined completion below.
-    assert!(matches!(
-        cancel_one["result"]["status"].as_str(),
-        Some("cancellation_requested" | "not_current")
-    ));
-    assert_eq!(cancel_one["result"]["scope"], scope);
-    assert_eq!(cancel_one["result"]["send_request_id"], "h:hold");
-    assert_eq!(cancel_one["result"], cancel_two["result"]);
-    let held_completion = cli.response("h:hold").await;
-    assert!(held_completion.get("error").is_none());
-    assert_eq!(held_completion["result"]["completion"], "cancelled");
+    let provider_join = std::panic::AssertUnwindSafe(provider.finish())
+        .catch_unwind()
+        .await;
+    let owner_join = std::panic::AssertUnwindSafe(owner.finish())
+        .catch_unwind()
+        .await;
+    fs::write(
+        cli.root.path().join("protocol.json"),
+        serde_json::to_vec_pretty(&cli.rows).unwrap(),
+    )
+    .unwrap();
+    let recorded = provider
+        .requests
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    fs::write(
+        cli.root.path().join("model-requests.json"),
+        serde_json::to_vec_pretty(
+            &recorded
+                .iter()
+                .map(|request| &request.body)
+                .collect::<Vec<_>>(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    drop(recorded);
+    let failure_text = |failure: &Box<dyn std::any::Any + Send>| {
+        failure
+            .downcast_ref::<String>()
+            .cloned()
+            .or_else(|| {
+                failure
+                    .downcast_ref::<&str>()
+                    .map(|text| (*text).to_owned())
+            })
+            .unwrap_or_else(|| "non-string panic payload".into())
+    };
+    fs::write(cli.root.path().join("outcome.json"), serde_json::to_vec_pretty(&json!({
+        "same_scope_continuation_observed":exercised.is_ok(),"natural_cleanup_passed":cleanup.is_ok(),
+        "forced_disposal":forced,"provider_joined":provider_join.is_ok(),"owner_joined":owner_join.is_ok(),
+        "scenario_error":exercised.as_ref().err().map(&failure_text),
+        "cleanup_error":cleanup.as_ref().err().map(&failure_text),
+        "provider_join_error":provider_join.as_ref().err().map(&failure_text),
+        "owner_join_error":owner_join.as_ref().err().map(&failure_text),
+        "store_repair_attempted":false})).unwrap()).unwrap();
+    let (cancel_one, approval_id) =
+        exercised.unwrap_or_else(|failure| std::panic::resume_unwind(failure));
+    cleanup.unwrap_or_else(|failure| std::panic::resume_unwind(failure));
+    provider_join.unwrap_or_else(|failure| std::panic::resume_unwind(failure));
+    let (owner_result, canaries) =
+        owner_join.unwrap_or_else(|failure| std::panic::resume_unwind(failure));
     let response_position = |id: &str| {
         cli.rows
             .iter()
             .position(|row| row["id"] == id && row.get("method").is_none())
             .unwrap()
     };
-    assert!(response_position("h:hold") < response_position("h:retire"));
+    assert!(response_position("h:hold") < response_position("h:after-cancel"));
+    assert!(response_position("h:after-cancel") < response_position("h:retire"));
     assert!(response_position("h:retire") < response_position("h:close"));
-    assert!(cli.finish().await.success());
-    provider.finish().await;
-    let (owner_result, canaries) = owner.finish().await;
     for path in [
         "/console/forge/frontends/prepare",
         "/console/forge/frontends/submit",
@@ -7306,7 +7739,7 @@ async fn actual_stdio_forge_configuration_remount_cancel_and_retire() {
         );
     }
     assert_eq!(owner_result["state"]["revision"], 1);
-    assert_eq!(provider.requests.lock().unwrap().len(), 7);
+    assert_eq!(provider.requests.lock().unwrap().len(), 10);
     assert_eq!(preparation_output_count(&cli.state), 0);
     assert_eq!(
         fs::read(cli.state.join(REALM).join("config.toml")).unwrap(),
@@ -7365,15 +7798,23 @@ async fn actual_stdio_forge_configuration_remount_cancel_and_retire() {
             }
         })
         .collect::<Vec<_>>();
-    // The cancelled turn has an admitted input and exact completion below,
-    // but its draft user message is not committed to canonical history.
-    assert_eq!(users, vec![FIRST, CHOICE]);
+    // Core owns cancelled-tail transcript settlement. Require every completed
+    // input exactly once without assuming whether the cancelled draft is kept.
+    assert_eq!(
+        users
+            .iter()
+            .filter(|text| text.as_str() != HOLD)
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        vec![FIRST, CHOICE, CONTINUE]
+    );
+    assert!(users.iter().filter(|text| text.as_str() == HOLD).count() <= 1);
     let mut inputs = persistence
         .runtime_store()
         .load_input_states_strict(&LogicalRuntimeId::for_session(&session))
         .await
         .unwrap();
-    assert_eq!(inputs.len(), 3);
+    assert_eq!(inputs.len(), 4);
     inputs.sort_by_key(|input| {
         input
             .seed
@@ -7381,7 +7822,10 @@ async fn actual_stdio_forge_configuration_remount_cancel_and_retire() {
             .expect("native admission sequence")
     });
     let mut native_completions = vec![];
-    for (input, send_id) in inputs.iter().zip(["h:first", "h:choice", "h:hold"]) {
+    for (input, send_id) in inputs
+        .iter()
+        .zip(["h:first", "h:choice", "h:hold", "h:after-cancel"])
+    {
         let value = serde_json::to_value(input).unwrap();
         let outcome: CompletionOutcome =
             serde_json::from_value(value["terminal_completion"]["outcome"].clone()).unwrap();
@@ -7398,7 +7842,11 @@ async fn actual_stdio_forge_configuration_remount_cancel_and_retire() {
             Some(InputTerminalOutcome::Consumed | InputTerminalOutcome::Abandoned { .. })
         ));
         assert_eq!(input.seed.attempt_count, 1);
-        assert_eq!(input.state.recovery_count, 0);
+        if send_id != "h:hold" {
+            assert_eq!(input.state.recovery_count, 0);
+        }
+        // Cancelled-tail settlement belongs to Core. Exact request/tool counts
+        // above prove this consumer did not replay the cancelled inspection.
     }
     let public_history = serde_json::to_string(stored.messages()).unwrap();
     let calls = provider.requests.lock().unwrap();
@@ -7419,7 +7867,13 @@ async fn actual_stdio_forge_configuration_remount_cancel_and_retire() {
     }
     println!(
         "Stdio Forge composition: {}",
-        json!({"scope":"copied_stdio_native_frozen_owner_scripted_model","candidate_binary":cli.binary,"cli_sha256":file_digest(&cli.binary),"test_sha256":file_digest(&std::env::current_exe().unwrap()),"resources_sha256":option_env!("MEERKAT_CONNECT_RESOURCES_SHA256"),"native_sessions":1,"native_inputs":3,"native_completions":native_completions,"cancel_status":cancel_one["result"]["status"],"completion_before_retire_before_close":true,"prepare_posts":1,"submit_posts":1,"revision":1,"service_preparations":0,"closed_with_stdin_open":true,"live_activation":false,"all_owned_processes_joined":true})
+        json!({"scope":"supplied_stdio_native_frozen_owner_scripted_model","forge_adapter":"forge_application","candidate_binary":cli.binary,"cli_sha256":file_digest(&cli.binary),"test_sha256":file_digest(&std::env::current_exe().unwrap()),"resources_sha256":option_env!("MEERKAT_CONNECT_RESOURCES_SHA256"),"native_sessions":1,"native_inputs":4,"same_session_followup_after_tool_round_cancel":true,"native_completions":native_completions,"cancel_status":cancel_one["result"]["status"],"completion_before_retire_before_close":true,"prepare_posts":1,"submit_posts":1,"revision":1,"service_preparations":0,"closed_with_stdin_open":true,"live_activation":false,"all_owned_processes_joined":true})
     );
-    let _ = &cli.root;
+    cli.root.disable_cleanup(false); // Every native and persistence assertion passed.
 }
+
+#[path = "cli_paired_host/private_service_probes.rs"]
+mod private_service_probes;
+
+#[path = "cli_paired_host/private_service_collections.rs"]
+mod private_service_collections;

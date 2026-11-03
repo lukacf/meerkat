@@ -15,6 +15,11 @@ pub(crate) mod composer;
 #[cfg(all(unix, feature = "console"))]
 pub use composer::configure_installed_account_requests;
 pub use composer::configure_installed_service_review;
+#[cfg(all(unix, feature = "console"))]
+pub use composer::{
+    BoundSharedSetupInstallation, PreparedSharedSetupInstallation, SharedSetupInstallation,
+    configure_shared_setup_installation, prepare_shared_setup_installation,
+};
 
 use std::{collections::BTreeMap, sync::Arc, time::SystemTime};
 
@@ -78,6 +83,40 @@ pub fn compose_installed_service_review(
     approvals.check_session(&session)?;
     let auth = ConnectorAuth::from_facade(facade, realm.realm.clone())?;
     compose_with_auth(adapter, auth, realm, session, approvals)
+}
+
+/// Live SDK composition for one helper of a host-owned shared Controller.
+/// The caller installs `connection` on this helper through the normal native
+/// factory, installs the paired `SharedSetupCallContext` before preparation,
+/// then supplies that same provider here with the factory's actual adapter. Socket possession is transport custody only. The existing native
+/// dispatcher and software review still own authorization of every operation.
+/// This does not alter a saved completed application's startup surface.
+#[cfg(unix)]
+pub fn compose_shared_installed_service_review(
+    adapter: Arc<meerkat::McpRouterAdapter>,
+    facade: HostAuthService,
+    realm: RealmLocator,
+    session: SessionId,
+    approvals: Arc<LocalApprovals>,
+    peer: Arc<crate::resources::SharedSetupCallContext>,
+) -> Result<InstalledServiceReview, ConnectError> {
+    approvals.check_session(&session)?;
+    let auth = ConnectorAuth::from_facade(facade, realm.realm.clone())?;
+    let checked = CheckedInstalls::with_shared_software_review(adapter, approvals.clone(), peer);
+    checked
+        .bind_realm(&realm)
+        .map_err(|_| refused("The selected setup router could not be bound"))?;
+    approvals.check_session(&session)?;
+    Ok(InstalledServiceReview {
+        realm,
+        session,
+        checked,
+        control: Control::new(auth.clone()),
+        auth,
+        approvals,
+        #[cfg(feature = "console")]
+        realm_installation: None,
+    })
 }
 
 fn compose_with_auth(

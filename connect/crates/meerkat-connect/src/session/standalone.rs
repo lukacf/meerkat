@@ -53,6 +53,7 @@ type MaterializationObserver = Box<dyn FnOnce(&meerkat::PersistenceBundle) + Sen
 /// No native stage, grant selection, ticket, actor or prepared client survives
 /// here. Reopening checks the original descriptor against the realm's own list.
 pub struct StandaloneContinuation {
+    provider_store_root: Option<std::path::PathBuf>,
     storage: meerkat_core::ResolvedStorage,
     session_id: SessionId,
     server: McpServerConfig,
@@ -93,7 +94,12 @@ impl StandaloneContinuation {
         let session = persistence.session_store().load(&self.session_id).await
             .map_err(|error| ConnectError::native("Load committed setup conversation", error))?
             .ok_or_else(|| invalid("The committed setup conversation is unavailable; a replacement session was not created"))?;
-        let mut startup = SessionStartup::open(self.storage.clone()).await?;
+        let mut startup = match &self.provider_store_root {
+            Some(root) => {
+                SessionStartup::open_with_provider_store(self.storage.clone(), root.clone()).await?
+            }
+            None => SessionStartup::open(self.storage.clone()).await?,
+        };
         // Keep the original supplied path and exact descriptor. The current
         // own-list is checked again after acquiring native runtime custody.
         require_same_setup_server(&startup.config.tools.mcp_servers, &self.server)?;
@@ -273,6 +279,7 @@ impl SessionStartup {
             .as_ref()
             .ok_or_else(|| invalid("The initial reviewed setup stage is unavailable"))?;
         Ok(StandaloneContinuation {
+            provider_store_root: self.provider_store_root.clone(),
             storage: self.storage.clone(),
             session_id: staged.session.id().clone(),
             server: staged.server.clone(),
@@ -298,6 +305,44 @@ impl SessionStartup {
         .await
     }
 
+    /// Trusted process composition for a separately selected native credential
+    /// store. The same policy is captured for cold continuation; no wire binding
+    /// or reviewed helper descriptor can choose or replace it.
+    pub async fn prepare_standalone_with_provider_store<
+        I: Future<Output = io::Result<()>>,
+        W: Write,
+    >(
+        storage: meerkat_core::ResolvedStorage,
+        session: Session,
+        prepared: crate::resources::PreparedResources,
+        provider_store_root: PathBuf,
+        approvals: &LocalApprovals,
+        presenter: &mut ApprovalPresenter,
+        input: &mut TerminalInput,
+        output: &mut W,
+        interrupt: Pin<&mut I>,
+    ) -> Result<Option<Self>, ConnectError> {
+        if !provider_store_root.is_absolute() {
+            return Err(invalid(
+                "Provider credential store must be an absolute host selection",
+            ));
+        }
+        let runtime = crate::realm::own_config_runtime(&storage)?;
+        Self::prepare_standalone_selected(
+            storage,
+            session,
+            prepared,
+            runtime,
+            Some(provider_store_root),
+            approvals,
+            presenter,
+            input,
+            output,
+            interrupt,
+        )
+        .await
+    }
+
     // The public entry fixes this dependency to the selected realm's own
     // native runtime. The rest of the flow uses that one concrete owner.
     async fn prepare_standalone_with_config<I: Future<Output = io::Result<()>>, W: Write>(
@@ -305,6 +350,25 @@ impl SessionStartup {
         session: Session,
         prepared: crate::resources::PreparedResources,
         runtime: meerkat_core::ConfigRuntime,
+        approvals: &LocalApprovals,
+        presenter: &mut ApprovalPresenter,
+        input: &mut TerminalInput,
+        output: &mut W,
+        interrupt: Pin<&mut I>,
+    ) -> Result<Option<Self>, ConnectError> {
+        Self::prepare_standalone_selected(
+            storage, session, prepared, runtime, None, approvals, presenter, input, output,
+            interrupt,
+        )
+        .await
+    }
+
+    async fn prepare_standalone_selected<I: Future<Output = io::Result<()>>, W: Write>(
+        storage: meerkat_core::ResolvedStorage,
+        session: Session,
+        prepared: crate::resources::PreparedResources,
+        runtime: meerkat_core::ConfigRuntime,
+        provider_store_root: Option<PathBuf>,
         approvals: &LocalApprovals,
         presenter: &mut ApprovalPresenter,
         input: &mut TerminalInput,
@@ -648,7 +712,10 @@ impl SessionStartup {
         // of StagedIssuanceEffect, so aborting the stage does not roll it back.
         // No ordinary runtime or administrative bundle is retained when
         // acquiring stage custody.
-        let mut startup = SessionStartup::open(storage.clone()).await?;
+        let mut startup = match provider_store_root {
+            Some(root) => SessionStartup::open_with_provider_store(storage.clone(), root).await?,
+            None => SessionStartup::open(storage.clone()).await?,
+        };
         let (stage, stopped, notice) = join_entered(
             stage_stock_realm_persistence_as(
                 &meerkat::DiskStorageProvider,
@@ -1176,6 +1243,35 @@ impl ConnectSession {
         connector_auth: Option<Arc<crate::connector_auth::ConnectorAuth>>,
         setup: Arc<NativeSetup>,
     ) -> Result<Self, ConnectError> {
+        Self::materialize_governed(
+            storage,
+            builder,
+            persistence,
+            session,
+            request,
+            stock,
+            research,
+            connector_auth,
+            Some(setup),
+            &[crate::setup::SERVER_NAME.to_owned()],
+        )
+        .await
+    }
+
+    // Shared owner construction for a resumed setup and its separately admitted
+    // service probe. The latter supplies no setup helper or composer.
+    pub(super) async fn materialize_governed(
+        storage: &meerkat_core::ResolvedStorage,
+        builder: FactoryAgentBuilder,
+        persistence: meerkat::PersistenceBundle,
+        session: Session,
+        request: CreateSessionRequest,
+        stock: Arc<meerkat::governed_realm::stock::StockGovernance>,
+        research: Option<crate::research::ResearchScope>,
+        connector_auth: Option<Arc<crate::connector_auth::ConnectorAuth>>,
+        setup: Option<Arc<NativeSetup>>,
+        servers: &[String],
+    ) -> Result<Self, ConnectError> {
         let config_path =
             crate::realm::config_source(storage)?.config_doc_path(&storage.locator.realm);
         // This builder holds a snapshot. Resolve declared service secrets from
@@ -1212,7 +1308,7 @@ impl ConnectSession {
                 // Native configured-MCP attachment requires this exact current
                 // session mandate before its actor is constructed.
                 stock
-                    .bind_session_agent(&machine, &id, [crate::setup::SERVER_NAME])
+                    .bind_session_agent(&machine, &id, servers.iter().map(String::as_str))
                     .await
                     .map_err(|e| ConnectError::native("Bind governed setup tool mandate", e))?;
                 let (_, actor_slot) = Box::pin(
@@ -1278,7 +1374,7 @@ impl ConnectSession {
                     research,
                     connector_auth,
                     Some(stock),
-                    Some(setup),
+                    setup,
                 )
                 .await);
             }
@@ -1300,10 +1396,12 @@ impl ConnectSession {
             stock: Some(stock),
             stock_submission: Arc::new(super::StockSubmission::default()),
         };
-        match setup.owner() {
-            Ok(owner) => opened.service_preparation = Some(owner),
-            Err(primary) => {
-                return combine(Err(primary), opened.close().await).map(|()| unreachable!());
+        if let Some(setup) = setup {
+            match setup.owner() {
+                Ok(owner) => opened.service_preparation = Some(owner),
+                Err(primary) => {
+                    return combine(Err(primary), opened.close().await).map(|()| unreachable!());
+                }
             }
         }
         if opened

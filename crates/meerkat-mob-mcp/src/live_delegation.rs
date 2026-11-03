@@ -1837,8 +1837,10 @@ struct ClientContextRestartInventoryReady {
 
 #[derive(Default)]
 struct ClientContextRestartDeferredLedger {
-    /// Deferred sessions nothing captured yet.
-    pending: Vec<SessionId>,
+    /// Deferred sessions nothing captured yet. Every member a lazy restore
+    /// leaves dormant is here, and each attachment checks them all, so one
+    /// lookup must not scan the rest.
+    pending: std::collections::BTreeSet<SessionId>,
     /// Operations of captured deferred sessions the reconciler has not
     /// taken yet.
     captured: Vec<ClientContextRestartInventoryEntry>,
@@ -1924,12 +1926,12 @@ impl ClientContextRestartInventoryReady {
     /// Record the sessions the startup capture deferred, then release channel
     /// preparation.
     async fn publish_startup_inventory(&self, deferred: Vec<SessionId>) {
-        self.deferred.lock().await.pending = deferred;
+        self.deferred.lock().await.pending = deferred.into_iter().collect();
         self.mark_ready();
     }
 
     async fn deferred_sessions(&self) -> Vec<SessionId> {
-        self.deferred.lock().await.pending.clone()
+        self.deferred.lock().await.pending.iter().cloned().collect()
     }
 
     async fn has_deferred_sessions(&self) -> bool {
@@ -1954,20 +1956,16 @@ impl ClientContextRestartInventoryReady {
         R: ClientContextRestartRecoveryOwner + ?Sized,
     {
         let mut ledger = self.deferred.lock().await;
-        let Some(index) = ledger
-            .pending
-            .iter()
-            .position(|pending| pending == session_id)
-        else {
+        if !ledger.pending.contains(session_id) {
             return Ok(ClientContextRestartDeferredCapture::NotDeferred);
-        };
+        }
         let Some(entries) = owner
             .capture_registered_client_context_session(session_id)
             .await?
         else {
             return Ok(ClientContextRestartDeferredCapture::Unregistered);
         };
-        ledger.pending.swap_remove(index);
+        ledger.pending.remove(session_id);
         let operations = entries.len();
         ledger.captured.extend(entries);
         drop(ledger);

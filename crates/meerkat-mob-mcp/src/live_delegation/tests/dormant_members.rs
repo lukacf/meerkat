@@ -202,6 +202,14 @@ async fn the_restart_capture_completes_over_a_dormant_member_and_leaves_it_dorma
         inventory.contains(&live_session, admission.operation().operation_id()),
         "the live member's operation is captured: {inventory:?}"
     );
+    assert!(
+        inventory.defers(&dormant_session),
+        "the dormant member's session is deferred until it is registered: {inventory:?}"
+    );
+    assert!(
+        !inventory.defers(&live_session),
+        "a registered session is read, not deferred: {inventory:?}"
+    );
 
     // No eager wake: the capture read nothing of the dormant member.
     assert!(
@@ -262,6 +270,14 @@ async fn a_live_channel_preparation_is_refused_when_the_restart_inventory_cannot
     assert!(
         refusal.contains("restart inventory"),
         "the refusal names the restart inventory it waited for: {refusal}"
+    );
+    assert_eq!(
+        refusal,
+        ClientContextRestartPrepareRefusal::InventoryPending {
+            waited: CLIENT_CONTEXT_RESTART_PREPARE_BOUND,
+        }
+        .to_string(),
+        "the refusal is the typed inventory-pending refusal"
     );
 }
 
@@ -471,6 +487,10 @@ async fn a_dormant_members_operation_is_reconciled_once_when_the_member_is_mater
         !inventory.contains(&source_session, &operation_id),
         "the dormant member's operation is not read at the capture: {inventory:?}"
     );
+    assert!(
+        inventory.defers(&source_session),
+        "the dormant member's session is deferred until it is registered: {inventory:?}"
+    );
 
     let reconciler = try_arm_client_context_restart_reconciler(
         &coordinator.client_context_restart_reconciler_armed,
@@ -525,6 +545,31 @@ async fn a_dormant_members_operation_is_reconciled_once_when_the_member_is_mater
         !reconciled.result_eligible(),
         "a recovered terminal is never delivered to a provider"
     );
+    let settled = lock_unpoisoned(&coordinator.client_context_restart_observations)
+        .iter()
+        .filter(|report| report.operation_id() == &operation_id)
+        .map(|report| report.disposition().clone())
+        .filter(|disposition| {
+            !matches!(
+                disposition,
+                ExperimentalClientContextRestartDisposition::InFlight
+                    | ExperimentalClientContextRestartDisposition::SourceUnmaterialized
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        settled,
+        vec![ExperimentalClientContextRestartDisposition::Reconciled { completed: true }],
+        "restart reconciliation settles the operation exactly once"
+    );
+    assert_eq!(
+        coordinator
+            .client_context_restart_inventory_ready
+            .capture_deferred(coordinator.as_ref(), &source_session)
+            .await,
+        Ok(ClientContextRestartDeferredCapture::NotDeferred),
+        "the member's session is never captured twice"
+    );
     assert!(matches!(
         coordinator
             .reconcile_one_client_context_snapshot(
@@ -535,4 +580,92 @@ async fn a_dormant_members_operation_is_reconciled_once_when_the_member_is_mater
             .await,
         ExperimentalClientContextRestartDisposition::AlreadyReconciled
     ));
+}
+
+/// A live channel prepared on a member that was dormant at the startup
+/// capture captures that member's deferred inventory first, once, before the
+/// channel can admit an operation of its own. Here no reconciler runs, so
+/// the preparation is the capture.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_channel_prepared_on_a_woken_member_captures_its_deferred_inventory_first() {
+    let fixture = DurableMembers::new("restart-prepare-captures").await;
+    let source = AgentIdentity::from("voice-source");
+    let source_session = fixture.spawn(&source).await;
+    let admission = fixture
+        .runtime
+        .__test_admit_confirmed_live_delegation(
+            &source_session,
+            source.as_str(),
+            meerkat_runtime::live_execution::LiveDelegationWorkerOwnership::ExistingMember,
+            TASK,
+        )
+        .await
+        .expect("a durable ClientContext operation on the source member");
+    let operation_id = admission.operation().operation_id().clone();
+    fixture
+        .runtime
+        .abandon_live_open_admission(
+            &source_session,
+            admission.operation().domain_correlation().channel_id(),
+        )
+        .await
+        .expect("revoke the provider channel, as a restart leaves it");
+    fixture.release(&source).await;
+
+    let coordinator = Arc::new(ExperimentalLiveDelegationCoordinator::new(
+        Arc::clone(&fixture.runtime),
+        Arc::clone(&fixture.mobs),
+    ));
+    let inventory = coordinator
+        .collect_client_context_restart_inventory()
+        .await
+        .expect("the restart capture completes while the source member is dormant");
+    assert!(
+        inventory.defers(&source_session),
+        "the dormant member's session is deferred: {inventory:?}"
+    );
+    coordinator
+        .client_context_restart_inventory_ready
+        .publish_startup_inventory(inventory.deferred)
+        .await;
+    coordinator
+        .client_context_restart_reconciler_armed
+        .store(true, std::sync::atomic::Ordering::Release);
+
+    fixture
+        .handle
+        .ensure_member_live(&source)
+        .await
+        .expect("the member's wake materializes it");
+    let control: Arc<dyn ExperimentalGptLiveControlPlane> = Arc::new(UnboundControl);
+    let prepared = coordinator
+        .prepare_bound_channel(
+            test_runtime_binding(source_session.clone(), "live-after-wake", 1),
+            control,
+        )
+        .await;
+    assert_eq!(
+        prepared,
+        Err("experimental live control binding is unavailable".to_string()),
+        "the preparation passed restart reconciliation and stopped at the binding check"
+    );
+    assert_eq!(
+        coordinator
+            .client_context_restart_inventory_ready
+            .take_captured()
+            .await
+            .into_iter()
+            .map(|entry| entry.operation_id)
+            .collect::<Vec<_>>(),
+        vec![operation_id],
+        "the preparation captured the member's operation before the channel"
+    );
+    assert_eq!(
+        coordinator
+            .client_context_restart_inventory_ready
+            .capture_deferred(coordinator.as_ref(), &source_session)
+            .await,
+        Ok(ClientContextRestartDeferredCapture::NotDeferred),
+        "the session is captured once"
+    );
 }

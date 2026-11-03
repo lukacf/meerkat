@@ -2668,8 +2668,15 @@ pub struct ToolsConfig {
     /// Default timeout for tool execution (supports humantime format: "30s", "1m")
     #[serde(with = "humantime_serde")]
     pub default_timeout: Duration,
-    /// Per-tool timeout overrides (supports humantime format: "30s", "1m")
-    #[serde(default)]
+    /// Per-tool timeout overrides, keyed by tool name. Each value is a
+    /// humantime string (`"840s"`, `"14m"`, `"1h 2m"`) or serde's
+    /// `{ secs, nanos }` table for a `Duration`; a string that is not a
+    /// duration fails the config load, naming its key.
+    ///
+    /// Always written as the `{ secs, nanos }` table, the only form 0.9.9,
+    /// 0.9.8 and earlier read, so a config this release writes stays
+    /// readable by them after a rollback.
+    #[serde(default, deserialize_with = "tool_timeouts_serde::deserialize")]
     pub tool_timeouts: HashMap<String, Duration>,
     /// Maximum concurrent tool executions
     pub max_concurrent: usize,
@@ -3478,7 +3485,10 @@ impl PersistedConfigDocument {
     /// default, so a typed re-serialization would turn every default into an
     /// override and stop the realm inheriting it, including capabilities a
     /// parent realm disabled. A `null` member removes the key, so the field
-    /// inherits again.
+    /// inherits again. A per-tool timeout string the patch sets
+    /// (`tools.tool_timeouts.<tool>`) is written as the `{ secs, nanos }`
+    /// table a typed write stores, so the document stays readable by 0.9.9
+    /// and 0.9.8 after a rollback.
     ///
     /// Legacy keys are dropped before the patch applies, and the patched
     /// document is loaded strictly, so a patch that introduces a removed key
@@ -3494,7 +3504,10 @@ impl PersistedConfigDocument {
         let persisted = Self::parse(content)?;
         let mut document = crate::config_document::parse(content)?;
         LegacyModelFallbackKeys::drop_from_document(&mut document);
-        crate::config_document::apply_merge_patch(&mut document, patch)?;
+        crate::config_document::apply_merge_patch(
+            &mut document,
+            tool_timeouts_serde::patch_in_struct_form(patch),
+        )?;
         let mut config: Config = toml::from_str(&document.to_string())
             .map_err(|error| crate::config_document::invalid_patched_document(&error))?;
         let mut warnings = persisted.removed_key_warnings;
@@ -3845,6 +3858,144 @@ mod optional_duration_serde {
             }
             _ => Err(D::Error::custom("expected string or number for duration")),
         }
+    }
+}
+
+/// Serde reader for `ToolsConfig::tool_timeouts`: each entry is a humantime
+/// string (`"840s"`, `"14m"`, `"1h 2m"`) or the `{ secs, nanos }` table of
+/// `Duration`'s own serde form.
+///
+/// The table goes through `Duration`'s own reader, so it loads exactly as it
+/// did when it was the only form, errors included. A string that is not a
+/// duration is a load error naming its key; no entry falls back to a
+/// default. Zero and negative values follow the table: `"0s"` is a zero
+/// timeout, as `{ secs = 0, nanos = 0 }` is, and a negative value is
+/// refused, as a negative `secs` is.
+///
+/// There is deliberately no writer: the field keeps `Duration`'s derived
+/// `Serialize`, the table, because 0.9.9, 0.9.8 and earlier read only the
+/// table, and a config this release writes must stay readable by them when
+/// a host rolls back. `patch_in_struct_form` holds config patches to the
+/// same form.
+mod tool_timeouts_serde {
+    use serde::Deserialize;
+    use serde::de::value::{MapAccessDeserializer, SeqAccessDeserializer};
+    use serde::de::{DeserializeSeed, Deserializer, Error, MapAccess, SeqAccess, Visitor};
+    use std::collections::HashMap;
+    use std::fmt;
+    use std::time::Duration;
+
+    /// The forms a per-tool timeout takes, for error messages.
+    const FORMS: &str =
+        "a humantime duration such as \"30s\", \"14m\" or \"1h 2m\", or a { secs, nanos } table";
+
+    pub(super) fn deserialize<'de, D>(
+        deserializer: D,
+    ) -> Result<HashMap<String, Duration>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_map(Timeouts)
+    }
+
+    struct Timeouts;
+
+    impl<'de> Visitor<'de> for Timeouts {
+        type Value = HashMap<String, Duration>;
+
+        // The derived map reader's own text.
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("a map")
+        }
+
+        fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+        where
+            A: MapAccess<'de>,
+        {
+            let mut timeouts = HashMap::new();
+            while let Some(tool) = map.next_key::<String>()? {
+                let timeout = map.next_value_seed(Timeout { tool: &tool })?;
+                timeouts.insert(tool, timeout);
+            }
+            Ok(timeouts)
+        }
+    }
+
+    /// One entry's value; `tool` is its key, which errors name.
+    struct Timeout<'a> {
+        tool: &'a str,
+    }
+
+    impl<'de> DeserializeSeed<'de> for Timeout<'_> {
+        type Value = Duration;
+
+        fn deserialize<D>(self, deserializer: D) -> Result<Duration, D::Error>
+        where
+            D: Deserializer<'de>,
+        {
+            deserializer.deserialize_any(self)
+        }
+    }
+
+    impl<'de> Visitor<'de> for Timeout<'_> {
+        type Value = Duration;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(formatter, "`tools.tool_timeouts.{}` as {FORMS}", self.tool)
+        }
+
+        fn visit_str<E>(self, text: &str) -> Result<Duration, E>
+        where
+            E: Error,
+        {
+            humantime_serde::re::humantime::parse_duration(text).map_err(|error| {
+                E::custom(format_args!(
+                    "`tools.tool_timeouts.{}` = {text:?} is not a duration ({error}); use {FORMS}",
+                    self.tool
+                ))
+            })
+        }
+
+        // The `{ secs, nanos }` table, and the `[secs, nanos]` sequence that
+        // `Duration`'s reader also takes, go through that reader itself.
+        fn visit_map<A>(self, map: A) -> Result<Duration, A::Error>
+        where
+            A: MapAccess<'de>,
+        {
+            Duration::deserialize(MapAccessDeserializer::new(map))
+        }
+
+        fn visit_seq<A>(self, seq: A) -> Result<Duration, A::Error>
+        where
+            A: SeqAccess<'de>,
+        {
+            Duration::deserialize(SeqAccessDeserializer::new(seq))
+        }
+    }
+
+    /// `patch` with each duration string it sets under `tools.tool_timeouts`
+    /// replaced by the `{ secs, nanos }` table a typed write stores, so a
+    /// patched document stays readable by 0.9.9 and 0.9.8 after a rollback.
+    /// A string that is not a duration stays as written: loading the patched
+    /// document then refuses it, naming its key.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) fn patch_in_struct_form(mut patch: serde_json::Value) -> serde_json::Value {
+        if let Some(entries) = patch
+            .get_mut("tools")
+            .and_then(|tools| tools.get_mut("tool_timeouts"))
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            for entry in entries.values_mut() {
+                let table = entry
+                    .as_str()
+                    .and_then(|text| humantime_serde::re::humantime::parse_duration(text).ok())
+                    .and_then(|duration| serde_json::to_value(duration).ok());
+                if let Some(table) = table {
+                    *entry = table;
+                }
+            }
+        }
+        patch
     }
 }
 

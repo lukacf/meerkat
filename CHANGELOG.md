@@ -64,6 +64,19 @@ them.
   umask. A store file an older version left readable by others becomes
   private on its next commit.
 
+- `meerkat-core`: `[tools.tool_timeouts]` entries accept humantime duration
+  strings, as the field's documentation said (`my_tool = "840s"`, `"14m"`,
+  `"1h 2m"`). Releases through 0.9.9 read only serde's `{ secs, nanos }`
+  table there, so the string form failed the whole config load. Each entry
+  now takes either form: the table loads exactly as before, and a string
+  that is not a duration is a config error naming its key
+  (`tools.tool_timeouts.<tool>`), never a default. Zero and negative values
+  follow the table form: `"0s"` is a zero timeout and a negative value is
+  refused. Meerkat still writes the table form, also when a config patch
+  (`config/patch`, `rkat config patch`) sets a string, so a config written by
+  this release stays readable by 0.9.9 and 0.9.8 if a host rolls back. A
+  string written into a config file by hand loads only on 0.9.10 and later.
+
 ## [0.9.9] - 2026-11-03
 
 ### Highlights

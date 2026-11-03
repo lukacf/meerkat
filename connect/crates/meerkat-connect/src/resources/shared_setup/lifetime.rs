@@ -179,6 +179,13 @@ mod tests {
         let resources = root.join("resources");
         fs::create_dir(&resources).unwrap();
         fs::write(resources.join("resources.json"), b"selected resources").unwrap();
+        // An installed resource manifest may be public but never group or
+        // other writable; set that mode instead of inheriting the process umask.
+        fs::set_permissions(
+            resources.join("resources.json"),
+            fs::Permissions::from_mode(0o644),
+        )
+        .unwrap();
         let realm = meerkat_core::RealmLocator {
             state_root: root.clone(),
             realm: meerkat_core::mob_realm_id("lifetime-control").unwrap(),

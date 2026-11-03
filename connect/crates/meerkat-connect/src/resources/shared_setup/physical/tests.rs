@@ -24,12 +24,22 @@ impl Case {
     }
     fn with_peers(mode: &str, peers: usize) -> Self {
         let temp = tempfile::tempdir().unwrap();
+        // The fence admits only a private (0700) artifact directory, and the
+        // installed resource manifest may be public but never group or other
+        // writable. Set both modes here instead of inheriting them from the
+        // process umask, which concurrent tests share and must not change.
+        fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700)).unwrap();
         let root = temp.path().canonicalize().unwrap();
         let resources = root.join("resources");
         fs::create_dir(&resources).unwrap();
         fs::write(
             resources.join("resources.json"),
             b"selected fixture resources",
+        )
+        .unwrap();
+        fs::set_permissions(
+            resources.join("resources.json"),
+            fs::Permissions::from_mode(0o644),
         )
         .unwrap();
         lifetime::write_new(&root.join("prepare.stdout"), b"selected fixture descriptor").unwrap();

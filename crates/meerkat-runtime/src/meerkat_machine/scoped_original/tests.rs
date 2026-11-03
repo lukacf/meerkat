@@ -265,6 +265,11 @@ struct Fixture {
 /// An authenticated original with two source contributors, admitted to its
 /// current destination under a host-policy mandate.
 fn fixture() -> Fixture {
+    fixture_with_clock(Arc::new(Clock))
+}
+
+/// [`fixture`] whose grant owner reads time from `clock`.
+fn fixture_with_clock(clock: Arc<dyn LocalAuthorizationClock>) -> Fixture {
     let input = input("caller");
     let ingress = Arc::clone(input.header().ingress_context.as_ref().expect("ingress"));
     let mut claims = input
@@ -300,7 +305,7 @@ fn fixture() -> Fixture {
                 generation: 1,
             },
             publication.clone(),
-            Arc::new(Clock),
+            clock,
         )
         .expect("real generated grant owner"),
     );
@@ -2654,6 +2659,119 @@ fn an_owner_change_during_an_admission_lineage_read_is_a_changed_policy() {
         f.admit(f.claims.clone()).is_ok(),
         "admits once the change completes"
     );
+}
+
+/// The fixture grant owner's clock, which runs one armed owner change at its
+/// next time read. A lineage read takes the time inside its observation of
+/// the grant publication, before it takes the grant owner's state, so the
+/// change publishes and completes while that read is under way.
+#[derive(Default)]
+struct ChangingClock(Mutex<Option<Box<dyn FnOnce() + Send>>>);
+
+impl ChangingClock {
+    fn arm(&self, change: impl FnOnce() + Send + 'static) {
+        *self.0.lock().expect("fixture") = Some(Box::new(change));
+    }
+
+    /// Whether the armed change ran.
+    fn ran(&self) -> bool {
+        self.0.lock().expect("fixture").is_none()
+    }
+}
+
+impl LocalAuthorizationClock for ChangingClock {
+    fn now(&self) -> Result<LocalAuthorizationTime, meerkat_authorization::clock::LocalClockError> {
+        let change = self.0.lock().expect("fixture").take();
+        if let Some(change) = change {
+            change();
+        }
+        Clock.now()
+    }
+}
+
+/// Arm `clock` with another actor's owner change on `f`'s grant
+/// publication: the revocation of `grant` when `revoke`, otherwise a change
+/// of some other owner fact.
+fn arm_completed_change(clock: &ChangingClock, f: &Fixture, grant: GrantLineageRef, revoke: bool) {
+    if revoke {
+        let grants = Arc::downgrade(&f.grants);
+        let root = f.root.clone();
+        clock.arm(move || {
+            grants
+                .upgrade()
+                .expect("the grant owner")
+                .revoke(&root, &grant, &mut AnyCustody)
+                .expect("another actor revokes the grant");
+        });
+    } else {
+        let publication = f.publication.clone();
+        clock.arm(move || {
+            drop(
+                publication
+                    .begin_owner_change()
+                    .expect("another actor's owner change"),
+            );
+        });
+    }
+}
+
+/// Another actor's owner change that publishes and completes while
+/// admission reads a grant lineage (the admitted original's own mandate, or
+/// a named contributor's liveness) leaves that read stale, with no change in
+/// progress any more. Admission makes the read once more from the owners: it
+/// admits while the grant holds, and refuses with the owners' current answer
+/// (`Denied`) when that change revoked the grant. A change still in progress
+/// keeps answering `PolicyChanged`
+/// (`an_owner_change_during_an_admission_lineage_read_is_a_changed_policy`).
+///
+/// RED on the base: every case answered `PolicyChanged`.
+#[test]
+fn an_owner_change_completed_during_an_admission_lineage_read_is_read_again() {
+    let read_again = |revoke: bool, during: Result<(), NativeAdmissionError>, case: &str| {
+        if revoke {
+            assert_eq!(
+                refusal(during),
+                Some(OperationRefusalKind::Denied),
+                "{case}: the owners' current answer"
+            );
+        } else {
+            assert!(
+                during.is_ok(),
+                "{case}: admitted after one more read: {during:?}"
+            );
+        }
+    };
+    for revoke in [false, true] {
+        // The admitted original's own grant-lineage mandate.
+        let clock = Arc::new(ChangingClock::default());
+        let f = fixture_with_clock(clock.clone());
+        let helper = f.helper_claims();
+        let WorkAuthorityBasis::GrantLineage { lineage } = &helper.authority_basis else {
+            panic!("the helper's own grant-lineage mandate")
+        };
+        arm_completed_change(&clock, &f, lineage[0].clone(), revoke);
+        let during = f.admit(helper.clone());
+        assert!(
+            clock.ran(),
+            "revoke={revoke}: the change ran during the read"
+        );
+        read_again(revoke, during, "the original's own mandate");
+
+        // A named contributor's lineage, under the fixture's own host-policy
+        // mandate, so that no other lineage is read first.
+        let clock = Arc::new(ChangingClock::default());
+        let f = fixture_with_clock(clock.clone());
+        let source = f.claims.contributing_work[1].clone();
+        let lineage = f.issue_source_grant("source-leaf", ExecutionRestrictions::unrestricted());
+        f.hold_contributor(&source, vec![lineage.clone()]);
+        arm_completed_change(&clock, &f, lineage, revoke);
+        let during = f.admit(f.claims.clone());
+        assert!(
+            clock.ran(),
+            "revoke={revoke}: the change ran during the read"
+        );
+        read_again(revoke, during, "a contributor's liveness");
+    }
 }
 
 /// A poisoned grant publication at the same admission reads stays

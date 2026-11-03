@@ -542,6 +542,7 @@ if (args[0] === "api") {
   const gateCheck = extractStepRun(workflow, "Check lane results");
   const gateEnv = {
     CHANGES_RESULT: "success", FMT_GOVERNANCE_RESULT: "success", RATCHETS_RESULT: "success", STAGGER_RESULT: "success",
+    CI_LANES_SELFTEST_RESULT: "success", PATH_CLASSIFIER_SELFTEST_RESULT: "success",
     TLC_AUDITS_RESULT: "skipped", MACHINE_AUTHORITY: "false", CLIPPY_RESULT: "skipped",
     GOVERNANCE_GATES_RESULT: "skipped", GOVERNANCE_GATES: "false",
     UNIT_RESULT: "success", INTEGRATION_RESULT: "skipped", GOVERNED_JSONL_RESULT: "skipped",
@@ -596,6 +597,8 @@ if (args[0] === "api") {
   );
   for (const [label, change] of [
     ["a failed ratchet", { RATCHETS_RESULT: "failure" }],
+    ["a failed lane classifier selftest", { CI_LANES_SELFTEST_RESULT: "failure" }],
+    ["a path classifier selftest that did not run", { PATH_CLASSIFIER_SELFTEST_RESULT: "skipped" }],
     ["a failed stagger job", { STAGGER_RESULT: "failure" }],
     ["a failed governance gate", { GOVERNANCE_GATES_RESULT: "failure" }],
     ["a governance change whose gates did not run", { GOVERNANCE_GATES: "true" }],

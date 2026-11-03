@@ -98,6 +98,7 @@ fn ci_runs_fail_closed_cargo_lanes_on_hosted_runners() {
         vec![
             "bazel-graph",
             "changes",
+            "ci-lanes-selftest",
             "clippy",
             "clippy-rest",
             "closure-check",
@@ -118,6 +119,7 @@ fn ci_runs_fail_closed_cargo_lanes_on_hosted_runners() {
             "main-unit-archive-run",
             "main-unit-rest",
             "mcp-confinement-positive",
+            "path-classifier-selftest",
             "published-floor",
             "ratchets",
             "rustdoc",
@@ -256,6 +258,8 @@ fn ci_runs_fail_closed_cargo_lanes_on_hosted_runners() {
     for lane in [
         "changes",
         "fmt-governance",
+        "ci-lanes-selftest",
+        "path-classifier-selftest",
         "ratchets",
         "governance-gates",
         "tlc-audits",
@@ -323,6 +327,7 @@ fn ci_runs_fail_closed_cargo_lanes_on_hosted_runners() {
         "make verify-version-parity",
         "make verify-lock-consistency",
         "make ci-lanes-selftest",
+        "make path-classifier-selftest",
         "make verify-schema-freshness",
         "make verify-sdk-codegen-freshness",
         "make machine-check-drift",

@@ -72,8 +72,8 @@ and back up the state root as the steps above say.
   `rust-version = "1.97.0"` (0.9.8 declared 1.94.0), and Cargo refuses to
   build them, `cargo install rkat` included, with an older rustc.
 - **Pin `=0.9.9`.** Move every `meerkat*` dependency to `=0.9.9` at once.
-  Meta 0.9.7 pins Core `=0.9.8`, so a host that embeds Meta stays on Core
-  0.9.8 until a Meta release pins `=0.9.9`.
+  Meta 0.9.9 pins Core `=0.9.9`, so a host that embeds Meta moves Meta and
+  Core to 0.9.9 together (Meta 0.9.7 pinned Core `=0.9.8`).
 - **Upgrade the SDKs with the server.** A Python, TypeScript or Web SDK of
   0.9.8 or earlier refuses the new `tool_results_bounded_for_request` event
   type, as it does any event type newer than its contract.

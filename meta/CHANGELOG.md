@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.9.9] - 2026-11-03
+
 ### Breaking
 
 - A host's own `MobSessionService` wrapper (around the session service it

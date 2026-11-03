@@ -1830,8 +1830,9 @@ struct ClientContextRestartInventoryReady {
     ready: std::sync::atomic::AtomicBool,
     changed: tokio::sync::Notify,
     deferred: tokio::sync::Mutex<ClientContextRestartDeferredLedger>,
-    /// A deferred session was captured. The permit a capture stores wakes a
-    /// reconciler that was not waiting yet.
+    /// A channel's preparation captured a deferred session; its operations
+    /// wait in the ledger. The permit it stores wakes a reconciler that was
+    /// not waiting yet.
     deferred_captured: tokio::sync::Notify,
 }
 
@@ -1934,12 +1935,26 @@ impl ClientContextRestartInventoryReady {
         self.deferred.lock().await.pending.iter().cloned().collect()
     }
 
+    #[cfg(test)]
     async fn has_deferred_sessions(&self) -> bool {
         !self.deferred.lock().await.pending.is_empty()
     }
 
+    #[cfg(test)]
     async fn take_captured(&self) -> Vec<ClientContextRestartInventoryEntry> {
-        std::mem::take(&mut self.deferred.lock().await.captured)
+        self.take_captured_and_pending().await.0
+    }
+
+    /// Take the operations captured since the last take, and whether a
+    /// deferred session is still pending, under one lock. Read apart, a
+    /// capture between the two reads would be left behind by a reconciler
+    /// that took nothing and then found nothing pending.
+    async fn take_captured_and_pending(&self) -> (Vec<ClientContextRestartInventoryEntry>, bool) {
+        let mut ledger = self.deferred.lock().await;
+        (
+            std::mem::take(&mut ledger.captured),
+            !ledger.pending.is_empty(),
+        )
     }
 
     /// Capture `session_id` if the startup capture deferred it and nothing
@@ -1968,9 +1983,28 @@ impl ClientContextRestartInventoryReady {
         ledger.pending.remove(session_id);
         let operations = entries.len();
         ledger.captured.extend(entries);
-        drop(ledger);
-        self.deferred_captured.notify_one();
         Ok(ClientContextRestartDeferredCapture::Captured { operations })
+    }
+
+    /// [`Self::capture_deferred`] by the preparation of a live channel on
+    /// `session_id`. The operations it captures wait in the ledger for the
+    /// reconciler, so a capture wakes the reconciler's wait, or its next one.
+    async fn capture_deferred_before_channel<R>(
+        &self,
+        owner: &R,
+        session_id: &SessionId,
+    ) -> Result<ClientContextRestartDeferredCapture, String>
+    where
+        R: ClientContextRestartRecoveryOwner + ?Sized,
+    {
+        let capture = self.capture_deferred(owner, session_id).await;
+        if matches!(
+            capture,
+            Ok(ClientContextRestartDeferredCapture::Captured { .. })
+        ) {
+            self.deferred_captured.notify_one();
+        }
+        capture
     }
 }
 
@@ -2129,51 +2163,65 @@ async fn run_client_context_restart_reconciler<R>(
     let mut scan_warning = RetryWarning::default();
     let mut capture_retry_delay = timing.retry_delay;
     retry_delay = timing.retry_delay;
+    // The deferred sessions are checked now, and then again only after a
+    // serving attachment (a member may have been materialized) or a failed
+    // capture: never on the in-flight interval of the operations observed.
+    let mut check_deferred = true;
     loop {
         // A deferred session MeerkatMachine holds registered again (its
         // member was materialized) is captured here, once; the preparation
-        // of a channel on it may have captured it first.
-        let deferred = inventory_ready.deferred_sessions().await;
+        // of a channel on it may have captured it first. The check sees every
+        // attachment committed before it: an attachment is committed after
+        // its session's registration.
         let mut capture_failed = false;
-        if !deferred.is_empty() {
-            let Some(current_owner) = owner.upgrade() else {
-                return;
-            };
-            let mut failure = None;
-            for session_id in &deferred {
-                match inventory_ready
-                    .capture_deferred(&*current_owner, session_id)
-                    .await
-                {
-                    Ok(ClientContextRestartDeferredCapture::Captured { operations }) => {
-                        tracing::debug!(
-                            %session_id,
-                            operations,
-                            "ClientContext restart inventory captured a deferred member session once its member was materialized"
+        if check_deferred {
+            check_deferred = false;
+            attachments.mark_unchanged();
+            let deferred = inventory_ready.deferred_sessions().await;
+            if !deferred.is_empty() {
+                let Some(current_owner) = owner.upgrade() else {
+                    return;
+                };
+                let mut failure = None;
+                for session_id in &deferred {
+                    match inventory_ready
+                        .capture_deferred(&*current_owner, session_id)
+                        .await
+                    {
+                        Ok(ClientContextRestartDeferredCapture::Captured { operations }) => {
+                            tracing::debug!(
+                                %session_id,
+                                operations,
+                                "ClientContext restart inventory captured a deferred member session once its member was materialized"
+                            );
+                        }
+                        Ok(_) => {}
+                        Err(error) => failure = Some(error),
+                    }
+                }
+                drop(current_owner);
+                match failure {
+                    Some(error) => {
+                        capture_failed = true;
+                        deferred_warning.log(
+                            "ClientContext restart capture of a materialized member session remains pending",
+                            &error,
                         );
                     }
-                    Ok(_) => {}
-                    Err(error) => failure = Some(error),
-                }
-            }
-            drop(current_owner);
-            match failure {
-                Some(error) => {
-                    capture_failed = true;
-                    deferred_warning.log(
-                        "ClientContext restart capture of a materialized member session remains pending",
-                        &error,
-                    );
-                }
-                None => {
-                    deferred_warning.reset();
-                    capture_retry_delay = timing.retry_delay;
+                    None => {
+                        deferred_warning.reset();
+                        capture_retry_delay = timing.retry_delay;
+                    }
                 }
             }
         }
-        entries.extend(inventory_ready.take_captured().await);
+        // Taken in one step with the pending check, so an operation a
+        // channel's preparation captured is never left behind.
+        let (taken, deferred_left) = inventory_ready.take_captured_and_pending().await;
+        entries.extend(taken);
 
         let mut in_flight = false;
+        let mut scan_failed = false;
         if !entries.is_empty() {
             let Some(current_owner) = owner.upgrade() else {
                 return;
@@ -2188,67 +2236,79 @@ async fn run_client_context_restart_reconciler<R>(
                 )
                 .await;
             drop(current_owner);
-            let reports = match pass {
-                Ok(reports) => reports,
+            match pass {
+                Ok(reports) => {
+                    scan_warning.reset();
+                    retry_delay = timing.retry_delay;
+                    for report in &reports {
+                        if matches!(
+                            report.disposition(),
+                            ExperimentalClientContextRestartDisposition::Broken { .. }
+                        ) {
+                            tracing::warn!(
+                                operation_id = %report.operation_id(),
+                                disposition_reason = "durable_client_context_recovery_broken",
+                                "ClientContext restart reconciliation stopped with durable recovery debt"
+                            );
+                        }
+                    }
+                    in_flight = reports.iter().any(|report| {
+                        matches!(
+                            report.disposition(),
+                            ExperimentalClientContextRestartDisposition::InFlight
+                        )
+                    });
+                    // An operation still in flight is observed again after
+                    // the in-flight delay, one whose source member is dormant
+                    // again once a member is materialized; every other one is
+                    // settled.
+                    entries.retain(|entry| {
+                        reports.iter().any(|report| {
+                            report.operation_id() == &entry.operation_id
+                                && matches!(
+                                    report.disposition(),
+                                    ExperimentalClientContextRestartDisposition::InFlight
+                                        | ExperimentalClientContextRestartDisposition::SourceUnmaterialized
+                                )
+                        })
+                    });
+                }
                 Err(error) => {
+                    scan_failed = true;
                     scan_warning.log(
                         "ClientContext restart reconciliation scan remains pending",
                         &error,
                     );
-                    tokio::time::sleep(retry_delay).await;
-                    retry_delay = retry_delay.saturating_mul(2).min(timing.retry_max_delay);
-                    continue;
-                }
-            };
-            scan_warning.reset();
-            retry_delay = timing.retry_delay;
-            for report in &reports {
-                if matches!(
-                    report.disposition(),
-                    ExperimentalClientContextRestartDisposition::Broken { .. }
-                ) {
-                    tracing::warn!(
-                        operation_id = %report.operation_id(),
-                        disposition_reason = "durable_client_context_recovery_broken",
-                        "ClientContext restart reconciliation stopped with durable recovery debt"
-                    );
                 }
             }
-            in_flight = reports.iter().any(|report| {
-                matches!(
-                    report.disposition(),
-                    ExperimentalClientContextRestartDisposition::InFlight
-                )
-            });
-            // An operation still in flight is observed again after the
-            // in-flight delay, one whose source member is dormant again once
-            // a member is materialized; every other one is settled.
-            entries.retain(|entry| {
-                reports.iter().any(|report| {
-                    report.operation_id() == &entry.operation_id
-                        && matches!(
-                            report.disposition(),
-                            ExperimentalClientContextRestartDisposition::InFlight
-                                | ExperimentalClientContextRestartDisposition::SourceUnmaterialized
-                        )
-                })
-            });
         }
 
-        if entries.is_empty() && !inventory_ready.has_deferred_sessions().await {
+        if entries.is_empty() && !deferred_left {
             return;
         }
-        if in_flight {
-            tokio::time::sleep(timing.in_flight_delay).await;
-            continue;
-        }
-        if capture_failed {
-            // A registered session's read failed: it is read again after
-            // the backoff, not at the next attachment.
-            tokio::time::sleep(capture_retry_delay).await;
+
+        // A failed scan, an operation in flight and a failed capture each
+        // come back after their own delay.
+        let delay = if scan_failed {
+            let delay = retry_delay;
+            retry_delay = retry_delay.saturating_mul(2).min(timing.retry_max_delay);
+            Some(delay)
+        } else if in_flight {
+            Some(timing.in_flight_delay)
+        } else if capture_failed {
+            let delay = capture_retry_delay;
             capture_retry_delay = capture_retry_delay
                 .saturating_mul(2)
                 .min(timing.retry_max_delay);
+            Some(delay)
+        } else {
+            None
+        };
+        if let Some(delay) = delay {
+            tokio::time::sleep(delay).await;
+            // A failed capture is read again; an attachment committed in the
+            // meantime has the deferred sessions checked again.
+            check_deferred = capture_failed || attachments.has_changed().unwrap_or(true);
             continue;
         }
 
@@ -2264,6 +2324,7 @@ async fn run_client_context_restart_reconciler<R>(
                     // durable for the next start.
                     return;
                 }
+                check_deferred = true;
             }
             () = captured => {}
         }
@@ -3846,7 +3907,7 @@ impl ExperimentalLiveDelegationCoordinator {
     ) -> Result<(), ClientContextRestartPrepareRefusal> {
         let reason = match self
             .client_context_restart_inventory_ready
-            .capture_deferred(self, session_id)
+            .capture_deferred_before_channel(self, session_id)
             .await
         {
             Ok(
@@ -8657,13 +8718,19 @@ mod tests {
                 .clone()
         }
 
-        /// The scripted runtime registers `session_id` with `operations` and
-        /// commits its serving attachment: its member was materialized.
-        fn materialize(&self, session_id: &SessionId, operations: &[OperationId]) {
+        /// The scripted runtime registers `session_id` with `operations`,
+        /// with no serving attachment committed yet.
+        fn register(&self, session_id: &SessionId, operations: &[OperationId]) {
             self.registered
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .insert(session_id.clone(), operations.to_vec());
+        }
+
+        /// The scripted runtime registers `session_id` with `operations` and
+        /// commits its serving attachment: its member was materialized.
+        fn materialize(&self, session_id: &SessionId, operations: &[OperationId]) {
+            self.register(session_id, operations);
             self.commit_attachment();
         }
 
@@ -9499,6 +9566,162 @@ mod tests {
             )]
         );
         assert!(!inventory_ready.has_deferred_sessions().await);
+    }
+
+    /// A live channel's preparation that captures a deferred session wakes the
+    /// waiting reconciler, which observes the captured operation without an
+    /// attachment: the session is registered but no attachment is committed.
+    #[tokio::test]
+    async fn a_capture_by_a_channel_preparation_wakes_the_waiting_reconciler() {
+        let armed = std::sync::atomic::AtomicBool::new(false);
+        let inventory_ready = Arc::new(ClientContextRestartInventoryReady::default());
+        let session_id = SessionId::new();
+        let operation_id = OperationId::new();
+        let (owner, probe) = ScriptedRestartRecoveryOwner::new(
+            vec![Ok(())],
+            vec![Ok(ScriptedRestartRecoveryOwner::deferring(&session_id))],
+            vec![Ok(vec![ScriptedRestartRecoveryOwner::report_for(
+                &operation_id,
+                ExperimentalClientContextRestartDisposition::Reconciled { completed: true },
+            )])],
+            false,
+        );
+        let found_unregistered = probe.found_unregistered.notified();
+        tokio::pin!(found_unregistered);
+        found_unregistered.as_mut().enable();
+        let task = try_arm_client_context_restart_reconciler(
+            &armed,
+            Arc::clone(&owner),
+            Arc::clone(&inventory_ready),
+            immediate_restart_reconcile_timing(),
+        )
+        .expect("arm restart reconciliation");
+        found_unregistered.await;
+
+        probe.register(&session_id, std::slice::from_ref(&operation_id));
+        assert_eq!(
+            inventory_ready
+                .capture_deferred_before_channel(owner.as_ref(), &session_id)
+                .await,
+            Ok(ClientContextRestartDeferredCapture::Captured { operations: 1 }),
+            "the preparation captures the session"
+        );
+        task.await.expect("restart reconciliation completes");
+        assert_eq!(
+            probe.invocations(),
+            vec![
+                RestartRecoveryInvocation::ForceRestore,
+                RestartRecoveryInvocation::CaptureInventory,
+                RestartRecoveryInvocation::CaptureSession,
+                RestartRecoveryInvocation::CaptureSession,
+                RestartRecoveryInvocation::ObservePass,
+            ],
+            "the reconciler observed the operation the preparation captured, and read nothing again"
+        );
+        assert_eq!(
+            probe.observed_inventories(),
+            vec![ScriptedRestartRecoveryOwner::inventory(
+                &session_id,
+                std::slice::from_ref(&operation_id),
+            )]
+        );
+    }
+
+    /// While an operation is in flight it is observed on every interval, but
+    /// the deferred sessions are checked again only after a serving
+    /// attachment: a dormant member costs nothing per interval.
+    #[tokio::test]
+    async fn client_context_restart_checks_deferred_sessions_only_after_an_attachment() {
+        let armed = std::sync::atomic::AtomicBool::new(false);
+        let inventory_ready = Arc::new(ClientContextRestartInventoryReady::default());
+        let live_session = SessionId::new();
+        let live_operation = OperationId::new();
+        let dormant_session = SessionId::new();
+        let dormant_operation = OperationId::new();
+        let in_flight = || -> Result<Vec<ExperimentalClientContextRestartReport>, String> {
+            Ok(vec![ScriptedRestartRecoveryOwner::report_for(
+                &live_operation,
+                ExperimentalClientContextRestartDisposition::InFlight,
+            )])
+        };
+        let (owner, probe) = ScriptedRestartRecoveryOwner::new(
+            vec![Ok(())],
+            vec![Ok(ClientContextRestartInventory {
+                deferred: vec![dormant_session.clone()],
+                ..ScriptedRestartRecoveryOwner::inventory(
+                    &live_session,
+                    std::slice::from_ref(&live_operation),
+                )
+            })],
+            vec![
+                in_flight(),
+                in_flight(),
+                in_flight(),
+                Ok(vec![ScriptedRestartRecoveryOwner::report_for(
+                    &live_operation,
+                    ExperimentalClientContextRestartDisposition::Reconciled { completed: true },
+                )]),
+                Ok(vec![ScriptedRestartRecoveryOwner::report_for(
+                    &dormant_operation,
+                    ExperimentalClientContextRestartDisposition::Reconciled { completed: true },
+                )]),
+            ],
+            false,
+        );
+        let task = try_arm_client_context_restart_reconciler(
+            &armed,
+            Arc::clone(&owner),
+            Arc::clone(&inventory_ready),
+            immediate_restart_reconcile_timing(),
+        )
+        .expect("arm restart reconciliation");
+        // Every pass notifies; the fourth settles the live operation, and
+        // nothing runs after it until an attachment.
+        loop {
+            let observed = probe.observed.notified();
+            tokio::pin!(observed);
+            observed.as_mut().enable();
+            let passes = probe
+                .invocations()
+                .into_iter()
+                .filter(|invocation| *invocation == RestartRecoveryInvocation::ObservePass)
+                .count();
+            if passes == 4 {
+                break;
+            }
+            observed.await;
+        }
+        assert_eq!(
+            probe.invocations(),
+            vec![
+                RestartRecoveryInvocation::ForceRestore,
+                RestartRecoveryInvocation::CaptureInventory,
+                RestartRecoveryInvocation::CaptureSession,
+                RestartRecoveryInvocation::ObservePass,
+                RestartRecoveryInvocation::ObservePass,
+                RestartRecoveryInvocation::ObservePass,
+                RestartRecoveryInvocation::ObservePass,
+            ],
+            "the dormant member's session is checked once, not on every in-flight interval"
+        );
+
+        probe.materialize(&dormant_session, std::slice::from_ref(&dormant_operation));
+        task.await.expect("restart reconciliation completes");
+        assert_eq!(
+            probe.invocations(),
+            vec![
+                RestartRecoveryInvocation::ForceRestore,
+                RestartRecoveryInvocation::CaptureInventory,
+                RestartRecoveryInvocation::CaptureSession,
+                RestartRecoveryInvocation::ObservePass,
+                RestartRecoveryInvocation::ObservePass,
+                RestartRecoveryInvocation::ObservePass,
+                RestartRecoveryInvocation::ObservePass,
+                RestartRecoveryInvocation::CaptureSession,
+                RestartRecoveryInvocation::ObservePass,
+            ],
+            "the attachment has the deferred session checked and its operation observed"
+        );
     }
 
     /// A failure of a retried restart step warns on the first failure of a

@@ -237,7 +237,7 @@
       {
         "product": "Meta",
         "description": "Application and orchestration layer for Meerkat",
-        "icon": "/mobkit/logo.png",
+        "icon": "/meta/logo.png",
         "tabs": [
           {
             "tab": "Documentation",
@@ -245,37 +245,37 @@
               {
                 "group": "Getting started",
                 "pages": [
-                  "mobkit/introduction",
-                  "mobkit/quickstart"
+                  "meta/introduction",
+                  "meta/quickstart"
                 ]
               },
               {
                 "group": "Core concepts",
                 "pages": [
-                  "mobkit/concepts/modules",
-                  "mobkit/concepts/events",
-                  "mobkit/concepts/roster",
-                  "mobkit/concepts/gating",
-                  "mobkit/concepts/access-control",
-                  "mobkit/concepts/delivery",
-                  "mobkit/concepts/mob-announcements",
-                  "mobkit/concepts/scheduling",
-                  "mobkit/concepts/memory",
-                  "mobkit/concepts/sessions"
+                  "meta/concepts/modules",
+                  "meta/concepts/events",
+                  "meta/concepts/roster",
+                  "meta/concepts/gating",
+                  "meta/concepts/access-control",
+                  "meta/concepts/delivery",
+                  "meta/concepts/mob-announcements",
+                  "meta/concepts/scheduling",
+                  "meta/concepts/memory",
+                  "meta/concepts/sessions"
                 ]
               },
               {
                 "group": "Guides",
                 "pages": [
-                  "mobkit/guides/unified-runtime",
-                  "mobkit/guides/module-system",
-                  "mobkit/guides/console",
-                  "mobkit/guides/flow-editor",
-                  "mobkit/guides/authentication",
-                  "mobkit/guides/deployment",
-                  "mobkit/guides/upgrading-to-0-9-4",
-                  "mobkit/guides/upgrading-from-mobkit",
-                  "mobkit/guides/continuity-export"
+                  "meta/guides/unified-runtime",
+                  "meta/guides/module-system",
+                  "meta/guides/console",
+                  "meta/guides/flow-editor",
+                  "meta/guides/authentication",
+                  "meta/guides/deployment",
+                  "meta/guides/upgrading-to-0-9-4",
+                  "meta/guides/upgrading-from-mobkit",
+                  "meta/guides/continuity-export"
                 ]
               }
             ]
@@ -286,9 +286,9 @@
               {
                 "group": "Protocols",
                 "pages": [
-                  "mobkit/api/rpc",
-                  "mobkit/api/rest",
-                  "mobkit/api/sse"
+                  "meta/api/rpc",
+                  "meta/api/rest",
+                  "meta/api/sse"
                 ]
               }
             ]
@@ -299,19 +299,19 @@
               {
                 "group": "Rust",
                 "pages": [
-                  "mobkit/sdks/rust"
+                  "meta/sdks/rust"
                 ]
               },
               {
                 "group": "TypeScript",
                 "pages": [
-                  "mobkit/sdks/typescript"
+                  "meta/sdks/typescript"
                 ]
               },
               {
                 "group": "Python",
                 "pages": [
-                  "mobkit/sdks/python"
+                  "meta/sdks/python"
                 ]
               }
             ]
@@ -322,15 +322,15 @@
               {
                 "group": "Architecture",
                 "pages": [
-                  "mobkit/reference/architecture",
-                  "mobkit/reference/configuration"
+                  "meta/reference/architecture",
+                  "meta/reference/configuration"
                 ]
               },
               {
                 "group": "Governance",
                 "pages": [
-                  "mobkit/reference/decisions",
-                  "mobkit/reference/governance"
+                  "meta/reference/decisions",
+                  "meta/reference/governance"
                 ]
               }
             ]
@@ -615,8 +615,8 @@
   },
   "redirects": [
     {
-      "source": "/meta/:slug*",
-      "destination": "/mobkit/:slug*"
+      "source": "/mobkit/:slug*",
+      "destination": "/meta/:slug*"
     },
     {
       "source": "/connect/sdks/activepieces",

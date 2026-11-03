@@ -1,0 +1,13 @@
+{
+  "generated": true,
+  "source_repository": "https://github.com/lukacf/meerkat",
+  "source_path": "meta/docs",
+  "source_branch": "main",
+  "source_ref": "main",
+  "source_commit": "104965d47f033b9d87eef22260941a892ed48fff",
+  "source_commit_date": "2026-11-03",
+  "source_version": "0.9.7",
+  "source_docs_dirty": false,
+  "public_pages": 31,
+  "content_sha256": "823d19aa8bcbd9261d22db46b3c39f2c9062c3741d07d1050b148af453bc08ca"
+}

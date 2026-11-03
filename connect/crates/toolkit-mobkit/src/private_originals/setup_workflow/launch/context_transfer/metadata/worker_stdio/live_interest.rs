@@ -100,6 +100,12 @@ async fn child() {
     let observed_directory = directory.clone();
     let observed_sessions = sessions.clone();
     let expected_before = before.clone();
+    // The bindings this run restores: A's waiter source, P and G.
+    let restored = (
+        saved.row.key.clone(),
+        saved.durable.parent_source().clone(),
+        saved.durable.lead_source().clone(),
+    );
     let observer = tokio::spawn(async move {
         let _release = Release(observed_probe.clone());
         let checked = AssertUnwindSafe(async {
@@ -223,7 +229,51 @@ async fn child() {
         );
         host.join_close().await.unwrap();
         assert_eq!(work_census(directory.path(), &sessions).await, before);
-        assert!(source.retained.lock().unwrap().is_empty());
+        // Interim close check until Connect states the close contract. The
+        // retained set is append-only in this host (hold_binding only adds),
+        // so after join_close it holds exactly the bindings this run
+        // restored, each once, and no live actor serves any of their sessions.
+        let (waiter_key, parent, lead) = &restored;
+        let mut held: Vec<_> = source
+            .retained
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|held| source.key(&held.reference).unwrap())
+            .collect();
+        let mut expected = vec![
+            waiter_key.clone(),
+            source.key(parent).unwrap(),
+            source.key(lead).unwrap(),
+        ];
+        held.sort_by(|a, b| a.id.cmp(&b.id));
+        expected.sort_by(|a, b| a.id.cmp(&b.id));
+        assert_eq!(
+            held, expected,
+            "exactly the bindings this run restored, each once"
+        );
+        if let Some(pins) = source
+            .controller_pin_source
+            .get()
+            .and_then(std::sync::Weak::upgrade)
+        {
+            for session in &sessions {
+                assert!(
+                    pins.live_actor(session).await.is_none(),
+                    "no live actor after close"
+                );
+            }
+        }
+        // A retained historical handle authorizes nothing after close: the
+        // current owners refuse a restoration through it, typed.
+        let refused = source.restore_workflow_parent_source(parent).await;
+        assert!(
+            matches!(
+                refused,
+                Err(crate::private_originals::PrivateOriginalError::Unavailable)
+            ),
+            "a closed host refuses its retained handle: {refused:?}"
+        );
         assert!(source.workflow_context_transfers().unwrap().is_empty());
     })
     .catch_unwind()

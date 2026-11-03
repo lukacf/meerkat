@@ -1082,3 +1082,28 @@ async fn lead_wake_under_a_held_source_writer_registers_once() {
     .await;
     close(&c, body).await;
 }
+
+/// Restoring the same binding again in one host reuses its retained entry:
+/// three restorations of G's custody leave the retained set at the size the
+/// first one left it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn repeated_restoration_of_one_binding_keeps_its_retained_entry() {
+    let saved = admit_then_close().await;
+    let c = PersistentDedicated::reopen(saved.durable).await;
+    let body = AssertUnwindSafe(Box::pin(async {
+        join_recovery_for_idle_restore(&c).await;
+        c.member.restore_admitted_source().await.unwrap();
+        let once = c.f.source.retained.lock().unwrap().len();
+        for _ in 0..2 {
+            c.member.restore_admitted_source().await.unwrap();
+        }
+        let after = c.f.source.retained.lock().unwrap().len();
+        assert_eq!(
+            after, once,
+            "retained after 1 restoration: {once}, after 3: {after}"
+        );
+    }))
+    .catch_unwind()
+    .await;
+    close(&c, body).await;
+}

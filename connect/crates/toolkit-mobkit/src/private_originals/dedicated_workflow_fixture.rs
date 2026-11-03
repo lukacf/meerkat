@@ -1222,6 +1222,9 @@ impl DurableDedicated {
     pub fn lead_source(&self) -> &PrivateOriginalRef {
         &self.lead.original
     }
+    pub fn parent_source(&self) -> &PrivateOriginalRef {
+        &self.parent.original
+    }
     pub fn sessions(&self) -> &[SessionId] {
         &self.sessions
     }

@@ -516,7 +516,10 @@ routes `global:copilot_openai`, `global:copilot_anthropic` and
 `--from-env` it stores nothing and writes routes that read
 `COPILOT_GITHUB_TOKEN`, then `GH_TOKEN`, then `GITHUB_TOKEN`, checking the
 token when one is set. A token that fails the check is never stored, and
-`--backend` and `--method` are refused.
+`--backend` and `--method` are refused. Both `rkat auth login copilot` forms
+refuse, before writing anything, a `[realm.global]` that configures its
+Copilot account once in a `[copilot]` section (see
+[GitHub Copilot configured once](/guides/auth#github-copilot-configured-once)).
 
 Runtime credential **reads inherit** down the realm chain. CLI auth
 administration differs: `--realm` on profile, status, test, and refresh

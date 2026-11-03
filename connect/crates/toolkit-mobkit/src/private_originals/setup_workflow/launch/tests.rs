@@ -1962,6 +1962,9 @@ mod lifecycle_tests;
 #[path = "bind_tests.rs"]
 mod bind_tests;
 
+#[path = "replay_tests.rs"]
+mod replay_tests;
+
 #[path = "idle_restore_tests.rs"]
 mod idle_restore_tests;
 

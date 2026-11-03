@@ -57,7 +57,10 @@ async def main():
         job = controller.validations[checked_b["validation_id"]]["job_id"]
         assert controller._job_threads[job].is_alive()
         assert not controller._job_controls[job]["requested"].is_set()
-        assert a in owner._pending and b not in owner._pending
+        # Pending selections are keyed (peer, ticket): A keeps its exact
+        # unreleased ticket and B, released into P, has none left.
+        assert (a, pending_a["ticket"]) in owner._pending
+        assert not any(peer is b for peer, _ in owner._pending)
         with patch.object(controller, "stop", wraps=controller.stop) as stopping:
             callback = owner.owner_control({"operation": "leave_preparation", "peer": 0,
                 "validation_id": inspect_a["selection"]["result"]["validation_id"],
@@ -71,7 +74,7 @@ async def main():
             assert not report["stop_requested_while_held"]
             assert report["worker_alive_after_callback"]
             assert not callback["physical_stop_requested"] and not callback["worker_joined"]
-            assert a not in owner._pending
+            assert not any(peer is a for peer, _ in owner._pending)
             assert not controller.closing and not waiting.done()
             controller.runner.block.set()
             installed = await asyncio.wait_for(asyncio.shield(waiting), 3)

@@ -262,12 +262,34 @@ else
   bad "Rust crate publish script is missing crates.io rate-limit retry handling"
 fi
 
-if grep -Fq 'scripts/release-rust-crates.sh" --levels' scripts/release-publish-rust-crates.sh &&
-  grep -Fq 'wait_for_index "$level"' scripts/release-publish-rust-crates.sh &&
-  levels_summary="$(scripts/release-rust-crates.sh --levels --format summary 2>&1)"; then
-  pass "Rust crates publish by dependency level ($(wc -l <<<"${levels_summary}" | tr -d ' ') levels), each level visible in the index before the next"
+# The publisher is product-aware (0.9.9): it walks the dependency levels of
+# the crate list MEERKAT_RELEASE_CRATE_LIST names, Core's
+# scripts/release-rust-crates.sh by default (release.yml) and Meta's
+# scripts/release-meta-crates.sh in meta-release.yml, and waits for each level
+# in the index before the next. So check that form of the publisher, then
+# that each product's list answers its level plan. Contract tests point the
+# doctor at a mutated copy of the publisher.
+crate_publisher="${RELEASE_CRATE_PUBLISHER_FILE:-scripts/release-publish-rust-crates.sh}"
+level_plans=()
+level_plan_errors=()
+for product_list in core:scripts/release-rust-crates.sh meta:scripts/release-meta-crates.sh; do
+  product="${product_list%%:*}"
+  crate_list="${product_list#*:}"
+  if level_summary="$("${crate_list}" --levels --format summary 2>&1)" && [[ -n "${level_summary}" ]]; then
+    level_count="$(wc -l <<<"${level_summary}" | tr -d ' ')"
+    level_plans+=("${product} ${level_count} level$([[ "${level_count}" == 1 ]] || echo s)")
+  else
+    level_plan_errors+=("${product} (${crate_list}): ${level_summary:-no level plan}")
+  fi
+done
+if ! grep -Eq '^CRATE_LIST="\$\{MEERKAT_RELEASE_CRATE_LIST:-.*scripts/release-rust-crates\.sh\}"$' "${crate_publisher}" ||
+  ! grep -Fq '"$CRATE_LIST" --levels' "${crate_publisher}" ||
+  ! grep -Fq 'wait_for_index "$level"' "${crate_publisher}"; then
+  bad "Rust crate publishing must walk the dependency levels of the product's crate list (MEERKAT_RELEASE_CRATE_LIST, Core's scripts/release-rust-crates.sh by default) and wait for each level in the index (${crate_publisher})"
+elif [[ ${#level_plan_errors[@]} -gt 0 ]]; then
+  bad "Every product's crate list must answer its dependency level plan: $(IFS=';'; echo "${level_plan_errors[*]//$'\n'/ }")"
 else
-  bad "Rust crate publishing must walk the dependency levels of scripts/release-rust-crates.sh and wait for each level in the index (${levels_summary:-no level plan})"
+  pass "Rust crates publish by dependency level per product ($(IFS=,; echo "${level_plans[*]}" | sed 's/,/, /g')), each level visible in the index before the next"
 fi
 
 # The semver-gate and SLO assertions evaluate workflow behaviour under concrete

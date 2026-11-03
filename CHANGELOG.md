@@ -35,6 +35,117 @@ them.
 
 ## [Unreleased]
 
+### Highlights
+
+- GitHub Copilot configured once. A `[realm.<realm>.copilot]` section
+  states a Copilot account's token source once (an `env` or
+  `external_resolver` source) in place of nine backend, auth and binding
+  tables: the realm gets the account's `copilot_openai`,
+  `copilot_anthropic` and `copilot_gemini` routes in token mode, under the
+  names the explicit tables use. Account models: a request that names a
+  route of a Copilot account can run a model only the account lists (no
+  catalog row, no `[models.<id>]` entry), with the protocol and limits
+  from the account's model list; a model the account does not offer is
+  refused before any model request, and no other route or credential is
+  tried. See Added and Breaking, and Known limitations for Meerkat
+  Connect.
+
+### Breaking
+
+- `meerkat-core`, `meerkat-llm-core`: a GitHub Copilot account configured
+  once, and account models (see Added). `RealmConfigSection` gains the
+  public field `copilot: Option<CopilotAccountConfig>`, so code that builds
+  it literally must set it (`None` keeps the previous behaviour).
+  `ProviderBindingError` (meerkat-core) gains
+  `CopilotAccountRouteConflict { route }` and
+  `CopilotAccountSourceUnsupported { source_kind }`, and `FactoryError`
+  (meerkat-llm-core) gains `AccountModel(Box<AccountModelRefusal>)` (a
+  refusal converts into it with `From`), each appended last, so an
+  exhaustive match needs their arms.
+
+- Behaviour-only (not measured by the gate): `meerkat`:
+  `resolve_create_session_model` serves a model on the route of its
+  provider that shares the named binding's credential account. A request
+  that names a route of a GitHub Copilot account and a model of another
+  provider family, and no provider, now resolves to the account's route of
+  that family (the resolution's `auth_binding` is that route, not the
+  binding the request named), where it failed with
+  `CreateSessionModelResolutionError::ProviderModelMismatch` (or
+  `ConfiguredProviderModelMismatch` for a configured model). An account
+  with two routes of that family refuses it as ambiguous
+  (`CreateSessionModelResolutionError::AuthBinding`). A request that also
+  names a provider, and an account with no route of the model's provider
+  (every account but a Copilot one), keep the mismatch error.
+
+### Added
+
+- GitHub Copilot configured once: `[realm.<realm>.copilot]` states a Copilot
+  account's credential source once (`source`, an `env` or
+  `external_resolver` source; optional `options`, the client identity
+  headers), and the realm gets the account's three routes,
+  `copilot_openai`, `copilot_anthropic` and `copilot_gemini`, on its
+  `github_copilot` credential account in token mode
+  (`github_copilot_token`), as if their nine tables were written out. The
+  section next to an explicit table of one of its routes, or next to
+  another binding on its account, is refused, and so is a source the
+  routes do not read (a secret in config, a stored token, a credential
+  command); `rkat auth login copilot` refuses a `[realm.global]` that has
+  the section. A session on one of the routes carries the account as its
+  credential identity and runs with provider-native tools off, as on the
+  explicit tables. The zero-config routes are the same lowering of the
+  default source. For hosts and embedders:
+  `meerkat_core::CopilotAccountConfig` and `RealmConfigSection::copilot`
+  (see Breaking).
+
+- Copilot account models: on a route of a GitHub Copilot account, a model
+  the registry does not define (no catalog row, no `[models.<id>]` entry) is
+  defined for the build by the account's model list. The endpoints the
+  account lists for the model choose its protocol, never its vendor:
+  `/v1/messages` is the Anthropic Messages wire, otherwise `/responses`
+  (first) or `/chat/completions` the OpenAI wire, and the session runs on
+  the account's route of that protocol, whichever route of the account the
+  request named. Its context window, prompt and output limits and image
+  input come from the list; nothing about the model is stored, and a resume
+  asks the account again. A model the account does not offer, offers on no
+  endpoint Meerkat speaks, or cannot list (its discovery failed) is refused
+  before any model request (`FactoryError::AccountModel`), and no other
+  route or credential is tried. A request that names no binding still
+  cannot reach such a model: name any route of the account, for example
+  `rkat run --auth-binding global:copilot_openai --model <id> "..."`. A live
+  model switch or a fallback target to such a model, and any live
+  reconfigure of a session that runs one, need a `[models.<id>]` entry. For
+  hosts and embedders:
+  `ProviderRuntime::account_model` (provided; `AccountModelLookup::NotReported`
+  by default), `ProviderRuntimeRegistry::account_model`,
+  `AccountModelLookup` and `AccountModelRefusal` (meerkat-llm-core);
+  `CopilotModelOffering::{enabled, protocol_provider, registry_definition}`,
+  `CopilotModelSnapshot::{offered_model_ids, account_model}` and
+  `CopilotRuntime::account_model` (meerkat-copilot). (#1991)
+
+### Changed
+
+- A session on a zero-config Copilot route, or on a route of a
+  `[realm.<realm>.copilot]` account, carries the route's account as its
+  credential identity, the identity its connection and lease always used,
+  and runs with provider-native tools off, as an explicit Copilot route
+  does. A zero-config route's session carried the binding as its credential
+  identity before, so a provider switch or a fallback target did not stay
+  on the account.
+
+### Known limitations
+
+- Meerkat Connect: its provider setup and first-target setup read a
+  realm's explicit tables only, so they do not yet list the routes a
+  `[realm.<realm>.copilot]` section declares (see Added), and a realm whose
+  Copilot account is configured only by the section can look unconfigured
+  there. Use the explicit Copilot tables with Connect until a later
+  release. With the explicit tables, Connect can offer each of the three
+  Copilot routes as a target for a model of one provider family, and the
+  session runs on the account's route of the model's family whichever is
+  chosen, on the same credential (see Breaking): choosing `copilot_openai`
+  for an Anthropic model runs on `copilot_anthropic`, so the chosen
+  target's name is not the route the session runs on.
+
 ## [0.9.9] - 2026-11-03
 
 ### Highlights
@@ -56,19 +167,6 @@ them.
   verbatim echo of the token stays out of provider errors, stream errors and
   logs (see Security). See Added, and Breaking for the new
   `GitHubCopilotToken` auth method variants.
-
-- GitHub Copilot configured once. A `[realm.<realm>.copilot]` section
-  states a Copilot account's token source once (an `env` or
-  `external_resolver` source) in place of nine backend, auth and binding
-  tables: the realm gets the account's `copilot_openai`,
-  `copilot_anthropic` and `copilot_gemini` routes in token mode, under the
-  names the explicit tables use. Account models: a request that names a
-  route of a Copilot account can run a model only the account lists (no
-  catalog row, no `[models.<id>]` entry), with the protocol and limits
-  from the account's model list; a model the account does not offer is
-  refused before any model request, and no other route or credential is
-  tried. See Added and Breaking, and Known limitations for Meerkat
-  Connect.
 
 - GitHub Copilot reliability. A temporary failure of the Copilot token
   exchange (a network failure or timeout, HTTP 408, 429 or 5xx, or a GitHub
@@ -1470,31 +1568,6 @@ them.
   (Python, TypeScript) or as its generated event type (Web); an SDK of 0.9.8
   or earlier refuses the unknown type, as for any newer contract.
 
-- `meerkat-core`, `meerkat-llm-core`: a GitHub Copilot account configured
-  once, and account models (see Added). `RealmConfigSection` gains the
-  public field `copilot: Option<CopilotAccountConfig>`, so code that builds
-  it literally must set it (`None` keeps the previous behaviour).
-  `ProviderBindingError` (meerkat-core) gains
-  `CopilotAccountRouteConflict { route }` and
-  `CopilotAccountSourceUnsupported { source_kind }`, and `FactoryError`
-  (meerkat-llm-core) gains `AccountModel(Box<AccountModelRefusal>)` (a
-  refusal converts into it with `From`), each appended last, so an
-  exhaustive match needs their arms.
-
-- Behaviour-only (not measured by the gate): `meerkat`:
-  `resolve_create_session_model` serves a model on the route of its
-  provider that shares the named binding's credential account. A request
-  that names a route of a GitHub Copilot account and a model of another
-  provider family, and no provider, now resolves to the account's route of
-  that family (the resolution's `auth_binding` is that route, not the
-  binding the request named), where it failed with
-  `CreateSessionModelResolutionError::ProviderModelMismatch` (or
-  `ConfiguredProviderModelMismatch` for a configured model). An account
-  with two routes of that family refuses it as ambiguous
-  (`CreateSessionModelResolutionError::AuthBinding`). A request that also
-  names a provider, and an account with no route of the model's provider
-  (every account but a Copilot one), keep the mismatch error.
-
 ### Added
 
 - `meerkat-mob-mcp`, `meerkat-rpc`, `meerkat-contracts`: quarantined mobs
@@ -2015,11 +2088,7 @@ them.
   mode from `COPILOT_GITHUB_TOKEN`, then `GH_TOKEN`, then `GITHUB_TOKEN`, with
   no config, also for a provider switch on the shared account and for
   `rkat auth test` and `rkat auth status`. Default selection never picks
-  these routes, and any configured Copilot route turns them off. A session
-  on one of them carries the `global:account:github_copilot` account as its
-  credential identity, the identity its connection and lease use, so a
-  provider switch or a fallback target stays on the account, and it runs
-  with provider-native tools off, as on an explicit Copilot route.
+  these routes, and any configured Copilot route turns them off.
   `RealmConnectionSet::copilot_token_default` returns them.
 
 - `meerkat-copilot`, `meerkat-runtime`, `meerkat-core`: how a
@@ -2768,49 +2837,6 @@ them.
   set before resolution; the first request then obtains them.
   `ResolverEnvironment::admits_pending_account_limits` reads it. Off by
   default; it has no effect on wasm32.
-
-- GitHub Copilot configured once: `[realm.<realm>.copilot]` states a Copilot
-  account's credential source once (`source`, an `env` or
-  `external_resolver` source; optional `options`, the client identity
-  headers), and the realm gets the account's three routes,
-  `copilot_openai`, `copilot_anthropic` and `copilot_gemini`, on its
-  `github_copilot` credential account in token mode
-  (`github_copilot_token`), as if their nine tables were written out. The
-  section next to an explicit table of one of its routes, or next to
-  another binding on its account, is refused, and so is a source the
-  routes do not read (a secret in config, a stored token, a credential
-  command); `rkat auth login copilot` refuses a `[realm.global]` that has
-  the section. A session on one of the routes carries the account as its
-  credential identity and runs with provider-native tools off, as on the
-  explicit tables. The zero-config routes are the same lowering of the
-  default source. For hosts and embedders:
-  `meerkat_core::CopilotAccountConfig` and `RealmConfigSection::copilot`
-  (see Breaking).
-
-- Copilot account models: on a route of a GitHub Copilot account, a model
-  the registry does not define (no catalog row, no `[models.<id>]` entry) is
-  defined for the build by the account's model list. The endpoints the
-  account lists for the model choose its protocol, never its vendor:
-  `/v1/messages` is the Anthropic Messages wire, otherwise `/responses`
-  (first) or `/chat/completions` the OpenAI wire, and the session runs on
-  the account's route of that protocol, whichever route of the account the
-  request named. Its context window, prompt and output limits and image
-  input come from the list; nothing about the model is stored, and a resume
-  asks the account again. A model the account does not offer, offers on no
-  endpoint Meerkat speaks, or cannot list (its discovery failed) is refused
-  before any model request (`FactoryError::AccountModel`), and no other
-  route or credential is tried. A request that names no binding still
-  cannot reach such a model: name any route of the account, for example
-  `rkat run --auth-binding global:copilot_openai --model <id> "..."`. A live
-  model switch or a fallback target to such a model, and any live
-  reconfigure of a session that runs one, need a `[models.<id>]` entry. For
-  hosts and embedders:
-  `ProviderRuntime::account_model` (provided; `AccountModelLookup::NotReported`
-  by default), `ProviderRuntimeRegistry::account_model`,
-  `AccountModelLookup` and `AccountModelRefusal` (meerkat-llm-core);
-  `CopilotModelOffering::{enabled, protocol_provider, registry_definition}`,
-  `CopilotModelSnapshot::{offered_model_ids, account_model}` and
-  `CopilotRuntime::account_model` (meerkat-copilot). (#1991)
 
 ### Changed
 
@@ -4185,18 +4211,6 @@ them.
   its first turn builds the session, so it does not report a scoped tool
   grant gate no grant could honour: the create succeeds, and the refused
   build is only logged.
-
-- Meerkat Connect: its provider setup and first-target setup read a
-  realm's explicit tables only, so they do not yet list the routes a
-  `[realm.<realm>.copilot]` section declares (see Added), and a realm whose
-  Copilot account is configured only by the section can look unconfigured
-  there. Use the explicit Copilot tables with Connect until a later
-  release. With the explicit tables, Connect can offer each of the three
-  Copilot routes as a target for a model of one provider family, and the
-  session runs on the account's route of the model's family whichever is
-  chosen, on the same credential (see Breaking): choosing `copilot_openai`
-  for an Anthropic model runs on `copilot_anthropic`, so the chosen
-  target's name is not the route the session runs on.
 
 ## [0.9.8] - 2026-10-30
 

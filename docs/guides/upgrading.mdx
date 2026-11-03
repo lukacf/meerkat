@@ -359,7 +359,21 @@ literally or matches them exhaustively follows them:
   `meerkat-mob`, `meerkat-runtime` and `meerkat-core` gain inputs, signals,
   effects, state fields and transitions, and `InputFieldDomainKind` gains
   `CiValues`. Every new variant is appended after the released ones, so no
-  implicit discriminant moves.
+  implicit discriminant moves, except in two enums. In
+  `generated::mob::TransitionId` (`meerkat-machine-kernels`), the 14 member
+  custody transitions it gains (`RecordMemberCustodyUnrestored*` and
+  `ResolveMemberCustodyRestored*`) sit directly before
+  `RetireMemberArchiveOnly`, so the implicit discriminants of
+  `RetireMemberArchiveOnly` and of every released variant after it move. In
+  `meerkat-runtime`'s `MeerkatMachineRuntimeInternalInput`,
+  `ReplaceToolGrantGate` and `ApplyToolGrantOpenSet` sit directly before
+  `AbandonDeferredSessionPromotion`, so the implicit discriminants of
+  `AbandonDeferredSessionPromotion` and of every released variant after it
+  move. Neither enum has a `repr`, and neither serializes its discriminant
+  (`TransitionId` (de)serializes by variant name), so only an integer cast
+  observes this: code that casts these variants to integers, or stores such
+  integers, must re-read them, since an integer from 0.9.8 can name another
+  variant.
 
 **Do:** add the fields and the arms. Wrap a `MemberRespawnReceipt` that a
 closure inside `std::panic::catch_unwind` captures in

@@ -244,8 +244,12 @@ impl PrivateOriginals {
         &self,
         reference: &PrivateOriginalRef,
     ) -> Result<(), PrivateOriginalError> {
-        self.reject_service_continuation_with_failure(reference, None, None, None)
-            .await
+        // The rejection holds three decoded source records across its awaits;
+        // its callers keep only a pointer to it.
+        box_in_own_frame(|| {
+            self.reject_service_continuation_with_failure(reference, None, None, None)
+        })
+        .await
     }
 
     #[cfg(test)]
@@ -289,15 +293,17 @@ impl PrivateOriginals {
             .ok_or(PrivateOriginalError::Denied)?;
         task.attachment_member(grant)?;
         let batch_member = matches!(task, ApprovedTaskLink::Batch(_)).then_some(grant);
-        self.reject_service_continuation_with_failure(
-            reference,
-            Some(failure),
-            observation,
-            batch_member,
-        )
+        box_in_own_frame(|| {
+            self.reject_service_continuation_with_failure(
+                reference,
+                Some(failure),
+                observation,
+                batch_member,
+            )
+        })
         .await?;
         self.retire_service_attachment(reference, task).await;
-        self.compensate_rejected_batch(reference).await
+        box_in_own_frame(|| self.compensate_rejected_batch(reference)).await
     }
 
     async fn reject_service_continuation_with_failure(

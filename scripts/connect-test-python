@@ -1,0 +1,154 @@
+#!/usr/bin/env bash
+# Print the absolute path of the Python interpreter that Connect's native
+# tests select through TOOLKIT_SHARED_TEST_PYTHON.
+#
+# Those tests never guess an interpreter: the executor selects it, and some of
+# their protocol children need more than a standard library.
+# - toolkit-mobkit's private host test runs this checkout's Python host
+#   participant: it imports the Connect Python SDK (connect/sdk/python/src)
+#   and the Meta Python SDK it builds on (meta/sdk/python), and refuses a
+#   meerkat_toolkit module loaded from anywhere but this checkout.
+# - The shared setup controls of meerkat-connect and meerkat-toolkit run the
+#   consumer-setup MCP adapter in isolated mode (-I, which ignores
+#   PYTHONPATH) on the MCP SDK Connect pins, mcp==2.2.0, and its
+#   dependencies.
+# Controls that need only the standard library run on it unchanged.
+#
+# The interpreter is a venv at DIR (an absolute path) made from a Python >=
+# 3.11: mcp==2.2.0 installed from wheels, and a .pth file in its
+# site-packages that names the two in-tree SDK source roots, so both load
+# from this checkout, never from a published release, under any flags but
+# -S. An existing DIR is reused only when it is that interpreter for this
+# checkout; any other existing DIR is refused, never replaced.
+#
+# - With `--if-needed DIR <cargo package flags>` (`-p NAME`, `--package NAME`,
+#   `--workspace`, `--exclude NAME`; other flags such as `--features LIST` are
+#   ignored), it prints nothing and prepares nothing unless a selected package
+#   is one whose unit tests read the selection: meerkat-connect,
+#   toolkit-mobkit or meerkat-toolkit.
+#
+# Usage:
+#   TOOLKIT_SHARED_TEST_PYTHON="$(scripts/connect-test-python /absolute/dir)"
+#   export TOOLKIT_SHARED_TEST_PYTHON
+#
+#   python="$(scripts/connect-test-python --if-needed "${RUNNER_TEMP}/connect-test-python" ${PACKAGES})"
+set -euo pipefail
+
+mcp_version="2.2.0"
+readers=(meerkat-connect toolkit-mobkit meerkat-toolkit)
+
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+sdk="${root}/connect/sdk/python/src"
+meta="${root}/meta/sdk/python"
+
+if_needed=false
+if [[ "${1:-}" == "--if-needed" ]]; then
+  if_needed=true
+  shift
+fi
+dir="${1:?usage: connect-test-python [--if-needed] DIR [cargo package flags]}"
+shift
+
+if [[ "${if_needed}" == true ]]; then
+  selected=()
+  excluded=()
+  workspace=false
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -p | --package)
+        selected+=("${2:-}")
+        shift 2 || shift
+        continue
+        ;;
+      --package=*) selected+=("${1#--package=}") ;;
+      --exclude)
+        excluded+=("${2:-}")
+        shift 2 || shift
+        continue
+        ;;
+      --exclude=*) excluded+=("${1#--exclude=}") ;;
+      --workspace) workspace=true ;;
+    esac
+    shift
+  done
+  needed=false
+  for reader in "${readers[@]}"; do
+    for name in "${selected[@]+"${selected[@]}"}"; do
+      [[ "${name}" == "${reader}" ]] && needed=true
+    done
+    if [[ "${workspace}" == true ]]; then
+      skip=false
+      for name in "${excluded[@]+"${excluded[@]}"}"; do
+        [[ "${name}" == "${reader}" ]] && skip=true
+      done
+      [[ "${skip}" == false ]] && needed=true
+    fi
+  done
+  [[ "${needed}" == true ]] || exit 0
+fi
+
+if [[ "${dir}" != /* ]]; then
+  echo "connect-test-python: DIR must be an absolute path, got '${dir}'" >&2
+  exit 2
+fi
+for source in "${sdk}/meerkat_toolkit/member_classes.py" "${meta}/meerkat_meta/__init__.py"; do
+  if [[ ! -f "${source}" ]]; then
+    echo "connect-test-python: this checkout has no ${source#"${root}/"}" >&2
+    exit 1
+  fi
+done
+
+python="${dir}/bin/python3"
+
+# The interpreter's own MCP SDK, under the isolated mode the shared setup
+# controls use, and this checkout's SDK and Meta source by module file, as
+# the private host participant checks it.
+verify() {
+  (cd / && "${python}" -I -B -c '
+import importlib.metadata
+import sys
+
+import anyio, jsonschema, referencing
+import mcp.server.stdio
+from mcp import types
+from mcp.server import Server
+
+version = importlib.metadata.version("mcp")
+if version != sys.argv[1]:
+    raise SystemExit(f"mcp {version} is installed, not {sys.argv[1]}")
+' "${mcp_version}") &&
+    (cd / && "${python}" -I -B -c '
+import pathlib
+import sys
+
+import meerkat_meta
+import meerkat_toolkit.member_classes as member_classes
+from meerkat_toolkit.host_control import HostBootstrapSelection, PrivateHostClient, SelectedHostArtifact
+
+loaded = [pathlib.Path(member_classes.__file__).resolve(), pathlib.Path(meerkat_meta.__file__).resolve()]
+expected = [pathlib.Path(path).resolve() for path in sys.argv[1:]]
+if loaded != expected:
+    raise SystemExit(f"loaded {loaded}, not this checkout'"'"'s {expected}")
+' "${sdk}/meerkat_toolkit/member_classes.py" "${meta}/meerkat_meta/__init__.py")
+}
+
+if [[ -e "${dir}" ]]; then
+  if [[ -x "${python}" ]] && verify >/dev/null 2>&1; then
+    printf '%s\n' "${python}"
+    exit 0
+  fi
+  echo "connect-test-python: ${dir} exists and is not this checkout's Connect test Python; remove it or choose another directory" >&2
+  exit 1
+fi
+
+base="$("${root}/scripts/require-python" 3.11 connect-test-python)"
+"${base}" -m venv "${dir}" >&2
+"${python}" -m pip install --quiet --disable-pip-version-check --no-input --only-binary=:all: \
+  "mcp==${mcp_version}" >&2
+purelib="$("${python}" -I -c 'import sysconfig; print(sysconfig.get_path("purelib"))')"
+printf '%s\n%s\n' "${sdk}" "${meta}" >"${purelib}/meerkat-connect-test-sources.pth"
+if ! verify; then
+  echo "connect-test-python: ${python} does not import MCP ${mcp_version} and this checkout's Connect and Meta SDKs" >&2
+  exit 1
+fi
+printf '%s\n' "${python}"

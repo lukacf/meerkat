@@ -27,6 +27,16 @@
 # finish), and the publication stops with the status of the first failed
 # crate in canonical order (124 after MEERKAT_CRATE_PUBLISH_TIMEOUT); no
 # later level starts.
+#
+# Every cargo publish gets a [patch.crates-io] config naming the list's
+# other crates (scripts/generate-patch-config.sh), so a crate resolves its
+# unpublished siblings from their paths. The patch is part of the packaged
+# Cargo.lock: a patched sibling is recorded as a path package, and an unused
+# patch as [[patch.unused]]. MEERKAT_CRATE_PUBLISH_PATCH=false (default
+# true) drops the patch from real uploads, which then package exactly what
+# `cargo package` packages without one: each level waits for the one below
+# in the index, so a crate resolves its siblings from crates.io. A dry run
+# keeps the patch, since nothing it names is published.
 
 set -euo pipefail
 
@@ -39,6 +49,7 @@ fi
 DRY_RUN="${MEERKAT_REGISTRY_DRY_RUN:-false}"
 PUBLISH_TIMEOUT="${MEERKAT_CRATE_PUBLISH_TIMEOUT:-20m}"
 NO_VERIFY="${MEERKAT_CARGO_PUBLISH_NO_VERIFY:-true}"
+PATCH="${MEERKAT_CRATE_PUBLISH_PATCH:-true}"
 RUNNER_TEMP="${RUNNER_TEMP:-/tmp}"
 INDEX_URL="${MEERKAT_CRATE_INDEX_URL:-https://index.crates.io}"
 INDEX_TIMEOUT="${MEERKAT_CRATE_INDEX_TIMEOUT:-600}"
@@ -47,6 +58,14 @@ INDEX_POLL="${MEERKAT_CRATE_INDEX_POLL_SECONDS:-5}"
 case "$DRY_RUN" in
   1|true|TRUE|yes|YES|on|ON) DRY_RUN=true ;;
   *) DRY_RUN=false ;;
+esac
+
+case "$PATCH" in
+  true|false) ;;
+  *)
+    echo "MEERKAT_CRATE_PUBLISH_PATCH must be true or false, got ${PATCH}" >&2
+    exit 2
+    ;;
 esac
 
 case "$NO_VERIFY" in
@@ -104,7 +123,12 @@ publish_one() {
     rc=$?
     set -e
   else
-    local cmd=(cargo publish -p "$crate" --locked --config "$tmp_cfg")
+    local cmd=(cargo publish -p "$crate" --locked)
+    if [[ "$PATCH" == "true" ]]; then
+      cmd+=(--config "$tmp_cfg")
+    else
+      echo "  ${crate}: upload without the patch config; its siblings resolve from crates.io"
+    fi
     if [[ "$NO_VERIFY" == "true" ]]; then
       cmd+=(--no-verify)
       echo "  ${crate}: upload mode skips cargo's duplicate verifier; release validation already packaged and linked these crates"

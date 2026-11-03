@@ -30,8 +30,9 @@ name: Meta release
 #     the root Cargo.toml defines; the old step that appended overrides to
 #     Cargo.toml is gone;
 #   - crates publish through scripts/release-publish-rust-crates.sh with
-#     MEERKAT_RELEASE_CRATE_LIST=scripts/release-meta-crates.sh, bound to the
-#     checksums the floor-checked packages produced.
+#     MEERKAT_RELEASE_CRATE_LIST=scripts/release-meta-crates.sh and
+#     MEERKAT_CRATE_PUBLISH_PATCH=false, bound to the checksums
+#     verify_crate_packages records.
 # Owner decisions still open (plan-v2 section 10): per-product release
 # environments for the publish tokens (release-meta), and whether the floor
 # check is required on every Meta PR or only here.
@@ -806,10 +807,12 @@ jobs:
             fi
           fi
 
-  # The packaged bytes the floor check built against published Core. No
-  # verify build here: floor_check already compiled exactly these packages
-  # (cargo package is byte-reproducible for a commit), so this job only
-  # records their checksums for the publisher to bind to.
+  # The crate bytes the publisher must upload. No verify build here:
+  # floor_check compiled these crates' packaged sources against published
+  # Core. Its own archives differ from these in Cargo.lock only (it
+  # packages with every in-repo crate patched to its path), so this job
+  # packages without a patch (cargo package is byte-reproducible for a
+  # commit) and records the checksums publish_registries binds to.
   verify_crate_packages:
     name: Record the floor-checked Meta crate checksums
     needs: [resolve_release, release_validate, floor_check]
@@ -897,12 +900,17 @@ jobs:
             echo "${crate}: ${actual} (floor-checked)"
           done
       # Only Meta's list: meta-extension-state (level 0), then meerkat-meta.
-      # The publisher's patch config covers only these crates, so Core
-      # resolves from crates.io exactly as the floor check proved.
+      # Real uploads carry no patch config (MEERKAT_CRATE_PUBLISH_PATCH):
+      # a patch is recorded in each packaged Cargo.lock, so the upload would
+      # differ from the bytes bound above. meerkat-meta packages after
+      # meta-extension-state is in the index, and records it with its
+      # crates.io checksum, as the bound packaging does; Core resolves from
+      # crates.io either way. A dry run keeps the patch.
       - name: Publish the Meta crates by dependency level
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
           MEERKAT_RELEASE_CRATE_LIST: scripts/release-meta-crates.sh
+          MEERKAT_CRATE_PUBLISH_PATCH: "false"
           MEERKAT_REGISTRY_DRY_RUN: ${{ needs.resolve_release.outputs.dry_run }}
         run: scripts/release-publish-rust-crates.sh
       - name: Verify exact packages are public on every registry

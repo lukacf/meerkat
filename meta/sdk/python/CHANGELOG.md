@@ -4,6 +4,8 @@ All notable changes to the Python SDK are documented here.
 
 ## Unreleased
 
+## 0.9.9
+
 - `MetaRuntime.prune_member_system_rows(identity, remove, *,
   retire_superseded_activation_bodies=False, expected_parent_revision=None,
   note=None)` calls `meta/prune_member_system_rows`: it removes the

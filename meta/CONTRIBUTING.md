@@ -208,9 +208,10 @@ the tier's target artifact identities, and its archive and inner-executable
 hashes. The manifest's own artifact identity is outside the manifest to avoid a
 self-referential hash.
 
-Inner members follow the unchanged producer: Unix archives contain the executable
+Inner members follow the producer: Unix archives contain the executable
 basename, and Windows ZIPs contain exactly
-`target/<exact-target>/release/<exact-binary>.exe`. These paths are derived from
+`target/<exact-target>/release-meta/<exact-binary>.exe` (the `release-meta`
+profile meta-release.yml builds with). These paths are derived from
 the supported target/binary inventory, never chosen by the manifest. Other nested
 paths, links, duplicate members, and extra files are refused.
 

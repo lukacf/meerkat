@@ -127,7 +127,15 @@ else
     echo "semver-breaks: baseline ${baseline_tag}, candidate ${workspace_version}"
 fi
 
-if ! git rev-parse -q --verify "refs/tags/${baseline_tag}^{commit}" >/dev/null 2>&1; then
+baseline_tag_absent=false
+if [[ "$semver_product" != core ]]; then
+    # A product release cut before its tags lived here has no tag on
+    # origin; resolve_product_baseline_tag reports that instead of failing.
+    resolve_product_baseline_tag "$baseline_tag" || exit 1
+    if [[ "$baseline_tag_absent" == true ]]; then
+        echo "semver-breaks: origin has no ${baseline_tag}; measuring every ${semver_product} release crate against crates.io ${baseline_version}"
+    fi
+elif ! git rev-parse -q --verify "refs/tags/${baseline_tag}^{commit}" >/dev/null 2>&1; then
     echo "semver-breaks: fetching ${baseline_tag}"
     git fetch --no-tags --depth=1 origin "+refs/tags/${baseline_tag}:refs/tags/${baseline_tag}"
 fi
@@ -140,9 +148,22 @@ for crate in "${release_crates[@]}"; do
     [[ -n "$crate" ]] || continue
     classify_args+=(--release-crate "$crate")
 done
-"$PYTHON" "$ROOT/scripts/semver_changed_crates.py" \
-    --repo-root "$ROOT" --baseline-tag "$baseline_tag" --head HEAD \
-    "${classify_args[@]}" >"$classification_file"
+if [[ "$baseline_tag_absent" == true ]]; then
+    # No tree to compare with: every release crate is measured (fail
+    # closed; a crate crates.io never published at the baseline version
+    # then fails the measurement instead of passing unmeasured).
+    "$PYTHON" -c '
+import json, sys
+tag, crates = sys.argv[1], [crate for crate in sys.argv[2:] if crate]
+reason = f"origin has no {tag}; measured against the registry release"
+print(json.dumps({"baseline_tag": tag, "changed": crates, "unchanged": [], "first_publish": [],
+                  "reasons": {crate: reason for crate in crates}}, indent=2, sort_keys=True))
+' "$baseline_tag" "${release_crates[@]}" >"$classification_file"
+else
+    "$PYTHON" "$ROOT/scripts/semver_changed_crates.py" \
+        --repo-root "$ROOT" --baseline-tag "$baseline_tag" --head HEAD \
+        "${classify_args[@]}" >"$classification_file"
+fi
 
 classified() {
     "$PYTHON" -c 'import json,sys; [print(c) for c in json.load(open(sys.argv[1]))[sys.argv[2]]]' "$classification_file" "$1"
@@ -171,7 +192,9 @@ manifest_field() {
 manifest_has_crate() {
     "$PYTHON" -c 'import json,sys; sys.exit(0 if sys.argv[2] in json.load(open(sys.argv[1]))["crates"] else 1)' "$1" "$2"
 }
-if [[ -z "$baseline_rustdoc_dir" && ${#changed_crates[@]} -gt 0 ]]; then
+if [[ -z "$baseline_rustdoc_dir" && "$baseline_tag_absent" == true ]]; then
+    baseline_rustdoc_note="origin has no ${baseline_tag}, so no release carries its baseline rustdoc"
+elif [[ -z "$baseline_rustdoc_dir" && ${#changed_crates[@]} -gt 0 ]]; then
     asset="${semver_rustdoc_asset_prefix}-${baseline_version}.tar.zst"
     asset_url="https://github.com/lukacf/meerkat/releases/download/${baseline_tag}/${asset}"
     rustdoc_download_dir="$(mktemp -d "${TMPDIR:-/tmp}/meerkat-semver-rustdoc.XXXXXX")"

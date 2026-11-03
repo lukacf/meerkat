@@ -13,7 +13,9 @@
 # that never reaches the index fails the level once
 # MEERKAT_CRATE_INDEX_TIMEOUT has passed; crates.io server errors, cargo's
 # 30-second timeout report included, and network errors are retried on their
-# own bounded budget, separate from the rate limit's.
+# own bounded budget, separate from the rate limit's; and
+# MEERKAT_CRATE_PUBLISH_PATCH=false drops the patch config from real uploads
+# only, while any value but true or false refuses to start.
 
 set -euo pipefail
 
@@ -38,13 +40,16 @@ if [[ "${1:-}" != "publish" ]]; then
 fi
 crate=""
 dry_run=false
+config=no
 while [[ "$#" -gt 0 ]]; do
   case "$1" in
     -p) crate="$2"; shift 2 ;;
     --dry-run) dry_run=true; shift ;;
+    --config) config=yes; shift 2 ;;
     *) shift ;;
   esac
 done
+echo "${crate} ${config}" >>"${STATE}/configs"
 now_ms() { date +%s%3N; }
 {
   flock 9
@@ -374,5 +379,30 @@ publish server-error-malformed 2 MEERKAT_CRATE_PUBLISH_SERVER_ERROR_BACKOFF="30 
 grep -Fq "MEERKAT_CRATE_PUBLISH_SERVER_ERROR_BACKOFF must list whole seconds, got soon" "${TEST_ROOT}/server-error-malformed/out.log" ||
   fail "server-error-malformed: the bad delay is not named"
 echo "ok: an empty server-error delay list disables the retry and a malformed one refuses to start"
+
+# 9. The patch config: by default every upload carries it (run 1 above);
+#    MEERKAT_CRATE_PUBLISH_PATCH=false drops it from every real upload and
+#    keeps it on a dry run; any other value refuses to start.
+configs_with() {
+  awk -v want="$2" '$2 == want' "${TEST_ROOT}/$1/configs" | wc -l | tr -d ' '
+}
+crate_count="$(wc -l <<<"${all_crates}" | tr -d ' ')"
+[[ "$(configs_with uploads no)" == 0 && "$(configs_with uploads yes)" -gt 0 ]] ||
+  fail "patch: a default upload ran without the patch config"
+publish patch-off 0 MEERKAT_CRATE_PUBLISH_JOBS=4 MEERKAT_CRATE_PUBLISH_PATCH=false
+[[ "$(started patch-off)" == "${all_crates}" ]] || fail "patch-off: not every crate was published exactly once"
+check_level_order patch-off
+[[ "$(configs_with patch-off yes)" == 0 && "$(configs_with patch-off no)" == "${crate_count}" ]] ||
+  fail "patch-off: an upload carried the patch config" "$(cat "${TEST_ROOT}/patch-off/configs")"
+grep -Fq "upload without the patch config" "${TEST_ROOT}/patch-off/out.log" ||
+  fail "patch-off: the patch-free upload is not reported"
+publish patch-off-dry 0 MEERKAT_CRATE_PUBLISH_PATCH=false MEERKAT_REGISTRY_DRY_RUN=true
+[[ "$(configs_with patch-off-dry no)" == 0 && "$(configs_with patch-off-dry yes)" == "${crate_count}" ]] ||
+  fail "patch-off-dry: a dry run dropped the patch config"
+publish patch-malformed 2 MEERKAT_CRATE_PUBLISH_PATCH=no
+[[ ! -s "${TEST_ROOT}/patch-malformed/events" ]] || fail "patch-malformed: a crate started"
+grep -Fq "MEERKAT_CRATE_PUBLISH_PATCH must be true or false, got no" "${TEST_ROOT}/patch-malformed/out.log" ||
+  fail "patch-malformed: the bad value is not named"
+echo "ok: MEERKAT_CRATE_PUBLISH_PATCH=false drops the patch config from every upload, keeps it on a dry run, and only true or false start"
 
 echo "level-parallel publisher contract holds"

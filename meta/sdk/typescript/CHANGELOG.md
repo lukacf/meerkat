@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.9.9
+
 - `WorkGraphEvidenceInput.withdraws` (optional): the ids of earlier evidence
   on the same item that the new ref withdraws. `workGraphEvidenceInputToDict`
   sends it, so `workgraphAddEvidence` can withdraw evidence (goal

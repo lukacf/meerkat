@@ -38688,9 +38688,16 @@ mod tests {
                             boundary,
                             RefusalBoundary::Stream | RefusalBoundary::ProviderStream
                         );
+                    // ReprepareRequired from the request's stream is a stale
+                    // read: the first preparation, one per free rebuild after
+                    // it, then the one ordinary rebuild.
                     assert_eq!(
                         alternate.preparations.load(Ordering::Relaxed),
-                        if bounded_reprepare { 2 } else { 1 }
+                        if bounded_reprepare {
+                            2 + usize::from(crate::authorization::OWNER_CHANGE_FREE_REBUILDS)
+                        } else {
+                            1
+                        }
                     );
                     assert_eq!(controller.requests.lock().unwrap().len(), 2);
                     assert!(

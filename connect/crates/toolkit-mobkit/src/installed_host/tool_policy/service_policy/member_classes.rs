@@ -1986,6 +1986,40 @@ impl ServicePolicyOwner {
         }
         Ok(Some((current, route)))
     }
+    /// [`Self::member_route`] for the recipient of a saved native selection.
+    /// A recipient this process holds any registration for answers through
+    /// that live path unchanged, so a partial, unverified, ended or replaced
+    /// registration stays refused and is never treated as absent. A recipient
+    /// with no process registration at all (Dormant after a restart, until a
+    /// live operation wakes it) is read from its canonical admission instead,
+    /// as [`Self::cold_ordinary_source_coordinates`] reads a cold ordinary
+    /// member: Active, with the exact destination generation and session
+    /// document its phase names. A retired, non-Active, unknown or changed
+    /// recipient is refused as before. This read wakes nothing and stands for
+    /// no registration.
+    pub(crate) fn recipient_member_route(
+        &self,
+        id: &toolkit_package::Id,
+    ) -> Result<
+        Option<(
+            MemberClassAdmission,
+            meerkat_toolkit::host_lifetime::policy::CompiledNativeSourceRoute,
+        )>,
+        HostLifetimeError,
+    > {
+        let Some((current, route)) = self.current_member_route(id)? else {
+            return Ok(None);
+        };
+        let present = self
+            .member_registrations
+            .lock()
+            .map_err(|_| unavailable())?
+            .contains_key(&current.instance.member.member.member);
+        if present {
+            return self.member_route(id);
+        }
+        Ok(Some((current, route)))
+    }
     /// Only a genuinely absent process registration can take the cold ingress
     /// path. A partial, ended or replaced registration still needs the ordinary
     /// strict route check; none can be reclassified as a cold owner.

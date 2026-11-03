@@ -7,6 +7,32 @@ use meerkat_toolkit::host_lifetime::policy::{
     CompiledNativeSourceOrigin, CompiledNativeSourceRoute, PreparedNativeMember,
 };
 
+/// Which member route a selection resolves through.
+#[derive(Clone, Copy)]
+enum MemberRouteRead {
+    /// The live route: a member with a verified registration in this process.
+    Live,
+    /// The recipient of a saved native selection: also a member with no
+    /// process registration at all, from its canonical Active admission.
+    Recipient,
+}
+
+impl MemberRouteRead {
+    fn member_route(
+        self,
+        owner: &crate::installed_host::tool_policy::service_policy::ServicePolicyOwner,
+        id: &Id,
+    ) -> Result<
+        Option<(MemberClassAdmission, CompiledNativeSourceRoute)>,
+        meerkat_toolkit::host_lifetime::control::HostLifetimeError,
+    > {
+        match self {
+            Self::Live => owner.member_route(id),
+            Self::Recipient => owner.recipient_member_route(id),
+        }
+    }
+}
+
 impl PrivateOriginals {
     /// Ordinary class Add is rooted in the installed operator, not in the
     /// application's requested principal fields. Issued parents are deliberately
@@ -92,6 +118,38 @@ impl PrivateOriginals {
         Option<MemberClassAdmission>,
         meerkat_toolkit::host_lifetime::control::HostLifetimeError,
     > {
+        self.setup_admission_through(selected, MemberRouteRead::Live)
+    }
+
+    /// [`Self::selected_setup_admission`] for a saved selection's recipient:
+    /// a recipient with no process registration is read from its canonical
+    /// Active admission ([`MemberRouteRead::Recipient`]).
+    pub(super) fn recipient_setup_admission(
+        &self,
+        selected: &(
+            CompiledNativeSourceRoute,
+            PreparedNativeMember,
+            Option<EvidenceId>,
+        ),
+    ) -> Result<
+        Option<MemberClassAdmission>,
+        meerkat_toolkit::host_lifetime::control::HostLifetimeError,
+    > {
+        self.setup_admission_through(selected, MemberRouteRead::Recipient)
+    }
+
+    fn setup_admission_through(
+        &self,
+        selected: &(
+            CompiledNativeSourceRoute,
+            PreparedNativeMember,
+            Option<EvidenceId>,
+        ),
+        read: MemberRouteRead,
+    ) -> Result<
+        Option<MemberClassAdmission>,
+        meerkat_toolkit::host_lifetime::control::HostLifetimeError,
+    > {
         use meerkat_toolkit::host_lifetime::control::HostLifetimeError;
         if selected.2.is_none() {
             return Ok(None);
@@ -100,8 +158,8 @@ impl PrivateOriginals {
             .service_tool_policy
             .get()
             .ok_or(HostLifetimeError::Unavailable)?;
-        let (admission, route) = owner
-            .member_route(&selected.0.id)?
+        let (admission, route) = read
+            .member_route(owner, &selected.0.id)?
             .ok_or(HostLifetimeError::Denied)?;
         let MemberClassAdmissionPhase::Active { context, .. } = &admission.phase else {
             return Err(HostLifetimeError::Denied);
@@ -319,6 +377,38 @@ impl PrivateOriginals {
         ),
         PrivateOriginalError,
     > {
+        self.source_route_through(id, MemberRouteRead::Live)
+    }
+
+    /// [`Self::selected_source_route`] for a saved selection's recipient: a
+    /// recipient with no process registration is read from its canonical
+    /// Active admission ([`MemberRouteRead::Recipient`]).
+    pub(super) fn recipient_source_route(
+        &self,
+        id: &Id,
+    ) -> Result<
+        (
+            CompiledNativeSourceRoute,
+            PreparedNativeMember,
+            Option<EvidenceId>,
+        ),
+        PrivateOriginalError,
+    > {
+        self.source_route_through(id, MemberRouteRead::Recipient)
+    }
+
+    fn source_route_through(
+        &self,
+        id: &Id,
+        read: MemberRouteRead,
+    ) -> Result<
+        (
+            CompiledNativeSourceRoute,
+            PreparedNativeMember,
+            Option<EvidenceId>,
+        ),
+        PrivateOriginalError,
+    > {
         let lifetime = self
             .host_lifetime
             .get()
@@ -354,8 +444,8 @@ impl PrivateOriginals {
             .service_tool_policy
             .get()
             .ok_or(PrivateOriginalError::Denied)?;
-        let (admission, route) = owner
-            .member_route(id)
+        let (admission, route) = read
+            .member_route(owner, id)
             .map_err(|error| match error {
                 meerkat_toolkit::host_lifetime::control::HostLifetimeError::Unavailable
                 | meerkat_toolkit::host_lifetime::control::HostLifetimeError::NotSettled => {

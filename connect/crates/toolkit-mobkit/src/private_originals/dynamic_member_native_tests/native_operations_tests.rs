@@ -439,6 +439,11 @@ async fn native_target_preparation_restores_exact_grants_before_first_input() {
         let recipient_entry = f.native.mob_handle().get_member(
             &meerkat_mobkit::member_comms_id::mob_member_id("project-aborted")).await.unwrap().unwrap();
         let peer = recipient_entry.peer_id().expect("restored recipient has its actual native peer identity");
+        // The restart restores the recipient Dormant: no process registration
+        // and no live actor. Its saved selection is checked from its
+        // canonical Active admission, and the check wakes nothing.
+        assert!(f.service.live_session_actor_witness(&recipient_session).await.is_none(),
+            "the restart left the recipient Dormant");
         for (submission, request, key, row, basis) in &saved {
             assert_eq!(f.source.store.get(key).await.unwrap().as_ref(), Some(row));
             f.source.prepare_original_native_operations(submission.clone(), request.clone()).await.unwrap();
@@ -452,6 +457,8 @@ async fn native_target_preparation_restores_exact_grants_before_first_input() {
                 assert_eq!(&restored, basis, "reopen must reuse the exact native root and child IDs");
             }
         }
+        assert!(f.service.live_session_actor_witness(&recipient_session).await.is_none(),
+            "checking the saved selections woke no recipient");
         let mut changed = saved[0].1.clone();
         let NativeOriginalTarget::Peer { route, .. } = &mut changed.targets[0].target else { unreachable!() };
         *route = f.route(ADDED).id;

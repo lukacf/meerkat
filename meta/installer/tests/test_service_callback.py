@@ -41,7 +41,7 @@ def test_actual_route_returns_fixed_document_and_exact_csp(client):
 def test_actual_post_cannot_accept_or_echo_without_original_native_owner(client):
     response = client.post(MCP_CALLBACK_PATH + '?code=query-secret',
         content=b'{"query":"state=state-secret&code=body-secret"}',
-        headers={'Origin': 'https://mk-installer-02.eu-prod-misc-01.int.p.midasplayer.cloud',
+        headers={'Origin': 'https://forge.example.invalid',
                  'Content-Type': 'application/json'})
     assert response.status_code == 503
     assert response.headers['cache-control'] == 'no-store'

@@ -903,6 +903,102 @@ async fn two_peers_messaging_one_released_member_share_one_wake() {
     fixture.finish().await;
 }
 
+/// A peer message to a fresh seat wakes it once and is delivered once. A
+/// fresh seat (`seat_dormant_members`) is a member seated Dormant on a
+/// session no build has created, never materialized: its seat recorded its
+/// endpoint from the key pair its first build loads and published its wake
+/// route under that key, and the live peer wired to it trusts that
+/// endpoint. A message through the mob's peer-message API, and one from the
+/// peer's own comms runtime addressed by the seat's comms name (as the
+/// peer's comms tools address it), each wakes its seat once (the wake
+/// creates the seat's session) and is delivered into it once; neither is
+/// answered `PeerNotFound`.
+///
+/// RED: publish no inproc wake route (drop the `publish_wake_route` call in
+/// `MobActor::publish_member_wake_route`): both sends find no route and are
+/// refused `PeerNotFound`, and the seats stay Dormant.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_peer_message_wakes_a_fresh_seat_once_and_is_delivered_once() {
+    let fixture = WakeFixture::with_member_seats("wake-fresh-seat").await;
+    let sender = fixture.spawn("fresh-seat-sender").await;
+    let seats = ["fresh-seat-api", "fresh-seat-comms"]
+        .map(|label| AgentIdentity::from(format!("{label}-{}", Uuid::new_v4().simple())));
+    let outcomes = tokio::time::timeout(
+        WAIT,
+        fixture.handle.seat_dormant_members(
+            seats
+                .iter()
+                .map(|seat| SpawnMemberSpec::new("worker", seat.clone()))
+                .collect(),
+        ),
+    )
+    .await
+    .expect("the seat answers")
+    .expect("the seat commits");
+    assert!(
+        outcomes
+            .iter()
+            .all(|outcome| matches!(outcome, crate::runtime::DormantSeatOutcome::Seated { .. })),
+        "every spec is seated: {outcomes:?}"
+    );
+    for seat in &seats {
+        fixture.wire(&sender, seat).await;
+        assert_eq!(
+            fixture.residency(seat),
+            Some(mob_dsl::MemberMaterializationPhase::Dormant),
+            "{seat} stays Dormant until its first delivery"
+        );
+        assert!(
+            crate::runtime::boot_plan::domain_member_seat_session_unborn(
+                &fixture.handle.machine_state_watch_rx.borrow(),
+                seat,
+            ),
+            "{seat} was never materialized: its session is unborn"
+        );
+    }
+    let [through_api, through_comms] = &seats;
+
+    let api_body = token("fresh-seat-api");
+    let receipt = tokio::time::timeout(
+        WAIT,
+        fixture.handle.send_peer_message(
+            sender.clone(),
+            through_api.clone(),
+            api_body.as_str(),
+            HandlingMode::Queue,
+        ),
+    )
+    .await
+    .expect("the send answers")
+    .expect("the fresh seat is woken and the message handed off");
+    assert_eq!(&receipt.to, through_api);
+
+    let comms_body = token("fresh-seat-comms");
+    let sent = fixture
+        .raw_peer_send(&sender, through_comms, &comms_body)
+        .await;
+    assert!(
+        matches!(sent, Ok(SendReceipt::PeerMessageSent { .. })),
+        "the peer's own send wakes the fresh seat and hands the message off, never \
+         PeerNotFound: {sent:?}"
+    );
+
+    for (seat, body) in [(through_api, &api_body), (through_comms, &comms_body)] {
+        assert_eq!(fixture.delivered_count(seat, body).await, 1, "{seat}");
+        fixture
+            .wait_residency(seat, Some(mob_dsl::MemberMaterializationPhase::Live))
+            .await;
+        let builds = fixture
+            .preparer
+            .prepared()
+            .into_iter()
+            .filter(|build| &build.identity == seat)
+            .count();
+        assert_eq!(builds, 1, "one wake builds {seat} once");
+    }
+    fixture.finish().await;
+}
+
 /// A final build preparation refusal breaks the member, and a broken member
 /// answers peers typed.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

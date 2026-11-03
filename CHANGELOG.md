@@ -63,6 +63,7 @@ them.
   decision files no longer refuse stores created under the common 022/002
   umask. A store file an older version left readable by others becomes
   private on its next commit.
+
 - `meerkat-core`: a governed tool call refused at its own effect entry
   (`ToolDispatchContext::enter_reviewed_effect`, or a ticket or governed
   operation entering through it) before any effect of the call entered now

@@ -37,6 +37,16 @@
             "pages": ["introduction", "quickstart"]
           },
           {
+            "group": "Meta Forge",
+            "pages": [
+              "forge/introduction",
+              "forge/quickstart",
+              "forge/concepts",
+              "forge/reference",
+              "forge/troubleshooting"
+            ]
+          },
+          {
             "group": "Core concepts",
             "pages": [
               "concepts/modules",

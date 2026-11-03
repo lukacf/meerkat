@@ -1047,8 +1047,13 @@ function assertArchivedLanes(plan, label) {
     assert.equal(shards.length, 1, `${product.name} lints in one shard (${shards.length})`);
     assert.deepEqual(shards[0].packages, members.sort(), `${product.name}'s shard holds every ${product.name} package`);
   }
-  // Feature checks keep the weight-packed shards (--workspace-shards).
-  assert.ok(new Set(plan.feature_check_jobs.map((job) => job.name.replace(/ (bazel set|matrix)$/, ""))).size <= 8);
+  // Feature checks keep the weight-packed shards (--workspace-shards); a
+  // chain head's widest set is a job beside its shard's.
+  assert.ok(
+    new Set(
+      plan.feature_check_jobs.filter((job) => !job.name.endsWith(" widest set")).map((job) => job.name.replace(/ (bazel set|matrix)$/, "")),
+    ).size <= 8,
+  );
   // Cost-balanced, not count-balanced: no shard carries more than a quarter
   // of the estimated workspace cost, so the heaviest crates spread out.
   const total = plan.shards.reduce((sum, shard) => sum + shard.estimated_cost, 0);
@@ -1682,6 +1687,8 @@ for (const path of [
     "closure_count",
     "closure_flags",
     "closure_check",
+    "closure_check_count",
+    "closure_check_matrix",
     "rustdoc",
     "governed_jsonl",
     "mcp_confinement_positive",
@@ -1695,6 +1702,22 @@ for (const path of [
   assert.equal(lines.rust_changed, "true");
   assert.deepEqual(bothWaves(lines, "shard_matrix", "shard_rest_matrix"), [{ name: "core", packages: "-p meerkat-core", targets: "--all-targets" }]);
   assert.match(lines.closure_flags, /-p meerkat-core/);
+  // The closure check runs one job per product's part of the closure, Core's
+  // first: each row checks exactly one part of closure_flags.
+  const closureParts = JSON.parse(lines.closure_check_matrix).include;
+  assert.deepEqual(closureParts.map((row) => row.packages), lines.closure_flags.split(" ; "), "one closure-check job per product's part");
+  assert.equal(closureParts[0].product, CORE, "Core's part comes first");
+  assert.equal(new Set(closureParts.map((row) => row.product)).size, closureParts.length, "a product's part is one job");
+  for (const row of closureParts) {
+    const count = row.packages.split(" ").filter((word) => word === "-p").length;
+    assert.equal(row.name, `${row.product}, ${count} crates`, `${row.name} names its product and its crate count`);
+  }
+  assert.equal(Number(lines.closure_check_count), closureParts.length);
+  assert.equal(
+    closureParts.reduce((sum, row) => sum + row.packages.split(" ").filter((word) => word === "-p").length, 0),
+    Number(lines.closure_count),
+    "the parts together check the whole closure",
+  );
   for (const key of ["unit_shard_count", "unit_shard_matrix", "unit_deferred", "unit_deferred_count", "unit_rows_on_main", "unit_rows_on_main_count", "main_unit_shard_count", "main_unit_shard_matrix"]) {
     assert.ok(key in lines, `github output has ${key}`);
   }
@@ -2199,16 +2222,28 @@ for (const path of [
   assert.match(stagger, /^    needs: changes$/m, "the stagger job follows the classification");
   assert.match(stagger, /STAGGER_SECONDS: \$\{\{ github\.event_name == 'pull_request' && '0' \|\| '30' \}\}/, "it waits on a push only");
   assert.match(stagger, /run: sleep "\$\{STAGGER_SECONDS\}"$/m);
-  for (const job of ["ratchets", "integration", "governed-jsonl", "closure-check", "sdk-host", "example-web", "wasm-timers", "bazel-graph"]) {
+  for (const job of ["ratchets", "integration", "governed-jsonl", "sdk-host", "example-web", "wasm-timers", "bazel-graph"]) {
     assert.ok(jobLines(workflow, job).includes("    needs: [changes, stagger]"), `${job} is a short lane: it waits for the stagger job`);
   }
-  for (const job of ["wasm-check", "governance-gates", "mcp-confinement-positive", "tlc-audits", "main-unit-archive-build", "clippy", "main-unit", "closure-tests", "feature-check", "rustdoc"]) {
+  for (const job of ["wasm-check", "governance-gates", "mcp-confinement-positive", "tlc-audits", "main-unit-archive-build", "clippy", "main-unit", "closure-tests", "feature-check", "rustdoc", "closure-check"]) {
     assert.ok(jobLines(workflow, job).includes("    needs: changes"), `${job} starts with the first wave`);
   }
   const gate = jobLines(workflow, "gate");
   for (const job of ["stagger", "clippy-rest", "main-unit-rest", "closure-tests-rest", "feature-check-rest"]) {
     assert.ok(gate.includes(`      - ${job}`), `the gate waits for ${job}`);
   }
+  // The closure check runs one job per product's part of the closure, from
+  // the plan's matrix, and each job checks its own part.
+  const closureCheck = jobLines(workflow, "closure-check");
+  assert.ok(
+    closureCheck.includes("      matrix: ${{ fromJSON(needs.changes.outputs.closure_check_matrix) }}"),
+    "the closure check runs the plan's parts",
+  );
+  assert.ok(closureCheck.includes("          CLOSURE: ${{ matrix.packages }}"), "each closure-check job checks its own part");
+  assert.ok(
+    workflow.includes("      closure_check_matrix: ${{ steps.plan.outputs.closure_check_matrix }}\n"),
+    "the classification job exports closure_check_matrix",
+  );
 }
 
 // Format + governance ends with the Mintlify parse and link check of the docs
@@ -2641,7 +2676,8 @@ for (const path of [
 
 // Feature-combination checks (#1687): each clippy shard gives a Bazel-set job
 // (its packages under their Bazel test feature set) and a matrix job (their
-// other Bazel library/binary sets and their Make feature-matrix rows).
+// other Bazel library/binary sets and their Make feature-matrix rows), and a
+// Clippy chain head's widest Bazel library/binary set is a job of its own.
 {
   const rows = (plan) => plan.feature_check_jobs.flatMap((job) => job.commands);
   // #1595: meerkat-mob-mcp's lib tests under Bazel's `openai-live` alone.
@@ -2698,11 +2734,13 @@ for (const path of [
     workspace.packages.filter((name) => workspace.package_model[name].product === CORE),
     "feature-check shards partition Core's packages",
   );
-  assert.ok(workspace.feature_check_jobs.length <= 2 * workspace.feature_check_shards.length);
+  assert.ok(workspace.feature_check_jobs.length <= 2 * workspace.feature_check_shards.length + MOB_CHAIN_CLIPPY_HEADS.length);
   for (const job of workspace.feature_check_jobs) {
-    const shard = workspace.feature_check_shards.find(
-      (candidate) => job.name === `${candidate.name} bazel set` || job.name === `${candidate.name} matrix`,
-    );
+    const shard = job.name.endsWith(" widest set")
+      ? workspace.feature_check_shards.find((candidate) => candidate.packages.includes(job.packages[0]))
+      : workspace.feature_check_shards.find(
+          (candidate) => job.name === `${candidate.name} bazel set` || job.name === `${candidate.name} matrix`,
+        );
     assert.ok(shard, `feature-check job ${job.name} follows a clippy shard`);
     for (const row of job.commands) {
       for (const [, name] of row.matchAll(/-p (\S+)/g)) {
@@ -2717,6 +2755,20 @@ for (const path of [
   );
   for (const name of ["meerkat", "meerkat-mob", "meerkat-mob-mcp", "rkat", "meerkat-core"]) {
     assert.ok(bazelChecked.has(name), `the workspace plan checks ${name} under its Bazel test set`);
+  }
+  // A chain head's widest Bazel library/binary set (rkat's and meerkat-rpc's
+  // production sets) is one command in a job of its own, and no other job
+  // runs it.
+  const widest = workspace.feature_check_jobs.filter((job) => job.name.endsWith(" widest set"));
+  for (const name of ["rkat widest set", "rpc widest set"]) {
+    assert.ok(widest.some((job) => job.name === name), `the workspace plan checks the ${name} in a job of its own`);
+  }
+  for (const job of widest) {
+    assert.ok(MOB_CHAIN_CLIPPY_HEADS.includes(job.packages[0]), `${job.name} belongs to a chain head`);
+    assert.equal(job.commands.length, 1, `${job.name} is one command`);
+    assert.match(job.commands[0], new RegExp(`^-p ${job.packages[0]} --no-default-features --features \\S+`), `${job.name} checks a feature set`);
+    const elsewhere = workspace.feature_check_jobs.filter((other) => other !== job).flatMap((other) => other.commands);
+    assert.ok(!elsewhere.includes(job.commands[0]), `${job.name} runs once`);
   }
   for (const row of [
     "-p meerkat-client --no-default-features",
@@ -2734,6 +2786,10 @@ for (const path of [
   const lines = Object.fromEntries(github.stdout.trim().split("\n").map((line) => [line.slice(0, line.indexOf("=")), line.slice(line.indexOf("=") + 1)]));
   assert.equal(lines.feature_check_count, "0");
   assert.deepEqual(JSON.parse(lines.feature_check_matrix).include, [{ name: "none", commands: "" }]);
+  // Nor a closure check: its matrix keeps a placeholder behind a zero count.
+  assert.equal(lines.closure_check, "false");
+  assert.equal(lines.closure_check_count, "0");
+  assert.deepEqual(JSON.parse(lines.closure_check_matrix).include, [{ name: "none", product: "none", packages: "" }]);
 }
 
 // A change to the lane definitions runs the lanes they define.

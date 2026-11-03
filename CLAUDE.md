@@ -613,7 +613,8 @@ and its CI must be green before a release tag (`require_ci_green`):
   product's selection; a bare `--workspace` row is refused.
 - `closure-check` (push only): `cargo check --all-features` (lib and bin
   targets) over the reverse-dependency closure of the changed packages, one
-  invocation per product's part of it.
+  job per product's part of it (`closure_check_rows`), the parts in parallel
+  and with the first wave.
 - `rustdoc` (push only): `cargo doc --no-deps --keep-going` with
   `RUSTDOCFLAGS=-Dwarnings`, in two parallel legs (default features and
   `--all-features`), over Core's members (`--workspace` excluding the
@@ -650,7 +651,9 @@ and its CI must be green before a release tag (`require_ci_green`):
   `test-support` and surface variants) and the `$(CARGO) check` rows of
   `make test-minimal` and `make test-feature-matrix-lib`. Feature names are
   read from `BUILD.bazel` and the Makefile and validated against cargo
-  metadata, so a renamed feature fails the plan.
+  metadata, so a renamed feature fails the plan. The widest Bazel
+  library/binary set of each Clippy chain head (`MOB_CHAIN_CLIPPY_HEADS`)
+  runs as a job of its own (`<head> widest set`) beside its shard's two.
 - `wasm-check` (`make wasm-check`: wasm32 Clippy of the web runtime and the
   crates it links, which type-checks them too, so no separate `cargo check`
   runs): every Rust-relevant push that reaches Core, and pull
@@ -675,7 +678,7 @@ and its CI must be green before a release tag (`require_ci_green`):
   shards), `sdk-host`, and the push-only lanes above.
 - Long rows first: `clippy`, `main-unit`, `closure-tests` and
   `feature-check` run in two waves (`<lane>` and `<lane>-rest`, a copy the
-  lanes self-test checks); rows measured at 8 minutes or more
+  lanes self-test checks); rows measured at 15 minutes or more
   (`scripts/ci-row-durations.json`, keyed by a row's name without a packed
   row's member count, so a repack keeps the measurement while the bin's
   heaviest member stays the same), or never measured, start first, and the

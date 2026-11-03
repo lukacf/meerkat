@@ -1042,11 +1042,18 @@ impl RosterEntry {
     }
 
     /// Canonical comms peer ID for this roster entry.
+    ///
+    /// In an entry a `MobHandle` read returns (`get_member`, `roster`,
+    /// `list_all_members`), a member that is not materialized in this
+    /// process (Dormant, or Waking) carries the peer id of the endpoint
+    /// MobMachine records for it, the one its wake presents, as a live
+    /// member carries its live runtime's.
     pub fn peer_id(&self) -> Option<PeerId> {
         self.peer_id
     }
 
-    /// Transport/auth public key for comms wiring, if known.
+    /// Transport/auth public key for comms wiring, if known. A `MobHandle`
+    /// read projects it with [`Self::peer_id`], from the same endpoint.
     pub fn transport_public_key(&self) -> Option<&str> {
         self.transport_public_key.as_deref()
     }

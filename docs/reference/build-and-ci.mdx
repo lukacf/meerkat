@@ -236,7 +236,7 @@ the exact-tree attestation; nightly and the release tag carry the rest):
 | `main-unit` per shard: `nextest --lib --bins` over the whole workspace, including the meerkat-mob chain (mob, mob-adaptive, mob-mcp, mob-pack, rpc, rest, mcp-server, rkat, web-runtime, integration-tests, machine-codegen: the crates whose unit-lane build graph contains mob); the `unit` rows a push would have run are its first rows, the same shards (Cargo unifies features across the packages of one run) and suites, and the rest of the workspace is packed around them | deferred | yes | `make test-unit` | Bazel unit lanes |
 | `integration` per suite: `nextest -p <package> --test '*'` for each `INTEGRATION_SUITES` entry in `scripts/ci-cargo-lanes.mjs` whose trigger packages or paths changed; plus the reader rows (below) | the suites whose package does not compile meerkat-mob, and the reader rows outside that chain | every selected suite, and reader rows for lib, bin and example targets when the push has no `main-unit` | `make test-int` | Bazel integration lanes |
 | `closure-tests`: the deterministic workspace test lanes (`scripts/pre-push-unit.sh`) for the test scope: integration-fast, HeadCanonical and `e2e-fast` rows over Core's members (`--workspace` and an `--exclude` for every other product's package), and each product's test binaries in rows that select exactly its packages | deferred | yes | `make test-int`, `make e2e-fast` | Bazel integration lanes |
-| `closure-check`: `cargo check --all-features` (lib and bin targets) over the reverse-dependency closure, one invocation per product's part of it | deferred | yes | - | - |
+| `closure-check`: `cargo check --all-features` (lib and bin targets) over the reverse-dependency closure, one job per product's part of it, the parts in parallel | deferred | yes | - | - |
 | `rustdoc` (two parallel legs, default features and `--all-features`): `cargo doc --no-deps` with `RUSTDOCFLAGS=-Dwarnings` over Core's members when the plan reaches Core, else over the changed products' packages: every crate's documentation, its intra-doc links included. It documents those packages together, so an error that only `cargo doc -p <crate>` shows (features unify across members) is outside it | deferred | yes | - | - |
 | `feature-check`: the changed packages' Bazel feature sets and the Make feature-matrix check rows | deferred | yes | feature matrix | Bazel graph |
 | `governed-jsonl`, `mcp-confinement-positive`: the non-MCP governed JSONL tests and the Linux positive confinement cases | when the pull request touches the lane's own inputs (`GUARD_LANE_INPUTS`: the files defining the selected cases and their crates' manifests), changes its definition between base and head (`GUARD_LANE_DEFINITIONS`: its ci.yml job without comments, the Makefile's confinement rule and assignments, the default nextest profile's selection, the selected modules' declarations) or has no diff, deferred otherwise | yes | - | - |
@@ -279,14 +279,15 @@ change to its code.
 
 Long rows first. `clippy`, `main-unit`, `closure-tests` and `feature-check`
 run in two waves, each wave a job of its own (`<lane>` and `<lane>-rest`).
-The rows that took 8 minutes or more on a green run, and rows never
-measured, start right after `changes`; the shorter rows, and the short
-lanes (`ratchets`, `integration`, `governed-jsonl`, `closure-check`,
-`sdk-host`, `example-web`, `wasm-timers`, `bazel-graph`), wait for the
-`stagger` job, which sleeps 30 seconds on a push and not at all on a pull
-request. The account's hosted runners take about 40 jobs at a time and pick
-queued jobs in no reliable order, so on a push of about a hundred jobs a
-long row picked late set the wall time. The measurements are
+The rows that took 15 minutes or more on a green run, and rows never
+measured, start right after `changes`, as do the closure check's
+per-product jobs; the shorter rows, and the short lanes (`ratchets`,
+`integration`, `governed-jsonl`, `sdk-host`, `example-web`, `wasm-timers`,
+`bazel-graph`), wait for the `stagger` job, which sleeps 30 seconds on a
+push and not at all on a pull request. The account's hosted runners take
+about 40 jobs at a time and pick queued jobs in no reliable order, so on a
+whole-workspace push of about 170 jobs a long row picked late set the wall
+time. The measurements are
 `scripts/ci-row-durations.json`, regenerated from green runs with
 `scripts/ci-row-durations.mjs --repository OWNER/REPO --output
 scripts/ci-row-durations.json RUN_ID...`; a stale entry only moves a row

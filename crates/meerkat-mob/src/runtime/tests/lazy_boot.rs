@@ -1520,6 +1520,247 @@ async fn a_fresh_seat_creates_nothing_and_its_first_wake_creates_its_session_onc
     assert!(!seat_session_unborn(&handle, &identity));
 }
 
+/// The peer id and transport key of the endpoint MobMachine records for
+/// `identity`.
+fn recorded_comms_identity(handle: &MobHandle, identity: &AgentIdentity) -> (PeerId, String) {
+    let state = handle.machine_state_watch_rx.borrow();
+    let endpoint = state
+        .member_peer_endpoints
+        .get(&dsl::AgentIdentity::from_domain(identity))
+        .unwrap_or_else(|| panic!("MobMachine records no endpoint for {identity}"));
+    (
+        PeerId::parse(&endpoint.peer_id.0).expect("a canonical peer id"),
+        meerkat_comms::PubKey::new(endpoint.signing_key.0).to_pubkey_string(),
+    )
+}
+
+/// The comms identity (peer id and transport key) every roster and
+/// member-list read shows for `identity`, by read.
+async fn read_comms_identities(
+    handle: &MobHandle,
+    identity: &AgentIdentity,
+) -> Vec<(&'static str, Option<PeerId>, Option<String>)> {
+    let entries = [
+        (
+            "get_member",
+            handle.get_member(identity).await.expect("read the member"),
+        ),
+        (
+            "read_handle get_member",
+            handle
+                .read_handle()
+                .get_member(identity)
+                .await
+                .expect("read the member"),
+        ),
+        ("roster", handle.roster().await.get(identity).cloned()),
+        (
+            "list_all_members",
+            handle
+                .list_all_members()
+                .await
+                .into_iter()
+                .find(|entry| &entry.agent_identity == identity),
+        ),
+    ];
+    let lists = [
+        ("list_members", handle.list_members().await),
+        (
+            "list_members_including_retiring",
+            handle.list_members_including_retiring().await,
+        ),
+        (
+            "list_members_observation_snapshot",
+            handle.list_members_observation_snapshot().await,
+        ),
+        (
+            "list_members_matching",
+            handle
+                .list_members_matching(crate::runtime::MemberFilter::default())
+                .await
+                .expect("list the members"),
+        ),
+    ];
+    let mut reads = Vec::new();
+    for (read, entry) in entries {
+        let entry = entry.unwrap_or_else(|| panic!("{read} holds {identity}"));
+        reads.push((
+            read,
+            entry.peer_id(),
+            entry.transport_public_key().map(str::to_owned),
+        ));
+    }
+    for (read, members) in lists {
+        let entry = members
+            .into_iter()
+            .find(|entry| &entry.agent_identity == identity)
+            .unwrap_or_else(|| panic!("{read} lists {identity}"));
+        reads.push((read, entry.peer_id, entry.transport_public_key));
+    }
+    reads
+}
+
+/// A fresh seat reads like a live member: every roster and member-list read
+/// shows the peer id and transport key of the endpoint its seat recorded in
+/// MobMachine (the key pair its first build loads), the endpoint
+/// `member_peer_endpoint` answers, and no read wakes it: it stays Dormant
+/// with its session unborn, and nothing is created, registered or attached
+/// for it. Its first wake presents that same peer id, which the reads keep.
+///
+/// RED: project the roster's own comms identity for a member that is not
+/// materialized (drop the machine arm of `projected_member_comms_identity`):
+/// every read shows the fresh seat with no peer id until its first wake.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_fresh_seat_reads_with_its_recorded_peer_id_and_no_read_wakes_it() {
+    let keys = tempfile::tempdir().expect("a comms identity root");
+    let (handle, service, _events) = seat_mob("seat-peer-id", |builder| {
+        builder.with_member_comms_identity_root(keys.path())
+    })
+    .await;
+    let identity = worker(0);
+    let outcomes = handle
+        .seat_dormant_members(vec![turn_driven(&identity)])
+        .await
+        .expect("the batch answers");
+    assert!(
+        matches!(&outcomes[0], DormantSeatOutcome::Seated { .. }),
+        "{outcomes:?}"
+    );
+    let (peer_id, transport_public_key) = recorded_comms_identity(&handle, &identity);
+    let endpoint = handle
+        .member_peer_endpoint(&identity)
+        .await
+        .expect("read the member's endpoint")
+        .expect("the seat recorded the member's endpoint");
+    assert_eq!(endpoint.descriptor.peer_id, peer_id);
+
+    for (read, read_peer_id, read_key) in read_comms_identities(&handle, &identity).await {
+        assert_eq!(
+            (read_peer_id, read_key.as_deref()),
+            (Some(peer_id), Some(transport_public_key.as_str())),
+            "{read} shows the fresh seat with the comms identity its seat recorded"
+        );
+    }
+    assert_eq!(
+        phase_of(&handle, &identity),
+        Some(dsl::MemberMaterializationPhase::Dormant),
+        "no read woke the seat"
+    );
+    assert!(
+        seat_session_unborn(&handle, &identity),
+        "no read created its session"
+    );
+    assert!(
+        service.recorded_create_requests().await.is_empty(),
+        "no read built or registered the member"
+    );
+    assert_eq!(
+        service.active_session_count().await,
+        0,
+        "no read attached a live session"
+    );
+
+    handle
+        .ensure_member_live(&identity)
+        .await
+        .expect("the first wake materializes the seat");
+    let session = handle
+        .resolve_bridge_session_id(&identity)
+        .await
+        .expect("a session-bound member");
+    let live_peer_id = service
+        .comms_runtime(&session)
+        .await
+        .expect("the woken member's comms runtime")
+        .peer_id()
+        .expect("the woken member's peer id");
+    assert_eq!(
+        live_peer_id, peer_id,
+        "the woken member presents the peer id the reads showed while it was Dormant"
+    );
+    for (read, read_peer_id, _) in read_comms_identities(&handle, &identity).await {
+        assert_eq!(
+            read_peer_id,
+            Some(peer_id),
+            "{read} keeps the peer id once the member is live"
+        );
+    }
+}
+
+/// A member's same-session successor (`respawn_member`, seated Dormant at
+/// the next generation on the member's own session) reads with the comms
+/// identity the member read with live: MobMachine keeps the member's
+/// endpoint for it, and every roster and member-list read shows that
+/// endpoint's peer id and transport key while the successor stays Dormant.
+///
+/// RED: project the roster's own comms identity for a member that is not
+/// materialized (drop the machine arm of `projected_member_comms_identity`):
+/// the successor's new roster entry reads with no peer id until its first
+/// wake.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_dormant_same_session_successor_reads_with_the_members_peer_id() {
+    let keys = tempfile::tempdir().expect("a comms identity root");
+    let (handle, _service, _events) = seat_mob("successor-peer-id", |builder| {
+        builder.with_member_comms_identity_root(keys.path())
+    })
+    .await;
+    let identity = worker(0);
+    handle
+        .spawn_spec(turn_driven(&identity))
+        .await
+        .expect("spawn the member");
+    let live = handle
+        .get_member(&identity)
+        .await
+        .expect("read the member")
+        .expect("a member");
+    let peer_id = live.peer_id().expect("the live member's peer id");
+    let transport_public_key = live
+        .transport_public_key()
+        .expect("the live member's transport key")
+        .to_owned();
+
+    tokio::time::timeout(
+        LAZY_STEP,
+        handle.respawn_member(identity.clone(), crate::runtime::MemberRespawn::new()),
+    )
+    .await
+    .expect("the respawn answers")
+    .expect("the member is respawned on its own session");
+    assert_eq!(
+        handle
+            .get_member(&identity)
+            .await
+            .expect("read the member")
+            .map(|entry| entry.generation),
+        Some(crate::ids::Generation::new(1)),
+        "the successor is seated"
+    );
+    assert_eq!(
+        phase_of(&handle, &identity),
+        Some(dsl::MemberMaterializationPhase::Dormant),
+        "the successor is seated Dormant"
+    );
+    assert_eq!(
+        recorded_comms_identity(&handle, &identity),
+        (peer_id, transport_public_key.clone()),
+        "MobMachine keeps the member's endpoint for its successor"
+    );
+
+    for (read, read_peer_id, read_key) in read_comms_identities(&handle, &identity).await {
+        assert_eq!(
+            (read_peer_id, read_key.as_deref()),
+            (Some(peer_id), Some(transport_public_key.as_str())),
+            "{read} shows the Dormant successor with the member's comms identity"
+        );
+    }
+    assert_eq!(
+        phase_of(&handle, &identity),
+        Some(dsl::MemberMaterializationPhase::Dormant),
+        "no read woke the successor"
+    );
+}
+
 /// A seat whose journal append failed wrote and created nothing; its retry
 /// seats the identity on the same name-based session, still creating nothing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- The storage doctor (`meta/storage/doctor`, and the console's read method)
+  takes the rollback census of a state directory: what a rollback to a
+  release on Core 0.9.8 or earlier (Meta 0.9.7 or earlier) does not read,
+  counted read-only by Core's own rules, as three Info findings with the
+  counts only (no session id, identity or mob name):
+  - `operator-instruction-envelope`: the sessions of `runtime.sqlite`
+    written at session envelope 5, which such a release refuses until a
+    roll-forward, so their identities do not resume there;
+  - `operator-instruction-mob-events`: the events at mob event schema 10 in
+    the directory's own mob journal (`event_log.sqlite3`) and in each child
+    mob's journal under `mobs/`. Such a release does not start a mob whose
+    journal holds any, and stops restoring every mob of the directory at
+    it;
+  - `identity-store-rows`: the identity-store rows of schema version 2 and
+    later (store-owned identities and the tombstones of removed names,
+    with the archived and unreadable ones counted apart) in the same mob
+    stores, which such a release does not read and this release has no
+    step to delete.
+
+  Each census reports one finding for the state directory with its total,
+  0 included, and one for each file that counts above 0 or could not be
+  counted, whose `path` names the file. The findings use Core's finding
+  codes; the doctor's result shape is unchanged, so no SDK changes: the
+  TypeScript SDK passes unknown codes through and the Python SDK returns
+  the raw result. This is the supported census the 0.9.9 upgrade notes
+  promised in place of the read-only queries.
+
+- `meta_gateway identity-census --json` reports `identity_store_rows`: the
+  identity-store rows of schema version 2 and later in the directory's mob
+  store (`created_rows`, `archived`, `tombstones`, `unreadable`), counted by
+  Core's read-only reader, or `null` when the directory has no durable mob
+  store. The text report prints the same counts. The format stays
+  `meerkat-meta.identity-census` version 1: the field is additive.
+
 ## [0.9.9] - 2026-11-03
 
 ### Breaking

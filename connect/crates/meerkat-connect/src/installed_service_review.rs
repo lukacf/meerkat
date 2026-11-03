@@ -440,14 +440,16 @@ impl InstalledServiceReview {
         self.approvals.check_session(&self.session)?;
         login.check_current().map_err(refused)?;
         let task = match task {
+            // Both task steps are large futures; box them where they are built
+            // instead of holding them inline in this review's state.
             Some(task) => Some(
-                task.prepare_review_with_tool_policy(
+                Box::pin(task.prepare_review_with_tool_policy(
                     &installation,
                     operation_ids,
                     task_expires_in_ms,
                     request.clone(),
                     task_tool_policy,
-                )
+                ))
                 .await
                 .map_err(|_| refused("The waiting task cannot be offered for service approval"))?,
             ),
@@ -520,19 +522,18 @@ impl InstalledServiceReview {
             cancellation.check()?;
         }
         let fresh_instruction_retained = match task {
-            Some(task) => task
-                .approve(
-                    decision.clone(),
-                    account_publication_current(
-                        login.clone(),
-                        self.approvals.clone(),
-                        self.session.clone(),
-                        cancellation.clone(),
-                        decision_current,
-                    ),
-                )
-                .await
-                .map_err(|_| refused("The approved instruction could not be retained"))?,
+            Some(task) => Box::pin(task.approve(
+                decision.clone(),
+                account_publication_current(
+                    login.clone(),
+                    self.approvals.clone(),
+                    self.session.clone(),
+                    cancellation.clone(),
+                    decision_current,
+                ),
+            ))
+            .await
+            .map_err(|_| refused("The approved instruction could not be retained"))?,
             None => false,
         };
         self.approvals.check_session(&self.session)?;

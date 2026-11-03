@@ -154,32 +154,37 @@ async fn until(mut predicate: impl FnMut() -> bool) {
     .expect("bounded actual owner observation");
 }
 async fn persisted(directory: &Path, sessions: &[SessionId]) -> Value {
+    use meerkat::SessionStore;
     let layout = meerkat_mobkit::storage_layout::MetaStorageLayout::standalone(
         directory.to_path_buf(),
         directory.join("gateway-home"),
     );
-    let runtime = meerkat_runtime::store::SqliteRuntimeStore::new(layout.runtime_db()).unwrap();
+    // The gateway's head-canonical pair on runtime.sqlite: the runtime store
+    // holds each session's inputs and catalog, and the session store on the
+    // same file holds its committed transcript.
+    let runtime =
+        meerkat_runtime::store::SqliteRuntimeStore::new_head_canonical(layout.runtime_db())
+            .unwrap();
+    let committed = meerkat::SqliteSessionStore::open(layout.runtime_db()).unwrap();
     let mut records = Vec::new();
     for session in sessions {
         let inputs = runtime
             .load_input_states_strict(&meerkat_runtime::LogicalRuntimeId::for_session(session))
             .await
             .unwrap();
-        // Read the actual runtime-owned body and its verified commit identity.
-        let original = runtime
-            .load_committed_whole_blob_snapshot(&meerkat_runtime::LogicalRuntimeId::for_session(
-                session,
-            ))
+        // Read the actual committed transcript of the original session.
+        let original = committed
+            .load(session)
             .await
             .unwrap()
-            .expect("original transcript remains in its selected runtime store");
-        assert_eq!(original.session().id(), session);
+            .expect("original transcript remains in its selected session store");
+        assert_eq!(original.id(), session);
         records.push(json!({"inputs": inputs.iter().map(|row| json!({
             "id": row.state.input_id, "history": row.state.history,
             "authority": row.state.authority_contributors, "key": row.state.idempotency_key,
             "body_retained": row.state.persisted_input.is_some(), "phase": row.seed.phase,
             "admission_sequence": row.seed.admission_sequence, "attempts": row.seed.attempt_count,
-        })).collect::<Vec<_>>(), "session": original.session()}));
+        })).collect::<Vec<_>>(), "session": original}));
     }
     let catalog = runtime
         .list_runtime_session_catalog_entries(meerkat_core::SessionFilter {

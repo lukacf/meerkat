@@ -224,19 +224,24 @@ impl DedicatedFixture<meerkat::PersistentSessionService<FactoryAgentBuilder>> {
             profile,
             None,
             |builder, configuration, directory| {
+                // The stdio gateway later opens this state directory with
+                // Meta's own composition of Core's stores: the head-canonical
+                // session and runtime stores sharing runtime.sqlite under the
+                // installation's realm. Its startup refuses a 0.9.3 sessions
+                // database and WholeBlob runtimes, so seed the same layout.
                 let layout = meerkat_mobkit::storage_layout::MetaStorageLayout::standalone(
                     directory.to_path_buf(),
                     directory.join("gateway-home"),
                 );
+                let (sessions, runtime) =
+                    meerkat_mobkit::mob_handle_runtime::open_native_session_pair(
+                        directory,
+                        layout.meerkat_level_realm().unwrap(),
+                    )
+                    .unwrap();
                 let persistence = meerkat::PersistenceBundle::new_with_local_grant_authorization(
-                    Arc::new(
-                        meerkat::SqliteSessionStore::open(layout.session_db().unwrap().path)
-                            .unwrap(),
-                    ),
-                    Arc::new(
-                        meerkat_runtime::store::SqliteRuntimeStore::new(layout.runtime_db())
-                            .unwrap(),
-                    ),
+                    sessions,
+                    runtime,
                     Arc::new(meerkat::MemoryBlobStore::new()),
                     configuration,
                 )

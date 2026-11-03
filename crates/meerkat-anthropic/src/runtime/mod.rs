@@ -50,7 +50,9 @@ use meerkat_llm_core::provider_runtime::errors::{
     ProviderAuthError, ProviderBindingError, ProviderClientError,
 };
 use meerkat_llm_core::provider_runtime::registry::ResolverEnvironment;
-use meerkat_llm_core::provider_runtime::runtime::{CredentialReadiness, ProviderRuntime};
+use meerkat_llm_core::provider_runtime::runtime::{
+    AccountModelLookup, CredentialReadiness, ProviderRuntime,
+};
 
 use meerkat_core::lifecycle::run_primitive::AnthropicCacheControlPolicy;
 
@@ -452,6 +454,23 @@ impl ProviderRuntime for AnthropicProviderRuntime {
                 ProviderBindingError::ProviderMismatch,
             )),
         }
+    }
+
+    /// A GitHub Copilot route's account states the models it serves: the
+    /// account's model list answers for a model the model registry does not
+    /// define. No other backend states an account model list.
+    fn account_model(&self, connection: &ResolvedConnection, model: &str) -> AccountModelLookup {
+        #[cfg(all(feature = "copilot", not(target_arch = "wasm32")))]
+        if matches!(
+            connection.backend,
+            NormalizedBackendKind::Anthropic(AnthropicBackendKind::Copilot)
+        ) && let Some(copilot) = self.copilot.as_ref()
+        {
+            return copilot.account_model(connection, model);
+        }
+        #[cfg(not(all(feature = "copilot", not(target_arch = "wasm32"))))]
+        let _ = (connection, model);
+        AccountModelLookup::NotReported
     }
 
     async fn resolve_binding(

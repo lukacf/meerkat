@@ -217,6 +217,7 @@ fn public_openai_config() -> (Config, AuthBindingRef) {
         default_binding: Some("api".into()),
         parent: None,
         connector_client: Default::default(),
+        copilot: None,
     };
     config.realm.insert("optional-tool-probe".into(), realm);
     (config, configured_binding("optional-tool-probe", "api"))

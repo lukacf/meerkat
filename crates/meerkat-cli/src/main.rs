@@ -7584,6 +7584,25 @@ fn validate_reserved_copilot_route(
     Ok(())
 }
 
+/// Refuse a Copilot login over a `[realm.global]` that configures its
+/// Copilot account once (`[realm.global.copilot]`): the section already
+/// declares the account's routes, and the login's explicit routes would
+/// declare them again. Nothing is written.
+#[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
+fn refuse_login_over_copilot_account(
+    section: &meerkat_core::RealmConfigSection,
+) -> anyhow::Result<()> {
+    if section.copilot.is_some() {
+        anyhow::bail!(
+            "[realm.global.copilot] in ~/.rkat/config.toml configures the GitHub Copilot \
+             account, with its routes global:copilot_openai, global:copilot_anthropic and \
+             global:copilot_gemini; change its source there, or remove \
+             [realm.global.copilot] to sign in with explicit routes"
+        );
+    }
+    Ok(())
+}
+
 #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
 fn ensure_cli_interactive_oauth_config(
     provider: LoginProvider,
@@ -7607,6 +7626,9 @@ fn ensure_cli_interactive_oauth_config(
         None
     };
     let section = config.realm.entry(realm_id.to_string()).or_default();
+    if provider == LoginProvider::Copilot {
+        refuse_login_over_copilot_account(section)?;
+    }
     let copilot_options = if provider == LoginProvider::Copilot {
         let account = credential_account.as_ref().ok_or_else(|| {
             anyhow::anyhow!("Copilot login target is missing its credential account")
@@ -7871,6 +7893,7 @@ fn ensure_cli_copilot_token_config(
         .realm
         .entry(CLI_INTERACTIVE_OAUTH_REALM_ID.to_string())
         .or_default();
+    refuse_login_over_copilot_account(section)?;
     let canonical_options = section
         .backend
         .get(meerkat_copilot::CopilotProviderRoute::OpenAi.binding_id())
@@ -26091,6 +26114,40 @@ default_model = "gemini-3.8-flash"
         ensure_cli_copilot_token_config(&mut config, CopilotTokenSource::Stored)
             .expect_err("routes reading the environment are not switched to the store");
         assert_eq!(config.realm.get("global").cloned(), before);
+    }
+
+    /// A `[realm.global]` that configures its Copilot account once
+    /// (`[realm.global.copilot]`) already has the account's routes: neither
+    /// login writes explicit routes over it. The refusal names the section,
+    /// and the config is left as it was.
+    #[cfg(feature = "copilot")]
+    #[test]
+    fn test_cli_copilot_logins_refuse_a_realm_that_configures_its_copilot_account() {
+        let configured: Config = toml::from_str(
+            r#"
+[realm.global.copilot]
+source = { kind = "env", env = "COPILOT_GITHUB_TOKEN" }
+"#,
+        )
+        .unwrap();
+
+        let mut config = configured.clone();
+        let error = ensure_cli_copilot_token_config(&mut config, CopilotTokenSource::Environment)
+            .expect_err("a token login does not write routes over the account section");
+        assert!(
+            error.to_string().contains("[realm.global.copilot]"),
+            "{error}"
+        );
+        assert_eq!(config.realm.get("global"), configured.realm.get("global"));
+
+        let mut config = configured.clone();
+        let error = ensure_cli_interactive_oauth_config(LoginProvider::Copilot, &mut config)
+            .expect_err("the device sign-in does not write routes over the account section");
+        assert!(
+            error.to_string().contains("[realm.global.copilot]"),
+            "{error}"
+        );
+        assert_eq!(config.realm.get("global"), configured.realm.get("global"));
     }
 
     /// T19: a checked token is stored as a static bearer under the shared

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "meta-forge"
-version = "0.3.0"
+version = "0.3.1"
 description = "Meta Forge: agent-guided creation and deployment of Meerkat systems"
 requires-python = ">=3.11"
 dependencies = [

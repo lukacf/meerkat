@@ -99,6 +99,7 @@ fn realm_with_oauth_binding_no_refresh(auth_method: &str) -> RealmConnectionSet 
         default_binding: Some("default_claude".into()),
         parent: None,
         connector_client: Default::default(),
+        copilot: None,
     };
     RealmConnectionSet::from_config("dev", &section).unwrap()
 }
@@ -151,6 +152,7 @@ fn realm_with_oauth_binding_source(
         default_binding: Some("default_claude".into()),
         parent: None,
         connector_client: Default::default(),
+        copilot: None,
     };
     RealmConnectionSet::from_config("dev", &section).unwrap()
 }

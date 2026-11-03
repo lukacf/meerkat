@@ -607,6 +607,7 @@ fn openai_oauth_config() -> Config {
         default_binding: Some(BINDING_ID.to_string()),
         parent: None,
         connector_client: Default::default(),
+        copilot: None,
     };
     section.backend.insert(
         "chatgpt_backend".to_string(),

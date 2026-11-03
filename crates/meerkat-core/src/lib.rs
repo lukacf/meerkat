@@ -779,14 +779,14 @@ pub use auth::{
 pub use connection::{
     AuthBindingRef, AuthCredentialIdentity, AuthProfile, AuthProfileConfig, BackendProfile,
     BackendProfileConfig, BindingId, BindingOrigin, BindingPolicy, ConnectionTargetError,
-    ConnectorClientAuthMethod, ConnectorClientConfig, CredentialAccountBindingCandidates,
-    CredentialAccountId, CredentialAccountRef, CredentialSourceSpec, ExternalResolverId,
-    IdentityError, MemberCommsName, MemberCommsNameError, MobMemberBinding, PeerRole, ProfileId,
-    ProviderBinding, ProviderBindingConfig, ProviderBindingError, RealmConfigSection,
-    RealmConnectionSet, RealmId, ResolvedConnectionTarget, mob_realm_id,
-    resolve_auth_binding_candidates_for_provider, resolve_auth_binding_or_default_for_provider,
-    resolve_credential_account_binding_for_provider, resolve_explicit_auth_binding_target,
-    resolve_realm_binding_target_for_provider,
+    ConnectorClientAuthMethod, ConnectorClientConfig, CopilotAccountConfig,
+    CredentialAccountBindingCandidates, CredentialAccountId, CredentialAccountRef,
+    CredentialSourceSpec, ExternalResolverId, IdentityError, MemberCommsName, MemberCommsNameError,
+    MobMemberBinding, PeerRole, ProfileId, ProviderBinding, ProviderBindingConfig,
+    ProviderBindingError, RealmConfigSection, RealmConnectionSet, RealmId,
+    ResolvedConnectionTarget, mob_realm_id, resolve_auth_binding_candidates_for_provider,
+    resolve_auth_binding_or_default_for_provider, resolve_credential_account_binding_for_provider,
+    resolve_explicit_auth_binding_target, resolve_realm_binding_target_for_provider,
 };
 pub use self_hosted_binding::{
     SelfHostedBindingCandidate, SelfHostedBindingServer, SelfHostedConnectionError,

@@ -2130,8 +2130,18 @@ fn a_held_child_mob_keeps_its_member_subscribed_and_delivers_once_it_runs() {
         if gateway.stderr_has_line(&[
             "announcement backlog not sealed this round",
             CHILD_MEMBER,
-            "is held until its owner resolves",
+            "is hosted here but not running: held until its owner resolves",
         ]) {
+            // That wording names a held and a quarantined mob alike: the
+            // runtime's own line says this one is held.
+            assert!(
+                gateway.stderr_has_line(&[
+                    "holding a restored child mob before activation",
+                    CHILD_MOB,
+                ]),
+                "the child mob was not held\n{}",
+                gateway.stderr_tail()
+            );
             break;
         }
         assert!(
